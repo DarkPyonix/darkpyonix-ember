@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DarkPyonix — 로그인</title>
+<script>(function(){try{document.documentElement.setAttribute('data-xtheme',localStorage.getItem('xmo_theme')||'sepia');}catch(e){document.documentElement.setAttribute('data-xtheme','sepia');}})();</script>
+<style>
+/* === DarkPyonix theme palettes (shared with the home launcher; persisted as `xmo_theme`). === */
+:root[data-xtheme="light"]{ --bg:#f4f4f5; --card:#ffffff; --ink:#2b2b2b; --muted:#8a8a8f; --line:#ececee; --brand:#c0392b; --shadow:rgba(0,0,0,.16); }
+:root[data-xtheme="sepia"]{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --shadow:rgba(120,80,50,.18); }
+:root[data-xtheme="dark"]{ --bg:#1f1c19; --card:#2a2622; --ink:#e8e0d4; --muted:#a59a8c; --line:#38322c; --brand:#d0654f; --shadow:rgba(0,0,0,.6); }
+:root{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --shadow:rgba(120,80,50,.18); }
+*{box-sizing:border-box;} html,body{margin:0;min-height:100%;}
+body{ background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans KR',sans-serif;
+  display:flex; align-items:center; justify-content:center;
+  padding: calc(env(safe-area-inset-top) + 20px) 20px calc(env(safe-area-inset-bottom) + 20px); }
+.xl-card{ width:100%; max-width:440px; background:var(--card); border-radius:20px; box-shadow:0 20px 50px var(--shadow); overflow:hidden; }
+.xl-theme-pos{ position:fixed; top:calc(env(safe-area-inset-top) + 12px); right:12px; z-index:5; }
+.xtheme{ display:inline-flex; gap:3px; background:var(--card); border:1px solid var(--line); border-radius:999px; padding:3px; box-shadow:0 4px 14px var(--shadow); }
+.xtheme button{ width:30px; height:30px; border:none; border-radius:999px; background:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; display:flex; align-items:center; justify-content:center; transition:background .15s,color .15s; }
+.xtheme button.on{ background:var(--brand); color:#fff; }
+.xl-head{ text-align:center; padding:34px 24px 20px; border-bottom:1px solid var(--line); }
+.xl-brand{ font-size:30px; font-weight:800; color:var(--brand); }
+.xl-body{ padding:20px 26px 28px; }
+.xl-sub{ text-align:center; color:var(--muted); font-size:13px; }
+.xl-target{ text-align:center; color:var(--brand); font-size:13px; font-weight:700; margin:6px 0 14px; min-height:16px; }
+.xl-field{ display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--line); padding:12px 4px; }
+.xl-field.focus{ border-color:var(--brand); }
+.xl-field .ic{ width:20px; text-align:center; flex:0 0 20px; font-size:15px; }
+.xl-field input{ flex:1; border:none; background:transparent; font-size:15px; outline:none; color:var(--ink); }
+.xl-field .eye{ background:none;border:none;color:var(--brand);cursor:pointer;font-size:15px; }
+.xl-btn{ width:100%; margin-top:24px; padding:14px; border:none; border-radius:12px; background:var(--brand); color:#fff; font-size:15px; font-weight:700; cursor:pointer; letter-spacing:.5px; }
+.xl-btn:active{ opacity:.9; }
+.xl-err{ color:#c0392b; font-size:12.5px; text-align:center; margin-top:12px; min-height:16px; }
+.xl-foot{ text-align:center; margin-top:14px; }
+.xl-foot a{ color:var(--muted); font-size:12px; text-decoration:none; }
+</style></head>
+<body>
+<div class="xl-theme-pos"><div class="xtheme" id="xtheme" role="group" aria-label="테마">
+  <button type="button" data-t="light" title="라이트">☀</button>
+  <button type="button" data-t="sepia" title="세피아">◐</button>
+  <button type="button" data-t="dark" title="다크">☾</button>
+</div></div>
+<form class="xl-card" id="form">
+  <div class="xl-head"><div class="xl-brand">DarkPyonix</div></div>
+  <div class="xl-body">
+    <div class="xl-sub">Login With Username</div>
+    <div class="xl-target" id="target"></div>
+    <div class="xl-field"><span class="ic">👤</span><input id="user" placeholder="사용자 이름" autocomplete="username" autofocus></div>
+    <div class="xl-field"><span class="ic">🔒</span><input id="pass" type="password" placeholder="비밀번호" autocomplete="current-password"><button type="button" class="eye" id="eye">👁</button></div>
+    <div class="xl-field"><span class="ic">🌐</span><input id="url" placeholder="http://server" autocomplete="off"></div>
+    <button class="xl-btn" type="submit">LOGIN</button>
+    <div class="xl-err" id="err"></div>
+    <div class="xl-foot"><a href="/">← 워크스페이스 목록</a></div>
+  </div>
+</form>
+<script>
+function qp(k){ return new URL(location.href).searchParams.get(k)||''; }
+var wsName=qp('name'), wsUrl=qp('url'), folder=qp('folder');
+document.getElementById('url').value = wsUrl || location.origin;
+document.getElementById('target').textContent = wsName ? ('→ '+wsName) : '';
+try{ var lu=localStorage.getItem('xmo_last_user'); if(lu){ document.getElementById('user').value=lu; var pf0=document.getElementById('pass'); if(pf0) pf0.focus(); } }catch(_){}
+var pass=document.getElementById('pass'), eye=document.getElementById('eye');
+eye.addEventListener('click', function(){ pass.type = (pass.type==='password'?'text':'password'); });
+[].forEach.call(document.querySelectorAll('.xl-field'), function(f){ var i=f.querySelector('input'); if(!i)return; i.addEventListener('focus',function(){f.classList.add('focus');}); i.addEventListener('blur',function(){f.classList.remove('focus');}); });
+document.getElementById('form').addEventListener('submit', function(e){
+  e.preventDefault();
+  var user=document.getElementById('user').value.trim();
+  var pw=pass.value;
+  var srv=(document.getElementById('url').value.trim()||location.origin).replace(/\/+$/,'');
+  var err=document.getElementById('err'); err.textContent='';
+  if(!user){ err.textContent='사용자 이름을 입력하세요'; return; }
+  if(!pw){ err.textContent='비밀번호를 입력하세요'; return; }
+  // username + password 검증 → 서버가 세션 쿠키 설정(/auth 는 같은 오리진에 mount).
+  fetch(srv+'/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:user, password:pw})})
+    .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(d){ return {ok:r.ok, d:d}; }); })
+    .then(function(res){
+      if(res.ok && res.d && res.d.ok){
+        try{ localStorage.setItem('xmo_last_user', user); }catch(_){}
+        var nx = qp('next');   // 게이트가 redirect 하며 붙인 원래 목적지
+        // xmo 파라미터를 붙이지 않는다 — 서버가 기기(UA)를 보고 모바일이면 frame 래퍼를,
+        // 데스크톱이면 순정 VS Code(폭이 좁아지면 오버레이 바)를 알아서 내보낸다.
+        location.href = nx || (srv + '/?folder=' + encodeURIComponent(folder));
+      } else { err.textContent = (res.d && res.d.error) || '로그인 실패'; }
+    })
+    .catch(function(){ err.textContent='서버에 연결할 수 없습니다'; });
+});
+(function(){
+  var TK='xmo_theme', root=document.documentElement, box=document.getElementById('xtheme');
+  function get(){ try{ return localStorage.getItem(TK)||'sepia'; }catch(e){ return 'sepia'; } }
+  function paint(){ var t=get(); if(box){ [].forEach.call(box.querySelectorAll('button'),function(b){ b.classList.toggle('on', b.getAttribute('data-t')===t); }); } }
+  function set(t){ try{ localStorage.setItem(TK,t); }catch(e){} root.setAttribute('data-xtheme',t); paint(); }
+  if(box){ box.addEventListener('click', function(e){ var b=e.target.closest('button'); if(b) set(b.getAttribute('data-t')); }); }
+  root.setAttribute('data-xtheme', get()); paint();
+})();
+</script>
+</body></html>

@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>DarkPyonix</title>
+<style>
+  /* --xf-gutter: measured width of the iframe's hidden native activity bar; the
+     iframe is shifted left by this amount so the dead column sits off-screen. */
+  :root { --xf-bar: 56px; --xf-gutter: 48px; --xf-title-h: 35px; --xf-status-h: 22px;
+          --xf-bg: #181818; --xf-fg: #9d9d9d; --xf-fg-active: #ffffff; --xf-border: #2b2b2b; }
+  @media (max-width: 420px) { :root { --xf-bar: 52px; } }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--xf-bg); }
+  /* NOTE: an iframe is a replaced element — top+bottom (or left+right) does NOT
+     stretch it; it falls back to the intrinsic 300x150. Width/height must be explicit. */
+  #xf-frame { position: fixed; border: 0; background: var(--xf-bg); top: env(safe-area-inset-top, 0px); }
+  #xf-bar { position: fixed; display: flex; background: var(--xf-bg); z-index: 10; }
+  /* The bar holds 홈 · 에이전트 · 터미널 · (뷰 컨테이너 전부) · 설정 and scrolls: 5 slots
+     are visible in portrait and the rest are a swipe away, so an extension that adds a
+     view container (Claude, Codex, …) simply extends the strip. */
+  #xf-bar::-webkit-scrollbar { display: none; }
+  /* CHROME OFF (wide window / mouse): no bar, iframe fills everything, and the embed is
+     told to restore VS Code's own activity + status bars — indistinguishable from opening
+     VS Code Web directly. Higher specificity than the orientation rules below, on purpose. */
+  :root[data-xf-chrome="off"] #xf-bar { display: none; }
+  :root[data-xf-chrome="off"] #xf-frame { left: 0; top: 0; width: 100%; height: 100%; }
+  @media (orientation: portrait) {
+    #xf-frame { left: calc(0px - var(--xf-gutter)); width: calc(100% + var(--xf-gutter));
+                height: calc(100% - env(safe-area-inset-top, 0px) - var(--xf-bar) - env(safe-area-inset-bottom, 0px)); }
+    #xf-bar { left: 0; right: 0; bottom: 0; height: calc(var(--xf-bar) + env(safe-area-inset-bottom, 0px));
+              padding: 0 0 env(safe-area-inset-bottom, 0px); flex-direction: row; align-items: center;
+              justify-content: flex-start;
+              overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+              -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
+              touch-action: pan-x; }
+    /* 20% => exactly five buttons across, whatever the screen width. */
+    #xf-bar .xf-btn { flex: 0 0 20%; width: auto; }
+  }
+  @media (orientation: landscape) {
+    /* vscode.dev-style: the iframe spans the FULL width (title/status bars run
+       edge-to-edge), and our bar sits ON TOP of the empty column left by the
+       hidden native activity bar — between the title row and the status row. */
+    #xf-frame { left: 0; width: 100%;
+                height: calc(100% - env(safe-area-inset-top, 0px)); }
+    #xf-bar { left: 0; top: calc(env(safe-area-inset-top, 0px) + var(--xf-title-h, 35px));
+              bottom: var(--xf-status-h, 22px);
+              width: var(--xf-gutter, 48px);
+              padding: 10px 0 54px; flex-direction: column; align-items: center;
+              justify-content: flex-start; gap: 8px;
+              overflow-x: hidden; overflow-y: auto; scrollbar-width: none;
+              -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
+              touch-action: pan-y; }
+    /* Fixed 40px rows rather than portrait's 20% slots: this bar spans the whole screen
+       height, so five equal slots would blow each icon up to 80-160px on a tablet. */
+    #xf-bar .xf-btn { width: 40px; height: 40px; flex: 0 0 40px; }
+    /* Settings sits at the BOTTOM-LEFT, native VS Code style. It has to leave the scroll
+       flow (position: fixed) — `margin-top: auto` does nothing once the list overflows,
+       which is exactly when you still want Settings reachable. The bar reserves
+       padding-bottom for it so the last scrollable icon never hides underneath. */
+    #xf-bar .xf-btn[data-kind="settings"] {
+      position: fixed; left: 0; bottom: var(--xf-status-h, 0px);
+      width: var(--xf-gutter, 48px); height: 46px; flex: none;
+      background: var(--xf-bg); z-index: 11;
+    }
+  }
+  .xf-btn { flex: 0 0 auto; width: 44px; height: 44px; position: relative; display: inline-flex;
+            align-items: center; justify-content: center;
+            background: transparent; border: 0; color: var(--xf-fg); cursor: pointer; padding: 0; }
+  /* The tap slot is 20% of the bar (5 across at any width), but the highlight pill stays
+     icon-sized — a slot-wide pill looked stretched once the window got wider than a phone. */
+  .xf-btn::before { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                    width: 100%; max-width: 52px; height: 40px; border-radius: 12px;
+                    background: transparent; transition: background .12s ease; }
+  .xf-btn > * { position: relative; z-index: 1; }   /* keep icons above the pill */
+  .xf-btn:active::before { background: rgba(128,128,128,.22); }
+  .xf-btn.active { color: var(--xf-fg-active); }
+  .xf-btn svg { width: 25px; height: 25px; display: block; }
+  /* A native view item's icon is either a codicon glyph (font injected from the iframe)
+     or an extension-supplied image. */
+  .xf-btn .xf-glyph { font: normal normal normal 24px/1 codicon; display: block; color: inherit; }
+  .xf-btn .xf-img { width: 24px; height: 24px; display: block; object-fit: contain; }
+  /* Extension `uri-icon` containers (Claude Code, ...) are drawn as a mask tinted with the
+     current text color, exactly the way VS Code draws them in the native activity bar. */
+  .xf-btn .xf-mask { width: 24px; height: 24px; display: block; background-color: currentColor;
+                     -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+                     -webkit-mask-position: center; mask-position: center;
+                     -webkit-mask-size: contain; mask-size: contain; }
+  #xf-backdrop { position: fixed; inset: 0; z-index: 20; display: none; background: transparent; }
+  #xf-backdrop.open { display: block; }
+  /* --xf-menu-shadow is the shadow VS Code's OWN context menus use, measured live inside
+     the iframe (__xmo.theme().menuShadow) — tapping a row in here opens exactly such a
+     menu on top of ours, and two different depths in one gesture read as a glitch. */
+  .xf-popup { position: fixed; z-index: 21; display: none; min-width: 208px; padding: 6px; border-radius: 12px;
+              background: var(--xf-bg); border: 1px solid var(--xf-border);
+              box-shadow: var(--xf-menu-shadow, 0 0 12px rgba(0,0,0,.14)); }
+  .xf-popup.open { display: block; }
+  .xf-row { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; background: transparent;
+            border: 0; border-radius: 8px; color: var(--xf-fg-active); font-size: 14px; cursor: pointer; text-align: left; }
+  .xf-row:active { background: rgba(128,128,128,.22); }
+  .xf-row svg { width: 18px; height: 18px; flex: 0 0 auto; color: var(--xf-fg); }
+  #xf-splash { position: fixed; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
+               color: var(--xf-fg); font: 14px system-ui, sans-serif; background: var(--xf-bg); }
+  #xf-splash.done { display: none; }
+  #xf-toast { position: fixed; left: 50%; transform: translateX(-50%); z-index: 30; display: none;
+              padding: 10px 16px; border-radius: 10px; background: rgba(30,30,30,.92); color: #fff;
+              font: 13px system-ui, sans-serif; bottom: calc(var(--xf-bar) + env(safe-area-inset-bottom, 0px) + 14px); }
+  #xf-toast.show { display: block; }
+</style>
+</head>
+<body>
+<div id="xf-splash">워크스페이스 연결 중…</div>
+<iframe id="xf-frame" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+<nav id="xf-bar"></nav>
+<div id="xf-backdrop"></div>
+<div id="xf-settings-menu" class="xf-popup"></div>
+<div id="xf-toast"></div>
+<script>
+(function(){
+  var frame = document.getElementById('xf-frame');
+  var bar = document.getElementById('xf-bar');
+  var backdrop = document.getElementById('xf-backdrop');
+  var splash = document.getElementById('xf-splash');
+
+  // Evaluated here (before the iframe src is set) so the initial state rides along in the
+  // URL — otherwise a desktop load would briefly show the embed with its native bars hidden
+  // before the parent could turn the chrome off.
+  var chromeMq = matchMedia('(pointer: coarse), (max-width: 1366px)');
+  // THE orientation. The iframe must never decide this for itself: the wrapper makes it 48px
+  // wider (hidden gutter) and a bar shorter, so a near-square window (e.g. 910x912) reads
+  // landscape inside while the device is portrait — and the embed then skipped its portrait
+  // compensation, pushing the title bar's right end 48px off-screen.
+  var portraitMq = matchMedia('(orientation: portrait)');
+
+  // iframe URL = 이 페이지의 URL 에 xmo=embed 를 붙인 것. 그래야 서버가 래퍼를
+  // 또 씌우지 않고 워크벤치를 그대로 내보낸다(안 그러면 무한 중첩).
+  var qp = new URLSearchParams(location.search);
+  var folder = qp.get('folder') || '';
+  qp.set('xmo', 'embed');
+  qp.set('xmochrome', chromeMq.matches ? 'on' : 'off');
+  qp.set('xmoorient', portraitMq.matches ? 'portrait' : 'landscape');
+  frame.src = '/?' + qp.toString();
+  frame.addEventListener('load', function(){ splash.classList.add('done'); }, false);
+  var seg = folder.replace(/\\/g, '/').replace(/\/+$/, '').split('/');
+  document.title = (seg[seg.length - 1] || 'DarkPyonix') + ' — DarkPyonix';
+
+  function api(){ try { return frame.contentWindow.__xmo || null; } catch(e){ return null; } }
+
+  // --- inline SVG icons (codicon font is not available in the parent page) ---
+  var S = 'fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"';
+  var ICONS = {
+    home: '<svg viewBox="0 0 24 24" ' + S + '><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/></svg>',
+    files: '<svg viewBox="0 0 24 24" ' + S + '><path d="M3.5 6.5h6l2 2h9v10h-17z"/><path d="M3.5 6.5v-1h5"/></svg>',
+    terminal: '<svg viewBox="0 0 24 24" ' + S + '><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 3-3 3"/><path d="M12.5 15.5H17"/></svg>',
+    agent: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><circle cx="8.4" cy="8.6" r="1.55" fill="var(--xf-bg)"/><circle cx="15.6" cy="8.2" r="1.05" fill="var(--xf-bg)"/><circle cx="14.4" cy="14.3" r="2" fill="var(--xf-bg)"/><circle cx="8.9" cy="14.6" r=".9" fill="var(--xf-bg)"/><circle cx="12.2" cy="17.1" r=".65" fill="var(--xf-bg)"/></svg>',
+    more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="19" cy="12" r="1.7" fill="currentColor"/></svg>',
+    // Authentic VS Code codicon "gear" (16x16 grid) so it matches the editor's own settings icon.
+    settings: '<svg viewBox="0 0 16 16" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M9.1 4.4L8.6 2H7.4l-.5 2.4-.7.3-2-1.3-.9.8 1.3 2-.2.7-2.4.5v1.2l2.4.5.3.7-1.3 2 .8.8 2-1.3.7.3.5 2.4h1.1l.5-2.4.7-.3 2 1.3.8-.8-1.3-2 .3-.7 2.4-.5V7.4L12 6.9l-.3-.7 1.3-2-.8-.8-2 1.3-.8-.3zM8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z"/></svg>',
+    search: '<svg viewBox="0 0 24 24" ' + S + '><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/></svg>',
+    git: '<svg viewBox="0 0 24 24" ' + S + '><circle cx="6.5" cy="6" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><circle cx="17.5" cy="9" r="2.2"/><path d="M6.5 8.2v7.6M15.6 10.4c-2.5 2-6 1.2-8 3.4"/></svg>',
+    debug: '<svg viewBox="0 0 24 24" ' + S + '><path d="M7 4.5v15l12-7.5z"/></svg>',
+    ext: '<svg viewBox="0 0 24 24" ' + S + '><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg>',
+    test: '<svg viewBox="0 0 24 24" ' + S + '><path d="M9.5 3.5h5M11 3.5v5.2L5.5 19a1.6 1.6 0 0 0 1.4 2.4h10.2a1.6 1.6 0 0 0 1.4-2.4L13 8.7V3.5"/></svg>',
+    account: '<svg viewBox="0 0 24 24" ' + S + '><circle cx="12" cy="8.5" r="3.6"/><path d="M4.5 20.2c1.4-3.4 4.2-5 7.5-5s6.1 1.6 7.5 5"/></svg>'
+  };
+
+  function el(tag, cls, html){ var e = document.createElement(tag); if(cls) e.className = cls; if(html != null) e.innerHTML = html; return e; }
+  function closeAll(){ document.querySelectorAll('.xf-popup.open').forEach(function(p){ p.classList.remove('open'); }); backdrop.classList.remove('open'); }
+  backdrop.addEventListener('click', closeAll, false);
+
+  // Anchor a popup to its trigger button: above the bar in portrait, right of it in landscape.
+  function openPopup(popup, btn){
+    closeAll();
+    popup.classList.add('open'); backdrop.classList.add('open');
+    var r = btn.getBoundingClientRect(), pr = popup.getBoundingClientRect();
+    var portrait = matchMedia('(orientation: portrait)').matches;
+    var x, y;
+    if(portrait){
+      x = Math.min(Math.max(8, r.left + r.width / 2 - pr.width / 2), innerWidth - pr.width - 8);
+      y = r.top - pr.height - 10;
+    } else {
+      x = r.right + 10;
+      y = Math.min(Math.max(8, r.top + r.height / 2 - pr.height / 2), innerHeight - pr.height - 8);
+    }
+    popup.style.left = x + 'px'; popup.style.top = y + 'px';
+  }
+
+  function iconBtn(kind, icon, onTap){
+    var b = el('button', 'xf-btn'); b.type = 'button'; b.dataset.kind = kind; b.innerHTML = ICONS[icon];
+    if(onTap) b.addEventListener('click', function(e){ e.preventDefault(); onTap(b); }, false);
+    return b;
+  }
+  function menuRow(icon, label, onTap){
+    var r = el('button', 'xf-row'); r.type = 'button'; r.innerHTML = ICONS[icon] + '<span></span>';
+    r.lastChild.textContent = label;
+    r.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); closeAll(); onTap(); }, false);
+    return r;
+  }
+  var toastTimer = null;
+  function toast(msg){
+    var t = document.getElementById('xf-toast'); t.textContent = msg; t.classList.add('show');
+    if(toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 2200);
+  }
+  function withApi(fn){
+    var a = api();
+    if(!a){ toast('VS Code 로딩 중입니다… 잠시 후 다시 눌러주세요'); }
+    else if(a.ready && !a.ready()){ toast('VS Code 부팅 중입니다… 잠시 후 다시 눌러주세요'); }
+    else fn(a);
+    syncActiveSoon();
+  }
+
+  // Highlight the bar buttons that match the actual view state inside the iframe.
+  function syncActive(){
+    var a = api(); if(!a) return;
+    var st = null, views = null;
+    try { st = a.state ? a.state() : null; } catch(e){}
+    try { views = a.views ? a.views() : null; } catch(e){}
+    var actives = {};
+    (views || []).forEach(function(v){ if(v.active) actives[v.label] = true; });
+    bar.querySelectorAll('.xf-btn').forEach(function(b){
+      if(b.dataset.kind === 'view') b.classList.toggle('active', !!actives[b.dataset.label]);
+      else if(st) b.classList.toggle('active', !!st[b.dataset.kind]);
+    });
+  }
+  function syncActiveSoon(){ setTimeout(syncActive, 350); setTimeout(syncActive, 1000); }
+
+  // --- nav bar: 홈 · 에이전트 · 터미널 · (네이티브 뷰 컨테이너 전부) · 설정 -------------
+  // The middle section is read live from VS Code (__xmo.views()), so extension-contributed
+  // containers (Claude, Codex, …) appear on their own — no hard-coded list to fall out of
+  // date, and nothing hidden behind a "더보기" popup any more.
+  var settingsBtn = iconBtn('settings', 'settings', function(b){ settingsMenu.classList.contains('open') ? closeAll() : openPopup(settingsMenu, b); });
+  var FILES_RE = /^(explorer|탐색기)/i;   // pulled out of the view list so it can sit right after 홈
+
+  // The parent page has no codicon CSS at all — pull the font out of the iframe once so
+  // the glyphs reported by views() render exactly like they do inside VS Code.
+  var codiconLoaded = false;
+  function ensureCodiconFont(){
+    if(codiconLoaded) return;
+    var a = api(); if(!a || !a.codiconFont) return;
+    var url = ''; try { url = a.codiconFont(); } catch(e){ return; }
+    if(!url) return;
+    codiconLoaded = true;
+    var st = document.createElement('style');
+    st.textContent = '@font-face{font-family:"codicon";font-display:block;src:url("' + url + '") format("truetype");}';
+    document.head.appendChild(st);
+  }
+
+  function viewBtn(v){
+    var b = el('button', 'xf-btn'); b.type = 'button';
+    b.dataset.kind = 'view'; b.dataset.label = v.label;
+    b.title = v.label; b.setAttribute('aria-label', v.label);
+    if(v.glyph){
+      var g = el('span', 'xf-glyph'); g.textContent = v.glyph; b.appendChild(g);
+    } else if(v.mask){
+      var mk = el('span', 'xf-mask');
+      mk.style.setProperty('-webkit-mask-image', 'url("' + v.mask + '")');
+      mk.style.setProperty('mask-image', 'url("' + v.mask + '")');
+      b.appendChild(mk);
+    } else if(v.img){
+      var im = document.createElement('img'); im.className = 'xf-img'; im.alt = ''; im.src = v.img; b.appendChild(im);
+    } else {
+      b.innerHTML = ICONS.ext;   // last-resort placeholder
+    }
+    b.addEventListener('click', function(e){
+      e.preventDefault(); closeAll();
+      withApi(function(a){ a.activateView(v.label); });
+    }, false);
+    return b;
+  }
+
+  // Rebuild only when the container set actually changed — rebuilding every tick would
+  // reset the bar's scroll position while the user is swiping it.
+  var barSig = null;
+  function renderBar(){
+    var a = api(), views = [];
+    if(a && a.views){ try { views = a.views() || []; } catch(e){ views = []; } }
+    ensureCodiconFont();
+    var sig = views.map(function(v){ return v.label + ':' + (v.glyph || v.mask || v.img || ''); }).join('|');
+    if(sig === barSig){ syncActive(); return; }
+    barSig = sig;
+    bar.innerHTML = '';
+    // 순서: 홈 · 파일(탐색기) · 에이전트 · 터미널 · (나머지 뷰 전부) · 설정
+    var files = null, rest = [];
+    views.forEach(function(v){ if(!files && FILES_RE.test(v.label)) files = v; else rest.push(v); });
+    bar.appendChild(iconBtn('home', 'home', function(){ location.href = '/'; }));
+    if(files) bar.appendChild(viewBtn(files));
+    bar.appendChild(iconBtn('agent', 'agent', function(){ closeAll(); withApi(function(x){ x.agent(); }); }));
+    bar.appendChild(iconBtn('terminal', 'terminal', function(){ closeAll(); withApi(function(x){ x.terminal(); }); }));
+    rest.forEach(function(v){ bar.appendChild(viewBtn(v)); });
+    bar.appendChild(settingsBtn);   // same node every time, so the popup anchor stays valid
+    syncActive();
+  }
+  renderBar();
+
+  // --- 홈(허브)에서 특정 대화를 눌러 들어온 경우: ?agent=&cid= ------------------
+  // VS Code 가 뜨는 즉시 에이전트 패널을 열어 준다. 대화 자체를 되살리는 명령
+  // (claude --resume <id>)은 홈 화면이 클립보드에 넣어 두므로, 터미널을 열고
+  // 붙여넣기만 하면 그 대화가 이어진다.
+  var deepCid = qp.get('cid') || '';
+  if(deepCid){
+    var deepTries = 0;
+    var deepTimer = setInterval(function(){
+      var a = api();
+      if(a && a.ready && a.ready()){
+        clearInterval(deepTimer);
+        try { a.agent(); } catch(e){}
+        toast('에이전트를 열었습니다 · 터미널에 붙여넣기로 대화를 이어가세요');
+      } else if(++deepTries > 60){ clearInterval(deepTimer); }
+    }, 500);
+  }
+
+  // --- popups ---
+  // VS Code anchors the Manage / Accounts context menu to the HIDDEN activity-bar icon,
+  // which in portrait sits at the far left — the menu opened nowhere near the button that
+  // asked for it. Hand the embed the trigger's rect (in iframe coordinates) so it can put
+  // the menu where the user actually tapped.
+  function anchorInFrame(btn){
+    var r = btn.getBoundingClientRect(), f = frame.getBoundingClientRect();
+    return { x: Math.round(r.left - f.left), y: Math.round(r.top - f.top),
+             w: Math.round(r.width), h: Math.round(r.height) };
+  }
+
+  var settingsMenu = document.getElementById('xf-settings-menu');
+  [['settings', '설정 · 관리', 'settings-view-bar-icon', ['Manage', '관리']],
+   ['account', '계정 · 동기화', 'accounts-view-bar-icon', ['Accounts', '계정']]].forEach(function(m){
+    settingsMenu.appendChild(menuRow(m[0], m[1], function(){
+      var at = anchorInFrame(settingsBtn);
+      withApi(function(a){ a.menu(m[2], m[3], at); });
+    }));
+  });
+
+  // --- theme sync: match the bar to the VS Code theme inside the iframe.
+  // Dark theme -> white browser chrome, light theme -> black (DarkPyonix spec).
+  var themeMeta = document.querySelector('meta[name="theme-color"]');
+  function syncTheme(){
+    var a = api(); if(!a) return;
+    var t; try { t = a.theme(); } catch(e){ t = null; }
+    if(!t || !t.bg) return;
+    var root = document.documentElement.style;
+    root.setProperty('--xf-bg', t.bg);
+    if(t.fg) root.setProperty('--xf-fg', t.fg);
+    if(t.fgActive) root.setProperty('--xf-fg-active', t.fgActive);
+    if(t.border) root.setProperty('--xf-border', t.border);
+    if(t.menuShadow) root.setProperty('--xf-menu-shadow', t.menuShadow);
+    var color = t.dark ? '#ffffff' : '#000000';
+    if(themeMeta.getAttribute('content') !== color) themeMeta.setAttribute('content', color);
+  }
+  // Live-measured layout vars: gutter = hidden activity bar width (portrait slides
+  // the iframe by it; landscape sizes the overlay bar with it), plus the title /
+  // status row heights that bound the landscape bar (vscode.dev-style column).
+  function syncLayoutVars(){
+    var a = api(); if(!a) return;
+    var rs = document.documentElement.style;
+    try {
+      if(a.gutter){
+        var g = a.gutter();
+        if(typeof g === 'number' && g >= 24 && g <= 120) rs.setProperty('--xf-gutter', g + 'px');
+      }
+      if(a.metrics){
+        var m = a.metrics();
+        if(m && m.titleH >= 20 && m.titleH <= 90) rs.setProperty('--xf-title-h', m.titleH + 'px');
+        if(m && m.statusH >= 0 && m.statusH <= 60) rs.setProperty('--xf-status-h', m.statusH + 'px');
+      }
+    } catch(e){}
+  }
+  // --- responsive chrome -----------------------------------------------------------
+  // The wrapper is served to EVERY client, so it is the wrapper — not the server — that
+  // decides whether the mobile chrome is on. Wide window with a mouse => hand the whole
+  // viewport to the iframe and let VS Code show its own bars. Narrow or touch => our bar,
+  // and the iframe slides left by the gutter so VS Code's dead activity-bar column (which
+  // no CSS can remove — see HANDOFF §5) ends up off-screen instead of as a blank strip.
+  var chromeOn = null;
+  function applyChrome(){
+    var on = chromeMq.matches;
+    if(on !== chromeOn){
+      chromeOn = on;
+      document.documentElement.setAttribute('data-xf-chrome', on ? 'on' : 'off');
+      if(!on) closeAll();
+    }
+    // Re-push every tick: the embed may have (re)loaded since the last change, and the
+    // orientation is ours to declare (see portraitMq above).
+    var a = api();
+    if(a && a.setChrome){ try { a.setChrome(on, portraitMq.matches); } catch(e){} }
+  }
+  applyChrome();
+  try { chromeMq.addEventListener('change', applyChrome); } catch(e){}
+  // Touching our bar lives in the PARENT document, so it cannot blur the iframe's focused
+  // input by itself — ask the embed to do it, or the phone keyboard stays up.
+  ['pointerdown', 'touchstart'].forEach(function(ev){
+    bar.addEventListener(ev, function(){
+      var a = api(); if(a && a.dismissKeyboard){ try { a.dismissKeyboard(); } catch(e){} }
+    }, true);
+  });
+  try { portraitMq.addEventListener('change', applyChrome); } catch(e){}
+
+  // renderBar() no-ops unless the container set changed, so this doubles as the
+  // "an extension was just installed/removed" watcher.
+  setInterval(function(){ applyChrome(); syncTheme(); renderBar(); syncLayoutVars(); }, 1500);
+  frame.addEventListener('load', function(){ barSig = null; chromeOn = null; applyChrome(); renderBar(); }, false);
+  window.addEventListener('resize', function(){ applyChrome(); closeAll(); }, { passive: true });
+
+  // Android Chrome "desktop site" mode fakes a Linux-desktop UA and ignores the
+  // viewport meta (layout viewport pinned to ~1200px, rotation never updates it,
+  // touch coordinates drift) — everything looks broken. Detect and tell the user.
+  if(navigator.maxTouchPoints > 0 && /X11; Linux x86_64/.test(navigator.userAgent)){
+    var warn = el('div', null, null);
+    warn.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:50;' +
+      'top:calc(env(safe-area-inset-top,0px) + 10px);max-width:88vw;padding:12px 16px;border-radius:12px;' +
+      'background:#b23a2e;color:#fff;font:13.5px/1.5 system-ui,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.35);';
+    warn.textContent = '브라우저의 "데스크톱 사이트" 모드가 켜져 있어 화면·터치가 어긋납니다. 메뉴(⋮)에서 "데스크톱 사이트"를 끄고 새로고침해 주세요.';
+    document.body.appendChild(warn);
+  }
+})();
+</script>
+</body></html>

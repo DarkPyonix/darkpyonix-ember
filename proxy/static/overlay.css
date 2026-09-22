@@ -1,0 +1,120 @@
+
+/* Embed (frame-wrapper iframe) WITH the parent's chrome on: the parent owns the nav bar,
+   so hide the native activity bar — invisible but DOM intact, since the parent's buttons
+   forward clicks to these hidden items (and read their icons/labels).
+   `data-xmo-chrome="off"` (wide desktop window) leaves everything native. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"] .monaco-workbench .part.activitybar { opacity: 0 !important; pointer-events: none !important; }
+/* While we silently read an overflow menu to discover hidden view containers, keep it
+   invisible — the user must not see a menu flash on load (see xmoScanOverflow). */
+:root[data-xmo-scan] .context-view { opacity: 0 !important; pointer-events: none !important; }
+/* PORTRAIT ONLY: the parent slides the iframe left by the activity bar width
+   (dead gutter), which would also push the titlebar's left edge (hamburger menu)
+   off-screen — shift the titlebar content back right by the same amount.
+   (Landscape keeps the iframe at full width; the parent bar overlays the gutter.)
+
+   ⚠️ Keyed on `data-xmo-orient` (declared by the PARENT), NOT on a media query. The wrapper
+   makes this iframe 48px WIDER (hidden gutter) and one bar SHORTER than the window, so a
+   near-square window — 910x912 through ~812x912 — reads landscape in here while the device
+   is portrait. These rules then silently stopped applying and the title bar's right end
+   (layout controls) hung 48px past the screen edge. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .part.titlebar { padding-left: 48px !important; box-sizing: border-box !important; }
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .part.statusbar { padding-left: 48px !important; box-sizing: border-box !important; }
+/* PORTRAIT FULL-SCREEN VIEWS. VS Code will not do this natively: the editor group has a
+   220px minimum width, so on a 438px workbench the side bar is capped at 170px and it
+   even DISABLES the sash at that point — there is no "Maximize Side Bar" to call, unlike
+   the panel and the secondary side bar. So the part is stretched here... */
+/* ⚠️ Do NOT do this with `position: fixed` on the part. That worked geometrically, but a
+   view whose content is a WEBVIEW (cross-origin iframe — Claude Code, and any extension
+   webview) rendered BLANK inside the fixed/composited subtree on Chromium. Widen the grid
+   SLOT instead: it is already `position:absolute` and its parent `.split-view-container`
+   is only 48px narrower than the workbench, so the part never leaves the normal
+   compositing path. `z-index` is needed because the editor/aux slots come later in DOM
+   order and would otherwise paint over the widened side bar.
+ */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .split-view-view.visible:has(> .part.sidebar) {
+  width: calc(100% - var(--xmo-frame-left, 48px)) !important;
+}
+/* ...and the slots it would otherwise cover are collapsed instead of being stacked under it.
+   NO `z-index` here, ever: VS Code Web hosts webviews as `.webview-overlay-content`
+   (position: fixed, z-index: 21) parented to `.monaco-workbench` — NOT inside the part —
+   and positions them over the view by script. Raising the side bar slot into that contest
+   made every webview view (Claude Code, any extension view) render BLANK; dropping the
+   z-index instead let the editor slot paint over the widened side bar. Collapsing the
+   siblings removes the overlap altogether, so neither problem exists.
+   `.visible` matters: without it a CLOSED side bar would still be forced to full width.
+   `:has(.part.editor)` is a DESCENDANT match on purpose — the editor is not a direct child
+   of its slot: the grid nests editor+panel in their own vertical split branch. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .split-view-container:has(> .split-view-view.visible > .part.sidebar) > .split-view-view:is(:has(.part.editor), :has(.part.auxiliarybar)) {
+  width: 0 !important; min-width: 0 !important;
+}
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .part.sidebar:not([aria-hidden="true"]) {
+  width: 100% !important; max-width: none !important; min-width: 0 !important;
+}
+/* ...and its panes must be stretched with it, or the tree keeps rendering at the old
+   170px inside a full-width frame (VS Code sizes them from its grid, which never heard
+   about our resize). `width` with !important beats VS Code's inline styles and survives
+   relayouts — the same property that made the landscape status-bar fix stable (§5);
+   it is OFFSETS that get re-cancelled, not widths. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .part.sidebar:not([aria-hidden="true"]) :is(
+    .composite, .content, .pane, .pane-body, .split-view-view,
+    .monaco-scrollable-element, .monaco-list, .monaco-list-row) {
+  width: 100% !important; max-width: none !important;
+}
+
+/* LANDSCAPE: workspace | agent, 50/50. Asked for so an edit can be watched landing in the
+   editor while the agent is being told what to do.
+   VS Code cannot do this itself — the editor group has a 220px minimum, so even a real sash
+   drag stops at ~41% on a 748px phone (measured), and a SYNTHETIC sash drag is ignored
+   outright (VS Code's Sash only honours trusted pointer events). So the slots are set
+   directly, the same way the portrait side bar is. The primary side bar folds away: the
+   request is workspace vs agent.
+   `--xmo-ab-w` = the native activity bar column our own bar overlays in landscape. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="landscape"] .monaco-workbench .split-view-container:has(> .split-view-view.visible > .part.auxiliarybar) > .split-view-view:has(> .part.auxiliarybar) {
+  left: 50% !important; width: 50% !important;
+}
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="landscape"] .monaco-workbench .split-view-container:has(> .split-view-view.visible > .part.auxiliarybar) > .split-view-view:has(.part.editor) {
+  left: var(--xmo-ab-w, 48px) !important; width: calc(50% - var(--xmo-ab-w, 48px)) !important;
+}
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="landscape"] .monaco-workbench .split-view-container:has(> .split-view-view.visible > .part.auxiliarybar) > .split-view-view:has(> .part.sidebar) {
+  width: 0 !important; min-width: 0 !important;
+}
+/* ...and the agent's own panes must follow, or its content keeps the old narrow width. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="landscape"] .monaco-workbench .part.auxiliarybar :is(
+    .composite, .content, .pane, .pane-body, .split-view-view,
+    .monaco-scrollable-element, .monaco-list, .monaco-list-row) {
+  width: 100% !important; max-width: none !important;
+}
+
+/* PORTRAIT: one editor group at a time. Extension actions ("Claude Code open", "Codex
+   sidebar", Open to the Side, …) split the editor, and on a phone two 220px groups side by
+   side is unusable. Same trick as the side bar: the group slots are `.split-view-view`
+   with inline left/width, so collapse the inactive ones and give the active one everything.
+   Widths beat inline styles and are not re-cancelled (§5). */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .part.editor .split-view-view:has(> .editor-group-container.active) {
+  left: 0 !important; width: 100% !important;
+}
+:root[data-xmo-embed="1"][data-xmo-chrome="on"][data-xmo-orient="portrait"] .monaco-workbench .part.editor .split-view-view:has(> .editor-group-container:not(.active)) {
+  width: 0 !important; min-width: 0 !important;
+}
+
+/* Editor tab strip at the BOTTOM of its group — phone style: the tabs sit near your thumb
+   and the file content starts right under the top bars.
+   `.editor-group-container` lays its children out in NORMAL FLOW (title, then
+   .editor-container whose height VS Code sets to groupHeight - titleHeight), so simply
+   taking the title OUT of the flow slides the editor up by exactly the title height and
+   leaves an equally tall gap at the bottom for it to sit in. No arithmetic of our own and
+   no offset for VS Code to re-cancel (§5) — it stays correct at any group size.
+   `top: auto` matters: should VS Code ever write an inline `top`, a box with both top and
+   bottom set would STRETCH between them instead of hugging the bottom. */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"] .monaco-workbench .part.editor .editor-group-container {
+  position: relative !important;          /* anchor for the absolutely placed title */
+}
+:root[data-xmo-embed="1"][data-xmo-chrome="on"] .monaco-workbench .part.editor .editor-group-container > .title {
+  position: absolute !important;
+  top: auto !important; bottom: 0 !important; left: 0 !important; right: 0 !important;
+  z-index: 5 !important;
+}
+
+/* === Status bar relocated just below the title bar in frame/embed mode (the embed boot
+   JS shifts the workbench down and pins the bar); keep it above the editor content. === */
+:root[data-xmo-embed="1"][data-xmo-chrome="on"] .monaco-workbench .part.statusbar { z-index: 30 !important; }

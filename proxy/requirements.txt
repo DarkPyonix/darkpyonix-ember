@@ -1,0 +1,11 @@
+# Python 3.10 or newer is required (the `str | None` syntax). main.py checks this at startup.
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+httpx==0.27.2
+
+# ⚠️ websockets must stay pinned to 12.x — unpin it and VS Code Web does not come up at all.
+# dpx/vscode/proxy.py calls websockets.connect(extra_headers=...), and that argument was
+# renamed to additional_headers and removed in newer websockets. To move off this pin, the
+# argument name in proxy.py has to change with it.
+websockets==12.0

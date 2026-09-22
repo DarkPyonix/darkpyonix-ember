@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local state — differs per machine
+darkpyonix.db
+_xmo_recent.json
+_dpx_machine.json
+_dpx_hub_state.json
+
+# Certificates and keys are never committed. See docs/BACKGROUND.md for how to obtain HTTPS.
+*.pem
+*.key
+
+# Editor and OS debris (blocked up front, since several people share this repo)
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

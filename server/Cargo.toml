@@ -9,6 +9,7 @@ license = "Apache-2.0"
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
+chacha20poly1305 = "0.10"
 futures = "0.3"
 libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -21,6 +22,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3"

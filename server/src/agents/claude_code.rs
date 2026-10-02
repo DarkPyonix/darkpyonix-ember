@@ -598,6 +598,20 @@ impl LineParser {
                     }),
                 }
             }
+            // `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":<unix s>,
+            // "rateLimitType":"five_hour",…}}` (recorded with 2.1.288). `status` is `allowed`,
+            // `allowed_warning` or `rejected` (Agent SDK `SDKRateLimitEvent`); only a rejection
+            // means the account is out of quota (FR-U3).
+            "rate_limit_event" => {
+                let info = &v["rate_limit_info"];
+                if info["status"] == "rejected" {
+                    let kind = info["rateLimitType"].as_str().unwrap_or("usage");
+                    out.push(Parsed::Event(AgentEvent::RateLimited {
+                        resets_at: info["resetsAt"].as_i64().map(|s| s * 1000),
+                        message: format!("Claude {kind} limit reached"),
+                    }));
+                }
+            }
             "control_response" => {
                 tracing::debug!(target: "ember::claude", "control_response: {}", v["response"]);
             }
@@ -721,6 +735,21 @@ mod tests {
     }
 
     // The following lines are hand-written (not recorded) in the shapes documented above.
+
+    #[test]
+    fn rejected_rate_limit_event_reports_the_reset() {
+        let mut p = LineParser::default();
+        let allowed = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790982600,"rateLimitType":"five_hour"}}"#;
+        assert!(p.parse(allowed).is_empty());
+        let rejected = allowed.replace("\"allowed\"", "\"rejected\"");
+        assert_eq!(
+            p.parse(&rejected),
+            [Parsed::Event(AgentEvent::RateLimited {
+                resets_at: Some(1_790_982_600_000),
+                message: "Claude five_hour limit reached".into(),
+            })]
+        );
+    }
 
     #[test]
     fn error_result_fails_the_turn() {

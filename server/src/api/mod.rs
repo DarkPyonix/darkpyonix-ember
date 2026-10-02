@@ -49,6 +49,7 @@ impl From<SessionError> for ApiError {
         let code = match &e {
             SessionError::NotFound(_) => StatusCode::NOT_FOUND,
             SessionError::AgentUnavailable(_) => StatusCode::BAD_REQUEST,
+            SessionError::Account(_) => StatusCode::CONFLICT,
             SessionError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))
@@ -86,6 +87,8 @@ struct CreateBody {
     cwd: PathBuf,
     model: Option<String>,
     title: Option<String>,
+    /// Account id (FR-U2); omitted = the router chooses.
+    account: Option<String>,
 }
 
 async fn create_session(
@@ -94,13 +97,16 @@ async fn create_session(
 ) -> ApiResult<impl IntoResponse> {
     let agent = AgentKind::parse(&b.agent)
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown agent {}", b.agent)))?;
-    let rec = s.create(NewSession {
-        project: b.project,
-        agent,
-        cwd: b.cwd,
-        model: b.model,
-        title: b.title.unwrap_or_else(|| "New conversation".into()),
-    })?;
+    let rec = s.create_with_account(
+        NewSession {
+            project: b.project,
+            agent,
+            cwd: b.cwd,
+            model: b.model,
+            title: b.title.unwrap_or_else(|| "New conversation".into()),
+        },
+        b.account.as_deref(),
+    )?;
     Ok((StatusCode::CREATED, Json(rec)))
 }
 

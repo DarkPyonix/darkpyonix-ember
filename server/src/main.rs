@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ember_server::accounts::Accounts;
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::scripted::ScriptedAdapter;
@@ -11,7 +12,7 @@ use ember_server::session::Sessions;
 use ember_server::store::Store;
 
 /// Configuration from the environment.
-/// - `EMBER_DATA_DIR`: where `ember.db` lives (default `~/.ember`)
+/// - `EMBER_DATA_DIR`: where `ember.db`, `secret.key` and `accounts/` live (default `~/.ember`)
 /// - `EMBER_LISTEN`: listen address (default `127.0.0.1:8740`)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
@@ -45,7 +46,9 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("EMBER_SCRIPTED_AGENT").as_deref() == Ok("1") {
         adapters.push(Arc::new(ScriptedAdapter));
     }
+    let accounts = Accounts::open(store.clone(), &data_dir)?;
     let sessions = Sessions::new(store, adapters);
+    accounts.install(&sessions);
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
@@ -90,7 +93,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("ember server listening on http://{addr}");
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
-    let app = ember_server::api::router(sessions).merge(ember_server::a2a::api::router(a2a));
+    let app = ember_server::api::router(sessions)
+        .merge(ember_server::a2a::api::router(a2a))
+        .merge(ember_server::accounts::api::router(accounts));
     axum::serve(listener, app).await?;
     Ok(())
 }

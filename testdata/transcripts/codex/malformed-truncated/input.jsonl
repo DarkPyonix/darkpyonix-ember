@@ -1,0 +1,9 @@
+{"timestamp":"2026-01-02T03:04:02.000Z","type":"session_meta","payload":{"id":"0199aaaa-0000-7000-8000-000000000005","timestamp":"2026-01-02T03:04:00.000Z","cwd":"/work/project","originator":"codex_cli_rs","cli_version":"0.50.0","instructions":null,"git":{"branch":"main"}}}
+garbage line
+{"timestamp":"2026-01-02T03:04:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"First question."}]}}
+
+"just a string"
+{"type":"response_item","payload":
+{"timestamp":"2026-01-02T03:04:04.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"First answer."}]}}
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Second question."}]}}
+{"timestamp":"2026-01-02T03:04:01.000Z","type":"response_item","payload":{"type":"messa

@@ -1,0 +1,23 @@
+{
+  "native_id": "0199aaaa-0000-7000-8000-000000000004",
+  "cwd": "/work/project",
+  "title": null,
+  "messages": [
+    {
+      "role": "user",
+      "text": "Summarise the design doc."
+    },
+    {
+      "role": "assistant",
+      "text": "The doc proposes a single SQLite store."
+    },
+    {
+      "role": "user",
+      "text": "What are the risks?"
+    },
+    {
+      "role": "assistant",
+      "text": "Write contention under many sessions."
+    }
+  ]
+}

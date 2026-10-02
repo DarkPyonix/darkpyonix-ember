@@ -28,6 +28,11 @@ pub struct SessionRecord {
     pub updated_at: i64,
     /// Sequence number of the last stored event (0 when none).
     pub last_seq: i64,
+    /// The account this session runs under (FR-U2); `None` uses the server's own agent login.
+    /// Fixed at creation and never changed.
+    pub account_id: Option<String>,
+    /// Why that account was chosen (user choice or the router's reason, FR-U3).
+    pub account_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,8 +47,9 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
-const SCHEMA: &str = "
-PRAGMA journal_mode = WAL;
+/// Schema version 1: the original tables. Databases created before migrations existed are at
+/// `user_version` 0 with these tables already present, hence `IF NOT EXISTS`.
+const SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS sessions (
     id          TEXT PRIMARY KEY,
     project     TEXT NOT NULL,
@@ -66,7 +72,31 @@ CREATE TABLE IF NOT EXISTS events (
 );
 ";
 
-fn now_ms() -> i64 {
+/// Migrations, in order: entry `i` brings `PRAGMA user_version` from `i` to `i + 1`. Each runs in
+/// its own transaction together with the version bump. Append only; never edit a shipped entry.
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, crate::accounts::schema::MIGRATION];
+
+/// Bring `conn` up to the latest schema version.
+fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    anyhow::ensure!(
+        current as usize <= MIGRATIONS.len(),
+        "database schema version {current} is newer than this server ({})",
+        MIGRATIONS.len()
+    );
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+const SESSION_COLUMNS: &str = "id, project, agent, cwd, model, native_id, status, title, created_at, updated_at, last_seq, account_id, account_reason";
+
+/// Current Unix time in milliseconds.
+pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
@@ -92,15 +122,26 @@ fn parse_status(s: &str) -> SessionStatus {
 
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Store> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
+        let mut conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        migrate(&mut conn)?;
         Ok(Store { conn: Mutex::new(conn) })
     }
 
     pub fn open_in_memory() -> anyhow::Result<Store> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
+        let mut conn = Connection::open_in_memory()?;
+        migrate(&mut conn)?;
         Ok(Store { conn: Mutex::new(conn) })
+    }
+
+    /// The connection, for modules that own their own tables (accounts, …).
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
+    /// `PRAGMA user_version` of the open database.
+    pub fn schema_version(&self) -> anyhow::Result<i64> {
+        Ok(self.conn().query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
     pub fn create_session(
@@ -111,12 +152,26 @@ impl Store {
         model: Option<&str>,
         title: &str,
     ) -> anyhow::Result<SessionRecord> {
+        self.create_session_with_account(project, agent, cwd, model, title, None)
+    }
+
+    /// Create a session under `account` = `(account id, reason)` (FR-U2).
+    pub fn create_session_with_account(
+        &self,
+        project: &str,
+        agent: AgentKind,
+        cwd: &str,
+        model: Option<&str>,
+        title: &str,
+        account: Option<(&str, &str)>,
+    ) -> anyhow::Result<SessionRecord> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
+        let (account_id, reason) = account.unzip();
         self.conn.lock().unwrap().execute(
-            "INSERT INTO sessions (id, project, agent, cwd, model, status, title, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-            params![id, project, agent.as_str(), cwd, model, status_str(SessionStatus::Idle), title, now],
+            "INSERT INTO sessions (id, project, agent, cwd, model, status, title, created_at, updated_at, account_id, account_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10)",
+            params![id, project, agent.as_str(), cwd, model, status_str(SessionStatus::Idle), title, now, account_id, reason],
         )?;
         Ok(self.session(&id)?.expect("just inserted"))
     }
@@ -125,8 +180,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         Ok(conn
             .query_row(
-                "SELECT id, project, agent, cwd, model, native_id, status, title, created_at, updated_at, last_seq
-                 FROM sessions WHERE id = ?1",
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
                 params![id],
                 row_to_session,
             )
@@ -135,10 +189,9 @@ impl Store {
 
     pub fn sessions(&self, project: Option<&str>) -> anyhow::Result<Vec<SessionRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, project, agent, cwd, model, native_id, status, title, created_at, updated_at, last_seq
-             FROM sessions WHERE (?1 IS NULL OR project = ?1) ORDER BY updated_at DESC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE (?1 IS NULL OR project = ?1) ORDER BY updated_at DESC"
+        ))?;
         let rows = stmt.query_map(params![project], row_to_session)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -220,6 +273,8 @@ fn row_to_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
         last_seq: r.get(10)?,
+        account_id: r.get(11)?,
+        account_reason: r.get(12)?,
     })
 }
 
@@ -253,6 +308,45 @@ mod tests {
         let tail = store.events_after(&id, 1).unwrap();
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].event, AgentEvent::UserMessage { text: "hi".into() });
+    }
+
+    #[test]
+    fn pre_migration_database_is_migrated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        {
+            // A database written by the server before migrations existed (user_version 0).
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project, agent, cwd, model, native_id, status, title, created_at, updated_at, last_seq)
+                 VALUES ('old', 'p', 'codex', '/tmp', NULL, 'thr-1', 'finished', 't', 1, 2, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let old = store.session("old").unwrap().unwrap();
+        assert_eq!(old.native_id.as_deref(), Some("thr-1"));
+        assert_eq!(old.account_id, None, "existing sessions keep the server's own login");
+        let new = store
+            .create_session_with_account("p", AgentKind::Codex, "/tmp", None, "t", Some(("a1", "chosen")))
+            .unwrap();
+        assert_eq!(new.account_id.as_deref(), Some("a1"));
+        drop(store);
+        // Reopening is a no-op.
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(store.sessions(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn newer_schema_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
+        assert!(Store::open(&path).is_err());
     }
 
     #[test]

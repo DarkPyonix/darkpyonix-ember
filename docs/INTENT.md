@@ -116,6 +116,10 @@ Putting the editor at the centre, as the 09-22 design did, made the heavy surfac
 CLI, stores every transcript, and manages every account. Computers connect to it; it does not
 connect to a computer for a conversation's history.
 
+**Implementation language.** [user, 2026-10-03] ember server is written in Rust ("ember server는
+rust로 하면 된단다"). The Python transcript parsers in `proxy/dpx/agents/` stay where they are; the
+Rust server's parsers share test vectors with them so both read history identically.
+
 **Why.** It is the direct fix for motivation 1. It also gives, for free, sessions that survive the
 local machine being closed (tmux for agents), several computers attaching to one session, and
 search across all sessions in one place.

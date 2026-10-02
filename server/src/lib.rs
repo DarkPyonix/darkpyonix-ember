@@ -2,6 +2,8 @@
 //!
 //! Runs agent CLIs headless, stores every session, and pushes updates to clients.
 
+pub mod a2a;
+pub mod accounts;
 pub mod agents;
 pub mod api;
 pub mod events;

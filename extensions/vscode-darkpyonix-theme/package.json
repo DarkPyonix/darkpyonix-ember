@@ -1,0 +1,31 @@
+{
+  "name": "vscode-darkpyonix-theme",
+  "displayName": "vscode-darkpyonix-theme",
+  "description": "DarkPyonix custom theme for VS Code",
+  "version": "0.0.2",
+  "publisher": "DarkPyonix",
+  "engines": {
+    "vscode": "^1.102.0"
+  },
+  "categories": [
+    "Themes"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DarkPyonix/vscode-darkpyonix-theme.git"
+  },
+  "contributes": {
+    "themes": [
+      {
+        "label": "DarkPyonix Light",
+        "uiTheme": "vs",
+        "path": "./themes/DarkPyonix Light-color-theme.json"
+      },
+      {
+        "label": "DarkPyonix Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/DarkPyonix Dark-color-theme.json"
+      }
+    ]
+  }
+}

@@ -79,11 +79,16 @@ pub type AccountChoice = (String, String);
 pub type AccountRouter =
     Arc<dyn Fn(AgentKind, Option<&str>) -> Result<Option<AccountChoice>, String> + Send + Sync>;
 
+/// Contributes system-level instructions to an agent process when its session starts (e.g. how
+/// to use the A2A tool). Contributions are joined with blank lines.
+pub type InstructionsHook = Arc<dyn Fn(&SessionRecord) -> Option<String> + Send + Sync>;
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
     event_hooks: std::sync::Mutex<Vec<EventHook>>,
     account_router: std::sync::Mutex<Option<AccountRouter>>,
+    instructions_hooks: std::sync::Mutex<Vec<InstructionsHook>>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
@@ -101,6 +106,7 @@ impl Sessions {
             start_hooks: std::sync::Mutex::new(Vec::new()),
             event_hooks: std::sync::Mutex::new(Vec::new()),
             account_router: std::sync::Mutex::new(None),
+            instructions_hooks: std::sync::Mutex::new(Vec::new()),
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
@@ -122,6 +128,11 @@ impl Sessions {
     /// Install the account router used by [`Sessions::create_with_account`].
     pub fn set_account_router(&self, router: AccountRouter) {
         *self.account_router.lock().unwrap() = Some(router);
+    }
+
+    /// Register a hook that adds instructions to every agent process this server starts.
+    pub fn add_instructions_hook(&self, hook: InstructionsHook) {
+        self.instructions_hooks.lock().unwrap().push(hook);
     }
 
     pub fn store(&self) -> &Store {
@@ -177,6 +188,11 @@ impl Sessions {
         Ok(rec)
     }
 
+    /// Record and push an event that did not come from the agent (e.g. an A2A notice).
+    pub fn record_event(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
+        self.record(session_id, event)
+    }
+
     /// Record and push one event.
     fn record(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
         let (stored, status) = self.store.append(session_id, event)?;
@@ -203,6 +219,8 @@ impl Sessions {
             .clone();
         let env: Vec<(String, String)> =
             self.start_hooks.lock().unwrap().iter().flat_map(|h| h(&rec)).collect();
+        let instructions: Vec<String> =
+            self.instructions_hooks.lock().unwrap().iter().filter_map(|h| h(&rec)).collect();
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
         let run = adapter
             .start(
@@ -211,6 +229,7 @@ impl Sessions {
                     resume_native_id: rec.native_id.clone(),
                     model: rec.model.clone(),
                     env,
+                    instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
                 },
                 tx.clone(),
             )

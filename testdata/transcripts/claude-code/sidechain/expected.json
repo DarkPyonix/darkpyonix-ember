@@ -1,0 +1,28 @@
+{
+  "native_id": "44444444-4444-4444-8444-444444444444",
+  "cwd": "/work/project",
+  "title": null,
+  "messages": [
+    {
+      "role": "user",
+      "text": "Find every TODO in the repository."
+    },
+    {
+      "role": "assistant",
+      "text": "{\"description\":\"Search TODOs\",\"prompt\":\"Find TODO comments\",\"subagent_type\":\"general-purpose\"}",
+      "tool_name": "Task",
+      "tool_call_id": "toolu_10"
+    },
+    {
+      "role": "tool",
+      "text": "One TODO, in src/app.py line 3.",
+      "tool_name": "Task",
+      "tool_call_id": "toolu_10",
+      "is_error": false
+    },
+    {
+      "role": "assistant",
+      "text": "There is one TODO: src/app.py line 3."
+    }
+  ]
+}

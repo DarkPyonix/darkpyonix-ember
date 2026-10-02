@@ -1,0 +1,23 @@
+{
+  "native_id": "55555555-5555-4555-8555-555555555555",
+  "cwd": "/work/project",
+  "title": "Parser refactor 파서",
+  "messages": [
+    {
+      "role": "user",
+      "text": "Refactor the parser module."
+    },
+    {
+      "role": "assistant",
+      "text": "Done: the parser is now split into two functions."
+    },
+    {
+      "role": "user",
+      "text": "Now add tests."
+    },
+    {
+      "role": "assistant",
+      "text": "Added tests for both functions."
+    }
+  ]
+}

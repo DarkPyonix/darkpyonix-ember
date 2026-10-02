@@ -40,6 +40,18 @@ Ember-specific additions:
 
 *[provisional — ordering proposed by the implementer, not yet confirmed by the user]*
 
+Target dates *[provisional]* are tracked as GitHub milestones (scope, completion criteria and the
+basis for each date are in the milestone descriptions):
+
+| Milestone | Target | Issues |
+| --------- | ------ | ------ |
+| M1 — ember server core | 2026-10-17 | #2, #3, #4 |
+| M2 — ember node and computer switching | 2026-10-31 | #5, #6 |
+| M4 — A2A and accounts | 2026-11-14 | #7, #8 |
+| M3 — native client (dioxus-compose) | 2026-11-28 — moves with `dioxus-compose`'s schedule | #9 |
+
+M4 is dated before M3 because it needs no native client. M5–M8 are not dated yet.
+
 | ID | Milestone | Decides |
 | -- | --------- | ------- |
 | **M0** | These documents, revised to the 10-03 brief and cross-referenced | Whether the conversation-first, main-server model has a coherent written spec |

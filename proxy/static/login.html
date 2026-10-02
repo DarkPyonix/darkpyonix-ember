@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DarkPyonix — 허브 로그인</title>
+<script>(function(){try{document.documentElement.setAttribute('data-xtheme',localStorage.getItem('xmo_theme')||'sepia');}catch(e){document.documentElement.setAttribute('data-xtheme','sepia');}})();</script>
+<style>
+:root[data-xtheme="light"]{ --bg:#f4f4f5; --card:#ffffff; --ink:#2b2b2b; --muted:#8a8a8f; --line:#ececee; --brand:#c0392b; --shadow:rgba(0,0,0,.16); }
+:root[data-xtheme="sepia"]{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --shadow:rgba(120,80,50,.18); }
+:root[data-xtheme="dark"]{ --bg:#1f1c19; --card:#2a2622; --ink:#e8e0d4; --muted:#a59a8c; --line:#38322c; --brand:#d0654f; --shadow:rgba(0,0,0,.6); }
+:root{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --shadow:rgba(120,80,50,.18); }
+*{box-sizing:border-box;} html,body{margin:0;min-height:100%;}
+body{ background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans KR',sans-serif;
+  display:flex; align-items:center; justify-content:center; padding:calc(env(safe-area-inset-top) + 20px) 20px calc(env(safe-area-inset-bottom) + 20px); }
+.card{ width:100%; max-width:420px; background:var(--card); border-radius:20px; box-shadow:0 20px 50px var(--shadow); overflow:hidden; }
+.head{ text-align:center; padding:32px 24px 18px; border-bottom:1px solid var(--line); }
+.brand{ font-size:28px; font-weight:800; color:var(--brand); }
+.sub{ font-size:12px; color:var(--muted); margin-top:4px; }
+.body{ padding:20px 24px 26px; }
+.field{ display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--line); padding:12px 4px; }
+.field input{ flex:1; border:none; background:transparent; font-size:15px; outline:none; color:var(--ink); }
+.eye{ background:none;border:none;color:var(--brand);cursor:pointer;font-size:15px; }
+.btn{ width:100%; margin-top:22px; padding:14px; border:none; border-radius:12px; background:var(--brand); color:#fff; font-size:15px; font-weight:700; cursor:pointer; }
+.err{ color:#c0392b; font-size:12.5px; text-align:center; margin-top:12px; min-height:16px; }
+</style></head>
+<body>
+<form class="card" id="form">
+  <div class="head"><div class="brand">DarkPyonix</div><div class="sub">허브 로그인</div></div>
+  <div class="body">
+    <div class="field"><span>👤</span><input id="user" placeholder="사용자 이름" autocomplete="username" autofocus></div>
+    <div class="field"><span>🔒</span><input id="pass" type="password" placeholder="비밀번호" autocomplete="current-password"><button type="button" class="eye" id="eye">👁</button></div>
+    <button class="btn" type="submit">LOGIN</button>
+    <div class="err" id="err"></div>
+  </div>
+</form>
+<script>
+var pass = document.getElementById('pass');
+document.getElementById('eye').addEventListener('click', function(){ pass.type = pass.type === 'password' ? 'text' : 'password'; });
+try { var lu = localStorage.getItem('xmo_last_user'); if(lu){ document.getElementById('user').value = lu; pass.focus(); } } catch(e){}
+document.getElementById('form').addEventListener('submit', function(e){
+  e.preventDefault();
+  var user = document.getElementById('user').value.trim(), err = document.getElementById('err');
+  err.textContent = '';
+  if(!user){ err.textContent = '사용자 이름을 입력하세요'; return; }
+  fetch('/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
+                        body: JSON.stringify({username:user, password:pass.value})})
+    .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(d){ return {ok:r.ok, d:d}; }); })
+    .then(function(res){
+      if(res.ok && res.d && res.d.ok){ try { localStorage.setItem('xmo_last_user', user); } catch(_){} location.href = '/'; }
+      else err.textContent = (res.d && res.d.error) || '로그인 실패';
+    })
+    .catch(function(){ err.textContent = '서버에 연결할 수 없습니다'; });
+});
+</script>
+</body></html>

@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DarkPyonix — 홈</title>
+<script>(function(){try{document.documentElement.setAttribute('data-xtheme',localStorage.getItem('xmo_theme')||'sepia');}catch(e){document.documentElement.setAttribute('data-xtheme','sepia');}})();</script>
+<style>
+/* 팔레트는 기존 홈/로그인 화면과 동일한 3테마(라이트/세피아/다크)를 그대로 쓴다.
+   localStorage 키도 같은 `xmo_theme` 이라 어느 화면에서 바꾸든 전체가 따라온다. */
+:root[data-xtheme="light"]{ --bg:#f4f4f5; --card:#ffffff; --ink:#2b2b2b; --muted:#8a8a8f; --line:#ececee; --brand:#c0392b; --accent:#f5821f; --ico-bg:#fff3e8; --chip:#eeeeee; --dash:#d7d7db; --shadow:rgba(0,0,0,.10); }
+:root[data-xtheme="sepia"]{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --accent:#c8632a; --ico-bg:#f3e7d6; --chip:#e9ddc9; --dash:#d9ccb8; --shadow:rgba(120,80,50,.14); }
+:root[data-xtheme="dark"]{ --bg:#1f1c19; --card:#2a2622; --ink:#e8e0d4; --muted:#a59a8c; --line:#38322c; --brand:#d0654f; --accent:#e08a4a; --ico-bg:#382e24; --chip:#38322c; --dash:#4a4038; --shadow:rgba(0,0,0,.5); }
+:root{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --accent:#c8632a; --ico-bg:#f3e7d6; --chip:#e9ddc9; --dash:#d9ccb8; --shadow:rgba(120,80,50,.14); }
+*{box-sizing:border-box;} html,body{margin:0;min-height:100%;}
+body{ background:var(--bg); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Noto Sans KR',sans-serif;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) calc(env(safe-area-inset-bottom) + 24px) env(safe-area-inset-left); }
+
+/* 상단바 = 뒤로 + 빵부스러기 + 테마 */
+.top{ position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; padding:12px 16px;
+      background:var(--bg); border-bottom:1px solid var(--line); }
+.back{ border:none; background:var(--chip); color:var(--ink); width:34px; height:34px; border-radius:10px; font-size:17px; cursor:pointer; flex:0 0 auto; display:none; }
+.back.show{ display:block; }
+.crumb{ flex:1; min-width:0; }
+.crumb .b1{ font-size:16px; font-weight:800; color:var(--brand); letter-spacing:.2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.crumb .b2{ font-size:11.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.xtheme{ display:inline-flex; gap:3px; background:var(--card); border:1px solid var(--line); border-radius:999px; padding:3px; flex:0 0 auto; }
+.xtheme button{ width:28px; height:28px; border:none; border-radius:999px; background:none; color:var(--muted); cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; }
+.xtheme button.on{ background:var(--brand); color:#fff; }
+
+.wrap{ padding:14px 16px 40px; }
+.grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+.card{ position:relative; background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; box-shadow:0 1px 3px var(--shadow); cursor:pointer; }
+.card:active{ transform:scale(.995); }
+.row{ display:flex; align-items:center; gap:10px; }
+.ico{ width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:var(--ico-bg);color:var(--accent);font-size:20px;flex:0 0 auto; }
+.title{ font-size:15.5px; font-weight:700; margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sub{ font-size:11.5px; color:var(--muted); word-break:break-all; margin-top:2px; }
+.dot{ width:9px;height:9px;border-radius:50%;background:#9e9e9e;flex:0 0 auto; }
+.dot.on{ background:#3fa34d; }
+.chips{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.chip{ font-size:10.5px; color:var(--muted); background:var(--chip); border-radius:999px; padding:3px 9px; }
+.chip.agent{ color:var(--brand); font-weight:700; }
+.prev{ border-top:1px solid var(--line); margin-top:12px; padding-top:10px; display:flex; flex-direction:column; gap:5px; }
+.pline{ font-size:12px; display:flex; gap:6px; align-items:baseline; }
+.pline .who{ flex:0 0 auto; font-size:10px; font-weight:700; color:var(--muted); width:38px; overflow:hidden; }
+.pline .who.a{ color:var(--accent); }
+.pline .tx{ flex:1; min-width:0; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pline.tool .tx{ color:var(--muted); font-family:ui-monospace,Consolas,monospace; font-size:11px; }
+.empty{ font-size:12.5px; color:var(--muted); padding:22px 4px; text-align:center; line-height:1.7; }
+.btn{ margin-top:12px; width:100%; border:none; border-radius:10px; padding:10px; font-size:13.5px; font-weight:600; color:#fff; background:var(--brand); cursor:pointer; }
+.btn.ghost{ background:var(--chip); color:var(--ink); }
+.filter{ width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--ink); font-size:13.5px; margin-bottom:12px; }
+
+/* 대화 기록 화면 */
+.log{ display:flex; flex-direction:column; gap:10px; max-width:820px; margin:0 auto; }
+.msg{ max-width:86%; padding:10px 13px; border-radius:14px; font-size:13.5px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+.msg.user{ align-self:flex-end; background:var(--brand); color:#fff; border-bottom-right-radius:5px; }
+.msg.assistant{ align-self:flex-start; background:var(--card); border:1px solid var(--line); border-bottom-left-radius:5px; }
+.msg.tool{ align-self:flex-start; background:transparent; border:1px dashed var(--dash); color:var(--muted);
+           font-family:ui-monospace,Consolas,monospace; font-size:11.5px; padding:6px 10px; }
+.bar{ position:sticky; bottom:0; background:var(--bg); border-top:1px solid var(--line);
+      padding:10px 0 calc(10px + env(safe-area-inset-bottom)); margin-top:16px; display:flex; gap:8px; }
+.bar .btn{ margin:0; }
+code{ font-family:ui-monospace,Consolas,monospace; background:var(--chip); border-radius:6px; padding:1px 5px; font-size:11.5px; }
+#toast{ position:fixed; left:50%; transform:translateX(-50%); bottom:calc(24px + env(safe-area-inset-bottom)); z-index:20;
+        display:none; padding:10px 16px; border-radius:10px; background:rgba(30,30,30,.92); color:#fff; font-size:13px; max-width:86vw; }
+#toast.show{ display:block; }
+</style></head>
+<body>
+<div class="top">
+  <button class="back" id="back" type="button" aria-label="뒤로">←</button>
+  <div class="crumb"><div class="b1" id="b1">DarkPyonix</div><div class="b2" id="b2">내 컴퓨터</div></div>
+  <div class="xtheme" id="xtheme" role="group" aria-label="테마">
+    <button type="button" data-t="light" title="라이트">☀</button>
+    <button type="button" data-t="sepia" title="세피아">◐</button>
+    <button type="button" data-t="dark" title="다크">☾</button>
+  </div>
+</div>
+<div class="wrap" id="view"></div>
+<div id="toast"></div>
+<script>
+(function(){
+'use strict';
+
+// ---------------------------------------------------------------------------
+// 라우팅 (해시 기반 — 폰의 뒤로가기 버튼이 그대로 동작한다)
+//   #/                          컴퓨터 목록
+//   #/m/<mid>                   그 PC 의 워크스페이스 목록
+//   #/m/<mid>/w/<b64folder>     그 워크스페이스의 대화 목록
+//   #/m/<mid>/c/<agent>/<cid>?f=<b64folder>   대화 전체 기록
+// ---------------------------------------------------------------------------
+var view = document.getElementById('view');
+var TREE = { machines: [] };
+
+function b64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/=+$/,''); }
+function unb64(s){ try { return decodeURIComponent(escape(atob(s))); } catch(e){ return ''; } }
+function nameOf(p){ var s = String(p||'').replace(/\\/g,'/').replace(/\/+$/,''); return s.split('/').pop() || s; }
+function rel(ts){
+  if(!ts) return '';
+  var s = Math.max(0, Date.now()/1000 - Number(ts));
+  if(s < 60) return '방금';
+  if(s < 3600) return Math.floor(s/60) + '분 전';
+  if(s < 86400) return Math.floor(s/3600) + '시간 전';
+  if(s < 86400*30) return Math.floor(s/86400) + '일 전';
+  return new Date(Number(ts)*1000).toLocaleDateString('ko-KR');
+}
+function el(tag, cls, text){ var e = document.createElement(tag); if(cls) e.className = cls; if(text != null) e.textContent = text; return e; }
+function crumbs(a, b){ document.getElementById('b1').textContent = a; document.getElementById('b2').textContent = b || ''; }
+function toast(msg){
+  var t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(function(){ t.classList.remove('show'); }, 2600);
+}
+function machineOf(mid){ return TREE.machines.filter(function(x){ return x.id === mid; })[0]; }
+function agentName(m, id){
+  var a = ((m && m.agents) || []).filter(function(x){ return x.id === id; })[0];
+  return (a && a.name) || id;
+}
+function api(path){
+  return fetch(path, {cache:'no-store', credentials:'same-origin'}).then(function(r){
+    if(r.status === 401){ location.href = '/login'; throw new Error('unauthorized'); }
+    return r.json().catch(function(){ return {ok:false, error:'응답을 해석하지 못했습니다'}; });
+  });
+}
+
+// --- 화면 1: 컴퓨터 목록 -----------------------------------------------------
+function machineCard(m){
+  var c = el('div','card');
+  var head = el('div','row');
+  head.appendChild(el('div','ico','🖥'));
+  var meta = el('div'); meta.style.cssText = 'flex:1;min-width:0';
+  meta.appendChild(el('div','title', m.name));
+  meta.appendChild(el('div','sub', (m.os || '') + (m.online ? '' : ' · 마지막 접속 ' + rel(m.last_seen))));
+  head.appendChild(meta);
+  head.appendChild(el('div', 'dot' + (m.online ? ' on' : '')));
+  c.appendChild(head);
+
+  var chips = el('div','chips');
+  chips.appendChild(el('span','chip', (m.workspaces ? m.workspaces.length : (m.workspace_count || 0)) + '개 워크스페이스'));
+  (m.agents || []).forEach(function(a){ chips.appendChild(el('span','chip agent', a.name || a.id)); });
+  if(!m.online) chips.appendChild(el('span','chip','오프라인'));
+  c.appendChild(chips);
+
+  // 이 PC 에서 가장 최근에 손댄 대화 두 줄 — 카드만 보고도 뭘 하다 말았는지 보이게.
+  var recent = [];
+  (m.workspaces || []).forEach(function(w){ (w.recent || []).forEach(function(cv){ recent.push(cv); }); });
+  recent.sort(function(x,y){ return (y.updated||0) - (x.updated||0); });
+  if(recent.length){
+    var p = el('div','prev');
+    recent.slice(0,2).forEach(function(cv){
+      var line = el('div','pline');
+      line.appendChild(el('span','who', nameOf(cv.folder).slice(0,6)));
+      line.appendChild(el('span','tx', cv.title || '(제목 없음)'));
+      p.appendChild(line);
+    });
+    c.appendChild(p);
+  }
+  c.addEventListener('click', function(){ location.hash = '#/m/' + m.id; });
+  return c;
+}
+
+function renderMachines(){
+  crumbs('DarkPyonix', '내 컴퓨터 ' + TREE.machines.length + '대');
+  document.getElementById('back').classList.remove('show');
+  view.innerHTML = '';
+  if(!TREE.machines.length){
+    var e = el('div','empty');
+    e.innerHTML = '연결된 컴퓨터가 없습니다.<br>각 PC 에서 <code>python connector.py</code> 를 실행해 주세요.';
+    view.appendChild(e); return;
+  }
+  var g = el('div','grid');
+  TREE.machines.forEach(function(m){ g.appendChild(machineCard(m)); });
+  view.appendChild(g);
+}
+
+// --- 화면 2: 워크스페이스 목록 -----------------------------------------------
+function workspaceCard(m, w){
+  var c = el('div','card');
+  var head = el('div','row');
+  head.appendChild(el('div','ico','📁'));
+  var meta = el('div'); meta.style.cssText = 'flex:1;min-width:0';
+  meta.appendChild(el('div','title', w.name || nameOf(w.folder)));
+  meta.appendChild(el('div','sub', w.folder));
+  head.appendChild(meta);
+  c.appendChild(head);
+
+  var chips = el('div','chips');
+  chips.appendChild(el('span','chip', (w.conversations || 0) + '개 대화'));
+  if(w.updated) chips.appendChild(el('span','chip', rel(w.updated)));
+  (w.agents || []).forEach(function(a){ chips.appendChild(el('span','chip agent', a)); });
+  c.appendChild(chips);
+
+  if((w.recent || []).length){
+    var p = el('div','prev');
+    w.recent.slice(0,3).forEach(function(cv){
+      var line = el('div','pline');
+      line.appendChild(el('span','who', rel(cv.updated)));
+      line.appendChild(el('span','tx', cv.title || '(제목 없음)'));
+      p.appendChild(line);
+    });
+    c.appendChild(p);
+  }
+
+  var open = el('button','btn ghost','VS Code 로 열기');
+  open.addEventListener('click', function(e){ e.stopPropagation(); jump(m.id, w.folder, '', ''); });
+  c.appendChild(open);
+  c.addEventListener('click', function(){ location.hash = '#/m/' + m.id + '/w/' + b64(w.folder); });
+  return c;
+}
+
+function renderWorkspaces(mid){
+  var m = machineOf(mid);
+  if(!m){ location.hash = '#/'; return; }
+  crumbs(m.name, (m.online ? '온라인' : '오프라인 · ' + rel(m.last_seen)) + ' · 워크스페이스 ' + (m.workspaces||[]).length + '개');
+  document.getElementById('back').classList.add('show');
+  view.innerHTML = '';
+  var list = (m.workspaces || []);
+  if(!list.length){
+    view.appendChild(el('div','empty', m.online ? '이 PC 에서 에이전트 대화 기록을 찾지 못했습니다.'
+                                                : '오프라인입니다. 받아둔 정보가 없습니다.'));
+    return;
+  }
+  var g = el('div','grid');
+  list.forEach(function(w){ g.appendChild(workspaceCard(m, w)); });
+  view.appendChild(g);
+}
+
+// --- 화면 3: 대화 목록 -------------------------------------------------------
+function conversationCard(m, cv){
+  var c = el('div','card');
+  var head = el('div','row');
+  head.appendChild(el('div','ico','💬'));
+  var meta = el('div'); meta.style.cssText = 'flex:1;min-width:0';
+  meta.appendChild(el('div','title', cv.title || '(제목 없음)'));
+  meta.appendChild(el('div','sub', rel(cv.updated) + ' · 기록 ' + (cv.message_count || 0) + '줄'));
+  head.appendChild(meta);
+  c.appendChild(head);
+
+  var chips = el('div','chips');
+  chips.appendChild(el('span','chip agent', agentName(m, cv.agent)));
+  c.appendChild(chips);
+
+  if((cv.preview || []).length){
+    var p = el('div','prev');
+    cv.preview.forEach(function(msg){
+      var line = el('div','pline' + (msg.kind === 'tool' ? ' tool' : ''));
+      line.appendChild(el('span','who' + (msg.role === 'assistant' ? ' a' : ''), msg.role === 'user' ? '나' : 'AI'));
+      line.appendChild(el('span','tx', msg.text));
+      p.appendChild(line);
+    });
+    c.appendChild(p);
+  }
+  c.addEventListener('click', function(){
+    location.hash = '#/m/' + m.id + '/c/' + encodeURIComponent(cv.agent) + '/' + encodeURIComponent(cv.id)
+                  + '?f=' + b64(cv.folder || '');
+  });
+  return c;
+}
+
+function renderConversations(mid, folder){
+  var m = machineOf(mid);
+  if(!m){ location.hash = '#/'; return; }
+  crumbs(nameOf(folder), m.name + ' · ' + folder);
+  document.getElementById('back').classList.add('show');
+  view.innerHTML = '';
+  view.appendChild(el('div','empty','불러오는 중…'));
+
+  api('/api/machines/' + encodeURIComponent(mid) + '/conversations?folder=' + encodeURIComponent(folder)
+      + '&fresh=' + (m.online ? 1 : 0)).then(function(d){
+    view.innerHTML = '';
+    var list = (d && d.conversations) || [];
+    if(!list.length){ view.appendChild(el('div','empty','이 워크스페이스에는 아직 대화가 없습니다.')); return; }
+
+    var box = el('input','filter'); box.type = 'search'; box.placeholder = '대화 검색 (제목·미리보기)';
+    view.appendChild(box);
+    var g = el('div','grid'); view.appendChild(g);
+    function paint(q){
+      g.innerHTML = '';
+      q = (q || '').trim().toLowerCase();
+      list.filter(function(cv){
+        if(!q) return true;
+        var hay = (cv.title || '') + ' ' + (cv.preview || []).map(function(x){ return x.text; }).join(' ');
+        return hay.toLowerCase().indexOf(q) >= 0;
+      }).forEach(function(cv){ g.appendChild(conversationCard(m, cv)); });
+      if(!g.children.length) g.appendChild(el('div','empty','검색 결과가 없습니다.'));
+    }
+    box.addEventListener('input', function(){ paint(box.value); });
+    paint('');
+  }).catch(function(){ view.innerHTML = ''; view.appendChild(el('div','empty','대화 목록을 불러오지 못했습니다.')); });
+}
+
+// --- 화면 4: 대화 전체 기록 --------------------------------------------------
+function renderTranscript(mid, agent, cid, folder){
+  var m = machineOf(mid);
+  if(!m){ location.hash = '#/'; return; }
+  crumbs('대화 기록', m.name + ' · ' + nameOf(folder));
+  document.getElementById('back').classList.add('show');
+  view.innerHTML = '';
+  view.appendChild(el('div','empty','기록을 읽는 중…'));
+
+  api('/api/machines/' + encodeURIComponent(mid) + '/transcript?agent=' + encodeURIComponent(agent)
+      + '&cid=' + encodeURIComponent(cid)).then(function(d){
+    view.innerHTML = '';
+    if(!d || !d.ok){
+      view.appendChild(el('div','empty', (d && d.error) || '기록을 읽지 못했습니다.'));
+    } else {
+      var log = el('div','log');
+      (d.messages || []).forEach(function(msg){
+        var cls = msg.kind === 'tool' ? 'tool' : (msg.role === 'user' ? 'user' : 'assistant');
+        log.appendChild(el('div','msg ' + cls, msg.text));
+      });
+      if(!log.children.length) log.appendChild(el('div','empty','표시할 발화가 없습니다.'));
+      view.appendChild(log);
+    }
+    var bar = el('div','bar');
+    var go = el('button','btn','VS Code 에서 이어가기');
+    go.addEventListener('click', function(){ jump(mid, folder, agent, cid); });
+    bar.appendChild(go);
+    view.appendChild(bar);
+  }).catch(function(){ view.innerHTML = ''; view.appendChild(el('div','empty','기록을 읽지 못했습니다.')); });
+}
+
+// --- VS Code 로 점프 ---------------------------------------------------------
+// 허브가 그 PC 의 공개 주소(DPX_PUBLIC_URL)와 이어가기 명령을 알려준다. 명령은
+// 클립보드에 넣어 두므로 워크스페이스가 열린 뒤 터미널에 붙여넣기만 하면 된다.
+function jump(mid, folder, agent, cid){
+  var q = '/api/machines/' + encodeURIComponent(mid) + '/open?folder=' + encodeURIComponent(folder);
+  if(agent && cid) q += '&agent=' + encodeURIComponent(agent) + '&cid=' + encodeURIComponent(cid);
+  api(q).then(function(d){
+    if(!d || !d.ok || !d.url){ toast((d && d.reason) || '열 수 있는 주소가 없습니다.'); return; }
+    var cmd = d.resume && d.resume.command;
+    if(cmd){
+      try { navigator.clipboard.writeText(cmd); toast('이어가기 명령을 복사했습니다 — 터미널에 붙여넣으세요'); }
+      catch(e){ toast('이어가기 명령: ' + cmd); }
+    }
+    setTimeout(function(){ location.href = d.url; }, cmd ? 800 : 0);
+  });
+}
+
+// --- 라우터 ------------------------------------------------------------------
+function route(){
+  var h = location.hash.replace(/^#/, '') || '/';
+  var qs = '', qi = h.indexOf('?');
+  if(qi >= 0){ qs = h.slice(qi + 1); h = h.slice(0, qi); }
+  var p = h.split('/').filter(Boolean);
+  if(p[0] === 'm' && p[2] === 'w') return renderConversations(p[1], unb64(p[3] || ''));
+  if(p[0] === 'm' && p[2] === 'c'){
+    var f = /(^|&)f=([^&]*)/.exec(qs);
+    return renderTranscript(p[1], decodeURIComponent(p[3] || ''), decodeURIComponent(p[4] || ''),
+                            f ? unb64(f[2]) : '');
+  }
+  if(p[0] === 'm') return renderWorkspaces(p[1]);
+  return renderMachines();
+}
+document.getElementById('back').addEventListener('click', function(){ history.back(); });
+window.addEventListener('hashchange', route);
+
+// --- 트리 로드 + 주기 갱신 ---------------------------------------------------
+// 목록 화면에 있을 때만 다시 그린다(대화를 읽는 중에 화면이 튀지 않도록).
+function loadTree(silent){
+  return api('/api/tree').then(function(d){
+    if(d && d.ok) TREE = d;
+    var onList = /^(#\/?|#\/m\/[^/]+)?$/.test(location.hash);
+    if(!silent || onList) route();
+  }).catch(function(){
+    if(!silent){ view.innerHTML = ''; view.appendChild(el('div','empty','허브에 연결하지 못했습니다.')); }
+  });
+}
+loadTree(false);
+setInterval(function(){ if(!document.hidden) loadTree(true); }, 20000);
+
+// --- 테마 --------------------------------------------------------------------
+(function(){
+  var TK = 'xmo_theme', root = document.documentElement, box = document.getElementById('xtheme');
+  function get(){ try { return localStorage.getItem(TK) || 'sepia'; } catch(e){ return 'sepia'; } }
+  function paint(){ var t = get(); [].forEach.call(box.querySelectorAll('button'), function(b){ b.classList.toggle('on', b.getAttribute('data-t') === t); }); }
+  box.addEventListener('click', function(e){
+    var b = e.target.closest('button'); if(!b) return;
+    var t = b.getAttribute('data-t');
+    try { localStorage.setItem(TK, t); } catch(_){}
+    root.setAttribute('data-xtheme', t); paint();
+  });
+  root.setAttribute('data-xtheme', get()); paint();
+})();
+})();
+</script>
+</body></html>

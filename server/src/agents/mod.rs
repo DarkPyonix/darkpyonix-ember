@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::events::{AgentEvent, ApprovalDecision};
 
+pub mod claude_code;
 pub mod scripted;
 
 /// Which agent CLI a session runs.

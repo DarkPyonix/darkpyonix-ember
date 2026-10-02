@@ -46,7 +46,7 @@ def _ts(value) -> float:
 
 def _is_noise(obj: dict) -> bool:
     """Lines to exclude from a preview: subagent (sidechain) lines, meta, and slash-command shells."""
-    if obj.get("isSidechain") or obj.get("isMeta"):
+    if obj.get("isSidechain") or obj.get("isMeta") or obj.get("isCompactSummary"):
         return True
     msg = obj.get("message") or {}
     content = msg.get("content")
@@ -117,6 +117,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                 created = _ts(obj.get("timestamp"))
             if not title and obj.get("type") == "summary" and obj.get("summary"):
                 title = str(obj["summary"])
+        custom = ""        # a title the user set wins over the summary; the last one counts
+        for obj in iter_json(head + tail):
+            if obj.get("type") == "custom-title" and obj.get("customTitle"):
+                custom = str(obj["customTitle"])
+        title = custom or title
         if not title:      # a summary line is sometimes appended at the end, after the conversation
             for obj in iter_json(tail):
                 if obj.get("type") == "summary" and obj.get("summary"):
@@ -188,12 +193,12 @@ class ClaudeCodeAdapter(AgentAdapter):
         if not path:
             return []
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
         except Exception:
             return []
         out: list[Message] = []
         for obj in iter_json(lines):
-            if obj.get("isSidechain") or obj.get("isMeta"):
+            if obj.get("isSidechain") or obj.get("isMeta") or obj.get("isCompactSummary"):
                 continue
             msg = _message_of(obj)
             if msg:

@@ -1,0 +1,13 @@
+{"timestamp":"2026-01-02T03:04:01.000Z","type":"session_meta","payload":{"id":"0199aaaa-0000-7000-8000-000000000001","timestamp":"2026-01-02T03:04:00.000Z","cwd":"/work/project","originator":"codex_cli_rs","cli_version":"0.50.0","instructions":null,"git":{"branch":"main"}}}
+{"timestamp":"2026-01-02T03:04:02.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\nSandbox is read-only.\n</permissions instructions>"}]}}
+{"timestamp":"2026-01-02T03:04:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_instructions>\nAlways run the tests.\n</user_instructions>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/work/project</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}
+{"timestamp":"2026-01-02T03:04:04.000Z","type":"turn_context","payload":{"cwd":"/work/project","approval_policy":"on-request","model":"gpt-test"}}
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-01-02T03:04:06.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"What does main.py do?"}]}}
+{"timestamp":"2026-01-02T03:04:07.000Z","type":"event_msg","payload":{"type":"user_message","message":"What does main.py do?","images":[]}}
+{"timestamp":"2026-01-02T03:04:08.000Z","type":"response_item","payload":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Thinking about main.py"}],"encrypted_content":"abc"}}
+{"timestamp":"2026-01-02T03:04:09.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"It starts the HTTP server."}]}}
+{"timestamp":"2026-01-02T03:04:10.000Z","type":"event_msg","payload":{"type":"agent_message","message":"It starts the HTTP server."}}
+{"timestamp":"2026-01-02T03:04:11.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"It starts the HTTP server."}}
+{"timestamp":"2026-01-02T03:04:12.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"And config.toml?"},{"type":"input_text","text":"Briefly."}]}}
+{"timestamp":"2026-01-02T03:04:13.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"It sets the port."}]}}

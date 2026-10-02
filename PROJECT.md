@@ -56,14 +56,14 @@ worktrees (`.claude/worktrees/`).
 | M6 — remote browser and agent browser use | 2026-10-16 — viewing depends on dioxus-compose's frame-surface widget | #12 |
 | M3 — native client (dioxus-compose) | 2026-10-18 — rich text depends on dioxus-compose pulling its widget milestone to 10-14 | #9 |
 
-**Excluded from this deadline** *[provisional]*:
+**Brought back into scope** [user, 2026-10-03]: the editor core (M8, `INTENT.md` D9a), the OSE
+runtime as the default (D10, #21), and tab detach with the bridge ("이건 핵심인데? 빼지 마"). The mobile
+IDE without Node is designed now and implemented later ("기능 설계는 미리 해놔"); see
+`docs/design/MOBILE-NO-NODE.md`. Nothing is currently excluded.
 
-| Item | Why |
-| ---- | --- |
-| M8 — Compose-native editor core (§E) | It was never committed. It is gated on real usage data, which cannot exist before the product ships. |
-| OSE runtime (`FR-W4` default) | It needs our own VS Code build pipeline and Open VSX, which is a separate release stream. VSC ships first. |
-| Mobile IDE without Node (`FR-W5`) | It needs a new `serve-web`-compatible Rust server, not wrapping. |
-| Tab detach and native bridge (`FR-B1`–`FR-B4`) | It is polish, not needed for the product to be usable. |
+| Added milestone | Target | Depends on |
+| --------------- | ------ | ---------- |
+| M8 — Ember editor core (connection layer + editor) | 2026-10-18 | dioxus-compose M12 HTML/CSS renderer (10-15), M13 workbench (10-18), and the code editor widget (first cut 10-15, may slip a day or two) |
 
 Editor extensions (`vscode-darkpyonix`, `vscode-darkpyonix-theme`, `intellij-darkpyonix`) live in
 this repository under `extensions/` [user, 2026-10-03]. The darkpyonix leader implements them on

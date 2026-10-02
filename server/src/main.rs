@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::AgentAdapter;
 use ember_server::session::Sessions;
@@ -11,6 +12,7 @@ use ember_server::store::Store;
 /// - `EMBER_DATA_DIR`: where `ember.db` lives (default `~/.ember`)
 /// - `EMBER_LISTEN`: listen address (default `127.0.0.1:8740`)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
+/// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,7 +33,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
     }
 
-    let mut adapters: Vec<Arc<dyn AgentAdapter>> = Vec::new();
+    // Always offered; detection reports a missing binary as not installed (FR-A6).
+    let mut adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(CodexAdapter::from_env())];
     if std::env::var("EMBER_SCRIPTED_AGENT").as_deref() == Ok("1") {
         adapters.push(Arc::new(ScriptedAdapter));
     }

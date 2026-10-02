@@ -65,6 +65,11 @@ Switching computers (`FR-X3`) changes only step 3's destination. *[provisional]*
 agent is told the computer changed and which earlier file observations are no longer valid
 (`FR-S7`).
 
+**Kernel status.** To show a DarkPyonix kernel's run state and latest output in the conversation
+view, ember server calls that computer's darkpyonix manager HTTP API over the tunnel
+(`darkpyonix-core/docs/ARCHITECTURE.md` §6). The kernel stack knows nothing about conversations,
+accounts or computer switching.
+
 ### 1.3 Relationship to `proxy/` today
 
 `proxy/` (merged in #1) is a FastAPI service in front of `code serve-web`. Its parts map onto this

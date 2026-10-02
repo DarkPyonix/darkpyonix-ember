@@ -50,7 +50,8 @@ basis for each date are in the milestone descriptions):
 | M4 — A2A and accounts | 2026-11-14 | #7, #8 |
 | M3 — native client (dioxus-compose) | 2026-11-28 — moves with `dioxus-compose`'s schedule | #9 |
 
-M4 is dated before M3 because it needs no native client. M5–M8 are not dated yet.
+M4 is dated before M3 because it needs no native client. M5–M8 are not dated yet; M5 (networking)
+moves together with `darkpyonix-core`'s hub milestone, since both wait on Q7 (transport choice).
 
 | ID | Milestone | Decides |
 | -- | --------- | ------- |

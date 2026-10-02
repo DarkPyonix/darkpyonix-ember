@@ -105,7 +105,7 @@ Reasons, sources and the decisions behind them: [`docs/INTENT.md`](docs/INTENT.m
 
 - **[dioxus-compose](https://github.com/DarkPyonix/dioxus-compose)** — the native GUI stack the
   client is built on. Its non-negotiables apply unchanged to Ember's client.
-- **darkpyonix-core** — the DarkPyonix kernel, manager and hub, with their API contracts
+- **[darkpyonix-core](https://github.com/DarkPyonix/darkpyonix)** (GitHub: `DarkPyonix/darkpyonix`) — the DarkPyonix kernel, manager and hub, with their API contracts
   (`docs/PROTOCOL.md`, `docs/api/`, `docs/FORMAT.md`). Ember links to these rather than redefining
   them.
 

@@ -127,7 +127,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
-| **FR-N1** | Main server ↔ computer and client ↔ main server connections are peer to peer, through a Rust-implemented tunnel or an existing mesh network (product unconfirmed — `INTENT.md` Q7). | Works across two different NATs with no port forwarding configured by the user. |
+| **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel, through a Rust-implemented tunnel or an existing mesh network (product unconfirmed — `INTENT.md` Q7). | Works across two different NATs with no port forwarding configured by the user. |
 | **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback, so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
 | **FR-N3** | All connections are encrypted and authenticated per device; a device can be revoked. | Revoking a device closes its connections within one heartbeat. |
 | **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium — see `proxy/docs/CONSTRAINTS.md`). |

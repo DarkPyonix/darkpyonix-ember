@@ -1,223 +1,256 @@
 # INTENT.md — DarkPyonix Ember
 
+> **Revised 2026-10-03.** The 2026-09-22 version of this document framed Ember as "a native
+> launcher plus wrapped VS Code Web windows." The user's 2026-10-03 brief moved the centre of the
+> product to **agent conversations that live on one main server and move between computers**.
+> VS Code is still here, but as the optional coding window you open *from* a conversation, not as
+> the thing the product is organised around. The earlier VS Code analysis is kept; see
+> `IMPLEMENTATION.md` and `BACKGROUND.md`.
+>
+> **Marking convention.** Every decision below is tagged with where it came from:
+> - **[user]** — stated by the user; quoted where the wording matters.
+> - **[provisional]** — a team proposal the user has not confirmed. Treat it as a working
+>   assumption that may be overturned, not as settled.
+
 ## Motivation
 
-Agentic IDEs in the current generation (Orca, Paseo, and most competitors) are webview stacks:
-Electron shell, Chromium engine, a JS heap that stays resident for as long as the project is open
-— which, for an agent that works in the background, tends to mean *all day, for every open
-project*. That is precisely the weight `dioxus-compose` exists to remove from desktop software.
-Ember is the decision to apply that argument to an IDE specifically, and to do it without breaking
-the one thing that makes VS Code worth building on top of in the first place: its extension
-marketplace.
+Three frictions, each from the user's own day-to-day work, define what Ember is for.
 
-Two problems, and they pull in opposite directions.
+**1. Conversations are stuck on the machine that started them.** A coding CLI such as Claude Code
+writes its transcript to the local disk of whatever computer it ran on. Moving a piece of work from
+one computer to another means moving files around by hand, and in practice the conversation is
+abandoned and restarted. [user] Ember keeps **every conversation on one main server** — a personal
+Raspberry Pi or Mac mini — so that a conversation is no longer a property of a computer.
 
-**Problem A — the steady-state surface must not be a browser.** A developer using an agentic IDE
-spends a lot of time *not* actively editing: watching an agent work, checking which server a
-project is assigned to, skimming a conversation history, picking the next project to open. If that
-surface costs a browser engine's memory and startup time just to exist, the product has recreated
-exactly the weight it was supposed to avoid — it has just moved the weight from "the editor" to
-"the thing you look at before you open the editor."
+**2. Agents from different vendors cannot talk to each other.** Two Claude sessions can coordinate,
+but only on the same machine and the same account; across machines that means pasting through the
+Claude web app, and across accounts it is impossible. Claude and Codex cannot talk directly at all —
+today the workaround is a shared file both agents poll. [user] Ember gives agents **a direct
+channel to each other (A2A)** across models, machines and accounts.
 
-**Problem B — the market only exists inside the official VS Code Extension Host.** VS Code's
-marketplace is not a list of standalone plugins; it is a list of Node.js modules written against a
-specific, large, internally-versioned RPC API exposed by a specific process, the Extension Host
-(`vscode-docs1`, *Extensibility Principles and Patterns*: "The extension host is a Node.js process
-and it exposes the VS Code API to extension writers"). There is no version of "keep the
-marketplace working" that does not mean "run the official Extension Host, unmodified." This is not
-a preference; it is what the word "marketplace" means here.
+**3. A remote machine's view of the network is hard to borrow.** When developing on a remote
+server, you sometimes need to open a web page *as that server sees it*. Today that means SSH
+port forwarding used like a VPN. [user] Ember opens **a browser session that egresses from the
+chosen computer**, with its IP, while the browser's own data (cookies, logins, history) stays on
+the main server — so moving between computers feels like using one computer.
 
-Ember's actual contribution is not "no webview" (that slogan alone is unachievable while B holds)
-and not "full VS Code" (that alone reproduces A). It is the specific, documented place where the
-line between them sits, and the discipline to keep that line where the evidence says it should be
-rather than where it would be more flattering to claim.
+There is a fourth, older motivation that the main-server model also addresses: running many CLI
+agents locally makes a laptop slow. Moving the agent runtimes and transcripts to the main server
+leaves the local machine with only a thin execution daemon plus whatever the tools themselves
+(builds, tests) cost. [provisional — the split between memory pressure and build CPU has not been
+measured.]
+
+The concept, in the user's words: **"한 인공지능이 작업 컴퓨터를 이동해가면서 작업하는 형태"** —
+one AI that moves between work computers as it works.
+
+## The shape of the product
+
+- **A project is a company; computers are its branch offices.** [user] A project has computers
+  assigned to it, and work for that project can happen at any of them. This is what separates
+  Ember from agent multiplexers that treat a project as a folder on one machine.
+- **Conversation first, code second.** [user] The main screen lists projects; each project shows
+  its running conversation sessions and whether each has finished; the computer list sits at the
+  bottom. Opening a conversation is the primary action. A coding window is opened only when needed,
+  from an **"Open IDE"** button at the top right of the conversation view.
+- **Ember launches other IDEs too.** [user] "Open IDE" can launch Ember's own IDE window, VS Code,
+  or JetBrains Gateway.
+- **The overall UX follows JetBrains Gateway**: a light front door, heavier per-project sessions
+  opened on demand. [user]
+
+## Components
+
+The `darkpyonix-ember` repository covers these deliverables. [user]
+
+| Component | What it is |
+| --------- | ---------- |
+| **ember** | The multiplatform client: everything described in this document. Its IDE window reaches files mainly through VS Code's own `serve-web`. For Android and iOS, where there is no Node, it also supports a `serve-web`-compatible Rust backend, or no backend at all with direct local access through web APIs (the `vscode.dev` model). Hosted for outside access through a dedicated manager. |
+| **vscode-darkpyonix** | VS Code extension rendering DarkPyonix notebook files (`.py`, `.pynb`). Installed by default. |
+| **vscode-darkpyonix-theme** | VS Code theme extension in the DarkPyonix Ember (phoenix) design language. Installed by default. |
+| **intellij-darkpyonix** | IntelliJ / PyCharm plugin rendering DarkPyonix notebook files (`.py`, `.pynb`). Installed by default. |
+
+The kernel, manager and hub APIs belong to `darkpyonix-core` and are linked from there, not
+redefined here: `darkpyonix-core/docs/ARCHITECTURE.md`, `docs/api/manager.openapi.yaml`,
+`docs/api/hub.openapi.yaml`, `docs/PROTOCOL.md`, `docs/FORMAT.md`. Ember's own documents define
+the main server's **conversation, account, computer, shell-wrapping and A2A** APIs. [provisional
+boundary, agreed with the darkpyonix leader]
 
 ## Non-negotiables
 
-| ID | Constraint |
-| -- | ---------- |
-| **E1** | The launcher never contains a webview, under any circumstance, for any feature. |
-| **E2** | The VS Code Extension Host is always the official, unmodified Node.js implementation. |
-| **E3** | An extension that works unmodified in upstream VS Code must work unmodified in Ember. |
-| **E4** | A webview, where one exists, is scoped to the smallest region that needs it. |
-| **E5** | A Compose-native editor core, if built, must not diverge from VS Code's own behavior — VS Code is correct by definition where the two disagree. |
-
-These are restated from `README.md` here because every decision below is a resolution of the
-tension between E1 and E2, and needs them in view.
+| ID | Constraint | Source |
+| -- | ---------- | ------ |
+| **E1** | The client's launcher and conversation screens never contain a webview, under any circumstance. They are built on `dioxus-compose`. The IDE window is the one place a webview may exist. | [user, 2026-10-03] |
+| **E2** | A wrapped agent CLI (Claude Code, Codex, Antigravity, OMP, …) keeps its native behaviour. Ember adds around it — A2A, computer switching, browser — and never patches or reimplements the agent itself. | [user]: "본연의 동작을 보존해주면서 에이전트간 소통 기능만 추가" |
+| **E3** | All conversations, all agent processes and all account credentials live on the main server. A computer is a place where tools run; it is never the system of record for a conversation. | [user] |
+| **E4** | VS Code is wrapped, never modified: Ember does not patch VS Code's source and never reimplements the Extension Host. Which extension marketplace applies follows the chosen VS Code runtime (Open VSX for OSE, the Microsoft Marketplace for the official build). | [provisional — narrowed from the 09-22 "official marketplace required"; see D10] |
+| **E5** | Inside the IDE window, a webview is scoped to the smallest region that needs it once the editor-core work of `IMPLEMENTATION.md` lands. Until then the IDE window as a whole is the acknowledged exception. | [kept from 09-22] |
+| **E6** | A Compose-native editor core, if ever built, must not diverge from VS Code's behaviour; VS Code is correct by definition where the two disagree. | [kept from 09-22] |
 
 ## Decisions
 
-### D1 — Split the product into a launcher and per-project editor windows, not one window
+### D1 — A conversation session is the top-level object; its computer is a changeable attribute
 
-**Decision.** Ember is not a single VS Code window with a sidebar bolted on. It is a
-`dioxus-compose` launcher plus independent, separately-opened editor windows, one per project
-server the user has open — the JetBrains Gateway shape, not the VS Code Desktop shape.
+**Decision.** A conversation session belongs to a project, not to a computer. Which computer it is
+currently executing on is an attribute of the session that can change during the session's life.
+The 09-22 model — one project, one assigned server — is the special case of a session that never
+changes computer.
 
-**Why.** This is what makes E1 achievable at all. If the launcher and the editor shared a window
-or a process, the launcher would inherit the editor's webview by construction. Splitting them into
-genuinely separate OS windows/processes means E1 is a fact about the launcher's process, not a
-policy someone has to remember to uphold inside a shared one.
+**Source.** That a session is not bound to a computer and must be able to move between computers
+is [user]. Making the session top-level and "current computer" an attribute is [provisional]; it
+was chosen because it survives every open answer to Q1–Q3 without restructuring.
 
-**Rejected alternative.** A single-window IDE with a native sidebar and a webview-based main
-editor area, à la how some Electron apps embed native panels. Rejected because the sidebar and the
-editor area would still share a process and a window, and "no webview in this half of the window"
-is a much weaker, much more fragile guarantee than "no webview in this process."
+**Rejected alternative.** Binding each session permanently to one computer. Simpler — no stale
+observations to manage — but it contradicts the core concept.
 
-### D2 — The Extension Host is never reimplemented, in any language
+### D2 — Conversation first; the IDE is something a conversation opens
 
-**Decision.** Ember does not write a Rust, Python, or other substitute for the Node.js Extension
-Host, at any point on the roadmap, including after M6.
+**Decision.** [user] The main screen is projects → conversations (with completion status) →
+computers. The IDE is launched from the conversation view's "Open IDE" button and can be Ember's
+own IDE window, VS Code, or JetBrains Gateway.
 
-**Why.** The Extension Host is not a stateless request/response server that happens to be written
-in Node.js — it is a process that loads and executes the actual extension code, using a large,
-internal, evolving RPC protocol that VS Code's core team does not publish as a stable spec
-(`readoss.com`, on `ExtensionHostKind.LocalProcess`: "full Node API access"). Reimplementing it
-would mean re-deriving that protocol from source on every VS Code upgrade, forever, to run code
-Microsoft already runs correctly. This is the single most expensive possible way to buy a small
-amount of "no Node.js on the server" purity, and E2/E3 exist specifically to foreclose it before
-anyone is tempted.
+**Why.** An agentic workflow spends most of its time watching and steering agents, not editing.
+Putting the editor at the centre, as the 09-22 design did, made the heavy surface the default one.
 
-**Rejected alternative.** "Rust or Python server responds to the same requests instead." Explored
-directly in `IMPLEMENTATION.md` §2 as Q1/Q2 and found to work only for the static-asset-serving
-sliver of what `--serve-web` does — not for anything the Extension Host itself is responsible for.
+### D3 — One main server owns conversations, shells and accounts
 
-### D3 — Wrap VS Code Web, don't fork it, for as long as possible
+**Decision.** [user] A single main server — a personal Raspberry Pi or Mac mini — runs every agent
+CLI, stores every transcript, and manages every account. Computers connect to it; it does not
+connect to a computer for a conversation's history.
 
-**Decision.** Where Ember needs to change VS Code Web's behavior (responsive layout, titlebar
-treatment, tab-detach signaling), it does so through CSS/DOM injection and a `postMessage`/native
-bridge layered on top of the official build, not by maintaining a patched fork of the VS Code Web
-source.
+**Why.** It is the direct fix for motivation 1. It also gives, for free, sessions that survive the
+local machine being closed (tmux for agents), several computers attaching to one session, and
+search across all sessions in one place.
 
-**Why.** A fork has to be rebased against upstream forever, and upstream moves fast (VS Code ships
-roughly monthly). A wrapping layer that reads the DOM and injects scripts is more fragile to *some*
-upstream UI changes, but it fails visibly and locally — a selector stops matching — rather than
-requiring a merge conflict to be resolved by hand on every release. It also means Ember never has
-to publish or maintain a VS Code build of its own, which would itself be a supply-chain and trust
-question for every extension author and user.
+**Known cost.** [provisional analysis] A transcript records observations of a particular computer —
+file contents, command output, absolute paths, the OS and toolchain. When a session moves, many of
+those observations become false on the new computer, and an agent that trusts them will edit files
+based on contents that are no longer there. How Ember invalidates them is open (Q4). Source code
+read by the agent also ends up on the main server; acceptable for a self-hosted server, but it
+changes if Ember is ever offered as a hosted product.
 
-**Rejected alternative.** Fork `vscode` and `vscode-web`, add native window/titlebar hooks
-directly analogous to the ones Electron gives Desktop VS Code (`BrowserWindow`, drag regions).
-Rejected per D4 below — tab detach specifically does not need this.
+### D4 — Agents are wrapped at the shell boundary, and their tools run on the chosen computer
 
-### D4 — Tab detach is emulated at the bridge layer, not reimplemented from Electron's APIs
+**Decision.** [user, original definition] Ember wraps the shell each CLI sees, so that CLIs running
+on the main server behave as if their actions happen on the designated computer. The CLI process and
+its transcript stay on the main server; its tool calls (file reads and writes, commands) are carried
+out on the session's current computer and their results streamed back.
 
-**Decision.** VS Code Desktop's drag-a-tab-out-to-a-new-window behavior is an Electron-specific
-feature (`BrowserWindow.setBounds`, native window creation) that does not exist in VS Code Web's
-codebase at all — it is not merely disabled there, the code path is absent. Ember does not port
-it. Instead, a small injected script detects a drag-out gesture in the webview, and hands off to
-the native shell (`FR-B1`–`FR-B4`): the native side opens a **new webview-backed window** pointed
-at the same locally-served VS Code Web instance, with the detached file's URI and (where available)
-cursor/scroll/selection state passed along as initial state.
+**Why this boundary.** It is the layer every CLI shares, which is what lets E2 hold: no CLI needs to
+know it is being wrapped.
 
-**Why.** This keeps D3 intact — no VS Code source is patched — while still giving users a
-close-enough approximation of the behavior they expect from Desktop. It is honestly weaker than
-true Electron-style tab splitting (a new window opens rather than a tab visibly detaching from
-existing chrome), and `PROJECT.md` Q5 tracks whether that gap matters in practice once users try
-it.
+**Open.** The exact interception point per CLI (shell, PTY, filesystem, tool protocol) is an
+implementation question to be answered per agent, against each CLI's actual behaviour — see Q6.
 
-**Rejected alternative.** Accept no tab-detach at all, route it through a right-click "Open in New
-Window" menu item instead. Still on the table as a fallback if M3 user testing finds the drag
-emulation unreliable, but not the starting design, because "drag a tab out" is a strong enough
-existing-VS-Code-user expectation to be worth the emulation attempt first.
+### D5 — Agents talk to each other directly (A2A), across models, machines and accounts
 
-### D5 — The native bridge uses per-platform webview message-handler APIs, not a generic IPC layer
+**Decision.** [user] Ember provides a messaging channel between agent sessions that works between
+different vendors (Claude ↔ Codex), between sessions on different computers, and between sessions
+under different accounts. It is the only behaviour Ember adds to a wrapped agent's conversation.
 
-**Decision.** Communication between a webview-hosted editor window and the native shell uses each
-platform's own webview↔native bridge (`WKScriptMessageHandler` / `postMessage` on macOS,
-`AddHostObjectToScript` on Windows `WebView2`) behind a common Rust-side trait, rather than a
-generic transport like a local WebSocket.
+**Why.** Motivation 2. Because every session already runs on the main server (D3), the channel is
+local to the server, regardless of which computers the sessions are working on.
 
-**Why.** True JSI-style same-process, zero-copy calls are structurally impossible here — a webview
-is a separate process from the native shell, full stop, so the JSI comparison itself was a
-category error once examined closely. Given that a process boundary is unavoidable, the native
-message-handler APIs are the closest available approximation: lower overhead than a socket
-round-trip, and they do not require standing up a local server just to talk to a window the OS
-already knows about. The events this carries (tab-detach signals, window-spawn requests, agent
-conversation sync pings) are low-frequency, human-triggered events, not a high-rate rendering sync
-channel — so the *speed* difference between this and a WebSocket would not be perceptible either
-way; the choice is really about not introducing a socket-server dependency where none is needed.
+**Rejected alternative.** A shared file that agents read and write. It is what users do today, and
+it is the limitation this decision exists to remove.
 
-**Rejected alternative.** Local WebSocket server in the native shell, webview connects as a
-client. Not wrong, just unnecessary given the event frequency involved, and it would mean the
-native shell process always has a listening socket even when no bridge traffic is happening.
-Revisit if a future feature needs cross-window state sync frequent enough that the platform
-message-handler APIs' overhead becomes visible.
+### D6 — A remote browser that egresses from the chosen computer, with its data on the main server
 
-### D6 — MVP does not touch Monaco; the Compose-native editor core is a separate, gated, later milestone
+**Decision.** [user] Ember can open a browser session whose network traffic leaves from a chosen
+computer, so that pages see that computer's IP and network. The browser's profile data — cookies,
+sessions, storage — is kept on the main server, so switching computers keeps the same logged-in
+browser. Agents can use the same browser (agent browser use).
 
-**Decision.** M1–M5 (`PROJECT.md`) ship an editor experience that is VS Code Web, wrapped, inside
-a webview, inside its own window. No Compose reimplementation of Monaco, CodeLens, Hover, inline
-completions, or any other editor-surface behavior happens before M6, and M6 is explicitly not
-scheduled — it is gated on real usage data from the hybrid model existing first.
+**Why.** Motivation 3, and it extends "one AI moving between computers" to the browser: one
+browser identity, many vantage points.
 
-**Why.** The tempting version of "no webview" is "reimplement the editor in Compose and remove
-Monaco entirely." Examined in `IMPLEMENTATION.md` §3–4, that turns out to require rebuilding a
-meaningful fraction of what Monaco is — text shaping, IME, accessibility, TextMate grammar
-tokenization, virtual scrolling over large files, and, critically, the exact overlay-positioning
-system that CodeLens/Hover/inline-completion extensions (including Copilot-class agent
-suggestions, which are core to what an *agentic* IDE is for) depend on. This is the same trap
-`dioxus-compose` was built to route around for GUI toolkits generally — "the ecosystem lacks a
-mature enough X, so borrow a mature X instead of building a new immature one" — and building
-Ember's own immature Monaco-substitute first would repeat the mistake `dioxus-compose` exists to
-avoid, at a much larger scale, for the single feature (agent-suggestion overlays) that most
-directly serves Ember's actual purpose.
+### D7 — Many accounts per agent, with usage routing
 
-**Rejected alternative.** Build the Compose-native editor core first, ship the wrapped-webview
-version only as a stopgap. Rejected: this makes M1 depend on M6-sized work before anything ships,
-and repeats the exact "wait for our own immature renderer instead of using someone else's mature
-one" trap D6 exists to name. See `PROJECT.md`'s milestone ordering, which is a direct consequence
-of this decision, not an independent scheduling choice.
+**Decision.** [user] The main server holds several accounts each for Claude Code, Codex and
+Antigravity. It can route usage between accounts by policy or by configuration, and a new
+conversation can be started under a chosen account. Signing in with OpenAI is supported, with a
+page that lets ChatGPT usage be consumed as well as Codex token usage.
 
-### D7 — When M6 eventually starts, it starts with overlay/diagnostic-style extensions, not webview-panel extensions
+### D8 — Computers connect peer to peer, with darkpyonix.dev relaying the hole punch
 
-**Decision.** If and when the Compose-native editor core work begins, its first target category
-is extensions that only report structured data for the host to render — diagnostics, CodeLens,
-Hover, inline completions (`IMPLEMENTATION.md`'s category 1–2) — not extensions that ship their
-own HTML via `vscode.window.createWebviewPanel` (category 3).
+**Decision.** [user] The main server connects to each computer peer to peer, through either a
+tunnel implemented in Rust or an existing mesh product ("tailcat" in the brief — unconfirmed which
+product is meant; see Q7). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
+so that, as with Paseo, users do not have to think about connectivity.
 
-**Why.** Category 1–2 extensions never touch Monaco's rendering code directly; they report data
-through the Extension API and let the Renderer draw it. That means a Compose renderer that
-correctly implements the same reporting contract is a drop-in replacement from the extension's
-point of view, with no cooperation needed from the extension author. Category 3 extensions
-*author their own webview content* — Jupyter's notebook cells, Markdown Preview Enhanced, GitLens'
-graph views — and no amount of Compose-side work changes that; those extensions will want a
-webview for as long as they exist in their current form, independent of anything Ember does.
+**Consequence.** This also settles the HTTPS problem `proxy/` has had for phones and tablets
+(`proxy/docs/BACKGROUND.md` §7-1), whichever transport is chosen — [provisional].
 
-**Rejected alternative.** Try to eliminate webview panels too, by building a Compose-native
-"webview-panel-compatible" surface extensions could target instead. Rejected: this would mean
-asking every extension author who currently ships HTML to instead target a new, Ember-specific
-API, which violates E3 (works unmodified) on its face. Category 3 webview panels are treated as a
-permanent, narrow exception under E4, not a problem to eventually solve away.
+### D9 — The client is native (dioxus-compose); the IDE window is wrapped VS Code Web
 
-### D8 — Milestone ordering is a non-negotiable, not a scheduling preference
+**Decision.** [user, 2026-10-03] The launcher and the conversation screens are built on
+`dioxus-compose` with no webview (E1). The IDE window is a webview running VS Code Web through
+Ember's wrapping layer, whose current implementation is `proxy/` (merged in #1).
 
-**Decision.** `PROJECT.md`'s M1–M5-before-M6 ordering is stated as fixed in that document, and
-this decision explains why it is pinned here rather than left as an ordinary planning call that
-could slip.
+**Tauri.** [provisional] The Tauri scaffold in this repository (`src-tauri/`, `src/`) and the
+Tauri/FastAPI design in `docs/design/INTEGRATION.md` are read as applying to **the IDE window and
+the mobile IDE shell** only, never to the launcher or conversation screens. Whether the scaffold is
+kept long-term is the user's decision; it is not deleted.
 
-**Why.** D6's argument only holds if it is actually followed under pressure. The specific failure
-mode being guarded against: momentum or excitement about the Compose-native editor core (it is, on
-its own technical merits, the more interesting and more differentiating piece of the project)
-quietly reordering the roadmap so that M1's ship-something-usable goal keeps getting deferred
-"until the real editor is ready." Pinning the order here, as a decision with its own ID, means
-reordering it requires amending `INTENT.md` in its own commit with a stated reason — the same bar
-any other non-negotiable change clears — rather than happening by drift in `PROJECT.md` alone.
+### D10 — Two VS Code runtimes: OSE by default, the official build as an option
 
-### D9 — DarkPyonix is a service Ember's Agent Host talks to, not a dependency Ember vendors
+**Decision.** [provisional — from `docs/design/INTEGRATION.md`, user-committed 2026-10-02; the
+brief itself names no build] The IDE window supports two VS Code runtimes:
 
-**Decision.** DarkPyonix's kernel runs as its own process per project server, reachable over that
-server's existing connection alongside the Extension Host and the VS Code Web static/dynamic
-serving. Ember's Agent Host code depends on a stable contract with DarkPyonix (`FR-K1`–`FR-K3`),
-not on DarkPyonix's internals or build process.
+| | OSE | VSC |
+| - | --- | --- |
+| Build | Compiled by DarkPyonix from the MIT source | The user's own installation of Microsoft's build |
+| Marketplace | Open VSX | Microsoft Marketplace |
+| Default | Yes | — |
+| Licence | MIT | Microsoft's licence, the user's responsibility |
 
-**Why.** DarkPyonix has its own roadmap, its own performance targets, and its own reasons to exist
-independent of Ember (it replaces Jupyter's kernel protocol generally, not just for agentic use).
-Coupling Ember to DarkPyonix's internals would mean every DarkPyonix release risks breaking Ember
-and vice versa. A stable, narrow contract is the same discipline `dioxus-compose` applies to its
-own Host↔Renderer boundary (`PR-2`, `PR-4` in that project's SPEC): only what crosses the boundary
-is load-bearing, and it should be as small and as typed as it can be.
+**Consequence for E4.** The 09-22 rule "the official marketplace must work" became "the marketplace
+matching the chosen runtime works" — the OSE default cannot reach the Microsoft Marketplace.
 
-**Rejected alternative.** Vendor DarkPyonix as a library inside Ember's own process. Rejected: it
-would tie DarkPyonix's language/runtime choices to Ember's, forfeit the "kernel usable outside
-Ember too" value DarkPyonix has on its own, and reintroduce exactly the tight coupling `PROJECT.md`
-Q3 is trying to keep open until DarkPyonix's own team resolves it from their side.
+**Mobile without Node.** [user] On Android and iOS the IDE window must work without Node, through a
+`serve-web`-compatible Rust backend or by direct local access through web APIs. This does **not**
+reimplement the Extension Host (E4): without Node there is no Node extension host at all, so only
+extensions that ship a web build (VS Code's browser web-worker extension host, as on `vscode.dev`)
+run there. Extensions that need Node require a VS Code server on a computer.
+
+### D11 — The 09-22 VS Code decisions still hold, inside the IDE window
+
+These were decided for the IDE window and are unchanged in substance. Their full reasoning is in the
+09-22 version of this document (git history) and in `IMPLEMENTATION.md`:
+
+- **Wrap, don't fork.** Behaviour changes to VS Code Web come from CSS/DOM injection and a bridge on
+  top of an unmodified build. `proxy/` is that layer.
+- **Tab detach is emulated** by detecting the gesture in the webview and opening a new window with
+  the file's state, not ported from Electron.
+- **The webview ↔ native bridge** uses each platform's own message-handler API
+  (`WKScriptMessageHandler`, WebView2 `postMessage`) behind one Rust trait.
+- **No Monaco replacement before the product ships.** A Compose-native editor core is the long-term
+  M-series ambition, gated behind a working product; it starts, if ever, with overlay-style
+  extensions (diagnostics, CodeLens, hover, inline completions), never with webview panels.
+
+### D12 — DarkPyonix is a service Ember talks to, not a dependency it vendors
+
+**Decision.** Unchanged from 09-22. The DarkPyonix kernel is its own process with its own contract,
+now defined in `darkpyonix-core` (`docs/PROTOCOL.md`, `docs/api/*`). Ember depends on that
+contract, not on the kernel's internals.
+
+### D13 — `proxy/`'s hub is transitional; its agent adapters are kept and moved to the main server
+
+**Decision.** [provisional] `proxy/dpx/hub/` puts several computers on one home screen by having
+each computer report the transcripts it holds locally (`~/.claude`, `~/.codex`). E3 replaces that
+model: transcripts live on the main server, not on the computers. The hub is marked transitional.
+The adapters in `proxy/dpx/agents/` — which parse Claude Code and Codex transcripts — stay useful
+unchanged, because the main server is now where those transcripts are; they are kept and
+relocated, not removed.
+
+## Open questions
+
+| ID | Question | Status |
+| -- | -------- | ------ |
+| **Q1** | How do a project's computers relate: copies of the same workspace (the same repository checked out on a Mac and a Linux box), machines with different roles (iOS builds on the Mac, GPU work on Linux), or simply "whichever computer I am at"? | Open — decides how much of a session's observations survive a move |
+| **Q2** | Who moves a session: the agent (a `switch_computer` tool plus a routing policy, e.g. "needs CUDA → GPU box"), the user, or both? | Open — the concept suggests the agent, unconfirmed |
+| **Q3** | When a session moves, does an open IDE window follow it, or stay with its computer? | Open |
+| **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal only |
+| **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional] |
+| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? | Open — answered per agent |
+| **Q7** | Is "tailcat" Tailscale? Rust tunnel, existing mesh, or both? | Open — awaiting the user |
+| **Q8** | Is the Tauri scaffold kept long-term, and for what? | Open — user decision (D9) |
+| **Q9** | `proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `proxy/docs/BACKGROUND.md` §7-3. | Open |

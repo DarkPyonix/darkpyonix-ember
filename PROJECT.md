@@ -1,74 +1,84 @@
 # PROJECT.md — DarkPyonix Ember
 
-> New to this project? [`docs/BACKGROUND.md`](docs/BACKGROUND.md) has the full chronological
-> reasoning behind every decision referenced below. This document assumes it.
+> **Revised 2026-10-03.** Scope follows `docs/INTENT.md` (conversation-first, one main server,
+> sessions that move between computers). `docs/BACKGROUND.md` records how the 09-22 VS Code design
+> was reached; it still governs the IDE window.
 
 ## Scope
 
-Ember is an agentic IDE. Its job is to make three things sit together comfortably:
+Ember is a multi-provider, LLM-based development environment and remote IDE. Its job is to make
+four things work together:
 
-1. A **native, always-light launcher** — projects, their assigned servers, agent conversation
-   history — built on `dioxus-compose`.
-2. A **full, unmodified VS Code editing experience** — Workbench, Monaco, Extension Host, and the
-   official marketplace — reachable per project without paying its cost when not in use.
-3. An **agent runtime** (the DarkPyonix kernel) that the IDE's chat surface and the launcher's
-   conversation viewer both talk to.
+1. **A main server** — a personal Raspberry Pi or Mac mini — that runs every wrapped agent CLI
+   (Claude Code, Codex, Antigravity, OMP), stores every conversation, and manages every account.
+2. **Computers** assigned to projects, each running a thin execution daemon, so that an agent on
+   the main server can work on whichever computer the session is currently using — and move.
+3. **A native client** — launcher and conversation screens on `dioxus-compose`, no webview — that
+   puts conversations first and opens an IDE only when needed.
+4. **An IDE window** — VS Code Web, wrapped (`proxy/`), or an external IDE (VS Code, JetBrains
+   Gateway) — launched from a conversation.
 
-This document does not re-derive `dioxus-compose`'s own scope, spec method, or non-negotiables.
-It assumes them and adds only what Ember needs on top. Where the two disagree, `dioxus-compose`'s
-own documents govern its own code; this document governs Ember's.
+Kernel, manager and hub APIs are `darkpyonix-core`'s; Ember links to them.
 
 ## Method
 
-Same discipline as `dioxus-compose`: **spec first, then a failing test, then code.** An SPEC ID
-(`FR-*`, `NFR-*`, `PR-*`) exists in `docs/SPEC.md` before behavior lands. A decision that changes
-scope goes to `docs/INTENT.md` first, in its own commit, with the alternatives it rejected and
-why.
+Spec first, then a failing test, then code. An ID exists in `docs/SPEC.md` before behaviour
+lands. A decision that changes scope goes into `docs/INTENT.md` first, with what it rejected.
 
-The one addition specific to Ember: because a large share of Ember's design work is about
-**which pieces of an existing, huge, actively-developed project (VS Code) Ember does and does not
-reimplement**, every such decision is tracked in `docs/IMPLEMENTATION.md` against a specific
-upstream VS Code architectural fact (extension host process model, `ExtensionHostKind`, the
-Renderer↔Extension-Host RPC boundary), not against Ember's convenience. If upstream's actual
-architecture and Ember's assumption about it disagree, upstream's architecture is correct and
-`IMPLEMENTATION.md` gets corrected, not worked around silently.
+Ember-specific additions:
+- Every decision in `INTENT.md` and `SPEC.md` is tagged **[user]** or **[provisional]**. A
+  provisional item may be built against, but not treated as settled; when the user confirms or
+  overturns it, the tag changes in its own commit.
+- Each wrapped agent is integrated against **that agent's actual, current behaviour** (its CLI
+  flags, its non-interactive protocol, its session files), verified by an integration test, never
+  by assumption. If an agent's real behaviour and these documents disagree, the documents are
+  corrected.
+- VS Code questions are still tracked in `docs/IMPLEMENTATION.md` against upstream architectural
+  facts.
 
 ## Milestones
 
+*[provisional — ordering proposed by the implementer, not yet confirmed by the user]*
+
 | ID | Milestone | Decides |
 | -- | --------- | ------- |
-| **M0** | Spec-first foundation: this document, `INTENT.md`, `SPEC.md`, `ARCHITECTURE.md`, `IMPLEMENTATION.md` land, cross-referenced, no code | Whether the tension between E1 and E2 (see `INTENT.md`) has an honest, written resolution before anyone writes a line of Rust or Kotlin |
-| **M1** | Launcher MVP: project list, server list, static (non-live) agent history view, on `dioxus-compose` — no editor window yet | Whether the launcher can, by itself, hit `dioxus-compose`'s own NFR-9 (indistinguishable-from-hand-written-Compose) budgets while additionally holding Ember's own project/server data model |
-| **M2** | Editor window MVP: click a server → new native window → webview → VS Code Web served locally against that server, API calls only crossing the network, no launcher↔editor bridge yet (user closes and reopens manually) | Whether "webview in its own window, everything else outside it stays native" holds up as a real, usable product, before any bridge complexity is added |
-| **M3** | Launcher↔editor bridge: tab-detach-to-new-window (`FR-B1`–`FR-B4`), native titlebar treatment on the editor window, live agent conversation sync between an open editor window and the launcher's viewer | Whether the native webview bridge (`WKScriptMessageHandler`/`AddHostObjectToScript`) is fast and reliable enough for interactive use, and whether tab-detach emulation feels acceptable without true Electron-style same-process window splitting |
-| **M4** | DarkPyonix kernel integration: agent sessions run against a real DarkPyonix kernel per project, both inline in the editor window and in the launcher's conversation viewer | Whether Ember's Agent Host contract (`FR-K1`–`FR-K3`) is stable enough that DarkPyonix's own roadmap can evolve without breaking Ember on every release |
-| **M5** | Responsive/mobile pass on the VS Code Web wrapping layer (`IMPL-2`): CSS/DOM overrides, touch handling, no upstream fork | Whether "wrap, don't fork" (E3, D3) survives contact with real mobile Monaco touch UX, or whether it forces a fork decision that has to go back through `INTENT.md` |
-| **M6** | Compose-native editor core, staged rollout starting with the FR-1/FR-2 category (diagnostics, CodeLens, Hover — see `IMPLEMENTATION.md` §3) | Whether removing Monaco from the steady state is worth its cost once real usage data from M1–M5 exists — **this milestone is explicitly not committed to now**; M0–M5 must ship and prove the hybrid model first |
+| **M0** | These documents, revised to the 10-03 brief and cross-referenced | Whether the conversation-first, main-server model has a coherent written spec |
+| **M1** | Main server core: Claude Code and Codex wrapped (`FR-A1`–`FR-A4`), transcripts stored on the server (`FR-S1`–`FR-S3`), sessions surviving client disconnects, a push channel (`PR-1`). Executes on the main server itself only. | Whether headless wrapping keeps each agent's native behaviour (E2) well enough to be the foundation |
+| **M2** | Execution daemon on a second computer (`FR-X1`, `FR-X2`, `FR-X5`) and switching a session between computers (`FR-X3`, `FR-S7` v0) | Whether "one AI moving between computers" works end to end, and what invalidation it really needs (Q1, Q4) |
+| **M3** | Native client on `dioxus-compose`: projects, sessions with status, computers, conversation view, "Open IDE" (`FR-L1`–`FR-L9`) | Whether the conversation-first client meets `dioxus-compose`'s performance bar with Ember's data model; depends on `dioxus-compose`'s own readiness |
+| **M4** | A2A (`FR-T1`–`FR-T6`) and accounts with usage routing (`FR-U1`–`FR-U3`, `FR-U5`) | Whether cross-vendor, cross-account messaging is useful without being a loop hazard |
+| **M5** | Networking: peer-to-peer with `darkpyonix.dev` hole punching and relay (`FR-N1`–`FR-N4`) | Which transport (Rust tunnel or an existing mesh — Q7); also resolves HTTPS for phones |
+| **M6** | Remote browser with server-held profile, and agent browser use (`FR-R1`–`FR-R5`) | How the browser reaches the client without breaking E1 |
+| **M7** | IDE window: `proxy/` integrated as the wrapping layer, OSE/VSC runtimes, bridge (`FR-W1`–`FR-W6`, `FR-B1`–`FR-B4`); mobile without Node (`FR-W5`) | Whether the wrapped IDE holds up from a conversation on desktop and phone |
+| **M8** | Compose-native editor core (§E) — **not committed**, gated behind M1–M7 and real usage data | See `IMPLEMENTATION.md` |
 
-M6 is the "Monaco replaced by Compose" ambition discussed at length in `IMPLEMENTATION.md`. It is
-listed here so it is not forgotten, and explicitly gated behind M1–M5 so it cannot become an excuse
-to delay a usable product. See `INTENT.md` D8 for why this ordering is a non-negotiable, not a
-preference.
+`proxy/` already delivers much of M7's wrapping layer and a transitional multi-machine home; it
+keeps working throughout and is folded in rather than rewritten (`INTENT.md` D13).
 
 ## Open questions
 
-| ID | Question | Status |
-| -- | -------- | ------ |
-| **Q1** | Can the static-asset half of `--serve-web` be split from the Extension-Host half cleanly enough that a Rust/Python layer can front the former without touching the latter? (`IMPLEMENTATION.md` §2) | Open — needs a source-level read of `vs/server` before M2 |
-| **Q2** | What is the actual wire protocol VS Code Web's Renderer speaks to the Extension Host, and how stable is it across VS Code releases? | Open — this is the load-bearing fact for whether M6 is even approachable later; no public spec is known to exist, so this may require reverse-engineering against a pinned VS Code version |
-| **Q3** | Does DarkPyonix expect to be addressed as a Jupyter-protocol-compatible kernel (so existing Jupyter-aware extensions "just work" against it), or as something Ember's Agent Host must speak a bespoke protocol to? | Open — blocks `FR-K1`, owned by DarkPyonix's own roadmap, tracked here as a dependency |
-| **Q4** | For extension-generated webview panels (`vscode.window.createWebviewPanel`) once M6 begins: does Ember keep a general-purpose embedded webview capability for any panel an extension asks for, or does it only special-case a short list of high-value extensions (Jupyter, Markdown preview)? | Open — deferred to M6 planning; premature to decide before M1–M5 ship |
-| **Q5** | Titlebar/tab-detach fidelity (`FR-B1`–`FR-B4`): is "new native window opens with the detached file" an acceptable substitute for VS Code Desktop's true same-process tab split, or does user testing at M3 demand closer parity? | Open — decided empirically at M3, not in advance |
+The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 
-## Rejected alternatives (summary — see `INTENT.md` for the full argument)
+| ID | Question |
+| -- | -------- |
+| Q1 | Are a project's computers copies of one workspace, machines with different roles, or "whichever computer I am at"? |
+| Q2 | Who moves a session between computers: the agent, the user, or both? |
+| Q3 | Does an open IDE window follow a session when it moves? |
+| Q4 | How are a transcript's computer-specific observations invalidated on a move? |
+| Q5 | What happens to a job left running on the previous computer? |
+| Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
+| Q7 | Which peer-to-peer transport ("tailcat" — Tailscale?) |
+| Q8 | Is the Tauri scaffold kept long-term, and for what? |
+| Q9 | `proxy/`'s carried-over items: login, pre-distribution security holes |
+| Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |
+| Q11 | What is "OMP" in the agent list, and how does it run headless? |
 
-- **Fork VS Code Web to add native window/titlebar APIs.** Rejected: couples Ember to a
-  continuously-rebased fork of a fast-moving upstream, for a feature (tab detach) that can be
-  emulated at the wrapping layer instead. See D4.
-- **Reimplement the Extension Host in Rust or Python.** Rejected outright, not just deferred: the
-  Extension Host is a Node.js child process running a large, evolving, internal RPC surface that
-  marketplace extensions depend on directly. See D2 and E2.
-- **Ship Ember's editor as Compose-native from day one, no Monaco at all.** Rejected for MVP:
-  this is the M6 ambition, and building it first means shipping nothing usable while chasing
-  Monaco's decade of text-shaping, IME, and accessibility maturity — the exact trap
-  `dioxus-compose` itself was built to avoid for GUI toolkits generally. See D8.
+## Rejected alternatives (summary — see `INTENT.md`)
+
+- **Each computer runs its own agents and keeps its own transcripts**, with a hub aggregating
+  them. This is what `proxy/`'s hub does today, and it is the arrangement that makes moving a
+  conversation between computers painful. Replaced by the main server (D3, D13).
+- **Patching or reimplementing the agents** to add Ember features. Violates E2; Ember adds around
+  agents only.
+- **Agents coordinating through a shared file.** The status quo that A2A replaces (D5).
+- **Forking VS Code** or **reimplementing the Extension Host.** Unchanged from 09-22 (E4, D11).

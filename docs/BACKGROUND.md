@@ -1,5 +1,11 @@
 # BACKGROUND.md — How Ember's design was arrived at
 
+> **Scope note (2026-10-03).** This is the chronological record of the **09-22** design, in which
+> Ember was a native launcher plus wrapped VS Code windows. The 10-03 brief moved the product's
+> centre to agent conversations on a main server that move between computers (`INTENT.md`). The
+> reasoning below remains the basis for the IDE window and for using `dioxus-compose`; it does not
+> describe the product as a whole any more.
+
 This document exists for one purpose: so that someone (or some agent) who was **not** present for
 the reasoning that produced `INTENT.md`'s decisions can read this once and have the same context
 as someone who was. It is a chronological record of the argument, not a spec — no `FR-*`/`NFR-*`

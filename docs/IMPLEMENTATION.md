@@ -1,5 +1,13 @@
 # IMPLEMENTATION.md — DarkPyonix Ember
 
+> **Scope note (2026-10-03).** Since the 10-03 revision of `INTENT.md`, Ember is conversation-first
+> and centred on a main server; VS Code is the optional IDE window. This analysis still holds for
+> that IDE window. Where it says "Ember's editor" read "the IDE window"; where it says "official
+> marketplace", read "the marketplace matching the chosen runtime" (`INTENT.md` D10, E4). The
+> M6 milestone named below is now **M8** in `PROJECT.md`, `FR-M*` is now `FR-E*` in `SPEC.md`, and
+> `INTENT.md` D-numbers cited below refer to the 09-22 version (in git history); their substance is
+> summarised in the current `INTENT.md` D11.
+
 ## How much of VS Code can Ember not reimplement — and what happens if it does anyway
 
 This document is the detailed answer to the question that sits underneath most of Ember's design:

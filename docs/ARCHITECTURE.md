@@ -1,66 +1,86 @@
 # ARCHITECTURE.md — DarkPyonix Ember
 
-This document describes process and window topology: what runs where, what talks to what, and —
-critically — which of VS Code's own architectural facts constrain Ember's choices rather than the
-other way around. `IMPLEMENTATION.md` covers the deeper question of *why* those facts are what
-they are and what can and cannot be substituted; this document is the map, not the argument.
+> **Revised 2026-10-03.** §1 is new and follows `INTENT.md`'s main-server model. §2 onwards is the
+> 09-22 material, unchanged in substance, and now describes **the IDE window only**. The whole
+> DarkPyonix component map (ember, ash, hub, kernel) lives in `darkpyonix-core/docs/ARCHITECTURE.md`;
+> this document must stay consistent with it.
+>
+> Items marked *[provisional]* are team proposals not yet confirmed by the user.
 
 ---
 
 ## 1. Topology, end to end
 
 ```
-┌───────────────────────────┐
-│      Ember Launcher          │   dioxus-compose · native · no webview (E1)
-│      (one process, always      │
-│       running while Ember       │
-│       is open)                   │
-└──────────────┬────────────┘
-               │ FR-B3: window-spawn request
-               │ (project + server selection)
-               ▼
-┌───────────────────────────┐        WebSocket / HTTPS         ┌────────────────────────────┐
-│   Ember Editor Window #N      │ ───────────────────────────► │  Project N's assigned server   │
-│   (one process per open         │   API + Extension Host RPC    │                                  │
-│    project; opened/closed         │   traffic only — never the      │  ┌──────────────────────┐   │
-│    independently of the             │   full UI asset payload on       │  │ VS Code server (official)│   │
-│    launcher and of each                │   every load, per FR-W1            │  │  — Extension Host          │   │
-│    other)                                │                                        │  │    (Node.js, E2)              │   │
-│                                                │                                        │  │  — Language servers,          │   │
-│  ┌─────────────────────┐                     │                                        │  │    debug adapters              │   │
-│  │  WKWebView / WebView2    │                     │                                        │  │  — static asset server         │   │
-│  │  loading VS Code Web         │ ◄───────────────────┘                                        │  │    (candidate for a thin        │   │
-│  │  (official, wrapped              │                                                                │  │    Rust/Python front —          │   │
-│  │   per FR-W2/FR-W3, not               │                                                                │  │    see §2 and IMPL-1)             │   │
-│  │   forked, per D3)                       │                                                                │  └──────────────────────┘   │
-│  └──────────┬──────────┘                                                                                                                    │
-│              │ FR-B1/B2/B4: platform                                                                    ┌──────────────────────┐   │
-│              │ webview message-handler                                                                     │ DarkPyonix kernel           │   │
-│              │ bridge (D5) — tab detach,                                                                    │  (per project, FR-K1)          │   │
-│              │ window-state events                                                                        └──────────────────────┘   │
-│              ▼                                                                                                                              │
-│  ┌─────────────────────┐                                                                                                                    │
-│  │  Native shell process     │                                                                                                                    │
-│  │  (owns the webview,           │                                                                                                                    │
-│  │   handles FR-B1–B4)              │                                                                                                                    │
-│  └─────────────────────┘                                                                                                                    │
-└───────────────────────────┘                                                                            └────────────────────────────┘
+                         ┌─────────────────────────────── darkpyonix.dev ───────────────────────────────┐
+                         │  hole-punch coordination + relay fallback (FR-N2) · sign-in                    │
+                         └───────────────▲──────────────────────────▲───────────────────────────▲─────┘
+                                         │                            │                             │
+  ┌──────────────────────────┐   P2P    │   ┌────────────────────────┴───────────────────────┐   │   ┌──────────────────────────┐
+  │ Client (desktop / phone)  │◀────────┴──▶│              MAIN SERVER                          │◀──┴──▶│ Computer A (e.g. Mac)       │
+  │                            │  PR-1 push   │   (personal Raspberry Pi or Mac mini)              │  P2P   │  Ember execution daemon     │
+  │  launcher + conversations  │             │                                                     │        │  — file ops, search,         │
+  │  dioxus-compose, NO webview│             │  ┌───────────────┐  ┌───────────────────────┐  │        │    commands + PTY (FR-X1)    │
+  │  (E1)                       │             │  │ Agent CLIs      │  │ Session store           │  │        │  — background jobs (FR-X4)   │
+  │                            │             │  │ Claude Code ×n  │  │ transcripts (normalised │  │        │  — browser egress (FR-R1)    │
+  │  [Open IDE] ───────┐       │             │  │ Codex ×n        │  │  + native session files)│  │        │  — VS Code server for the    │
+  └────────────────────┼──────┘             │  │ Antigravity ×n  │  │ accounts · computers     │  │        │    IDE window (§2)            │
+                       │                      │  │ OMP ×n          │  │ projects · schedules     │  │        └──────────────────────────┘
+                       ▼                      │  └───────┬───────┘  └───────────────────────┘  │
+  ┌──────────────────────────┐             │          │ tool calls (wrapped shell, D4)          │        ┌──────────────────────────┐
+  │ IDE window                  │             │          ▼                                          │◀─────▶│ Computer B (e.g. Linux GPU) │
+  │  Ember IDE: webview +        │             │  ┌───────────────────────────────────────────┐  │  P2P   │  Ember execution daemon     │
+  │  VS Code Web via proxy/       │             │  │ Execution router: sends each tool action   │  │        └──────────────────────────┘
+  │  — or VS Code / Gateway       │             │  │ to the session's CURRENT computer (FR-X3)  │  │
+  │  (FR-L7, §W)                  │             │  └───────────────────────────────────────────┘  │
+  └──────────────────────────┘             │  A2A broker (§T) · account/usage router (§U)       │
+                                             │  remote-browser profiles (FR-R2) · MCP registry     │
+                                             └─────────────────────────────────────────────────────┘
 ```
 
-Two things to notice, because they are easy to get backwards:
+### 1.1 What lives where
 
-- **The launcher never talks to a project's server directly for editing.** It talks to it only
-  for `FR-L2` (reachability), `FR-L3` (read-only conversation history), and `FR-B3` (asking the
-  native shell to open a window). It has no code path that renders editor content, because it has
-  no code path that *could* — there is no webview in that process (`NFR-L2`).
-- **Each editor window is its own process, independent of the launcher's process and of every
-  other editor window's process.** Closing one does not affect another; closing the launcher does
-  not close open editor windows (though it may, depending on `PROJECT.md` Q5's eventual answer,
-  prompt about orphaned windows — undecided).
+| Place | Holds | Never holds |
+| ----- | ----- | ----------- |
+| **Main server** | Every agent CLI process; every transcript and the agents' native session files; accounts and credentials; projects, computers and assignments; A2A queues; schedules; browser profiles | Project source as a system of record (that lives on the computers) |
+| **Computer** | Project files; the processes tools start (builds, tests, servers); the execution daemon; the VS Code server for an IDE window on that computer | Agent CLIs; transcripts; credentials for agent accounts |
+| **Client** | A cache of what the main server last pushed, for instant cold start | Anything authoritative |
+| **darkpyonix.dev** | Connection coordination and relay | Conversations, files, credentials |
+
+### 1.2 How a tool call travels
+
+1. A user message (or an A2A message, `FR-T3`) reaches a session on the main server.
+2. The session's agent CLI, running headless on the main server (`FR-A2`), decides to read a file
+   or run a command.
+3. Ember's wrapping layer intercepts the action at the shell/tool boundary (D4; exact point per
+   agent is Q6) and the execution router sends it to the session's current computer.
+4. The computer's daemon performs it and streams the result back; the agent sees it as if it had
+   run locally (`FR-X2`).
+5. The normalised event (`FR-A3`) is stored and pushed to every attached client (`PR-1`).
+
+Switching computers (`FR-X3`) changes only step 3's destination. *[provisional]* On a switch, the
+agent is told the computer changed and which earlier file observations are no longer valid
+(`FR-S7`).
+
+### 1.3 Relationship to `proxy/` today
+
+`proxy/` (merged in #1) is a FastAPI service in front of `code serve-web`. Its parts map onto this
+topology as follows (`INTENT.md` D13, *[provisional]*):
+
+| `proxy/` part | Role in the target architecture |
+| ------------- | ------------------------------- |
+| `dpx/vscode/`, `static/overlay.*`, `static/frame.html`, `static/webview-kb.js` | The IDE window's wrapping layer (`FR-W2`) — kept |
+| `dpx/agents/` (Claude Code / Codex transcript parsers) | Kept and moved to the main server, where the transcripts now are |
+| `dpx/auth/` | Login for the IDE window; superseded by device authentication (`FR-N3`) once M5 lands |
+| `static/home.html`, `dpx/home/` | Transitional web home; replaced by the native client (E1) |
+| `dpx/hub/` (per-computer connectors reporting local transcripts) | Transitional; replaced by the main server holding transcripts (E3) |
 
 ---
 
-## 2. Inside "the server": what VS Code's own process model dictates
+## 2. The IDE window: what VS Code's own process model dictates
+
+> 09-22 material. "The server" below means **the computer that serves VS Code Web for an IDE
+> window** — under the 10-03 model, a project's computer, not the main server.
 
 This is the part of the architecture Ember does not get to design — it is a fact about VS Code,
 and Ember's job is to model it accurately, not to wish it were simpler. VS Code's own multi-process
@@ -86,7 +106,7 @@ actual `vs/server` source.
 
 ---
 
-## 3. The bridge, in detail
+## 3. The IDE window bridge, in detail
 
 Per `INTENT.md` D5, the bridge is built on each platform's native webview↔host message-passing
 API, not a generic transport:

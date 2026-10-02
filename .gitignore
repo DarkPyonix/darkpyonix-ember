@@ -44,3 +44,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Isolated worktrees for parallel agents
+.claude/worktrees/

@@ -41,17 +41,37 @@ Ember-specific additions:
 *[provisional — ordering proposed by the implementer, not yet confirmed by the user]*
 
 Target dates *[provisional]* are tracked as GitHub milestones (scope, completion criteria and the
-basis for each date are in the milestone descriptions):
+basis for each date are in the milestone descriptions). **Deadline [user]: "실제 사용할 수 있는 정도의
+수준으로 개발 완료는 전부 2026년 11월 안으로"** — everything usable by 2026-11-30, with no lowering
+of the quality bar. What cannot fit is excluded below, with the reason.
 
 | Milestone | Target | Issues |
 | --------- | ------ | ------ |
 | M1 — ember server core | 2026-10-17 | #2, #3, #4 |
-| M2 — ember node and computer switching | 2026-10-31 | #5, #6 |
+| M2 — ember node and computer switching | 2026-10-31 | #5, #6, #13 |
 | M4 — A2A and accounts | 2026-11-14 | #7, #8 |
+| M5 — networking (HTTPS over P2P) | 2026-11-21 — moves with `darkpyonix-core`'s hub (11-20) and Q7 | #10 |
+| M7 — IDE window from a conversation | 2026-11-21 | #11 |
 | M3 — native client (dioxus-compose) | 2026-11-28 — moves with `dioxus-compose`'s schedule | #9 |
+| M6 — remote browser and agent browser use | 2026-11-28 | #12 |
 
-M4 is dated before M3 because it needs no native client. M5–M8 are not dated yet; M5 (networking)
-moves together with `darkpyonix-core`'s hub milestone, since both wait on Q7 (transport choice).
+M4 is dated before M3 because it needs no native client. Milestones overlap, so they are worked in
+parallel, with subagents in isolated worktrees (`.claude/worktrees/`).
+
+**Excluded from the November scope** *[provisional]*:
+
+| Item | Why |
+| ---- | --- |
+| M8 — Compose-native editor core (§E) | It was never committed; it is gated on real usage data, which cannot exist before the product ships. |
+| OSE runtime (`FR-W4` default) | It needs our own VS Code build pipeline and Open VSX: a separate release stream. VSC ships first. |
+| Mobile IDE without Node (`FR-W5`) | It needs a new `serve-web`-compatible Rust server, not wrapping. |
+| Tab detach and native bridge (`FR-B1`–`FR-B4`) | Polish. Not needed to be usable. |
+| Hand-written NAT traversal from scratch | It cannot reach the quality bar in the window. M5 builds on an existing P2P layer instead. |
+| OpenAI sign-in for ChatGPT usage (`FR-U4`) | Feasibility under OpenAI's terms is unverified. |
+| vscode-darkpyonix / intellij-darkpyonix renderers | Tracked separately. They depend on `darkpyonix-core`'s format and manager. |
+
+If M6's native viewer misses the quality bar by 11-28, remote-browser viewing is limited to desktop
+clients (`FR-R5` dropped), and the reason is recorded.
 
 | ID | Milestone | Decides |
 | -- | --------- | ------- |

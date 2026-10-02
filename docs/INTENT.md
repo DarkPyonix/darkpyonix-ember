@@ -172,8 +172,9 @@ page that lets ChatGPT usage be consumed as well as Codex token usage.
 ### D8 — Computers connect peer to peer, with darkpyonix.dev relaying the hole punch
 
 **Decision.** [user] The main server connects to each computer peer to peer, through either a
-tunnel implemented in Rust or an existing mesh product ("tailcat" in the brief — unconfirmed which
-product is meant; see Q7). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
+tunnel implemented in Rust or an existing mesh product ("tailcat" in the brief — a library that
+splits Tailscale's hole-punching out on its own; comparison with a Rust-written tunnel in progress,
+see Q7). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
 so that, as with Paseo, users do not have to think about connectivity.
 
 **Consequence.** This also settles the HTTPS problem `proxy/` has had for phones and tablets
@@ -185,10 +186,9 @@ so that, as with Paseo, users do not have to think about connectivity.
 `dioxus-compose` with no webview (E1). The IDE window is a webview running VS Code Web through
 Ember's wrapping layer, whose current implementation is `proxy/` (merged in #1).
 
-**Tauri.** [provisional] The Tauri scaffold in this repository (`src-tauri/`, `src/`) and the
-Tauri/FastAPI design in `docs/design/INTEGRATION.md` are read as applying to **the IDE window and
-the mobile IDE shell** only, never to the launcher or conversation screens. Whether the scaffold is
-kept long-term is the user's decision; it is not deleted.
+**Tauri.** [user, 2026-10-03] The Tauri scaffold has been deleted ("Tauri 스캐폴드가 왜 필요해?
+지워."). The Tauri parts of `docs/design/INTEGRATION.md` are marked obsolete; its VS Code runtime
+choice (D10) and mobile WebView notes still apply to the IDE window.
 
 ### D10 — Two VS Code runtimes: OSE by default, the official build as an option
 
@@ -252,5 +252,5 @@ relocated, not removed.
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional] |
 | **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | Open — answered per agent |
 | **Q7** | Is "tailcat" Tailscale? Rust tunnel, existing mesh, or both? | Open — awaiting the user |
-| **Q8** | Is the Tauri scaffold kept long-term, and for what? | Open — user decision (D9) |
+| **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed — deleted** [user, 2026-10-03] |
 | **Q9** | `proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `proxy/docs/BACKGROUND.md` §7-3. | Open |

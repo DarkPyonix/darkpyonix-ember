@@ -101,7 +101,7 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q5 | What happens to a job left running on the previous computer? |
 | Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
 | Q7 | Which peer-to-peer transport ("tailcat" — Tailscale?) |
-| Q8 | Is the Tauri scaffold kept long-term, and for what? |
+| Q8 | ~~Is the Tauri scaffold kept?~~ **Closed: deleted** [user, 2026-10-03] |
 | Q9 | `proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |
 | Q11 | ~~What is "OMP"?~~ oh-my-pi (`omp`), a distribution of the Pi coding agent that exposes ACP *[provisional — leader's research]* |

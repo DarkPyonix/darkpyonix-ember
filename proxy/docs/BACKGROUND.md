@@ -28,7 +28,7 @@
 | **The DarkPyonix proxy** | `main.py` + `dpx/` (:8888) | Relays every request upstream, injects HTML/CSS, relays WS, serves the home and login pages |
 | **The overlay** | `static/overlay.css` + `static/overlay.js` | The mobile UI injected into VS Code Web |
 | **Home launcher / login / wrapper** | `static/home.html` · `workspace_login.html` · `frame.html` | Workspace-picking home + login gate + iframe wrapper |
-| **ember (the Tauri desktop app)** | the `darkpyonix-ember` repository | The desktop shell. **Currently Tauri starter boilerplate, unimplemented.** Under option B, all it needs to do on launch is load a webview at `{server}/` |
+| **ember** | the `darkpyonix-ember` repository | ~~The Tauri desktop shell~~ — the Tauri scaffold was deleted (2026-10-03, user decision). The client is now a dioxus-compose native app; see `../../docs/INTENT.md` D9 |
 
 - Example deployment point: `my-pc.example.com`, where DarkPyonix runs.
 - `_xmo_recent.json` holds the list of recently opened workspace folders (server-side recents).
@@ -426,7 +426,7 @@ per device; three concurrent sessions confirmed by measurement).
    `dpx/vscode/extension.py`**; what remains is the middleware gating switch and the companion
    extension itself (tiny: a package.json plus a heartbeat extension.js). `xmo=on/frame/embed`
    will be kept as dev switches that bypass the gate.
-4. **ember (Tauri)**: implement loading a webview at `{server}/` on launch.
+4. ~~**ember (Tauri)**: implement loading a webview at `{server}/` on launch.~~ Obsolete — Tauri scaffold deleted (2026-10-03).
 
 ### Already called "resolved" by the user
 

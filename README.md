@@ -125,7 +125,6 @@ darkpyonix-ember/
 │  ├─ BACKGROUND.md      how the 09-22 VS Code design was reached
 │  └─ design/            design material (INTEGRATION.md, decks)
 ├─ proxy/               the IDE window wrapping layer (Python, FastAPI) — working
-├─ src-tauri/, src/     Tauri scaffold — scope under review (INTENT.md D9, Q8)
 └─ LICENSE
 ```
 

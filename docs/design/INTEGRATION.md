@@ -3,14 +3,16 @@
 ## 개요
 
 darkPyonix manager(FastAPI 기반)가 VSCode Web 서버를 라우팅으로 연결하는 구조.
-클라이언트는 Tauri 기반 WebView 앱으로 데스크탑, Android, iOS를 지원.
+~~클라이언트는 Tauri 기반 WebView 앱으로 데스크탑, Android, iOS를 지원.~~
+> **폐기됨 (2026-10-03 사용자 결정).** Tauri 클라이언트는 쓰지 않습니다. 클라이언트는 dioxus-compose 네이티브 앱이고,
+> 이 문서의 VSCode 런타임 선택과 모바일 WebView 최적화 내용은 IDE 창에 그대로 적용됩니다. (`docs/INTENT.md` D9, D10)
 
 ---
 
 ## 런타임 구조
 
 ```
-Client (Tauri WebView)
+Client (Tauri WebView — 폐기됨, 2026-10-03)
     ↕
 darkPyonix Manager (FastAPI)
     ↕ routing
@@ -64,6 +66,8 @@ padding-right: env(safe-area-inset-right);
 ```
 
 ### Android 뒤로가기 처리
+> 폐기됨(2026-10-03 사용자 결정): Tauri 기반 구현. 뒤로가기 처리 요구 자체는 유지.
+
 Tauri Kotlin 플러그인으로 Android 시스템 뒤로가기 이벤트를 가로채서 앱 레벨에서 처리.
 WebView 히스토리 뒤로가기 동작 차단.
 
@@ -74,6 +78,8 @@ VSCode 타이틀바/메뉴 영역을 모바일 친화적으로 재배치.
 ---
 
 ## Tauri 구조
+
+> **폐기됨 (2026-10-03 사용자 결정).**
 
 ```
 Rust (Tauri core)

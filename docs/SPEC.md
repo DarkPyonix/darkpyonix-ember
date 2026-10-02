@@ -149,6 +149,31 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-W6** | vscode-darkpyonix (notebook renderer) and vscode-darkpyonix-theme are installed by default. [user] | Present on first launch for both runtimes. |
 | **NFR-W1** | Extensions are tested unmodified from the marketplace matching the runtime. | Regressions block release. |
 
+### FR-W4 acceptance — the OSE runtime
+
+OSE is built by `.github/workflows/ose.yml` from `ose/` (Code-OSS at the tag in `ose/VERSION`,
+`product.json` overrides only; see `ose/README.md`). A release (tag `ose-v*`) is accepted when,
+for every target (linux-x64, linux-arm64, darwin-arm64, darwin-x64):
+
+1. **No Microsoft marketplace or telemetry in `product.json`.** `ose/check-product.sh` passes on
+   the packaged `product.json`: `extensionsGallery` points at Open VSX
+   (`serviceUrl` `https://open-vsx.org/vscode/gallery`, `itemUrl` `https://open-vsx.org/vscode/item`,
+   resource/extension templates on `open-vsx.org`); `enableTelemetry` is not true and there is no
+   `aiConfig`; no `marketplace.visualstudio.com`, `*.vsassets.io`, `vscode-unpkg.net`, update,
+   experiments or voice endpoint appears anywhere. Remaining Microsoft hosts (the webview CDN,
+   Copilot doc links) are listed in the job log and in `ose/README.md`.
+2. **It launches.** `ose/smoke.sh` starts `bin/dpx-ose-server` with the flags `proxy/dpx` uses
+   (`DEFAULT_OSE_ARGS`: `--host --port --without-connection-token --accept-server-license-terms
+   --server-data-dir`) and the workbench page is served.
+3. **Open VSX search and install work.** `ose/smoke.sh` queries `<serviceUrl>/extensionquery` and
+   gets results, and the server CLI installs an extension (`redhat.vscode-yaml` by default) from
+   Open VSX.
+4. **Manually, once per release, on a Raspberry Pi (64-bit OS) and a Mac:** `python -m dpx.serve`
+   with `DPX_OSE_SERVER` set opens the IDE window; the Extensions view searches Open VSX and
+   installs an extension; Help → About shows "DarkPyonix OSE" and the Code-OSS version.
+
+Steps 1–3 run in CI on every build; step 1 alone runs on every pull request touching `ose/`.
+
 ---
 
 ## §B — Native bridge (IDE window webview ↔ native shell)

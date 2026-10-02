@@ -1,0 +1,64 @@
+# Repository checks. Rust builds and tests run here, not on developer machines.
+#
+#   transport-isolation  scripts/check-transport-isolation.sh (SPEC FR-N5), when present
+#   rust                 cargo test for each crate dir that exists (server/, node/)
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transport-isolation:
+    name: transport isolation (FR-N5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run scripts/check-transport-isolation.sh
+        run: |
+          if [ -f scripts/check-transport-isolation.sh ]; then
+            bash scripts/check-transport-isolation.sh
+          else
+            echo "scripts/check-transport-isolation.sh not present on this ref; skipping"
+          fi
+
+  rust:
+    name: cargo test ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [server, node]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - id: present
+        name: Crate present?
+        run: |
+          if [ -f "${{ matrix.crate }}/Cargo.toml" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
+          else echo "${{ matrix.crate }}/Cargo.toml not present on this ref; skipping"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.present.outputs.yes == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.present.outputs.yes == 'true'
+        with:
+          workspaces: ${{ matrix.crate }}
+      - name: cargo test
+        if: steps.present.outputs.yes == 'true'
+        working-directory: ${{ matrix.crate }}
+        run: |
+          if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi

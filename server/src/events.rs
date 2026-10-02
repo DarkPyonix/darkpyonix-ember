@@ -28,6 +28,9 @@ pub enum AgentEvent {
     ApprovalResolved { approval_id: String, decision: ApprovalDecision },
     /// Token usage reported by the agent (FR-U3).
     Usage { input_tokens: u64, output_tokens: u64 },
+    /// The agent's account hit a rate or usage limit (FR-U3). `resets_at` is a Unix time in
+    /// milliseconds when the agent reported one. Usually followed by an `Error` and a failed turn.
+    RateLimited { resets_at: Option<i64>, message: String },
     /// The current turn is over.
     TurnEnded { outcome: TurnOutcome },
     /// The agent process reported or hit an error.

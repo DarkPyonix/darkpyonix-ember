@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -52,13 +53,22 @@ pub struct NewSession {
 struct LiveRun {
     run: Arc<Mutex<Box<dyn AgentRun>>>,
     events: mpsc::Sender<AgentEvent>,
+    /// Distinguishes successive processes of one session, so an exiting pump only removes its
+    /// own entry and never a newer process started after a release.
+    generation: u64,
 }
+
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub struct Sessions {
     store: Arc<Store>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
+    /// Last time each session recorded an event or received a message (FR-S6).
+    last_active: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Sessions a client is looking at, and until when (FR-S6). Renewed by the client.
+    leases: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl Sessions {
@@ -69,6 +79,8 @@ impl Sessions {
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
+            last_active: std::sync::Mutex::new(HashMap::new()),
+            leases: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -109,6 +121,7 @@ impl Sessions {
     /// Record and push one event.
     fn record(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
         let (stored, status) = self.store.append(session_id, event)?;
+        self.touch(session_id);
         let _ = self.push.send(Push::Event { v: PUSH_VERSION, status, event: stored });
         Ok(())
     }
@@ -136,7 +149,8 @@ impl Sessions {
                 tx.clone(),
             )
             .await?;
-        let run = LiveRun { run: Arc::new(Mutex::new(run)), events: tx };
+        let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let run = LiveRun { run: Arc::new(Mutex::new(run)), events: tx, generation };
         live.insert(id.to_string(), run.clone());
 
         // Pump: store then push every event, until the agent's channel closes.
@@ -156,12 +170,58 @@ impl Sessions {
                     tracing::error!(session = %sid, "failed to store event: {e:#}");
                 }
             }
-            this.live.lock().await.remove(&sid);
+            let mut live = this.live.lock().await;
+            if live.get(&sid).is_some_and(|l| l.generation == generation) {
+                live.remove(&sid);
+            }
         });
         Ok(run)
     }
 
+    fn touch(&self, id: &str) {
+        self.last_active.lock().unwrap().insert(id.to_string(), Instant::now());
+    }
+
+    /// A client is viewing `id`: keep its agent alive for `ttl` (FR-S6).
+    pub fn lease(&self, id: &str, ttl: Duration) -> Result<(), SessionError> {
+        self.store.session(id)?.ok_or_else(|| SessionError::NotFound(id.into()))?;
+        self.leases.lock().unwrap().insert(id.to_string(), Instant::now() + ttl);
+        Ok(())
+    }
+
+    /// Release agents that have been quiet for `idle`, are not mid-turn and are not leased
+    /// (FR-S6). Their next message resumes them natively. Returns the released session ids.
+    pub async fn reap_idle(self: &Arc<Self>, idle: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let candidates: Vec<String> = self.live.lock().await.keys().cloned().collect();
+        let mut released = Vec::new();
+        for id in candidates {
+            let leased = self.leases.lock().unwrap().get(&id).is_some_and(|until| *until > now);
+            let quiet = self
+                .last_active
+                .lock()
+                .unwrap()
+                .get(&id)
+                .is_none_or(|at| now.duration_since(*at) >= idle);
+            let busy = matches!(
+                self.store.session(&id).ok().flatten().map(|s| s.status),
+                Some(SessionStatus::Running | SessionStatus::WaitingForApproval)
+            );
+            if leased || !quiet || busy {
+                continue;
+            }
+            if let Err(e) = self.release(&id).await {
+                tracing::warn!(session = %id, "idle release failed: {e:#}");
+                continue;
+            }
+            released.push(id);
+        }
+        self.leases.lock().unwrap().retain(|_, until| *until > now);
+        released
+    }
+
     pub async fn send(self: &Arc<Self>, id: &str, text: &str) -> Result<(), SessionError> {
+        self.touch(id);
         let live = self.ensure_live(id).await?;
         live.events
             .send(AgentEvent::UserMessage { text: text.to_string() })

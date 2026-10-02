@@ -31,6 +31,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/v1/sessions/{id}/messages", post(send_message))
         .route("/api/v1/sessions/{id}/approvals/{approval_id}", post(answer))
         .route("/api/v1/sessions/{id}/interrupt", post(interrupt))
+        .route("/api/v1/sessions/{id}/lease", post(lease))
         .route("/api/v1/push", get(push))
         .with_state(sessions)
 }
@@ -160,6 +161,17 @@ async fn interrupt(
 ) -> ApiResult<impl IntoResponse> {
     s.interrupt(&id).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// How long one lease keeps a viewed session's agent alive; clients renew well before it ends.
+pub const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(90);
+
+async fn lease(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    s.lease(&id, LEASE_TTL)?;
+    Ok(Json(json!({ "ttl_secs": LEASE_TTL.as_secs() })))
 }
 
 async fn push(State(s): State<Arc<Sessions>>, ws: WebSocketUpgrade) -> impl IntoResponse {

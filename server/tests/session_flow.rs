@@ -183,3 +183,29 @@ async fn http_create_send_and_read_events() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn idle_agents_are_released_unless_leased_and_resume_on_next_message() {
+    // FR-S6.
+    let s = sessions_with(Arc::new(Store::open_in_memory().unwrap()));
+    let a = new_session(&s);
+    let b = new_session(&s);
+    for id in [&a, &b] {
+        s.send(id, "x").await.unwrap();
+        wait_status(&s, id, SessionStatus::WaitingForApproval).await;
+    }
+    // Mid-turn sessions are never reaped.
+    assert!(s.reap_idle(Duration::ZERO).await.is_empty());
+    for id in [&a, &b] {
+        s.answer(id, "approval-1", ApprovalDecision::AllowOnce).await.unwrap();
+        wait_status(&s, id, SessionStatus::Finished).await;
+    }
+    s.lease(&b, Duration::from_secs(60)).unwrap();
+    assert_eq!(s.reap_idle(Duration::ZERO).await, vec![a.clone()]);
+    assert!(!s.is_live(&a).await);
+    assert!(s.is_live(&b).await);
+    // A released session comes back on the next message.
+    s.send(&a, "again").await.unwrap();
+    wait_status(&s, &a, SessionStatus::WaitingForApproval).await;
+    assert!(s.is_live(&a).await);
+}

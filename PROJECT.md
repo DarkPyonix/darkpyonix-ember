@@ -50,7 +50,7 @@ of the quality bar. What cannot fit is excluded below, with the reason.
 | M1 — ember server core | 2026-10-17 | #2, #3, #4 |
 | M2 — ember node and computer switching | 2026-10-31 | #5, #6, #13 |
 | M4 — A2A and accounts | 2026-11-14 | #7, #8 |
-| M5 — networking (HTTPS over P2P) | 2026-11-21 — moves with `darkpyonix-core`'s hub (11-20) and Q7 | #10 |
+| M5 — networking (HTTPS over P2P) | 2026-11-21 — **start on hold** until Q7 is re-decided; moves with `darkpyonix-core`'s hub (11-20) | #10 |
 | M7 — IDE window from a conversation | 2026-11-21 | #11 |
 | M3 — native client (dioxus-compose) | 2026-11-28 — moves with `dioxus-compose`'s schedule | #9 |
 | M6 — remote browser and agent browser use | 2026-11-28 | #12 |
@@ -66,7 +66,6 @@ parallel, with subagents in isolated worktrees (`.claude/worktrees/`).
 | OSE runtime (`FR-W4` default) | It needs our own VS Code build pipeline and Open VSX: a separate release stream. VSC ships first. |
 | Mobile IDE without Node (`FR-W5`) | It needs a new `serve-web`-compatible Rust server, not wrapping. |
 | Tab detach and native bridge (`FR-B1`–`FR-B4`) | Polish. Not needed to be usable. |
-| Hand-written NAT traversal from scratch | It cannot reach the quality bar in the window. M5 builds on an existing P2P layer instead. |
 | vscode-darkpyonix / intellij-darkpyonix renderers | Not excluded from November: built in `darkpyonix-core`'s schedule by the darkpyonix leader, as clients of the core manager API (core M2, 10-17). Not tracked in Ember's milestones. |
 
 If M6's native viewer misses the quality bar by 11-28, remote-browser viewing is limited to desktop
@@ -99,7 +98,7 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q4 | How are a transcript's computer-specific observations invalidated on a move? |
 | Q5 | What happens to a job left running on the previous computer? |
 | Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
-| Q7 | Which peer-to-peer transport? *[provisional]* tailcat as a sidecar |
+| Q7 | Which peer-to-peer transport? *[under re-review]* iroh / rustunnel / own Rust implementation |
 | Q8 | ~~Is the Tauri scaffold kept?~~ **Closed: deleted** [user, 2026-10-03] |
 | Q9 | `proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |

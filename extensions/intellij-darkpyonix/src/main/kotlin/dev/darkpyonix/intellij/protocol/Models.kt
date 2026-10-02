@@ -40,7 +40,7 @@ data class CellLock(
 
 /** `Cursor` of manager.openapi.yaml. Lines and columns are 0-based within the cell source. */
 data class CellCursor(val cellId: String, val line: Int, val column: Int, val selection: List<List<Int>>? = null) {
-    fun toJson(): Map<String, Any?> = linkedMapOf(
+    fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "cell_id" to cellId, "line" to line, "column" to column,
     ).also { if (selection != null) it["selection"] = selection }
 

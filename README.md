@@ -50,8 +50,8 @@ demand.
 
 ## 🏗 Architecture, one paragraph
 
-A **main server** runs the agent CLIs headless, stores transcripts, accounts and browser profiles,
-and brokers agent-to-agent messages. Each **computer** runs a thin execution daemon that performs
+A **main server** runs **ember server**: it runs the agent CLIs headless, stores transcripts, accounts and browser profiles,
+and brokers agent-to-agent messages. Each **computer** runs **ember node**, a thin execution daemon that performs
 tool actions (files, commands, browser egress) for whichever sessions are using it. The **client**
 — launcher and conversation screens on `dioxus-compose`, with no webview — talks to the main
 server; the **IDE window** is VS Code Web wrapped by `proxy/`. Everything connects peer to peer,
@@ -77,7 +77,7 @@ Design stage, with one working piece.
 | Layer | State |
 | ----- | ----- |
 | Main server (agent wrapping, sessions, accounts, A2A) | Specified (`docs/SPEC.md` §S, §A, §T, §U), not implemented |
-| Execution daemon and computer switching | Specified (§X), not implemented |
+| ember node (execution daemon) and computer switching | Specified (§X), not implemented |
 | Native client (dioxus-compose) | Specified (§L); depends on `dioxus-compose` |
 | Networking (P2P, `darkpyonix.dev` relay) | Specified (§N); transport not chosen |
 | Remote and agent browser | Specified (§R), not implemented |

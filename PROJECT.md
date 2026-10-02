@@ -11,7 +11,7 @@ four things work together:
 
 1. **A main server** — a personal Raspberry Pi or Mac mini — that runs every wrapped agent CLI
    (Claude Code, Codex, Antigravity, OMP), stores every conversation, and manages every account.
-2. **Computers** assigned to projects, each running a thin execution daemon, so that an agent on
+2. **Computers** assigned to projects, each running **ember node**, a thin execution daemon, so that an agent on
    the main server can work on whichever computer the session is currently using — and move.
 3. **A native client** — launcher and conversation screens on `dioxus-compose`, no webview — that
    puts conversations first and opens an IDE only when needed.
@@ -44,7 +44,7 @@ Ember-specific additions:
 | -- | --------- | ------- |
 | **M0** | These documents, revised to the 10-03 brief and cross-referenced | Whether the conversation-first, main-server model has a coherent written spec |
 | **M1** | Main server core: Claude Code and Codex wrapped (`FR-A1`–`FR-A4`), transcripts stored on the server (`FR-S1`–`FR-S3`), sessions surviving client disconnects, a push channel (`PR-1`). Executes on the main server itself only. | Whether headless wrapping keeps each agent's native behaviour (E2) well enough to be the foundation |
-| **M2** | Execution daemon on a second computer (`FR-X1`, `FR-X2`, `FR-X5`) and switching a session between computers (`FR-X3`, `FR-S7` v0) | Whether "one AI moving between computers" works end to end, and what invalidation it really needs (Q1, Q4) |
+| **M2** | ember node on a second computer (`FR-X1`, `FR-X2`, `FR-X5`) and switching a session between computers (`FR-X3`, `FR-S7` v0) | Whether "one AI moving between computers" works end to end, and what invalidation it really needs (Q1, Q4) |
 | **M3** | Native client on `dioxus-compose`: projects, sessions with status, computers, conversation view, "Open IDE" (`FR-L1`–`FR-L9`) | Whether the conversation-first client meets `dioxus-compose`'s performance bar with Ember's data model; depends on `dioxus-compose`'s own readiness |
 | **M4** | A2A (`FR-T1`–`FR-T6`) and accounts with usage routing (`FR-U1`–`FR-U3`, `FR-U5`) | Whether cross-vendor, cross-account messaging is useful without being a loop hazard |
 | **M5** | Networking: peer-to-peer with `darkpyonix.dev` hole punching and relay (`FR-N1`–`FR-N4`) | Which transport (Rust tunnel or an existing mesh — Q7); also resolves HTTPS for phones |
@@ -71,7 +71,7 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q8 | Is the Tauri scaffold kept long-term, and for what? |
 | Q9 | `proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |
-| Q11 | What is "OMP" in the agent list, and how does it run headless? |
+| Q11 | ~~What is "OMP"?~~ oh-my-pi (`omp`), a distribution of the Pi coding agent that exposes ACP *[provisional — leader's research]* |
 
 ## Rejected alternatives (summary — see `INTENT.md`)
 

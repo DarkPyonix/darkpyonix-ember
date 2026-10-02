@@ -47,3 +47,10 @@ dist-ssr
 
 # Isolated worktrees for parallel agents
 .claude/worktrees/
+
+# Per-worktree scratch space (npm cache, VS Code test profiles)
+.scratch/
+
+# Editor extension build outputs
+*.vsix
+.vscode-test/

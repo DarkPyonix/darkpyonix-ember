@@ -176,9 +176,8 @@ page that lets ChatGPT usage be consumed as well as Codex token usage.
 ### D8 — Computers connect peer to peer, with darkpyonix.dev relaying the hole punch
 
 **Decision.** [user] The main server connects to each computer peer to peer, through either a
-tunnel implemented in Rust or an existing mesh product ("tailcat" in the brief — a library that
-splits Tailscale's hole-punching out on its own; comparison with a Rust-written tunnel in progress,
-see Q7). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
+tunnel implemented in Rust or an existing mesh product ("tailcat" in the brief — `github.com/tailscale/tailcat`,
+Tailscale's data plane as a standalone Go library and CLI, BSD-3). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
 so that, as with Paseo, users do not have to think about connectivity.
 
 **Consequence.** This also settles the HTTPS problem `proxy/` has had for phones and tablets
@@ -255,6 +254,6 @@ relocated, not removed.
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal only |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional] |
 | **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | Open — answered per agent |
-| **Q7** | Is "tailcat" Tailscale? Rust tunnel, existing mesh, or both? | Open — awaiting the user |
+| **Q7** | Which transport: tailcat, a Rust library (iroh 1.0), or a tunnel written from scratch? | *[provisional]* tailcat as a sidecar behind a replaceable interface; a from-scratch tunnel is out of the November scope. The user named tailcat; its exit-node and SOCKS modes also give M6's browser egress. Awaiting user confirmation. |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed — deleted** [user, 2026-10-03] |
 | **Q9** | `proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `proxy/docs/BACKGROUND.md` §7-3. | Open |

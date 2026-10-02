@@ -99,7 +99,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
-| **FR-R1** | A browser session can be opened whose network egress is a chosen computer. | A what-is-my-IP page shows the chosen computer's public IP; a page on that computer's LAN or `localhost` is reachable. |
+| **FR-R1** | A browser session can be opened whose network egress is a chosen computer. *[provisional]* The egress path is that computer's ember node running a tailcat exit node or SOCKS service, which the main server's browser uses as its proxy. | A what-is-my-IP page shows the chosen computer's public IP; a page on that computer's LAN or `localhost` is reachable. |
 | **FR-R2** | Browser profile data (cookies, storage, logins, history) is stored on the main server and reused whichever computer is the egress. | Log in to a site with egress A, switch egress to B, reload: still logged in. |
 | **FR-R3** | Agents can drive the same browser through a browser-automation tool (DevTools-protocol based), and the user can see and take over the page the agent is driving. | An agent fills a form while the user watches; the user takes over to complete a login; the agent continues afterwards. An "agent is active" indicator is shown. |
 | **FR-R4** | Browser data can be cleared per project. | Clearing removes cookies and storage for that profile only. |
@@ -118,7 +118,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-U1** | The main server holds several accounts per agent (Claude Code, Codex, Antigravity), each with isolated credentials and configuration. | Two Claude Code accounts run sessions simultaneously without sharing credentials or settings. |
 | **FR-U2** | A new session is started under a chosen account. | The session's account is shown in the conversation view and cannot silently change. |
 | **FR-U3** | Usage per account is recorded and visible; usage routing can choose the account for a new session by policy (e.g. least used, failover when one is rate-limited). | A rate-limited account is skipped by the router and the reason is shown. |
-| **FR-U4** | Sign in with OpenAI, with a page that lets ChatGPT usage be consumed in addition to Codex token usage. [user] | *Feasibility of consuming ChatGPT usage outside ChatGPT is unverified and must be checked against OpenAI's terms before implementation.* |
+| **FR-U4** | Sign in with OpenAI ("Sign in with ChatGPT", OAuth 2.0 / OIDC with PKCE and a loopback redirect), with a page that lets ChatGPT plan usage be consumed in addition to Codex token usage. [user] | Works for a **self-hosted** ember server only: OpenAI permits open-source, locally hosted apps to call the Responses API on the user's ChatGPT Plus/Pro plan, with a per-app weekly cap, `store:false` and `stream:true` required, and no image generation, file search, code interpreter or hosted MCP. It is never offered through `darkpyonix.dev` (remote hosting needs OpenAI's approval). Source: developers.openai.com/siwc/token-sharing-open-source, per the darkpyonix leader's research, 2026-10-03. |
 | **FR-U5** | API-key providers (any OpenAI-compatible or vendor API) can be added with keys encrypted at rest. | Keys never appear in transcripts, logs or exports. |
 
 ---
@@ -127,8 +127,8 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
-| **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel, through a Rust-implemented tunnel or an existing mesh network (product unconfirmed — `INTENT.md` Q7). | Works across two different NATs with no port forwarding configured by the user. |
-| **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback, so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
+| **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel. *[provisional]* The first transport is tailcat (Tailscale's data plane as a standalone library: WireGuard + PSK, disco/STUN/port-mapping hole punching, DERP relay fallback), run as a sidecar process behind a replaceable tunnel interface, so it can later be swapped for an in-process Rust library such as iroh. | Works across two different NATs with no port forwarding configured by the user. |
+| **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback (a self-run DERP relay plus an address directory, since tailcat addresses carry a public key and DERP information exchanged out of band), so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
 | **FR-N3** | All connections are encrypted and authenticated per device; a device can be revoked. | Revoking a device closes its connections within one heartbeat. |
 | **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium — see `proxy/docs/CONSTRAINTS.md`). |
 | **PR-1** | Main server → client push channel for session status, transcript updates, computer reachability and assignments. | Versioned schema; a version mismatch is detected and reported, not silently dropped. |

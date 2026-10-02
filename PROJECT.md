@@ -67,7 +67,6 @@ parallel, with subagents in isolated worktrees (`.claude/worktrees/`).
 | Mobile IDE without Node (`FR-W5`) | It needs a new `serve-web`-compatible Rust server, not wrapping. |
 | Tab detach and native bridge (`FR-B1`–`FR-B4`) | Polish. Not needed to be usable. |
 | Hand-written NAT traversal from scratch | It cannot reach the quality bar in the window. M5 builds on an existing P2P layer instead. |
-| OpenAI sign-in for ChatGPT usage (`FR-U4`) | Feasibility under OpenAI's terms is unverified. |
 | vscode-darkpyonix / intellij-darkpyonix renderers | Not excluded from November: built in `darkpyonix-core`'s schedule by the darkpyonix leader, as clients of the core manager API (core M2, 10-17). Not tracked in Ember's milestones. |
 
 If M6's native viewer misses the quality bar by 11-28, remote-browser viewing is limited to desktop
@@ -100,7 +99,7 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q4 | How are a transcript's computer-specific observations invalidated on a move? |
 | Q5 | What happens to a job left running on the previous computer? |
 | Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
-| Q7 | Which peer-to-peer transport ("tailcat" — Tailscale?) |
+| Q7 | Which peer-to-peer transport? *[provisional]* tailcat as a sidecar |
 | Q8 | ~~Is the Tauri scaffold kept?~~ **Closed: deleted** [user, 2026-10-03] |
 | Q9 | `proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |

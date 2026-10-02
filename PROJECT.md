@@ -38,38 +38,40 @@ Ember-specific additions:
 
 ## Milestones
 
-*[provisional — ordering proposed by the implementer, not yet confirmed by the user]*
+Target dates are tracked as GitHub milestones (scope, completion criteria and the basis for each
+date are in the milestone descriptions).
 
-Target dates *[provisional]* are tracked as GitHub milestones (scope, completion criteria and the
-basis for each date are in the milestone descriptions). **Deadline [user]: "실제 사용할 수 있는 정도의
-수준으로 개발 완료는 전부 2026년 11월 안으로"** — everything usable by 2026-11-30, with no lowering
-of the quality bar. What cannot fit is excluded below, with the reason.
+**Deadline [user]:** "10월 셋째쭈 구현까지 기간 당겨야 해. 기간을 당기고 서브 에이전트를 충분히 활용하는걸로
+하자" (2026-10-03). Everything must be usable by **2026-10-18**, with no lowering of the quality bar.
+This replaces the earlier end-of-November deadline. Work runs in parallel, with subagents in isolated
+worktrees (`.claude/worktrees/`).
 
 | Milestone | Target | Issues |
 | --------- | ------ | ------ |
-| M1 — ember server core | 2026-10-17 | #2, #3, #4 |
-| M2 — ember node and computer switching | 2026-10-31 | #5, #6, #13 |
-| M4 — A2A and accounts | 2026-11-14 | #7, #8 |
-| M5 — networking (HTTPS over P2P) | 2026-11-21 — moves with `darkpyonix-core`'s hub (11-20) | #10 |
-| M7 — IDE window from a conversation | 2026-11-21 | #11 |
-| M3 — native client (dioxus-compose) | 2026-11-28 — moves with `dioxus-compose`'s schedule | #9 |
-| M6 — remote browser and agent browser use | 2026-11-28 | #12 |
+| M1 — ember server core | **done 2026-10-03** (#14) | #2, #3, #4 |
+| M2 — ember node and computer switching | 2026-10-09 | #5, #6, #13 |
+| M7 — IDE window from a conversation | 2026-10-11 | #11 |
+| M4 — A2A and accounts | 2026-10-14 (A2A and accounts by 10-09) | #7, #8, #15 |
+| M5 — networking (iroh, HTTPS over P2P) | 2026-10-16 — the real-network NFR-N1 measurement on 10-14 to 10-16 needs the user's help | #10 |
+| M6 — remote browser and agent browser use | 2026-10-16 — viewing depends on dioxus-compose's frame-surface widget | #12 |
+| M3 — native client (dioxus-compose) | 2026-10-18 — rich text depends on dioxus-compose pulling its widget milestone to 10-14 | #9 |
 
-M4 is dated before M3 because it needs no native client. Milestones overlap, so they are worked in
-parallel, with subagents in isolated worktrees (`.claude/worktrees/`).
-
-**Excluded from the November scope** *[provisional]*:
+**Excluded from this deadline** *[provisional]*:
 
 | Item | Why |
 | ---- | --- |
-| M8 — Compose-native editor core (§E) | It was never committed; it is gated on real usage data, which cannot exist before the product ships. |
-| OSE runtime (`FR-W4` default) | It needs our own VS Code build pipeline and Open VSX: a separate release stream. VSC ships first. |
+| M8 — Compose-native editor core (§E) | It was never committed. It is gated on real usage data, which cannot exist before the product ships. |
+| OSE runtime (`FR-W4` default) | It needs our own VS Code build pipeline and Open VSX, which is a separate release stream. VSC ships first. |
 | Mobile IDE without Node (`FR-W5`) | It needs a new `serve-web`-compatible Rust server, not wrapping. |
-| Tab detach and native bridge (`FR-B1`–`FR-B4`) | Polish. Not needed to be usable. |
-| vscode-darkpyonix / intellij-darkpyonix renderers | Not excluded from November: built in `darkpyonix-core`'s schedule by the darkpyonix leader, as clients of the core manager API (core M2, 10-17). Not tracked in Ember's milestones. |
+| Tab detach and native bridge (`FR-B1`–`FR-B4`) | It is polish, not needed for the product to be usable. |
 
-If M6's native viewer misses the quality bar by 11-28, remote-browser viewing is limited to desktop
-clients (`FR-R5` dropped), and the reason is recorded.
+Editor extensions (`vscode-darkpyonix`, `vscode-darkpyonix-theme`, `intellij-darkpyonix`) live in
+this repository under `extensions/` [user, 2026-10-03]. The darkpyonix leader implements them on
+their own schedule, so they are not tracked in Ember's milestones.
+
+If dioxus-compose cannot deliver markdown and syntax highlighting by 10-14, the conversation view
+shows plain text for those parts, and the gap is recorded. If the frame-surface widget is not ready
+by 10-16, remote-browser viewing is limited, and the reason is recorded.
 
 | ID | Milestone | Decides |
 | -- | --------- | ------- |

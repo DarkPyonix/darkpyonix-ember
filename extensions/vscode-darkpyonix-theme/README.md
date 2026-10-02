@@ -27,8 +27,8 @@ repository; the files here were copied unchanged except for this README, `packag
 
 The Dark variant maps every Light UI color through this table; text on ember fills stays
 dark (`#17120E`) for contrast, selections use `#4A3A2C`, and token colors are lightened
-versions of the Light token colors. The same palette is used by the IntelliJ plugin in
-`../intellij-darkpyonix` (editor color schemes).
+versions of the Light token colors. The IntelliJ plugin in `../intellij-darkpyonix` uses the
+same ember/sand colors for its cell decorations.
 
 ## Try it
 

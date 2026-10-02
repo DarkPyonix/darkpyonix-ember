@@ -81,6 +81,7 @@ async fn codex_read_edit_run_with_approval_then_resume() {
         resume_native_id: None,
         model: model.clone(),
         env: Vec::new(),
+        instructions: None,
     };
     let mut run = adapter.start(req, tx).await.unwrap();
     let thread_id = match rx.recv().await.unwrap() {
@@ -119,6 +120,7 @@ async fn codex_read_edit_run_with_approval_then_resume() {
         resume_native_id: Some(thread_id.clone()),
         model,
         env: Vec::new(),
+        instructions: None,
     };
     let mut run = adapter.start(req, tx).await.unwrap();
     assert_eq!(rx.recv().await.unwrap(), AgentEvent::NativeSession { native_id: thread_id });

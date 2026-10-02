@@ -97,6 +97,9 @@ impl CodexAdapter {
         if let Some(sandbox) = &self.sandbox {
             p.insert("sandbox".into(), json!(sandbox));
         }
+        if let Some(text) = &req.instructions {
+            p.insert("developerInstructions".into(), json!(text));
+        }
         p
     }
 }
@@ -788,6 +791,15 @@ mod tests {
                 (v["dir"].as_str().unwrap().to_string(), v["msg"].clone())
             })
             .collect()
+    }
+
+    #[test]
+    fn instructions_become_developer_instructions() {
+        let req = StartRequest { instructions: Some("use ember-a2a".into()), ..Default::default() };
+        let p = CodexAdapter::new("codex").thread_params(&req);
+        assert_eq!(p.get("developerInstructions"), Some(&json!("use ember-a2a")));
+        let p = CodexAdapter::new("codex").thread_params(&StartRequest::default());
+        assert!(!p.contains_key("developerInstructions"));
     }
 
     const SESSION: &str = include_str!("../../tests/fixtures/codex/session.jsonl");

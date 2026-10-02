@@ -96,6 +96,10 @@ impl ClaudeCodeAdapter {
             args.push("--model".into());
             args.push(model.clone());
         }
+        if let Some(text) = &req.instructions {
+            // Equals form, so instructions starting with "-" are never read as a flag.
+            args.push(format!("--append-system-prompt={text}"));
+        }
         if let Some(id) = &req.resume_native_id {
             // Equals form, as the SDK does, so an id can never be read as a flag.
             args.push(format!("--resume={id}"));
@@ -785,8 +789,10 @@ mod tests {
             resume_native_id: Some("abc".into()),
             model: Some("haiku".into()),
             env: Vec::new(),
+            instructions: Some("use ember-a2a".into()),
         };
         let args = ClaudeCodeAdapter::args(&req);
+        assert!(args.contains(&"--append-system-prompt=use ember-a2a".to_string()));
         assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
         assert!(args.contains(&"--resume=abc".to_string()));

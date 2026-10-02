@@ -68,7 +68,7 @@ parallel, with subagents in isolated worktrees (`.claude/worktrees/`).
 | Tab detach and native bridge (`FR-B1`–`FR-B4`) | Polish. Not needed to be usable. |
 | Hand-written NAT traversal from scratch | It cannot reach the quality bar in the window. M5 builds on an existing P2P layer instead. |
 | OpenAI sign-in for ChatGPT usage (`FR-U4`) | Feasibility under OpenAI's terms is unverified. |
-| vscode-darkpyonix / intellij-darkpyonix renderers | Tracked separately. They depend on `darkpyonix-core`'s format and manager. |
+| vscode-darkpyonix / intellij-darkpyonix renderers | Not excluded from November: built in `darkpyonix-core`'s schedule by the darkpyonix leader, as clients of the core manager API (core M2, 10-17). Not tracked in Ember's milestones. |
 
 If M6's native viewer misses the quality bar by 11-28, remote-browser viewing is limited to desktop
 clients (`FR-R5` dropped), and the reason is recorded.

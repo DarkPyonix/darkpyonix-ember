@@ -50,7 +50,7 @@ of the quality bar. What cannot fit is excluded below, with the reason.
 | M1 — ember server core | 2026-10-17 | #2, #3, #4 |
 | M2 — ember node and computer switching | 2026-10-31 | #5, #6, #13 |
 | M4 — A2A and accounts | 2026-11-14 | #7, #8 |
-| M5 — networking (HTTPS over P2P) | 2026-11-21 — **start on hold** until Q7 is re-decided; moves with `darkpyonix-core`'s hub (11-20) | #10 |
+| M5 — networking (HTTPS over P2P) | 2026-11-21 — moves with `darkpyonix-core`'s hub (11-20) | #10 |
 | M7 — IDE window from a conversation | 2026-11-21 | #11 |
 | M3 — native client (dioxus-compose) | 2026-11-28 — moves with `dioxus-compose`'s schedule | #9 |
 | M6 — remote browser and agent browser use | 2026-11-28 | #12 |
@@ -98,7 +98,7 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q4 | How are a transcript's computer-specific observations invalidated on a move? |
 | Q5 | What happens to a job left running on the previous computer? |
 | Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
-| Q7 | Which peer-to-peer transport? *[provisional — awaiting user]* iroh 1.0 behind a replaceable interface |
+| Q7 | ~~Which peer-to-peer transport?~~ **iroh 1.0, conditionally** [user] — own implementation if `NFR-N1` is missed |
 | Q8 | ~~Is the Tauri scaffold kept?~~ **Closed: deleted** [user, 2026-10-03] |
 | Q9 | `proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |

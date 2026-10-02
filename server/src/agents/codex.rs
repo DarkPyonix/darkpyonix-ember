@@ -128,6 +128,7 @@ impl AgentAdapter for CodexAdapter {
         events: mpsc::Sender<AgentEvent>,
     ) -> anyhow::Result<Box<dyn AgentRun>> {
         let mut child = Command::new(&self.bin)
+            .envs(req.env.iter().map(|(k, v)| (k, v)))
             .arg("app-server")
             .current_dir(&req.cwd)
             .stdin(Stdio::piped())

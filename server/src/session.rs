@@ -60,8 +60,12 @@ struct LiveRun {
 
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Contributes environment variables to an agent process when its session starts.
+pub type StartHook = Arc<dyn Fn(&SessionRecord) -> Vec<(String, String)> + Send + Sync>;
+
 pub struct Sessions {
     store: Arc<Store>,
+    start_hooks: std::sync::Mutex<Vec<StartHook>>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
@@ -76,12 +80,18 @@ impl Sessions {
         let (push, _) = broadcast::channel(1024);
         Arc::new(Sessions {
             store,
+            start_hooks: std::sync::Mutex::new(Vec::new()),
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
             last_active: std::sync::Mutex::new(HashMap::new()),
             leases: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Register a hook that adds environment to every agent process this server starts.
+    pub fn add_start_hook(&self, hook: StartHook) {
+        self.start_hooks.lock().unwrap().push(hook);
     }
 
     pub fn store(&self) -> &Store {
@@ -138,6 +148,8 @@ impl Sessions {
             .get(&rec.agent)
             .ok_or(SessionError::AgentUnavailable(rec.agent.as_str()))?
             .clone();
+        let env: Vec<(String, String)> =
+            self.start_hooks.lock().unwrap().iter().flat_map(|h| h(&rec)).collect();
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
         let run = adapter
             .start(
@@ -145,6 +157,7 @@ impl Sessions {
                     cwd: PathBuf::from(&rec.cwd),
                     resume_native_id: rec.native_id.clone(),
                     model: rec.model.clone(),
+                    env,
                 },
                 tx.clone(),
             )

@@ -137,6 +137,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         events: mpsc::Sender<AgentEvent>,
     ) -> anyhow::Result<Box<dyn AgentRun>> {
         let mut child = Command::new(&self.bin)
+            .envs(req.env.iter().map(|(k, v)| (k, v)))
             .args(Self::args(&req))
             .current_dir(&req.cwd)
             .stdin(Stdio::piped())
@@ -783,6 +784,7 @@ mod tests {
             cwd: ".".into(),
             resume_native_id: Some("abc".into()),
             model: Some("haiku".into()),
+            env: Vec::new(),
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));

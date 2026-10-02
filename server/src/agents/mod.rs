@@ -46,7 +46,7 @@ impl AgentKind {
 }
 
 /// Everything an adapter needs to start or resume an agent process.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StartRequest {
     /// Working directory the agent sees.
     pub cwd: PathBuf,
@@ -54,6 +54,9 @@ pub struct StartRequest {
     pub resume_native_id: Option<String>,
     /// Model override, if the user picked one.
     pub model: Option<String>,
+    /// Extra environment for the agent process, from the session's start hooks (account
+    /// isolation, A2A runtime credentials, …). Applied on top of the server's environment.
+    pub env: Vec<(String, String)>,
 }
 
 /// Result of probing for an installed agent (FR-A6).

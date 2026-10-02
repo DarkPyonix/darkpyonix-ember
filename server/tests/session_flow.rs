@@ -209,3 +209,18 @@ async fn idle_agents_are_released_unless_leased_and_resume_on_next_message() {
     wait_status(&s, &a, SessionStatus::WaitingForApproval).await;
     assert!(s.is_live(&a).await);
 }
+
+#[tokio::test]
+async fn start_hooks_run_for_each_agent_start() {
+    let s = sessions_with(Arc::new(Store::open_in_memory().unwrap()));
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let log = seen.clone();
+    s.add_start_hook(Arc::new(move |rec| {
+        log.lock().unwrap().push(rec.id.clone());
+        vec![("EMBER_SESSION_ID".into(), rec.id.clone())]
+    }));
+    let id = new_session(&s);
+    s.send(&id, "x").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    assert_eq!(*seen.lock().unwrap(), vec![id]);
+}

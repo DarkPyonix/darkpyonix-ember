@@ -40,6 +40,7 @@ async fn fake_cli_turn_with_allow_always_and_deny() {
                 cwd: dir.path().to_path_buf(),
                 resume_native_id: Some("prev".into()),
                 model: Some("haiku".into()),
+                env: Vec::new(),
             },
             tx,
         )
@@ -175,6 +176,7 @@ async fn real_claude_read_edit_run_then_resume() {
         cwd: cwd.clone(),
         resume_native_id: resume,
         model: Some("haiku".into()),
+        env: Vec::new(),
     };
 
     // Turn 1: read, edit (needs approval in the default permission mode), run a command.

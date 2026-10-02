@@ -6,6 +6,9 @@
 > this document must stay consistent with it.
 >
 > Items marked *[provisional]* are team proposals not yet confirmed by the user.
+>
+> **Names.** The main server runs **ember server**; each computer runs **ember node** (the execution
+> daemon). These are the names shared with `darkpyonix-core/docs/ARCHITECTURE.md`. *[provisional]*
 
 ---
 
@@ -18,7 +21,7 @@
                                          │                            │                             │
   ┌──────────────────────────┐   P2P    │   ┌────────────────────────┴───────────────────────┐   │   ┌──────────────────────────┐
   │ Client (desktop / phone)  │◀────────┴──▶│              MAIN SERVER                          │◀──┴──▶│ Computer A (e.g. Mac)       │
-  │                            │  PR-1 push   │   (personal Raspberry Pi or Mac mini)              │  P2P   │  Ember execution daemon     │
+  │                            │  PR-1 push   │   (personal Raspberry Pi or Mac mini)              │  P2P   │  ember node (exec daemon)   │
   │  launcher + conversations  │             │                                                     │        │  — file ops, search,         │
   │  dioxus-compose, NO webview│             │  ┌───────────────┐  ┌───────────────────────┐  │        │    commands + PTY (FR-X1)    │
   │  (E1)                       │             │  │ Agent CLIs      │  │ Session store           │  │        │  — background jobs (FR-X4)   │
@@ -29,7 +32,7 @@
                        ▼                      │  └───────┬───────┘  └───────────────────────┘  │
   ┌──────────────────────────┐             │          │ tool calls (wrapped shell, D4)          │        ┌──────────────────────────┐
   │ IDE window                  │             │          ▼                                          │◀─────▶│ Computer B (e.g. Linux GPU) │
-  │  Ember IDE: webview +        │             │  ┌───────────────────────────────────────────┐  │  P2P   │  Ember execution daemon     │
+  │  Ember IDE: webview +        │             │  ┌───────────────────────────────────────────┐  │  P2P   │  ember node (exec daemon)   │
   │  VS Code Web via proxy/       │             │  │ Execution router: sends each tool action   │  │        └──────────────────────────┘
   │  — or VS Code / Gateway       │             │  │ to the session's CURRENT computer (FR-X3)  │  │
   │  (FR-L7, §W)                  │             │  └───────────────────────────────────────────┘  │
@@ -43,7 +46,7 @@
 | Place | Holds | Never holds |
 | ----- | ----- | ----------- |
 | **Main server** | Every agent CLI process; every transcript and the agents' native session files; accounts and credentials; projects, computers and assignments; A2A queues; schedules; browser profiles | Project source as a system of record (that lives on the computers) |
-| **Computer** | Project files; the processes tools start (builds, tests, servers); the execution daemon; the VS Code server for an IDE window on that computer | Agent CLIs; transcripts; credentials for agent accounts |
+| **Computer** | Project files; the processes tools start (builds, tests, servers); **ember node** (the execution daemon); the VS Code server for an IDE window on that computer | Agent CLIs; transcripts; credentials for agent accounts |
 | **Client** | A cache of what the main server last pushed, for instant cold start | Anything authoritative |
 | **darkpyonix.dev** | Connection coordination and relay | Conversations, files, credentials |
 
@@ -54,7 +57,7 @@
    or run a command.
 3. Ember's wrapping layer intercepts the action at the shell/tool boundary (D4; exact point per
    agent is Q6) and the execution router sends it to the session's current computer.
-4. The computer's daemon performs it and streams the result back; the agent sees it as if it had
+4. The computer's ember node performs it and streams the result back; the agent sees it as if it had
    run locally (`FR-X2`).
 5. The normalised event (`FR-A3`) is stored and pushed to every attached client (`PR-1`).
 

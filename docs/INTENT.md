@@ -36,7 +36,7 @@ the main server — so moving between computers feels like using one computer.
 
 There is a fourth, older motivation that the main-server model also addresses: running many CLI
 agents locally makes a laptop slow. Moving the agent runtimes and transcripts to the main server
-leaves the local machine with only a thin execution daemon plus whatever the tools themselves
+leaves the local machine with only a thin execution daemon (**ember node**) plus whatever the tools themselves
 (builds, tests) cost. [provisional — the split between memory pressure and build CPU has not been
 measured.]
 
@@ -79,7 +79,7 @@ boundary, agreed with the darkpyonix leader]
 | ID | Constraint | Source |
 | -- | ---------- | ------ |
 | **E1** | The client's launcher and conversation screens never contain a webview, under any circumstance. They are built on `dioxus-compose`. The IDE window is the one place a webview may exist. | [user, 2026-10-03] |
-| **E2** | A wrapped agent CLI (Claude Code, Codex, Antigravity, OMP, …) keeps its native behaviour. Ember adds around it — A2A, computer switching, browser — and never patches or reimplements the agent itself. | [user]: "본연의 동작을 보존해주면서 에이전트간 소통 기능만 추가" |
+| **E2** | A wrapped agent CLI (Claude Code, Codex, Antigravity, OMP (oh-my-pi), …) keeps its native behaviour. Ember adds around it — A2A, computer switching, browser — and never patches or reimplements the agent itself. | [user]: "본연의 동작을 보존해주면서 에이전트간 소통 기능만 추가" |
 | **E3** | All conversations, all agent processes and all account credentials live on the main server. A computer is a place where tools run; it is never the system of record for a conversation. | [user] |
 | **E4** | VS Code is wrapped, never modified: Ember does not patch VS Code's source and never reimplements the Extension Host. Which extension marketplace applies follows the chosen VS Code runtime (Open VSX for OSE, the Microsoft Marketplace for the official build). | [provisional — narrowed from the 09-22 "official marketplace required"; see D10] |
 | **E5** | Inside the IDE window, a webview is scoped to the smallest region that needs it once the editor-core work of `IMPLEMENTATION.md` lands. Until then the IDE window as a whole is the acknowledged exception. | [kept from 09-22] |
@@ -250,7 +250,7 @@ relocated, not removed.
 | **Q3** | When a session moves, does an open IDE window follow it, or stay with its computer? | Open |
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal only |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional] |
-| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? | Open — answered per agent |
+| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | Open — answered per agent |
 | **Q7** | Is "tailcat" Tailscale? Rust tunnel, existing mesh, or both? | Open — awaiting the user |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | Open — user decision (D9) |
 | **Q9** | `proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `proxy/docs/BACKGROUND.md` §7-3. | Open |

@@ -195,6 +195,33 @@ def installed_ids(extensions_dir: Path) -> set[str]:
     return found
 
 
+def prepare_data_dir(rt: str, data_dir: Path) -> None:
+    """Machine settings the runtime needs before it starts.
+
+    OSE (Code-OSS) has no Marketplace signature verifier — `@vscode/vsce-sign` is Microsoft-only —
+    so every gallery install fails with "Signature verification was not executed" unless
+    `extensions.verifySignature` is off. Existing machine settings are kept; only that key is set.
+    VSC is left as the user configured it.
+    """
+    if rt != "ose":
+        return
+    # The running server reads Machine settings; its CLI (`--install-extension`, used by
+    # ensure_extensions) reads the default profile's User settings.
+    for scope in ("Machine", "User"):
+        path = data_dir / "data" / scope / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if not isinstance(current, dict):
+                current = {}
+        except (OSError, ValueError):
+            current = {}
+        if current.get("extensions.verifySignature") is False:
+            continue
+        current["extensions.verifySignature"] = False
+        path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+
+
 def ensure_extensions(entries: list[str], extensions_dir: Path, command: str) -> dict:
     """Install every entry not yet in `extensions_dir`. Idempotent; never raises.
 

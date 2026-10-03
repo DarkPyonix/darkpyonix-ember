@@ -14,7 +14,7 @@ Behaviour changes for the IDE window come from `proxy/`.
 | ---- | ---------- |
 | `VERSION` | The Code-OSS release tag that is built (currently `1.139.1`, commit `04c0d99f4fb0`). |
 | `product.overrides.json` | Deep-merged into upstream `product.json`: DarkPyonix names, Open VSX gallery, telemetry off. |
-| `build.sh` | Fetch tag → apply overrides → `npm ci` → gulp `vscode-reh-web-<target>-min` → `tar.gz` + `.sha256`. CI only. |
+| `build.sh` | Fetch tag → apply overrides → `npm ci` → gulp `core-ci` + Copilot extension → gulp `vscode-reh-web-<target>-min-ci` → `tar.gz` + `.sha256`. CI only; see [Build notes](#build-notes). |
 | `check-product.sh` | Fails if a `product.json` is not on Open VSX, has telemetry on, or names a Microsoft marketplace/update/telemetry endpoint. |
 | `smoke.sh` | Starts a packaged build and checks: workbench served, Open VSX search, extension install. |
 
@@ -39,6 +39,48 @@ rebuild) runs the matrix and publishes a GitHub release with all archives and `S
 
 To move to a new Code-OSS release: change `VERSION`, open a PR (the `product` job checks the new
 upstream `product.json` against the overrides in seconds), then run the workflow manually or tag.
+
+## Build notes
+
+`build.sh` follows upstream's own pipeline (`build/azure-pipelines/{linux,darwin}/steps/product-build-*-compile.yml`
+at the pinned tag) wherever it can. Where it differs, it is because that step depends on
+Microsoft-internal resources. The upstream tree stays unpatched in every case.
+
+- **Linux native modules: run `build/npm/preinstall.ts` before `npm ci`.** The root `.npmrc`
+  builds native modules (native-keymap, @vscode/spdlog, kerberos, ...) against Electron's headers.
+  Their V8 headers use a deprecation-attribute syntax that GCC < 13 cannot parse
+  (`v8config.h: error: expected identifier before '__attribute__'`,
+  [GCC bug 69585](https://gcc.gnu.org/bugzilla/show_bug.cgi?id=69585)). Upstream ships fixed
+  copies in `build/npm/gyp/custom-headers`, and `preinstall.ts` lays them over the node-gyp header
+  cache. npm runs the root `preinstall` only after the dependencies have been built, so upstream
+  calls the script explicitly first, and `build.sh` does the same on Linux. Upstream builds with a
+  Chromium clang and a glibc 2.28 sysroot (`build/azure-pipelines/linux/setup-env.sh`). OSE uses
+  the runner's GCC 11 instead, which is why the archive needs glibc ≥ 2.35 (see Targets).
+- **macOS:** `GYP_DEFINES=kerberos_use_rtld=false`, as upstream sets it.
+- **Copilot.** At 1.139 the MIT Copilot Chat extension lives in-tree (`extensions/copilot`). Every
+  REH packaging task ends with `prepareBuiltInCopilotRipgrepShim` (`build/lib/copilot.ts`),
+  which needs `extensions/copilot/node_modules/@github/copilot/sdk` in the output. Upstream puts it
+  there with a Copilot VSIX built by a separate job. That job needs the private
+  `microsoft/vscode-capi` repository and is downloaded by `build/azure-pipelines/common/downloadCopilotVsix.ts`
+  into `.build/extensions/copilot`. Upstream's local fallback task, `compile-copilot-extension-build`,
+  builds the extension from source, but `build/.moduleignore` strips `@github/copilot/**` from it,
+  so the one-shot `vscode-reh-web-<target>-min` task always fails at the shim outside Microsoft.
+  `build.sh` therefore runs upstream's CI sequence: `gulp core-ci`, then
+  `compile-copilot-extension-build` in place of the VSIX download, then copies
+  `@github/copilot/{package.json,sdk/}` (what `extensions/copilot/script/postinstall.ts`
+  materialized, and what the VSIX's `.vscodeignore` keeps) into `.build/extensions/copilot`, then
+  `gulp vscode-reh-web-<target>-min-ci`. The shim then prunes the SDK to the target and fetches the
+  version-matched `@github/copilot-<platform>` native package, which it checks against the
+  integrity in `extensions/copilot/package-lock.json`.
+  Copilot cannot be left out through `product.json`: the shim step runs unconditionally, and
+  removing it means patching `build/gulpfile.reh.ts`, which is what VSCodium does
+  (`patches/53-ext-copilot-remove-it.patch`). The extension is inert until a user signs in to
+  GitHub Copilot (see "Microsoft hosts that remain").
+- `core-ci` also builds the desktop bundle and type-checks `src/` with tsgo, as upstream's
+  pipeline does. That adds a few minutes, but it is the only named gulp task that produces
+  `out-vscode-reh-web-min` without also running the Copilot packaging step.
+- `GITHUB_TOKEN` (the workflow's read-only token) is passed to the build to avoid GitHub API rate
+  limits when built-in extensions and packages are fetched.
 
 ## Running it with `proxy/dpx`
 

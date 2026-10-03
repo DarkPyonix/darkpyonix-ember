@@ -48,13 +48,19 @@ pub fn load_key(data_dir: &Path) -> anyhow::Result<SecretKey> {
     Ok(SecretKey::load_or_generate(data_dir.join(KEY_FILE))?)
 }
 
-/// The transport configuration with the hub (FR-N2): when this server is registered (`token`),
-/// or the hub was named explicitly (`EMBER_HUB_URL`), the hub's relay and address directory;
+/// The transport configuration with the hub (FR-N2): when this server is `registered`, or the
+/// hub was named explicitly (`EMBER_HUB_URL`), the hub's relay and address directory, resolving
+/// with `token` (the registration's resolve token, `dpr_`; never the device token: NFR-H2);
 /// otherwise the plain environment configuration (the directory is turned on at runtime once
 /// the server registers, see [`crate::hub`]).
-pub fn config_with_hub(key: SecretKey, hub: Option<&ember_hub::HubConfig>, token: Option<String>) -> TransportConfig {
+pub fn config_with_hub(
+    key: SecretKey,
+    hub: Option<&ember_hub::HubConfig>,
+    registered: bool,
+    token: Option<String>,
+) -> TransportConfig {
     match hub {
-        Some(h) if token.is_some() || ember_hub::HubConfig::explicitly_enabled() => h.transport_config(key, token),
+        Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => h.transport_config(key, token),
         _ => TransportConfig::from_env(key),
     }
 }

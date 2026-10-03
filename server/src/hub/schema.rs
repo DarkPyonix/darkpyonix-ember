@@ -17,3 +17,20 @@ CREATE TABLE hub_registration (
 -- FR-N3 rows synced from the hub account are 'hub'; rows added by hand are 'local'.
 ALTER TABLE devices ADD COLUMN source TEXT NOT NULL DEFAULT 'local';
 ";
+
+/// Migration from `user_version` 10 to 11 (darkpyonix-core PR #34):
+/// - the read-only **resolve token** (`dpr_...`, NFR-H2) that goes in the pkarr resolver's URL
+///   instead of the device token, sealed like it (AAD `ember/hub-resolve-token/v1:<endpoint>`);
+///   `NULL` for a registration made before the hub issued them (one is fetched on start);
+/// - the **pending link** (`link_id`), so a server restarted while waiting for approval resumes
+///   it with `GET /v1/device-links/{link_id}` instead of starting over.
+pub const RESOLVE_MIGRATION: &str = "
+ALTER TABLE hub_registration ADD COLUMN resolve_nonce BLOB;
+ALTER TABLE hub_registration ADD COLUMN resolve_ciphertext BLOB;
+CREATE TABLE hub_pending_link (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    hub_url    TEXT NOT NULL,
+    link_id    TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+";

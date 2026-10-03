@@ -52,6 +52,9 @@ struct Fixture {
     app: axum::Router,
     net: MemNetwork,
     server_t: Transport,
+    store: Arc<Store>,
+    accounts: Arc<Accounts>,
+    key: SecretKey,
     _dir: tempfile::TempDir,
 }
 
@@ -74,13 +77,14 @@ async fn fixture() -> Fixture {
         Some(st.dialer.clone()),
     );
     computers.install(&sessions);
-    let mut server_hub = ServerHub::new(HubConfig::new(hub.url()), store.clone(), accounts, key, devices.clone());
+    let mut server_hub =
+        ServerHub::new(HubConfig::new(hub.url()), store.clone(), accounts.clone(), key.clone(), devices.clone());
     server_hub.set_poll_interval(Duration::from_millis(50));
     server_hub.attach_transport(server_t.clone());
     let app = ember_server::hub::api::router(Some(server_hub.clone()), computers.clone())
         .merge(ember_server::hub::api::admin_router(Some(server_hub.clone()), computers.clone()))
         .merge(computers::api::router(computers.clone(), sessions.clone()));
-    Fixture { hub, server_hub, computers, devices, app, net, server_t, _dir: dir }
+    Fixture { hub, server_hub, computers, devices, app, net, server_t, store, accounts, key, _dir: dir }
 }
 
 async fn register_server(f: &Fixture) {
@@ -254,9 +258,9 @@ async fn revocation_on_the_hub_is_detected_and_surfaced() {
     let (st, body) = call(&f.app, Method::GET, "/api/v1/hub/devices", None).await;
     assert_eq!(st, StatusCode::GONE, "{body}");
     assert!(body["error"].as_str().unwrap().contains("removed"));
-    // A revoked key cannot simply link again.
-    let (st, _) = call(&f.app, Method::POST, "/api/v1/hub/link", None).await;
-    assert_eq!(st, StatusCode::GONE);
+    // A removed key cannot simply link again: the hub refuses until the owner re-admits it.
+    let (st, body) = call(&f.app, Method::POST, "/api/v1/hub/link", None).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
 }
 
 #[tokio::test]
@@ -272,6 +276,163 @@ async fn revocation_is_noticed_by_any_hub_call_and_by_the_watcher() {
     // The watcher stops on a revoked registration.
     let task = f.server_hub.spawn_watch(Duration::from_millis(20));
     tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn long_poll_watcher_sees_removal_at_once_and_syncs_devices() {
+    let f = fixture().await;
+    register_server(&f).await;
+    // Registration asked the hub's /v1/config: the fake offers the long-poll.
+    let (_, status) = call(&f.app, Method::GET, "/api/v1/hub", None).await;
+    assert_eq!(status["long_poll"], true, "{status}");
+    assert_eq!(status["pkarr_url"], format!("{}/pkarr", f.hub.url()));
+    assert_eq!(status["relay_source"], "derived");
+
+    f.server_hub.set_sync_devices(true);
+    // A one-minute period: only the long-poll can be this quick.
+    let task = f.server_hub.spawn_watch(Duration::from_secs(60));
+    let node = SecretKey::generate().peer_id();
+    f.hub.register(node, "gpu box", Role::Computer);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !f.devices.list().unwrap().iter().any(|d| d.peer_id == node) {
+        assert!(std::time::Instant::now() < deadline, "device list change not synced by the long-poll");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Let the next held request reach the hub, then remove this server there.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let t0 = std::time::Instant::now();
+    assert!(f.hub.remove(&f.server_t.peer_id()));
+    tokio::time::timeout(Duration::from_secs(2), task).await.expect("watcher stops on removal").unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert!(f.server_hub.status().unwrap().revoked);
+}
+
+#[tokio::test]
+async fn a_rejected_token_is_not_a_revocation() {
+    let f = fixture().await;
+    register_server(&f).await;
+    // `401 {code: invalid_credentials}` (a token the hub does not know) does not revoke.
+    let e = f.hub.client().with_token("dpd_unknown").devices().await.unwrap_err();
+    assert!(!e.is_revocation(), "{e:?}");
+    let (st, body) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["state"], "active");
+    // `401 {code: device_removed}` does.
+    assert!(f.hub.remove(&f.server_t.peer_id()));
+    let (_, body) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    assert_eq!(body["state"], "revoked");
+    assert!(f.server_hub.status().unwrap().revoked);
+}
+
+#[tokio::test]
+async fn registration_keeps_a_sealed_resolve_token_and_reports_the_app() {
+    let f = fixture().await;
+    register_server(&f).await;
+    let me = f.server_t.peer_id();
+    // The directory resolves with the resolve token, never the device token (NFR-H2).
+    let resolve = f.server_hub.directory_token().expect("resolve token stored");
+    assert!(resolve.starts_with("dpr_"));
+    assert_eq!(Some(resolve.clone()), f.hub.resolve_token(&me));
+    // Stored sealed (with the server's secret.key) and read back after a "restart".
+    let devices = Devices::open(f.store.clone()).unwrap();
+    let again = ServerHub::new(HubConfig::new(f.hub.url()), f.store.clone(), f.accounts.clone(), f.key.clone(), devices);
+    assert_eq!(again.directory_token(), Some(resolve));
+    // The app record (FR-H10) was published with the server's own token.
+    let device = f.hub.devices().into_iter().find(|d| d.endpoint_id == me).unwrap();
+    let app = device.app.expect("app reported");
+    assert_eq!(app.kind, "ember-server");
+    assert_eq!(app.services, vec!["ember-server-v1"]);
+}
+
+#[tokio::test]
+async fn a_main_server_code_is_approved_in_the_browser_not_by_the_server() {
+    let f = fixture().await;
+    register_server(&f).await;
+    let link = DeviceLink::start(&f.hub.client(), &SecretKey::generate(), "second", Role::MainServer).await.unwrap();
+    let code = link.user_code().to_string();
+    let (st, body) =
+        call(&f.app, Method::POST, &format!("/api/v1/hub/link-codes/{code}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("/link?code="), "{body}");
+    // Denying is allowed.
+    let (st, _) =
+        call(&f.app, Method::POST, &format!("/api/v1/hub/link-codes/{code}"), Some(json!({ "approve": false }))).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(!f.server_hub.status().unwrap().revoked, "a 403 is not a revocation");
+}
+
+#[tokio::test]
+async fn leaving_removes_the_server_on_the_hub() {
+    let f = fixture().await;
+    register_server(&f).await;
+    let me = f.server_t.peer_id();
+    let (st, _) = call(&f.app, Method::DELETE, "/api/v1/hub/registration", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(f.hub.devices().iter().all(|d| d.endpoint_id != me), "removed on the hub with its own token");
+    assert!(!f.server_hub.status().unwrap().registered);
+
+    // `?local=1` only forgets here.
+    let f = fixture().await;
+    register_server(&f).await;
+    let (st, _) = call(&f.app, Method::DELETE, "/api/v1/hub/registration?local=1", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(f.hub.devices().iter().any(|d| d.endpoint_id == f.server_t.peer_id()));
+}
+
+#[tokio::test]
+async fn a_link_pending_at_restart_is_resumed() {
+    let f = fixture().await;
+    let (st, pending) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home" }))).await;
+    assert_eq!(st, StatusCode::ACCEPTED);
+    let code = pending["user_code"].as_str().unwrap().to_string();
+
+    // "Restart": a new ServerHub on the same store finds the link and follows it.
+    let devices = Devices::open(f.store.clone()).unwrap();
+    let mut again = ServerHub::new(HubConfig::new(f.hub.url()), f.store.clone(), f.accounts.clone(), f.key.clone(), devices);
+    again.set_poll_interval(Duration::from_millis(50));
+    let view = again.resume_link().await.unwrap().expect("pending link resumed");
+    assert_eq!(view.user_code, code);
+    assert!(f.hub.approve(&code));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !again.status().unwrap().registered {
+        assert!(std::time::Instant::now() < deadline, "resumed link never completed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Nothing left to resume.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(again.resume_link().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_removed_server_relinks_after_readmission() {
+    let f = fixture().await;
+    register_server(&f).await;
+    let me = f.server_t.peer_id();
+    assert!(f.hub.remove(&me));
+    let (st, _) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(f.server_hub.status().unwrap().revoked);
+
+    // Not re-admitted: 409 with the advice.
+    let (st, body) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home" }))).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("re-admit"), "{body}");
+
+    // The owner re-admits it, the server links again, the person approves in the browser.
+    assert!(f.hub.readmit(&me));
+    let (st, pending) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home" }))).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{pending}");
+    assert!(f.hub.approve(pending["user_code"].as_str().unwrap()));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let st = f.server_hub.status().unwrap();
+        if st.registered && !st.revoked {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "re-admitted link never completed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]

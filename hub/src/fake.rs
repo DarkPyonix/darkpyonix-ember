@@ -1,18 +1,28 @@
-//! An in-process fake of the darkpyonix.dev hub: the subset of `hub.openapi.yaml` (v0.3.0)
-//! Ember uses, with the same status codes and bodies. One account; a "signed-in browser" is
-//! represented by [`FakeHub::session_token`] sent as a bearer token.
+//! An in-process fake of the darkpyonix.dev hub: the subset of `hub.openapi.yaml` Ember uses
+//! (v0.3.0 plus the FR-H1, FR-H8–H11 and NFR-H2 additions of darkpyonix-core PR #34, branch
+//! `feat/m4-hub-ember-gaps`), with the same status codes and bodies. One account; a "signed-in
+//! browser" is represented by [`FakeHub::session_token`] sent as a bearer token.
 //!
-//! Served: `GET /health`, `POST /v1/device-links`, `POST /v1/device-links/{link_id}/token`,
-//! `GET`/`POST /v1/link-codes/{user_code}`, `GET /v1/me`, `GET /v1/devices`,
-//! `GET`/`DELETE /v1/devices/{endpoint_id}`, `GET /v1/devices/{endpoint_id}/addresses`,
-//! `PUT`/`GET /pkarr/{key}` (the pkarr relay protocol, with signature check). Not served: GitHub
-//! sign-in, the relay, shares, names.
+//! Served: `GET /health`, `GET /v1/config`, `POST /v1/device-links`,
+//! `GET /v1/device-links/{link_id}`, `POST /v1/device-links/{link_id}/token`,
+//! `GET`/`POST /v1/link-codes/{user_code}`, `GET /v1/me`, `POST /v1/me/resolve-token`,
+//! `GET /v1/devices` (weak `ETag`, `If-None-Match`, `?wait=0..25` long-poll),
+//! `GET`/`PATCH`/`DELETE /v1/devices/{endpoint_id}`, `POST /v1/devices/{endpoint_id}/readmit`,
+//! `GET /v1/devices/{endpoint_id}/addresses`, `PUT`/`GET /pkarr/{key}` (the pkarr relay
+//! protocol, with signature check; resolving with a `dpr_` resolve token in `?token=`, never a
+//! device token). Every `401` carries `code` `device_removed` or `invalid_credentials`. Not
+//! served: GitHub sign-in, the relay, shares, names.
+//!
+//! Deviations, for tests only: a held long-poll wakes on the change itself (the hub checks about
+//! every 2 s), and [`FakeHub::set_honour_wait`] / [`FakeHub::set_config_enabled`] simulate a
+//! misbehaving or older hub.
 
 // Every handler here returns an axum Response as its error; that type's size does not matter in a test fake.
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -24,11 +34,12 @@ use base64::Engine;
 use ember_transport::PeerId;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::link::link_message;
 use crate::registration::now_secs;
-use crate::types::{Device, Role};
+use crate::types::{Device, DeviceApp, Role};
 use crate::z32;
 use crate::HubClient;
 
@@ -36,6 +47,12 @@ const ACCOUNT_ID: &str = "a_00000000000000f1";
 const GITHUB_LOGIN: &str = "octocat";
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const MAX_DNS_PACKET: usize = 1000;
+/// `?wait=` must be an integer from 0 to this (FR-H9).
+const MAX_WAIT_SECS: u64 = 25;
+/// How long a re-admission stays open (FR-H11).
+const READMIT_SECS: i64 = 900;
+/// The `api_version` of `/v1/config` (the contract's `const: 1`).
+pub const FAKE_API_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkStatus {
@@ -55,13 +72,17 @@ struct Link {
     challenge: String,
     status: LinkStatus,
     expires_at: i64,
+    /// Started by a re-admitted key (FR-H11): approval needs a session; claiming restores the row.
+    readmit: bool,
 }
 
 #[derive(Debug, Clone)]
 struct FakeDevice {
     device: Device,
     token: String,
+    resolve_token: String,
     removed: bool,
+    readmit_until: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +101,14 @@ struct Inner {
     link_ttl: i64,
     counter: u64,
     base_url: String,
+    config_enabled: bool,
+    config_relays: Vec<String>,
+    honour_wait: bool,
+    /// The device list's version (the weak `ETag` `W/"v<n>"`).
+    version: u64,
+    device_list_requests: u64,
+    /// Woken on every version bump (held `?wait=` requests).
+    changed: Arc<Notify>,
 }
 
 impl Inner {
@@ -101,9 +130,20 @@ impl Inner {
         s
     }
 
-    fn token(&mut self) -> String {
+    fn secret(&mut self, prefix: &str) -> String {
         let n = self.next();
-        format!("dpd_fake{n:04}{}", hex::encode(n.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes()))
+        format!("{prefix}fake{n:04}{}", hex::encode(n.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_be_bytes()))
+    }
+
+    /// The device list changed (added, restored, removed, renamed, app, online; not
+    /// `last_seen` alone).
+    fn bump(&mut self) {
+        self.version += 1;
+        self.changed.notify_waiters();
+    }
+
+    fn etag(&self) -> String {
+        format!("W/\"v{}\"", self.version)
     }
 
     fn device_by_token(&self, token: &str) -> Option<&FakeDevice> {
@@ -114,11 +154,54 @@ impl Inner {
         self.devices.iter().find(|d| d.device.endpoint_id == *id && !d.removed)
     }
 
-    fn insert_device(&mut self, endpoint_id: PeerId, name: &str, role: Role) -> (Device, String) {
-        let token = self.token();
-        let device = Device { endpoint_id, name: name.into(), role, created_at: now_secs(), last_seen: None, online: false };
-        self.devices.push(FakeDevice { device: device.clone(), token: token.clone(), removed: false });
-        (device, token)
+    fn live_devices(&self) -> Vec<&Device> {
+        self.devices.iter().filter(|d| !d.removed).map(|d| &d.device).collect()
+    }
+
+    /// Adds a device, or restores a removed row (a re-admitted key) with new tokens.
+    fn insert_device(&mut self, endpoint_id: PeerId, name: &str, role: Role) -> (Device, String, String) {
+        let token = self.secret("dpd_");
+        let resolve = self.secret("dpr_");
+        let device = match self.devices.iter_mut().find(|d| d.device.endpoint_id == endpoint_id) {
+            Some(d) => {
+                d.removed = false;
+                d.readmit_until = None;
+                d.token = token.clone();
+                d.resolve_token = resolve.clone();
+                d.device.clone()
+            }
+            None => {
+                let device = Device {
+                    endpoint_id,
+                    name: name.into(),
+                    role,
+                    created_at: now_secs(),
+                    last_seen: None,
+                    online: false,
+                    app: None,
+                };
+                self.devices.push(FakeDevice {
+                    device: device.clone(),
+                    token: token.clone(),
+                    resolve_token: resolve.clone(),
+                    removed: false,
+                    readmit_until: None,
+                });
+                device
+            }
+        };
+        self.bump();
+        (device, token, resolve)
+    }
+
+    fn remove(&mut self, id: &PeerId) -> bool {
+        let Some(d) = self.devices.iter_mut().find(|d| d.device.endpoint_id == *id && !d.removed) else {
+            return false;
+        };
+        d.removed = true;
+        self.records.remove(id);
+        self.bump();
+        true
     }
 }
 
@@ -145,6 +228,12 @@ impl FakeHub {
             link_ttl: 900,
             counter: 0,
             base_url: url.clone(),
+            config_enabled: true,
+            config_relays: Vec::new(),
+            honour_wait: true,
+            version: 1,
+            device_list_requests: 0,
+            changed: Arc::new(Notify::new()),
         }));
         let app = router(state.clone());
         let task = tokio::spawn(async move {
@@ -182,6 +271,31 @@ impl FakeHub {
         self.state.lock().unwrap().link_ttl = secs;
     }
 
+    /// Whether `GET /v1/config` is served (`false`: `404`, like a hub before FR-H8).
+    pub fn set_config_enabled(&self, on: bool) {
+        self.state.lock().unwrap().config_enabled = on;
+    }
+
+    /// The `relay_urls` `/v1/config` advertises (default none: the fake has no relay).
+    pub fn set_config_relays(&self, relays: Vec<String>) {
+        self.state.lock().unwrap().config_relays = relays;
+    }
+
+    /// Test knob, not the contract: `false` answers `?wait=` at once (a hub that ignores it).
+    pub fn set_honour_wait(&self, on: bool) {
+        self.state.lock().unwrap().honour_wait = on;
+    }
+
+    /// `GET /v1/devices` requests served so far.
+    pub fn device_list_requests(&self) -> u64 {
+        self.state.lock().unwrap().device_list_requests
+    }
+
+    /// The device list's version (the `ETag` is `W/"v<version>"`).
+    pub fn list_version(&self) -> u64 {
+        self.state.lock().unwrap().version
+    }
+
     /// User codes of pending links.
     pub fn pending_codes(&self) -> Vec<String> {
         let now = now_secs();
@@ -207,23 +321,42 @@ impl FakeHub {
         self.decide(user_code, true)
     }
 
-    /// Registers a device directly (skipping the link flow); returns its token.
+    /// Registers a device directly (skipping the link flow); returns its device token.
     pub fn register(&self, endpoint_id: PeerId, name: &str, role: Role) -> String {
         self.state.lock().unwrap().insert_device(endpoint_id, name, role).1
     }
 
+    /// The current resolve token (`dpr_...`) of a live device.
+    pub fn resolve_token(&self, endpoint_id: &PeerId) -> Option<String> {
+        self.state.lock().unwrap().live_device(endpoint_id).map(|d| d.resolve_token.clone())
+    }
+
     /// Removes a device as the account owner would (`DELETE /v1/devices/{id}`).
     pub fn remove(&self, endpoint_id: &PeerId) -> bool {
+        self.state.lock().unwrap().remove(endpoint_id)
+    }
+
+    /// Re-admits a removed device as the signed-in owner would (`POST .../readmit`).
+    pub fn readmit(&self, endpoint_id: &PeerId) -> bool {
         let mut s = self.state.lock().unwrap();
-        let found = match s.devices.iter_mut().find(|d| d.device.endpoint_id == *endpoint_id && !d.removed) {
+        match s.devices.iter_mut().find(|d| d.device.endpoint_id == *endpoint_id && d.removed) {
             Some(d) => {
-                d.removed = true;
+                d.readmit_until = Some(now_secs() + READMIT_SECS);
                 true
             }
             None => false,
-        };
-        s.records.remove(endpoint_id);
-        found
+        }
+    }
+
+    /// Sets a device's `online` flag, as the relay host would report it (bumps the version).
+    pub fn set_online(&self, endpoint_id: &PeerId, online: bool) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(d) = s.devices.iter_mut().find(|d| d.device.endpoint_id == *endpoint_id && !d.removed) {
+            if d.device.online != online {
+                d.device.online = online;
+                s.bump();
+            }
+        }
     }
 
     /// Devices not removed.
@@ -255,12 +388,16 @@ impl std::fmt::Debug for FakeHub {
 fn router(state: Shared) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(json!({ "status": "ok", "version": "fake" })) }))
+        .route("/v1/config", get(hub_config))
         .route("/v1/device-links", post(create_link))
+        .route("/v1/device-links/{link_id}", get(get_link))
         .route("/v1/device-links/{link_id}/token", post(claim_link))
         .route("/v1/link-codes/{code}", get(get_link_code).post(decide_link_code))
         .route("/v1/me", get(me))
+        .route("/v1/me/resolve-token", post(rotate_resolve_token))
         .route("/v1/devices", get(list_devices))
-        .route("/v1/devices/{id}", get(get_device).delete(remove_device))
+        .route("/v1/devices/{id}", get(get_device).patch(update_device).delete(remove_device))
+        .route("/v1/devices/{id}/readmit", post(readmit_device))
         .route("/v1/devices/{id}/addresses", get(device_addresses))
         .route("/pkarr/{key}", put(pkarr_put).get(pkarr_get))
         .with_state(state)
@@ -270,19 +407,34 @@ fn err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+fn unauthorized(code: &str) -> Response {
+    let msg = if code == "device_removed" { "this device was removed from the account" } else { "unauthorized" };
+    (StatusCode::UNAUTHORIZED, Json(json!({ "error": msg, "code": code }))).into_response()
+}
+
 type HResult = Result<Response, Response>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Principal {
     Session,
     Device { endpoint_id: PeerId, role: Role },
 }
 
 impl Principal {
+    fn has_account_rights(&self) -> bool {
+        matches!(self, Principal::Session | Principal::Device { role: Role::MainServer, .. })
+    }
+
     fn require_account_rights(&self) -> Result<(), Response> {
-        match self {
-            Principal::Session | Principal::Device { role: Role::MainServer, .. } => Ok(()),
-            Principal::Device { .. } => Err(err(StatusCode::FORBIDDEN, "account rights required")),
+        if self.has_account_rights() {
+            Ok(())
+        } else {
+            Err(err(StatusCode::FORBIDDEN, "account rights required"))
         }
+    }
+
+    fn is_device(&self, id: &PeerId) -> bool {
+        matches!(self, Principal::Device { endpoint_id, .. } if endpoint_id == id)
     }
 }
 
@@ -291,16 +443,19 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
     v.strip_prefix("Bearer ").map(|t| t.trim().to_string())
 }
 
-fn principal(s: &Inner, headers: &HeaderMap, query_token: Option<&str>) -> Result<Principal, Response> {
-    let token = bearer(headers).or_else(|| query_token.map(str::to_string));
-    let Some(token) = token else { return Err(err(StatusCode::UNAUTHORIZED, "unauthorized")) };
+/// The caller, from `Authorization: Bearer` (a device token, or the session stand-in).
+fn principal(s: &Inner, headers: &HeaderMap) -> Result<Principal, Response> {
+    let Some(token) = bearer(headers) else { return Err(unauthorized("invalid_credentials")) };
     if token == s.session_token {
         return Ok(Principal::Session);
     }
-    match s.device_by_token(&token) {
-        Some(d) => Ok(Principal::Device { endpoint_id: d.device.endpoint_id, role: d.device.role }),
-        None => Err(err(StatusCode::UNAUTHORIZED, "unauthorized")),
+    if let Some(d) = s.device_by_token(&token) {
+        return Ok(Principal::Device { endpoint_id: d.device.endpoint_id, role: d.device.role });
     }
+    if s.devices.iter().any(|d| d.token == token && d.removed) {
+        return Err(unauthorized("device_removed"));
+    }
+    Err(unauthorized("invalid_credentials"))
 }
 
 fn normalize_code(raw: &str) -> Option<String> {
@@ -322,8 +477,70 @@ fn role_of(v: &Value) -> Option<Role> {
     match v.as_str()? {
         "main_server" => Some(Role::MainServer),
         "computer" => Some(Role::Computer),
+        "client" => Some(Role::Client),
         _ => None,
     }
+}
+
+/// `^[a-z][a-z0-9-]{0,31}$`
+fn label_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=32).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// `^[0-9A-Za-z][0-9A-Za-z.+-]{0,31}$`
+fn version_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    (1..=32).contains(&b.len())
+        && b[0].is_ascii_alphanumeric()
+        && b.iter().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'+' | b'-'))
+}
+
+fn parse_app(v: &Value) -> Result<Option<DeviceApp>, Response> {
+    let bad = || err(StatusCode::BAD_REQUEST, "malformed app");
+    if v.is_null() {
+        return Ok(None);
+    }
+    let obj = v.as_object().ok_or_else(bad)?;
+    if obj.keys().any(|k| !matches!(k.as_str(), "kind" | "version" | "services")) {
+        return Err(bad());
+    }
+    let kind = obj.get("kind").and_then(Value::as_str).filter(|k| label_ok(k)).ok_or_else(bad)?;
+    let version = obj.get("version").and_then(Value::as_str).filter(|v| version_ok(v)).ok_or_else(bad)?;
+    let mut services = Vec::new();
+    if let Some(list) = obj.get("services") {
+        for item in list.as_array().ok_or_else(bad)? {
+            let s = item.as_str().filter(|s| label_ok(s)).ok_or_else(bad)?;
+            if services.iter().any(|x: &String| x == s) {
+                return Err(bad());
+            }
+            services.push(s.to_string());
+        }
+    }
+    if services.len() > 16 {
+        return Err(bad());
+    }
+    Ok(Some(DeviceApp { kind: kind.into(), version: version.into(), services }))
+}
+
+async fn hub_config(State(st): State<Shared>) -> HResult {
+    let s = st.lock().unwrap();
+    if !s.config_enabled {
+        return Err(err(StatusCode::NOT_FOUND, "not found"));
+    }
+    Ok((
+        [("cache-control", "public, max-age=300")],
+        Json(json!({
+            "api_version": FAKE_API_VERSION,
+            "hub_version": "fake",
+            "relay_urls": s.config_relays,
+            "pkarr_url": format!("{}/pkarr", s.base_url),
+            "link_url": format!("{}/link", s.base_url),
+        })),
+    )
+        .into_response())
 }
 
 async fn create_link(State(st): State<Shared>, body: Bytes) -> HResult {
@@ -333,16 +550,19 @@ async fn create_link(State(st): State<Shared>, body: Bytes) -> HResult {
         .and_then(parse_peer)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "endpoint_id must be 64 lowercase hex characters"))?;
     let name = v["name"].as_str().filter(|n| !n.is_empty() && n.chars().count() <= 64).ok_or_else(|| err(StatusCode::BAD_REQUEST, "name must be 1 to 64 characters"))?;
-    let role = role_of(&v["role"]).ok_or_else(|| err(StatusCode::BAD_REQUEST, "role must be main_server or computer"))?;
+    let role = role_of(&v["role"]).ok_or_else(|| err(StatusCode::BAD_REQUEST, "role must be main_server, computer or client"))?;
     let mut s = st.lock().unwrap();
-    if s.devices.iter().any(|d| d.device.endpoint_id == endpoint_id) {
-        return Err(err(StatusCode::CONFLICT, "endpoint id already registered (removed keys are not reused)"));
-    }
+    let now = now_secs();
+    let readmit = match s.devices.iter().find(|d| d.device.endpoint_id == endpoint_id) {
+        None => false,
+        Some(d) if d.removed && d.readmit_until.is_some_and(|t| t >= now) => true,
+        Some(_) => return Err(err(StatusCode::CONFLICT, "endpoint id registered, or removed and not re-admitted")),
+    };
     let n = s.next();
     let link_id = format!("l_{n:032x}");
     let challenge = hex::encode([n.to_be_bytes(), (!n).to_be_bytes(), n.rotate_left(17).to_be_bytes(), n.wrapping_mul(7).to_be_bytes()].concat());
     let user_code = s.user_code();
-    let expires_at = now_secs() + s.link_ttl;
+    let expires_at = now + s.link_ttl;
     s.links.push(Link {
         link_id: link_id.clone(),
         user_code: user_code.clone(),
@@ -352,6 +572,7 @@ async fn create_link(State(st): State<Shared>, body: Bytes) -> HResult {
         challenge: challenge.clone(),
         status: LinkStatus::Pending,
         expires_at,
+        readmit,
     });
     let verification = format!("{}/link", s.base_url);
     Ok((
@@ -367,6 +588,32 @@ async fn create_link(State(st): State<Shared>, body: Bytes) -> HResult {
         })),
     )
         .into_response())
+}
+
+async fn get_link(State(st): State<Shared>, Path(link_id): Path<String>) -> HResult {
+    let s = st.lock().unwrap();
+    let l = s.links.iter().find(|l| l.link_id == link_id).ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown link"))?;
+    let expired = l.expires_at < now_secs() && matches!(l.status, LinkStatus::Pending | LinkStatus::Approved);
+    let status = match l.status {
+        _ if expired => "expired",
+        LinkStatus::Pending => "pending",
+        LinkStatus::Approved => "approved",
+        LinkStatus::Denied => "denied",
+        LinkStatus::Claimed => "claimed",
+    };
+    Ok(Json(json!({
+        "link_id": l.link_id,
+        "status": status,
+        "endpoint_id": l.endpoint_id,
+        "name": l.name,
+        "role": l.role,
+        "user_code": l.user_code,
+        "verification_uri_complete": format!("{}/link?code={}", s.base_url, l.user_code),
+        "challenge": l.challenge,
+        "interval": s.interval,
+        "expires_at": l.expires_at,
+    }))
+    .into_response())
 }
 
 async fn claim_link(State(st): State<Shared>, Path(link_id): Path<String>, body: Bytes) -> HResult {
@@ -395,11 +642,13 @@ async fn claim_link(State(st): State<Shared>, Path(link_id): Path<String>, body:
         LinkStatus::Claimed => unreachable!(),
         LinkStatus::Approved => {
             s.links[idx].status = LinkStatus::Claimed;
-            if s.devices.iter().any(|d| d.device.endpoint_id == link.endpoint_id) {
+            let existing = s.devices.iter().find(|d| d.device.endpoint_id == link.endpoint_id);
+            if existing.is_some_and(|d| !d.removed || !link.readmit) {
                 return Err(err(StatusCode::CONFLICT, "endpoint id already registered"));
             }
-            let (device, token) = s.insert_device(link.endpoint_id, &link.name, link.role);
-            Ok((StatusCode::CREATED, Json(json!({ "device": device, "device_token": token }))).into_response())
+            let (device, token, resolve) = s.insert_device(link.endpoint_id, &link.name, link.role);
+            Ok((StatusCode::CREATED, Json(json!({ "device": device, "device_token": token, "resolve_token": resolve })))
+                .into_response())
         }
     }
 }
@@ -415,7 +664,7 @@ fn pending_by_code(s: &Inner, raw: &str) -> Result<usize, Response> {
 
 async fn get_link_code(State(st): State<Shared>, headers: HeaderMap, Path(code): Path<String>) -> HResult {
     let s = st.lock().unwrap();
-    principal(&s, &headers, None)?.require_account_rights()?;
+    principal(&s, &headers)?.require_account_rights()?;
     let l = &s.links[pending_by_code(&s, &code)?];
     Ok(Json(json!({
         "user_code": l.user_code,
@@ -429,55 +678,178 @@ async fn get_link_code(State(st): State<Shared>, headers: HeaderMap, Path(code):
 
 async fn decide_link_code(State(st): State<Shared>, headers: HeaderMap, Path(code): Path<String>, body: Bytes) -> HResult {
     let mut s = st.lock().unwrap();
-    principal(&s, &headers, None)?.require_account_rights()?;
+    let who = principal(&s, &headers)?;
+    who.require_account_rights()?;
     let v: Value = serde_json::from_slice(&body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed body"))?;
     let approve = v["approve"].as_bool().ok_or_else(|| err(StatusCode::BAD_REQUEST, "approve must be a boolean"))?;
     let idx = pending_by_code(&s, &code)?;
+    let link = &s.links[idx];
+    if approve && who != Principal::Session && (link.role == Role::MainServer || link.readmit) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "a main_server link or a re-admitted key's link needs a signed-in browser session to approve",
+        ));
+    }
     s.links[idx].status = if approve { LinkStatus::Approved } else { LinkStatus::Denied };
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn me(State(st): State<Shared>, headers: HeaderMap) -> HResult {
     let s = st.lock().unwrap();
-    let (via, endpoint) = match principal(&s, &headers, None)? {
+    let (via, endpoint) = match principal(&s, &headers)? {
         Principal::Session => ("session", None),
         Principal::Device { endpoint_id, .. } => ("device", Some(endpoint_id)),
     };
     Ok(Json(json!({ "account_id": ACCOUNT_ID, "github_login": GITHUB_LOGIN, "via": via, "endpoint_id": endpoint })).into_response())
 }
 
-async fn list_devices(State(st): State<Shared>, headers: HeaderMap) -> HResult {
-    let s = st.lock().unwrap();
-    principal(&s, &headers, None)?;
-    let devices: Vec<&Device> = s.devices.iter().filter(|d| !d.removed).map(|d| &d.device).collect();
-    Ok(Json(json!({ "devices": devices })).into_response())
+async fn rotate_resolve_token(State(st): State<Shared>, headers: HeaderMap) -> HResult {
+    let mut s = st.lock().unwrap();
+    let Principal::Device { endpoint_id, .. } = principal(&s, &headers)? else {
+        return Err(unauthorized("invalid_credentials"));
+    };
+    let token = s.secret("dpr_");
+    if let Some(d) = s.devices.iter_mut().find(|d| d.device.endpoint_id == endpoint_id && !d.removed) {
+        d.resolve_token = token.clone();
+    }
+    Ok((StatusCode::CREATED, Json(json!({ "resolve_token": token }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct WaitQuery {
+    wait: Option<String>,
+}
+
+/// Weak comparison (`W/` ignored), `*` matches anything.
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    let strip = |t: &str| t.trim().trim_start_matches("W/").to_string();
+    headers
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == "*" || strip(t) == strip(etag)))
+}
+
+/// `GET /v1/devices` (FR-H9): weak `ETag` = the list's version; `If-None-Match` matching →
+/// `304`, or with `?wait=N` (0..=25) held until the version changes (`200`) or `N` s pass
+/// (`304`). The caller's credential is checked on every wake-up: a waiting device that was
+/// removed gets `401 device_removed`.
+async fn list_devices(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<WaitQuery>) -> HResult {
+    let wait = match q.wait.as_deref() {
+        None => 0,
+        Some(w) => w
+            .parse::<u64>()
+            .ok()
+            .filter(|w| *w <= MAX_WAIT_SECS)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "`wait` is not an integer from 0 to 25"))?,
+    };
+    let (changed, wait) = {
+        let mut s = st.lock().unwrap();
+        s.device_list_requests += 1;
+        principal(&s, &headers)?;
+        (s.changed.clone(), if s.honour_wait { wait } else { 0 })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(wait);
+    loop {
+        // Registered before looking, so a change between the look and the wait is not missed.
+        let notified = changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let s = st.lock().unwrap();
+            principal(&s, &headers)?;
+            let etag = s.etag();
+            if !if_none_match(&headers, &etag) {
+                let devices = s.live_devices();
+                return Ok(([("etag", etag)], Json(json!({ "devices": devices }))).into_response());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok((StatusCode::NOT_MODIFIED, [("etag", etag)]).into_response());
+            }
+        }
+        let _ = tokio::time::timeout_at(deadline, notified).await;
+    }
 }
 
 async fn get_device(State(st): State<Shared>, headers: HeaderMap, Path(id): Path<String>) -> HResult {
     let s = st.lock().unwrap();
-    principal(&s, &headers, None)?;
+    principal(&s, &headers)?;
     let id = parse_peer(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let d = s.live_device(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     Ok(Json(json!(d.device)).into_response())
 }
 
+async fn update_device(State(st): State<Shared>, headers: HeaderMap, Path(id): Path<String>, body: Bytes) -> HResult {
+    let mut s = st.lock().unwrap();
+    let who = principal(&s, &headers)?;
+    let v: Value = serde_json::from_slice(&body).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed body"))?;
+    let obj = v.as_object().filter(|o| !o.is_empty()).ok_or_else(|| err(StatusCode::BAD_REQUEST, "malformed body"))?;
+    if obj.keys().any(|k| k != "name" && k != "app") {
+        return Err(err(StatusCode::BAD_REQUEST, "unknown field"));
+    }
+    let name = match obj.get("name") {
+        None => None,
+        Some(n) => Some(
+            n.as_str()
+                .filter(|n| !n.is_empty() && n.chars().count() <= 64)
+                .ok_or_else(|| err(StatusCode::BAD_REQUEST, "name must be 1 to 64 characters"))?
+                .to_string(),
+        ),
+    };
+    let app = obj.get("app").map(parse_app).transpose()?;
+    let id = parse_peer(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    s.live_device(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    if name.is_some() && !(who.has_account_rights() || who.is_device(&id)) {
+        return Err(err(StatusCode::FORBIDDEN, "renaming needs account rights or the device's own token"));
+    }
+    if app.is_some() && !who.is_device(&id) {
+        return Err(err(StatusCode::FORBIDDEN, "only the device itself sets its app"));
+    }
+    let d = s.devices.iter_mut().find(|d| d.device.endpoint_id == id && !d.removed).expect("checked");
+    if let Some(n) = name {
+        d.device.name = n;
+    }
+    if let Some(a) = app {
+        d.device.app = a;
+    }
+    let device = d.device.clone();
+    s.bump();
+    Ok(Json(json!(device)).into_response())
+}
+
 async fn remove_device(State(st): State<Shared>, headers: HeaderMap, Path(id): Path<String>) -> HResult {
     let mut s = st.lock().unwrap();
-    principal(&s, &headers, None)?.require_account_rights()?;
+    let who = principal(&s, &headers)?;
+    let id = parse_peer(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    s.live_device(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    if !(who.has_account_rights() || who.is_device(&id)) {
+        return Err(err(StatusCode::FORBIDDEN, "account rights or the device's own token required"));
+    }
+    s.remove(&id);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn readmit_device(State(st): State<Shared>, headers: HeaderMap, Path(id): Path<String>) -> HResult {
+    let mut s = st.lock().unwrap();
+    if principal(&s, &headers)? != Principal::Session {
+        return Err(err(StatusCode::FORBIDDEN, "only a signed-in session may re-admit a device"));
+    }
     let id = parse_peer(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let d = s
         .devices
         .iter_mut()
-        .find(|d| d.device.endpoint_id == id && !d.removed)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    d.removed = true;
-    s.records.remove(&id);
-    Ok(StatusCode::NO_CONTENT.into_response())
+        .find(|d| d.device.endpoint_id == id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no device with this key was ever in the account"))?;
+    if !d.removed {
+        return Err(err(StatusCode::CONFLICT, "the device is not removed"));
+    }
+    let expires_at = now_secs() + READMIT_SECS;
+    d.readmit_until = Some(expires_at);
+    Ok(Json(json!({ "endpoint_id": id, "expires_at": expires_at })).into_response())
 }
 
 async fn device_addresses(State(st): State<Shared>, headers: HeaderMap, Path(id): Path<String>) -> HResult {
     let s = st.lock().unwrap();
-    principal(&s, &headers, None)?;
+    principal(&s, &headers)?;
     let id = parse_peer(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     s.live_device(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let rec = s.records.get(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "nothing published"))?;
@@ -531,6 +903,7 @@ async fn pkarr_put(State(st): State<Shared>, Path(key): Path<String>, body: Byte
     }
     s.records.insert(peer, Record { timestamp_us, payload: body.to_vec() });
     let now = now_secs();
+    // `last_seen` alone does not change the list's version (FR-H9).
     if let Some(d) = s.devices.iter_mut().find(|d| d.device.endpoint_id == peer && !d.removed) {
         d.device.last_seen = Some(now);
     }
@@ -542,11 +915,22 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+/// `GET /pkarr/{key}`: a resolve token in `?token=` (a device token there counts as none:
+/// `401 invalid_credentials`, NFR-H2), or a device token / session in the header.
 async fn pkarr_get(State(st): State<Shared>, headers: HeaderMap, Path(key): Path<String>, Query(q): Query<TokenQuery>) -> HResult {
     let key = z32::decode_key(&key).ok_or_else(|| err(StatusCode::BAD_REQUEST, "malformed key"))?;
     let peer = PeerId::from_bytes(key).map_err(|_| err(StatusCode::BAD_REQUEST, "malformed key"))?;
     let s = st.lock().unwrap();
-    principal(&s, &headers, q.token.as_deref())?;
+    match q.token.as_deref() {
+        Some(t) => {
+            if !s.devices.iter().any(|d| !d.removed && d.resolve_token == t) {
+                return Err(unauthorized("invalid_credentials"));
+            }
+        }
+        None => {
+            principal(&s, &headers)?;
+        }
+    }
     s.live_device(&peer).ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let rec = s.records.get(&peer).ok_or_else(|| err(StatusCode::NOT_FOUND, "nothing published"))?;
     Ok(([("content-type", "application/octet-stream")], rec.payload.clone()).into_response())

@@ -24,6 +24,19 @@
 //!
 //! Every other notification is ignored.
 //!
+//! # Another computer (FR-X1–FR-X3, `docs/design/INTERCEPTION.md` option (c))
+//!
+//! When [`StartRequest::remote`] is set, the adapter opts into the experimental API
+//! (`initialize` with `capabilities.experimentalApi = true`), registers the computer with
+//! `environment/add {environmentId, execServerUrl}`, starts the thread with
+//! `environments: [{environmentId, cwd}]` and repeats `environments` on every `turn/start` (the
+//! field is sticky "for this turn and subsequent turns", and `thread/resume` has no such field).
+//! Codex then runs its tools through that exec-server. Field and method names are from
+//! `codex app-server generate-ts --experimental` (codex-cli 0.155.1); that a real turn's shell and
+//! `apply_patch` execute remotely is still unverified. The computer's environment block reaches
+//! Codex through [`StartRequest::instructions`] (`developerInstructions`), like every other
+//! instructions hook.
+//!
 //! Server → client requests mapped to `ApprovalRequested` and answered by [`AgentRun::answer`]:
 //! `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
 //! `item/permissions/requestApproval`, and the legacy `execCommandApproval` / `applyPatchApproval`.
@@ -47,7 +60,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, RemoteExec, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a response to one of our requests.
@@ -130,10 +143,17 @@ impl AgentAdapter for CodexAdapter {
         req: StartRequest,
         events: mpsc::Sender<AgentEvent>,
     ) -> anyhow::Result<Box<dyn AgentRun>> {
+        // With a remote executor the project path lives on the other computer and need not
+        // exist here; the app-server process itself then starts in the temp directory.
+        let spawn_dir = if req.remote.is_some() && !req.cwd.is_dir() {
+            std::env::temp_dir()
+        } else {
+            req.cwd.clone()
+        };
         let mut child = Command::new(&self.bin)
             .envs(req.env.iter().map(|(k, v)| (k, v)))
             .arg("app-server")
-            .current_dir(&req.cwd)
+            .current_dir(&spawn_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -160,10 +180,25 @@ impl AgentAdapter for CodexAdapter {
         });
         tokio::spawn(read_loop(conn.clone(), stdout, events.clone()));
 
-        conn.request("initialize", initialize_params()).await.context("codex initialize")?;
+        conn.request("initialize", initialize_params(req.remote.is_some()))
+            .await
+            .context("codex initialize")?;
         conn.notify("initialized", None).await?;
 
+        let environments = match &req.remote {
+            Some(remote) => {
+                conn.request("environment/add", environment_add_params(remote))
+                    .await
+                    .context("environment/add")?;
+                Some(environments_param(remote, &req.cwd))
+            }
+            None => None,
+        };
+
         let mut params = self.thread_params(&req);
+        if let (Some(envs), None) = (&environments, &req.resume_native_id) {
+            params.insert("environments".into(), envs.clone());
+        }
         let resp = match &req.resume_native_id {
             Some(id) => {
                 params.insert("threadId".into(), json!(id));
@@ -180,7 +215,7 @@ impl AgentAdapter for CodexAdapter {
         conn.mapper.lock().unwrap().thread_id = Some(thread_id.clone());
         events.send(AgentEvent::NativeSession { native_id: thread_id.clone() }).await?;
 
-        Ok(Box::new(CodexRun { conn, child: Some(child), events, thread_id }))
+        Ok(Box::new(CodexRun { conn, child: Some(child), events, thread_id, environments }))
     }
 }
 
@@ -189,11 +224,27 @@ fn parse_version(stdout: &str) -> Option<String> {
     stdout.lines().next()?.split_whitespace().last().map(str::to_string)
 }
 
-fn initialize_params() -> Value {
+fn initialize_params(experimental: bool) -> Value {
+    // `environment/*` and the `environments` fields exist only in the experimental API.
+    let capabilities = if experimental {
+        json!({ "experimentalApi": true, "requestAttestation": false })
+    } else {
+        Value::Null
+    };
     json!({
         "clientInfo": { "name": "ember", "title": null, "version": env!("CARGO_PKG_VERSION") },
-        "capabilities": null,
+        "capabilities": capabilities,
     })
+}
+
+/// `EnvironmentAddParams`.
+fn environment_add_params(remote: &RemoteExec) -> Value {
+    json!({ "environmentId": remote.environment_id, "execServerUrl": remote.exec_server_url })
+}
+
+/// `environments: Array<TurnEnvironmentParams>` selecting `remote` with the session's cwd.
+fn environments_param(remote: &RemoteExec, cwd: &std::path::Path) -> Value {
+    json!([{ "environmentId": remote.environment_id, "cwd": cwd.to_string_lossy() }])
 }
 
 /// `result.thread.id` of a `thread/start` / `thread/resume` response.
@@ -331,6 +382,8 @@ struct CodexRun {
     child: Option<Child>,
     events: mpsc::Sender<AgentEvent>,
     thread_id: String,
+    /// `environments` for every `turn/start` when the tools run on another computer.
+    environments: Option<Value>,
 }
 
 #[async_trait]
@@ -353,10 +406,11 @@ impl AgentRun for CodexRun {
                 }
             }
         }
-        let resp = self
-            .conn
-            .request("turn/start", json!({ "threadId": self.thread_id, "input": text_input(text) }))
-            .await;
+        let mut params = json!({ "threadId": self.thread_id, "input": text_input(text) });
+        if let Some(envs) = &self.environments {
+            params["environments"] = envs.clone();
+        }
+        let resp = self.conn.request("turn/start", params).await;
         match resp {
             Ok(resp) => {
                 if let Some(turn_id) = resp.pointer("/turn/id").and_then(Value::as_str) {
@@ -855,6 +909,27 @@ mod tests {
         assert!(!p.contains_key("developerInstructions"));
     }
 
+    #[test]
+    fn remote_computer_params_follow_the_experimental_schema() {
+        let remote = RemoteExec {
+            environment_id: "ember-pi".into(),
+            exec_server_url: "ws://127.0.0.1:4100/s3cret".into(),
+        };
+        // InitializeCapabilities: both non-optional fields present.
+        assert_eq!(
+            initialize_params(true)["capabilities"],
+            json!({ "experimentalApi": true, "requestAttestation": false })
+        );
+        assert_eq!(
+            environment_add_params(&remote),
+            json!({ "environmentId": "ember-pi", "execServerUrl": "ws://127.0.0.1:4100/s3cret" })
+        );
+        assert_eq!(
+            environments_param(&remote, std::path::Path::new("/home/pi/proj")),
+            json!([{ "environmentId": "ember-pi", "cwd": "/home/pi/proj" }])
+        );
+    }
+
     const SESSION: &str = include_str!("../../tests/fixtures/codex/session.jsonl");
     const SYNTHETIC: &str = include_str!("../../tests/fixtures/codex/synthetic.jsonl");
 
@@ -931,7 +1006,7 @@ mod tests {
         let lines = fixture(SESSION);
         let out: Vec<&Value> = lines.iter().filter(|(d, _)| d == "out").map(|(_, m)| m).collect();
         // initialize params (version aside) and the approval answer are what the server accepted.
-        let mut init = initialize_params();
+        let mut init = initialize_params(false);
         init["clientInfo"]["version"] = json!("0.1");
         assert_eq!(out[0]["method"], "initialize");
         assert_eq!(out[0]["params"], init);

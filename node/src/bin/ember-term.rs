@@ -316,7 +316,7 @@ async fn list(client: &NodeClient, o: &Opts) -> anyhow::Result<i32> {
         println!("{}", serde_json::to_string_pretty(&terms)?);
         return Ok(0);
     }
-    println!("{:<32}  {:<8}  {:<10}  {:>3}  {}", "ID", "STATE", "ORIGIN", "ATT", "TITLE");
+    println!("{:<32}  {:<8}  {:<10}  {:>3}  TITLE", "ID", "STATE", "ORIGIN", "ATT");
     for t in terms {
         let state = match t.state {
             TermState::Running => "running".to_string(),

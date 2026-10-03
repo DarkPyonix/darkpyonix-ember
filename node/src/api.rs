@@ -12,6 +12,7 @@
 //! | POST | `/v1/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/v1/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
 //! | GET (WS) | `/v1/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
+//! | GET (WS) | `/v1/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
 //! | POST | `/v1/jobs` | [`JobRequest`] → [`JobInfo`] |
 //! | GET  | `/v1/jobs` | → `[JobInfo]` |
 //! | GET  | `/v1/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
@@ -118,6 +119,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/fs/glob", post(glob))
         .route("/v1/fs/grep", post(grep))
         .route("/v1/exec", get(exec_ws))
+        .route("/v1/exec-server", get(crate::exec_server::ws))
         .route("/v1/jobs", get(list_jobs).post(start_job))
         .route("/v1/jobs/{id}", get(get_job).delete(remove_job))
         .route("/v1/jobs/{id}/kill", post(kill_job))
@@ -392,6 +394,17 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
         kill_group(pid, libc::SIGKILL);
     }
     let _ = sink.close().await;
+    // Read whatever the client still sends until it answers the close. Dropping the socket with
+    // unread input makes the kernel reset the connection, and the client then loses the exit
+    // event it has not read yet (seen on Linux CI).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(Ok(msg)) = stream.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 #[derive(Deserialize)]

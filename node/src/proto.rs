@@ -653,6 +653,8 @@ pub enum TermRefusal {
 }
 
 /// Daemon → client messages on `/v1/terms/{id}/attach`.
+// A wire message: `Attached` is sent once per attach, so its size does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum TermEvent {

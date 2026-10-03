@@ -234,6 +234,28 @@ Unchanged in substance from 09-22; see `ARCHITECTURE.md` §3 and `INTENT.md` D11
 | **NFR-B1** | New IDE window open-to-usable ≤ a plain `serve-web` page load + 100 ms. | p99 on the reference machine. |
 | **NFR-B2** | One bridge message ≤ 5 ms p99 encode-to-receipt. | Regression guard. |
 
+**Implementation notes (10-03).** Webview side: `proxy/static/detach.js` (VS Code Web target;
+the editor core reuses the schema later). Native side: the `bridge/` crate (`ember-bridge`):
+message types, the `WebviewBridge` trait, version handling and the detach → open-window step.
+No platform webview implementation yet. Details and field reliability: `proxy/README.md`
+"Tab detach".
+
+- **FR-B1** "never both" is enforced by deciding at `dragend` only when no VS Code drop target
+  accepted the drop (`dropEffect === 'none'`) and the drop is > 48 px from the tab strip or
+  outside the window. VS Code's own drag-out-of-window feature
+  (`workbench.editor.dragToOpenWindow`) is defaulted off by the proxy; Alt-drag stays VS Code's.
+  Dirty, multi-selected and resource-less tabs are not detached. Touch is out of scope until
+  a touch drag gesture exists (VS Code's tab drag is HTML5 drag-and-drop).
+- **FR-B2** positions are 0-based. `fileUri` is always present; `cursor`, `selection` and
+  `scroll` are `null` when the dragged editor is not visible and has no saved view state.
+  Additive fields: `workspace`, `screen`, `label`, `editor`, `stateSource`, `sentAtMs`.
+  The payload is a JSON string on every platform.
+- **FR-B3** without a native shell (plain browser) the fallback opens the same workspace URL
+  with VS Code Web's `payload=[["openFile","<uri>:<line>:<col>"],["gotoLineMode","true"]]`:
+  the cursor survives, the selection range and scroll do not. The native host loads the same
+  URL (`OpenWindow::vscode_web_path`); carrying selection and scroll into the new window is open.
+- **NFR-B2** `sentAtMs` on `tab_detach` lets the host measure encode-to-receipt.
+
 ---
 
 ## §K — DarkPyonix kernel

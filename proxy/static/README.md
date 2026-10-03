@@ -16,6 +16,7 @@ reads and serves them.
 | `overlay.css` | `GET /__overlay.css`, and appended after the workbench's main CSS | `dpx.vscode.inject.main_css` |
 | `overlay.js` | `GET /__overlay.js` — injected into the workbench top-level document only | `dpx.vscode.inject.workbench_html` |
 | `webview-kb.js` | `GET /__kb.js` — injected into VS Code webview host frames only | `dpx.vscode.inject.webview_kb` |
+| `detach.js` | `GET /__detach.js` — tab detach, injected into the workbench top-level document only (next to `overlay.js`) | `dpx.vscode.inject.workbench_html` |
 
 ## Files the hub (`dpx/hub/server.py`) uses
 

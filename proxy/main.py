@@ -43,8 +43,9 @@ from dpx.auth.api import SESSION_COOKIE, auth_app, init_db, user_count, validate
 from dpx.auth.gate import is_public_path
 from dpx.home import api as home_api
 from dpx.home import workspaces
+from dpx.config import FOLDER_ROOTS
 from dpx.terms import api as terms_api
-from dpx.vscode import extension, inject, proxy
+from dpx.vscode import extension, inject, proxy, roots, runtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("proxy")
@@ -113,6 +114,12 @@ async def overlay_js():
     return assets.script("overlay.js")
 
 
+@app.get("/__detach.js")
+async def detach_js():
+    """Tab detach (SPEC FR-B1/B2), injected next to overlay.js in the workbench document."""
+    return assets.script("detach.js")
+
+
 @app.get("/__kb.js")
 async def webview_kb_js():
     """The webview-frame-only keyboard policy. Never injected into the workbench, which
@@ -125,6 +132,13 @@ async def favicon():
     # Passing this to the proxy makes serve-web answer 404 (or 502 when upstream is down),
     # and the browser then asks again on every page. End it with a 204.
     return Response(status_code=204)
+
+
+@app.get("/__runtime")
+def vscode_runtime():
+    """The VSC runtime check (INTEGRATION.md "VSC 런타임 설정 흐름"): is `code` installed,
+    which version, and install guidance if not. Needs a session (it names local paths)."""
+    return JSONResponse(runtime.detect())
 
 
 # Must be registered **before** the catch-all below. Otherwise it is shadowed, goes upstream
@@ -167,6 +181,7 @@ def _serve_our_page(request: Request, path: str, xmo: str) -> Response | None:
 # The path a single request takes — in order, top to bottom
 #   1. Internal endpoints (/healthz, /__ext/*) pass straight through
 #   2. The auth gate: anything not public needs a valid session
+#   2b. Folder roots: `?folder=` / `?workspace=` outside DPX_FOLDER_ROOTS → 403
 #   3. Our screens (home, login, the frame wrapper) are served from static/ and end here
 #   4. The workbench main CSS → with the overlay CSS appended
 #   5. Webview host frames → with the keyboard policy JS added
@@ -192,6 +207,14 @@ async def route_request(request: Request, call_next):
                 # A top-level navigation → send it to the login page, preserving the destination
                 return RedirectResponse(f"/login?next={quote(str(request.url))}", status_code=303)
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # 2b. Folder roots — a workspace outside the configured roots is refused here, before it
+    #     is recorded as recent or reaches serve-web. No roots configured = no restriction.
+    refused = roots.refused_param(dict(request.query_params), FOLDER_ROOTS)
+    if refused:
+        logger.info(">> REFUSED %s outside folder roots", refused)
+        return JSONResponse({"error": f"{refused} is outside the allowed folder roots"},
+                            status_code=403)
 
     xmo = request.query_params.get("xmo", "").lower()
 

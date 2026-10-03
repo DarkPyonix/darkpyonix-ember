@@ -3,7 +3,7 @@
 Every request bound for serve-web (the workspace editor, its assets and its WebSocket)
 requires a valid session. This replaces VS Code's connection token.
 
-The only public paths are the login page, the auth API, health, and the overlay assets.
+The only public paths are the login page, the auth API, health, and the injected assets (overlay, kb, detach).
 Home (`/`) and `/__workspaces` need a session too, because home shows the machine's folder
 paths and conversation previews — they used to be public, which meant all of it was visible
 before signing in.
@@ -11,7 +11,7 @@ before signing in.
 The middleware in the root `main.py` is what actually calls this.
 """
 _PUBLIC_EXACT = {"/healthz", "/login", "/favicon.ico"}
-_PUBLIC_PREFIX = ("/auth", "/__ext", "/__overlay", "/__kb")
+_PUBLIC_PREFIX = ("/auth", "/__ext", "/__overlay", "/__kb", "/__detach")
 
 
 def is_public_path(path: str) -> bool:

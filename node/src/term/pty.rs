@@ -262,7 +262,7 @@ pub fn keeper_main(args: &[String]) -> i32 {
 type CmsgBuf = [u64; 8];
 
 fn send_fd(sock: &UnixStream, fd: RawFd) -> io::Result<()> {
-    let mut byte = [b'F'];
+    let mut byte = *b"F";
     let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
     let mut cbuf: CmsgBuf = [0; 8];
     // SAFETY: standard SCM_RIGHTS construction into a zeroed, aligned, large-enough buffer.

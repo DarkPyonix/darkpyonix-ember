@@ -95,7 +95,7 @@ async fn until(a: &mut TermAttachment, out: &mut String, needle: &str, seen: &mu
 async fn next_control_event(a: &mut TermAttachment) -> TermEvent {
     loop {
         match a.recv().await.unwrap() {
-            Some(TermEvent::Output { .. }) | Some(TermEvent::Clients { .. }) => continue,
+            Some(TermEvent::Output { .. }) | Some(TermEvent::Clients { .. }) | Some(TermEvent::Snapshot { .. }) => continue,
             Some(ev) => return ev,
             None => panic!("closed"),
         }

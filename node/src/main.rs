@@ -9,13 +9,19 @@ use ember_node::term::pty;
 /// - `EMBER_NODE_STATE_DIR`: persistent terminal metadata and `local.json` (default
 ///   `$HOME/.ember/node`)
 /// - `EMBER_NODE_KEEP_PTY=0`: do not start PTY keepers (terminal sessions end with the daemon)
+/// - `EMBER_NODE_CODEX_BIN`: codex binary for `/v1/exec-server` (default `codex` on `PATH`)
 ///
 /// `ember-node __keep-pty …` is the internal PTY keeper (see `ember_node::term::pty`).
+/// `ember-node exec-server` instead becomes `codex exec-server --listen stdio` on this process's
+/// stdio — the same command the daemon starts for each `/v1/exec-server` connection.
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(pty::KEEPER_SUBCOMMAND) {
         // No runtime, no logging: the keeper is a few hundred kilobytes that hold one fd.
         std::process::exit(pty::keeper_main(&args[2..]));
+    }
+    if args.get(1).map(String::as_str) == Some("exec-server") {
+        return Err(ember_node::exec_server::run_stdio());
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve())
 }

@@ -169,7 +169,7 @@ impl Terms {
             .values()
             .filter_map(|s| s.finished_ms().map(|t| (t, s.clone())))
             .collect();
-        finished.sort_by(|a, b| b.0.cmp(&a.0));
+        finished.sort_by_key(|f| std::cmp::Reverse(f.0));
         for (i, (_, s)) in finished.iter().enumerate() {
             if i >= MAX_FINISHED {
                 self.sessions.lock().unwrap().remove(&s.id);

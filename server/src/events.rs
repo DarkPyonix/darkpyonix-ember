@@ -14,6 +14,10 @@ pub enum AgentEvent {
     NativeSession { native_id: String },
     /// A message the user (or an A2A sender) sent into the session.
     UserMessage { text: String },
+    /// A note from Ember itself, delivered **to the agent** in front of the next user message
+    /// (e.g. "the session's computer changed", FR-S7). Stored so the transcript shows what the
+    /// agent was told. Unlike [`AgentEvent::Notice`], it is part of the agent's conversation.
+    SystemNotice { text: String },
     /// Incremental assistant text, for live display. Not needed to reconstruct the transcript.
     AssistantDelta { text: String },
     /// A complete assistant message.

@@ -76,7 +76,7 @@ accounts or computer switching.
 | ---- | ---- |
 | `server/` | ember server (Rust) |
 | `node/` | ember node, the execution daemon (Rust) |
-| `transport/` | the transport interface and its iroh backend (FR-N5) |
+| `transport/` | the transport interface and its iroh backend (FR-N5); see §1.5 |
 | `client/` | the client core below the dioxus-compose UI |
 | `proxy/` | the IDE window wrapping layer (Python) |
 | `bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |
@@ -94,6 +94,40 @@ topology as follows (`INTENT.md` D13, *[provisional]*):
 | `dpx/auth/` | Login for the IDE window; superseded by device authentication (`FR-N3`) once M5 lands |
 | `static/home.html`, `dpx/home/` | Transitional web home; replaced by the native client (E1) |
 | `dpx/hub/` (per-computer connectors reporting local transcripts) | Transitional; replaced by the main server holding transcripts (E3) |
+
+
+### 1.5 Connections on the transport (M5)
+
+Every arrow marked P2P in the diagram is HTTP carried over `ember-transport` (`FR-N1`, `FR-N5`):
+**one transport stream = one HTTP/1.1 connection**, so the server and node routers, their
+WebSockets and the client's push channel run unchanged. Nothing outside `transport/` names the
+backend; tests use the in-memory `MemNetwork`.
+
+```
+ client device ──ember-server/1──▶ ember server ──ember-node/1──▶ ember node
+   (Dialer)        gate: devices      (Dialer, one       gate: allowed server
+                   table (FR-N3)       connection/node)   peer ids (FR-N3)
+                                       │
+          ember-exec shim ─http://127.0.0.1:<p>─▶ bridge ─(one stream per TCP conn)─▶ node
+          codex app-server ─ws://127.0.0.1:<p>/<secret>─▶ exec-server relay ─▶ node
+```
+
+| Piece | Where | Role |
+| ----- | ----- | ---- |
+| Identity | `transport.key` in the server's data dir / the node's state dir | Persistent Ed25519 key = `PeerId`; printed with the `PeerAddr` at start |
+| `PeerGate` | `ember-transport` | Allow-list checked at accept (before any request); revoking closes the peer's open connections |
+| `Dialer` | `ember-transport` | One cached connection per (peer, service), a fresh stream per request/WebSocket, re-dial after close |
+| `HttpListener::with_gate` | `ember-transport` | `axum::serve` over a gated transport listener |
+| `NodeClient` | `node/src/client.rs` | Same API over HTTP (`new`) or the transport (`over_transport`) |
+| Devices | `server/src/devices/` | `devices` table → the server's gate; managed on the TCP listener only |
+| Computers by peer | `server/src/computers/` | `peer_json` column (migration 5); probes, exec relay and the shim bridge dial through the server's `Dialer` |
+| `Api` | `client/src/api.rs` | Same API and push socket over HTTP (`new`) or the transport (`over_transport`) |
+
+Both daemons keep their TCP listener for local use (`ember-term`, the VS Code companion,
+loopback admin). Bearer tokens (node API) are kept as a second factor on top of the peer
+allow-list for now. How peers find each other beyond address hints — the `darkpyonix.dev`
+address directory and device registration under the user's account (`FR-N2`) — plugs into
+`ember_transport::AddressDirectory` and is not built yet.
 
 ---
 

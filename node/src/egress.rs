@@ -489,9 +489,7 @@ async fn pump_axum<IO: AsyncRead + AsyncWrite>(ws: WebSocket, io: IO) {
 // Client side
 
 /// Client side of `/v1/egress`: one raw SOCKS5 byte stream to the node.
-pub type EgressStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+pub type EgressStream = tokio_tungstenite::WebSocketStream<crate::client::NodeIo>;
 
 impl NodeClient {
     /// Open `/v1/egress`. Bytes go both ways as Binary frames; see the module docs.

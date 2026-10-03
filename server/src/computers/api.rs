@@ -4,11 +4,14 @@
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
 //! | GET    | `/api/v1/computers?probe=<bool>` | → `[ComputerStatus]` (`local` first; probe default true) |
-//! | POST   | `/api/v1/computers` | `{name, url, token}` → 201 `Computer` (token never returned) |
+//! | POST   | `/api/v1/computers` | `{name, url, token}` or `{name, peer, token}` → 201 `Computer` (token never returned) |
 //! | GET    | `/api/v1/computers/{id}` | → `ComputerStatus` with `env` |
 //! | DELETE | `/api/v1/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it) |
 //! | GET    | `/api/v1/sessions/{id}/computer` | → `CurrentComputer` |
 //! | PUT    | `/api/v1/sessions/{id}/computer` | `{computer_id}` → `SwitchOutcome` (409 mid-turn, 502 unreachable) |
+//!
+//! `peer` registers a node reached over the transport (`FR-N1`): either its peer id (64 hex
+//! chars) or a full `PeerAddr` JSON object `{peer, relays, direct}` as the node prints at start.
 
 use std::sync::Arc;
 
@@ -17,6 +20,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use ember_transport::{PeerAddr, PeerId};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -74,12 +78,33 @@ async fn list(State(s): State<AppState>, Query(q): Query<ListQuery>) -> ApiResul
 #[derive(Deserialize)]
 struct RegisterBody {
     name: String,
-    url: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    peer: Option<PeerSpec>,
     token: String,
 }
 
+/// A node's transport address: a bare peer id or a full address.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PeerSpec {
+    Id(PeerId),
+    Addr(PeerAddr),
+}
+
 async fn register(State(s): State<AppState>, Json(b): Json<RegisterBody>) -> ApiResult<impl IntoResponse> {
-    let c = s.computers.register(&b.name, &b.url, &b.token)?;
+    let c = match (b.url.filter(|u| !u.is_empty()), b.peer) {
+        (Some(url), None) => s.computers.register(&b.name, &url, &b.token)?,
+        (None, Some(peer)) => {
+            let addr = match peer {
+                PeerSpec::Id(id) => PeerAddr::new(id),
+                PeerSpec::Addr(a) => a,
+            };
+            s.computers.register_peer(&b.name, &addr, &b.token)?
+        }
+        _ => return Err(ComputerError::BadRequest("give exactly one of url or peer".into()).into()),
+    };
     Ok((StatusCode::CREATED, Json(c)))
 }
 

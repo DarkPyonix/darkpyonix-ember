@@ -35,9 +35,10 @@
 //! status code.
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
-//! API can run over TCP today and over another stream transport (e.g. QUIC streams) later.
-//! The remote browser's SOCKS5 egress (FR-R1) is the `/v1/egress` route, so it rides the same
-//! authenticated transport; an optional plain SOCKS5 listener is in [`crate::egress`].
+//! API runs over TCP and over the peer-to-peer transport ([`crate::transport`], service
+//! `ember-node/1`, peer allow-list in front). The remote browser's SOCKS5 egress (FR-R1) is the
+//! `/v1/egress` route, so it rides the same authenticated connection; an optional plain SOCKS5
+//! listener is in [`crate::egress`].
 
 use std::sync::Arc;
 

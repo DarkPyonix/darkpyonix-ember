@@ -138,9 +138,8 @@ async fn bridge(node: Node, ws: WebSocket) {
 }
 
 /// Client side of `/v1/exec-server`: a raw byte stream to a fresh codex exec-server on the node.
-pub type ExecServerStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+/// Over TCP or the transport alike ([`crate::client::NodeIo`]).
+pub type ExecServerStream = tokio_tungstenite::WebSocketStream<crate::client::NodeIo>;
 
 impl NodeClient {
     /// Open `/v1/exec-server`. Send stdin bytes as Binary frames; stdout arrives as Binary frames.

@@ -135,6 +135,20 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **NFR-N1** | Transport quality bar. **If iroh misses any line after tuning, our own implementation is evaluated** (`FR-N1`). Initial targets, set before measurement; the first M5 measurement may adjust a target once, with the measured data and reason recorded here. | Measured on the real network matrix: home router ↔ school/office network, home ↔ LTE hotspot, and symmetric NAT on one side; 20 runs per pair. <br>• **Direct-path success:** ≥ 85% across the matrix excluding symmetric-NAT pairs; symmetric-NAT pairs must still connect via relay 100%. <br>• **Direct-path overhead:** RTT ≤ raw path + 5 ms (p50) and + 15 ms (p95); throughput ≥ 80% of a raw TCP transfer over the same path. <br>• **Connection setup:** first byte ≤ 1.5 s p95 (relay allowed); direct path established ≤ 5 s p95 when one exists. <br>• **Relay → direct upgrade:** ≤ 10 s p95 after a direct path becomes possible; direct → relay fallback with no stream reset. <br>• **Network change** (Wi-Fi ↔ LTE): open streams survive; stall ≤ 3 s p95. <br>• **Mobile:** an idle background connection adds ≤ 2%/hour battery drain (Android and iOS); reconnect on foreground ≤ 1 s p95. |
 | **PR-1** | Main server → client push channel for session status, transcript updates, computer reachability and assignments. | Versioned schema; a version mismatch is detected and reported, not silently dropped. |
 
+
+### §N status — transport wiring (M5, issue #10)
+
+Where the acceptance criteria stand after wiring `ember-transport` into the real connections.
+Not yet built or run at the time of writing; the evidence column names the tests that will
+check it.
+
+| ID | What is wired | Evidence / what remains |
+| -- | ------------- | ----------------------- |
+| **FR-N1** | ember node serves its API on transport service `ember-node/1` (`EMBER_NODE_TRANSPORT=1`, or `only`); ember server dials nodes registered by peer (`POST /api/v1/computers {name, peer, token}`) and serves its own API on `ember-server/1` (`EMBER_TRANSPORT=1`); the client crate reaches the server with `Api::over_transport`. One transport stream = one HTTP/1.1 connection, so every HTTP route and WebSocket (exec, events, exec-server, terminal attach, push) is unchanged. | `node/tests/transport.rs`, `server/tests/transport.rs`, `client/tests/transport_flow.rs` (fake transport). The two-NAT acceptance run is still to do on real networks (`NFR-N1` matrix). |
+| **FR-N2** | Relay URL from `EMBER_RELAY_URL`; peers addressed by `PeerAddr` (id + hints) or bare id. | The `darkpyonix.dev` address directory and GitHub-account device registration are **not** implemented: `ember_transport::AddressDirectory` is the slot (`TransportConfig::directory`). Until then a node is registered by pasting the `PeerAddr` it prints. |
+| **FR-N3** | Per-device allow-lists enforced at accept (`ember_transport::PeerGate`): the server admits peers in its `devices` table (store migration 6; `/api/v1/devices`, served on TCP only), the node admits server peer ids from `EMBER_NODE_ALLOWED_PEERS` / `<state dir>/allowed-peers`. Revoking (`DELETE /api/v1/devices/{peer}`; node: edit the file + SIGHUP) closes the peer's open connections immediately, which is within one heartbeat. Bearer tokens stay as a second factor for now. | `transport/tests/gate.rs`; revocation cases in the three suites above. |
+| **FR-N5** | All of the above uses `ember-transport`'s API only. | `scripts/check-transport-isolation.sh` passes; server, node and client tests run against `MemNetwork`. |
+
 ---
 
 ## §W — IDE window (VS Code Web, wrapped)

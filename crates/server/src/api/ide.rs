@@ -7,7 +7,7 @@
 //! | `kind`    | What it is                                    | What we return                    |
 //! |-----------|-----------------------------------------------|-----------------------------------|
 //! | `ember`   | Ember's own editor-core IDE (dioxus-compose, M8) | launch info only (no URL)       |
-//! | `vscode`  | VS Code Web wrapped by `proxy/` on that computer | the proxy URL with `?folder=`   |
+//! | `vscode`  | VS Code Web wrapped by `web/proxy/` on that computer | the proxy URL with `?folder=`   |
 //! | `gateway` | JetBrains Gateway                             | a `jetbrains-gateway://` link and the command that opens it on that computer |
 //!
 //! **Computers are not wired yet** (ember node, `FR-X1`): a session has no current-computer

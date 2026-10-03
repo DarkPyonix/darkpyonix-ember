@@ -1,7 +1,7 @@
 // Unit tests for the companion's vscode-free parts: the /__terms client, the Pseudoterminal
 // adapter against a fake attach socket, and the auto-attach plan.
 //
-//     cd proxy/companion && node --test
+//     cd web/proxy/companion && node --test
 'use strict';
 
 const test = require('node:test');

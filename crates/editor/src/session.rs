@@ -1,6 +1,6 @@
 //! `EditorSession`: one workspace on one computer's OSE server, driven for one editor window.
 //!
-//! [`EditorSession::connect`] does what `editor-conn/tests/live_ose.rs` proved works against a
+//! [`EditorSession::connect`] does what `crates/editor-conn/tests/live_ose.rs` proved works against a
 //! real OSE server (steps 1-4 there):
 //!
 //! 1. `GET /version` → must be `ember_editor_conn::PINNED_COMMIT` (else

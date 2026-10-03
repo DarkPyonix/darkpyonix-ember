@@ -2,7 +2,7 @@
 // configurations are rewritten, the session they create, the endpoint parsing, the attach
 // configuration, and the re-attach plan.
 //
-//     cd proxy/companion && node --test
+//     cd web/proxy/companion && node --test
 'use strict';
 
 const test = require('node:test');

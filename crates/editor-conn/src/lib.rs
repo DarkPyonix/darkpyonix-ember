@@ -27,13 +27,13 @@
 //!
 //! **Version pinning.** The wire format is not a public contract. All facts here were read at
 //! Code-OSS commit [`PINNED_COMMIT`] (release tag [`PINNED_VERSION`]), the release OSE is built
-//! from (`ose/VERSION`); the ext-host RPC numbering in [`rpc_ids`] in particular must be
+//! from (`build/ose/VERSION`); the ext-host RPC numbering in [`rpc_ids`] in particular must be
 //! regenerated per Code-OSS release. [`PINNED_VERSION`] / [`PINNED_COMMIT`] are the single source
 //! of truth for the pin in this crate:
 //!
-//! - a unit test fails if [`PINNED_VERSION`] differs from `ose/VERSION`;
+//! - a unit test fails if [`PINNED_VERSION`] differs from `build/ose/VERSION`;
 //! - CI (`.github/workflows/checks.yml`, job `editor-conn-pin`) regenerates [`rpc_ids::PROXY_IDS`]
-//!   at the `ose/VERSION` tag and fails if the table or [`PINNED_COMMIT`] differ;
+//!   at the `build/ose/VERSION` tag and fails if the table or [`PINNED_COMMIT`] differ;
 //! - at connect time [`handshake::verify_server`] reads the server's `GET /version` and refuses any
 //!   other commit with [`Error::UnsupportedServerVersion`].
 
@@ -50,7 +50,7 @@ pub mod rpc;
 pub mod rpc_ids;
 pub mod uri;
 
-/// The Code-OSS release tag this crate is pinned to. Must equal `ose/VERSION` (checked by the
+/// The Code-OSS release tag this crate is pinned to. Must equal `build/ose/VERSION` (checked by the
 /// `pin_matches_ose_version` test and by CI).
 pub const PINNED_VERSION: &str = "1.139.1";
 /// The commit of [`PINNED_VERSION`] in `microsoft/vscode` (what an OSE server built from that tag
@@ -146,16 +146,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
-    /// The pin has one source of truth: `ose/VERSION` names the tag OSE is built from, and this
+    /// The pin has one source of truth: `build/ose/VERSION` names the tag OSE is built from, and this
     /// crate must be pinned to the same tag.
     #[test]
     fn pin_matches_ose_version() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ose/VERSION");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/ose/VERSION");
         let version = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         assert_eq!(
             version.trim(),
             PINNED_VERSION,
-            "ose/VERSION and ember_editor_conn::PINNED_VERSION differ: regenerate src/rpc_ids.rs with \
+            "build/ose/VERSION and ember_editor_conn::PINNED_VERSION differ: regenerate src/rpc_ids.rs with \
              scripts/gen_rpc_ids.sh at the new tag and update PINNED_VERSION / PINNED_COMMIT"
         );
     }

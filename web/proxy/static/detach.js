@@ -18,7 +18,7 @@
  *      fallback (a new window on the same workspace with the file at the cursor).
  *
  * Where the state comes from (measured against VS Code 1.138 workbench source; see
- * docs in proxy/README.md "Tab detach"):
+ * docs in web/proxy/README.md "Tab detach"):
  *   - dataTransfer 'ResourceURLs'  JSON array of URI strings. Set on every tab drag for
  *                                  editors backed by a file system provider. RELIABLE.
  *   - dataTransfer 'CodeEditors'   JSON array of untyped editor inputs; each carries
@@ -37,7 +37,7 @@
  * example; Monaco's 1-based values are converted here.
  *
  * The pure parts (tracker, extraction, message and URL building, transport choice) are
- * exported for proxy/tests/js/detach.test.js, which runs with plain `node`.
+ * exported for web/proxy/tests/js/detach.test.js, which runs with plain `node`.
  */
 (function (root, factory) {
   'use strict';
@@ -50,7 +50,7 @@
   'use strict';
 
   // ---------------------------------------------------------------------------------------
-  // Protocol constants — keep in sync with bridge/src/messages.rs
+  // Protocol constants — keep in sync with crates/bridge/src/messages.rs
   // ---------------------------------------------------------------------------------------
   var VERSIONS = { tab_detach: 1, sibling_window_closed: 1, open_window: 1 };
   var HANDLER_NAME = 'emberBridge';
@@ -298,8 +298,8 @@
   //   `:line:column` (1-based) is split off the URI path and becomes the selection start.
   // src/vs/workbench/browser/layout.ts: when files are passed this way, the workspace's
   //   previously open editors are NOT restored (unless window.restoreWindows = preserve).
-  // Keep in sync with OpenWindow::vscode_web_path in bridge/src/messages.rs; both are
-  // checked against testdata/bridge/detach_vectors.json.
+  // Keep in sync with OpenWindow::vscode_web_path in crates/bridge/src/messages.rs; both are
+  // checked against tests/vectors/bridge/detach_vectors.json.
   // ---------------------------------------------------------------------------------------
   function buildWorkspaceQuery(target) {
     if (!target || !target.folder) return null;

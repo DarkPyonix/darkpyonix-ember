@@ -2,8 +2,8 @@
 # Download the newest OSE build for this machine from the `ose` GitHub Actions workflow and
 # unpack it. Prints the server launcher path (…/bin/dpx-ose-server) on stdout, nothing else, so:
 #
-#   export EMBER_OSE_SERVER="$(editor-conn/scripts/fetch-ose-artifact.sh)"
-#   cargo test --manifest-path editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
+#   export EMBER_OSE_SERVER="$(crates/editor-conn/scripts/fetch-ose-artifact.sh)"
+#   cargo test --manifest-path crates/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
 #
 # Picks the most recent *successful* run of .github/workflows/ose.yml that still has an
 # unexpired artifact named dpx-ose-<target> (pull-request runs and dispatches limited to other

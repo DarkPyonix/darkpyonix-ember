@@ -1,6 +1,6 @@
 # Remote browser — server side (M6, SPEC §R, INTENT D6)
 
-Code: `server/src/browser/`. Stream protocol version: **1** (`browser::STREAM_VERSION`).
+Code: `crates/server/src/browser/`. Stream protocol version: **1** (`browser::STREAM_VERSION`).
 
 ## Model
 
@@ -83,9 +83,9 @@ metadata; the JPEG may be downscaled (`max_width/height`), so clients scale by
 
 ```text
 Chrome --proxy-server=socks5://127.0.0.1:<port>
-  └─TCP─▶ ember server: loopback listener for computer X (server/src/computers/egress.rs)
+  └─TCP─▶ ember server: loopback listener for computer X (crates/server/src/computers/egress.rs)
             └─ one WebSocket per TCP connection: GET <node>/v1/egress (Bearer <node token>)
-                 └─▶ ember node X: SOCKS5 server (node/src/egress.rs) ──TCP─▶ target
+                 └─▶ ember node X: SOCKS5 server (crates/node/src/egress.rs) ──TCP─▶ target
 ```
 
 - The server listener does not parse SOCKS5; it copies bytes, so Chrome's SOCKS5 client and the

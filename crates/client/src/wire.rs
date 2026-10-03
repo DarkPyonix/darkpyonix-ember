@@ -1,4 +1,4 @@
-//! The main server's wire types, as the client sees them (PR-1, `server/src/{events,store}.rs`).
+//! The main server's wire types, as the client sees them (PR-1, `crates/server/src/{events,store}.rs`).
 //!
 //! Mirrored rather than shared so the client never links the server. Decoding is tolerant where
 //! the server may grow: unknown event kinds and statuses decode to `Unknown` instead of failing,

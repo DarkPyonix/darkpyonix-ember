@@ -35,9 +35,10 @@ VS Code questions. Kernel, manager and hub APIs belong to `darkpyonix-core`; Emb
   시켜야지", "니가 작업 붙잡고 있으면 다른 일들도 진행이 안되잖아".)
 - Use sub-agents generously for parallel work, each in its own worktree under
   `.claude/worktrees/<name>/`.
-- `client/` depends on `server/`, and `server/` on `node/`, by path, and CI runs
-  `cargo test --locked` per crate. When a dependency changes in `node/` or `server/`, rebuild the
-  dependants so their `Cargo.lock` files update, and commit them in the same PR.
+- `crates/client/` depends on `crates/server/`, and `crates/server/` on `crates/node/`, by path,
+  and CI runs `cargo test --locked` per crate. When a dependency changes in `crates/node/` or
+  `crates/server/`, rebuild the dependants so their `Cargo.lock` files update, and commit them in
+  the same PR.
 
 ## Where files go
 
@@ -47,11 +48,12 @@ directory beside this checkout, not the home directory. Large files in a worktre
 copied. If a task seems to need a path outside the repository, ask first.
 
 **The repository root is fixed.** No new folder or file at the root without the user's approval:
-propose what to add and why, and wait. Approved root entries (2026-10-03): `.github/`,
-`.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`, `README.md`, `app/`,
-`bridge/`, `client/`, `docs/`, `editor/`, `editor-conn/`, `extensions/`, `hub/`, `node/`, `ose/`,
-`proxy/`, `scripts/`, `server/`, `testdata/`, `transport/`, plus the ignored `.claude/` and
-`.scratch/`. A regrouping of these is proposed in #60 and waits for approval.
+propose what to add and why, and wait. Approved root entries (2026-10-03, regrouped by #60):
+`.github/`, `.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`,
+`README.md`, `build/`, `crates/`, `docs/`, `extensions/`, `scripts/`, `tests/`, `web/`, plus the
+ignored `.claude/` and `.scratch/`. Rust crates live in `crates/<name>/`, the VS Code Web wrapper
+in `web/proxy/`, the OSE build pipeline in `build/ose/`, and shared test vectors in
+`tests/vectors/`.
 
 ## Git
 

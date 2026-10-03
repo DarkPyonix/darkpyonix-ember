@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Regenerate the PROXY_IDS table body in editor-conn/src/rpc_ids.rs for a Code-OSS checkout.
+# Regenerate the PROXY_IDS table body in crates/editor-conn/src/rpc_ids.rs for a Code-OSS checkout.
 #
-# Usage: editor-conn/scripts/gen_rpc_ids.sh <path-to-vscode-checkout>
+# Usage: crates/editor-conn/scripts/gen_rpc_ids.sh <path-to-vscode-checkout>
 #
-# The checkout must be the tag in ose/VERSION (the Code-OSS release OSE is built from).
+# The checkout must be the tag in build/ose/VERSION (the Code-OSS release OSE is built from).
 #
 # Prints the array body (one `"Name", // nid` line per identifier) to stdout. Paste it between
-# `pub const PROXY_IDS: &[&str] = &[` and `];`, update PINNED_VERSION (= ose/VERSION) and
+# `pub const PROXY_IDS: &[&str] = &[` and `];`, update PINNED_VERSION (= build/ose/VERSION) and
 # PINNED_COMMIT (= the commit printed on stderr) in src/lib.rs, and re-run the tests. CI
-# (.github/workflows/checks.yml, job editor-conn-pin) runs this at the ose/VERSION tag and fails if
+# (.github/workflows/checks.yml, job editor-conn-pin) runs this at the build/ose/VERSION tag and fails if
 # src/rpc_ids.rs or the two constants differ.
 #
 # The rule being reproduced: ProxyIdentifier.nid = ++ProxyIdentifier.count in module evaluation

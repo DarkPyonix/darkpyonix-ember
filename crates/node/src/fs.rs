@@ -1,7 +1,7 @@
 //! File operations: stat, ranged read with whole-file hash, atomic write with a hash
 //! precondition, directory listing, glob and grep (FR-X1), and the namespace operations a
 //! mounted filesystem needs (lstat, readlink, symlink, mkdir, remove, rename, setattr, pwrite;
-//! ember server's project mount, `server/src/computers/mount`).
+//! ember server's project mount, `crates/server/src/computers/mount`).
 //!
 //! All functions are blocking; the API layer runs them on the blocking pool.
 //!

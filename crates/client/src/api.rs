@@ -1,4 +1,4 @@
-//! HTTP client for the main server's `/api/v1` (see `server/src/api/mod.rs`).
+//! HTTP client for the main server's `/api/v1` (see `crates/server/src/api/mod.rs`).
 //!
 //! An [`Api`] reaches the server one of two ways, behind the same methods:
 //!

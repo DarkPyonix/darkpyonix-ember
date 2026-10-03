@@ -3,7 +3,7 @@
 > Status: **design note for #6** (2026-10-03). Nothing here is implemented yet. It answers part
 > of `INTENT.md` Q6 for D4/E2. The question is how an unmodified Claude Code or Codex process on
 > ember server can have its tool actions (file read, edit and write, glob and grep, shell) carried
-> out on the session's current computer through **ember node** (`node/`), while the agent keeps
+> out on the session's current computer through **ember node** (`crates/node/`), while the agent keeps
 > its native behaviour.
 >
 > Facts were checked on 2026-10-03 against **Claude Code 2.1.288** and **codex-cli 0.155.1** on

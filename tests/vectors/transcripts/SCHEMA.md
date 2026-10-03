@@ -2,11 +2,11 @@
 
 Shared vectors for every parser that reads an agent's **native transcript file** (Claude Code's
 `~/.claude/projects/*/*.jsonl`, Codex's `~/.codex/sessions/**/rollout-*.jsonl`): the Python
-adapters in `proxy/dpx/agents/` and the Rust importers in `server/src/history/`.
+adapters in `web/proxy/dpx/agents/` and the Rust importers in `crates/server/src/history/`.
 
 ```
-testdata/transcripts/<agent>/<case>/input.jsonl     native file, synthetic content
-testdata/transcripts/<agent>/<case>/expected.json   the normalised form below
+tests/vectors/transcripts/<agent>/<case>/input.jsonl     native file, synthetic content
+tests/vectors/transcripts/<agent>/<case>/expected.json   the normalised form below
 ```
 
 Run both suites with `scripts/test-transcript-vectors.sh`.
@@ -75,9 +75,9 @@ Run both suites with `scripts/test-transcript-vectors.sh`.
 
 ## How each implementation is checked
 
-* **Rust** (`server/src/history/`) must reproduce `expected.json` exactly.
-* **Python** (`proxy/dpx/agents/`) is a display parser that summarises tools instead of keeping
-  them, so `proxy/tests/test_transcript_vectors.py` compares a projection: the ordered
+* **Rust** (`crates/server/src/history/`) must reproduce `expected.json` exactly.
+* **Python** (`web/proxy/dpx/agents/`) is a display parser that summarises tools instead of keeping
+  them, so `web/proxy/tests/test_transcript_vectors.py` compares a projection: the ordered
   `(role, text)` of user/assistant messages without `tool_name`, against the adapter's
   `kind == "text"` messages; plus `cwd`, and `title` where it is not `null`. `native_id` is not
   compared (the Python adapter identifies a conversation by its file name).

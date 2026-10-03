@@ -28,7 +28,7 @@
 | **The DarkPyonix proxy** | `main.py` + `dpx/` (:8888) | Relays every request upstream, injects HTML/CSS, relays WS, serves the home and login pages |
 | **The overlay** | `static/overlay.css` + `static/overlay.js` | The mobile UI injected into VS Code Web |
 | **Home launcher / login / wrapper** | `static/home.html` · `workspace_login.html` · `frame.html` | Workspace-picking home + login gate + iframe wrapper |
-| **ember** | the `darkpyonix-ember` repository | ~~The Tauri desktop shell~~ — the Tauri scaffold was deleted (2026-10-03, user decision). The client is now a dioxus-compose native app; see `../../docs/INTENT.md` D9 |
+| **ember** | the `darkpyonix-ember` repository | ~~The Tauri desktop shell~~ — the Tauri scaffold was deleted (2026-10-03, user decision). The client is now a dioxus-compose native app; see `../../../docs/INTENT.md` D9 |
 
 - Example deployment point: `my-pc.example.com`, where DarkPyonix runs.
 - `_xmo_recent.json` holds the list of recently opened workspace folders (server-side recents).

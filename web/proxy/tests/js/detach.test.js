@@ -1,10 +1,10 @@
 // Unit tests for static/detach.js — plain node, no npm install:
 //
-//   node proxy/tests/js/detach.test.js        (or: node --test proxy/tests/js/)
+//   node web/proxy/tests/js/detach.test.js        (or: node --test web/proxy/tests/js/)
 //
 // Covers the FR-B1 drag state machine, state extraction from VS Code's drag data, the
 // FR-B2 message, incoming version checks (FR-B4) and the transport choice. The browser-
-// fallback URL is checked against testdata/bridge/detach_vectors.json, which the Rust
+// fallback URL is checked against tests/vectors/bridge/detach_vectors.json, which the Rust
 // bridge crate checks too.
 'use strict';
 const test = require('node:test');
@@ -14,7 +14,7 @@ const path = require('node:path');
 
 const d = require('../../static/detach.js');
 const VECTORS = JSON.parse(fs.readFileSync(
-  path.join(__dirname, '..', '..', '..', 'testdata', 'bridge', 'detach_vectors.json'), 'utf8'));
+  path.join(__dirname, '..', '..', '..', '..', 'tests', 'vectors', 'bridge', 'detach_vectors.json'), 'utf8'));
 
 const STRIP = { left: 0, top: 30, right: 800, bottom: 65 };   // a tab strip, client coords
 const far = { x: 400, y: 65 + 200 };                            // well below the strip

@@ -54,7 +54,7 @@ A **main server** runs **ember server**: it runs the agent CLIs headless, stores
 and brokers agent-to-agent messages. Each **computer** runs **ember node**, a thin execution daemon that performs
 tool actions (files, commands, browser egress) for whichever sessions are using it. The **client**
 — launcher and conversation screens on `dioxus-compose`, with no webview — talks to the main
-server; the **IDE window** is VS Code Web wrapped by `proxy/`. Everything connects peer to peer,
+server; the **IDE window** is VS Code Web wrapped by `web/proxy/`. Everything connects peer to peer,
 with `darkpyonix.dev` coordinating hole punching. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
@@ -81,7 +81,7 @@ Design stage, with one working piece.
 | Native client (dioxus-compose) | Specified (§L); depends on `dioxus-compose` |
 | Networking (P2P, `darkpyonix.dev` relay) | Specified (§N); transport not chosen |
 | Remote and agent browser | Specified (§R), not implemented |
-| IDE window wrapping layer | **Working** in [`proxy/`](proxy/README.md) — VS Code Web on tablets and phones |
+| IDE window wrapping layer | **Working** in [`web/proxy/`](web/proxy/README.md) — VS Code Web on tablets and phones |
 | Compose-native editor core | Long-term, not committed (§E) |
 
 ---
@@ -124,8 +124,10 @@ darkpyonix-ember/
 │  ├─ IMPLEMENTATION.md  the IDE window's VS Code analysis (what can and cannot be replaced)
 │  ├─ BACKGROUND.md      how the 09-22 VS Code design was reached
 │  └─ design/            design material (INTEGRATION.md, decks)
-├─ server/              ember server (Rust) — main server: agents, sessions, push
-├─ proxy/               the IDE window wrapping layer (Python, FastAPI) — working
+├─ crates/
+│  └─ server/            ember server (Rust) — main server: agents, sessions, push
+├─ web/
+│  └─ proxy/             the IDE window wrapping layer (Python, FastAPI) — working
 ├─ extensions/          editor extensions: vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
 └─ LICENSE
 ```

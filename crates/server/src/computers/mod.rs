@@ -1,6 +1,6 @@
 //! Computers and switching a session between them (SPEC FR-X1–FR-X3, FR-S7 v0).
 //!
-//! A *computer* is an ember node (`node/`) this server can reach, with a bearer token, either by
+//! A *computer* is an ember node (`crates/node/`) this server can reach, with a bearer token, either by
 //! HTTP URL or by transport peer ([`ember_transport::PeerAddr`], SPEC `FR-N1`): a peer-addressed
 //! node is dialed through the server's transport ([`crate::transport`]) for `ember-node/1`, and
 //! the node admits the server only if the server's peer id is on its allow-list (`FR-N3`). The

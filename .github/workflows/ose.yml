@@ -1,5 +1,5 @@
 # DarkPyonix OSE: Code-OSS (MIT) VS Code web server, renamed and pointed at Open VSX.
-# See ose/README.md. Builds run here, never on a developer machine.
+# See build/ose/README.md. Builds run here, never on a developer machine.
 #
 #   pull_request     -> product job only (product.json overrides + checks; seconds)
 #   push / dispatch  -> product + 4-target build matrix + smoke test, artifacts uploaded
@@ -8,10 +8,10 @@ name: ose
 
 on:
   pull_request:
-    paths: ["ose/**", ".github/workflows/ose.yml"]
+    paths: ["build/ose/**", ".github/workflows/ose.yml"]
   push:
     branches: [main, develop]
-    paths: ["ose/**", ".github/workflows/ose.yml"]
+    paths: ["build/ose/**", ".github/workflows/ose.yml"]
     tags: ["ose-v*"]
   workflow_dispatch:
     inputs:
@@ -41,7 +41,7 @@ jobs:
       - id: version
         name: Resolve Code-OSS tag and its Node version
         run: |
-          tag="$(tr -d '[:space:]' < ose/VERSION)"
+          tag="$(tr -d '[:space:]' < build/ose/VERSION)"
           node="$(curl -fsSL "https://raw.githubusercontent.com/microsoft/vscode/$tag/.nvmrc" | tr -d '[:space:]v')"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "node=$node" >> "$GITHUB_OUTPUT"
@@ -63,14 +63,14 @@ jobs:
             '{include: [.[] | select(. as $e | $t == "" or ($t | split(",") | map(gsub("\\s";"")) | index($e.target) != null))]}' <<< "$all")" \
             >> "$GITHUB_OUTPUT"
       - name: Apply overrides and check (Open VSX, telemetry off, no MS marketplace)
-        run: ose/build.sh --product-only
-      - name: Tag matches ose/VERSION
+        run: build/ose/build.sh --product-only
+      - name: Tag matches build/ose/VERSION
         if: startsWith(github.ref, 'refs/tags/ose-v')
         run: |
           want="${{ steps.version.outputs.tag }}"
           got="${GITHUB_REF_NAME#ose-v}"
           # ose-v1.139.1 or ose-v1.139.1-dpx.2 (a rebuild of the same upstream tag)
-          case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match ose/VERSION ($want)"; exit 1 ;; esac
+          case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match build/ose/VERSION ($want)"; exit 1 ;; esac
 
   build:
     name: build ${{ matrix.target }}
@@ -83,8 +83,8 @@ jobs:
     timeout-minutes: 240
     env:
       CI: "true"
-      OSE_WORK_DIR: ${{ github.workspace }}/ose/.work
-      OSE_OUT_DIR: ${{ github.workspace }}/ose/dist
+      OSE_WORK_DIR: ${{ github.workspace }}/build/ose/.work
+      OSE_OUT_DIR: ${{ github.workspace }}/build/ose/dist
     steps:
       - uses: actions/checkout@v5
 
@@ -123,8 +123,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ose/.work/vscode/.build/node
-            ose/.work/vscode/.build/builtInExtensions
+            build/ose/.work/vscode/.build/node
+            build/ose/.work/vscode/.build/builtInExtensions
           key: ose-dl-${{ matrix.target }}-${{ needs.product.outputs.tag }}
 
       - name: Build, package and smoke-test
@@ -133,14 +133,14 @@ jobs:
           # Read-only token: upstream's build fetches built-in extensions and npm packages from
           # GitHub and is rate-limited without one (upstream passes GITHUB_TOKEN the same way).
           GITHUB_TOKEN: ${{ github.token }}
-        run: ose/build.sh --target ${{ matrix.target }} --smoke
+        run: build/ose/build.sh --target ${{ matrix.target }} --smoke
 
       - uses: actions/upload-artifact@v4
         with:
           name: dpx-ose-${{ matrix.target }}
           path: |
-            ose/dist/*.tar.gz
-            ose/dist/*.sha256
+            build/ose/dist/*.tar.gz
+            build/ose/dist/*.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -170,4 +170,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --title "DarkPyonix OSE ${GITHUB_REF_NAME#ose-v}" \
-            --notes "DarkPyonix OSE built from Code-OSS ${{ needs.product.outputs.tag }} (MIT, https://github.com/microsoft/vscode/tree/${{ needs.product.outputs.tag }}). Extensions gallery: Open VSX. Telemetry off. See ose/README.md for running it with proxy/dpx."
+            --notes "DarkPyonix OSE built from Code-OSS ${{ needs.product.outputs.tag }} (MIT, https://github.com/microsoft/vscode/tree/${{ needs.product.outputs.tag }}). Extensions gallery: Open VSX. Telemetry off. See build/ose/README.md for running it with web/proxy/dpx."

@@ -1,9 +1,9 @@
 //! End-to-end test against a real OSE server (Code-OSS [`PINNED_VERSION`], the build CI makes from
-//! `ose/VERSION`). Ignored by default and gated on `EMBER_OSE_SERVER`:
+//! `build/ose/VERSION`). Ignored by default and gated on `EMBER_OSE_SERVER`:
 //!
 //! ```sh
-//! export EMBER_OSE_SERVER="$(editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
-//! cargo test --manifest-path editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
+//! export EMBER_OSE_SERVER="$(crates/editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
+//! cargo test --manifest-path crates/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
 //! ```
 //!
 //! Optional: `EMBER_OSE_VERBOSE=1` prints every extension-host → Ember call (and extension
@@ -13,10 +13,10 @@
 //!
 //! Flow (each step prints its duration):
 //!
-//! 0. Start `dpx-ose-server` with the flags `proxy/dpx` uses (`--host 127.0.0.1 --port P
+//! 0. Start `dpx-ose-server` with the flags `web/proxy/dpx` uses (`--host 127.0.0.1 --port P
 //!    --without-connection-token --accept-server-license-terms --server-data-dir D
 //!    --telemetry-level off`) on a free port, with `extensions.verifySignature: false` in
-//!    `D/data/Machine/settings.json` like `ose/smoke.sh`, in its own process group; wait for the
+//!    `D/data/Machine/settings.json` like `build/ose/smoke.sh`, in its own process group; wait for the
 //!    port.
 //! 1. `verify_server` (`GET /version`) → commit must equal [`PINNED_COMMIT`].
 //! 2. Management connection over plain TCP (`skipWebSocketFrames`): handshake, IPC client,
@@ -169,7 +169,7 @@ struct Server {
 impl Server {
     fn start(bin: &Path, root: &Path) -> Self {
         let data = root.join("data");
-        // ose/smoke.sh and proxy/dpx/vscode/runtime.py: Code-OSS has no Marketplace signature
+        // build/ose/smoke.sh and web/proxy/dpx/vscode/runtime.py: Code-OSS has no Marketplace signature
         // verifier, so OSE runs with signature verification off.
         let machine = data.join("data").join("Machine");
         std::fs::create_dir_all(&machine).unwrap();
@@ -361,7 +361,7 @@ async fn respond_loop(
 #[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server"]
 async fn live_ose_end_to_end() {
     let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
-        eprintln!("[live-ose] EMBER_OSE_SERVER not set; skipping (editor-conn/scripts/fetch-ose-artifact.sh prints it)");
+        eprintln!("[live-ose] EMBER_OSE_SERVER not set; skipping (crates/editor-conn/scripts/fetch-ose-artifact.sh prints it)");
         return;
     };
     assert!(bin.is_file(), "EMBER_OSE_SERVER={} is not a file", bin.display());

@@ -110,7 +110,7 @@ web server on a free **loopback** port, starts the proxy in front of it with **f
 enforced**, and prints one JSON line when both answer:
 
 ```sh
-cd proxy
+cd web/proxy
 export DPX_USERNAME=<user> DPX_PASSWORD=<password>     # first run only, as above
 python -m dpx.serve --runtime vsc --root ~/work --root ~/src
 # {"event": "ready", "url": "http://127.0.0.1:53817/", "upstream_port": 53816, "roots": [...], ...}
@@ -162,7 +162,7 @@ marketplaces never mix — settings there are separate from a desktop VS Code's.
 | `--announce-file PATH` | — | none |
 
 The URL it announces is what ember server's "Open IDE" returns as the `vscode` target
-(`EMBER_IDE_COMPUTERS` → `ide_url`, see `server/src/api/ide.rs`).
+(`EMBER_IDE_COMPUTERS` → `ide_url`, see `crates/server/src/api/ide.rs`).
 
 Tests (stdlib only; the middleware test is skipped without FastAPI):
 `python3 -m unittest discover -s tests -t .`
@@ -271,7 +271,7 @@ and the legacy overlay mode have **all been removed**. There is no switch left t
 **To change a screen open `static/`; to change behavior open one folder under `dpx/`.**
 
 ```
-proxy/
+web/proxy/
 ├─ main.py            app assembly + request routing ← read only this for the overall flow
 ├─ dpx/
 │  ├─ serve.py        `python -m dpx.serve` — runtime server + proxy, one entry
@@ -332,7 +332,7 @@ this machine's folder paths verbatim.
 Drag an editor tab out of its tab strip and drop it where VS Code does not take it — past
 48 px from the strip, or outside the window — and the tab moves to a new IDE window on the
 same workspace, opened at the cursor. `static/detach.js` does the webview side; the native
-side is the Rust crate `bridge/` (`ember-bridge`) at the repository root.
+side is the Rust crate `crates/bridge/` (`ember-bridge`) in this repository.
 
 **Never both.** detach.js never cancels or synthesises drag events. It decides at `dragend`,
 and only when `dataTransfer.dropEffect === 'none'` — every VS Code drop target (the tab strip
@@ -388,14 +388,14 @@ Positions on the bridge are 0-based (`line`, `column`).
    If the popup is blocked (`dragend` is not an activation-triggering event), a toast offers
    an "Open" button.
 
-The URL form is checked against `testdata/bridge/detach_vectors.json` by both the JS tests
+The URL form is checked against `tests/vectors/bridge/detach_vectors.json` by both the JS tests
 and `ember-bridge`.
 
 Tests (no npm install, no browser):
 
 ```sh
-node proxy/tests/js/detach.test.js        # drag state machine, extraction, message, URL, transport
-cd proxy && python3 -m unittest           # includes tests/test_inject.py (detach.js is injected)
+node web/proxy/tests/js/detach.test.js        # drag state machine, extraction, message, URL, transport
+cd web/proxy && python3 -m unittest           # includes tests/test_inject.py (detach.js is injected)
 ```
 
 Not covered yet: touch (VS Code's tab drag is HTML5 drag-and-drop, which phones and most

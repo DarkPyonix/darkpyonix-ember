@@ -3,7 +3,7 @@
 Tests the pure rewrite in dpx/vscode/html_rewrite.py (no FastAPI needed) plus source-level
 checks that the proxy serves `/__detach.js` and uses the rewrite.
 
-    cd proxy && python3 -m unittest
+    cd web/proxy && python3 -m unittest
 """
 from __future__ import annotations
 

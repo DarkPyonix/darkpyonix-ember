@@ -1,5 +1,5 @@
 {
-  "$comment": "Shared by proxy/tests/js/detach.test.js (buildWorkspaceQuery) and bridge/src/messages.rs (OpenWindow::vscode_web_path). Positions are 0-based; the URL carries 1-based line:column. expectedPath null = no browser-fallback URL can be built.",
+  "$comment": "Shared by web/proxy/tests/js/detach.test.js (buildWorkspaceQuery) and crates/bridge/src/messages.rs (OpenWindow::vscode_web_path). Positions are 0-based; the URL carries 1-based line:column. expectedPath null = no browser-fallback URL can be built.",
   "cases": [
     {
       "name": "cursor and selection",

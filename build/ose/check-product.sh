@@ -2,7 +2,7 @@
 # Verify an OSE product.json (SPEC FR-W4): Open VSX gallery, telemetry off, no Microsoft
 # marketplace / telemetry / update endpoints.
 #
-#   ose/check-product.sh <path/to/product.json>
+#   build/ose/check-product.sh <path/to/product.json>
 #
 # Accepts either the patched source product.json or the one inside a packaged build
 # (<build>/product.json). Pure python3 stdlib, so it runs on CI runners and on a Pi.

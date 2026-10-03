@@ -4,8 +4,8 @@
 //! Codex under `~/.codex/sessions`). The importers here read one such file into a neutral
 //! [`Transcript`], which [`to_events`] turns into the server's [`AgentEvent`]s so the history can
 //! be stored like any live session. The format and its edge cases are pinned by the shared
-//! vectors in `testdata/transcripts/` (see its `SCHEMA.md`), which the Python adapters in
-//! `proxy/dpx/agents/` are tested against too.
+//! vectors in `tests/vectors/transcripts/` (see its `SCHEMA.md`), which the Python adapters in
+//! `web/proxy/dpx/agents/` are tested against too.
 
 use std::path::Path;
 
@@ -221,10 +221,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn vectors_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../testdata/transcripts")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/transcripts")
     }
 
-    /// Runs `agent`'s importer over every vector under `testdata/transcripts/<dir>/`.
+    /// Runs `agent`'s importer over every vector under `tests/vectors/transcripts/<dir>/`.
     fn run_vectors(agent: AgentKind, dir: &str) {
         let mut cases: Vec<PathBuf> = std::fs::read_dir(vectors_dir().join(dir))
             .expect("vector dir")

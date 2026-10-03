@@ -2,8 +2,8 @@
 //! and a session's current computer (FR-X3), "Open IDE" targets (FR-L7), and session creation
 //! with an account. Projects and computer assignment (FR-L4), session metadata, search and
 //! export (FR-L9, FR-S4) go through `ember_client` (`Client::patch_session`,
-//! `Client::assign_computer`, `Client::search`, `Api::export_session`). Shapes mirror `server/src/{accounts,computers}/api.rs` and
-//! `server/src/api/ide.rs`, decoded tolerantly (unknown fields ignored, optional ones
+//! `Client::assign_computer`, `Client::search`, `Api::export_session`). Shapes mirror `crates/server/src/{accounts,computers}/api.rs` and
+//! `crates/server/src/api/ide.rs`, decoded tolerantly (unknown fields ignored, optional ones
 //! defaulted) like `ember_client::wire`.
 //!
 //! TODO(ember-client): move these into `ember_client::api` once the client crate grows them;
@@ -85,7 +85,7 @@ pub struct SwitchOutcome {
     pub notice: Option<String>,
 }
 
-/// One "Open IDE" target (`server/src/api/ide.rs` `Target`).
+/// One "Open IDE" target (`crates/server/src/api/ide.rs` `Target`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IdeTarget {
     /// `ember`, `vscode` or `gateway`.

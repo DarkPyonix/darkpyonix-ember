@@ -3,7 +3,7 @@
 Status: **implemented, not compiled yet** (written without running cargo). Contract:
 `darkpyonix-core` `docs/api/hub.openapi.yaml` (info v0.3.0) and SPEC FR-H1, FR-H8–H11,
 NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember-gaps`, base
-`feat/m4-hub-workers`). Worker source `hub/worker/src/`.
+`feat/m4-hub-workers`). Worker source `crates/hub/worker/src/`.
 
 ## What it does
 
@@ -35,7 +35,7 @@ Why not a `HubDirectory: AddressDirectory` outside the transport:
 - **End-to-end verification.** iroh's resolver verifies the packet against the peer's key, so the
   hub cannot redirect a peer. A JSON resolver (`/v1/devices/{id}/addresses`) would trust the hub.
 - **Republish, TTL, backoff** come with iroh's publisher.
-- **FR-N5 holds:** no iroh type leaves `transport/`; the hub crate, server and node only see
+- **FR-N5 holds:** no iroh type leaves `crates/transport/`; the hub crate, server and node only see
   `HubDirectory`, `Transport::enable_hub`, `Transport::set_directory_token`, `Transport::set_relays`.
 
 The `AddressDirectory` slot stays (tests, `MemoryDirectory`). The in-memory backend ignores
@@ -130,13 +130,13 @@ with; nothing in Ember uses it yet.
 
 | Where | What |
 | ----- | ---- |
-| `transport/src/config.rs` | `HubDirectory`; `TransportConfig::hub`. |
-| `transport/src/iroh_backend.rs` | `enable_hub` (iroh `PkarrPublisher` + token-switchable `HubResolver`), `set_directory_token`, `set_relays`. |
-| `transport/src/key.rs` | `SecretKey::sign`, `PeerId::verify` (the link proof of possession). |
-| `hub/` (`ember-hub`, new) | `HubConfig` (`EMBER_HUB_URL`, default `https://darkpyonix.dev`; relay and directory from `/v1/config` via `discover`, else relay derived as `relay.<host>`; override `EMBER_HUB_RELAY_URL`; `EMBER_RELAY_URL` wins), `HubInfo`, `HubClient` (`config`, `devices_since`), `DeviceWatcher`, `DeviceLink`, `Registration` / `RegistrationFile` (0600), `check_registration` / `watch_registration` / `watch_registration_with`, `z32`, `fake::FakeHub` (the PR #34 contract: `/v1/config`, versioned weak `ETag` + `?wait=0..25`, `device_removed` / `invalid_credentials`, resolve tokens, `PATCH`, self-removal, readmit, link status, `client` role). |
-| `server/src/hub/` | `ServerHub`: link as `main_server` (resumed after a restart), device and resolve tokens sealed with `secret.key` in `hub_registration` (migrations 10 and 11), revocation watch (long-poll, else 60 s), app record, device list, add computer, approve codes, devices sync, leave. `api::router` (status, devices, add computer: also over the transport) and `api::admin_router` (link, check, forget, remove, codes, sync: TCP only). |
-| `server/src/devices/` | `source` column (`local` / `hub`), `Devices::sync_from_hub`. |
-| `node/src/hub.rs` | `ember-node hub register|status|forget [--local]`, `<state dir>/hub.json` (+ `hub-link.json` while waiting), app record, transport config from the registration, watch (revocation → `revoked_at`, token cleared), `EMBER_NODE_HUB_ALLOW_SERVERS=1` admits the account's main servers. SIGHUP picks up a new registration. |
+| `crates/transport/src/config.rs` | `HubDirectory`; `TransportConfig::hub`. |
+| `crates/transport/src/iroh_backend.rs` | `enable_hub` (iroh `PkarrPublisher` + token-switchable `HubResolver`), `set_directory_token`, `set_relays`. |
+| `crates/transport/src/key.rs` | `SecretKey::sign`, `PeerId::verify` (the link proof of possession). |
+| `crates/hub/` (`ember-hub`, new) | `HubConfig` (`EMBER_HUB_URL`, default `https://darkpyonix.dev`; relay and directory from `/v1/config` via `discover`, else relay derived as `relay.<host>`; override `EMBER_HUB_RELAY_URL`; `EMBER_RELAY_URL` wins), `HubInfo`, `HubClient` (`config`, `devices_since`), `DeviceWatcher`, `DeviceLink`, `Registration` / `RegistrationFile` (0600), `check_registration` / `watch_registration` / `watch_registration_with`, `z32`, `fake::FakeHub` (the PR #34 contract: `/v1/config`, versioned weak `ETag` + `?wait=0..25`, `device_removed` / `invalid_credentials`, resolve tokens, `PATCH`, self-removal, readmit, link status, `client` role). |
+| `crates/server/src/hub/` | `ServerHub`: link as `main_server` (resumed after a restart), device and resolve tokens sealed with `secret.key` in `hub_registration` (migrations 10 and 11), revocation watch (long-poll, else 60 s), app record, device list, add computer, approve codes, devices sync, leave. `api::router` (status, devices, add computer: also over the transport) and `api::admin_router` (link, check, forget, remove, codes, sync: TCP only). |
+| `crates/server/src/devices/` | `source` column (`local` / `hub`), `Devices::sync_from_hub`. |
+| `crates/node/src/hub.rs` | `ember-node hub register|status|forget [--local]`, `<state dir>/hub.json` (+ `hub-link.json` while waiting), app record, transport config from the registration, watch (revocation → `revoked_at`, token cleared), `EMBER_NODE_HUB_ALLOW_SERVERS=1` admits the account's main servers. SIGHUP picks up a new registration. |
 
 ### Server API
 
@@ -160,14 +160,14 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
 
 ## Tests (not run yet)
 
-- `hub/tests/link_flow.rs` — approve in browser, claim once (with a resolve token), re-link
+- `crates/hub/tests/link_flow.rs` — approve in browser, claim once (with a resolve token), re-link
   refused; the main server approves computer and client links, a computer cannot, a
   `main_server` link needs the browser; deny, expiry, wrong-key proof, malformed request; resume
   by link id after a restart (pending, claimed, denied, unknown); a removed key rejoins only after
   readmission approved in the browser, as the same device row.
-- `hub/tests/revocation.rs` — watch sees `Revoked` after removal, stops; unreachable ≠ revoked;
+- `crates/hub/tests/revocation.rs` — watch sees `Revoked` after removal, stops; unreachable ≠ revoked;
   a removed device gets `DeviceRemoved`, a bogus token `InvalidCredentials`.
-- `hub/tests/config_longpoll.rs` — `/v1/config` discovery (relays, pkarr, explicit relay kept);
+- `crates/hub/tests/config_longpoll.rs` — `/v1/config` discovery (relays, pkarr, explicit relay kept);
   fallback on `404` and when unreachable; weak `ETag` → `304`, held `304` at `wait`, `200` on
   change (online bumps the version); `wait=26` is `400`; long-poll returns within ~0.2 s of a
   change; `watch_registration_with` sees a removal within 1.5 s with a one-hour period; polling
@@ -176,11 +176,11 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
   token in `/pkarr?token=` is refused and a resolve token accepted, an old registration gets one
   (rotation revokes the previous); rename, app (own token only), client without account rights,
   self-removal.
-- `hub/tests/directory.rs` — two real (iroh) endpoints on localhost publish to the fake hub's
+- `crates/hub/tests/directory.rs` — two real (iroh) endpoints on localhost publish to the fake hub's
   `/pkarr` and dial by peer id alone (resolving with resolve tokens); an unregistered endpoint is
   not stored, a tokenless one or one with a device token resolves nothing, the resolve token set
   at runtime works.
-- `server/tests/hub.rs` — link via API (sealed token), add a computer from the device list and
+- `crates/server/tests/hub.rs` — link via API (sealed token), add a computer from the device list and
   reach it over the (fake) transport, approve a node's code, devices sync + revocation through
   it, revocation detected by `check`, by any hub call, and the watcher; the long-poll watcher
   (60 s period) syncs a new device and stops on removal within 2 s; a rejected token is not a
@@ -188,7 +188,7 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
   `main_server` code answers 403 with the browser link; leaving removes the server on the hub
   (`?local=1` does not); a link pending at restart is resumed; a removed server relinks after
   readmission; 503 when off.
-- `node/tests/hub.rs` — `register` writes 0600 `hub.json` and configures the transport (and the
+- `crates/node/tests/hub.rs` — `register` writes 0600 `hub.json` and configures the transport (and the
   discovered relay, or the derived one when `/v1/config` is `404`), resolving with the resolve
   token, reporting its app; removal marks `revoked_at` and drops hub-admitted servers (through
   the long-poll); re-registering is refused until readmitted, then works; an old registration
@@ -218,7 +218,7 @@ Left open or worth confirming:
 
 ## Open (Ember-side)
 
-- The native client crate has no hub calls yet (`client/src/api.rs` has no computers calls
+- The native client crate has no hub calls yet (`crates/client/src/api.rs` has no computers calls
   either); the routes are ready for it.
 - Approving codes from a phone over the transport is local-only for now (it grants account
   membership).

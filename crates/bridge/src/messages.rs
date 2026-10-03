@@ -8,7 +8,7 @@
 //! - Versions are per kind ([`expected_version`]). Adding an optional field does **not**
 //!   bump a version; unknown fields are ignored on decode.
 //! - A version mismatch is logged (`tracing::warn!`) and returned as
-//!   [`Inbound::VersionMismatch`] with a best-effort decode and the raw JSON — never
+//!   [`Inbound::VersionMismatch`] with a best-effort decode and the raw JSON, never
 //!   silently dropped.
 //! - Positions are **0-based** `(line, column)`, like LSP; `detach.js` converts Monaco's
 //!   1-based values.
@@ -168,7 +168,7 @@ impl OpenWindow {
     /// VS Code Web (`src/vs/code/browser/workbench/workbench.ts`, `WorkspaceProvider`) reads
     /// `folder` and a JSON `payload` of `[key, value]` pairs; `environmentService.ts` turns
     /// `openFile` into the file to open and, with `gotoLineMode` present, splits a 1-based
-    /// `:line:column` suffix off the URI path. Only the cursor survives this way — selection
+    /// `:line:column` suffix off the URI path. Only the cursor survives this way; selection
     /// range and scroll do not (the editor reveals the cursor instead).
     pub fn vscode_web_path(&self) -> Option<String> {
         let folder = self.workspace.as_ref()?.folder.as_deref()?;
@@ -260,7 +260,7 @@ pub enum Inbound {
 }
 
 impl Inbound {
-    /// The usable message, if any — including a best-effort decode across a version skew.
+    /// The usable message, if any, including a best-effort decode across a version skew.
     pub fn message(&self) -> Option<&BridgeMessage> {
         match self {
             Inbound::Message(m) => Some(m),

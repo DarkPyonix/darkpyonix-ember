@@ -508,7 +508,7 @@ async fn namespace_operations_for_the_mount() {
     assert_eq!(s.size, 8);
     assert_eq!(std::fs::read(root.join("a/f.txt")).unwrap(), b"hello\0\0\0");
 
-    // symlink / readlink / lstat: the link itself, never followed — even when it points outside.
+    // symlink / readlink / lstat: the link itself, never followed, even when it points outside.
     std::fs::write(f.outside.join("secret"), "s3cret").unwrap();
     let s = c.symlink(root.join("a/out"), f.outside.join("secret")).await.unwrap();
     assert_eq!(s.kind, FileKind::Symlink);

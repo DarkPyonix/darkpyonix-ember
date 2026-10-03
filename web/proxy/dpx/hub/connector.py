@@ -1,4 +1,4 @@
-"""The DarkPyonix connector — runs on each machine and reports itself to the hub.
+"""The DarkPyonix connector: runs on each machine and reports itself to the hub.
 
 Why outbound
 ------------

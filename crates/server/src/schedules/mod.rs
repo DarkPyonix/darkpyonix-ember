@@ -7,7 +7,7 @@
 //! are recorded in `schedule_runs` (status, session, started/finished, error) and pushed.
 //!
 //! The [`Scheduler`] keeps each schedule's next planned trigger in the store. A trigger found
-//! more than [`GRACE_MS`] in the past — the server was down, or asleep — is not silently run:
+//! more than [`GRACE_MS`] in the past (the server was down, or asleep) is not silently run:
 //! it is recorded as `missed`, with a notice (in the target session for `continue` schedules, and
 //! always as a pushed `missed` run). With `catch_up: true` only the latest missed trigger is run;
 //! the earlier ones stay `missed`. Never more than one run per schedule per tick.

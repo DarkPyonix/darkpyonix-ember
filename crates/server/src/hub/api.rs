@@ -1,8 +1,8 @@
 //! HTTP API for the hub integration (FR-N2), in two routers:
 //!
-//! - [`router`] — reading the status and the account's devices, and adding one as a computer.
+//! - [`router`]: reading the status and the account's devices, and adding one as a computer.
 //!   Served like `/api/v1/computers` (TCP and, to allowed devices, the transport).
-//! - [`admin_router`] — everything else. **Local only**: `main.rs` merges it into the TCP
+//! - [`admin_router`]: everything else. **Local only**: `main.rs` merges it into the TCP
 //!   listener's app, never into the app served over the transport (like device management: a
 //!   device must not be able to (de)register the server, let devices into the account or
 //!   remove them).

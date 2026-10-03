@@ -9,12 +9,12 @@ Design notes
   its own process with main.py reverse-proxying `/auth/*` (or validating against a shared
   SQLite file).
 - Storage is a **shared SQLite file** in the app folder (`darkpyonix.db`). The main.py gate
-  calls `validate_session()` directly, in-process — the shared-SQLite coupling, which is the
+  calls `validate_session()` directly, in-process: the shared-SQLite coupling, which is the
   recommended starting point.
 - Passwords are stored as stdlib `pbkdf2_hmac` hashes (no external dependency, 200k rounds).
 - WARNING: **no default account is seeded.** An account is created only on a first run where
   both `DPX_USERNAME` and `DPX_PASSWORD` are given. How accounts should be issued is
-  **undecided** — see docs/BACKGROUND.md §7-2.
+  **undecided** (see docs/BACKGROUND.md §7-2).
 - The `users` table supports multiple users, but **there is no per-user file isolation**. An
   account is less an identity than one of several entry passes: whoever logs in sees the files
   of the OS account that started the server.
@@ -69,7 +69,7 @@ def init_db() -> None:
     `DPX_PASSWORD` are given. Without them the server starts with no accounts and nobody can
     log in, which means no workspace opens. main.py logs that fact, and the fix, at startup.
 
-    How accounts should be created is **still undecided** — see docs/BACKGROUND.md §7-2.
+    How accounts should be created is **still undecided** (see docs/BACKGROUND.md §7-2).
     """
     with _conn() as c:
         c.execute("CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, pw_hash TEXT NOT NULL, created REAL)")

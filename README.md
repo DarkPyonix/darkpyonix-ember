@@ -1,7 +1,7 @@
 # darkpyonix-ember
 
 **One AI, many computers.** Ember is a multi-provider, LLM-based development environment and
-remote IDE. Your coding agents — Claude Code, Codex, Antigravity, OMP — run on one main server
+remote IDE. Your coding agents (Claude Code, Codex, Antigravity, OMP) run on one main server
 that keeps every conversation, and do their work on whichever of your computers the task needs,
 moving between them as they go.
 
@@ -16,14 +16,14 @@ Three frictions from day-to-day agentic development:
 
 - **Conversations are stuck on the computer that started them.** A CLI agent writes its transcript
   to local disk; moving work to another computer means abandoning the conversation. Ember keeps
-  all conversations on **one main server** — a Raspberry Pi or Mac mini — so a conversation is no
+  all conversations on **one main server** (a Raspberry Pi or Mac mini), so a conversation is no
   longer tied to a computer.
 - **Agents from different vendors can't talk.** Claude and Codex can only coordinate through a
   shared file, and even two Claude sessions can't talk across computers or accounts. Ember gives
   agents **a direct channel to each other**, across models, computers and accounts.
 - **A remote computer's view of the network is hard to borrow.** Ember opens **a browser that
   egresses from the chosen computer**, with its IP, while cookies and logins stay on the main
-  server — one browser identity, many vantage points. Agents can drive it too.
+  server: one browser identity, many vantage points. Agents can drive it too.
 
 A project is a company; its computers are branch offices. The agent works for the company, and
 goes to whichever office the work needs.
@@ -38,8 +38,8 @@ goes to whichever office the work needs.
 2. Open a conversation. The agent is running on the main server; its tools act on the session's
    current computer. Send messages, approve tool calls, switch the computer, or let it talk to
    another agent.
-3. Need to look at code? **"Open IDE"** (top right) launches Ember's IDE window — VS Code Web,
-   wrapped — or VS Code, or JetBrains Gateway, on that project and computer.
+3. Need to look at code? **"Open IDE"** (top right) launches Ember's IDE window (VS Code Web,
+   wrapped), or VS Code, or JetBrains Gateway, on that project and computer.
 4. Close the client. The sessions keep running on the main server. Open it again on a phone or
    another computer and pick up where you left off.
 
@@ -53,7 +53,7 @@ demand.
 A **main server** runs **ember server**: it runs the agent CLIs headless, stores transcripts, accounts and browser profiles,
 and brokers agent-to-agent messages. Each **computer** runs **ember node**, a thin execution daemon that performs
 tool actions (files, commands, browser egress) for whichever sessions are using it. The **client**
-— launcher and conversation screens on `dioxus-compose`, with no webview — talks to the main
+(launcher and conversation screens on `dioxus-compose`, with no webview) talks to the main
 server; the **IDE window** is VS Code Web wrapped by `web/proxy/`. Everything connects peer to peer,
 with `darkpyonix.dev` coordinating hole punching. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -63,7 +63,7 @@ with `darkpyonix.dev` coordinating hole punching. See [`docs/ARCHITECTURE.md`](d
 
 | Component | What it is |
 | --------- | ---------- |
-| **ember** | The multiplatform client and agent environment described above. Its IDE window uses VS Code's `serve-web`, or — on Android and iOS, without Node — a `serve-web`-compatible Rust backend or direct web-API access. |
+| **ember** | The multiplatform client and agent environment described above. Its IDE window uses VS Code's `serve-web`, or (on Android and iOS, without Node) a `serve-web`-compatible Rust backend or direct web-API access. |
 | **vscode-darkpyonix** | VS Code extension rendering DarkPyonix notebooks (`.py`, `.pynb`). Installed by default. |
 | **vscode-darkpyonix-theme** | VS Code theme in the DarkPyonix Ember (phoenix) design language. Installed by default. |
 | **intellij-darkpyonix** | IntelliJ / PyCharm plugin rendering DarkPyonix notebooks. Installed by default. |
@@ -81,7 +81,7 @@ Design stage, with one working piece.
 | Native client (dioxus-compose) | Specified (§L); depends on `dioxus-compose` |
 | Networking (P2P, `darkpyonix.dev` relay) | Specified (§N); transport not chosen |
 | Remote and agent browser | Specified (§R), not implemented |
-| IDE window wrapping layer | **Working** in [`web/proxy/`](web/proxy/README.md) — VS Code Web on tablets and phones |
+| IDE window wrapping layer | **Working** in [`web/proxy/`](web/proxy/README.md): VS Code Web on tablets and phones |
 | Compose-native editor core | Long-term, not committed (§E) |
 
 ---
@@ -103,9 +103,9 @@ Reasons, sources and the decisions behind them: [`docs/INTENT.md`](docs/INTENT.m
 
 ## 🔗 Related repositories
 
-- **[dioxus-compose](https://github.com/DarkPyonix/dioxus-compose)** — the native GUI stack the
+- **[dioxus-compose](https://github.com/DarkPyonix/dioxus-compose)**: the native GUI stack the
   client is built on. Its non-negotiables apply unchanged to Ember's client.
-- **[darkpyonix-core](https://github.com/DarkPyonix/darkpyonix)** (GitHub: `DarkPyonix/darkpyonix`) — the DarkPyonix kernel, manager and hub, with their API contracts
+- **[darkpyonix-core](https://github.com/DarkPyonix/darkpyonix)** (GitHub: `DarkPyonix/darkpyonix`): the DarkPyonix kernel, manager and hub, with their API contracts
   (`docs/PROTOCOL.md`, `docs/api/`, `docs/FORMAT.md`). Ember links to these rather than redefining
   them.
 
@@ -125,9 +125,9 @@ darkpyonix-ember/
 │  ├─ BACKGROUND.md      how the 09-22 VS Code design was reached
 │  └─ design/            design material (INTEGRATION.md, decks)
 ├─ crates/
-│  └─ server/            ember server (Rust) — main server: agents, sessions, push
+│  └─ server/            ember server (Rust), main server: agents, sessions, push
 ├─ web/
-│  └─ proxy/             the IDE window wrapping layer (Python, FastAPI) — working
+│  └─ proxy/             the IDE window wrapping layer (Python, FastAPI), working
 ├─ extensions/          editor extensions: vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
 └─ LICENSE
 ```

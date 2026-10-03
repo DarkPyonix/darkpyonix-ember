@@ -118,7 +118,7 @@ fn match_from(p: &[char], s: &[char]) -> bool {
     }
     match p[0] {
         '*' if p.get(1) == Some(&'*') => {
-            // `**` — also swallow a following `/` so `**/x` matches `x` at the top level.
+            // `**`: also swallow a following `/` so `**/x` matches `x` at the top level.
             let rest = if p.get(2) == Some(&'/') { &p[3..] } else { &p[2..] };
             (0..=s.len()).any(|i| match_from(rest, &s[i..]))
         }

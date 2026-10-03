@@ -1,4 +1,4 @@
-# Hub integration — Ember on darkpyonix.dev (FR-N2)
+# Hub integration: Ember on darkpyonix.dev (FR-N2)
 
 Status: **implemented, not compiled yet** (written without running cargo). Contract:
 `darkpyonix-core` `docs/api/hub.openapi.yaml` (info v0.3.0) and SPEC FR-H1, FR-H8–H11,
@@ -160,14 +160,14 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
 
 ## Tests (not run yet)
 
-- `crates/hub/tests/link_flow.rs` — approve in browser, claim once (with a resolve token), re-link
+- `crates/hub/tests/link_flow.rs`: approve in browser, claim once (with a resolve token), re-link
   refused; the main server approves computer and client links, a computer cannot, a
   `main_server` link needs the browser; deny, expiry, wrong-key proof, malformed request; resume
   by link id after a restart (pending, claimed, denied, unknown); a removed key rejoins only after
   readmission approved in the browser, as the same device row.
-- `crates/hub/tests/revocation.rs` — watch sees `Revoked` after removal, stops; unreachable ≠ revoked;
+- `crates/hub/tests/revocation.rs`: watch sees `Revoked` after removal, stops; unreachable ≠ revoked;
   a removed device gets `DeviceRemoved`, a bogus token `InvalidCredentials`.
-- `crates/hub/tests/config_longpoll.rs` — `/v1/config` discovery (relays, pkarr, explicit relay kept);
+- `crates/hub/tests/config_longpoll.rs`: `/v1/config` discovery (relays, pkarr, explicit relay kept);
   fallback on `404` and when unreachable; weak `ETag` → `304`, held `304` at `wait`, `200` on
   change (online bumps the version); `wait=26` is `400`; long-poll returns within ~0.2 s of a
   change; `watch_registration_with` sees a removal within 1.5 s with a one-hour period; polling
@@ -176,11 +176,11 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
   token in `/pkarr?token=` is refused and a resolve token accepted, an old registration gets one
   (rotation revokes the previous); rename, app (own token only), client without account rights,
   self-removal.
-- `crates/hub/tests/directory.rs` — two real (iroh) endpoints on localhost publish to the fake hub's
+- `crates/hub/tests/directory.rs`: two real (iroh) endpoints on localhost publish to the fake hub's
   `/pkarr` and dial by peer id alone (resolving with resolve tokens); an unregistered endpoint is
   not stored, a tokenless one or one with a device token resolves nothing, the resolve token set
   at runtime works.
-- `crates/server/tests/hub.rs` — link via API (sealed token), add a computer from the device list and
+- `crates/server/tests/hub.rs`: link via API (sealed token), add a computer from the device list and
   reach it over the (fake) transport, approve a node's code, devices sync + revocation through
   it, revocation detected by `check`, by any hub call, and the watcher; the long-poll watcher
   (60 s period) syncs a new device and stops on removal within 2 s; a rejected token is not a
@@ -188,7 +188,7 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
   `main_server` code answers 403 with the browser link; leaving removes the server on the hub
   (`?local=1` does not); a link pending at restart is resumed; a removed server relinks after
   readmission; 503 when off.
-- `crates/node/tests/hub.rs` — `register` writes 0600 `hub.json` and configures the transport (and the
+- `crates/node/tests/hub.rs`: `register` writes 0600 `hub.json` and configures the transport (and the
   discovered relay, or the derived one when `/v1/config` is `404`), resolving with the resolve
   token, reporting its app; removal marks `revoked_at` and drops hub-admitted servers (through
   the long-poll); re-registering is refused until readmitted, then works; an old registration

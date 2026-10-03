@@ -1,11 +1,11 @@
-"""The auth gate — which paths are open without a session.
+"""The auth gate: which paths are open without a session.
 
 Every request bound for serve-web (the workspace editor, its assets and its WebSocket)
 requires a valid session. This replaces VS Code's connection token.
 
 The only public paths are the login page, the auth API, health, and the injected assets (overlay, kb, detach).
 Home (`/`) and `/__workspaces` need a session too, because home shows the machine's folder
-paths and conversation previews — they used to be public, which meant all of it was visible
+paths and conversation previews. They used to be public, which meant all of it was visible
 before signing in.
 
 The middleware in the root `main.py` is what actually calls this.

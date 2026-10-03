@@ -23,7 +23,7 @@ EXT_STATE = {"last_ping": 0.0, "enabled": False}
 
 
 def active() -> bool:
-    """Is the extension alive right now — that is, may we alter the screen?"""
+    """Is the extension alive right now, that is, may we alter the screen?"""
     return EXT_STATE["enabled"] and (time.monotonic() - EXT_STATE["last_ping"]) < EXT_TTL_SECONDS
 
 

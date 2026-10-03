@@ -1,18 +1,18 @@
 //! Remote browser and agent browser use (SPEC §R, INTENT D6).
 //!
-//! One headless Chromium per project runs on the ember server. Its profile directory — cookies,
-//! storage, logins, history — lives under `<data dir>/browser/<project>/profile` (FR-R2) and can be
+//! One headless Chromium per project runs on the ember server. Its profile directory (cookies,
+//! storage, logins, history) lives under `<data dir>/browser/<project>/profile` (FR-R2) and can be
 //! wiped per project (FR-R4). Network egress is chosen per project (FR-R1, [`egress::Egress`]):
-//! direct, a configured proxy URL, or a registered computer — whose ember node's SOCKS5 exit
+//! direct, a configured proxy URL, or a registered computer, whose ember node's SOCKS5 exit
 //! (`/v1/egress`) is reached through a loopback listener in this server
 //! ([`crate::computers::egress`]). The choice is persisted ([`egress::EgressStore`]) and survives
 //! restarts. Switching egress restarts Chrome on the same profile, so logins survive (FR-R2).
 //!
 //! Three ways in, all under `/api/v1/browsers/{project}` (see [`api`] and
 //! `docs/design/REMOTE-BROWSER.md`):
-//! - **view** — a WebSocket carrying JPEG screencast frames out and pointer/keyboard input in
+//! - **view**: a WebSocket carrying JPEG screencast frames out and pointer/keyboard input in
 //!   (no webview in the client, E1);
-//! - **cdp** — a DevTools-protocol WebSocket relay for agents' browser MCP servers (FR-R3), which
+//! - **cdp**: a DevTools-protocol WebSocket relay for agents' browser MCP servers (FR-R3), which
 //!   also drives the "agent is active" flag and pauses the agent while the user has taken over;
 //! - plain HTTP for open / egress / clear / input.
 
@@ -193,7 +193,7 @@ impl BrowserManager {
         out
     }
 
-    /// Delete the project's profile — cookies, storage, history (FR-R4). A running browser is
+    /// Delete the project's profile: cookies, storage, history (FR-R4). A running browser is
     /// restarted on the empty profile with the same egress.
     pub async fn clear_data(&self, project: &str) -> anyhow::Result<()> {
         let b = self.instance(project).await?;
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(store.load("acme").unwrap(), None);
     }
 
-    /// Without Chrome, starting fails — and a computer that cannot be resolved is an error, not a
+    /// Without Chrome, starting fails, and a computer that cannot be resolved is an error, not a
     /// silent fallback to the server's own network.
     #[tokio::test]
     async fn unresolvable_computer_is_an_error() {

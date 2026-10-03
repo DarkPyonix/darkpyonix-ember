@@ -47,7 +47,7 @@ use crate::Error;
 /// How to reach the server and which workspace to open.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
-    /// `host:port` — the HTTP `Host` header for the upgrade requests.
+    /// `host:port`: the HTTP `Host` header for the upgrade requests.
     pub host: String,
     /// The remote authority the server's URI transformers key on. Every file URI is
     /// `vscode-remote://<remote_authority><path>`. Usually equal to `host`.

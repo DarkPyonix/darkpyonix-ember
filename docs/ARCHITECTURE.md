@@ -1,4 +1,4 @@
-# ARCHITECTURE.md — DarkPyonix Ember
+# ARCHITECTURE.md: DarkPyonix Ember
 
 > **Revised 2026-10-03.** §1 is new and follows `INTENT.md`'s main-server model. §2 onwards is the
 > 09-22 material, unchanged in substance, and now describes **the IDE window only**. The whole
@@ -22,11 +22,11 @@
   ┌──────────────────────────┐   P2P    │   ┌────────────────────────┴───────────────────────┐   │   ┌──────────────────────────┐
   │ Client (desktop / phone)  │◀────────┴──▶│              MAIN SERVER                          │◀──┴──▶│ Computer A (e.g. Mac)       │
   │                            │  PR-1 push   │   (personal Raspberry Pi or Mac mini)              │  P2P   │  ember node (exec daemon)   │
-  │  launcher + conversations  │             │                                                     │        │  — file ops, search,         │
+  │  launcher + conversations  │             │                                                     │        │  - file ops, search,         │
   │  dioxus-compose, NO webview│             │  ┌───────────────┐  ┌───────────────────────┐  │        │    commands + PTY (FR-X1)    │
-  │  (E1)                       │             │  │ Agent CLIs      │  │ Session store           │  │        │  — background jobs (FR-X4)   │
-  │                            │             │  │ Claude Code ×n  │  │ transcripts (normalised │  │        │  — browser egress (FR-R1)    │
-  │  [Open IDE] ───────┐       │             │  │ Codex ×n        │  │  + native session files)│  │        │  — VS Code server for the    │
+  │  (E1)                       │             │  │ Agent CLIs      │  │ Session store           │  │        │  - background jobs (FR-X4)   │
+  │                            │             │  │ Claude Code ×n  │  │ transcripts (normalised │  │        │  - browser egress (FR-R1)    │
+  │  [Open IDE] ───────┐       │             │  │ Codex ×n        │  │  + native session files)│  │        │  - VS Code server for the    │
   └────────────────────┼──────┘             │  │ Antigravity ×n  │  │ accounts · computers     │  │        │    IDE window (§2)            │
                        │                      │  │ OMP ×n          │  │ projects · schedules     │  │        └──────────────────────────┘
                        ▼                      │  └───────┬───────┘  └───────────────────────┘  │
@@ -34,7 +34,7 @@
   │ IDE window                  │             │          ▼                                          │◀─────▶│ Computer B (e.g. Linux GPU) │
   │  Ember IDE: webview +        │             │  ┌───────────────────────────────────────────┐  │  P2P   │  ember node (exec daemon)   │
   │  VS Code Web via web/proxy/   │             │  │ Execution router: sends each tool action   │  │        └──────────────────────────┘
-  │  — or VS Code / Gateway       │             │  │ to the session's CURRENT computer (FR-X3)  │  │
+  │  - or VS Code / Gateway       │             │  │ to the session's CURRENT computer (FR-X3)  │  │
   │  (FR-L7, §W)                  │             │  └───────────────────────────────────────────┘  │
   └──────────────────────────┘             │  A2A broker (§T) · account/usage router (§U)       │
                                              │  remote-browser profiles (FR-R2) · MCP registry     │
@@ -89,7 +89,7 @@ topology as follows (`INTENT.md` D13, *[provisional]*):
 
 | `web/proxy/` part | Role in the target architecture |
 | ------------- | ------------------------------- |
-| `dpx/vscode/`, `static/overlay.*`, `static/frame.html`, `static/webview-kb.js` | The IDE window's wrapping layer (`FR-W2`) — kept |
+| `dpx/vscode/`, `static/overlay.*`, `static/frame.html`, `static/webview-kb.js` | The IDE window's wrapping layer (`FR-W2`), kept |
 | `dpx/agents/` (Claude Code / Codex transcript parsers) | Kept and moved to the main server, where the transcripts now are |
 | `dpx/auth/` | Login for the IDE window; superseded by device authentication (`FR-N3`) once M5 lands |
 | `static/home.html`, `dpx/home/` | Transitional web home; replaced by the native client (E1) |
@@ -125,8 +125,8 @@ backend; tests use the in-memory `MemNetwork`.
 
 Both daemons keep their TCP listener for local use (`ember-term`, the VS Code companion,
 loopback admin). Bearer tokens (node API) are kept as a second factor on top of the peer
-allow-list for now. How peers find each other beyond address hints — the `darkpyonix.dev`
-address directory and device registration under the user's account (`FR-N2`) — plugs into
+allow-list for now. How peers find each other beyond address hints (the `darkpyonix.dev`
+address directory and device registration under the user's account, `FR-N2`) plugs into
 `ember_transport::AddressDirectory` and is not built yet.
 
 ---
@@ -134,18 +134,18 @@ address directory and device registration under the user's account (`FR-N2`) —
 ## 2. The IDE window: what VS Code's own process model dictates
 
 > 09-22 material. "The server" below means **the computer that serves VS Code Web for an IDE
-> window** — under the 10-03 model, a project's computer, not the main server.
+> window**: under the 10-03 model, a project's computer, not the main server.
 
-This is the part of the architecture Ember does not get to design — it is a fact about VS Code,
+This is the part of the architecture Ember does not get to design. It is a fact about VS Code,
 and Ember's job is to model it accurately, not to wish it were simpler. VS Code's own multi-process
 architecture, running server-side under `--serve-web` (or equivalently under `code-server`), is:
 
 | VS Code's own process | Role | Can Ember substitute it? |
 | ---------------------- | ---- | -------------------------- |
 | **Extension Host** (`LocalProcess` kind: a Node.js child process) | Loads and runs marketplace extension code; exposes the VS Code Extension API (`vscode.*`) to it | **No.** This is `E2`/`D2`, unconditional. See `IMPLEMENTATION.md` §1. |
-| **Renderer / Workbench** | In desktop VS Code, an Electron renderer process painting the UI. Under `--serve-web`, this is the JS/CSS bundle that loads *inside the browser/webview*, i.e., inside Ember's editor window's webview. | This is the piece D6/M6 eventually targets for a Compose-native replacement — but not before M6, and even then category-3 (webview-panel) extensions still need *something* webview-shaped. See `IMPLEMENTATION.md` §3–5. |
+| **Renderer / Workbench** | In desktop VS Code, an Electron renderer process painting the UI. Under `--serve-web`, this is the JS/CSS bundle that loads *inside the browser/webview*, i.e., inside Ember's editor window's webview. | This is the piece D6/M6 eventually targets for a Compose-native replacement, but not before M6, and even then category-3 (webview-panel) extensions still need *something* webview-shaped. See `IMPLEMENTATION.md` §3–5. |
 | **Language servers / debug adapters** | Separate processes already, communicating over stdio with JSON (LSP/DAP) | Already decoupled from VS Code core by design upstream; Ember does not need to do anything special here beyond making sure the server host can spawn them, which `--serve-web` already handles. |
-| **Pty Host** | Manages integrated terminal instances | Same as above — already its own process upstream; not a substitution question for Ember. |
+| **Pty Host** | Manages integrated terminal instances | Same as above: already its own process upstream; not a substitution question for Ember. |
 | **Shared Process** | Background tasks: storage, telemetry | Not user-visible; not a target for substitution. |
 | **Static asset serving** (part of what `--serve-web` bundles together) | Serves the Workbench's HTML/JS/CSS payload to whatever's loading it | **Candidate for substitution.** This is `PROJECT.md` Q1/Q2: whether this can be split from the Extension-Host-owning process cleanly enough for a Rust/Python layer to front it (caching, local serving) without touching anything Extension-Host-related. Tracked in `IMPLEMENTATION.md` §2 as `IMPL-1`. |
 
@@ -169,10 +169,10 @@ API, not a generic transport:
   `window.webkit.messageHandlers.<handler>.postMessage(payload)`; the native (Swift/ObjC, called
   from the Rust/Compose host) side registers a handler that receives it as a callback. Native→web
   push (`FR-B4`) goes through `WKWebView.evaluateJavaScript`.
-- **Windows:** `WebView2`. `postMessage`/`AddHostObjectToScript` — the latter exposes a COM host
+- **Windows:** `WebView2`. `postMessage`/`AddHostObjectToScript`; the latter exposes a COM host
   object whose methods JS can call close to directly, which is the closest available approximation
   to a synchronous call on this platform.
-- **Common abstraction:** a Rust trait (`WebviewBridge` or equivalent — naming TBD at
+- **Common abstraction:** a Rust trait (`WebviewBridge` or equivalent, naming TBD at
   implementation time) with `send_to_native(payload)` / `send_to_webview(payload)`, implemented
   per-platform underneath, so `FR-B1`–`FR-B4` are specified and tested once against the trait, not
   once per platform.
@@ -206,7 +206,7 @@ crosses as a JSON string; `version` is per `kind` (`tab_detach`, `sibling_window
 `screen`, `label`, `editor` and `sentAtMs`; the WKWebView handler is named `emberBridge`, and
 native → webview pushes call `window.__emberBridge.receive(json)`.
 
-Schemas are versioned (`"version"`) from the start — per `FR-B2`'s acceptance criteria — because
+Schemas are versioned (`"version"`) from the start (per `FR-B2`'s acceptance criteria), because
 the launcher and any number of editor windows may be running builds that drifted by a release or
 two, and a silent schema mismatch is a worse failure mode than a logged, ignored, versioned one.
 

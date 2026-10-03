@@ -13,7 +13,7 @@
 //!   range.
 //! - **Changes made on the node by anything else** (the agent's Bash tool through `ember-exec`,
 //!   the user's editor) become visible after the TTL, or at once when [`RemoteFs::invalidate_all`]
-//!   is called — the `ember-exec` shim asks for that after every command (see
+//!   is called; the `ember-exec` shim asks for that after every command (see
 //!   `super::CtlSocket`). The node has no change feed yet.
 //! - **Every node call has a deadline** ([`CacheConfig::op_timeout`]); a call that misses it, or
 //!   cannot reach the node, fails with [`FsErr::TimedOut`] / [`FsErr::Unreachable`] (EIO /

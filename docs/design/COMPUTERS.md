@@ -16,7 +16,7 @@
 | Node bridge | `crates/node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
 | Browser egress | `crates/server/src/computers/egress.rs`, `crates/node/src/egress.rs` | Per computer, a loopback SOCKS5 listener (`socks5://127.0.0.1:<port>`) that a project's browser uses as `--proxy-server`; each connection becomes one node `/v1/egress` stream where the node runs SOCKS5 (FR-R1, see `REMOTE-BROWSER.md`). A computer that is some project's browser egress cannot be removed (409). |
 | Claude shim | `crates/server/src/computers/shim.rs`, `crates/server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/v1/exec` and carries the cwd back. |
-| Mount | `crates/server/src/computers/mount.rs` (+ `mount/`) | Mounts a Claude Code session's cwd from its node at the same path: `remote_fs.rs` (node-backed filesystem with caches), `nfs.rs` (loopback NFSv3, feature `mount-nfs`), `fuse.rs` (Linux FUSE, feature `mount-fuse`), `cmd.rs` (mount commands, mount point checks). **Written, not compiled or run** — see § Project mount. |
+| Mount | `crates/server/src/computers/mount.rs` (+ `mount/`) | Mounts a Claude Code session's cwd from its node at the same path: `remote_fs.rs` (node-backed filesystem with caches), `nfs.rs` (loopback NFSv3, feature `mount-nfs`), `fuse.rs` (Linux FUSE, feature `mount-fuse`), `cmd.rs` (mount commands, mount point checks). **Written, not compiled or run**; see § Project mount. |
 
 The local server is the implicit computer `local`. A session with no `session_computer` row
 behaves exactly as before this change: no environment block, nothing redirected.
@@ -32,7 +32,7 @@ behaves exactly as before this change: no environment block, nothing redirected.
 3. If the session's agent has already run (it has a native id), queues a notice: the computer
    changed and earlier file contents, listings and command output must be re-read / re-run.
 4. Releases the agent process. The next message starts it again (native resume) with:
-   - the **environment block** built from `/v1/env` as system-level instructions — Claude Code
+   - the **environment block** built from `/v1/env` as system-level instructions: Claude Code
      `--append-system-prompt=…`, Codex `developerInstructions` on `thread/start`/`thread/resume`.
      It is contributed by an instructions hook (`Sessions::add_instructions_hook`), joined with
      the other hooks' instructions (A2A, …). Because hooks run at every process start, a switch
@@ -47,7 +47,7 @@ Switching to the computer a session is already on is a no-op (`changed: false`).
 
 ## Per agent
 
-**Codex — tools run on the node (shell, unified exec, PTY, apply_patch file ops [U]).**
+**Codex: tools run on the node (shell, unified exec, PTY, apply_patch file ops [U]).**
 The start request carries `RemoteExec {environment_id: "ember-<computer id>", exec_server_url}`.
 The adapter then sends `initialize` with `capabilities: {experimentalApi: true,
 requestAttestation: false}`, `environment/add {environmentId, execServerUrl}`, `thread/start`
@@ -55,7 +55,7 @@ with `environments: [{environmentId, cwd}]`, and `environments` again on every `
 (`thread/resume` has no such field). The app-server process starts in the temp directory when
 the project path does not exist on the server.
 
-**Claude Code — Bash runs on the node; file tools go through the project mount.**
+**Claude Code: Bash runs on the node; file tools go through the project mount.**
 Environment: `CLAUDE_CODE_SHELL_PREFIX=<abs path of ember-exec>`, `EMBER_EXEC_NODE_URL`,
 `EMBER_EXEC_NODE_TOKEN`, `EMBER_EXEC_REMOTE_SHELL` (the node's `$SHELL`), and with the mount
 enabled `EMBER_MOUNT_CTL`. Read / Edit / Write / Glob / Grep operate on the server's disk, where

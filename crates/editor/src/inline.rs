@@ -6,7 +6,7 @@
 //!   `IdentifiableInlineCompletions | undefined` = `{ pid, languageId, items: [{ insertText:
 //!   string | { snippet }, range?: IRange, command?: ICommandDto, additionalTextEdits?, idx, … }] }`.
 //! * `$handleInlineCompletionDidShow(handle, pid, idx, updatedInsertText)` when an item is shown,
-//!   `$handleInlineCompletionEndOfLifetime(handle, pid, idx, reason)` when it goes away — only if
+//!   `$handleInlineCompletionEndOfLifetime(handle, pid, idx, reason)` when it goes away, only if
 //!   the provider registered with `supportsHandleEvents` (`mainThreadLanguageFeatures.ts`
 //!   L1383-1420).
 //! * `$freeInlineCompletionsList(handle, pid, { kind })` for every list once it is no longer used
@@ -28,8 +28,8 @@
 //! Typing through: if the user types exactly the next characters of the ghost, the ghost shrinks
 //! and stays. Typing anything else ends it (`Ignored`, `userTypingDisagreed: true`).
 //!
-//! Acceptance (FR-38 §38.4): on Tab the widget itself inserts the ghost text — a `CodeChanged`
-//! that looks like typing the whole ghost — and then sends `DecorationActivated(ghost id)` in the
+//! Acceptance (FR-38 §38.4): on Tab the widget itself inserts the ghost text (a `CodeChanged`
+//! that looks like typing the whole ghost) and then sends `DecorationActivated(ghost id)` in the
 //! same frame. So a fully typed-through ghost is parked as "just completed" until the next event:
 //! an activation for its id makes it `Accepted`; anything else makes it `Ignored`. If an activation
 //! arrives while the ghost text is still pending (a widget that does not insert), the session

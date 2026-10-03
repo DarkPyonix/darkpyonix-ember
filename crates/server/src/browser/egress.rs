@@ -1,6 +1,6 @@
 //! A project's browser egress choice (FR-R1), and keeping it across server restarts.
 //!
-//! The choice is what the user picked — direct, a proxy URL, or a registered computer — not the
+//! The choice is what the user picked (direct, a proxy URL, or a registered computer), not the
 //! proxy URL Chrome is started with: a computer resolves to a loopback SOCKS5 listener in this
 //! process ([`crate::computers::egress`]) whose port changes on every server start, so the
 //! computer id is what is stored and it is resolved again each time Chrome starts.

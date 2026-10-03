@@ -1,13 +1,13 @@
-"""`python -m dpx.serve` — one non-interactive entry for the IDE window on a computer.
+"""`python -m dpx.serve`: one non-interactive entry for the IDE window on a computer.
 
 Runs next to ember node on each computer (SPEC `FR-W1`, `FR-W4`):
 
-    1. checks the chosen runtime — OSE (default, `DPX_OSE_SERVER`) or VSC (`code`), see
+    1. checks the chosen runtime: OSE (default, `DPX_OSE_SERVER`) or VSC (`code`), see
        dpx/vscode/runtime.py; missing → prints the not-installed status with install
        guidance as JSON and exits 3
     2. installs the default extensions (FR-W6) into the server's data dir, once
     3. starts the VS Code web server (OSE's REH web server, or `code serve-web`) on a free
-       loopback port — never exposed directly; the proxy's login replaces its token
+       loopback port, never exposed directly; the proxy's login replaces its token
     4. starts the proxy (uvicorn main:app) in front of it, with folder roots enforced
     5. prints one JSON line `{"event": "ready", "url": …}` on stdout (and to
        `--announce-file` if given), then supervises both until a signal or until either dies

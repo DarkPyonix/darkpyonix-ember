@@ -9,7 +9,7 @@
 //!   logs instead of dropping (FR-B2).
 //! - [`bridge`]: the [`WebviewBridge`] trait every platform implements, plus a
 //!   [`LoopbackBridge`] for tests. No platform webview implementation lives here yet.
-//! - [`host`]: what the native host does with a message — turns a `tab_detach` into an
+//! - [`host`]: what the native host does with a message: it turns a `tab_detach` into an
 //!   `open_window` request for a [`WindowOpener`] (FR-B3) and pushes
 //!   `sibling_window_closed` back into webviews (FR-B4).
 //!

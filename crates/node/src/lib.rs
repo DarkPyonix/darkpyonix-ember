@@ -1,4 +1,4 @@
-//! ember node — the execution daemon that runs on each computer (`docs/SPEC.md` §X).
+//! ember node: the execution daemon that runs on each computer (`docs/SPEC.md` §X).
 //!
 //! It carries out tool actions for sessions whose agents run on ember server: file operations,
 //! search, commands (with pipes or a PTY) and background jobs, and describes its environment.
@@ -12,12 +12,12 @@
 //!   address directory and relay (SPEC `FR-N2`).
 //! - [`client`]: the typed client ember server uses, over HTTP or the transport.
 //! - [`proto`]: wire types shared by both.
-//! - [`term`]: persistent terminal sessions (SPEC §P) — owned by the daemon, attachable by many
+//! - [`term`]: persistent terminal sessions (SPEC §P), owned by the daemon, attachable by many
 //!   clients, with a terminal model for redraw on attach; the `ember-term` binary
 //!   (`src/bin/ember-term.rs`) attaches a local terminal (e.g. VS Code's) to one.
 //!
 //! Known limits: jobs live in the daemon's memory and do not survive a daemon restart (terminal
-//! sessions do, best effort, through their PTY keepers — see [`term`]); the path
+//! sessions do, best effort, through their PTY keepers; see [`term`]); the path
 //! policy confines the file API and working directories, not what a command does.
 //! - [`egress`]: the SOCKS5 exit for the remote browser (FR-R1), served as `/v1/egress` (one
 //!   WebSocket per proxied TCP connection) and optionally as a plain SOCKS5 listener.

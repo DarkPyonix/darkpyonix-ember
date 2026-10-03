@@ -1,4 +1,4 @@
-"""`/__terms/*` — ember node's persistent terminal sessions, relayed for the browser.
+"""`/__terms/*`: ember node's persistent terminal sessions, relayed for the browser.
 
 | Method | Path                          | ember node                          |
 |--------|-------------------------------|-------------------------------------|

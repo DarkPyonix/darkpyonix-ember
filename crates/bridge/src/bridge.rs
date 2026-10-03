@@ -7,8 +7,8 @@
 //! | webview → native     | `WKScriptMessageHandler` named [`crate::HANDLER_NAME`] | `WebMessageReceived` (`TryGetWebMessageAsString`) |
 //! | native → webview     | `evaluateJavaScript("window.__emberBridge.receive(<json>)")` | `PostWebMessageAsString` (detach.js listens on `chrome.webview`) |
 //!
-//! `send_to_native` exists on the trait (not only in JS) so a non-webview editor surface —
-//! the Ember editor core — can speak the same protocol, and so FR-B1–B4 are tested once
+//! `send_to_native` exists on the trait (not only in JS) so a non-webview editor surface
+//! (the Ember editor core) can speak the same protocol, and so FR-B1–B4 are tested once
 //! against the trait with [`LoopbackBridge`].
 
 use std::sync::atomic::{AtomicBool, Ordering};

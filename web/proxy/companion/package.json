@@ -127,7 +127,7 @@
         "ember.debug.debugpyPath": {
           "type": "string",
           "default": "",
-          "description": "Directory containing the debugpy package on the workspace computer (e.g. the Python Debugger extension's bundled/libs). Empty: debugpy must be importable by the configuration's interpreter (pip install debugpy)."
+          "description": "Directory containing the debugpy package on the workspace computer (e.g. the Python Debugger extension's bundled/libs). Empty: debugpy must be importable by the configuration's interpreter (e.g. `uv add debugpy`)."
         }
       }
     }

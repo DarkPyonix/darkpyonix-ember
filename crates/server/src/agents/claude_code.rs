@@ -232,12 +232,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
     ) -> anyhow::Result<Box<dyn AgentRun>> {
         // On another computer, Bash runs there through the `ember-exec` shim and Read/Edit/
         // Write/Glob/Grep use this server's disk, where the project mount
-        // (`crate::computers::mount`) has put the node's directory at the same path — when a
+        // (`crate::computers::mount`) has put the node's directory at the same path when a
         // mount mechanism is enabled; otherwise the path must exist here as well.
         anyhow::ensure!(
             req.cwd.is_dir(),
             "working directory {} does not exist on the ember server (on another computer it is \
-             mounted here when the project mount is enabled — see EMBER_MOUNT)",
+             mounted here when the project mount is enabled; see EMBER_MOUNT)",
             req.cwd.display()
         );
         // MCP servers with environment (FR-A7): the config goes into a private file that lives

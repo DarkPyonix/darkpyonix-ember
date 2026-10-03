@@ -92,7 +92,7 @@ for word; user documents in 합니다체, internal documents in 한다체.
 - **No em-dash (U+2014)** in documents or code (comments, doc strings, strings), because the user
   ruled it out (2026-10-03). Use a comma, a colon or parentheses, or split the sentence. An en-dash
   in a numeric range is fine. `scripts/check-no-em-dash.sh` enforces it in CI; recorded data
-  (`.json`, `.jsonl`) is exempt.
+  (`.json`, `.jsonl` and test fixtures captured from real CLIs) is exempt.
 - **Install and run examples use uv, ppp (pypackpack) and tcl (toolchain-lite) only**, never
   `pip install`, because those are the toolchains the user supports (2026-10-03). Rust examples use
   cargo; Node examples stay as they are.

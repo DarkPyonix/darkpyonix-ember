@@ -222,7 +222,7 @@ class AgentAdapter:
         """
         return None
 
-    # The default implementation, grouped by folder — adapters need not override it
+    # The default implementation, grouped by folder; adapters need not override it
     def workspaces(self) -> list[Workspace]:
         by_folder: dict[str, Workspace] = {}
         for conv in self.conversations():

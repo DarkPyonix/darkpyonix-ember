@@ -2,7 +2,7 @@
 //!
 //! A session exists in the store whether or not its agent process is running. The process is
 //! started (or natively resumed) on the first message after the server starts or the session went
-//! idle, and every event it emits is stored before it is pushed — so clients can come and go
+//! idle, and every event it emits is stored before it is pushed, so clients can come and go
 //! without affecting the turn.
 
 use std::collections::HashMap;
@@ -106,13 +106,13 @@ pub type AccountRouter =
 pub type InstructionsHook = Arc<dyn Fn(&SessionRecord) -> Option<String> + Send + Sync>;
 
 /// Adjusts the whole start request of an agent process (computer switching: remote executor,
-/// shell shim — `crate::computers`). Runs after the start and instructions hooks; an error fails
+/// shell shim; see `crate::computers`). Runs after the start and instructions hooks; an error fails
 /// the start rather than silently running the agent somewhere else.
 pub type StartConfigHook =
     Arc<dyn Fn(&SessionRecord, &mut StartRequest) -> anyhow::Result<()> + Send + Sync>;
 
 /// Prepares what an agent process needs before it starts and may take time doing it (the
-/// project mount for a Claude Code session on another computer — `crate::computers::mount`).
+/// project mount for a Claude Code session on another computer; see `crate::computers::mount`).
 /// Awaited before the start-config hooks; an error fails the start.
 pub type PrepareHook = Arc<
     dyn Fn(SessionRecord) -> futures::future::BoxFuture<'static, anyhow::Result<()>> + Send + Sync,

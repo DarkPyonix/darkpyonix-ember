@@ -105,7 +105,7 @@ impl Client {
         Ok(Self::with_api(config, api).await)
     }
 
-    /// Like [`Client::new`], with a ready [`Api`] — e.g. [`Api::over_transport`] to reach the
+    /// Like [`Client::new`], with a ready [`Api`], e.g. [`Api::over_transport`] to reach the
     /// server over the peer-to-peer transport. `config.base_url` is then unused.
     pub async fn with_api(config: ClientConfig, api: Api) -> Client {
         let state = match &config.cache_path {

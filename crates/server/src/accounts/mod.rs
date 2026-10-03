@@ -8,7 +8,7 @@
 //!
 //! Each account is a directory under `<data dir>/accounts/<id>` (mode `0700`) that the agent CLI
 //! is pointed at through its own, documented configuration-root variable. Everything the CLI keeps
-//! per user — credentials, settings, native session files — then lives there, so two accounts of
+//! per user (credentials, settings, native session files) then lives there, so two accounts of
 //! one agent never share credentials or settings, and the vendor binary is unchanged.
 //!
 //! | Agent | Variable | Sources | Verified (2026-10-03) |

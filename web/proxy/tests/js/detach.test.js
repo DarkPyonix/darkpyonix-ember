@@ -1,4 +1,4 @@
-// Unit tests for static/detach.js — plain node, no npm install:
+// Unit tests for static/detach.js, plain node, no npm install:
 //
 //   node web/proxy/tests/js/detach.test.js        (or: node --test web/proxy/tests/js/)
 //

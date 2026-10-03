@@ -2,7 +2,7 @@
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DarkPyonix — 홈</title>
+<title>DarkPyonix · 홈</title>
 <script>(function(){try{document.documentElement.setAttribute('data-xtheme',localStorage.getItem('xmo_theme')||'sepia');}catch(e){document.documentElement.setAttribute('data-xtheme','sepia');}})();</script>
 <style>
 /* 팔레트는 기존 홈/로그인 화면과 동일한 3테마(라이트/세피아/다크)를 그대로 쓴다.
@@ -83,7 +83,7 @@ code{ font-family:ui-monospace,Consolas,monospace; background:var(--chip); borde
 'use strict';
 
 // ---------------------------------------------------------------------------
-// 라우팅 (해시 기반 — 폰의 뒤로가기 버튼이 그대로 동작한다)
+// 라우팅 (해시 기반: 폰의 뒤로가기 버튼이 그대로 동작한다)
 //   #/                          컴퓨터 목록
 //   #/m/<mid>                   그 PC 의 워크스페이스 목록
 //   #/m/<mid>/w/<b64folder>     그 워크스페이스의 대화 목록
@@ -140,7 +140,7 @@ function machineCard(m){
   if(!m.online) chips.appendChild(el('span','chip','오프라인'));
   c.appendChild(chips);
 
-  // 이 PC 에서 가장 최근에 손댄 대화 두 줄 — 카드만 보고도 뭘 하다 말았는지 보이게.
+  // 이 PC 에서 가장 최근에 손댄 대화 두 줄: 카드만 보고도 뭘 하다 말았는지 보이게.
   var recent = [];
   (m.workspaces || []).forEach(function(w){ (w.recent || []).forEach(function(cv){ recent.push(cv); }); });
   recent.sort(function(x,y){ return (y.updated||0) - (x.updated||0); });
@@ -329,7 +329,7 @@ function jump(mid, folder, agent, cid){
     if(!d || !d.ok || !d.url){ toast((d && d.reason) || '열 수 있는 주소가 없습니다.'); return; }
     var cmd = d.resume && d.resume.command;
     if(cmd){
-      try { navigator.clipboard.writeText(cmd); toast('이어가기 명령을 복사했습니다 — 터미널에 붙여넣으세요'); }
+      try { navigator.clipboard.writeText(cmd); toast('이어가기 명령을 복사했습니다. 터미널에 붙여넣으세요'); }
       catch(e){ toast('이어가기 명령: ' + cmd); }
     }
     setTimeout(function(){ location.href = d.url; }, cmd ? 800 : 0);

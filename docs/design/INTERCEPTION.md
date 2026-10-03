@@ -75,8 +75,8 @@
 4. Option (a) needs ember node API additions: rename, remove, mkdir, symlink and readlink,
    setattr/chmod, and a batched stat/readdir to cut round trips. It also needs a change
    notification so the mount's cache can be invalidated. Option (c) needs a raw-stream bridge
-   endpoint. *(2026-10-03: the fs additions and the mount are written — `COMPUTERS.md` § Project
-   mount; the batched stat is covered by listings that carry attributes, and the change feed is
+   endpoint. *(2026-10-03: the fs additions and the mount are written (`COMPUTERS.md` § Project
+   mount); the batched stat is covered by listings that carry attributes, and the change feed is
    replaced for now by a 1 s TTL plus an invalidation from `ember-exec` after each command.)*
 5. Measure the latency of (a) on the Pi before committing. If the per-syscall cost is too high,
    prefetch the project tree by content hash, which already exists in `/v1/fs/read`.

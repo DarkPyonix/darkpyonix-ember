@@ -14,7 +14,7 @@ except ImportError:          # pragma: no cover - depends on the environment
     TestClient = None
 
 
-@unittest.skipIf(TestClient is None, "FastAPI not installed (pip install -r requirements.txt)")
+@unittest.skipIf(TestClient is None, "FastAPI not installed (run under: uv run --with-requirements requirements.txt)")
 class MiddlewareRootsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

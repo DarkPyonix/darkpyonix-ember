@@ -125,9 +125,13 @@ backend; tests use the in-memory `MemNetwork`.
 
 Both daemons keep their TCP listener for local use (`ember-term`, the VS Code companion,
 loopback admin). Bearer tokens (node API) are kept as a second factor on top of the peer
-allow-list for now. How peers find each other beyond address hints (the `darkpyonix.dev`
-address directory and device registration under the user's account, `FR-N2`) plugs into
-`ember_transport::AddressDirectory` and is not built yet.
+allow-list for now. Peers find each other beyond address hints through the hub (`FR-N2`,
+`docs/design/HUB-INTEGRATION.md`): devices register under the user's GitHub account with the
+`ember-hub` crate, and `ember_transport::HubDirectory` (an `AddressDirectory`) publishes and
+resolves signed address records at the hub's `/pkarr`. Tested against `ember_hub::fake::FakeHub`
+in CI; not yet run against the real hub. The default hub address (`https://darkpyonix.dev`)
+and its `/v1` paths are to change (#62, draft PR #75), which waits for darkpyonix #41 and
+darkpyonix-core #42.
 
 ---
 

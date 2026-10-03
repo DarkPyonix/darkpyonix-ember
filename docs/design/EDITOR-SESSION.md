@@ -1,6 +1,8 @@
 # EDITOR-SESSION.md: The editor session between editor-conn and the CodeEditor widget
 
-> Status: design + first code (`crates/editor/`, package `ember-editor`), **not compiled yet**.
+> Status: **partial.** `crates/editor/` (package `ember-editor`, #46) builds and its unit and flow
+> tests run in CI. The live test (`tests/live_session.rs`, `#[ignore]`) runs by hand; the widget
+> side and "Open IDE → Ember" in the client are not built (#32).
 > Milestone: M8 (`PROJECT.md`), issue #32, SPEC §E (`FR-E1`–`FR-E4`). Written 2026-10-03.
 > Builds on `EDITOR-CONNECTION.md` (§6 step 3 and 4 of its plan).
 
@@ -201,11 +203,10 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
 6. **Hover popup and Markdown** are drawn by the UI with dioxus-compose's overlay widgets and the
    FR-26 Markdown renderer; `command:` links only when `is_trusted`.
 
-## 7. Uncertain APIs (not compiled, not run)
+## 7. Uncertain APIs (not verified on screen)
 
-- **Nothing in `crates/editor/` has been compiled or run.** The unit tests (`src/*`) and the pure flow
-  tests (`tests/engine_flow.rs`) were checked by reading only. The live test
-  (`tests/live_session.rs`, `#[ignore]`, `EMBER_OSE_SERVER`) has never run.
+- The unit tests (`src/*`) and the pure flow tests (`tests/engine_flow.rs`) run in CI. The live
+  test (`tests/live_session.rs`, `#[ignore]`, `EMBER_OSE_SERVER`) runs by hand only.
 - `tokio::select!` handlers that reassign a variable borrowed by a branch future
   (`changes = None` in `session.rs`) rely on tokio dropping the branch futures before running the
   handler.

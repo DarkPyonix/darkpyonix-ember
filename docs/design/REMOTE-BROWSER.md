@@ -1,5 +1,9 @@
 # Remote browser: server side (M6, SPEC §R, INTENT D6)
 
+Status: **partial.** Server side, node egress and the agent's browser MCP are implemented (#29,
+#44) and tested in CI; no client renders the browser yet (FR-R5), and the acceptance runs with a
+real Chrome and a real node are not verified (#12).
+
 Code: `crates/server/src/browser/`. Stream protocol version: **1** (`browser::STREAM_VERSION`).
 
 ## Model
@@ -45,6 +49,8 @@ Connecting starts the browser if needed and registers a viewer; the screencast r
 least one viewer is connected. All viewers share one stream (one tab, one quality setting).
 
 ### Server → client
+
+> The `v` field below is decided to go (INTENT D15, #85): fields are only added, unknown fields are ignored, and there is no version negotiation.
 
 - **Text** `{"type":"hello","v":1,"project":…,"state":ViewState}`: first message. A client that
   does not know `v` must say so to the user, not guess.

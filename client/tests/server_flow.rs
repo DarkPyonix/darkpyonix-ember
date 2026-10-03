@@ -141,7 +141,7 @@ async fn turn_with_approval_survives_push_restarts_without_loss_or_duplicates() 
     wait_server(&s, &a, SessionStatus::Finished).await;
     s.send(&b, "elsewhere").await.unwrap();
     wait_server(&s, &b, SessionStatus::WaitingForApproval).await;
-    s.answer(&b, "approval-1", ApprovalDecision::AllowAlways).await.unwrap();
+    s.answer(&b, "approval-1", ember_server::events::ApprovalDecision::AllowAlways).await.unwrap();
     wait_server(&s, &b, SessionStatus::Finished).await;
     // Nothing arrived while disconnected.
     assert_eq!(client_status(&c, &a), Some(wire::SessionStatus::WaitingForApproval));
@@ -241,7 +241,7 @@ async fn version_mismatch_is_reported_not_dropped() {
 
     // Health says v2: refused before connecting.
     let app = axum::Router::new()
-        .route("/api/v1/health", get(|| { axum::Json(serde_json::json!({"ok": true, "push_version": 2})) }));
+        .route("/api/v1/health", get(|| async { axum::Json(serde_json::json!({"ok": true, "push_version": 2})) }));
     let url = serve(app).await;
     let c = Client::new(ClientConfig::new(url)).await.unwrap();
     c.start();
@@ -253,8 +253,8 @@ async fn version_mismatch_is_reported_not_dropped() {
 
     // Health says v1 but a push message says v3: detected on the message.
     let app = axum::Router::new()
-        .route("/api/v1/health", get(|| { axum::Json(serde_json::json!({"ok": true, "push_version": 1})) }))
-        .route("/api/v1/sessions", get(|| { axum::Json(serde_json::json!([])) }))
+        .route("/api/v1/health", get(|| async { axum::Json(serde_json::json!({"ok": true, "push_version": 1})) }))
+        .route("/api/v1/sessions", get(|| async { axum::Json(serde_json::json!([])) }))
         .route(
             "/api/v1/push",
             get(|ws: WebSocketUpgrade| async move {

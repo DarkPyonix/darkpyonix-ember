@@ -194,6 +194,32 @@ Steps 1–3 run in CI on every build; step 1 alone runs on every pull request to
 
 ---
 
+## §P — Persistent work in IDE windows
+
+[user, 2026-10-03: "엠버에서 vscode나 엠버 에디터 같은 경우 그 안에서 실행 중인 작업들은 창을 끄더라도
+항상 실행되고 있어야 한다는거 잊지 마. 만약 터미널에서 뭔가를 켜놨다 하면 창 꺼도, 다른 컴퓨터에서 접속해도
+그 터미널이 보여야 하는거야."] Applies to both IDE targets that Ember hosts: the VS Code window (VS Code
+Web) and the Ember editor.
+
+**Design.** The terminal process is owned by **ember node's persistent PTY session** on that computer,
+not by the IDE window, VS Code's pty host, or the client. The IDE is only a client that attaches to it.
+This way a window close, a VS Code server restart, or a client switching device does not end it, and
+VS Code and the Ember editor see the same terminal. VS Code's own persistent terminals
+(`terminal.integrated.enablePersistentSessions`) are not relied on, because a server restart or the
+revive timeout ends them.
+
+| ID | Requirement | Acceptance criteria |
+| -- | ----------- | ------------------- |
+| **FR-P1** | Terminals, tasks and launched processes started from an IDE window keep running after every window on every device is closed. | In a VS Code window run `sleep 600; echo done`, close the window, and wait 10 minutes. The process is still alive on the computer (visible in ember node's session list) and prints `done`. The same applies to the Ember editor. |
+| **FR-P2** | Re-attaching shows the same terminal, from the same device or from any other computer or phone. Scrollback (at least 10,000 lines) and the live input state carry over: the shell prompt, a running TUI, and cursor position. | Start `htop` or a REPL in one window. Close it. Open the IDE on another computer (or phone). The same terminal appears in the terminal list with its full scrollback and the TUI redrawn, and accepts input. |
+| **FR-P3** | The same terminal can be attached from several devices and from both IDE targets at once. | A terminal opened in VS Code appears in the Ember editor's terminal list on another device. Output appears on both within 100 ms of each other on a LAN. |
+| **FR-P4** | Input from several attached clients: **all attached clients may type** and their keystrokes are serialized by ember node in arrival order. Any client can **take control**, after which other clients are read-only, with a visible "controlled by <device>" banner, until control is released or the controller detaches. The terminal size follows the controller, or the most recently active client when nobody has control. Others see the content at that size, scaled to fit. | Two devices type alternately: the output contains both inputs in order and neither is lost. Device A takes control: device B's keystrokes are refused with the banner shown, and are accepted again after A releases or detaches. Resizing on the controller resizes the PTY. |
+| **FR-P5** | VS Code tasks (`tasks.json`) and the Ember editor's run actions run in persistent sessions as well. Debug sessions keep their debuggee process running when the window closes; re-attaching the debugger is best-effort. | Start a long build task, close the window, reopen: the task's terminal is listed with its output and exits normally. A program started under the debugger is still running after the window closes. |
+| **FR-P6** | Persistent sessions are listed per computer and per project in the client, with what started them (IDE, agent, user), and can be killed from there. Sessions survive an ember server restart. Sessions survive an ember node restart only if the processes were detached from it (best-effort; documented). | Restart ember server: every terminal is still listed and attachable. The list shows the origin and allows kill. |
+| **NFR-P1** | Attach latency and overhead. | Re-attach shows the last screen in ≤ 500 ms on a LAN. Idle sessions cost ≤ 2 MB of memory each in ember node beyond the shell itself. |
+
+---
+
 ## §B — Native bridge (IDE window webview ↔ native shell)
 
 Unchanged in substance from 09-22; see `ARCHITECTURE.md` §3 and `INTENT.md` D11.

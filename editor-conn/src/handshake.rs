@@ -9,6 +9,12 @@
 //! (`makeRawSocketHeaders`, L11-26) uses: after the `101` response the socket carries
 //! `PersistentProtocol` frames directly, with no WebSocket framing or permessage-deflate. That is
 //! what lets this crate run over any byte stream.
+//!
+//! **Version gate.** Before the first [`connect`], call [`verify_server`] on a fresh stream: it
+//! reads `GET /version` (agent server L145-148, served without a connection token) and returns
+//! [`Error::UnsupportedServerVersion`] unless the server is [`crate::PINNED_COMMIT`]. Put the
+//! returned commit in [`ConnectOptions::commit`]; the server then repeats the check itself
+//! (L351-357) and [`connect`] refuses any other value before touching the stream.
 
 use std::future::Future;
 use std::time::Duration;
@@ -57,7 +63,9 @@ pub struct ConnectOptions {
     /// Identifies this logical connection across reconnects. One per connection, never reused.
     pub reconnection_token: String,
     /// Our idea of the server commit. When both sides set it, the server refuses a mismatch
-    /// ("Client refused: version mismatch"). Use the value of `GET /version`.
+    /// ("Client refused: version mismatch"). Use the value returned by [`verify_server`]; any
+    /// value other than [`crate::PINNED_COMMIT`] makes [`connect`] fail with
+    /// [`Error::UnsupportedServerVersion`].
     pub commit: Option<String>,
     /// Timeout for the whole handshake.
     pub timeout: Duration,
@@ -170,13 +178,101 @@ fn check_upgrade_response(head: &[u8]) -> Result<()> {
     }
 }
 
+/// The server's refusal reason when the `connectionType` commit differs from its own
+/// (agent server L351-357).
+pub const VERSION_MISMATCH_REASON: &str = "Client refused: version mismatch";
+
 fn parse_control(raw: &[u8]) -> Result<Value> {
     let v: Value = serde_json::from_slice(raw)?;
     if v.get("type").and_then(Value::as_str) == Some("error") {
         let reason = v.get("reason").and_then(Value::as_str).unwrap_or("unknown").to_owned();
+        if reason == VERSION_MISMATCH_REASON {
+            return Err(Error::UnsupportedServerVersion { server: None });
+        }
         return Err(Error::Refused(reason));
     }
     Ok(v)
+}
+
+/// The `GET /version` request. HTTP/1.0 so that Node answers with a plain body and closes the
+/// socket (no chunked encoding).
+pub fn version_request(opts: &ConnectOptions) -> String {
+    let base = opts.path.trim_end_matches('/');
+    format!("GET {base}/version HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", opts.host)
+}
+
+/// Read the server commit with `GET /version` over a fresh `stream` (consumed; the server closes
+/// it). An empty string means a dev server without a product commit.
+pub async fn server_commit<S>(mut stream: S, opts: &ConnectOptions) -> Result<String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let fut = async {
+        stream.write_all(version_request(opts).as_bytes()).await?;
+        stream.flush().await?;
+        let mut buf = Vec::with_capacity(512);
+        let mut chunk = [0u8; 512];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() > 16 * 1024 {
+                return Err(Error::Handshake("GET /version response too large".into()));
+            }
+        }
+        parse_version_response(&buf)
+    };
+    tokio::time::timeout(opts.timeout, fut).await.map_err(|_| Error::Timeout("GET /version"))?
+}
+
+fn parse_version_response(raw: &[u8]) -> Result<String> {
+    let end = find_header_end(raw).ok_or_else(|| Error::Handshake("GET /version: truncated response".into()))?;
+    let head = String::from_utf8_lossy(&raw[..end]);
+    let status = head.lines().next().unwrap_or_default();
+    if status.split_whitespace().nth(1) != Some("200") {
+        return Err(Error::Handshake(format!("GET /version: {status}")));
+    }
+    let body = &raw[end + 4..];
+    let chunked = head.lines().skip(1).any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.starts_with("transfer-encoding:") && l.contains("chunked")
+    });
+    let body = if chunked { dechunk(body)? } else { body.to_vec() };
+    Ok(String::from_utf8_lossy(&body).trim().to_owned())
+}
+
+/// Minimal `Transfer-Encoding: chunked` decoder (no trailers, no extensions).
+fn dechunk(mut body: &[u8]) -> Result<Vec<u8>> {
+    let bad = || Error::Handshake("GET /version: malformed chunked body".into());
+    let mut out = Vec::new();
+    loop {
+        let line_end = body.windows(2).position(|w| w == b"\r\n").ok_or_else(bad)?;
+        let size_str = String::from_utf8_lossy(&body[..line_end]);
+        let size = usize::from_str_radix(size_str.split(';').next().unwrap_or_default().trim(), 16).map_err(|_| bad())?;
+        body = &body[line_end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        if body.len() < size {
+            return Err(bad());
+        }
+        out.extend_from_slice(&body[..size]);
+        body = body.get(size + 2..).ok_or_else(bad)?;
+    }
+}
+
+/// The connect-time version gate: read `GET /version` over `stream` and accept only
+/// [`crate::PINNED_COMMIT`]. Returns the commit to put in [`ConnectOptions::commit`]; otherwise
+/// [`Error::UnsupportedServerVersion`].
+pub async fn verify_server<S>(stream: S, opts: &ConnectOptions) -> Result<String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let commit = server_commit(stream, opts).await?;
+    crate::check_server_commit(&commit)?;
+    Ok(commit)
 }
 
 /// Run auth → sign → connectionType on an attached transport and return the server's first
@@ -234,6 +330,9 @@ pub async fn connect<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    if let Some(commit) = &opts.commit {
+        crate::check_server_commit(commit)?;
+    }
     let leftover = upgrade(&mut stream, opts, false).await?;
     let conn = Connection::new(stream, leftover);
     let first = handshake(&conn.handle, opts, ty, args).await?;
@@ -264,7 +363,7 @@ where
 /// an `error` control message (unknown/duplicate reconnection token, auth mismatch, version
 /// mismatch) is fatal; network failures and timeouts are retried.
 pub fn is_permanent(err: &Error) -> bool {
-    matches!(err, Error::Refused(_))
+    matches!(err, Error::Refused(_) | Error::UnsupportedServerVersion { .. })
 }
 
 /// The reconnect loop (`PersistentConnection._runReconnectingLoop`): back off
@@ -420,6 +519,60 @@ mod tests {
         let (_conn, first) = connect(client, &opts, ConnectionType::Management, None).await.unwrap();
         assert_eq!(first, serde_json::json!({"type":"ok"}));
         server_task.await.unwrap();
+    }
+
+    #[test]
+    fn version_request_and_response() {
+        let opts = ConnectOptions::new("127.0.0.1:8000");
+        assert_eq!(
+            version_request(&opts),
+            "GET /version HTTP/1.0\r\nHost: 127.0.0.1:8000\r\nConnection: close\r\n\r\n"
+        );
+        let plain = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n{}", crate::PINNED_COMMIT);
+        assert_eq!(parse_version_response(plain.as_bytes()).unwrap(), crate::PINNED_COMMIT);
+        let chunked = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n28\r\n{}\r\n0\r\n\r\n",
+            crate::PINNED_COMMIT
+        );
+        assert_eq!(parse_version_response(chunked.as_bytes()).unwrap(), crate::PINNED_COMMIT);
+        assert!(parse_version_response(b"HTTP/1.1 404 Not Found\r\n\r\n").is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_server_refuses_other_commit() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while find_header_end(&buf).is_none() {
+                let n = server.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            assert!(buf.starts_with(b"GET /version HTTP/1.0\r\n"));
+            server
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n0036dcb6c18a603d2168c00fa578be600987ac7b")
+                .await
+                .unwrap();
+            // dropping `server` closes the pipe
+        });
+        let err = verify_server(client, &ConnectOptions::new("h")).await.unwrap_err();
+        assert!(matches!(err, Error::UnsupportedServerVersion { server: Some(ref c) } if c.starts_with("0036dcb6")));
+        assert!(is_permanent(&err));
+    }
+
+    #[tokio::test]
+    async fn connect_refuses_unpinned_commit_without_io() {
+        let (client, _server) = tokio::io::duplex(64);
+        let mut opts = ConnectOptions::new("h");
+        opts.commit = Some("deadbeef".into());
+        let err = connect(client, &opts, ConnectionType::Management, None).await.err().unwrap();
+        assert!(matches!(err, Error::UnsupportedServerVersion { server: Some(ref c) } if c == "deadbeef"));
+    }
+
+    #[test]
+    fn server_version_mismatch_is_typed() {
+        let raw = br#"{"type":"error","reason":"Client refused: version mismatch"}"#;
+        assert!(matches!(parse_control(raw), Err(Error::UnsupportedServerVersion { server: None })));
     }
 
     #[tokio::test]

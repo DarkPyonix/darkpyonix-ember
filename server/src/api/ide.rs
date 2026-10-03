@@ -15,6 +15,11 @@
 //! default, and each computer's IDE details come from [`IdeConfig`] (`EMBER_IDE_COMPUTERS`).
 //! The folder is the session's `cwd`, taken as a path on that computer.
 //!
+//! TODO(computers): sessions now have a current computer (`crate::computers`,
+//! `GET /api/v1/sessions/{id}/computer`) and computers are registered there. Default
+//! `?computer=` to the session's current computer and map registered computers to IDE targets
+//! instead of the separate `EMBER_IDE_COMPUTERS` list.
+//!
 //! Link formats:
 //! - Gateway: `jetbrains-gateway://connect#type=ssh&host=…&port=…&user=…&projectPath=…`
 //!   `[&idePath=…&deploy=false]`, as in JetBrains' "Connect and work with JetBrains Gateway"

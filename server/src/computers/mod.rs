@@ -614,6 +614,13 @@ impl Computers {
         self.dialer.as_ref()
     }
 
+    /// The project mount's way to open a computer's file API: the same client as
+    /// [`Computers::client`] (HTTP, or the transport through this server's dialer), with the
+    /// mount's per-request deadline. For [`mount::ProjectMounts::from_env`].
+    pub fn node_fs(&self) -> mount::NodeFsConnector {
+        mount::node_fs(self.dialer.clone())
+    }
+
     /// A [`NodeClient`] for a registered computer (HTTP or transport).
     pub fn client(&self, id: &str) -> Result<NodeClient, ComputerError> {
         let c = self.resolve(id)?.ok_or_else(|| {

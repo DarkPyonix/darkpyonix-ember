@@ -138,11 +138,11 @@ impl FsErr {
 
 impl From<ClientError> for FsErr {
     fn from(e: ClientError) -> FsErr {
-        if let ClientError::Http(h) = &e {
-            if h.is_timeout() {
-                return FsErr::TimedOut;
-            }
+        // The client's deadline ([`NodeClient::with_deadline`], over HTTP or the transport).
+        if e.is_timeout() {
+            return FsErr::TimedOut;
         }
+        // Includes dial / stream failures over the peer-to-peer transport.
         if e.is_transport() {
             return FsErr::Unreachable(e.to_string());
         }
@@ -1302,5 +1302,8 @@ pub(crate) mod tests {
         assert_eq!(FsErr::from(api(412, ErrorCode::PreconditionFailed, None)), FsErr::Exist);
         assert!(matches!(FsErr::from(api(500, ErrorCode::Internal, Some("EWEIRD"))), FsErr::Io(_)));
         assert!(matches!(FsErr::from(ClientError::Protocol("p".into())), FsErr::Io(_)));
+        // A transport-backed client: dial failures are an outage, a missed deadline a timeout.
+        assert!(matches!(FsErr::from(ClientError::Transport("no route".into())), FsErr::Unreachable(_)));
+        assert_eq!(FsErr::from(ClientError::Timeout(Duration::from_secs(4))), FsErr::TimedOut);
     }
 }

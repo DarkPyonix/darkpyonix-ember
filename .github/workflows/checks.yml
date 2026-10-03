@@ -1,7 +1,9 @@
 # Repository checks. Rust builds and tests run here, not on developer machines.
 #
 #   transport-isolation  scripts/check-transport-isolation.sh (SPEC FR-N5), when present
-#   rust                 cargo test for each crate dir that exists (server/, node/)
+#   editor-conn-pin      editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
+#                        Code-OSS tag in ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   rust                 cargo test for each crate dir that exists
 name: checks
 
 on:
@@ -32,6 +34,52 @@ jobs:
             echo "scripts/check-transport-isolation.sh not present on this ref; skipping"
           fi
 
+  editor-conn-pin:
+    name: editor-conn pin (rpc_ids vs ose/VERSION)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Regenerate rpc_ids.rs at the ose/VERSION tag and compare
+        run: |
+          set -euo pipefail
+          if [ ! -f editor-conn/scripts/gen_rpc_ids.sh ] || [ ! -f ose/VERSION ]; then
+            echo "editor-conn/scripts/gen_rpc_ids.sh or ose/VERSION not present on this ref; skipping"
+            exit 0
+          fi
+          tag="$(tr -d '[:space:]' < ose/VERSION)"
+          src="$RUNNER_TEMP/vscode"
+          # Shallow, blobless, sparse: only src/vs is needed (the script scans it for
+          # createProxyIdentifier calls).
+          git clone --quiet --depth 1 --branch "$tag" --filter=blob:none --sparse \
+            https://github.com/microsoft/vscode.git "$src"
+          git -C "$src" sparse-checkout set src/vs
+          commit="$(git -C "$src" rev-parse HEAD)"
+          echo "Code-OSS $tag = $commit"
+
+          bash editor-conn/scripts/gen_rpc_ids.sh "$src" > "$RUNNER_TEMP/generated.txt"
+          sed -n '/^pub const PROXY_IDS: &\[&str\] = &\[$/,/^\];$/p' editor-conn/src/rpc_ids.rs \
+            | sed '1d;$d' > "$RUNNER_TEMP/current.txt"
+          if [ ! -s "$RUNNER_TEMP/current.txt" ]; then
+            echo "::error file=editor-conn/src/rpc_ids.rs::PROXY_IDS table not found"
+            exit 1
+          fi
+
+          fail=0
+          if ! diff -u "$RUNNER_TEMP/current.txt" "$RUNNER_TEMP/generated.txt"; then
+            echo "::error file=editor-conn/src/rpc_ids.rs::PROXY_IDS differs from gen_rpc_ids.sh at Code-OSS $tag; regenerate it"
+            fail=1
+          fi
+          if ! grep -qx "pub const PINNED_VERSION: &str = \"$tag\";" editor-conn/src/lib.rs; then
+            echo "::error file=editor-conn/src/lib.rs::PINNED_VERSION is not \"$tag\" (ose/VERSION)"
+            fail=1
+          fi
+          if ! grep -qx "pub const PINNED_COMMIT: &str = \"$commit\";" editor-conn/src/lib.rs; then
+            echo "::error file=editor-conn/src/lib.rs::PINNED_COMMIT is not \"$commit\" (Code-OSS $tag)"
+            fail=1
+          fi
+          exit "$fail"
+
   rust:
     name: cargo test ${{ matrix.crate }}
     runs-on: ubuntu-latest
@@ -39,7 +87,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [server, node]
+        crate: [server, node, transport, client, bridge, editor-conn]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always

@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 
 use super::cdp::{Cdp, CdpEvent};
 use super::chrome::{self, LaunchOptions};
+use super::egress::{Egress, SharedEgressResolver};
 use super::{BrowserConfig, STREAM_VERSION};
 
 /// An agent command within this long counts as "agent is active" (FR-R3 indicator).
@@ -51,6 +52,9 @@ pub struct ViewState {
     pub running: bool,
     /// Proxy URL the browser egresses through; `null` = the server's own network.
     pub egress: Option<String>,
+    /// The computer the browser egresses from, when the egress is a registered computer
+    /// (`egress` is then that computer's loopback SOCKS5 listener).
+    pub egress_computer: Option<String>,
     /// The tab being streamed and receiving input.
     pub target_id: Option<String>,
     pub url: String,
@@ -156,7 +160,9 @@ pub struct BrowserInstance {
     launch: LaunchOptions,
     chrome_found: bool,
     run: tokio::sync::Mutex<Option<Running>>,
-    egress: Mutex<Option<String>>,
+    /// The user's choice; resolved to a proxy URL at every start.
+    egress: Mutex<Egress>,
+    resolver: Option<SharedEgressResolver>,
     page: Mutex<Option<(PageRef, Arc<Cdp>)>>,
     /// Packed binary frame messages (see `docs/design/REMOTE-BROWSER.md`).
     frames: broadcast::Sender<Bytes>,
@@ -170,7 +176,13 @@ pub struct BrowserInstance {
 }
 
 impl BrowserInstance {
-    pub(super) fn new(project: &str, profile_dir: PathBuf, cfg: &BrowserConfig) -> Arc<Self> {
+    pub(super) fn new(
+        project: &str,
+        profile_dir: PathBuf,
+        cfg: &BrowserConfig,
+        egress: Egress,
+        resolver: Option<SharedEgressResolver>,
+    ) -> Arc<Self> {
         let launch = LaunchOptions {
             chrome: cfg.chrome.clone().unwrap_or_default(),
             profile_dir: profile_dir.clone(),
@@ -184,13 +196,15 @@ impl BrowserInstance {
             launch,
             chrome_found: cfg.chrome.is_some(),
             run: Default::default(),
-            egress: Mutex::new(None),
+            egress: Mutex::new(egress),
+            resolver,
             page: Mutex::new(None),
             frames: broadcast::channel(4).0,
             frame_seq: AtomicU64::new(0),
             state: watch::channel(ViewState {
                 running: false,
                 egress: None,
+                egress_computer: None,
                 target_id: None,
                 url: String::new(),
                 title: String::new(),
@@ -240,8 +254,41 @@ impl BrowserInstance {
         }
     }
 
+    /// The proxy URL the browser was last started with (`None`: direct, or never started).
     pub fn egress(&self) -> Option<String> {
+        self.state.borrow().egress.clone()
+    }
+
+    /// The egress the user chose (persisted by the manager).
+    pub fn egress_choice(&self) -> Egress {
         self.egress.lock().unwrap().clone()
+    }
+
+    /// Record `egress` without touching a running browser; it applies at the next start.
+    pub(super) fn set_egress_choice(&self, egress: Egress) {
+        *self.egress.lock().unwrap() = egress;
+    }
+
+    pub async fn is_running(&self) -> bool {
+        self.run.lock().await.is_some()
+    }
+
+    /// The proxy URL for `egress`, resolving a computer to its loopback SOCKS5 listener.
+    pub fn resolve_egress(&self, egress: &Egress) -> anyhow::Result<Option<String>> {
+        let proxy = match egress {
+            Egress::Direct => None,
+            Egress::Proxy { url } => Some(url.clone()),
+            Egress::Computer { id } => self
+                .resolver
+                .as_ref()
+                .ok_or_else(|| anyhow!("egress through a computer is not available on this server"))?
+                .proxy_for_computer(id)
+                .with_context(|| format!("egress through computer {id}"))?,
+        };
+        if let Some(p) = &proxy {
+            chrome::check_proxy(p)?;
+        }
+        Ok(proxy)
     }
 
     /// The current DevTools browser endpoint, starting the browser if needed.
@@ -260,13 +307,20 @@ impl BrowserInstance {
             }
             Self::stop_running(run.take().unwrap()).await;
         }
-        let egress = self.egress();
-        match self.start(egress.clone()).await {
-            Ok(r) => {
+        let choice = self.egress_choice();
+        // Never fall back to direct when the chosen egress cannot be resolved: that would leak
+        // the server's own address where the user asked for another computer's.
+        let started = match self.resolve_egress(&choice) {
+            Ok(proxy) => self.start(proxy.clone()).await.map(|r| (r, proxy)),
+            Err(e) => Err(e),
+        };
+        match started {
+            Ok((r, proxy)) => {
                 *run = Some(r);
                 self.state.send_modify(|s| {
                     s.running = true;
-                    s.egress = egress;
+                    s.egress = proxy;
+                    s.egress_computer = choice.computer().map(str::to_string);
                     s.error = None;
                 });
                 Ok(())
@@ -281,20 +335,24 @@ impl BrowserInstance {
         }
     }
 
-    /// Switch egress: restart Chrome with the new proxy on the same profile (FR-R2). Viewers stay
-    /// connected; agent relay connections are closed and must reconnect.
+    /// Switch egress to a proxy URL (`None`: direct). Not persisted; see
+    /// [`super::BrowserManager::set_egress`].
     pub async fn set_egress(self: &Arc<Self>, egress: Option<String>) -> anyhow::Result<()> {
-        if let Some(p) = &egress {
-            chrome::check_proxy(p)?;
-        }
+        self.switch_egress(Egress::from_proxy(egress)).await
+    }
+
+    /// Switch egress: restart Chrome with the new proxy on the same profile (FR-R2), or start it.
+    /// Viewers stay connected; agent relay connections are closed and must reconnect.
+    pub async fn switch_egress(self: &Arc<Self>, egress: Egress) -> anyhow::Result<()> {
+        let proxy = self.resolve_egress(&egress)?;
         {
             let run = self.run.lock().await;
-            if run.is_some() && self.egress() == egress {
+            if run.is_some() && self.egress_choice() == egress && self.egress() == proxy {
                 drop(run);
                 return self.ensure_running().await;
             }
         }
-        *self.egress.lock().unwrap() = egress;
+        self.set_egress_choice(egress);
         self.stop().await;
         self.ensure_running().await
     }

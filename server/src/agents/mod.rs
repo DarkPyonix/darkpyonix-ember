@@ -64,6 +64,21 @@ pub struct StartRequest {
     /// Run the agent's tools on another computer through Codex's exec-server protocol. Only the
     /// Codex adapter uses it; other adapters are redirected through `env` (shell shim).
     pub remote: Option<RemoteExec>,
+    /// Extra stdio MCP servers for this agent process (e.g. the project's browser, FR-R3), added
+    /// to the agent's own configuration: Claude Code via `--mcp-config`, Codex via `-c
+    /// mcp_servers.<name>.…` overrides. The user's own MCP servers stay.
+    pub mcp_servers: Vec<McpServer>,
+}
+
+/// A stdio MCP server handed to an agent through its documented CLI configuration (E2).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct McpServer {
+    /// Name the agent sees (a TOML bare key for Codex: letters, digits, `-`, `_`).
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// Seconds the agent should allow for the server to start (`npx` may download it first).
+    pub startup_timeout_secs: Option<u32>,
 }
 
 /// A remote executor for an agent's tools (`docs/design/INTERCEPTION.md`, option (c)).

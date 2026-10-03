@@ -102,6 +102,71 @@ is chosen** (see the "tablet lockup" entry in [docs/CONSTRAINTS.md](docs/CONSTRA
 
 Health check: `curl http://127.0.0.1:8888/healthz` → `ok`
 
+## Running it next to ember node (`python -m dpx.serve`)
+
+This is how the IDE window runs on each computer (SPEC `FR-W1`). One command, no prompts:
+it checks the VS Code runtime, installs the default extensions once, starts the runtime's
+web server on a free **loopback** port, starts the proxy in front of it with **folder roots
+enforced**, and prints one JSON line when both answer:
+
+```sh
+cd proxy
+export DPX_USERNAME=<user> DPX_PASSWORD=<password>     # first run only, as above
+python -m dpx.serve --runtime vsc --root ~/work --root ~/src
+# {"event": "ready", "url": "http://127.0.0.1:53817/", "upstream_port": 53816, "roots": [...], ...}
+```
+
+Logs go to stderr; stdout carries only the ready line (also written to `--announce-file`
+if given, and removed on exit). Ctrl-C or SIGTERM stops both processes. Exit codes: `2`
+bad arguments (no root, a root that is not a directory), `3` runtime not installed,
+`4` a process failed to start or died.
+
+**Runtimes** (`INTENT.md` D10, `FR-W4`) — `--runtime` or `DPX_RUNTIME`:
+
+| Runtime | Default | Server | Configure |
+|---|---|---|---|
+| `ose` | yes | DarkPyonix-built Code-OSS web server (Open VSX) | `DPX_OSE_SERVER` = its launcher; `DPX_OSE_ARGS` = argument template with `{host}` `{port}` `{data_dir}` (default: the REH web server's `--host --port --without-connection-token --accept-server-license-terms --server-data-dir`) |
+| `vsc` | — | the user's Microsoft VS Code, `code serve-web` | `DPX_CODE_BIN` (default `code` on `PATH`) |
+
+`python -m dpx.serve --runtime vsc --check` prints the runtime status as JSON
+(`installed`, `version`, `commit`, `arch`, and `install_guide` when missing) — the data
+behind INTEGRATION.md's "verify `code --version`" step. A running proxy serves the same at
+`GET /__runtime` (needs a session).
+
+**Folder roots.** At least one `--root` (or `DPX_FOLDER_ROOTS`, `os.pathsep`-separated) is
+required in this mode. A `?folder=` or `?workspace=` outside every root — after resolving
+`..` and symlinks — is answered `403` before it reaches serve-web or the recent list. This
+restricts which workspace a URL opens; it is **not** a filesystem sandbox (the extension host
+and terminal still run as the OS user). The standalone proxy honours `DPX_FOLDER_ROOTS` too,
+and with it unset keeps its old, unrestricted behaviour.
+
+**Default extensions** (`FR-W6`). Each entry of `--extension` / `DPX_DEFAULT_EXTENSIONS`
+(a marketplace id or a `.vsix` path) is installed into `<data-dir>/extensions`, the directory
+the server started with `--server-data-dir <data-dir>` loads from; an entry already there is
+skipped. The default is the DarkPyonix theme, `darkpyonix.vscode-darkpyonix-theme` — **not
+published yet**, so until it is, its install fails with a warning (the server still starts);
+point `DPX_DEFAULT_EXTENSIONS` at the `.vsix`, or set it empty. `--data-dir` /
+`DPX_SERVER_DATA_DIR` defaults to `~/.ember/vscode-web/<runtime>`, one per runtime so the two
+marketplaces never mix — settings there are separate from a desktop VS Code's.
+
+| Option | Env | Default |
+|---|---|---|
+| `--root DIR` (repeatable) | `DPX_FOLDER_ROOTS` | required |
+| `--runtime ose\|vsc` | `DPX_RUNTIME` | `ose` |
+| `--server CMD` | `DPX_OSE_SERVER` / `DPX_CODE_BIN` | per runtime |
+| `--host` | `DPX_SERVE_HOST` | `127.0.0.1` |
+| `--port` | `DPX_SERVE_PORT` | `0` = a free port |
+| `--public-url` | `DPX_PUBLIC_URL` | `http://<host>:<port>/` (a wildcard bind is announced as `127.0.0.1`) |
+| `--data-dir` | `DPX_SERVER_DATA_DIR` | `~/.ember/vscode-web/<runtime>` |
+| `--extension ID_OR_VSIX` (repeatable) | `DPX_DEFAULT_EXTENSIONS` | the DarkPyonix theme |
+| `--announce-file PATH` | — | none |
+
+The URL it announces is what ember server's "Open IDE" returns as the `vscode` target
+(`EMBER_IDE_COMPUTERS` → `ide_url`, see `server/src/api/ide.rs`).
+
+Tests (stdlib only; the middleware test is skipped without FastAPI):
+`python3 -m unittest discover -s tests -t .`
+
 ---
 
 ## Screen flow
@@ -138,6 +203,8 @@ Health check: `curl http://127.0.0.1:8888/healthz` → `ok`
 | `DPX_NO_ASSET_CACHE` | (none) | `1` re-reads `static/` on every request — for working on the screens |
 | `DPX_HOME` | user home | Where to look for agent session files (`~/.claude`, …) |
 | `DPX_HUB_URL` · `DPX_HUB_TOKEN` | (none) | If set, the hub connector starts alongside → [docs/HUB.md](docs/HUB.md) |
+| `DPX_FOLDER_ROOTS` | (none) | Folders `?folder=` may open (`os.pathsep`-separated); outside → 403. Unset = unrestricted |
+| `DPX_RUNTIME` · `DPX_CODE_BIN` · `DPX_OSE_SERVER` | `ose` · `code` · (none) | The runtime `/__runtime` reports on (set by `dpx.serve`) |
 
 ---
 
@@ -190,6 +257,7 @@ and the legacy overlay mode have **all been removed**. There is no switch left t
 | `/__workspaces` | Recent workspaces the server remembers (`_xmo_recent.json`) |
 | `/__agents/*` | Agent conversation API, used by the home screen → [AGENTS.md](AGENTS.md) |
 | `/healthz` | Health check → `ok` |
+| `/__runtime` | VS Code runtime status (installed, version, install guide) |
 | `/__ext/ping` · `/__ext/state` | Extension-gating receiver — **plumbing only, unused** |
 | everything else | Proxied to serve-web (including WebSocket) |
 
@@ -204,6 +272,7 @@ and the legacy overlay mode have **all been removed**. There is no switch left t
 proxy/
 ├─ main.py            app assembly + request routing ← read only this for the overall flow
 ├─ dpx/
+│  ├─ serve.py        `python -m dpx.serve` — runtime server + proxy, one entry
 │  ├─ config.py       env vars · paths · constants (every setting lives here)
 │  ├─ assets.py       serving static/ files
 │  ├─ auth/           authentication
@@ -212,6 +281,8 @@ proxy/
 │  ├─ vscode/         everything on the VS Code Web side
 │  │  ├─ proxy.py       upstream relay (HTTP streaming · WebSocket)
 │  │  ├─ inject.py      where the overlay CSS/JS gets injected
+│  │  ├─ roots.py       folder roots (`?folder=` restriction)
+│  │  ├─ runtime.py     OSE / VSC runtime check · server command · default extensions
 │  │  └─ extension.py   companion-extension heartbeat gate + /__ext/*
 │  ├─ home/           the back end of the home screen
 │  │  ├─ api.py         /__agents/* · /__workspaces
@@ -220,7 +291,8 @@ proxy/
 │  └─ hub/            several machines on one home screen (optional) → docs/HUB.md
 │     ├─ server.py
 │     └─ connector.py
-└─ static/            screen HTML · CSS · JS → static/README.md
+├─ static/            screen HTML · CSS · JS → static/README.md
+└─ tests/             unittest (stdlib; FastAPI only for the middleware test)
 ```
 
 Every folder's `__init__.py` carries a table describing what that folder does.

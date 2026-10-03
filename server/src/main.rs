@@ -18,6 +18,8 @@ use ember_server::store::Store;
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
+/// - `EMBER_IDE_COMPUTERS`, `EMBER_IDE_URL`, `EMBER_PUBLIC_URL`: "Open IDE" targets per
+///   computer, until ember node reports them (see `api::ide::IdeConfig`)
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
 ///   `EMBER_LISTEN`, with an unspecified address replaced by loopback)
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
@@ -93,7 +95,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("ember server listening on http://{addr}");
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
-    let app = ember_server::api::router(sessions)
+    let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    let app = ember_server::api::router(sessions.clone())
+        .merge(ember_server::api::ide::router(sessions, ide))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts));
     axum::serve(listener, app).await?;

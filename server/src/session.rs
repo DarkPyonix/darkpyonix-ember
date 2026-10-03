@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, SessionStatus};
 use crate::projects::Project;
+use crate::schedules::{Schedule, ScheduleRun};
 use crate::store::{SessionPatch, SessionRecord, Store, StoredEvent};
 
 /// Version of the push envelope (PR-1). Bump on any incompatible change.
@@ -36,6 +37,15 @@ pub enum Push {
     SessionUpdated { v: u32, session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { v: u32, project: Project },
+    /// A schedule was created (FR-A8), by a user or by an agent (`ember-a2a schedule add`).
+    ScheduleCreated { v: u32, schedule: Schedule },
+    /// A schedule changed: edited, paused, resumed. Carries the whole record.
+    ScheduleUpdated { v: u32, schedule: Schedule },
+    /// A schedule was deleted.
+    ScheduleDeleted { v: u32, id: String, project: String },
+    /// A schedule run was recorded or changed status (`running`, `completed`, `failed`,
+    /// `interrupted`, `skipped`, `missed`). A `missed` run's `error` is the notice text.
+    ScheduleRun { v: u32, run: ScheduleRun },
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -12,7 +12,7 @@ use anyhow::{bail, Context};
 use serde_json::{json, Value};
 
 const USAGE: &str = "\
-ember-a2a — message other agent sessions in Ember
+ember-a2a — message other agent sessions in Ember, and schedule prompts
 
 Usage:
   ember-a2a list [--json]
@@ -21,6 +21,16 @@ Usage:
       Send a message. Use `-` (or no text) to read the text from stdin.
   ember-a2a show <message-id>
       A message you sent or received, with its delivery time.
+
+  ember-a2a schedule list [--json]
+      Schedules in this session's project.
+  ember-a2a schedule add (--cron '<min hour dom mon dow>' [--tz <IANA zone>] | --every <30m|2h|1d|secs>
+                          | --at <RFC 3339 time>) [--new [--title <title>]] [--catch-up] <prompt...>
+      Send <prompt> on a schedule: by default into this session; with --new, into a new
+      session in this project each time. Use `-` (or no prompt) to read it from stdin.
+      --catch-up runs the latest trigger missed while the server was down.
+  ember-a2a schedule rm <schedule-id>
+      Delete a schedule of this project.
 
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
@@ -128,6 +138,84 @@ impl Client {
     pub fn show(&self, id: &str) -> anyhow::Result<Value> {
         self.ok("GET", &format!("/api/v1/a2a/messages/{id}"), None)
     }
+
+    pub fn schedules(&self) -> anyhow::Result<Value> {
+        self.ok("GET", "/api/v1/a2a/schedules", None)
+    }
+
+    pub fn add_schedule(&self, body: &Value) -> anyhow::Result<Value> {
+        self.ok("POST", "/api/v1/a2a/schedules", Some(body))
+    }
+
+    pub fn remove_schedule(&self, id: &str) -> anyhow::Result<Value> {
+        self.ok("DELETE", &format!("/api/v1/a2a/schedules/{id}"), None)
+    }
+}
+
+/// `30s`, `15m`, `2h`, `1d` or plain seconds.
+pub fn parse_duration_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, unit) = match s.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => (&s[..i], &s[i..]),
+        None => (s, "s"),
+    };
+    let n: u64 = num.parse().ok()?;
+    let mult = match unit {
+        "s" | "sec" | "secs" => 1,
+        "m" | "min" | "mins" => 60,
+        "h" | "hr" | "hrs" => 3600,
+        "d" | "day" | "days" => 86_400,
+        _ => return None,
+    };
+    n.checked_mul(mult)
+}
+
+/// The request body for `schedule add`, from its arguments (after `add`). The prompt is `None`
+/// when it should be read from stdin.
+pub fn schedule_add_body(args: &[String]) -> Result<(Value, Option<String>), String> {
+    let mut cron = None;
+    let mut tz = None;
+    let mut every = None;
+    let mut at = None;
+    let mut new = false;
+    let mut title = None;
+    let mut catch_up = false;
+    let mut words: Vec<String> = Vec::new();
+    let mut literal = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} needs a value"));
+        match a.as_str() {
+            _ if literal => words.push(a.clone()),
+            "--" => literal = true,
+            "--cron" => cron = Some(value("--cron")?),
+            "--tz" => tz = Some(value("--tz")?),
+            "--every" => every = Some(value("--every")?),
+            "--at" => at = Some(value("--at")?),
+            "--new" => new = true,
+            "--title" => title = Some(value("--title")?),
+            "--catch-up" => catch_up = true,
+            _ => words.push(a.clone()),
+        }
+    }
+    let kind = match (cron, every, at) {
+        (Some(expr), None, None) => json!({ "type": "cron", "expr": expr, "tz": tz.unwrap_or_else(|| "UTC".into()) }),
+        (None, Some(e), None) => {
+            let seconds = parse_duration_secs(&e).ok_or_else(|| format!("bad --every {e:?} (use 30m, 2h, 1d or seconds)"))?;
+            json!({ "type": "interval", "seconds": seconds })
+        }
+        (None, None, Some(t)) => json!({ "type": "once", "at": t }),
+        _ => return Err("give exactly one of --cron, --every or --at".into()),
+    };
+    if title.is_some() && !new {
+        return Err("--title needs --new".into());
+    }
+    let mut body = json!({ "kind": kind, "catch_up": catch_up, "prompt": "" });
+    if new {
+        body["target"] = json!({ "type": "new", "title": title });
+    }
+    let prompt = if words.is_empty() || words == ["-"] { None } else { Some(words.join(" ")) };
+    Ok((body, prompt))
 }
 
 fn parse_response(raw: &[u8]) -> anyhow::Result<(u16, Value)> {
@@ -274,8 +362,76 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
             let v = Client::from_env()?.show(id)?;
             Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
         }
+        "schedule" => run_schedule(&args[1..]),
         other => Err(CliError::Usage(format!("unknown command {other}"))),
     }
+}
+
+fn run_schedule(args: &[String]) -> Result<String, CliError> {
+    let Some(sub) = args.first() else {
+        return Err(CliError::Usage("missing schedule command (add, list, rm)".into()));
+    };
+    match sub.as_str() {
+        "list" | "ls" => {
+            let v = Client::from_env()?.schedules()?;
+            if args[1..].iter().any(|a| a == "--json") {
+                return Ok(serde_json::to_string_pretty(&v).unwrap_or_default());
+            }
+            Ok(format_schedules(&v))
+        }
+        "add" => {
+            let (mut body, prompt) = schedule_add_body(&args[1..]).map_err(CliError::Usage)?;
+            let prompt = match prompt {
+                Some(p) => p,
+                None => {
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s).map_err(anyhow::Error::from)?;
+                    s
+                }
+            };
+            body["prompt"] = Value::String(prompt);
+            let v = Client::from_env()?.add_schedule(&body)?;
+            let id = v.get("id").and_then(Value::as_str).unwrap_or("?");
+            let next = v.get("next_run_at").and_then(Value::as_i64).map(|t| format!(" Next run at {}.", crate::schedules::timing::rfc3339(t))).unwrap_or_default();
+            Ok(format!("Created schedule {id}.{next}"))
+        }
+        "rm" | "remove" | "delete" => {
+            let id = args.get(1).ok_or_else(|| CliError::Usage("missing <schedule-id>".into()))?;
+            Client::from_env()?.remove_schedule(id)?;
+            Ok(format!("Deleted schedule {id}."))
+        }
+        other => Err(CliError::Usage(format!("unknown schedule command {other}"))),
+    }
+}
+
+fn format_schedules(v: &Value) -> String {
+    let rows = v.as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return "No schedules in this project.".into();
+    }
+    rows.iter()
+        .map(|r| {
+            let kind = &r["kind"];
+            let when = match kind["type"].as_str() {
+                Some("cron") => format!("cron \"{}\" {}", kind["expr"].as_str().unwrap_or(""), kind["tz"].as_str().unwrap_or("")),
+                Some("interval") => format!("every {}s", kind["seconds"]),
+                Some("once") => format!("once at {}", kind["at"]),
+                _ => "?".into(),
+            };
+            let target = match r["target"]["type"].as_str() {
+                Some("continue") => format!("continue {}", r["target"]["session_id"].as_str().unwrap_or("")),
+                _ => "new session".into(),
+            };
+            let state = if r["paused"].as_bool() == Some(true) { "paused" } else { "active" };
+            let prompt: String = r["prompt"].as_str().unwrap_or("").chars().take(60).collect();
+            format!(
+                "{}  {state}  {when}  -> {target}  next={}  {prompt}",
+                r["id"].as_str().unwrap_or("?"),
+                r["next_run_at"].as_i64().map(crate::schedules::timing::rfc3339).unwrap_or_else(|| "-".into())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_targets(v: &Value) -> String {
@@ -318,6 +474,29 @@ mod tests {
         let c = Client::new("http://[::1]:9000", "t").unwrap();
         assert_eq!((c.host.as_str(), c.port), ("[::1]", 9000));
         assert!(Client::new("https://x", "t").is_err());
+    }
+
+    #[test]
+    fn schedule_add_arguments() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (b, p) = schedule_add_body(&args(&["--cron", "0 9 * * 1-5", "--tz", "Asia/Seoul", "check", "CI"])).unwrap();
+        assert_eq!(b["kind"], json!({ "type": "cron", "expr": "0 9 * * 1-5", "tz": "Asia/Seoul" }));
+        assert!(b.get("target").is_none(), "continues the caller by default");
+        assert_eq!(p.as_deref(), Some("check CI"));
+        let (b, p) = schedule_add_body(&args(&["--every", "2h", "--new", "--title", "Nightly", "--catch-up", "-"])).unwrap();
+        assert_eq!(b["kind"], json!({ "type": "interval", "seconds": 7200 }));
+        assert_eq!(b["target"], json!({ "type": "new", "title": "Nightly" }));
+        assert_eq!(b["catch_up"], true);
+        assert_eq!(p, None, "stdin");
+        let (b, _) = schedule_add_body(&args(&["--at", "2026-10-04T09:00:00+09:00", "x"])).unwrap();
+        assert_eq!(b["kind"]["at"], "2026-10-04T09:00:00+09:00");
+        assert!(schedule_add_body(&args(&["x"])).is_err());
+        assert!(schedule_add_body(&args(&["--every", "1h", "--cron", "* * * * *", "x"])).is_err());
+        assert!(schedule_add_body(&args(&["--every", "soon", "x"])).is_err());
+        assert_eq!(parse_duration_secs("90"), Some(90));
+        assert_eq!(parse_duration_secs("15m"), Some(900));
+        assert_eq!(parse_duration_secs("1d"), Some(86_400));
+        assert_eq!(parse_duration_secs("1w"), None);
     }
 
     #[test]

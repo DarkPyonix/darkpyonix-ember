@@ -172,6 +172,8 @@ class PrepareDataDirTest(unittest.TestCase):
             p.write_text('{"editor.fontSize": 14}')
             runtime.prepare_data_dir("ose", Path(d))
             self.assertEqual(json.loads(p.read_text()), {"editor.fontSize": 14, "extensions.verifySignature": False})
+            u = Path(d) / "data" / "User" / "settings.json"
+            self.assertEqual(json.loads(u.read_text()), {"extensions.verifySignature": False})
 
     def test_vsc_is_left_alone(self):
         import tempfile

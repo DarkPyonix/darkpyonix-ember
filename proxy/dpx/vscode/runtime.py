@@ -205,18 +205,21 @@ def prepare_data_dir(rt: str, data_dir: Path) -> None:
     """
     if rt != "ose":
         return
-    path = data_dir / "data" / "Machine" / "settings.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        if not isinstance(current, dict):
+    # The running server reads Machine settings; its CLI (`--install-extension`, used by
+    # ensure_extensions) reads the default profile's User settings.
+    for scope in ("Machine", "User"):
+        path = data_dir / "data" / scope / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if not isinstance(current, dict):
+                current = {}
+        except (OSError, ValueError):
             current = {}
-    except (OSError, ValueError):
-        current = {}
-    if current.get("extensions.verifySignature") is False:
-        return
-    current["extensions.verifySignature"] = False
-    path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
+        if current.get("extensions.verifySignature") is False:
+            continue
+        current["extensions.verifySignature"] = False
+        path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
 
 
 def ensure_extensions(entries: list[str], extensions_dir: Path, command: str) -> dict:

@@ -30,8 +30,12 @@ echo "== 1. product.json"
 # Code-OSS has no Marketplace signature verifier (@vscode/vsce-sign is Microsoft-only), so
 # installs fail with "Signature verification was not executed" unless verification is off.
 # proxy/dpx/vscode/runtime.py writes the same machine setting for the OSE runtime.
-mkdir -p "$tmp/data/data/Machine"
-printf '{ "extensions.verifySignature": false }\n' > "$tmp/data/data/Machine/settings.json"
+# The running server reads Machine settings; the server CLI (--install-extension) reads the
+# default profile's User settings (remoteExtensionHostAgentCli.ts), so both get it.
+for scope in Machine User; do
+  mkdir -p "$tmp/data/data/$scope"
+  printf '{ "extensions.verifySignature": false }\n' > "$tmp/data/data/$scope/settings.json"
+done
 
 echo "== 2. server starts and serves the workbench"
 port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"

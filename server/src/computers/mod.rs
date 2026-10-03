@@ -267,8 +267,13 @@ impl Registry {
         if !projects.is_empty() {
             return Err(ComputerError::EgressInUse(id.to_string(), projects));
         }
-        let conn = self.store.conn();
-        Ok(conn.execute("DELETE FROM computers WHERE id = ?1", params![id])? > 0)
+        let mut conn = self.store.conn();
+        let tx = conn.transaction()?;
+        // Its project assignments go with it (FR-L4); the API pushes the affected projects.
+        tx.execute("DELETE FROM project_computers WHERE computer_id = ?1", params![id])?;
+        let removed = tx.execute("DELETE FROM computers WHERE id = ?1", params![id])? > 0;
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn session_computer(&self, session_id: &str) -> Result<Option<SessionComputer>, ComputerError> {
@@ -1169,6 +1174,8 @@ mod tests {
             last_seq: 0,
             account_id: None,
             account_reason: None,
+            pinned: false,
+            archived: false,
         }
     }
 

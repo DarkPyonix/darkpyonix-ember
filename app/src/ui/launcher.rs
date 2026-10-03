@@ -1,5 +1,8 @@
 //! The main screen (FR-L1–FR-L4): project cards with status badges, the selected project's
-//! sessions, and the computers at the bottom.
+//! sessions, and the computers at the bottom with their assignment to the selected project.
+//!
+//! Pin, archive and rename (FR-L9) and computer assignment (FR-L4) are main-server calls; the
+//! answer updates this client at once and the server's push updates every other client.
 //!
 //! Everything here renders from the client's state, which starts from the on-disk cache, so
 //! the screen is complete before the first network answer (FR-L1) and updates in place as
@@ -8,6 +11,7 @@
 use dioxus_compose::prelude::*;
 
 use ember_client::state::Reachability;
+use ember_client::wire::SessionPatch;
 
 use crate::model::{self, ProjectCard, SessionRow, Tone};
 use crate::services::{run, services};
@@ -21,8 +25,7 @@ pub fn Launcher() -> Element {
 
     let cards: Vec<ProjectCard> = {
         let _ = *ui.live.launcher.read();
-        let prefs = ui.prefs.read();
-        services().client.read(|s| model::project_cards(s, &prefs))
+        services().client.read(model::project_cards)
     };
     // The selected project, falling back to the most recently active one.
     let selected = ui
@@ -64,7 +67,7 @@ pub fn Launcher() -> Element {
                 }
             }
             Divider {}
-            ComputerList {}
+            ComputerList { project: selected.clone() }
         }
     }
 }
@@ -269,8 +272,9 @@ pub fn SessionRowView(row: SessionRow) -> Element {
     }
     meta.push(row.account.clone().unwrap_or_else(|| "server login".into()));
     let meta = meta.join(" \u{00b7} ");
-    let pin_label = if row.pinned { "Unpin" } else { "Pin" };
-    let archive_label = if row.archived { "Unarchive" } else { "Archive" };
+    let (pinned, archived) = (row.pinned, row.archived);
+    let pin_label = if pinned { "Unpin" } else { "Pin" };
+    let archive_label = if archived { "Unarchive" } else { "Archive" };
     let (id_open, id_pin, id_arch, id_export, id_rename) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
     let title_for_export = row.title.clone();
     let current_title = row.title.clone();
@@ -310,8 +314,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                             fill_max_width: true,
                             on_click: move |_| {
                                 menu_open.set(false);
-                                let id = id_pin.clone();
-                                ui.update_prefs(move |p| p.toggle_pin(&id));
+                                patch_session(id_pin.clone(), SessionPatch { pinned: Some(!pinned), ..Default::default() });
                             },
                         }
                         Button {
@@ -330,8 +333,13 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                             fill_max_width: true,
                             on_click: move |_| {
                                 menu_open.set(false);
-                                let id = id_arch.clone();
-                                ui.update_prefs(move |p| p.toggle_archive(&id));
+                                // An archived session is out of the way; it is not also pinned.
+                                let patch = if archived {
+                                    SessionPatch { archived: Some(false), ..Default::default() }
+                                } else {
+                                    SessionPatch { archived: Some(true), pinned: Some(false), ..Default::default() }
+                                };
+                                patch_session(id_arch.clone(), patch);
                             },
                         }
                         Button {
@@ -368,9 +376,9 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                 }
             }
         }
-        // FR-L9 rename. TODO(dioxus-compose): TextField has no initial value (it is
-        // uncontrolled), so the current title is the placeholder; leaving it empty clears a
-        // local rename.
+        // FR-L9 rename, on the main server. TODO(dioxus-compose): TextField has no initial
+        // value (it is uncontrolled), so the current title is the placeholder; an empty entry
+        // keeps the title.
         Dialog {
             open: renaming(),
             on_dismiss: move |_| renaming.set(false),
@@ -383,8 +391,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                     placeholder: current_title.clone(),
                     on_value_change: move |v: String| new_title.set(v),
                     on_submit: move |v: String| {
-                        let id = id_rename.clone();
-                        ui.update_prefs(move |p| p.rename(&id, &v));
+                        rename(id_rename.clone(), v);
                         renaming.set(false);
                     },
                 }
@@ -397,9 +404,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                         text: "Rename",
                         variant: ButtonVariant::Filled,
                         on_click: move |_| {
-                            let id = id.clone();
-                            let t = new_title();
-                            ui.update_prefs(move |p| p.rename(&id, &t));
+                            rename(id.clone(), new_title());
                             renaming.set(false);
                         },
                     }
@@ -407,6 +412,42 @@ pub fn SessionRowView(row: SessionRow) -> Element {
             }
         }
     }
+}
+
+/// Change a session's metadata on the main server (FR-L9); say so when it fails.
+pub fn patch_session(id: String, patch: SessionPatch) {
+    run(async move { services().client.patch_session(&id, &patch).await }, |r| {
+        if let Err(e) = r {
+            Message::new(format!("Could not update the session: {e}")).with_duration(MessageDuration::Long).show();
+        }
+    });
+}
+
+/// Rename on the main server; an empty title leaves it as it is.
+fn rename(id: String, title: String) {
+    let title = title.trim().to_string();
+    if !title.is_empty() {
+        patch_session(id, SessionPatch { title: Some(title), ..Default::default() });
+    }
+}
+
+/// Assign or unassign a computer to a project on the main server (FR-L4).
+fn set_assignment(project: String, computer_id: String, assign: bool) {
+    run(
+        async move {
+            let c = &services().client;
+            if assign {
+                c.assign_computer(&project, &computer_id).await
+            } else {
+                c.unassign_computer(&project, &computer_id).await
+            }
+        },
+        |r| {
+            if let Err(e) = r {
+                Message::new(format!("Could not change the assignment: {e}")).with_duration(MessageDuration::Long).show();
+            }
+        },
+    );
 }
 
 /// Export a session to the data directory and say where it went (FR-L9).
@@ -423,12 +464,22 @@ pub fn export(id: String, title: String) {
     );
 }
 
-/// The computers at the bottom of the main screen (FR-L3): reachability and assigned projects.
+/// The computers at the bottom of the main screen (FR-L3): reachability, assigned projects,
+/// and a switch assigning each to the selected project (FR-L4).
 #[component]
-fn ComputerList() -> Element {
+fn ComputerList(project: Option<String>) -> Element {
     let ui = use_ui();
     let _ = *ui.live.launcher.read();
-    let computers = services().client.read(|s| s.computers().to_vec());
+    let (computers, assigned): (Vec<_>, Vec<bool>) = services().client.read(|s| {
+        let list = s.computers().to_vec();
+        let assigned = list
+            .iter()
+            .map(|c| project.as_deref().is_some_and(|p| model::is_assigned(s, p, &c.id)))
+            .collect();
+        (list, assigned)
+    });
+    let has_project = project.is_some();
+    let selected = project.clone().unwrap_or_default();
     rsx! {
         Column {
             fill_max_width: true,
@@ -442,7 +493,7 @@ fn ComputerList() -> Element {
                 }
             }
             // TODO(dioxus-compose M9, ~10-08): a horizontally scrolling strip of cards.
-            for c in computers {
+            for (c, is_assigned) in computers.into_iter().zip(assigned) {
                 Row {
                     key: "{c.id}",
                     fill_max_width: true,
@@ -462,14 +513,24 @@ fn ComputerList() -> Element {
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
                     }
                     Spacer { weight: 1.0 }
-                    // TODO(server FR-L4): assigning computers to projects needs a main-server
-                    // API; until then this shows what the client state carries.
                     Text {
                         text: if c.projects.is_empty() { "No projects assigned".to_string() } else { model::join_projects(&c.projects) },
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
                         max_lines: 1,
                         overflow: TextOverflow::Ellipsis,
+                    }
+                    if has_project {
+                        Tooltip {
+                            text: if is_assigned { format!("Unassign from {selected}") } else { format!("Assign to {selected}") },
+                            Switch {
+                                checked: is_assigned,
+                                on_change: {
+                                    let (p, id) = (selected.clone(), c.id.clone());
+                                    move |v: bool| set_assignment(p.clone(), id.clone(), v)
+                                },
+                            }
+                        }
                     }
                 }
             }

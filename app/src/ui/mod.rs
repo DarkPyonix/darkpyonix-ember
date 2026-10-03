@@ -71,7 +71,7 @@ impl Ui {
         self.go(Route::Conversation(id.to_string()));
     }
 
-    /// Change prefs and persist them.
+    /// Change per-device prefs and persist them.
     pub fn update_prefs(&self, f: impl FnOnce(&mut Prefs)) {
         let mut prefs = self.prefs;
         let snapshot = {
@@ -98,10 +98,8 @@ impl Ui {
     /// would otherwise redraw the caller on every delta). Previews may be stale.
     pub fn with_rows_no_previews<R>(&self, f: impl FnOnce(&ember_client::State, &RowContext<'_>) -> R) -> R {
         let _ = *self.live.launcher.read();
-        let prefs = self.prefs.read();
-        let session_accounts = self.live.session_accounts.read();
         let labels = model::account_labels(&self.live.accounts.read());
-        let cx = RowContext { prefs: &prefs, session_accounts: &session_accounts, account_labels: &labels };
+        let cx = RowContext { account_labels: &labels };
         services().client.read(|s| f(s, &cx))
     }
 }

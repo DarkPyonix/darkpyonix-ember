@@ -147,7 +147,7 @@ class OutputsPanel(private val project: Project) : Disposable {
 
         val title = buildString {
             append(if (local.isPreamble) "Preamble" else "[${cell?.executionCount ?: " "}] Cell ${local.index}")
-            local.title?.let { append(" — ").append(it) }
+            local.title?.let { append(": ").append(it) }
             append("  ").append(local.type)
             cell?.status?.let { append(" · ").append(it) }
             if (cell != null && s.isStale(local, cell)) append(" · stale (source changed since this output)")

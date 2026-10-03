@@ -94,7 +94,7 @@ class CellDecorator(val editor: Editor, val session: NotebookSession) : Disposab
 
             val title = buildString {
                 append("Cell ").append(local.index)
-                local.title?.let { append(" — ").append(it) }
+                local.title?.let { append(": ").append(it) }
                 append(" [").append(local.type).append(']')
                 if (notes.isNotEmpty()) append("\n").append(notes.joinToString(", "))
             }

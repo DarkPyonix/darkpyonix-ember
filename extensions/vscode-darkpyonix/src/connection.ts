@@ -8,7 +8,7 @@ import type { Document, DocumentCell, Kernel, NbOutput } from "./manager/types";
 import { RunTracker, type ExecSink } from "./run/tracker";
 
 export interface OutputsHost {
-  /** Show stored outputs on an editor cell (by position) — FR-R4 latest outputs on open. */
+  /** Show stored outputs on an editor cell (by position): FR-R4 latest outputs on open. */
   showOutputs(position: number, cell: DocumentCell): void;
   kernelChanged(kernel: Kernel | null, state: string): void;
 }

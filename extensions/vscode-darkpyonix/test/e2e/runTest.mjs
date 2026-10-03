@@ -1,5 +1,5 @@
 // Runs test/e2e/suite.ts inside a real VS Code with @vscode/test-electron.
-// Uses an installed VS Code (VSCODE_PATH, default: the macOS app) — nothing is downloaded.
+// Uses an installed VS Code (VSCODE_PATH, default: the macOS app); nothing is downloaded.
 // The test workspace lives under <worktree>/.scratch/vscode-e2e; the profile in <worktree>/.scratch/u
 // (short: VS Code puts its IPC socket there and macOS limits socket paths to 103 chars).
 import { runTests } from "@vscode/test-electron";

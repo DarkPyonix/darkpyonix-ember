@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computers and the hub · Ember guide</title>
+<meta name="description" content="Register a computer with ember server by HTTP address, by peer address or through the darkpyonix.dev hub, assign it to projects, and switch a session onto it.">
+<link rel="alternate" hreflang="en" href="computers.html">
+<link rel="alternate" hreflang="ko" href="../ko/computers.html">
+<link rel="alternate" hreflang="x-default" href="computers.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="computers.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/computers.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html" aria-current="page">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#by-url">By HTTP address</a></li>
+        <li><a href="#peer">By peer address</a></li>
+        <li><a href="#hub">Through the hub</a></li>
+        <li><a href="#assign">Assigning to projects</a></li>
+        <li><a href="#switch">Switching a session</a></li>
+        <li><a href="#mount">The project mount</a></li>
+        <li><a href="#remove">Removing a computer</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Computers and the hub</p>
+    <h1>Putting a session to work on another computer</h1>
+    <p class="lede">
+      A computer joins Ember by running <code>ember-node</code> and being registered with the main
+      server. There are three ways to register it: by its HTTP address, by its peer address, or by
+      picking it from your darkpyonix.dev account. After that, any session can move onto it.
+    </p>
+    <div class="note">
+      <span class="label">The API, for now</span>
+      <p>
+        The client lists computers, assigns them to projects and switches sessions between them,
+        but it cannot add a computer yet. Adding one goes through <code>ember-server</code>'s HTTP
+        API, run on the main server with <code>curl</code>. The routes live under
+        <code>/api/v1</code> today and move to <code>/api</code>
+        <span class="pill planned">Planned</span>
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a>).
+      </p>
+    </div>
+
+    <h2 id="by-url">By HTTP address</h2>
+    <p>
+      The simplest way, for a computer on a network you trust. On the computer, start the node on
+      an address the main server can reach:
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the computer</figcaption>
+<pre><code><span class="k">export</span> EMBER_NODE_TOKEN=<span class="s">"$(openssl rand -hex 32)"</span>
+<span class="k">echo</span> <span class="s">"$EMBER_NODE_TOKEN"</span>   <span class="c"># you need it in the next step</span>
+EMBER_NODE_LISTEN=0.0.0.0:8741 EMBER_NODE_ROOTS=<span class="s">"$HOME/src"</span> ./target/release/ember-node</code></pre>
+    </figure>
+    <p>Then register it on the main server:</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the main server</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/computers \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"name": "linux-box", "url": "http://192.168.0.20:8741", "token": "&lt;the node token&gt;"}'</span>
+
+curl http://127.0.0.1:8740/api/v1/computers   <span class="c"># each computer, probed for reachability</span></code></pre>
+    </figure>
+    <p>
+      The token is never returned by the API. <code>EMBER_NODE_ROOTS</code> limits the folders the
+      node may touch, so a session cannot read or run anything outside them on that computer.
+    </p>
+
+    <h2 id="peer">By peer address</h2>
+    <p>
+      Over the peer-to-peer transport, the node needs no open port, and both sides are
+      authenticated by their keys. Each side prints its identity when it starts with the
+      transport on.
+    </p>
+    <ol>
+      <li>
+        Start the main server with <code>EMBER_TRANSPORT=1</code>. It prints
+        <code>ember server peer id: &hellip;</code> and <code>ember server peer addr: &hellip;</code>.
+      </li>
+      <li>
+        On the computer, add that server peer id to the node's allow-list, then start the node with
+        the transport. Without an entry it warns
+        <code>no allowed peers: every transport connection will be refused</code>.
+<figure class="codeblock" data-copy="Copy" data-copied="Copied">
+  <figcaption>shell, on the computer</figcaption>
+<pre><code>mkdir -p ~/.ember/node
+<span class="k">echo</span> <span class="s">"&lt;server peer id&gt;"</span> &gt;&gt; ~/.ember/node/allowed-peers
+EMBER_NODE_TRANSPORT=1 ./target/release/ember-node
+<span class="c"># ember node peer id: ...</span>
+<span class="c"># ember node peer addr: {"peer": ..., "relays": [...], "direct": [...]}</span></code></pre>
+</figure>
+        A running node reloads <code>allowed-peers</code> on <code>SIGHUP</code> and disconnects
+        peers that were removed from it.
+      </li>
+      <li>
+        Register the node with its peer id, or with the whole <code>peer addr</code> object it
+        printed, which also carries address hints:
+<figure class="codeblock" data-copy="Copy" data-copied="Copied">
+  <figcaption>shell, on the main server</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/computers \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"name": "laptop", "peer": "&lt;node peer id&gt;", "token": "&lt;the node token&gt;"}'</span></code></pre>
+</figure>
+      </li>
+    </ol>
+    <p>
+      The node token is still required on this path, as a second factor beside the key.
+      <span class="pill partial">Partial</span> The transport is tested on an in-memory network;
+      its measurement across real networks (home, office, LTE, symmetric NAT) is pending
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/10">#10</a>).
+    </p>
+
+    <h2 id="hub">Through the darkpyonix.dev hub</h2>
+    <p>
+      <span class="pill partial">Partial</span> The hub lets every device join your GitHub account
+      with a one-time code. Each device then publishes its address there and finds the others
+      there, so nobody types an address. Ember's side is tested against a fake hub but has not yet
+      run against the live one, and the hub's address is changing from
+      <code>https://darkpyonix.dev</code> to <code>https://hub.darkpyonix.dev</code>
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>). Until that
+      lands, the built-in default is the old address, so set <code>EMBER_HUB_URL</code> to the
+      hub's address on the server and on every node.
+    </p>
+    <h3 id="hub-server">1. Link the main server</h3>
+    <p>The hub needs the transport, so the server runs with <code>EMBER_TRANSPORT=1</code>.</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the main server</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/hub/link \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"name": "mini"}'</span>
+<span class="c"># {"user_code": "...", "verification_uri": "...", "verification_uri_complete": "...", ...}</span></code></pre>
+    </figure>
+    <p>
+      Open <code>verification_uri_complete</code> in a browser signed in to darkpyonix.dev with
+      GitHub, and approve. A main server must be approved in the browser.
+      <code>GET /api/v1/hub</code> shows the registration afterwards. If the server restarts while
+      the link waits, it resumes the same link.
+    </p>
+    <h3 id="hub-node">2. Register each computer</h3>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the computer</figcaption>
+<pre><code>./target/release/ember-node hub register --name laptop
+<span class="c"># To add this computer to your darkpyonix.dev account, open</span>
+<span class="c">#     https://...</span>
+<span class="c"># or enter the code ... at ... (or in Ember, as the account's server).</span>
+<span class="c"># Waiting for approval...</span></code></pre>
+    </figure>
+    <p>
+      Approve it in the browser, or let the main server approve it, since a computer's link may be
+      approved by the account's main server:
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the main server</figcaption>
+<pre><code>curl http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt;   <span class="c"># who is asking</span>
+curl -X POST http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt; \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"approve": true}'</span></code></pre>
+    </figure>
+    <p>
+      The registration is saved in <code>~/.ember/node/hub.json</code>. Restart the node with
+      <code>EMBER_NODE_TRANSPORT=1</code>, or send it <code>SIGHUP</code>, so it publishes its
+      address through the hub. To let in your account's main servers without editing
+      <code>allowed-peers</code>, also set <code>EMBER_NODE_HUB_ALLOW_SERVERS=1</code>.
+      <code>ember-node hub status</code> shows the state at any time.
+    </p>
+    <h3 id="hub-add">3. Add it as a computer</h3>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the main server</figcaption>
+<pre><code>curl http://127.0.0.1:8740/api/v1/hub/devices   <span class="c"># your account's devices, with endpoint_id</span>
+curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/computer \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"name": "laptop", "token": "&lt;the node token&gt;"}'</span></code></pre>
+    </figure>
+    <p>
+      The node token is still needed, because the hub never carries it. The computer is stored by
+      its peer id alone, and the server resolves its address through the hub's directory.
+    </p>
+
+    <h2 id="assign">Assigning computers to projects</h2>
+    <p>
+      The launcher lists computers at the bottom with their reachability (online, offline or
+      unknown) and the projects each serves. With a project selected, each computer has a switch,
+      "Assign to <em>project</em>". A project can have many computers and a computer many
+      projects. The API equivalent is
+      <code>PUT /api/v1/projects/{name}/computers/{computer_id}</code>, and <code>DELETE</code> on
+      the same path to unassign.
+    </p>
+
+    <h2 id="switch">Switching a session's computer</h2>
+    <p>
+      In a conversation, the header reads "On <em>computer</em>". Click it and pick another
+      computer. The switch is refused while a turn is running or waiting for approval, because the
+      running tool calls belong to the old computer; answer or stop the turn first. It is also
+      refused when the target does not answer.
+    </p>
+    <p>
+      After a switch the client says "Switched to <em>name</em>. The agent is told with your next
+      message." The agent's environment description (operating system, shell, toolchains) is
+      replaced, not appended, and a notice tells it to re-read files and re-run commands before
+      relying on them. How each agent's tools reach the computer:
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Agent</th><th scope="col">On another computer</th></tr></thead>
+        <tbody>
+          <tr><td>Codex</td><td>Every tool runs on the node through <code>codex exec-server</code>, so Codex must be installed on that computer too.</td></tr>
+          <tr><td>Claude Code</td><td>Bash runs on the node through <code>ember-exec</code>. Read, Edit, Write, Glob and Grep work on the main server's disk, where the <a href="#mount">project mount</a> puts the node's folder.</td></tr>
+          <tr><td>OMP and other ACP agents</td><td>File reads, writes and terminals that the agent asks Ember for run on the node.</td></tr>
+          <tr><td>Antigravity</td><td>Not supported yet: "Antigravity sessions cannot run on another computer yet".</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="pill partial">Partial</span> Codex and Claude Code's Bash tool were verified with
+      a node registered as a separate computer on the same Mac. A switch between two physically
+      separate computers is not verified yet
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+
+    <h2 id="mount">The project mount</h2>
+    <p>
+      <span class="pill partial">Partial</span> Claude Code's file tools run inside
+      <code>claude</code> on the main server. So when its session is on another computer, Ember
+      mounts that computer's project folder on the main server <em>at the same absolute path</em>.
+      The tools then see the right files, and paths in the transcript stay true. The mount is
+      written but not yet run on a real Mac mini or Raspberry Pi
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+    <ul>
+      <li><strong>Build:</strong> <code>--features mount-nfs</code> on a macOS main server, <code>--features mount-fuse</code> on Linux (<a href="install.html#mount-build">Install</a>). <code>EMBER_MOUNT=off</code> turns it off.</li>
+      <li><strong>Mount point:</strong> the path must be creatable by the server's user. When it is not (another user's home, <code>/home</code> on macOS, a new top-level folder), run <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> once; it prints each <code>sudo</code> command before running it, and <code>--dry-run</code> only prints them.</li>
+      <li><strong>Existing folders:</strong> a non-empty local folder at the same path is not mounted over, unless <code>EMBER_MOUNT_SHADOW=1</code>.</li>
+      <li><strong>Scope:</strong> only the session's folder is mounted. Nested project folders, and the same path served from two computers, are refused.</li>
+      <li><strong>Freshness:</strong> writes go to the node at once; changes made on the node by other programs show within about a second (<code>EMBER_MOUNT_TTL_MS</code>, default 1000).</li>
+      <li><strong>Outages:</strong> every node call has a 4-second deadline, so a lost computer shows up as an I/O error instead of a hang.</li>
+    </ul>
+
+    <h2 id="remove">Removing a computer</h2>
+    <p>
+      <code>DELETE /api/v1/computers/{id}</code> removes a computer and its project assignments.
+      It is refused while a session is on that computer, or while a project's remote browser
+      goes out through it; move those first. To leave the hub, run
+      <code>ember-node hub forget</code> on a computer, or
+      <code>DELETE /api/v1/hub/registration</code> on the main server. Add
+      <code>--local</code> or <code>?local=1</code> to forget the registration here only, while
+      the device stays in the account.
+    </p>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="first-conversation.html"><span>Previous</span>&larr; Your first conversation</a>
+      <a class="next" href="ide.html"><span>Next</span>Opening an IDE &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

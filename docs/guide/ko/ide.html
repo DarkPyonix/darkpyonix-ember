@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IDE 열기 · Ember 가이드</title>
+<meta name="description" content="IDE 열기의 세 가지 선택지(Ember 자체 에디터, VS Code Web, JetBrains Gateway), 각각이 컴퓨터를 찾는 방법, 그리고 지금 동작하는 범위.">
+<link rel="alternate" hreflang="en" href="../en/ide.html">
+<link rel="alternate" hreflang="ko" href="ide.html">
+<link rel="alternate" hreflang="x-default" href="../en/ide.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>가이드</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">메뉴</button>
+  <nav class="langswitch" aria-label="언어">
+    <a href="../en/ide.html" hreflang="en">EN</a>
+    <a href="ide.html" aria-current="true" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="다크" data-light="라이트" aria-pressed="false">다크</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="가이드">
+      <h2>가이드</h2>
+      <ul>
+        <li><a href="index.html">개요</a></li>
+        <li><a href="install.html">설치</a></li>
+        <li><a href="first-conversation.html">첫 대화</a></li>
+        <li><a href="computers.html">컴퓨터와 허브</a></li>
+        <li><a href="ide.html" aria-current="page">IDE 열기</a></li>
+        <li><a href="terminals.html">영구 터미널</a></li>
+        <li><a href="browser.html">원격 브라우저</a></li>
+        <li><a href="agents.html">에이전트</a></li>
+        <li><a href="troubleshooting.html">문제 해결</a></li>
+      </ul>
+      <h2>이 페이지</h2>
+      <ul>
+        <li><a href="#choices">세 가지 선택지</a></li>
+        <li><a href="#button">버튼이 하는 일</a></li>
+        <li><a href="#computer">어느 컴퓨터가 열리는가</a></li>
+        <li><a href="#vscode">VS Code Web</a></li>
+        <li><a href="#gateway">JetBrains Gateway</a></li>
+        <li><a href="#ember">Ember 자체 에디터</a></li>
+        <li><a href="#detach">탭 분리</a></li>
+        <li><a href="#phones">휴대폰과 태블릿</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">IDE 열기</p>
+    <h1>IDE 열기</h1>
+    <p class="lede">
+      대화는 에이전트와 함께 일하는 곳입니다. 코드를 직접 읽거나 고치고 싶을 때는 대화 화면
+      오른쪽 위의 <strong>Open IDE</strong> 버튼이 세션의 프로젝트를 IDE로 엽니다. 선택지는 세
+      가지이고, 하나의 겉모습만 바꾼 것이 아니라 서로 다른 세 프로그램입니다.
+    </p>
+
+    <div class="note">
+      <span class="label">현재 상태</span>
+      <p>
+        VS Code Web과 JetBrains Gateway는 지금 열립니다. 대상 컴퓨터는 서버 설정에 적어 둔
+        목록에서 가져옵니다. Ember 자체 에디터는 계획 단계이고
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>), 선택하면 자리
+        표시 화면만 나옵니다. IDE는 아직 세션의 현재 컴퓨터를 스스로 따라가지 않습니다.
+        <a href="#computer">어느 컴퓨터가 열리는가</a>를 보십시오.
+      </p>
+    </div>
+
+    <h2 id="choices">세 가지 선택지</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">선택지</th><th scope="col">열리는 것</th><th scope="col">상태</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Ember IDE</strong></td><td>dioxus-compose가 네이티브로 그리는 Ember 자체 에디터입니다. 웹뷰도 JavaScript 엔진도 없습니다.</td><td><span class="pill planned">계획</span> <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a></td></tr>
+          <tr><td><strong>VS Code</strong></td><td>컴퓨터에서 도는 VS Code Web을 Ember의 프록시로 감싼 것입니다. 기본 브라우저에서 열립니다.</td><td><span class="pill partial">부분</span></td></tr>
+          <tr><td><strong>JetBrains Gateway</strong></td><td><code>jetbrains-gateway://</code> 링크입니다. 지금 쓰는 기기에 설치된 Gateway를 띄우고, SSH로 컴퓨터에 접속합니다.</td><td><span class="pill partial">부분</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      VS Code와 Gateway가 부분인 이유는 같습니다. 열리기는 하지만, 어느 컴퓨터에서 열지는
+      세션이 아니라 설정 목록에서 정해집니다. Gateway는 아직 실제 Gateway 설치본으로 돌려 보지
+      않았고, 만들어지는 링크만 테스트합니다.
+    </p>
+
+    <h2 id="button">버튼이 하는 일</h2>
+    <p>
+      클라이언트는 이 세션에서 각 IDE를 어떻게 여는지 메인 서버에 묻습니다. 서버는 데이터만
+      돌려주고 창을 직접 열지 않습니다. 런처 프로세스는 웹뷰를 절대 만들면 안 되기 때문입니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>http: Open IDE 뒤의 요청</figcaption>
+<pre><code><span class="k">GET</span> /api/v1/sessions/{id}/ide?computer=studio   <span class="c"># ?computer= 는 생략할 수 있습니다</span></code></pre>
+    </figure>
+
+    <p>
+      응답에는 대상 셋이 항상 <code>ember</code>, <code>vscode</code>, <code>gateway</code> 순서로
+      들어 있습니다. 각 대상에는 <code>available</code> 이 있고, 쓸 수 없을 때는
+      <code>reason</code> 이 붙습니다(예: "no ide_url configured for computer"). 클라이언트는
+      조용히 실패하지 않고 이 이유를 보여 줍니다.
+    </p>
+    <ul>
+      <li>클라이언트는 마지막으로 고른 대상을 기억했다가 다음에 맨 앞에 보여 줍니다.</li>
+      <li>URL은 대상에 맞는 스킴일 때만 운영체제에 넘깁니다. VS Code는 <code>http</code> 나
+          <code>https</code>, Gateway는 <code>jetbrains-gateway://</code> 나
+          <code>jetbrains://</code> 입니다. 그래서 서버 응답이 클라이언트에게 로컬 파일이나
+          프로그램을 열게 할 수 없습니다.</li>
+      <li>열리는 폴더는 세션의 작업 디렉터리이고, 그 컴퓨터의 경로로 해석합니다.</li>
+    </ul>
+    <p>
+      이 페이지의 REST 경로는 지금 코드가 제공하는 그대로 적었습니다. 이슈
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a> 이 버전을 빼면
+      <code>/api/v1/...</code> 은 <code>/api/...</code> 가 됩니다.
+    </p>
+
+    <h2 id="computer">어느 컴퓨터가 열리는가 <span class="pill partial">부분</span></h2>
+    <p>
+      세션에는 이미 현재 컴퓨터가 있지만, IDE 대상은 아직 그것을 읽지 않습니다. 그때까지 서버는
+      각 컴퓨터의 IDE 정보를 <code>EMBER_IDE_COMPUTERS</code> 에서 가져오고, 요청이
+      <code>?computer=</code> 로 다른 컴퓨터를 지정하지 않으면 기본 컴퓨터를 엽니다. 값은
+      인라인 JSON이거나 JSON 파일 경로입니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>json: EMBER_IDE_COMPUTERS</figcaption>
+<pre><code>{ <span class="at">"default_computer"</span>: <span class="s">"mini"</span>,
+  <span class="at">"server_url"</span>: <span class="s">"http://mini.local:8740"</span>,
+  <span class="at">"computers"</span>: {
+    <span class="at">"mini"</span>:   { <span class="at">"local"</span>: <span class="k">true</span>, <span class="at">"ide_url"</span>: <span class="s">"http://127.0.0.1:8890/"</span>, <span class="at">"os"</span>: <span class="s">"macos"</span> },
+    <span class="at">"studio"</span>: { <span class="at">"ide_url"</span>: <span class="s">"http://studio.local:8890/"</span>, <span class="at">"ssh_host"</span>: <span class="s">"studio.local"</span>,
+                <span class="at">"ssh_user"</span>: <span class="s">"me"</span>, <span class="at">"os"</span>: <span class="s">"linux"</span> } } }</code></pre>
+    </figure>
+
+    <dl>
+      <dt><code>ide_url</code></dt>
+      <dd>그 컴퓨터에서 감싼 VS Code Web, 즉 프록시가 알려 주는 URL입니다(아래 참고).</dd>
+      <dt><code>ssh_host</code>, <code>ssh_user</code>, <code>ssh_port</code></dt>
+      <dd>Gateway가 접속할 곳입니다. <code>ssh_host</code> 가 없으면 Gateway 대상은 쓸 수 없습니다. 포트 기본값은 22입니다.</dd>
+      <dt><code>jetbrains_ide_path</code></dt>
+      <dd>컴퓨터에 이미 설치된 IDE 백엔드입니다. 없으면 Gateway가 어떤 IDE를 쓸지 묻습니다.</dd>
+      <dt><code>os</code></dt>
+      <dd><code>macos</code>, <code>linux</code>, <code>windows</code> 중 하나입니다.</dd>
+    </dl>
+    <p>
+      <code>EMBER_IDE_COMPUTERS</code> 가 없으면 컴퓨터는 <code>local</code> 하나이고, 그
+      <code>ide_url</code> 은 <code>EMBER_IDE_URL</code> 입니다. <code>server_url</code> 의 기본값은
+      <code>EMBER_PUBLIC_URL</code> 입니다. 이 대상을 <a href="computers.html">컴퓨터와 허브</a>
+      에서 등록한 컴퓨터로 옮기는 일은 서버 코드에 남은 과제입니다.
+    </p>
+
+    <h2 id="vscode">VS Code Web <span class="pill partial">부분</span></h2>
+    <p>
+      VS Code 선택지는 컴퓨터 자체에서 서비스하는 VS Code Web을 Ember의 프록시
+      (<code>web/proxy/</code>)로 감싼 것입니다. 프록시는 수정하지 않은 VS Code 빌드 위에, 좁은
+      창을 위한 타이틀 바와 터치 레이아웃을 더합니다. 넓은 창에서는 순정 VS Code가 보입니다.
+      런타임은 두 가지입니다.
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col"></th><th scope="col">OSE (기본값)</th><th scope="col">VSC</th></tr></thead>
+        <tbody>
+          <tr><td>빌드</td><td>DarkPyonix가 MIT 소스로 컴파일한 Code-OSS 1.139.1</td><td>사용자가 직접 설치한 Microsoft VS Code (<code>code serve-web</code>)</td></tr>
+          <tr><td>확장</td><td>Open VSX</td><td>Microsoft Marketplace</td></tr>
+          <tr><td>라이선스</td><td>MIT</td><td>Microsoft 라이선스, 사용자 책임</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      OSE가 기본값인 이유는 Microsoft 서버 라이선스가 호스팅과 재배포를 금지하기 때문입니다.
+      그래서 Ember는 Microsoft 서버를 내려받거나 함께 묶지 않고, VSC는 사용자가 직접 설치한
+      사본만 실행합니다. OSE는 저장소 CI가 linux-x64, linux-arm64, darwin-arm64, darwin-x64용으로
+      빌드합니다. 2026-10-03 현재 공개된 OSE 릴리스는 아직 없습니다. 그래서 지금은
+      <code>--runtime vsc</code> 를 쓰거나, 가지고 있는 OSE 빌드를 <code>DPX_OSE_SERVER</code> 로
+      지정합니다.
+    </p>
+    <p>
+      각 컴퓨터에서 <code>web/proxy</code> 로 가서 명령 하나로 런타임과 프록시를 띄웁니다.
+      <code>--root</code> 가 적어도 하나 필요하고, 어느 루트에도 속하지 않는 폴더는 403으로
+      거절합니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸, 컴퓨터에서</figcaption>
+<pre><code>cd web/proxy
+export DPX_USERNAME=<span class="s">&lt;user&gt;</span> DPX_PASSWORD=<span class="s">&lt;password&gt;</span>   <span class="c"># 처음 한 번만: 프록시 로그인 계정을 만듭니다</span>
+uv run --with-requirements requirements.txt python -m dpx.serve --runtime vsc --root ~/work
+<span class="c"># {"event": "ready", "url": "http://127.0.0.1:53817/", ...}</span></code></pre>
+    </figure>
+
+    <p>
+      ready 줄의 <code>url</code> 이 그 컴퓨터의 <code>ide_url</code> 입니다.
+      <code>--runtime vsc --check</code> 는 아무것도 띄우지 않고 <code>code</code> 설치 여부와
+      버전만 출력합니다. 설정과 확장은 <code>~/.ember/vscode-web/&lt;runtime&gt;</code> 에 런타임마다
+      따로 두므로, 두 마켓플레이스가 섞이지 않습니다.
+    </p>
+
+    <div class="warn">
+      <span class="label">루트는 샌드박스가 아닙니다</span>
+      <p>
+        <code>--root</code> 는 URL이 열 수 있는 폴더만 제한합니다. 확장 호스트와 터미널은 여전히
+        프록시를 띄운 운영체제 사용자로 실행되고, 프록시에 로그인할 수 있는 사람은 그 사용자의
+        파일을 볼 수 있습니다.
+      </p>
+    </div>
+
+    <h2 id="gateway">JetBrains Gateway <span class="pill partial">부분</span></h2>
+    <p>
+      JetBrains IDE를 고르면 Ember가 SSH 접속용 Gateway 링크를 만들어 운영체제에 넘기고,
+      운영체제가 지금 쓰는 기기에서 JetBrains Gateway를 띄웁니다. 그다음 Gateway가 컴퓨터에
+      접속해 세션의 폴더를 엽니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>Ember가 만드는 링크</figcaption>
+<pre><code>jetbrains-gateway://connect#type=ssh&amp;host=studio.local&amp;port=22&amp;user=me&amp;projectPath=%2Fhome%2Fme%2Fwork
+<span class="c"># jetbrains_ide_path 가 있으면 다음도 붙습니다: &amp;idePath=...&amp;deploy=false</span></code></pre>
+    </figure>
+
+    <p>
+      클라이언트가 도는 곳에 Gateway가 설치되어 있어야 하고, 컴퓨터에 SSH로 접속할 수 있어야
+      합니다. JetBrains는 Gateway를 Toolbox App으로 옮기면서 <code>jetbrains://</code> 스킴을
+      쓰고, 이 링크와의 호환은 제한적으로만 유지합니다. 그래서 클라이언트는
+      <code>jetbrains://</code> 도 받아들입니다.
+    </p>
+
+    <h2 id="ember">Ember 자체 에디터 <span class="pill planned">계획</span></h2>
+    <p>
+      클라이언트를 dioxus-compose로 만드는 이유가 바로 Ember IDE입니다. Code-OSS 워크벤치를
+      Rust로 네이티브하게 다시 만들고, Code-OSS의 CSS로 그리며, Monaco 대신 네이티브 코드 에디터
+      위젯을 씁니다. 이 창에는 웹뷰도 JavaScript 엔진도 없습니다.
+    </p>
+    <p>
+      확장은 컴퓨터의 OSE 서버가 띄운 공식 Node 확장 호스트에서 수정 없이 그대로 돕니다. Ember는
+      그 호스트를 다시 구현하지 않고, Code-OSS 자체의 연결 프로토콜로 대화합니다. 이 프로토콜은
+      VS Code 내부용이라서 Ember는 Code-OSS 커밋 하나(OSE가 빌드되는 1.139.1)에 고정하고, 접속할
+      때 서버 버전을 확인합니다. 첫 기능은 진단, CodeLens, 호버이고, 그다음이 인라인 완성입니다.
+    </p>
+    <p>
+      연결 계층(<code>ember-editor-conn</code>)과 세션 계층(<code>ember-editor</code>)은 첫 코드가
+      있지만 아직 컴파일하지 않았습니다. 에디터가 처음부터 끝까지 동작하기 전까지 Ember IDE를
+      고르면 자리 표시 화면이 나옵니다. 진행은
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a> 에서 확인합니다.
+    </p>
+
+    <h2 id="detach">탭 분리 <span class="pill partial">부분</span></h2>
+    <p>
+      VS Code Web에서 에디터 탭을 탭 줄 밖으로 끌어내면, 같은 워크스페이스의 새 IDE 창에서 같은
+      커서 위치로 열립니다.
+    </p>
+    <ul>
+      <li>탭 줄에서 48&nbsp;px 넘게 떨어진 곳이나 창 밖, 즉 VS Code가 드롭을 받지 않는 곳에
+          놓습니다. 짧게 끌면 여전히 탭 순서만 바뀌고, 한 동작이 두 가지를 함께 하지는 않습니다.</li>
+      <li>저장하지 않은 변경이 있는 탭은 분리하지 않습니다. 새 창은 디스크의 파일을 읽기
+          때문입니다. 먼저 저장하라는 메시지가 뜹니다.</li>
+      <li>Alt 드래그, 여러 개를 고른 탭, 파일이 없는 에디터(설정, 제목 없음)는 VS Code에
+          맡깁니다.</li>
+    </ul>
+    <p>
+      일반 브라우저에서는 새 창이 그 파일과 커서 위치로 열린 브라우저 창입니다. 선택 영역과
+      스크롤 위치는 넘어가지 않습니다. 브라우저가 팝업을 막으면 Open 버튼이 있는 알림이 뜹니다.
+      전체 상태(커서, 선택 영역, 스크롤)를 <code>ember-bridge</code> 메시지로 받는 네이티브 IDE
+      창은 설계되어 있지만, 네이티브 웹뷰 창은 아직 없습니다. VS Code의 탭 드래그는 HTML5 드래그
+      앤 드롭이고 휴대폰은 이것을 만들지 않으므로, 터치 화면은 지원하지 않습니다. 프록시에서
+      <code>DPX_TAB_DETACH=0</code> 으로 이 기능을 끕니다. 진행은
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/30">#30</a> 에서 확인합니다.
+    </p>
+
+    <h2 id="phones">휴대폰과 태블릿 <span class="pill planned">계획</span></h2>
+    <p>
+      프록시의 터치 레이아웃은 지금도 휴대폰과 태블릿 브라우저에서 동작합니다. 다만 확장
+      패널(웹뷰)은 보안 컨텍스트가 필요해서, LAN 주소로 일반 HTTP 접속을 하면 빈 화면이 됩니다.
+      컴퓨터 자신의 <code>localhost</code> 에서는 동작합니다. 다른 기기에서의 보안 연결은 Ember의
+      P2P 전송 계층과 함께 들어올 예정입니다
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/10">#10</a>).
+    </p>
+    <p>
+      기기에 Node가 없는 Android와 iOS에서, 컴퓨터 자신의 VS Code 서버나 오프라인 작업 사본으로
+      프로젝트를 여는 방식은 설계만 되어 있고 만들지 않았습니다.
+    </p>
+
+    <nav class="pagenav" aria-label="페이지 이동">
+      <a class="prev" href="computers.html"><span>이전</span>&larr; 컴퓨터와 허브</a>
+      <a class="next" href="terminals.html"><span>다음</span>영구 터미널 &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>이 가이드는 2026-10-03 기준 저장소 내용과 대조했습니다</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install · Ember guide</title>
+<meta name="description" content="Build ember server, ember node and the Ember client from source with cargo, the settings each one reads, and where each keeps its data.">
+<link rel="alternate" hreflang="en" href="install.html">
+<link rel="alternate" hreflang="ko" href="../ko/install.html">
+<link rel="alternate" hreflang="x-default" href="install.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="install.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/install.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html" aria-current="page">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#requirements">What you need</a></li>
+        <li><a href="#checkout">Get the code</a></li>
+        <li><a href="#server">ember server</a></li>
+        <li><a href="#node">ember node</a></li>
+        <li><a href="#client">The client</a></li>
+        <li><a href="#one-machine">The smallest setup</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Install</p>
+    <h1>Build Ember from source</h1>
+    <p class="lede">
+      Ember is three programs: <code>ember-server</code> on the main server, <code>ember-node</code>
+      on every other computer, and the client <code>ember-app</code> wherever you sit. There are no
+      releases or installers yet <span class="pill planned">Planned</span>, so each one is built
+      with cargo from a checkout.
+    </p>
+
+    <h2 id="requirements">What you need</h2>
+    <ul>
+      <li><strong>macOS or Linux.</strong> <code>ember-node</code> uses Unix PTYs and signals, so it does not build on Windows. Ember is developed on macOS; CI builds and tests the server and node crates on Linux (Ubuntu).</li>
+      <li><strong>A Rust toolchain with cargo</strong>, from rustup. The client needs Rust 1.85 or newer, because it uses the 2024 edition like dioxus-compose.</li>
+      <li><strong>A C compiler</strong>, because the server compiles SQLite into itself.</li>
+      <li><strong>The agent CLIs, on the main server only</strong>: <code>claude</code>, <code>codex</code>, <code>agy</code> or <code>omp</code>, installed the way each vendor documents and logged in as the user that will run <code>ember-server</code>. Ember finds them on <code>PATH</code> and lists a missing one as not installed rather than failing.</li>
+    </ul>
+
+    <h2 id="checkout">Get the code</h2>
+    <p>
+      Work lands on the <code>develop</code> branch; <code>main</code> does not carry the code yet.
+      Each crate under <code>crates/</code> is its own cargo project with its own
+      <code>Cargo.lock</code> (there is no workspace), so you build inside the crate's folder.
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>git clone https://github.com/DarkPyonix/darkpyonix-ember
+<span class="k">cd</span> darkpyonix-ember
+git checkout develop</code></pre>
+    </figure>
+
+    <h2 id="server">ember server, on the main server</h2>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code><span class="k">cd</span> crates/server
+cargo build --release --locked
+./target/release/ember-server</code></pre>
+    </figure>
+    <p>
+      The build produces three programs in <code>target/release/</code>: <code>ember-server</code>,
+      <code>ember-exec</code> and <code>ember-a2a</code>. Keep them in one directory.
+      <code>ember-server</code> looks for the other two next to its own binary: without
+      <code>ember-exec</code>, Claude Code sessions cannot run on other computers, and without
+      <code>ember-a2a</code>, agents cannot message each other.
+    </p>
+    <p>
+      At start it logs <code>ember server listening on http://127.0.0.1:8740</code>. Check it from
+      the same machine:
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>curl http://127.0.0.1:8740/api/v1/health
+<span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+    </figure>
+    <div class="warn">
+      <span class="label">The HTTP listener has no login</span>
+      <p>
+        Anyone who can reach <code>EMBER_LISTEN</code> can use every route, including accounts,
+        devices and the hub registration. Keep it on loopback (the default) or on a network you
+        trust. The authenticated path is the peer-to-peer transport, which admits only devices on
+        the server's allow-list (<a href="computers.html#peer">Computers and the hub</a>). To use
+        the client from another machine today, forward the port over SSH:
+        <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+      </p>
+    </div>
+
+    <h3 id="mount-build">Building with the project mount</h3>
+    <p>
+      <span class="pill partial">Partial</span> When a Claude Code session works on another
+      computer, its file tools (Read, Edit, Write, Glob, Grep) need that computer's project folder
+      on the main server's disk. The project mount provides it, and it is a build feature, because
+      it pulls in an NFS or FUSE implementation. It is written but not yet run on real hardware
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code><span class="c"># macOS main server: a loopback NFS server, mounted with mount_nfs</span>
+cargo build --release --locked --features mount-nfs
+<span class="c"># Linux main server: FUSE (needs the fuse3 package and a readable /dev/fuse)</span>
+cargo build --release --locked --features mount-fuse</code></pre>
+    </figure>
+    <p>
+      Without either feature the server still runs. Claude Code's Bash tool still runs on the other
+      computer, but its file tools need the project path to exist on the main server.
+    </p>
+
+    <h3 id="server-env">Settings</h3>
+    <p>Everything is configured through environment variables. The ones you are most likely to set:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>EMBER_DATA_DIR</code></td><td><code>~/.ember</code></td><td>Where the database, keys, accounts and browser profiles live.</td></tr>
+          <tr><td><code>EMBER_LISTEN</code></td><td><code>127.0.0.1:8740</code></td><td>The HTTP listener.</td></tr>
+          <tr><td><code>EMBER_IDLE_SECS</code></td><td><code>300</code></td><td>Release an agent process after this long without activity. The next message resumes it.</td></tr>
+          <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>claude</code>, <code>codex</code>, <code>agy</code> on <code>PATH</code></td><td>Which agent CLI to run.</td></tr>
+          <tr><td><code>EMBER_ACP_AGENTS</code></td><td>none</td><td>ACP agents to offer, as JSON, for example <code>["omp"]</code>. See <a href="agents.html">Agents</a>.</td></tr>
+          <tr><td><code>EMBER_TRANSPORT</code></td><td>off</td><td><code>1</code> binds the peer-to-peer transport. Needed for computers added by peer address and for the hub.</td></tr>
+          <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>The hub; <code>off</code> disables it. Used only with <code>EMBER_TRANSPORT=1</code>. The default moves to <code>https://hub.darkpyonix.dev</code> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
+          <tr><td><code>EMBER_RELAY_URL</code></td><td>the hub's relay</td><td>Relay server(s) for the transport.</td></tr>
+          <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code> or <code>off</code>; <code>auto</code> uses whichever feature the build has.</td></tr>
+          <tr><td><code>EMBER_A2A</code></td><td>on</td><td><code>0</code> starts agent-to-agent messaging switched off.</td></tr>
+          <tr><td><code>EMBER_CHROME_BIN</code></td><td>found on the machine</td><td>The browser for <a href="browser.html">remote browsing</a>.</td></tr>
+          <tr><td><code>RUST_LOG</code></td><td><code>info</code></td><td>Log filter, for example <code>RUST_LOG=debug</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The full list, with every variable the server reads, is the comment at the top of
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/crates/server/src/main.rs"><code>crates/server/src/main.rs</code></a>.
+    </p>
+
+    <h3 id="server-data">What it stores</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Path in <code>EMBER_DATA_DIR</code></th><th scope="col">What</th></tr></thead>
+        <tbody>
+          <tr><td><code>ember.db</code></td><td>SQLite: sessions and transcripts, projects, computers, accounts, A2A queues, schedules.</td></tr>
+          <tr><td><code>secret.key</code></td><td>Encrypts the secrets stored in <code>ember.db</code> (API keys, hub tokens). Back it up together with <code>ember.db</code>; one is useless without the other.</td></tr>
+          <tr><td><code>accounts/&lt;id&gt;/</code></td><td>Each account's own agent configuration directory, with its login.</td></tr>
+          <tr><td><code>agy/</code></td><td>One private folder per Antigravity session (its hook and rules).</td></tr>
+          <tr><td><code>browser/&lt;project&gt;/profile</code></td><td>Remote browser profiles: cookies, storage, logins.</td></tr>
+          <tr><td><code>transport.key</code></td><td>The server's peer identity, created with <code>EMBER_TRANSPORT=1</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="node">ember node, on each computer</h2>
+    <p>
+      Only computers other than the main server need a node; the main server's own disk is always
+      available as the computer <code>local</code>. Build it on the computer that will run it:
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code><span class="k">cd</span> crates/node
+cargo build --release --locked
+<span class="k">export</span> EMBER_NODE_TOKEN=<span class="s">"$(openssl rand -hex 32)"</span>   <span class="c"># keep it: the server needs it</span>
+./target/release/ember-node</code></pre>
+    </figure>
+    <p>
+      The build produces <code>ember-node</code> and <code>ember-term</code> (the terminal client
+      described in <a href="terminals.html">Persistent terminals</a>). The node refuses to start
+      without <code>EMBER_NODE_TOKEN</code>, because every request except a health check must carry
+      it. It logs <code>ember node listening on http://127.0.0.1:8741</code>.
+    </p>
+    <p>
+      That default address is reachable only from the same machine. You have two ways to let the
+      main server in. Over HTTP, set <code>EMBER_NODE_LISTEN</code> to an address the main server
+      can reach, on a network you trust, because the token travels unencrypted. Over the
+      peer-to-peer transport, set <code>EMBER_NODE_TRANSPORT=1</code>, which needs no open port.
+      <a href="computers.html">Computers and the hub</a> walks through both.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>EMBER_NODE_TOKEN</code></td><td>required</td><td>The bearer token <code>ember-server</code> presents.</td></tr>
+          <tr><td><code>EMBER_NODE_LISTEN</code></td><td><code>127.0.0.1:8741</code></td><td>The HTTP listener.</td></tr>
+          <tr><td><code>EMBER_NODE_ROOTS</code></td><td><code>$HOME</code></td><td>Colon-separated folders the node may touch. File operations and working directories outside them are refused.</td></tr>
+          <tr><td><code>EMBER_NODE_STATE_DIR</code></td><td><code>~/.ember/node</code></td><td>Terminal state, keys and the hub registration.</td></tr>
+          <tr><td><code>EMBER_NODE_TRANSPORT</code></td><td>off</td><td><code>1</code> also serves the API over the transport; <code>only</code> serves it there instead of TCP.</td></tr>
+          <tr><td><code>EMBER_NODE_ALLOWED_PEERS</code></td><td>none</td><td>Peer ids of the servers allowed in over the transport (also read from <code>allowed-peers</code> in the state directory).</td></tr>
+          <tr><td><code>EMBER_NODE_CODEX_BIN</code></td><td><code>codex</code> on <code>PATH</code></td><td>Codex sessions on this computer run <code>codex exec-server</code> here, so Codex must be installed on the node too.</td></tr>
+          <tr><td><code>EMBER_NODE_EGRESS</code></td><td>on</td><td><code>off</code> refuses remote-browser traffic through this computer.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The state directory holds <code>local.json</code> (how programs on this computer find the
+      node), <code>transport.key</code> (its peer identity), <code>allowed-peers</code> and, once
+      registered, <code>hub.json</code>. The full list of variables is the comment at the top of
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/crates/node/src/main.rs"><code>crates/node/src/main.rs</code></a>.
+    </p>
+
+    <h2 id="client">The client</h2>
+    <p>
+      <span class="pill partial">Partial</span> The desktop client is a native window drawn by
+      dioxus-compose, with no webview. It runs against <code>ember-server</code>, but its layout has
+      not yet been checked on a real display, and it speaks only HTTP for now
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/9">#9</a>).
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code><span class="k">cd</span> crates/app
+EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run --release --locked</code></pre>
+    </figure>
+    <p>
+      The client depends on dioxus-compose by git, pinned to one commit, and dioxus-compose's build
+      fetches the matching Compose renderer. If it cannot get one, build the renderer from
+      dioxus-compose yourself and set <code>DIOXUS_COMPOSE_RENDERER_DIR</code> to its absolute
+      path. That variable is checked first, and nothing is downloaded when it is set.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>EMBER_SERVER_URL</code></td><td><code>http://127.0.0.1:8740</code></td><td>The main server.</td></tr>
+          <tr><td><code>EMBER_DATA_DIR</code></td><td><code>&lt;OS data dir&gt;/ember</code></td><td>The client's cache (<code>client-cache.json</code>), preferences (<code>prefs.json</code>) and <code>exports/</code>. The OS data directory is <code>~/Library/Application Support</code> on macOS and <code>~/.local/share</code> on Linux.</td></tr>
+          <tr><td><code>EMBER_LOG</code></td><td><code>warn,ember_app=info,ember_client=info</code></td><td>Log filter.</td></tr>
+          <tr><td><code>DIOXUS_COMPOSE_RENDERER_DIR</code></td><td>download</td><td>Use a renderer you built.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <code>EMBER_DATA_DIR</code> has the same name as the server's variable. If you start both
+      from one shell on one machine, set it per command rather than exporting it, or the client
+      writes its cache into the server's data directory.
+    </p>
+
+    <h2 id="one-machine">The smallest setup</h2>
+    <p>
+      One Mac is enough to start: run <code>ember-server</code> and the client on it, with
+      <code>claude</code> or <code>codex</code> logged in. Sessions then run on the main server
+      itself. Add a node on a second computer when you want to work there.
+    </p>
+    <ol>
+      <li>Start <code>ember-server</code> in one terminal.</li>
+      <li>Start the client in another.</li>
+      <li>Continue with <a href="first-conversation.html">Your first conversation</a>.</li>
+    </ol>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="index.html"><span>Previous</span>&larr; Overview</a>
+      <a class="next" href="first-conversation.html"><span>Next</span>Your first conversation &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>컴퓨터와 허브 · Ember 가이드</title>
+<meta name="description" content="HTTP 주소, 피어 주소, darkpyonix.dev 허브로 컴퓨터를 ember server에 등록하고, 프로젝트에 배정하고, 세션을 그 컴퓨터로 옮기는 방법.">
+<link rel="alternate" hreflang="en" href="../en/computers.html">
+<link rel="alternate" hreflang="ko" href="computers.html">
+<link rel="alternate" hreflang="x-default" href="../en/computers.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>가이드</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">메뉴</button>
+  <nav class="langswitch" aria-label="언어">
+    <a href="../en/computers.html" hreflang="en">EN</a>
+    <a href="computers.html" aria-current="true" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="다크" data-light="라이트" aria-pressed="false">다크</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="가이드">
+      <h2>가이드</h2>
+      <ul>
+        <li><a href="index.html">개요</a></li>
+        <li><a href="install.html">설치</a></li>
+        <li><a href="first-conversation.html">첫 대화</a></li>
+        <li><a href="computers.html" aria-current="page">컴퓨터와 허브</a></li>
+        <li><a href="ide.html">IDE 열기</a></li>
+        <li><a href="terminals.html">영구 터미널</a></li>
+        <li><a href="browser.html">원격 브라우저</a></li>
+        <li><a href="agents.html">에이전트</a></li>
+        <li><a href="troubleshooting.html">문제 해결</a></li>
+      </ul>
+      <h2>이 페이지</h2>
+      <ul>
+        <li><a href="#by-url">HTTP 주소로</a></li>
+        <li><a href="#peer">피어 주소로</a></li>
+        <li><a href="#hub">허브를 통해</a></li>
+        <li><a href="#assign">프로젝트에 배정</a></li>
+        <li><a href="#switch">세션의 컴퓨터 전환</a></li>
+        <li><a href="#mount">프로젝트 마운트</a></li>
+        <li><a href="#remove">컴퓨터 제거</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">컴퓨터와 허브</p>
+    <h1>세션을 다른 컴퓨터에서 일하게 하기</h1>
+    <p class="lede">
+      컴퓨터는 <code>ember-node</code> 를 실행하고 메인 서버에 등록되면 Ember에 합류합니다. 등록
+      방법은 세 가지입니다: HTTP 주소, 피어 주소, 또는 darkpyonix.dev 계정에서 고르기. 등록한 뒤에는
+      어떤 세션이든 그 컴퓨터로 옮길 수 있습니다.
+    </p>
+    <div class="note">
+      <span class="label">지금은 API로</span>
+      <p>
+        클라이언트는 컴퓨터를 보여 주고, 프로젝트에 배정하고, 세션을 컴퓨터 사이에서 옮기지만, 컴퓨터를
+        추가하지는 아직 못합니다. 추가는 메인 서버에서 <code>curl</code> 로 <code>ember-server</code> 의
+        HTTP API를 불러서 합니다. 경로는 지금 <code>/api/v1</code> 아래에 있고 <code>/api</code> 로
+        옮겨 갑니다 <span class="pill planned">계획</span>
+        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a>).
+      </p>
+    </div>
+
+    <h2 id="by-url">HTTP 주소로</h2>
+    <p>
+      믿을 수 있는 네트워크의 컴퓨터라면 가장 간단한 방법입니다. 그 컴퓨터에서 메인 서버가 닿을 수
+      있는 주소로 노드를 시작합니다:
+    </p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell, 컴퓨터에서</figcaption>
+<pre><code><span class="k">export</span> EMBER_NODE_TOKEN=<span class="s">"$(openssl rand -hex 32)"</span>
+<span class="k">echo</span> <span class="s">"$EMBER_NODE_TOKEN"</span>   <span class="c"># 다음 단계에서 필요합니다</span>
+EMBER_NODE_LISTEN=0.0.0.0:8741 EMBER_NODE_ROOTS=<span class="s">"$HOME/src"</span> ./target/release/ember-node</code></pre>
+    </figure>
+    <p>그다음 메인 서버에 등록합니다:</p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell, 메인 서버에서</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/computers \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"name": "linux-box", "url": "http://192.168.0.20:8741", "token": "&lt;the node token&gt;"}'</span>
+
+curl http://127.0.0.1:8740/api/v1/computers   <span class="c"># 각 컴퓨터와 연결 상태 확인 결과</span></code></pre>
+    </figure>
+    <p>
+      API는 토큰을 절대 돌려주지 않습니다. <code>EMBER_NODE_ROOTS</code> 는 노드가 다룰 수 있는
+      폴더를 제한하므로, 세션은 그 컴퓨터에서 그 밖의 것을 읽거나 실행하지 못합니다.
+    </p>
+
+    <h2 id="peer">피어 주소로</h2>
+    <p>
+      P2P 전송을 쓰면 노드에 열어 둘 포트가 필요 없고, 양쪽이 각자의 키로 인증됩니다. 전송을 켜고
+      시작하면 양쪽 모두 자기 신원을 출력합니다.
+    </p>
+    <ol>
+      <li>
+        메인 서버를 <code>EMBER_TRANSPORT=1</code> 로 시작합니다.
+        <code>ember server peer id: &hellip;</code> 와 <code>ember server peer addr: &hellip;</code> 가
+        출력됩니다.
+      </li>
+      <li>
+        컴퓨터에서 그 서버 피어 id를 노드의 허용 목록에 넣고, 전송을 켜서 노드를 시작합니다. 목록이
+        비어 있으면 노드는 <code>no allowed peers: every transport connection will be refused</code>
+        라고 경고합니다.
+<figure class="codeblock" data-copy="복사" data-copied="복사됨">
+  <figcaption>shell, 컴퓨터에서</figcaption>
+<pre><code>mkdir -p ~/.ember/node
+<span class="k">echo</span> <span class="s">"&lt;server peer id&gt;"</span> &gt;&gt; ~/.ember/node/allowed-peers
+EMBER_NODE_TRANSPORT=1 ./target/release/ember-node
+<span class="c"># ember node peer id: ...</span>
+<span class="c"># ember node peer addr: {"peer": ..., "relays": [...], "direct": [...]}</span></code></pre>
+</figure>
+        실행 중인 노드는 <code>SIGHUP</code> 을 받으면 <code>allowed-peers</code> 를 다시 읽고, 목록에서
+        빠진 피어의 연결을 끊습니다.
+      </li>
+      <li>
+        노드를 피어 id로, 또는 주소 힌트까지 담긴 출력된 <code>peer addr</code> 객체 전체로 등록합니다:
+<figure class="codeblock" data-copy="복사" data-copied="복사됨">
+  <figcaption>shell, 메인 서버에서</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/computers \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"name": "laptop", "peer": "&lt;node peer id&gt;", "token": "&lt;the node token&gt;"}'</span></code></pre>
+</figure>
+      </li>
+    </ol>
+    <p>
+      이 경로에서도 노드 토큰은 키와 함께 쓰는 두 번째 인증 요소로 여전히 필요합니다.
+      <span class="pill partial">부분</span> 전송은 메모리 내 네트워크로 테스트했고, 실제 네트워크(집,
+      사무실, LTE, 대칭형 NAT)에서의 측정은 남아 있습니다
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/10">#10</a>).
+    </p>
+
+    <h2 id="hub">darkpyonix.dev 허브를 통해</h2>
+    <p>
+      <span class="pill partial">부분</span> 허브를 쓰면 모든 장치가 일회용 코드로 내 GitHub 계정에
+      합류합니다. 그 뒤 각 장치는 허브에 자기 주소를 올리고 다른 장치를 허브에서 찾으므로, 아무도
+      주소를 입력하지 않습니다. Ember 쪽은 가짜 허브로 테스트했지만 실제 허브에서는 아직 실행하지
+      않았고, 허브 주소가 <code>https://darkpyonix.dev</code> 에서 <code>https://hub.darkpyonix.dev</code>
+      로 바뀌는 중입니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).
+      그 변경이 들어오기 전까지는 내장 기본값이 이전 주소이므로, 서버와 모든 노드에서
+      <code>EMBER_HUB_URL</code> 을 허브 주소로 설정하세요.
+    </p>
+    <h3 id="hub-server">1. 메인 서버 연결하기</h3>
+    <p>허브는 전송이 있어야 하므로 서버를 <code>EMBER_TRANSPORT=1</code> 로 실행합니다.</p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell, 메인 서버에서</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/hub/link \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"name": "mini"}'</span>
+<span class="c"># {"user_code": "...", "verification_uri": "...", "verification_uri_complete": "...", ...}</span></code></pre>
+    </figure>
+    <p>
+      GitHub으로 darkpyonix.dev에 로그인한 브라우저에서 <code>verification_uri_complete</code> 를 열고
+      승인합니다. 메인 서버는 반드시 브라우저에서 승인해야 합니다. 승인한 뒤에는
+      <code>GET /api/v1/hub</code> 로 등록 상태를 볼 수 있습니다. 연결을 기다리는 동안 서버가
+      재시작되면 같은 연결을 이어서 기다립니다.
+    </p>
+    <h3 id="hub-node">2. 각 컴퓨터 등록하기</h3>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell, 컴퓨터에서</figcaption>
+<pre><code>./target/release/ember-node hub register --name laptop
+<span class="c"># To add this computer to your darkpyonix.dev account, open</span>
+<span class="c">#     https://...</span>
+<span class="c"># or enter the code ... at ... (or in Ember, as the account's server).</span>
+<span class="c"># Waiting for approval...</span></code></pre>
+    </figure>
+    <p>
+      브라우저에서 승인하거나, 메인 서버가 승인하게 합니다. 컴퓨터의 연결은 그 계정의 메인 서버가
+      승인할 수 있기 때문입니다:
+    </p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell, 메인 서버에서</figcaption>
+<pre><code>curl http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt;   <span class="c"># 누가 요청했는지</span>
+curl -X POST http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt; \
+  -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"approve": true}'</span></code></pre>
+    </figure>
+    <p>
+      등록 정보는 <code>~/.ember/node/hub.json</code> 에 저장됩니다. 노드를
+      <code>EMBER_NODE_TRANSPORT=1</code> 로 다시 시작하거나 <code>SIGHUP</code> 을 보내면, 노드가 허브를
+      통해 자기 주소를 올립니다. <code>allowed-peers</code> 를 고치지 않고 내 계정의 메인 서버를
+      들이려면 <code>EMBER_NODE_HUB_ALLOW_SERVERS=1</code> 도 설정합니다. 상태는 언제든
+      <code>ember-node hub status</code> 로 볼 수 있습니다.
+    </p>
+    <h3 id="hub-add">3. 컴퓨터로 추가하기</h3>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell, 메인 서버에서</figcaption>
+<pre><code>curl http://127.0.0.1:8740/api/v1/hub/devices   <span class="c"># 계정의 장치 목록과 endpoint_id</span>
+curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/computer \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"name": "laptop", "token": "&lt;the node token&gt;"}'</span></code></pre>
+    </figure>
+    <p>
+      허브는 노드 토큰을 전달하지 않으므로 여기서도 토큰이 필요합니다. 컴퓨터는 피어 id만으로
+      저장되고, 서버는 허브의 디렉터리를 통해 그 주소를 찾습니다.
+    </p>
+
+    <h2 id="assign">프로젝트에 배정하기</h2>
+    <p>
+      런처 아래쪽에는 컴퓨터가 연결 상태(online, offline, unknown)와 맡은 프로젝트와 함께 나열됩니다.
+      프로젝트를 고른 상태에서는 컴퓨터마다 "Assign to <em>project</em>" 스위치가 있습니다. 한 프로젝트에
+      여러 컴퓨터를, 한 컴퓨터에 여러 프로젝트를 배정할 수 있습니다. API로는
+      <code>PUT /api/v1/projects/{name}/computers/{computer_id}</code> 이고, 같은 경로에
+      <code>DELETE</code> 를 보내면 배정을 풉니다.
+    </p>
+
+    <h2 id="switch">세션의 컴퓨터 전환</h2>
+    <p>
+      대화 머리글에는 "On <em>computer</em>"가 있습니다. 그것을 눌러 다른 컴퓨터를 고릅니다. 턴이
+      진행 중이거나 승인을 기다리는 동안에는 전환이 거부됩니다. 진행 중인 도구 호출이 이전 컴퓨터의
+      것이기 때문입니다. 먼저 답하거나 턴을 멈추세요. 대상 컴퓨터가 응답하지 않을 때도 거부됩니다.
+    </p>
+    <p>
+      전환하면 클라이언트가 "Switched to <em>name</em>. The agent is told with your next message."라고
+      알려 줍니다. 에이전트의 환경 설명(운영체제, 셸, 툴체인)은 덧붙이지 않고 교체되며, 안내문이
+      파일을 다시 읽고 명령을 다시 실행한 뒤에 그 내용을 믿으라고 에이전트에게 알립니다. 에이전트별로
+      도구가 컴퓨터에 닿는 방식은 다음과 같습니다:
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">에이전트</th><th scope="col">다른 컴퓨터에서</th></tr></thead>
+        <tbody>
+          <tr><td>Codex</td><td>모든 도구가 <code>codex exec-server</code> 를 거쳐 노드에서 실행되므로, 그 컴퓨터에도 Codex가 설치되어 있어야 합니다.</td></tr>
+          <tr><td>Claude Code</td><td>Bash는 <code>ember-exec</code> 를 거쳐 노드에서 실행됩니다. Read, Edit, Write, Glob, Grep은 메인 서버의 디스크에서 동작하며, <a href="#mount">프로젝트 마운트</a>가 노드의 폴더를 그곳에 붙여 줍니다.</td></tr>
+          <tr><td>OMP와 그 밖의 ACP 에이전트</td><td>에이전트가 Ember에 요청하는 파일 읽기, 쓰기, 터미널이 노드에서 실행됩니다.</td></tr>
+          <tr><td>Antigravity</td><td>아직 지원하지 않습니다: "Antigravity sessions cannot run on another computer yet".</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="pill partial">부분</span> Codex와 Claude Code의 Bash 도구는 같은 Mac에서 노드를 별도
+      컴퓨터로 등록해 확인했습니다. 물리적으로 다른 두 컴퓨터 사이의 전환은 아직 확인하지 않았습니다
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+
+    <h2 id="mount">프로젝트 마운트</h2>
+    <p>
+      <span class="pill partial">부분</span> Claude Code의 파일 도구는 메인 서버의 <code>claude</code>
+      안에서 실행됩니다. 그래서 세션이 다른 컴퓨터에 있으면, Ember는 그 컴퓨터의 프로젝트 폴더를 메인
+      서버의 <em>같은 절대 경로</em>에 마운트합니다. 그러면 도구가 올바른 파일을 보고, 대화 기록의
+      경로도 사실로 남습니다. 마운트는 작성은 끝났지만 실제 Mac mini나 Raspberry Pi에서 아직 실행하지
+      않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+    <ul>
+      <li><strong>빌드:</strong> macOS 메인 서버는 <code>--features mount-nfs</code>, Linux는 <code>--features mount-fuse</code>(<a href="install.html#mount-build">설치</a>). <code>EMBER_MOUNT=off</code> 로 끌 수 있습니다.</li>
+      <li><strong>마운트 지점:</strong> 서버 사용자가 그 경로를 만들 수 있어야 합니다. 만들 수 없다면(다른 사용자의 홈, macOS의 <code>/home</code>, 새 최상위 폴더) <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> 를 한 번 실행합니다. 이 스크립트는 <code>sudo</code> 명령을 실행하기 전에 하나씩 출력하고, <code>--dry-run</code> 이면 출력만 합니다.</li>
+      <li><strong>기존 폴더:</strong> 같은 경로에 비어 있지 않은 로컬 폴더가 있으면 그 위에 마운트하지 않습니다. <code>EMBER_MOUNT_SHADOW=1</code> 이면 마운트합니다.</li>
+      <li><strong>범위:</strong> 세션의 폴더만 마운트합니다. 중첩된 프로젝트 폴더와, 같은 경로를 두 컴퓨터가 제공하는 경우는 거부합니다.</li>
+      <li><strong>최신성:</strong> 쓰기는 즉시 노드로 갑니다. 노드에서 다른 프로그램이 바꾼 내용은 1초쯤 뒤에 보입니다(<code>EMBER_MOUNT_TTL_MS</code>, 기본 1000).</li>
+      <li><strong>장애:</strong> 노드 호출마다 4초 기한이 있어서, 컴퓨터가 끊기면 멈추는 대신 I/O 오류로 드러납니다.</li>
+    </ul>
+
+    <h2 id="remove">컴퓨터 제거</h2>
+    <p>
+      <code>DELETE /api/v1/computers/{id}</code> 는 컴퓨터와 그 프로젝트 배정을 지웁니다. 그 컴퓨터에
+      있는 세션이 있거나 어떤 프로젝트의 원격 브라우저가 그 컴퓨터를 거쳐 나가는 동안에는 거부되므로,
+      먼저 옮기세요. 허브에서 빠지려면 컴퓨터에서 <code>ember-node hub forget</code> 을, 메인 서버에서는
+      <code>DELETE /api/v1/hub/registration</code> 을 실행합니다. <code>--local</code> 이나
+      <code>?local=1</code> 을 붙이면 여기서만 등록을 잊고, 장치는 계정에 남습니다.
+    </p>
+
+    <nav class="pagenav" aria-label="페이지 이동">
+      <a class="prev" href="first-conversation.html"><span>이전</span>&larr; 첫 대화</a>
+      <a class="next" href="ide.html"><span>다음</span>IDE 열기 &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>이 가이드는 2026-10-03 기준 저장소 내용과 대조했습니다</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

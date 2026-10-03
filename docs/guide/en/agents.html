@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agents · Ember guide</title>
+<meta name="description" content="How Ember runs Claude Code, Codex, Antigravity and ACP agents such as OMP, and the shared services around them: accounts, MCP servers, schedules, A2A messages and teams.">
+<link rel="alternate" hreflang="en" href="agents.html">
+<link rel="alternate" hreflang="ko" href="../ko/agents.html">
+<link rel="alternate" hreflang="x-default" href="agents.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="agents.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/agents.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html" aria-current="page">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#overview">The agents at a glance</a></li>
+        <li><a href="#claude">Claude Code</a></li>
+        <li><a href="#codex">Codex</a></li>
+        <li><a href="#antigravity">Antigravity</a></li>
+        <li><a href="#acp">OMP and other ACP agents</a></li>
+        <li><a href="#accounts">Accounts and usage routing</a></li>
+        <li><a href="#mcp">The central MCP registry</a></li>
+        <li><a href="#schedules">Scheduled prompts</a></li>
+        <li><a href="#a2a">A2A messages</a></li>
+        <li><a href="#teams">Teams and @@mentions</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Agents</p>
+    <h1>Agents</h1>
+    <p class="lede">
+      Ember runs each agent's own, unmodified CLI on the main server, through that agent's own
+      non-interactive protocol. Your agent settings, models and session IDs keep working as they
+      do natively. Ember adds what one CLI on one laptop cannot do: many accounts, shared MCP
+      servers, schedules, and agents that message each other.
+    </p>
+
+    <h2 id="overview">The agents at a glance</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Agent</th><th scope="col">How Ember drives it</th><th scope="col">Approvals</th><th scope="col">Accounts</th><th scope="col">Status</th></tr></thead>
+        <tbody>
+          <tr><td>Claude Code</td><td><code>claude --print</code>, stream-json in and out, one process per session</td><td>Claude Code's permission prompts</td><td>Yes, <code>CLAUDE_CONFIG_DIR</code></td><td><span class="pill works">Implemented</span></td></tr>
+          <tr><td>Codex</td><td><code>codex app-server</code>, JSON-RPC</td><td>Codex's approval requests</td><td>Yes, <code>CODEX_HOME</code></td><td><span class="pill works">Implemented</span></td></tr>
+          <tr><td>Antigravity</td><td><code>agy -p</code>, stream-json, one process per turn</td><td>Ember's own hook is the only gate</td><td>Not yet</td><td><span class="pill partial">Partial</span> <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a></td></tr>
+          <tr><td>OMP and other ACP agents</td><td>Agent Client Protocol over stdio</td><td>ACP permission requests</td><td>Not yet</td><td><span class="pill partial">Partial</span> <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/53">#53</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The server detects the installed agents and their versions at start and on demand
+      (<code>GET /api/v1/agents</code>); a missing agent is shown as not installed, not as an
+      error. Each agent's binary can be set with <code>EMBER_CLAUDE_BIN</code>,
+      <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code> and <code>EMBER_OMP_BIN</code>;
+      otherwise the name is looked up on <code>PATH</code>.
+    </p>
+    <p>
+      An idle session releases its agent process after <code>EMBER_IDLE_SECS</code> (300 by
+      default). The next message starts it again through the agent's own resume, so the
+      conversation continues where it was. REST paths on this page are shown as the code serves
+      them today; <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a> changes
+      <code>/api/v1/...</code> to <code>/api/...</code>.
+    </p>
+
+    <h2 id="claude">Claude Code <span class="pill works">Implemented</span></h2>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell: what Ember runs, one long-lived process per session</figcaption>
+<pre><code>claude --print --input-format stream-json --output-format stream-json --verbose \
+       --include-partial-messages --permission-prompt-tool stdio [--model M] [--resume ID]</code></pre>
+    </figure>
+    <ul>
+      <li><strong>Approvals.</strong> Each permission prompt becomes an approval card: allow once,
+          always allow, or deny. "Always allow" covers that tool for the life of the process;
+          later requests for it are answered at once, and the tool call still shows in the
+          conversation.</li>
+      <li><strong>Interrupt and resume.</strong> Interrupt ends the turn cleanly. A released or
+          restarted session comes back with <code>--resume</code>.</li>
+      <li><strong>Accounts.</strong> Each account is its own <code>CLAUDE_CONFIG_DIR</code>, see
+          <a href="#accounts">Accounts</a>.</li>
+      <li><strong>Other computers.</strong> Shell commands run on the session's computer through
+          the <code>ember-exec</code> shim. File tools see the computer's project through a mount
+          at the same path (<code>EMBER_MOUNT</code>: <code>auto</code>, <code>nfs</code>,
+          <code>fuse</code> or <code>off</code>; the server must be built with the
+          <code>mount-nfs</code> or <code>mount-fuse</code> feature).</li>
+    </ul>
+    <p>
+      The adapter was checked against Claude Code 2.1.288 and a recorded real session.
+    </p>
+
+    <h2 id="codex">Codex <span class="pill works">Implemented</span></h2>
+    <p>
+      Ember runs <code>codex app-server</code> and speaks its JSON-RPC over stdio. A thread id is
+      the session id, so Codex's own resume works.
+    </p>
+    <ul>
+      <li><strong>Messages mid-turn.</strong> A message sent while Codex is working is added to the
+          running turn with <code>turn/steer</code>, as Codex's own clients do.</li>
+      <li><strong>Approvals.</strong> Command, file-change and permission requests become approval
+          cards.</li>
+      <li><strong>Settings.</strong> Codex's own approval policy, sandbox, model and
+          <code>config.toml</code> apply as they do natively.</li>
+      <li><strong>Other computers.</strong> Ember registers the computer with Codex's experimental
+          <code>environment/add</code> so Codex runs its tools there. That a real turn's shell and
+          patches run remotely is not verified yet.</li>
+    </ul>
+    <p>
+      The protocol was read from codex-cli 0.155.1 and checked against a captured real session.
+    </p>
+
+    <h3 id="chatgpt">Sign in with ChatGPT <span class="pill partial">Partial</span></h3>
+    <p>
+      A <strong>self-hosted</strong> ember server can sign in with your ChatGPT account, so that
+      your ChatGPT Plus or Pro plan can be used in addition to Codex token usage. OpenAI allows
+      this only for open-source, locally hosted apps, so it is off when
+      <code>EMBER_HOSTED=1</code> and never offered through darkpyonix.dev.
+    </p>
+    <ol>
+      <li><code>POST /api/v1/chatgpt/signin</code> returns the authorization URL. Open it in a
+          browser.</li>
+      <li>OpenAI redirects to <code>http://127.0.0.1:&lt;port&gt;/auth/callback</code> on the server
+          (<code>EMBER_CHATGPT_REDIRECT_PORT</code>, default the server's port).</li>
+      <li>If your browser runs on another machine, that address does not reach the server: paste
+          the final URL into <code>POST /api/v1/chatgpt/signin/complete</code>.</li>
+    </ol>
+    <p>
+      Tokens are stored encrypted and never returned by the API. The weekly cap is set by you
+      in ChatGPT's settings, and no API reports it. Sign-in and token handling are implemented;
+      using the plan from a session, and showing the cap, are not done yet
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/16">#16</a>).
+    </p>
+
+    <h2 id="antigravity">Antigravity <span class="pill partial">Partial</span></h2>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell: what Ember runs, one process per turn</figcaption>
+<pre><code>agy -p &lt;message&gt; --output-format stream-json --add-dir &lt;session folder&gt; --sandbox \
+    --dangerously-skip-permissions [--conversation=&lt;id&gt;] [--model &lt;M&gt;]</code></pre>
+    </figure>
+    <p>
+      Antigravity's print mode cannot ask for permission: it silently refuses any tool that needs
+      one. So Ember runs it without its own prompts and makes <strong>its own
+      <code>PreToolUse</code> hook the only gate</strong>. The hook lives in a private folder per
+      session, under <code>&lt;data dir&gt;/agy/</code>; nothing is written to
+      <code>~/.gemini</code> or to your project, so your own agy sessions are unaffected.
+    </p>
+    <ul>
+      <li>Every tool call goes through the hook. Read-only tools inside the workspace pass;
+          anything else becomes an approval card.</li>
+      <li>The hook answers only <code>allow</code> or <code>deny</code>. Any error (server
+          unreachable, unknown token, odd reply) becomes <code>deny</code>.</li>
+      <li>An unanswered card is denied after 58 minutes, before agy's own hook timeout, with an
+          "approval timed out, retry" notice.</li>
+      <li>Before every turn Ember checks that agy has loaded the hook. If not, the turn is
+          refused.</li>
+      <li>Each run has a fresh token, revoked when it ends. Ending or interrupting a turn denies
+          every pending card.</li>
+    </ul>
+    <p>
+      <strong>Version pin.</strong> These rules were tested on agy <strong>1.2.16</strong>, which is
+      pinned. Another version gets a notice and runs read-only: only read-only tools inside the
+      workspace, everything else denied without asking. The pin moves only after the tests pass
+      on the new version.
+    </p>
+    <p>
+      <strong>Sandbox.</strong> <code>--sandbox</code> is on (<code>EMBER_AGY_SANDBOX=0</code>
+      turns it off). Under it, on 1.2.16, shell commands cannot write even inside the project,
+      while the file-edit tools can. The cause is being investigated in
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a>.
+    </p>
+    <p>
+      Not supported yet: accounts (agy keeps its login in <code>~/.gemini</code> and has no
+      variable to move it), sessions on another computer, and steering a running turn.
+    </p>
+
+    <h2 id="acp">OMP and other ACP agents <span class="pill partial">Partial</span></h2>
+    <p>
+      Agents that speak the Agent Client Protocol (ACP, version 1) run through one generic
+      adapter. They are configured, not compiled in, with <code>EMBER_ACP_AGENTS</code> (JSON) or
+      <code>EMBER_ACP_AGENTS_FILE</code> (the same JSON in a file):
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>json: EMBER_ACP_AGENTS</figcaption>
+<pre><code>[<span class="s">"omp"</span>, { <span class="at">"name"</span>: <span class="s">"gemini"</span>, <span class="at">"command"</span>: <span class="s">"gemini"</span>, <span class="at">"args"</span>: [<span class="s">"--experimental-acp"</span>] }]</code></pre>
+    </figure>
+
+    <p>
+      A string is a preset. The preset <code>omp</code> runs <code>omp acp</code>. An object needs
+      <code>name</code> and <code>command</code> and may add <code>args</code>,
+      <code>model_args</code>, <code>instructions_args</code>, <code>version_args</code> and
+      <code>env</code>. Each agent appears as an agent kind under its configured name.
+    </p>
+    <ul>
+      <li>Permission requests become approval cards (allow once, always allow, deny).</li>
+      <li>File reads and writes and terminal commands that the agent sends through ACP run on the
+          session's computer, through its ember node.</li>
+      <li>ACP has no steering, so a message sent mid-turn is queued for the next turn.</li>
+      <li>No account isolation yet: log in with the agent's own CLI on the server.</li>
+    </ul>
+    <p>
+      The adapter is tested against a fake ACP agent. It has not yet been run against a real OMP,
+      because OMP is not installed on the test server
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/53">#53</a>).
+    </p>
+
+    <h2 id="accounts">Accounts and usage routing <span class="pill works">Implemented</span></h2>
+    <p>
+      The main server can hold several accounts per agent for Claude Code and Codex. Each account
+      is a directory, <code>&lt;data dir&gt;/accounts/&lt;id&gt;</code>, that the CLI is pointed at
+      through its own variable: <code>CLAUDE_CONFIG_DIR</code> or <code>CODEX_HOME</code>.
+      Credentials, settings and native session files then stay apart, without patching either
+      CLI.
+    </p>
+    <ol>
+      <li>Create an account: <code>POST /api/v1/accounts</code> with
+          <code>{"agent": "claude-code", "label": "work"}</code>.</li>
+      <li>The answer includes the exact login command, for example
+          <code>CLAUDE_CONFIG_DIR=&lt;dir&gt; claude auth login</code>. Run it on the server as the
+          user ember runs as. Ember never automates login. For Codex on a headless server, add
+          <code>--device-auth</code>.</li>
+      <li><code>POST /api/v1/accounts/{id}/check</code> runs the agent's read-only status
+          command.</li>
+    </ol>
+    <p>
+      A new session uses the account you choose. Otherwise the router picks, among accounts that
+      are neither rate-limited nor logged out, the one with the fewest tokens used today (UTC),
+      then the default account, then the oldest. The choice and its reason are stored on the
+      session and do not change silently. A rate-limited account is skipped until its reset time;
+      a completed turn on it clears the mark. <code>GET /api/v1/accounts/route?agent=…</code> shows
+      what the router would choose now, and <code>GET /api/v1/usage?days=7</code> shows tokens per
+      account per day.
+    </p>
+    <div class="warn">
+      <span class="label">Keys in the server's environment</span>
+      <p>
+        <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code> or <code>CODEX_API_KEY</code> in
+        the server's own environment reach every agent process and override the account's login.
+        The server warns about them at start.
+      </p>
+    </div>
+    <p>
+      API-key providers (any OpenAI-compatible or vendor API) are added with
+      <code>POST /api/v1/providers</code>. Keys are encrypted at rest and never returned.
+    </p>
+
+    <h2 id="mcp">The central MCP registry <span class="pill works">Implemented</span></h2>
+    <p>
+      Add an MCP server once, and every agent session that supports MCP gets it when its process
+      starts: Claude Code through <code>--mcp-config</code>, Codex through
+      <code>-c mcp_servers.&lt;name&gt;</code> overrides, Antigravity through its session folder,
+      and ACP agents in <code>session/new</code>.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>http</figcaption>
+<pre><code><span class="k">POST</span> /api/v1/mcp
+{ <span class="at">"name"</span>: <span class="s">"github"</span>, <span class="at">"command"</span>: <span class="s">"github-mcp-server"</span>, <span class="at">"args"</span>: [<span class="s">"stdio"</span>],
+  <span class="at">"env"</span>: { <span class="at">"GITHUB_TOKEN"</span>: <span class="s">"..."</span> }, <span class="at">"scope"</span>: <span class="s">"all"</span> }   <span class="c"># or "project:&lt;name&gt;"</span></code></pre>
+    </figure>
+
+    <ul>
+      <li>Environment values are treated as secrets: encrypted at rest, never returned (only their
+          names), never on a command line, never logged.</li>
+      <li><code>PATCH</code> with <code>"enabled": false</code> switches a server off without
+          deleting it.</li>
+      <li>Changes apply from each agent process's next start.</li>
+    </ul>
+
+    <h2 id="schedules">Scheduled prompts <span class="pill works">Implemented</span></h2>
+    <p>
+      A schedule sends a prompt on a cron expression in a time zone, at a fixed interval, or once.
+      Each run either continues an existing session or starts a new one in the project. The prompt
+      arrives like a user message, behind a <code>[ember schedule]</code> header line.
+    </p>
+    <ul>
+      <li>A trigger missed while the server was down is not silently run. It is recorded as
+          missed, with a notice. With <code>catch_up</code>, only the latest missed trigger runs.</li>
+      <li>Cron times follow the time zone across daylight-saving changes; an hour that occurs
+          twice fires once.</li>
+      <li>You manage schedules through <code>/api/v1/schedules</code> (create, pause, resume, run
+          now, list runs). An agent can create them from a conversation:</li>
+    </ul>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, inside an agent session</figcaption>
+<pre><code>ember-a2a schedule add --cron <span class="s">'0 9 * * 1-5'</span> --tz Asia/Seoul <span class="s">"Summarize yesterday's commits"</span>
+ember-a2a schedule add --every 2h --new --title <span class="s">"CI watch"</span> <span class="s">"Check the CI status"</span>
+ember-a2a schedule list
+ember-a2a schedule rm &lt;schedule-id&gt;</code></pre>
+    </figure>
+
+    <h2 id="a2a">A2A messages <span class="pill works">Implemented</span></h2>
+    <p>
+      Sessions can message each other across vendors, computers and accounts. Every agent process
+      gets <code>EMBER_URL</code>, <code>EMBER_SESSION_ID</code> and a per-session
+      <code>EMBER_RUNTIME_TOKEN</code>, plus instructions for the <code>ember-a2a</code> command.
+      No agent is modified.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, inside an agent session</figcaption>
+<pre><code>ember-a2a list                               <span class="c"># sessions you can message</span>
+ember-a2a send &lt;session-id&gt; <span class="s">"Can you run the iOS build on the Mac?"</span>
+ember-a2a send &lt;session-id&gt; --reply-to &lt;message-id&gt; <span class="s">"Done, it passes."</span>
+ember-a2a show &lt;message-id&gt;</code></pre>
+    </figure>
+
+    <ul>
+      <li>A message enters the target like a user message, behind an <code>[ember a2a]</code>
+          header that names the sender and gives a reply reference.</li>
+      <li>A busy target gets it at the next turn boundary. A sleeping target is woken. Undelivered
+          messages survive a server restart.</li>
+      <li>Loop protection: at most 20 messages per session and 10 per pair of sessions within 10
+          minutes. Two agents told to reply to each other forever are stopped, with a notice.</li>
+      <li>A2A can be switched off for the whole server (<code>EMBER_A2A=0</code>, or
+          <code>PUT /api/v1/a2a/settings</code>) or per session
+          (<code>/api/v1/sessions/{id}/a2a</code>). Sends to or from a switched-off session are
+          refused with a reason.</li>
+    </ul>
+
+    <h2 id="teams">Teams and @@mentions <span class="pill works">Implemented</span></h2>
+    <p>
+      A session can lead a team. The first <code>team spawn</code> makes the calling session the
+      leader; each teammate is a new session in the same project, with the agent, account and
+      computer the leader chose. Teammates answer their own approvals in their own sessions.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, inside the leader's session</figcaption>
+<pre><code>ember-a2a team spawn reviewer --agent codex <span class="s">"Review the changes on this branch"</span>
+ember-a2a task add <span class="s">"Fix the flaky login test"</span> --assign reviewer
+ember-a2a mail send --all <span class="s">"Freeze at 18:00"</span>
+ember-a2a team list
+ember-a2a team end reviewer</code></pre>
+    </figure>
+
+    <ul>
+      <li>At most 8 active teammates. A session belongs to at most one team, and teams do not
+          nest.</li>
+      <li>Only the leader spawns and ends. Any member adds tasks; a teammate updates only its own
+          or unassigned tasks.</li>
+      <li>An active teammate can message only its own team, and only its team can message it.</li>
+      <li>The conversation view shows a team panel with members, live status and the task
+          list.</li>
+    </ul>
+    <p>
+      In the composer, <code>@@</code> mentions another session: <code>@@&lt;id&gt;</code>,
+      <code>@@&lt;title&gt;</code> or <code>@@"&lt;title with spaces&gt;"</code>. Typing
+      <code>@@</code> shows matching sessions. Your message stays in this conversation unchanged,
+      and each mentioned session gets a copy as an A2A message from this session, so it can answer
+      here with one call. A mention you could not resolve loses nothing. Not yet verified: a team
+      of real Claude Code and Codex sessions on different computers and accounts.
+    </p>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="browser.html"><span>Previous</span>&larr; Remote browser</a>
+      <a class="next" href="troubleshooting.html"><span>Next</span>Troubleshooting &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

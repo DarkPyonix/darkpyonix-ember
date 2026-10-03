@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>문제 해결 · Ember 가이드</title>
+<meta name="description" content="ember server, ember node, Ember 클라이언트가 출력하는 오류 메시지의 뜻과 대처 방법, 로그 위치, 알려진 macOS 사항.">
+<link rel="alternate" hreflang="en" href="../en/troubleshooting.html">
+<link rel="alternate" hreflang="ko" href="troubleshooting.html">
+<link rel="alternate" hreflang="x-default" href="../en/troubleshooting.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>가이드</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">메뉴</button>
+  <nav class="langswitch" aria-label="언어">
+    <a href="../en/troubleshooting.html" hreflang="en">EN</a>
+    <a href="troubleshooting.html" aria-current="true" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="다크" data-light="라이트" aria-pressed="false">다크</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="가이드">
+      <h2>가이드</h2>
+      <ul>
+        <li><a href="index.html">개요</a></li>
+        <li><a href="install.html">설치</a></li>
+        <li><a href="first-conversation.html">첫 대화</a></li>
+        <li><a href="computers.html">컴퓨터와 허브</a></li>
+        <li><a href="ide.html">IDE 열기</a></li>
+        <li><a href="terminals.html">영구 터미널</a></li>
+        <li><a href="browser.html">원격 브라우저</a></li>
+        <li><a href="agents.html">에이전트</a></li>
+        <li><a href="troubleshooting.html" aria-current="page">문제 해결</a></li>
+      </ul>
+      <h2>이 페이지</h2>
+      <ul>
+        <li><a href="#logs">로그 위치</a></li>
+        <li><a href="#client">클라이언트</a></li>
+        <li><a href="#sessions">세션 시작</a></li>
+        <li><a href="#computers">컴퓨터와 전환</a></li>
+        <li><a href="#mount">프로젝트 마운트</a></li>
+        <li><a href="#hub">허브</a></li>
+        <li><a href="#agents">에이전트</a></li>
+        <li><a href="#other">그 밖의 기능</a></li>
+        <li><a href="#macos">알려진 macOS 사항</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">문제 해결</p>
+    <h1>문제가 생겼을 때 Ember가 출력하는 것</h1>
+    <p class="lede">
+      이 페이지의 메시지는 모두 코드에서 그대로 옮겼습니다. 보이는 메시지를 찾으면 옆에 그 뜻과 할
+      일이 있습니다. 대부분의 문제는 셋 중 하나입니다: 서버가 찾는 자리에 없는 프로그램, 서버가 닿지
+      못하는 컴퓨터, 에이전트가 실행되는 곳에 없는 경로.
+    </p>
+
+    <h2 id="logs">로그 위치</h2>
+    <p>
+      <code>ember-server</code> 와 <code>ember-node</code> 는 실행 중인 터미널(표준 출력)에 로그를
+      씁니다. 로그 파일은 만들지 않으므로, 보관하려면 출력을 리디렉션하세요. 두 프로그램 모두
+      <code>RUST_LOG</code> 로 수준을 정하며(예: <code>RUST_LOG=debug</code>), 기본값은
+      <code>info</code> 입니다. 클라이언트도 자기 터미널에 로그를 쓰고, <code>EMBER_LOG</code> 로
+      거릅니다.
+    </p>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>shell</figcaption>
+<pre><code>RUST_LOG=info ./target/release/ember-server 2&gt;&amp;1 | tee -a ember-server.log
+curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+    </figure>
+    <p>
+      시작할 때의 경고는 읽어 볼 만합니다. 서버는 그때 찾지 못한 선택 요소(<code>ember-exec</code>,
+      <code>ember-a2a</code>, 브라우저)와 꺼져 있는 기능을 알려 줍니다.
+    </p>
+
+    <h2 id="client">클라이언트</h2>
+    <h3>"Set EMBER_SERVER_URL"을 출력하고 바로 끝남</h3>
+    <p>
+      <code>ember-app: &hellip;. Set EMBER_SERVER_URL to the main server, e.g. http://127.0.0.1:8740</code>
+      은 URL을 해석하지 못했다는 뜻입니다. <code>http://127.0.0.1:8740</code> 처럼 스킴까지 있는 전체
+      URL을 쓰세요. 종료 코드는 2입니다.
+    </p>
+    <h3>오래된 데이터만 보이고 갱신되지 않음</h3>
+    <p>
+      클라이언트는 서버가 답하기 전에 캐시된 프로젝트와 세션부터 그리므로, 창에 내용이 있다고 서버에
+      닿는다는 뜻은 아닙니다. 클라이언트가 실행되는 기계에서 위의 상태 확인 경로를 불러 보세요. 서버가
+      다른 곳에서 돈다면 기본값이 루프백이라는 점을 기억하세요(<a href="install.html#server">설치</a>의
+      SSH 전달 참고).
+    </p>
+    <h3>dioxus-compose에서 빌드가 멈춤</h3>
+    <p>
+      클라이언트의 빌드는 고정된 dioxus-compose 커밋에 맞는 Compose 렌더러를 받아 옵니다. 받지
+      못하면 dioxus-compose에서 렌더러를 빌드하고 <code>DIOXUS_COMPOSE_RENDERER_DIR</code> 를 그 절대
+      경로로 설정하세요. 다른 스키마로 만든 렌더러는 "this renderer was generated from a different
+      schema than this crate"로 빌드를 멈추고, 빈 폴더를 가리키는 변수는
+      "<code>DIOXUS_COMPOSE_RENDERER_DIR is set to &hellip;, but no renderer is there</code>"로 멈춥니다.
+    </p>
+
+    <h2 id="sessions">세션 시작</h2>
+    <h3>"agent &hellip; is not available on this server"</h3>
+    <p>
+      메인 서버에서 그 에이전트의 CLI를 찾지 못했습니다. <code>ember-server</code> 를 실행하는 사용자
+      기준으로 설치하거나, <code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>,
+      <code>EMBER_AGY_BIN</code> 으로 서버에 위치를 알려 주세요. ACP 에이전트는
+      <code>EMBER_ACP_AGENTS</code> 에도 있어야 합니다. 서버가 감지한 에이전트와 버전은
+      <code>GET /api/v1/agents</code> 로 볼 수 있습니다.
+    </p>
+    <h3>"working directory &hellip; does not exist on the ember server"</h3>
+    <p>
+      전체 문구는 "working directory &hellip; does not exist on the ember server (on another computer
+      it is mounted here when the project mount is enabled; see EMBER_MOUNT)"입니다. Claude Code와
+      Antigravity 세션은 메인 서버의 그 폴더에서 실행됩니다. 폴더를 만들거나 "Folder on the
+      computer"의 경로를 고치세요. 다른 컴퓨터의 세션이라면 프로젝트 마운트를 넣어 서버를 빌드합니다
+      (<a href="computers.html#mount">컴퓨터와 허브</a>).
+    </p>
+    <h3>"Started on the main server: could not switch computer (&hellip;)"</h3>
+    <p>
+      세션은 만들어졌지만 고른 컴퓨터로 옮기지 못했습니다. 괄호 안의 이유는 아래 전환 오류 중
+      하나입니다. 세션은 메인 서버에서 동작하니, 컴퓨터가 응답하면 다시 전환하세요.
+    </p>
+    <h3>새 세션마다 계정 이유와 함께 거부됨</h3>
+    <p>
+      에이전트에 계정이 있지만 쓸 수 있는 계정이 없으면(모두 사용 한도에 걸렸거나 로그아웃), 서버는 다른
+      로그인으로 넘어가지 않고 이유와 함께 세션 시작을 거부합니다.
+      <code>GET /api/v1/accounts/route?agent=claude-code</code> 는 라우터가 지금 무엇을 왜 고를지
+      보여 줍니다. <code>POST /api/v1/accounts/{id}/check</code> 는 에이전트 자체의 로그인 상태
+      명령을 실행하고, <code>POST /api/v1/accounts/{id}/clear-limit</code> 는 사용 한도 표시를
+      지웁니다.
+    </p>
+
+    <h2 id="computers">컴퓨터와 전환</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">메시지</th><th scope="col">할 일</th></tr></thead>
+        <tbody>
+          <tr><td><code>session &hellip; is mid-turn; switch computers when the turn is over</code></td><td>기다리는 승인에 답하거나 Stop을 누른 뒤 전환합니다.</td></tr>
+          <tr><td><code>computer &hellip; is unreachable: &hellip;</code></td><td>노드가 상태 확인에 응답하지 않았습니다. 노드가 실행 중인지, 메인 서버에서 <code>EMBER_NODE_LISTEN</code> 에 닿는지(또는 전송이 켜져 있는지), 토큰이 맞는지 확인합니다.</td></tr>
+          <tr><td><code>computer &hellip; is reached over the transport, but this server has none (set EMBER_TRANSPORT=1)</code></td><td>피어 주소로 추가한 컴퓨터입니다. 서버를 <code>EMBER_TRANSPORT=1</code> 로 다시 시작합니다.</td></tr>
+          <tr><td><code>no allowed peers: every transport connection will be refused</code>(노드 로그)</td><td>서버의 피어 id를 <code>~/.ember/node/allowed-peers</code> 나 <code>EMBER_NODE_ALLOWED_PEERS</code> 에 넣고, 노드에 <code>SIGHUP</code> 을 보냅니다.</td></tr>
+          <tr><td><code>EMBER_NODE_TOKEN must be set to a non-empty secret</code></td><td>노드를 시작하기 전에 환경에 토큰이 있어야 합니다.</td></tr>
+          <tr><td><code>path is outside the allowed roots: &hellip;</code></td><td>세션의 폴더가 그 컴퓨터의 <code>EMBER_NODE_ROOTS</code> 밖에 있습니다. 범위를 넓히거나 그 안의 폴더를 씁니다.</td></tr>
+          <tr><td><code>the ember-exec shim was not found; set EMBER_EXEC_BIN to run Claude Code on &hellip;</code></td><td><code>ember-exec</code> 를 <code>ember-server</code> 옆에 두거나(빌드가 둘을 함께 둡니다), <code>EMBER_EXEC_BIN</code> 을 설정합니다.</td></tr>
+          <tr><td><code>Antigravity sessions cannot run on another computer yet</code></td><td>Antigravity 세션은 메인 서버에 둡니다.</td></tr>
+          <tr><td><code>computer &hellip; is the current computer of &hellip; session(s)</code></td><td>컴퓨터를 지우기 전에 그 세션들을 옮깁니다.</td></tr>
+          <tr><td><code>computer &hellip; is the browser egress of project(s) &hellip;; change their egress first</code></td><td>먼저 그 프로젝트들의 원격 브라우저를 다른 컴퓨터로 돌립니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="mount">프로젝트 마운트</h2>
+    <p>
+      <span class="pill partial">부분</span> 이 메시지들은 실제 하드웨어에서 아직 실행하지 않은
+      코드에서 나옵니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">메시지</th><th scope="col">할 일</th></tr></thead>
+        <tbody>
+          <tr><td><code>cannot mount &hellip;: this ember server was built without a project mount (features mount-nfs on macOS, mount-fuse on Linux)</code></td><td>OS에 맞는 기능을 넣어 서버를 다시 빌드하거나, 프로젝트 경로를 메인 서버에도 둡니다.</td></tr>
+          <tr><td><code>&hellip; cannot be created by this user (&hellip;). &hellip;</code></td><td>마운트 지점에 한 번의 관리자 설정이 필요합니다. 서버 사용자로 <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> 를 실행합니다. <code>sudo</code> 를 쓰며 각 명령을 먼저 출력합니다.</td></tr>
+          <tr><td><code>&hellip; exists on this server and is not empty; &hellip;</code></td><td>같은 경로에 로컬 폴더가 있습니다. 옮기거나, <code>EMBER_MOUNT_SHADOW=1</code> 로 그 위에 마운트합니다.</td></tr>
+          <tr><td><code>project mount: &hellip; does not exist on computer "&hellip;"</code></td><td>그 컴퓨터에 폴더가 없습니다. 그곳에 만들거나 세션의 폴더를 고칩니다.</td></tr>
+          <tr><td><code>project mount: &hellip; is outside the directories its ember node allows (its roots)</code></td><td>그 컴퓨터의 <code>EMBER_NODE_ROOTS</code> 를 넓힙니다.</td></tr>
+          <tr><td><code>project mount: &hellip; is already mounted from another computer (&hellip;)</code></td><td>두 컴퓨터가 같은 경로를 동시에 제공할 수 없습니다. 세션 하나를 옮깁니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="hub">허브</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">메시지</th><th scope="col">할 일</th></tr></thead>
+        <tbody>
+          <tr><td><code>/api/v1/hub</code> 경로가 HTTP 503으로 응답</td><td>허브가 꺼져 있습니다: 서버가 <code>EMBER_TRANSPORT=1</code> 없이, 또는 <code>EMBER_HUB_URL=off</code> 로 실행되었습니다.</td></tr>
+          <tr><td><code>this server is not registered with the hub; start with POST /api/v1/hub/link</code></td><td>먼저 서버를 연결합니다(<a href="computers.html#hub-server">컴퓨터와 허브</a>).</td></tr>
+          <tr><td><code>the hub is off (EMBER_HUB_URL=off)</code>(<code>ember-node hub register</code>)</td><td><code>EMBER_HUB_URL</code> 을 지우거나 허브 주소로 설정합니다.</td></tr>
+          <tr><td><code>cannot reach the hub: &hellip;</code></td><td>네트워크와 <code>EMBER_HUB_URL</code> 을 확인합니다. 기본 주소는 바뀌는 중입니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
+          <tr><td><code>the link expired before it was approved (user code &hellip;)</code></td><td>연결을 다시 시작하고 더 빨리 승인합니다.</td></tr>
+          <tr><td><code>this endpoint is already registered with the hub, or was removed from its account (&hellip;)</code></td><td>제거된 장치는 계정 주인이 허브에서 다시 허용하고(15분간 유효) 새 연결을 브라우저에서 승인하면 다시 합류할 수 있습니다.</td></tr>
+          <tr><td><code>state: removed from the account (&hellip;)</code>(<code>ember-node hub status</code>)</td><td>누군가 허브에서 이 컴퓨터를 제거해 더 이상 게시되지 않습니다. 허브에서 다시 허용한 뒤 <code>ember-node hub register</code> 를 실행합니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="agents">에이전트</h2>
+    <h3>Antigravity: 셸 쓰기에서 "Operation not permitted"</h3>
+    <p>
+      <span class="pill partial">부분</span> macOS의 agy 1.2.16에서 <code>--sandbox</code>(Ember의
+      기본값)를 쓰면, <code>touch</code> 같은 명령이 프로젝트 안에서도
+      <code>Operation not permitted</code> 로 실패합니다. agy 자체의 파일 쓰기 도구는 동작합니다.
+      <code>--sandbox</code> 를 켠 채로 원인을 조사하고 있습니다
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a>).
+      <code>EMBER_AGY_SANDBOX=0</code> 이면 플래그를 빼지만, 그만큼 agy 자체의 샌드박스를 잃습니다.
+    </p>
+    <h3>Antigravity: "Approval for &hellip; timed out; retry."</h3>
+    <p>
+      Antigravity 승인에 58분 동안 답이 없어서, agy의 훅이 시간 초과되기 전에 Ember가 거부했습니다.
+      요청을 다시 보내세요.
+    </p>
+    <h3>에이전트끼리 메시지를 못 보냄</h3>
+    <p>
+      서버가 <code>ember-a2a not found next to the server binary; agents cannot use A2A</code> 를
+      로그에 남깁니다. <code>ember-a2a</code> 를 <code>ember-server</code> 옆에 두세요. 서버를
+      <code>EMBER_A2A=0</code> 으로 시작하지 않았는지도 확인합니다.
+    </p>
+
+    <h2 id="other">그 밖의 기능</h2>
+    <ul>
+      <li><code>remote browser unavailable: no Chrome/Chromium found (EMBER_CHROME_BIN)</code>: 메인 서버에 Chrome이나 Chromium을 설치하거나 <code>EMBER_CHROME_BIN</code> 을 설정합니다. <a href="browser.html">원격 브라우저</a>를 참고하세요.</li>
+      <li>"The Ember IDE arrives with the editor core (M8). Use VS Code or Gateway for now.": Ember 자체 IDE 창은 아직 없습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>). <a href="ide.html">IDE 열기</a>를 참고하세요.</li>
+      <li>서버 시작 시의 <code>&hellip; session(s) were mid-turn at shutdown; marked idle for resume</code> 는 오류가 아닙니다. 그 세션들은 다음 메시지와 함께 이어집니다.</li>
+    </ul>
+
+    <h2 id="macos">알려진 macOS 사항</h2>
+    <ul>
+      <li><strong><code>/home</code> 아래의 마운트 지점.</strong> macOS에서 <code>/home</code> 은 자동 마운트이므로, Mac 메인 서버에서는 <code>/home/pi/proj</code> 같은 노드 경로를 그냥 만들 수 없습니다. <code>scripts/ember-mount-setup.sh</code> 가 이를 처리합니다(<code>/etc/auto_master</code> 를 고칩니다). <code>/srv</code> 같은 새 최상위 폴더는 <code>/etc/synthetic.conf</code> 와 재부팅이 필요합니다.</li>
+      <li><strong>root 없는 NFS.</strong> macOS 마운트는 사용자가 소유한 폴더에서 <code>sudo</code> 없이 <code>mount_nfs</code> 가 동작한다는 점에 기대고 있습니다. 상위 프로젝트 문서에는 그렇게 나와 있지만, Ember의 Mac mini에서는 아직 확인하지 않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).</li>
+      <li><strong>Claude Code 계정과 키체인.</strong> Claude Code는 로그인을 macOS 로그인 키체인에 보관하므로, 계정을 지우기 전에 그 계정의 <code>auth logout</code> 명령으로 로그아웃하세요.</li>
+      <li><strong>클라이언트의 모습.</strong> 클라이언트는 macOS에서 실제 서버에 붙어 실행된 적이 있지만, 실제 화면에서 레이아웃을 확인한 사람은 아직 없습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/9">#9</a>).</li>
+    </ul>
+
+    <nav class="pagenav" aria-label="페이지 이동">
+      <a class="prev" href="agents.html"><span>이전</span>&larr; 에이전트</a>
+      <a class="next" href="index.html"><span>다음</span>개요 &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>이 가이드는 2026-10-03 기준 저장소 내용과 대조했습니다</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

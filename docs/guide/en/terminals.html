@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Persistent terminals · Ember guide</title>
+<meta name="description" content="Terminals that keep running when every window is closed and reappear on any device: who owns them, how to open and attach them, and who is in control.">
+<link rel="alternate" hreflang="en" href="terminals.html">
+<link rel="alternate" hreflang="ko" href="../ko/terminals.html">
+<link rel="alternate" hreflang="x-default" href="terminals.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="terminals.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/terminals.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html" aria-current="page">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#owner">Who owns a terminal</a></li>
+        <li><a href="#survives">What it survives</a></li>
+        <li><a href="#vscode">In VS Code Web</a></li>
+        <li><a href="#ember-term">From any shell: ember-term</a></li>
+        <li><a href="#control">Who is in control</a></li>
+        <li><a href="#screen">Scrollback and finished terminals</a></li>
+        <li><a href="#debug">Debugging</a></li>
+        <li><a href="#api">For client authors</a></li>
+        <li><a href="#gaps">Not yet</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Persistent terminals</p>
+    <h1>Persistent terminals</h1>
+    <p class="lede">
+      Start a build in a terminal, close the window, and the build keeps running. Open the IDE
+      later on another computer or a phone, and the same terminal is there with its scrollback
+      and its running program. This page explains how that works and how to use it.
+    </p>
+
+    <div class="note">
+      <span class="label">Where this stands</span>
+      <p>
+        <span class="pill partial">Partial</span> The ember node side and the VS Code Web side are
+        implemented, with tests in <code>crates/node/tests/terms.rs</code> and the companion
+        extension's own tests. The end-to-end checks (a real window closed, the terminal reopened
+        on a second device) have not been run yet. The Ember editor's terminal panel and a
+        terminal list in the Ember client are planned. Track it in
+        <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/26">#26</a>.
+      </p>
+    </div>
+
+    <h2 id="owner">Who owns a terminal</h2>
+    <p>
+      The terminal process belongs to <strong>ember node</strong> on the computer where it runs,
+      not to the IDE window, not to VS Code's own terminal host and not to the client. Windows,
+      agents and people are clients that attach to it and detach from it. Attaching and
+      detaching never start or stop the program; it runs until it exits or someone kills it.
+    </p>
+    <p>
+      This is why one terminal can be seen from VS Code Web and, later, from the Ember editor at
+      the same time. VS Code's own persistent terminals are not relied on, because a VS Code
+      server restart or its revive timeout ends them.
+    </p>
+    <p>
+      Each terminal records its <strong>origin</strong> (<code>ide-vscode</code>,
+      <code>ide-ember</code>, <code>agent</code> or <code>user</code>), its project, a title and
+      tags, so lists can show where a terminal came from.
+    </p>
+
+    <h2 id="survives">What it survives</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Event</th><th scope="col">What happens to the terminal</th></tr></thead>
+        <tbody>
+          <tr><td>The window closes or reloads</td><td>Nothing. The window only detaches.</td></tr>
+          <tr><td>You open the IDE on another device</td><td>The terminal is listed again, with its scrollback and screen.</td></tr>
+          <tr><td>The VS Code server or ember server restarts</td><td>Nothing. Both are only clients.</td></tr>
+          <tr><td>ember node restarts</td><td>Best effort: the program survives through a small PTY keeper process, and the restarted node adopts it again.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The keeper holds a copy of the terminal's handle in its own process session, so the shell is
+      not hung up when node exits. Some limits follow from that design:
+    </p>
+    <ul>
+      <li>After a graceful stop, the scrollback and screen carry over. After a crash, the adopted
+          terminal starts with an empty screen until the program draws again.</li>
+      <li>While no node is running, nobody reads the terminal. The program runs until the
+          kernel's buffer is full, then waits. Output in that buffer is not lost.</li>
+      <li>An adopted program's exit status is unknown.</li>
+      <li>A service manager must not kill the keepers along with the daemon: use
+          <code>KillMode=process</code> for systemd and <code>AbandonProcessGroup=true</code> for
+          launchd. The repository does not ship these unit files yet.</li>
+      <li>Windows has no keeper, because node's terminal code is Unix-only.</li>
+      <li><code>EMBER_NODE_KEEP_PTY=0</code> turns keepers off; terminals then end with the
+          daemon.</li>
+    </ul>
+
+    <h2 id="vscode">In VS Code Web</h2>
+    <p>
+      VS Code Web reaches persistent terminals through a small web extension, the
+      <strong>Ember persistent terminals</strong> companion in <code>web/proxy/companion/</code>.
+      It runs in the browser's extension host and talks to node through the proxy, so the node's
+      token never reaches the browser. No VS Code source is patched.
+    </p>
+    <ol>
+      <li>Copy <code>web/proxy/companion/</code> into the VS Code server's extensions folder as
+          <code>darkpyonix.ember-terminals-0.1.0/</code>. For <code>dpx.serve</code> that is the
+          <code>extensions</code> folder under <code>~/.ember/vscode-web/&lt;runtime&gt;</code>.</li>
+      <li>Open a terminal with the profile <strong>Ember (persistent)</strong>.</li>
+      <li>To make it the default for new terminals and tasks, run
+          <em>Ember: Use Persistent Terminals for New Terminals and Tasks</em> from the command
+          palette. It writes the settings below.</li>
+    </ol>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>jsonc: user settings the setup command writes</figcaption>
+<pre><code><span class="at">"terminal.integrated.defaultProfile.osx"</span>:   <span class="s">"Ember (persistent)"</span>,   <span class="c">// and .linux</span>
+<span class="c">// Tasks: VS Code runs automation shells as `&lt;path&gt; -c "&lt;command line&gt;"`.</span>
+<span class="at">"terminal.integrated.automationProfile.osx"</span>: { <span class="at">"path"</span>: <span class="s">"/Users/me/.cargo/bin/ember-term"</span> }, <span class="c">// and .linux</span>
+<span class="c">// Lets ember-term tag a task with the workspace instead of its working directory.</span>
+<span class="at">"terminal.integrated.env.osx"</span>: { <span class="at">"EMBER_PROJECT"</span>: <span class="s">"${workspaceFolder}"</span> }</code></pre>
+    </figure>
+
+    <p>
+      When a window starts, gains focus, and every 5 seconds while it has focus, the companion
+      lists the project's terminals and shows the ones the window does not have yet: running
+      VS Code terminals from any device, and tasks that finished in the last 10 minutes, with
+      their output.
+    </p>
+    <ul>
+      <li><strong>Closing a terminal tab yourself</strong> (the trash icon) kills the program. The
+          setting <code>ember.terminals.killOnClose</code> controls this.</li>
+      <li><strong>Closing or reloading the window</strong> only detaches.</li>
+      <li>Other commands: <em>Ember: Attach to a Persistent Terminal…</em> (every terminal on the
+          computer, any origin), <em>New Persistent Terminal</em>, <em>Take Control of Terminal</em>,
+          <em>Release Control of Terminal</em>, <em>Kill Persistent Terminal</em>.</li>
+    </ul>
+    <p>
+      Tasks from <code>tasks.json</code> run in persistent terminals through
+      <code>ember-term</code>. When the window closes, VS Code eventually disposes the task's
+      terminal; <code>ember-term</code> then detaches and the build keeps running. VS Code's own
+      task state (problem matchers, "task is running") does not carry over to a re-shown
+      terminal.
+    </p>
+
+    <h2 id="ember-term">From any shell: ember-term</h2>
+    <p>
+      <code>ember-term</code> is a small binary built with ember node. It attaches the terminal it
+      runs in to a node session, which also makes it usable as a plain terminal profile.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>ember-term                              <span class="c"># a new persistent shell</span>
+ember-term -c <span class="s">"make -j8"</span>                  <span class="c"># run a command in a new session; exits with its status</span>
+ember-term attach &lt;id&gt; [--passive]      <span class="c"># attach to an existing session</span>
+ember-term attach-or-create --key dev -- npm run dev
+ember-term list
+ember-term kill &lt;id&gt;</code></pre>
+    </figure>
+
+    <p>
+      It finds the node through <code>EMBER_NODE_URL</code> and <code>EMBER_NODE_TOKEN</code>, or
+      through <code>~/.ember/node/local.json</code>. It forwards its whole environment, and it
+      detaches on SIGHUP instead of ending the program.
+    </p>
+
+    <h2 id="control">Who is in control</h2>
+    <p>
+      Several devices can attach to one terminal at once. By default everyone may type.
+    </p>
+    <ul>
+      <li><strong>Typing.</strong> Keystrokes from every attached client reach the program in the
+          order node receives them, so when two devices type in turn, neither input is lost.</li>
+      <li><strong>Taking control.</strong> Any client can take control. Everyone else becomes
+          read-only and sees a "controlled by &lt;device&gt;" banner; their input is refused, not
+          queued. Control ends when the controller releases it or detaches.</li>
+      <li><strong>Size.</strong> The terminal follows the controller's size. With no controller,
+          it follows the client that typed or focused most recently. A passive attach, such as a
+          window restoring its terminal list, never resizes it.</li>
+      <li><strong>Different screen sizes.</strong> Other clients draw the terminal at its real
+          size. VS Code cannot scale an extension terminal, so a smaller VS Code window shows
+          wrapped lines instead; the Ember editor is meant to scale to fit.</li>
+      <li><strong>Slow clients.</strong> A client that falls far behind is dropped and re-attaches
+          for a fresh screen. It never slows the program or the other clients.</li>
+    </ul>
+
+    <h2 id="screen">Scrollback and finished terminals</h2>
+    <p>
+      Node keeps a terminal model fed with every byte. Attaching sends a snapshot first (the
+      scrollback, the screen, the cursor and the input modes, including a running full-screen
+      program), then the live stream, with no gap and no overlap between the two.
+    </p>
+    <ul>
+      <li>Scrollback keeps 10,000 lines, capped at 3&nbsp;MB per terminal.</li>
+      <li>A few details are not in the snapshot (scroll region, saved cursor, character sets, tab
+          stops, hyperlinks). A full-screen program repaints them on its next full redraw, and any
+          resize causes one.</li>
+      <li>A finished terminal stays listed (the 100 most recent). The 20 most recent keep their
+          screen, so attaching to a finished task shows its output and then its exit status.</li>
+    </ul>
+
+    <h2 id="debug">Debugging</h2>
+    <p>
+      A program started under the debugger normally dies with the debug adapter when the window
+      closes. The companion avoids that for two cases by rewriting a <code>launch</code> that uses
+      <code>"console": "integratedTerminal"</code>: the program runs in a persistent terminal with
+      the debugger listening on 127.0.0.1, and VS Code attaches to it.
+    </p>
+    <ul>
+      <li>Node (<code>node</code>, <code>pwa-node</code>, runtime <code>node</code>), through
+          <code>--inspect-brk</code>.</li>
+      <li>Python (<code>debugpy</code>), through <code>debugpy.listen</code>. debugpy must be
+          importable by that interpreter, or <code>ember.debug.debugpyPath</code> names the
+          folder that contains it.</li>
+    </ul>
+    <p>
+      A window opened later offers "Re-attach the debugger" for the project's running debuggees,
+      or you run <em>Ember: Re-attach Debugger to a Running Debuggee…</em>. Other debug adapters
+      and consoles are left unchanged and are not persistent. Opt out per configuration with
+      <code>"emberPersistent": false</code>, or globally with <code>ember.debug.persistent</code>.
+      This path has not been run against a real VS Code, js-debug or debugpy yet.
+    </p>
+
+    <h2 id="api">For client authors</h2>
+    <p>
+      Every client uses the same node API, authenticated with the node token. Through the proxy
+      the same routes are under <code>/__terms</code> and use the proxy's session cookie instead.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Route</th><th scope="col">What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /v1/terms</code></td><td>Create a session. A <code>key</code> makes it attach-or-create.</td></tr>
+          <tr><td><code>GET /v1/terms?project=&amp;origin=&amp;running=</code></td><td>List sessions, oldest first.</td></tr>
+          <tr><td><code>GET /v1/terms/{id}/snapshot</code></td><td>The current screen, without attaching.</td></tr>
+          <tr><td><code>GET /v1/terms/{id}/attach</code></td><td>WebSocket: a hello, then input in and events out.</td></tr>
+          <tr><td><code>POST /v1/terms/{id}/control</code></td><td>Take or release control.</td></tr>
+          <tr><td><code>POST /v1/terms/{id}/kill</code></td><td>SIGHUP, then SIGKILL after 3 seconds.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Rust clients use <code>NodeClient::term_create</code>, <code>term_attach</code> and the other
+      <code>term_*</code> methods of <code>ember-node</code>.
+    </p>
+
+    <h2 id="gaps">Not yet</h2>
+    <ul>
+      <li>The Ember editor's terminal panel, which will attach to the same sessions
+          (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>).</li>
+      <li>A per-computer and per-project terminal list in the Ember client, with origin and kill
+          (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/26">#26</a>).</li>
+      <li>Relaying attach through ember server for clients that reach the computer only through
+          the main server.</li>
+      <li>Measurements: the 500&nbsp;ms re-attach target and the 2&nbsp;MB per idle terminal are
+          estimates, not measured.</li>
+    </ul>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="ide.html"><span>Previous</span>&larr; Opening an IDE</a>
+      <a class="next" href="browser.html"><span>Next</span>Remote browser &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

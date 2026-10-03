@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your first conversation · Ember guide</title>
+<meta name="description" content="Create a project and a session, choose an agent, account and computer, send a message and answer the agent's approval requests.">
+<link rel="alternate" hreflang="en" href="first-conversation.html">
+<link rel="alternate" hreflang="ko" href="../ko/first-conversation.html">
+<link rel="alternate" hreflang="x-default" href="first-conversation.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="first-conversation.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/first-conversation.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html" aria-current="page">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#before">Before you start</a></li>
+        <li><a href="#project">Projects</a></li>
+        <li><a href="#new-session">Starting a session</a></li>
+        <li><a href="#accounts">Agents and accounts</a></li>
+        <li><a href="#send">Sending a message</a></li>
+        <li><a href="#approvals">Answering approvals</a></li>
+        <li><a href="#leave">Leaving and coming back</a></li>
+        <li><a href="#organise">Keeping sessions in order</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Your first conversation</p>
+    <h1>From an empty launcher to an answered approval</h1>
+    <p class="lede">
+      This page starts a session on the main server, sends it a message and answers the agent's
+      first approval request. It assumes <code>ember-server</code> and the client are running, as
+      set up in <a href="install.html">Install</a>.
+    </p>
+
+    <h2 id="before">Before you start</h2>
+    <ul>
+      <li>At least one agent CLI is installed on the main server and logged in as the user that runs <code>ember-server</code>. With no accounts configured, a session uses that login.</li>
+      <li>The project folder exists on the main server. A session starts on the main server, and Claude Code and Antigravity refuse to start in a folder that is not there.</li>
+    </ul>
+
+    <h2 id="project">Projects</h2>
+    <p>
+      A project is a name that groups sessions, and the computers that serve it are assigned to
+      the project. You do not create it separately: you name it in the first session's dialog, and
+      the server records it. On an empty launcher the client shows "No conversations yet" and a
+      <strong>New session</strong> button; on a project card, "New session in this project" starts
+      one there.
+    </p>
+    <p>
+      The same is available over the API, which is what the client calls:
+      <code>POST /api/v1/projects</code> with <code>{"name": "my-project"}</code>.
+    </p>
+
+    <h2 id="new-session">Starting a session</h2>
+    <p>The <strong>New session</strong> dialog asks for:</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Field</th><th scope="col">What to enter</th></tr></thead>
+        <tbody>
+          <tr><td>Project</td><td>An existing project, or "New project&hellip;" and then a <strong>Project name</strong>.</td></tr>
+          <tr><td>Folder on the computer</td><td>The absolute path of the project, for example <code>/Users/me/src/my-project</code>. The agent's working directory.</td></tr>
+          <tr><td>Model (optional)</td><td>Empty uses the agent's own default model.</td></tr>
+          <tr><td>Title (optional)</td><td>Shown in the launcher; you can rename the session later.</td></tr>
+          <tr><td>Agent</td><td>The agents the server detected as installed, for example <code>claude-code</code> or <code>codex</code>.</td></tr>
+          <tr><td>Account</td><td>"Automatic (the server's router chooses)", or one of the agent's accounts.</td></tr>
+          <tr><td>Computer</td><td>"The main server (default)", or a registered computer with its reachability.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <strong>Start</strong> creates the session and opens it. The client remembers the agent,
+      account, computer, model and folder per project, so the next session in that project starts
+      from the same choices.
+    </p>
+    <p>
+      A session is always created on the main server. If you picked another computer, the client
+      moves the session there before your first message. If that move fails, the session stays on
+      the main server and the client says so: "Started on the main server: could not switch
+      computer (&hellip;)".
+    </p>
+
+    <h2 id="accounts">Agents and accounts</h2>
+    <p>
+      Each agent can have several accounts on the main server. An account is a private
+      configuration directory under <code>accounts/</code> in the server's data directory, so two accounts of one agent
+      never share a login or settings, and the agent binary is never patched. With
+      <strong>Automatic</strong>, the server picks the agent's account with the fewest tokens used
+      today, skipping accounts that are rate-limited or logged out. With no accounts at all, the
+      session uses the server user's own login.
+    </p>
+    <p>
+      The client lists accounts but cannot create them yet, so you add one through the API. The
+      answer's <code>login</code> field holds the exact login command, with the account's
+      directory set. Run that command on the main server as the user that runs
+      <code>ember-server</code>:
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the main server</figcaption>
+<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/accounts \
+  -H <span class="s">'content-type: application/json'</span> \
+  -d <span class="s">'{"agent": "claude-code", "label": "work"}'</span>
+<span class="c"># "login": {"login": "CLAUDE_CONFIG_DIR=... claude auth login", ...}</span></code></pre>
+    </figure>
+    <p>
+      For Codex the command is <code>codex login</code> with <code>CODEX_HOME</code> set; on a
+      headless server add <code>--device-auth</code>. Antigravity accounts are not supported yet,
+      because <code>agy</code> has no configuration-directory variable. ACP agents such as OMP use
+      the login of their own CLI. Per-agent details are on the <a href="agents.html">Agents</a> page.
+    </p>
+
+    <h2 id="send">Sending a message</h2>
+    <p>
+      Type in the composer at the bottom of the conversation. <kbd>Enter</kbd> sends and
+      <kbd>Shift</kbd>+<kbd>Enter</kbd> starts a new line. The agent's reply streams in, with a
+      card for every tool call and its result. The header shows the session's computer ("On
+      &hellip;"), its status and the <strong>Open IDE</strong> button.
+    </p>
+    <p>
+      While a turn is running you can keep typing. The composer then says "Queue a message for the
+      next turn": queued messages are sent in order when the turn ends, and a badge counts them.
+      <strong>Stop</strong> interrupts the running turn.
+    </p>
+
+    <h2 id="approvals">Answering approvals</h2>
+    <p>
+      When the agent wants to run a tool that needs your permission, the conversation shows a card
+      "<em>tool</em> wants approval" with the tool's input, and the header shows how many approvals
+      are waiting. In the launcher, "waiting for approval" outranks "running", so you can spot such
+      a session from the project list.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Button</th><th scope="col">Effect</th></tr></thead>
+        <tbody>
+          <tr><td>Allow once</td><td>Runs this one call.</td></tr>
+          <tr><td>Always allow</td><td>Runs it, and allows this kind of tool for the rest of the session.</td></tr>
+          <tr><td>Deny</td><td>Refuses the call; the agent sees the refusal.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      A request that is still open when the turn ends is marked "Not answered before the turn
+      ended". Antigravity has no approval channel of its own, so Ember asks through a hook, and an
+      approval left unanswered for 58 minutes is denied; see <a href="agents.html">Agents</a>.
+      A mode that approves everything without asking is specified but not offered by the client
+      yet <span class="pill planned">Planned</span>.
+    </p>
+
+    <h2 id="leave">Leaving and coming back</h2>
+    <p>
+      Close the client at any time. The session lives on the main server, so a running turn
+      finishes without you, and any client that opens the session later sees the whole result.
+      Two clients can have the same session open and both see live output.
+    </p>
+    <p>
+      A session nobody is viewing releases its agent process after <code>EMBER_IDLE_SECS</code>
+      (300 seconds by default). Your next message starts the agent again with its own resume
+      (<code>--resume</code> for Claude Code, a thread resume for Codex), so the agent keeps its
+      context. A session open in a client is kept alive. If the main server restarts during a
+      turn, that session is marked idle and resumes the same way.
+    </p>
+
+    <h2 id="organise">Keeping sessions in order</h2>
+    <p>
+      Each session row in the launcher has <strong>Pin</strong>, <strong>Archive</strong>,
+      <strong>Rename</strong> and <strong>Export</strong>. These are stored on the server, so a
+      second client sees them at once. Export writes a self-contained file of the transcript into
+      the client's <code>exports/</code> folder. Search covers the text of every session's
+      messages on the server; each word matches as a prefix, so <code>오류</code> finds
+      <code>오류가</code>.
+    </p>
+    <p>
+      Next: put the work on another computer, in <a href="computers.html">Computers and the hub</a>.
+    </p>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="install.html"><span>Previous</span>&larr; Install</a>
+      <a class="next" href="computers.html"><span>Next</span>Computers and the hub &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

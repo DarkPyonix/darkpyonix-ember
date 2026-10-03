@@ -398,6 +398,7 @@ fn configs_parse_presets_overrides_and_custom_agents() {
     assert!(parse_configs(r#"[{"name": "x"}]"#, |_| None).is_err(), "command required");
     assert!(parse_configs(r#"["omp", "omp"]"#, |_| None).is_err(), "duplicate");
     assert!(parse_configs(r#"[{"name": "codex", "command": "c"}]"#, |_| None).is_err(), "built-in name");
+    assert!(parse_configs(r#"[{"name": "antigravity", "command": "c"}]"#, |_| None).is_err(), "built-in name");
     assert!(parse_configs(r#"[{"name": "a", "command": "c", "typo": 1}]"#, |_| None).is_err());
     assert!(parse_configs("{}", |_| None).is_err());
 }

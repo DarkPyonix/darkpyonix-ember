@@ -999,6 +999,9 @@ impl Computers {
                     exec_server_url: self.relay_url(&c)?,
                 });
             }
+            AgentKind::Antigravity => {
+                anyhow::bail!("Antigravity sessions cannot run on another computer yet")
+            }
             AgentKind::Scripted => {}
             // ACP agents ask the client (Ember) to read/write files and run commands; the ACP
             // adapter serves those requests through this computer's node API.

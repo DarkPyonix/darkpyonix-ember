@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use crate::events::{AgentEvent, ApprovalDecision};
 
 pub mod acp;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod scripted;
@@ -20,9 +21,9 @@ pub mod scripted;
 /// Which agent CLI a session runs.
 ///
 /// Serialised (JSON, and the `agent` column of `sessions` / `accounts`) as one kebab-case string:
-/// `"claude-code"`, `"codex"`, `"scripted"`, or the configured name of an Agent Client Protocol
-/// agent (`"omp"`, …, see [`acp`]). The built-in strings are unchanged from before ACP agents
-/// existed, so stored rows and clients keep working.
+/// `"claude-code"`, `"codex"`, `"antigravity"`, `"scripted"`, or the configured name of an Agent
+/// Client Protocol agent (`"omp"`, …, see [`acp`]). The built-in strings are unchanged from before
+/// ACP agents existed, so stored rows and clients keep working.
 ///
 /// ACP agents are configured at startup, so their names are not known at compile time. They are
 /// interned once into a process-wide registry ([`AcpName`]), which keeps `AgentKind` `Copy`,
@@ -31,6 +32,8 @@ pub mod scripted;
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    /// Google Antigravity's `agy` CLI.
+    Antigravity,
     /// In-process fake used by tests; never offered to users.
     Scripted,
     /// An agent driven through the Agent Client Protocol, by its configured name (FR-A2).
@@ -46,7 +49,7 @@ pub enum AgentKind {
 pub struct AcpName(&'static str);
 
 /// Built-in agent names an ACP agent may not take.
-const BUILTIN_NAMES: [&str; 3] = ["claude-code", "codex", "scripted"];
+const BUILTIN_NAMES: [&str; 4] = ["claude-code", "codex", "antigravity", "scripted"];
 
 /// Every interned ACP name, and whether it is configured (registered) on this server.
 fn acp_names() -> &'static std::sync::Mutex<std::collections::HashMap<&'static str, bool>> {
@@ -108,6 +111,7 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude-code",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "antigravity",
             AgentKind::Scripted => "scripted",
             AgentKind::Acp(name) => name.as_str(),
         }
@@ -118,6 +122,7 @@ impl AgentKind {
         match s {
             "claude-code" => Some(AgentKind::ClaudeCode),
             "codex" => Some(AgentKind::Codex),
+            "antigravity" => Some(AgentKind::Antigravity),
             "scripted" => Some(AgentKind::Scripted),
             _ => AcpName::lookup(s).map(AgentKind::Acp),
         }
@@ -162,14 +167,15 @@ pub struct StartRequest {
     pub env: Vec<(String, String)>,
     /// Extra system-level instructions for the agent, from the session's instruction hooks
     /// (e.g. how to use the A2A tool). Claude Code gets them via `--append-system-prompt`, Codex
-    /// as the thread's `developerInstructions`.
+    /// as the thread's `developerInstructions`, Antigravity as a rules file in its session root.
     pub instructions: Option<String>,
     /// Run the agent's tools on another computer through Codex's exec-server protocol. Only the
     /// Codex adapter uses it; other adapters are redirected through `env` (shell shim).
     pub remote: Option<RemoteExec>,
     /// Extra stdio MCP servers for this agent process (e.g. the project's browser, FR-R3), added
     /// to the agent's own configuration: Claude Code via `--mcp-config`, Codex via `-c
-    /// mcp_servers.<name>.…` overrides. The user's own MCP servers stay.
+    /// mcp_servers.<name>.…` overrides, Antigravity via `mcp_config.json` in its session root.
+    /// The user's own MCP servers stay.
     pub mcp_servers: Vec<McpServer>,
     /// The node API of the session's current computer, when it is not this server. Set for
     /// adapters that perform the agent's tool I/O themselves: the ACP adapter serves the agent's
@@ -265,6 +271,7 @@ mod tests {
         for (kind, s) in [
             (AgentKind::ClaudeCode, "claude-code"),
             (AgentKind::Codex, "codex"),
+            (AgentKind::Antigravity, "antigravity"),
             (AgentKind::Scripted, "scripted"),
         ] {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(s));
@@ -294,7 +301,7 @@ mod tests {
 
     #[test]
     fn acp_names_cannot_shadow_builtins_or_be_odd() {
-        for bad in ["codex", "claude-code", "scripted", "", "Omp", "-x", "a b", "a/b"] {
+        for bad in ["codex", "claude-code", "antigravity", "scripted", "", "Omp", "-x", "a b", "a/b"] {
             assert_eq!(AcpName::register(bad), None, "{bad:?}");
         }
         assert!(AcpName::valid("omp"));

@@ -3,9 +3,9 @@
 //! The user adds an MCP server once (`/api/v1/mcp`, [`api`]); every agent session that supports
 //! MCP gets it at process start, through [`StartRequest::mcp_servers`] — the same path as the
 //! project browser (FR-R3, `crate::browser::agent`), so Claude Code receives it in
-//! `--mcp-config` and Codex as `-c mcp_servers.<name>.…` overrides. A server applies to every
-//! project (`scope: "all"`) or to one (`"project:<name>"`), and can be switched off without
-//! deleting it.
+//! `--mcp-config`, Codex as `-c mcp_servers.<name>.…` overrides and Antigravity in its session
+//! root's `mcp_config.json`. A server applies to every project (`scope: "all"`) or to one
+//! (`"project:<name>"`), and can be switched off without deleting it.
 //!
 //! # Secrets
 //!
@@ -14,7 +14,8 @@
 //! - sealed at rest with the server key (`accounts::secrets::SecretBox`), bound to the row;
 //! - never returned: [`McpEntry`] carries the variable names only (`env_keys`);
 //! - never on an agent's command line: Claude Code reads it from a private `0600` config file,
-//!   Codex from its process environment through `env_vars` (see the adapters);
+//!   Codex from its process environment through `env_vars`, Antigravity from a private `0600`
+//!   `mcp_config.json` in its `0700` session root (see the adapters);
 //! - never logged (`McpServer`'s `Debug` prints names only) and never an event, so it cannot
 //!   reach a transcript or the push channel.
 

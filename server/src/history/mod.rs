@@ -109,6 +109,9 @@ pub fn import_file(agent: AgentKind, path: &Path) -> anyhow::Result<Transcript> 
     match agent {
         AgentKind::ClaudeCode => Ok(claude_code::parse(&text)),
         AgentKind::Codex => Ok(codex::parse(&text)),
+        AgentKind::Antigravity => {
+            anyhow::bail!("importing Antigravity history is not supported yet")
+        }
         AgentKind::Scripted => anyhow::bail!("the scripted agent has no native history"),
         // ACP has no transcript file format; each agent stores sessions its own way.
         AgentKind::Acp(name) => anyhow::bail!("importing {} transcripts is not supported", name.as_str()),

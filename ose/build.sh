@@ -13,8 +13,9 @@
 #   1. fetch    shallow-clone microsoft/vscode at the tag in ose/VERSION
 #   2. product  merge ose/product.overrides.json into product.json, drop Microsoft-only keys,
 #               then ose/check-product.sh
-#   3. install  npm ci (upstream uses npm with package-lock.json, not yarn)
-#   4. build    npm run gulp vscode-reh-web-<platform>-<arch>-min
+#   3. install  (Linux) build/npm/preinstall.ts first, then npm ci (npm + package-lock.json, not yarn)
+#   4. build    gulp core-ci -> compile-copilot-extension-build -> stage the Copilot SDK into
+#               .build/extensions/copilot -> gulp vscode-reh-web-<platform>-<arch>-min-ci
 #   5. package  dpx-ose-<tag>-<target>.tar.gz + .sha256, product check on the packaged output
 #   6. smoke    (--smoke) ose/smoke.sh on the packaged server
 set -euo pipefail
@@ -39,7 +40,7 @@ while [ $# -gt 0 ]; do
     --skip-install) SKIP_INSTALL=1; shift ;;
     --smoke) SMOKE=1; shift ;;
     --product-only) PRODUCT_ONLY=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -125,8 +126,21 @@ apply_product "$SRC/product.json"
 # --- 3. install ------------------------------------------------------------------------------
 export ELECTRON_SKIP_BINARY_DOWNLOAD=1       # the web server does not need Electron
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1    # nor test browsers
+export ONNXRUNTIME_NODE_INSTALL=skip         # upstream sets this too; no ONNX runtime download
 export NODE_OPTIONS="--max-old-space-size=$MAX_OLD_SPACE"
+# Kerberos on macOS: link directly instead of dlopen (upstream product-build-darwin-compile.yml).
+[ "${TARGET%%-*}" = darwin ] && export GYP_DEFINES="${GYP_DEFINES:+$GYP_DEFINES }kerberos_use_rtld=false"
 if [ "$SKIP_INSTALL" = 0 ]; then
+  if [ "${TARGET%%-*}" = linux ]; then
+    # npm (v7+) runs the root package's preinstall only after the dependencies' install scripts,
+    # but build/npm/preinstall.ts is what downloads the Electron/Node headers and overlays
+    # build/npm/gyp/custom-headers on them (v8config.h: deprecation-attribute syntax GCC < 13 can
+    # parse, https://gcc.gnu.org/bugzilla/show_bug.cgi?id=69585). Without it, native modules such as
+    # native-keymap fail to compile with Ubuntu 22.04's GCC 11. Upstream runs it explicitly before
+    # npm ci for the same reason (build/azure-pipelines/linux/steps/product-build-linux-compile.yml).
+    log "preinstall (v8 header overlay)"
+    (cd "$SRC" && node build/npm/preinstall.ts)
+  fi
   log "npm ci"
   for attempt in 1 2 3; do
     (cd "$SRC" && npm ci) && break
@@ -136,11 +150,44 @@ if [ "$SKIP_INSTALL" = 0 ]; then
 fi
 
 # --- 4. build ----------------------------------------------------------------------------------
-# gulp task from build/gulpfile.reh.ts: vscode-reh-web-<platform>-<arch>[-min]. It compiles the
-# built-in extensions, bundles the server-web target with esbuild (minified), downloads the Node
-# runtime pinned in remote/.npmrc and writes the package to <parent of the repo>/vscode-reh-web-<target>.
-log "gulp vscode-reh-web-$TARGET-min"
-(cd "$SRC" && npm run gulp "vscode-reh-web-$TARGET-min")
+# Upstream's own sequence (build/azure-pipelines/{linux,darwin}/steps/product-build-*-compile.yml):
+#   gulp core-ci                         built-in extensions + media, esbuild bundles incl.
+#                                        out-vscode-reh-web-min
+#   (download the Copilot VSIX into .build/extensions/copilot)
+#   gulp vscode-reh-web-<target>-min-ci  native extensions, Node runtime, package, Copilot shim
+# The Copilot VSIX comes from a separate upstream job that needs the private microsoft/vscode-capi
+# repo, so it cannot be reproduced here. Instead the extension is built from source with upstream's
+# own non-CI task (compile-copilot-extension-build), and the @github/copilot SDK that the VSIX would
+# carry is staged next to it (see stage_copilot_sdk). The one-shot vscode-reh-web-<target>-min task
+# is not used: it runs the same compile task, but the copied extension lacks the SDK
+# (build/.moduleignore strips @github/copilot/**), so its final Copilot shim step
+# (prepareBuiltInCopilotRipgrepShim, build/lib/copilot.ts) always fails outside Microsoft's pipeline.
+
+# Mirror the VSIX layout for node_modules/@github/copilot: its package.json (with the ./sdk export
+# that extensions/copilot/script/postinstall.ts adds) and the sdk/ tree that postinstall
+# materialized. The -ci task's shim then prunes it to the target platform and adds the
+# version-matched native prebuilds and ripgrep, exactly as it does for the VSIX.
+stage_copilot_sdk() {
+  local from="$SRC/extensions/copilot/node_modules/@github/copilot"
+  local to="$SRC/.build/extensions/copilot/node_modules/@github/copilot"
+  [ -f "$SRC/.build/extensions/copilot/package.json" ] || die "compile-copilot-extension-build did not produce .build/extensions/copilot"
+  [ -f "$from/sdk/index.js" ] || die "Copilot SDK missing at $from/sdk (extensions/copilot postinstall did not run?)"
+  rm -rf "$to"
+  mkdir -p "$to"
+  cp "$from/package.json" "$to/"
+  cp -R "$from/sdk" "$to/sdk"
+  echo "staged $(du -sh "$to" | cut -f1) of @github/copilot into .build/extensions/copilot"
+}
+
+rm -rf "$SRC/.build/extensions"   # what upstream's clean-extensions-build does
+log "gulp core-ci"
+(cd "$SRC" && npm run gulp core-ci)
+log "gulp compile-copilot-extension-build"
+(cd "$SRC" && npm run gulp compile-copilot-extension-build)
+log "stage Copilot SDK"
+stage_copilot_sdk
+log "gulp vscode-reh-web-$TARGET-min-ci"
+(cd "$SRC" && npm run gulp "vscode-reh-web-$TARGET-min-ci")
 
 BUILT="$WORK/vscode-reh-web-$TARGET"
 [ -d "$BUILT" ] || die "expected build output at $BUILT"

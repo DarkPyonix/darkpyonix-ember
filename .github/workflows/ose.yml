@@ -96,10 +96,13 @@ jobs:
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
-        # The VS Code "How to Contribute" Linux prerequisites (native node modules).
+        # Native node modules: VS Code's "How to Contribute" Linux prerequisites plus pkg-config,
+        # as upstream's build/azure-pipelines/linux/steps/product-build-linux-compile.yml installs.
+        # GCC 11 (Ubuntu 22.04) is enough once build.sh runs build/npm/preinstall.ts before npm ci.
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential g++ libx11-dev libxkbfile-dev libsecret-1-dev libkrb5-dev python-is-python3 jq
+          sudo apt-get install -y build-essential g++ pkg-config libx11-dev libxkbfile-dev libsecret-1-dev libkrb5-dev python-is-python3 jq
+          gcc --version | head -1
 
       - uses: actions/setup-python@v6
         with:
@@ -126,6 +129,10 @@ jobs:
 
       - name: Build, package and smoke-test
         id: build
+        env:
+          # Read-only token: upstream's build fetches built-in extensions and npm packages from
+          # GitHub and is rate-limited without one (upstream passes GITHUB_TOKEN the same way).
+          GITHUB_TOKEN: ${{ github.token }}
         run: ose/build.sh --target ${{ matrix.target }} --smoke
 
       - uses: actions/upload-artifact@v4

@@ -1,0 +1,229 @@
+{
+  "name": "vscode-darkpyonix",
+  "displayName": "DarkPyonix Notebooks",
+  "description": "Open DarkPyonix .pynb/.py notebooks as notebooks: cells per the DarkPyonix format, latest run outputs, live runs and multi-client collaboration through the DarkPyonix manager.",
+  "version": "0.1.0",
+  "publisher": "darkpyonix",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DarkPyonix/darkpyonix-ember.git",
+    "directory": "extensions/vscode-darkpyonix"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Notebooks",
+    "Data Science"
+  ],
+  "keywords": [
+    "darkpyonix",
+    "notebook",
+    "python",
+    "pynb"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onNotebook:darkpyonix-notebook",
+    "onNotebook:darkpyonix-notebook-py",
+    "onCommand:darkpyonix.openAsNotebook"
+  ],
+  "contributes": {
+    "notebooks": [
+      {
+        "type": "darkpyonix-notebook",
+        "displayName": "DarkPyonix Notebook",
+        "selector": [
+          {
+            "filenamePattern": "*.pynb"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "type": "darkpyonix-notebook-py",
+        "displayName": "DarkPyonix Notebook (.py)",
+        "selector": [
+          {
+            "filenamePattern": "*.py"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "languages": [
+      {
+        "id": "python",
+        "extensions": [
+          ".pynb"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "darkpyonix.openAsNotebook",
+        "title": "Open as DarkPyonix Notebook",
+        "category": "DarkPyonix"
+      },
+      {
+        "command": "darkpyonix.interruptKernel",
+        "title": "Interrupt Kernel",
+        "category": "DarkPyonix",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "darkpyonix.restartKernel",
+        "title": "Restart Kernel",
+        "category": "DarkPyonix",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "darkpyonix.hardRestartKernel",
+        "title": "Restart Kernel Process (hard)",
+        "category": "DarkPyonix"
+      },
+      {
+        "command": "darkpyonix.shutdownKernel",
+        "title": "Shut Down Kernel",
+        "category": "DarkPyonix"
+      },
+      {
+        "command": "darkpyonix.connect",
+        "title": "Connect to Manager / Join Collaboration",
+        "category": "DarkPyonix",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "darkpyonix.reloadDocument",
+        "title": "Reload Document from Kernel",
+        "category": "DarkPyonix"
+      },
+      {
+        "command": "darkpyonix.showOutputLog",
+        "title": "Show Log",
+        "category": "DarkPyonix"
+      }
+    ],
+    "menus": {
+      "notebook/toolbar": [
+        {
+          "command": "darkpyonix.interruptKernel",
+          "when": "notebookType == darkpyonix-notebook || notebookType == darkpyonix-notebook-py",
+          "group": "navigation/execute@10"
+        },
+        {
+          "command": "darkpyonix.restartKernel",
+          "when": "notebookType == darkpyonix-notebook || notebookType == darkpyonix-notebook-py",
+          "group": "navigation/execute@11"
+        },
+        {
+          "command": "darkpyonix.connect",
+          "when": "notebookType == darkpyonix-notebook || notebookType == darkpyonix-notebook-py",
+          "group": "status@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "darkpyonix.openAsNotebook",
+          "when": "resourceExtname == .py || resourceExtname == .pynb",
+          "group": "navigation@20"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "darkpyonix.openAsNotebook",
+          "when": "resourceExtname == .py || resourceExtname == .pynb"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "darkpyonix.openAsNotebook",
+          "when": "resourceExtname == .py || resourceExtname == .pynb"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DarkPyonix",
+      "properties": {
+        "darkpyonix.cliPath": {
+          "type": "string",
+          "default": "darkpyonix",
+          "description": "Path to the darkpyonix CLI, used to spawn an ephemeral manager when none is running (SPEC FR-C1)."
+        },
+        "darkpyonix.managerArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "manager",
+            "--ephemeral"
+          ],
+          "description": "Arguments passed to the CLI to start an ephemeral manager."
+        },
+        "darkpyonix.home": {
+          "type": "string",
+          "default": "",
+          "description": "DarkPyonix runtime home. Empty: $DARKPYONIX_HOME, else ~/.darkpyonix."
+        },
+        "darkpyonix.manager.url": {
+          "type": "string",
+          "default": "",
+          "description": "URL of a dedicated manager (e.g. https://main.example.darkpyonix.dev). Empty: use a local ephemeral manager."
+        },
+        "darkpyonix.manager.token": {
+          "type": "string",
+          "default": "",
+          "description": "Master or share token for the dedicated manager. Prefer the 'DarkPyonix: Connect' command, which stores it in the OS secret store."
+        },
+        "darkpyonix.manager.pathMap": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Local path prefix → path prefix on the dedicated manager's machine."
+        },
+        "darkpyonix.autoStartKernel": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start (or attach to) the file's kernel as soon as the notebook opens, which also joins collaboration. Otherwise the kernel starts on the first run; a kernel already running for the file is always attached."
+        },
+        "darkpyonix.python": {
+          "type": "string",
+          "default": "",
+          "description": "Interpreter for new kernels. Empty: the manager's default."
+        },
+        "darkpyonix.nickname": {
+          "type": "string",
+          "default": "",
+          "description": "Device name shown to other clients. Empty: this machine's host name."
+        },
+        "darkpyonix.lockIdleSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 3,
+          "description": "Release the edit lock on a cell after this many seconds without typing."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run",
+    "test:e2e": "node esbuild.mjs --e2e && node test/e2e/runTest.mjs",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

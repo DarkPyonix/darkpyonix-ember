@@ -118,6 +118,44 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-T6** | Users can mention another session from the composer, and can turn A2A off per user or per session. | Off means sends to and from that session are rejected with a clear reason. |
 | **FR-T7** | A leader session can spawn teammate sessions, assign tasks, and read a shared task list and mailbox. | Tasks and mailbox are stored on the main server; each teammate keeps its own approvals. |
 
+### §T status — teams and mentions (FR-T6, FR-T7, issue #55)
+
+- **Teams** *[provisional]* (store migration 11: `teams`, `team_members`, `team_tasks`,
+  `team_mail`). The first `ember-a2a team spawn` makes the calling session the leader of a new
+  team. A teammate is a new session in the leader's project and directory with the agent,
+  account and computer the leader chose (defaults: the leader's agent, the account router, the
+  main server) and nothing else: no model, no transcript, no approvals. Each teammate answers its
+  own approvals in its own session. Its first prompt arrives as an A2A message from the leader
+  (FR-T3), and its instructions name its role. At most 8 active teammates; spawns count against
+  the per-session limit of the window. A session belongs to at most one team, as leader or
+  teammate, for good; no nested teams. Ending a teammate (leader, or the user) stops its agent
+  and removes it from the team; the session and transcript stay.
+- **Permissions** *[provisional]*: only the leader spawns and ends. Any member adds tasks; the
+  leader assigns and updates any task; a teammate updates only tasks that are unassigned or its
+  own and assigns only to itself. An assignment to someone else, and a teammate's status change
+  (to the leader), are announced through the A2A queue under loop protection, best effort.
+- **Mailbox**: `mail send <name>|--all` stores the mail and delivers it through the A2A queue
+  (wakes the recipient, survives a restart, FR-T4); loop protection counts one message per
+  recipient (FR-T5), all or nothing. The leader reads all team mail; a teammate reads team-wide
+  mail and its own.
+- **Messaging rule** *[provisional]*: an active teammate is reachable only from its own team
+  (leader and teammates) and reaches only its own team; it is left out of everyone else's
+  `ember-a2a list` and mention candidates. Leaders and ended teammates are ordinary sessions.
+- **Mentions** *[provisional]*: the composer writes `@@<id>`, `@@<title>` or `@@"<title>"`. The
+  user's message goes to the session it was typed in, unchanged; each mentioned session gets a
+  copy as an A2A message from that session, so it can answer the origin with one call. Chosen
+  over redirecting the message because the user typed in this conversation and expects it to
+  continue here, and an unresolved mention then loses nothing. Mentions follow the switches and
+  the messaging rule but not the rate limits (a person sent them); they are stored, so they
+  count toward the window for later agent sends. Each outcome is a notice in the origin session.
+- **APIs**: agent routes under `/api/v1/a2a/team` (members, tasks, mail; runtime token = the
+  caller); user routes `GET /api/v1/sessions/{id}/team`, `GET /api/v1/teams/{id}`,
+  `GET /api/v1/teams/{id}/mail`, `POST /api/v1/teams/{id}/members/{session}/end`,
+  `GET /api/v1/sessions/{id}/mentions?q=`. Every team change is pushed as `team_updated` with the
+  whole team (additive; `PUSH_VERSION` stays 1). Details: `server/src/a2a/api.rs`.
+- **Not yet verified**: a team of real Claude Code and Codex sessions on different computers and
+  accounts (needs real agents and hardware); the composer suggestion list on screen.
+
 ---
 
 ## §R — Remote browser and agent browser use (D6)

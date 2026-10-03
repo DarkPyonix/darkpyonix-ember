@@ -46,6 +46,8 @@ pub struct Live {
     pub transcripts: SyncSignal<u64>,
     /// The message outbox (queued-message indicator).
     pub outbox: SyncSignal<u64>,
+    /// Any team (members, tasks: FR-T7).
+    pub teams: SyncSignal<u64>,
     pub accounts: SyncSignal<Vec<Account>>,
     pub agents: SyncSignal<Vec<DetectedAgent>>,
 }
@@ -57,6 +59,7 @@ impl Live {
             launcher: use_signal_sync(|| 0),
             transcripts: use_signal_sync(|| 0),
             outbox: use_signal_sync(|| 0),
+            teams: use_signal_sync(|| 0),
             accounts: use_signal_sync(Vec::new),
             agents: use_signal_sync(Vec::new),
         }
@@ -70,6 +73,7 @@ impl Live {
         Self::bump(self.launcher);
         Self::bump(self.transcripts);
         Self::bump(self.outbox);
+        Self::bump(self.teams);
     }
 }
 
@@ -171,6 +175,9 @@ fn on_changes(s: &'static Services, live: Live, ch: &Changes, prints: &mut Finge
     }
     if !ch.transcripts.is_empty() {
         Live::bump(live.transcripts);
+    }
+    if !ch.teams.is_empty() {
+        Live::bump(live.teams);
     }
     // Turn boundaries show up as session status changes.
     for id in &ch.sessions {

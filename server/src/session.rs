@@ -37,6 +37,8 @@ pub enum Push {
     SessionUpdated { v: u32, session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { v: u32, project: Project },
+    /// A team's members or tasks changed (FR-T7). Carries the whole team.
+    TeamUpdated { v: u32, team: crate::a2a::team::TeamView },
     /// A schedule was created (FR-A8), by a user or by an agent (`ember-a2a schedule add`).
     ScheduleCreated { v: u32, schedule: Schedule },
     /// A schedule changed: edited, paused, resumed. Carries the whole record.
@@ -121,6 +123,11 @@ pub type PrepareHook = Arc<
 /// The hook owns the note's lifetime: return it once.
 pub type MessageHook = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// Called with `(session id, text)` after a message **the user** typed was delivered (not
+/// A2A deliveries): mentions of other sessions (FR-T6). Awaited by [`Sessions::send_from_user`].
+pub type UserMessageHook =
+    Arc<dyn Fn(String, String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
@@ -130,6 +137,7 @@ pub struct Sessions {
     start_config_hooks: std::sync::Mutex<Vec<StartConfigHook>>,
     prepare_hooks: std::sync::Mutex<Vec<PrepareHook>>,
     message_hooks: std::sync::Mutex<Vec<MessageHook>>,
+    user_message_hooks: std::sync::Mutex<Vec<UserMessageHook>>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
@@ -151,6 +159,7 @@ impl Sessions {
             start_config_hooks: std::sync::Mutex::new(Vec::new()),
             prepare_hooks: std::sync::Mutex::new(Vec::new()),
             message_hooks: std::sync::Mutex::new(Vec::new()),
+            user_message_hooks: std::sync::Mutex::new(Vec::new()),
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
@@ -192,6 +201,11 @@ impl Sessions {
     /// Register a hook that may put a one-time note in front of the next message.
     pub fn add_message_hook(&self, hook: MessageHook) {
         self.message_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Register a hook that sees every message the user sends (after delivery).
+    pub fn add_user_message_hook(&self, hook: UserMessageHook) {
+        self.user_message_hooks.lock().unwrap().push(hook);
     }
 
     pub fn store(&self) -> &Store {
@@ -408,6 +422,17 @@ impl Sessions {
             format!("{}\n\n{text}", notes.join("\n\n"))
         };
         live.run.lock().await.send(&agent_text).await?;
+        Ok(())
+    }
+
+    /// A message the user typed: [`Sessions::send`], then the user-message hooks (mentions,
+    /// FR-T6). The HTTP API's `POST /sessions/{id}/messages` comes here.
+    pub async fn send_from_user(self: &Arc<Self>, id: &str, text: &str) -> Result<(), SessionError> {
+        self.send(id, text).await?;
+        let hooks: Vec<UserMessageHook> = self.user_message_hooks.lock().unwrap().clone();
+        for hook in hooks {
+            hook(id.to_string(), text.to_string()).await;
+        }
         Ok(())
     }
 

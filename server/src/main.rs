@@ -187,6 +187,20 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("ember-a2a not found next to the server binary; agents cannot use A2A");
     }
     let a2a = A2a::new(sessions.clone(), A2aStore::open(&data_dir.join("ember.db"))?, a2a_config);
+    // `team spawn --computer` (FR-T7) moves the new teammate like a user's switch (FR-X3).
+    {
+        let (computers, sessions) = (computers.clone(), sessions.clone());
+        a2a.set_computer_setter(Arc::new(move |session_id: String, computer_id: String| {
+            let (computers, sessions) = (computers.clone(), sessions.clone());
+            Box::pin(async move {
+                computers
+                    .switch(&sessions, &session_id, &computer_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }) as futures::future::BoxFuture<'static, Result<(), String>>
+        }));
+    }
 
     let idle = std::time::Duration::from_secs(
         std::env::var("EMBER_IDLE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300),

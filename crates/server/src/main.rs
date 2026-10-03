@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ember_server::accounts::Accounts;
+use ember_server::agents::antigravity::{self, AntigravityAdapter, HookBroker};
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::scripted::ScriptedAdapter;
@@ -26,6 +27,9 @@ use ember_server::store::Store;
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
+/// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
+///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
+///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=0` drops agy's `--sandbox`
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
@@ -80,8 +84,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Always offered; detection reports a missing binary as not installed (FR-A6).
-    let mut adapters: Vec<Arc<dyn AgentAdapter>> =
-        vec![Arc::new(ClaudeCodeAdapter::from_env()), Arc::new(CodexAdapter::from_env())];
+    // Antigravity's tool approvals arrive over HTTP from its PreToolUse hook (FR-A5).
+    let agy_hooks = HookBroker::new();
+    let mut adapters: Vec<Arc<dyn AgentAdapter>> = vec![
+        Arc::new(ClaudeCodeAdapter::from_env()),
+        Arc::new(CodexAdapter::from_env()),
+        Arc::new(AntigravityAdapter::from_env(&data_dir, agy_hooks.clone())),
+    ];
     if std::env::var("EMBER_SCRIPTED_AGENT").as_deref() == Ok("1") {
         adapters.push(Arc::new(ScriptedAdapter));
     }
@@ -178,7 +187,8 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
         .parse()?;
-    let agent_url = std::env::var("EMBER_AGENT_URL").unwrap_or_else(|_| {
+    // This server as seen from this machine (an unspecified address replaced by loopback).
+    let local_url = {
         let mut local = addr;
         if local.ip().is_unspecified() {
             local.set_ip(if addr.is_ipv4() {
@@ -188,7 +198,10 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         format!("http://{local}")
-    });
+    };
+    // Antigravity's hook runs on this machine and calls the local listener.
+    agy_hooks.set_base_url(&local_url);
+    let agent_url = std::env::var("EMBER_AGENT_URL").unwrap_or_else(|_| local_url.clone());
     let mut a2a_config = A2aConfig::new(agent_url);
     a2a_config.cli_path = A2aConfig::cli_next_to_current_exe();
     a2a_config.enabled_by_default =
@@ -326,9 +339,10 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    // Device management and the hub are local only (TCP).
+    // Device management, the hub and Antigravity's approval hook are local only (TCP).
     let local_app = app
         .merge(devices::api::router(devices.clone()))
+        .merge(antigravity::router(agy_hooks))
         .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
     axum::serve(listener, local_app)
         .with_graceful_shutdown(async {

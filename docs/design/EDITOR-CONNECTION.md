@@ -27,9 +27,26 @@ build OSE ourselves, we always know the exact server commit. That fact carries m
 
 ## 2. Pinned source
 
-All citations are to `microsoft/vscode` at commit **`0036dcb6c18a603d2168c00fa578be600987ac7b`**
-(2026-10-02, `package.json` version **1.141.0**). Paths are relative to `src/vs/`. Line numbers are
-at that commit.
+All citations are to `microsoft/vscode` at tag **`1.139.1`**, commit
+**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`ose/VERSION`).
+Paths are relative to `src/vs/`. Line numbers are at that commit.
+
+The pin has one source of truth per side, and they are checked against each other:
+
+- `ose/VERSION` names the tag OSE is built from (`ose/build.sh`).
+- `ember_editor_conn::PINNED_VERSION` / `PINNED_COMMIT` (`editor-conn/src/lib.rs`) name the tag and
+  commit the crate's tables and citations come from. The unit test `pin_matches_ose_version` fails
+  if `PINNED_VERSION` differs from `ose/VERSION`; the CI job `editor-conn-pin`
+  (`.github/workflows/checks.yml`) clones the `ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
+  fails if `rpc_ids.rs`, `PINNED_VERSION` or `PINNED_COMMIT` differ (§5).
+- At connect time, `handshake::verify_server` compares the server's `GET /version` with
+  `PINNED_COMMIT` (§3.4).
+
+The crate was first written against `0036dcb6` (1.141.0) and re-aligned to 1.139.1 on 2026-10-03.
+Between the two, the proxy table is identical (168 ids, same order) and no method or DTO of the
+minimal subset (§4) changed; `extHost.protocol.ts` differs in five hunks only (authentication
+options, progress DTOs, SCM, chat notebook edits, `$checkMcpServerAllowed`). Only line numbers
+moved.
 
 | Short name | Path |
 | ---------- | ---- |
@@ -80,7 +97,7 @@ Plain HTTP serves the rest. `GET /version` returns the server commit (`agentServ
   WebSocket binary frames with optional deflate (`node/ipc.net.ts` L292ff.). Ember never needs it.
 - The upgrade itself does **not** check the connection token. The token is checked in the `auth`
   handshake message (§3.4). The HTTP routes check it as `?tkn=` or the `vscode-tkn` cookie
-  (`agentServer.ts` L157; `base/common/network.ts` L192-193).
+  (`agentServer.ts` L157; `base/common/network.ts` L187-188).
 
 ### 3.3 PersistentProtocol framing (`ipc.net.ts`)
 
@@ -139,9 +156,22 @@ otherwise. That works against both OSE and VSC (`INTENT.md` D10). Ember cannot v
 signature. Server authenticity comes from the transport (TLS, or the iroh peer identity).
 
 **Commit check.** If both sides send a commit and they differ, the server refuses with
-"version mismatch" (L351-357). The extension host runs its own check on `initData.commit` and
-exits with code 55 on a mismatch (`extensionHostProcess.ts` L340-347). Ember reads `GET /version`
-and sends the commit only when it equals the commit its tables were generated for (§5).
+"Client refused: version mismatch" (L351-357). The extension host runs its own check on
+`initData.commit` and exits with code 55 on a mismatch (`extensionHostProcess.ts` L340-347).
+
+Ember gates before that (§5 mitigation 3):
+
+1. `handshake::verify_server(stream, &opts)` sends `GET /version` (HTTP/1.0 on a fresh stream;
+   the route needs no connection token, `agentServer.ts` L145-148) and compares the body with
+   `PINNED_COMMIT`. Any other commit, including the empty body of a dev server, returns
+   `Error::UnsupportedServerVersion { server: Some(commit) }`.
+2. The caller puts the verified commit in `ConnectOptions::commit`, so the server repeats the check.
+   `handshake::connect` refuses a `ConnectOptions::commit` other than `PINNED_COMMIT` before any I/O,
+   and maps the server's "version mismatch" refusal to `UnsupportedServerVersion { server: None }`.
+3. The same commit goes into `InitDataParams::commit` for the extension host.
+
+`UnsupportedServerVersion` is permanent (`handshake::is_permanent`): the editor core falls back to
+"Open in VS Code" instead of retrying.
 
 ### 3.5 Reconnection
 
@@ -154,10 +184,10 @@ Back-off is 0, 5, 5, 10, 10, 10, 10, 10, 30 s, then 30 s repeating
 
 A server `error` reply is permanent: "Unknown reconnection token (never seen | seen before)",
 "Duplicate reconnection token", an auth mismatch, or a version mismatch. Network errors and
-timeouts are retried (L700-730).
+timeouts are retried (L698-728).
 
 A lost management connection is fatal to the window upstream. A lost extension-host connection
-is not (`reconnectionFailureIsFatal`, L757-790).
+is not (`reconnectionFailureIsFatal`, L754-787).
 
 ### 3.6 IPC channel protocol (`ipc.ts`) — management connection
 
@@ -178,7 +208,7 @@ is not (`reconnectionFailureIsFatal`, L757-790).
   - `[204, id]` followed by data (event).
 - **Start of a connection** (`IPCClient` constructor, L1015-1031): the client first sends its
   context alone, which for management is `{remoteAuthority, clientId}`
-  (`remoteAgentConnection.ts` L763-766). Both sides run a `ChannelServer`, and each sends `[200]`.
+  (`remoteAgentConnection.ts` L760-763). Both sides run a `ChannelServer`, and each sends `[200]`.
   A `ChannelClient` sends nothing until it has seen the peer's `[200]`. The protocol is symmetric:
   Ember hosts no channels and answers any server-initiated request with an error.
 - **URIs** sent to the server are `vscode-remote://<authority>/<path>`. The server's URI
@@ -229,7 +259,7 @@ called both of these:
 - `ExtHostWorkspace.$initializeWorkspace(workspaceData | null, trusted)`. The ext host waits on it
   at `extHostExtensionService.ts` L218.
 - `ExtHostConfiguration.$initializeConfiguration(IConfigurationInitData)`. A barrier
-  (`extHostConfiguration.ts` L107-131) is awaited in `api/node/extHostExtensionService.ts` L180.
+  (`extHostConfiguration.ts` L107-131) is awaited in `api/node/extHostExtensionService.ts` L179.
 
 Upstream, those calls come from the `MainThreadWorkspace` and `MainThreadConfiguration`
 constructors (`api/browser/mainThreadWorkspace.ts` L66, `mainThreadConfiguration.ts` L29).
@@ -260,11 +290,11 @@ The extension host mirrors each open document. A document must first be announce
 
 - `ExtHostDocumentsAndEditors.$acceptDocumentsAndEditorsDelta({addedDocuments: [IModelAddedData]})`;
 - `IModelAddedData` = `{uri, versionId, lines[], EOL, languageId, isDirty, encoding}`
-  (`extHost.protocol.ts` L2397-2405, L2460-2470).
+  (`extHost.protocol.ts` L2390-2398, L2453-2463).
 
 Changes then go through
 `ExtHostDocuments.$acceptModelChanged(uri, ISerializedModelContentChangedEvent, isDirty)`
-(L2406-2412). The event is
+(L2404, in `ExtHostDocumentsShape` L2399-2405). The event is
 `{changes: [{range, rangeOffset, rangeLength, text}], eol, versionId, isUndoing, isRedoing, isFlush, isEolChange, detailedReason?}`
 (`editor/common/textModelEvents.ts` L87-127; `editor/common/model/mirrorTextModel.ts` L12-29).
 
@@ -313,8 +343,8 @@ Behaviour:
 - `rpcId` is one byte: `ProxyIdentifier.nid`, assigned by a global counter in declaration order
   of the `createProxyIdentifier` calls (`proxyIdentifier.ts` L42). At the pinned commit those
   calls are only in `extHost.protocol.ts`:
-  - `MainContext` (L4056-4144) gets ids 1–87;
-  - `ExtHostContext` (L4146-4228) gets ids 88–168.
+  - `MainContext` (L4046-4134) gets ids 1–87;
+  - `ExtHostContext` (L4136-4218) gets ids 88–168.
   - Examples: `MainThreadDiagnostics` = 16, `MainThreadLanguageFeatures` = 26,
     `ExtHostDocuments` = 95, `ExtHostLanguageFeatures` = 104.
 - The remote extension host runs a URI transformer over every RPC argument and reply
@@ -347,28 +377,28 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 
 | Direction | Call |
 | --------- | ---- |
-| EH→ | `MainThreadDiagnostics.$changeMany(owner, [uri, IMarkerData[] \| undefined][])` and `$clear(owner)` (`extHost.protocol.ts` L252-255) |
+| EH→ | `MainThreadDiagnostics.$changeMany(owner, [uri, IMarkerData[] \| undefined][])` and `$clear(owner)` (`extHost.protocol.ts` L254-257) |
 
 **FR-E3 CodeLens and hover**
 
 | Direction | Call |
 | --------- | ---- |
-| EH→ | `MainThreadLanguageFeatures.$registerCodeLensSupport(handle, selector, eventHandle?)`, `$emitCodeLensEvent`, `$registerHoverProvider(handle, selector)`, `$unregister(handle)` (L526-536) |
-| →EH | `$provideCodeLenses` / `$resolveCodeLens` / `$releaseCodeLenses`, and `$provideHover` / `$releaseHover` (L2962-2972) |
+| EH→ | `MainThreadLanguageFeatures.$registerCodeLensSupport(handle, selector, eventHandle?)`, `$emitCodeLensEvent`, `$registerHoverProvider(handle, selector)`, `$unregister(handle)` (L529-537) |
+| →EH | `$provideCodeLenses` / `$resolveCodeLens` / `$releaseCodeLenses`, and `$provideHover` / `$releaseHover` (L2956-2964) |
 
 **FR-E4 inline completions**
 
 | Direction | Call |
 | --------- | ---- |
-| EH→ | `$registerInlineCompletionsSupport` (17 positional args, L556-574), `$emitInlineCompletionsChange` |
-| →EH | `$provideInlineCompletions(handle, uri, position, InlineCompletionContext)`, `$handleInlineCompletionDidShow`, `$handleInlineCompletionEndOfLifetime`, `$freeInlineCompletionsList` (L3003-3008) |
+| EH→ | `$registerInlineCompletionsSupport` (17 positional args, L558-576), `$emitInlineCompletionsChange` (L577) |
+| →EH | `$provideInlineCompletions(handle, uri, position, InlineCompletionContext)`, `$handleInlineCompletionDidShow`, `$handleInlineCompletionEndOfLifetime`, `$freeInlineCompletionsList` (L2995-3000) |
 
 **Commands**
 
 | Direction | Call |
 | --------- | ---- |
-| EH→ | `MainThreadCommands.$registerCommand` / `$unregisterCommand` / `$executeCommand` (L134-140) |
-| →EH | `ExtHostCommands.$executeContributedCommand` (L2379-2382), for CodeLens and completion commands |
+| EH→ | `MainThreadCommands.$registerCommand` / `$unregisterCommand` / `$executeCommand` (L135-139) |
+| →EH | `ExtHostCommands.$executeContributedCommand` (L2373), for CodeLens and completion commands |
 
 **Files**
 
@@ -388,7 +418,8 @@ Read "→EH" as Ember calling the extension host, and "EH→" as the extension h
 
 ## 5. Version-stability risks
 
-Measured by diffing release tags against the pinned commit (2026-10-03):
+Measured by diffing release tags against `0036dcb6` (1.141.0) on 2026-10-03. The pin then moved
+back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor the subset.
 
 | Surface | Evidence | Risk |
 | ------- | -------- | ---- |
@@ -404,22 +435,27 @@ Measured by diffing release tags against the pinned commit (2026-10-03):
 **Mitigations (the plan depends on these):**
 
 1. **Pin per OSE build.** We build OSE ourselves (`INTENT.md` D10), so each Ember release names
-   one Code-OSS commit. `ember-editor-conn` carries the commit its tables came from
-   (`PINNED_CODE_OSS_COMMIT`).
+   one Code-OSS commit. `ember-editor-conn` carries the tag and commit its tables came from
+   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `ose/VERSION` by a unit test and by CI (§2).
 2. **Generate, don't hand-write.** `editor-conn/scripts/gen_rpc_ids.sh` regenerates the proxy
    table from `extHost.protocol.ts`. It fails if `createProxyIdentifier` appears in another file,
    because then module load order would decide the numbering. The next step is to generate the
    subset's DTO types from the TypeScript too. That needs a small `ts-morph` script at OSE build
    time; it runs at our build, not on the client.
 3. **Gate at connect time.** Read `GET /version`, and refuse the native editor core, falling back
-   to "Open in VS Code", unless the commit is one Ember has tables for.
+   to "Open in VS Code", unless the commit is one Ember has tables for. Implemented as
+   `handshake::verify_server` → `Error::UnsupportedServerVersion` (§3.4); today the only such
+   commit is `PINNED_COMMIT`.
    - For OSE the gate always passes, because Ember ships with its OSE build.
    - For VSC (the user's Microsoft build) the commit is arbitrary. A table can be generated for each
      public release tag: the tags are public, and the table is only the identifier order. Unknown
      commits fall back.
-4. **CI canary.** A job fetches each new upstream release tag, regenerates the table, and diffs
-   ids and subset signatures. It opens an issue on any change. This turns `PROJECT.md` Q2 into a
-   tracked number, not a surprise.
+4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/checks.yml`
+   shallow-clones `microsoft/vscode` at the `ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
+   if `editor-conn/src/rpc_ids.rs` or `PINNED_VERSION` / `PINNED_COMMIT` differ. So bumping
+   `ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
+   each *new* upstream release tag, regenerates the table, diffs ids and subset signatures, and
+   opens an issue on any change. That turns `PROJECT.md` Q2 into a tracked number, not a surprise.
 5. **Fail loud.** Any reply to an unknown method, a `ReplyErr` "Unknown actor", or a decode
    failure in the subset is logged with the pinned commit. Ember never guesses.
 
@@ -456,7 +492,8 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 
 | Module | Surface |
 | ------ | ------- |
-| `handshake` | `connect(stream, &ConnectOptions, ConnectionType, args)` → `(Connection, first_reply)`; `reconnect(&handle, stream, …)`; `reconnect_loop(&handle, dial, …, grace)`; `ExtensionHostStartParams` |
+| crate root | `PINNED_VERSION`, `PINNED_COMMIT`, `check_server_commit`; `Error::UnsupportedServerVersion` |
+| `handshake` | `verify_server(stream, &ConnectOptions)` → server commit or `UnsupportedServerVersion`; `server_commit(stream, …)`; `connect(stream, &ConnectOptions, ConnectionType, args)` → `(Connection, first_reply)`; `reconnect(&handle, stream, …)`; `reconnect_loop(&handle, dial, …, grace)`; `ExtensionHostStartParams` |
 | `connection` | `Connection { handle, events }`; `ConnectionHandle::{send, send_control, recv_control, close, replace_transport, finish_reconnect}`; `ConnEvent::{Message, Disconnected, Lost}` |
 | `ipc` | `IpcClient::start(conn, ctx)` → `(client, lifecycle_rx)`; `call(channel, cmd, IpcValue)`; `listen` / `unlisten`; `IpcValue`; `serialize` / `deserialize` |
 | `remote_fs` | `RemoteFs::{stat, read_file, write_file, readdir, mkdir, delete, rename, subscribe_changes, watch, unwatch}` |

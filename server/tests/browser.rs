@@ -161,8 +161,13 @@ fn tempdir() -> tempfile::TempDir {
 
 /// FR-R1 (egress through the chosen proxy, loopback included), FR-R2 (still logged in after
 /// switching egress), FR-R4 (clearing the profile).
+/// Browser tests launch a real Chrome each; run them one at a time so they don't starve each
+/// other on small CI runners (seen on GitHub's 2-core Linux runner).
+static BROWSER_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cookies_survive_egress_switch_and_clear_removes_them() {
+    let _serial = BROWSER_TESTS.lock().await;
     let dir = tempdir();
     let Some(m) = manager(dir.path()) else { return };
     let site = Site::default();
@@ -172,7 +177,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
     let base = format!("http://127.0.0.1:{}", addr.port());
 
     let b = m.open("egress", Some(Some(format!("socks5://{proxy_a}")))).await.unwrap();
-    b.wait_page(Duration::from_secs(15)).await.unwrap();
+    b.wait_page(Duration::from_secs(30)).await.unwrap();
     goto(&b, &format!("{base}/set")).await;
     let target = format!("127.0.0.1:{}", addr.port());
     assert!(seen_a.lock().unwrap().contains(&target), "egress A not used: {:?}", seen_a.lock().unwrap());
@@ -181,7 +186,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
     // Switch egress: restart on the same profile with proxy B.
     b.set_egress(Some(format!("socks5://{proxy_b}"))).await.unwrap();
     assert_eq!(b.egress().as_deref(), Some(format!("socks5://{proxy_b}").as_str()));
-    b.wait_page(Duration::from_secs(15)).await.unwrap();
+    b.wait_page(Duration::from_secs(30)).await.unwrap();
     goto(&b, &format!("{base}/")).await;
     assert!(seen_b.lock().unwrap().contains(&target), "egress B not used");
     assert!(text_of_c(&b).await.contains("sid=abc123"), "cookie lost across egress switch");
@@ -189,7 +194,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
 
     // Clear the profile (FR-R4): the cookie is gone, the browser keeps running on egress B.
     m.clear_data("egress").await.unwrap();
-    b.wait_page(Duration::from_secs(15)).await.unwrap();
+    b.wait_page(Duration::from_secs(30)).await.unwrap();
     goto(&b, &format!("{base}/")).await;
     assert_eq!(text_of_c(&b).await, "");
     b.stop().await;
@@ -199,6 +204,7 @@ async fn cookies_survive_egress_switch_and_clear_removes_them() {
 /// reaches the page. Prints local frame-rate and input-latency numbers.
 #[tokio::test(flavor = "multi_thread")]
 async fn view_stream_frames_and_click() {
+    let _serial = BROWSER_TESTS.lock().await;
     let dir = tempdir();
     let Some(m) = manager(dir.path()) else { return };
     let addr = serve_site(Site::default()).await;
@@ -219,7 +225,7 @@ async fn view_stream_frames_and_click() {
     assert_eq!(hello["v"], 1);
 
     let b = m.get("view").await.unwrap();
-    b.wait_page(Duration::from_secs(15)).await.unwrap();
+    b.wait_page(Duration::from_secs(30)).await.unwrap();
     let url = format!("http://127.0.0.1:{}/click", addr.port());
     let nav = json!({ "type": "navigate", "url": url }).to_string();
     ws.send(Message::Text(nav.into())).await.unwrap();
@@ -292,6 +298,7 @@ async fn view_stream_frames_and_click() {
 /// takeover holds agent commands until released.
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_relay_activity_and_takeover() {
+    let _serial = BROWSER_TESTS.lock().await;
     let dir = tempdir();
     let Some(m) = manager(dir.path()) else { return };
     let api = TcpListener::bind("127.0.0.1:0").await.unwrap();

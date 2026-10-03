@@ -110,7 +110,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 Antigravity (`agy`) has no headless approval channel and no ACP. Ember runs it with
 `--dangerously-skip-permissions --sandbox` and makes its own `PreToolUse` hook (matcher `*`, in a
 per-session folder passed with `--add-dir`) the only gate. **[user, 2026-10-03]** the "reinforced
-hook" design, relayed by the darkpyonix leader. Implementation: `server/src/agents/antigravity.rs`.
+hook" design, relayed by the darkpyonix leader. Implementation: `crates/server/src/agents/antigravity.rs`.
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
@@ -127,7 +127,7 @@ only). Every run: `agy -p "<prompt>" --output-format stream-json --add-dir <fold
 --new-project --model gemini-3.6-flash-low --dangerously-skip-permissions [extra]` from
 `<folder>/work`, `root/.agents/hooks.json` = one `PreToolUse` hook, matcher `*`. The prompt asked for
 `touch marker` unless noted; "marker" = whether the file appeared anywhere in the folder.
-Recordings: `server/tests/fixtures/agy/*_1.2.16.*`.
+Recordings: `crates/server/tests/fixtures/agy/*_1.2.16.*`.
 
 | # | Test | Setup | Observed | Result |
 | - | ---- | ----- | -------- | ------ |

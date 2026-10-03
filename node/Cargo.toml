@@ -13,6 +13,8 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 # The peer-to-peer transport (SPEC FR-N1, FR-N5): serve the API and dial nodes by peer id.
 ember-transport = { path = "../transport" }
+# The darkpyonix.dev hub: registering this computer to the user's account (SPEC FR-N2).
+ember-hub = { path = "../hub" }
 futures = "0.3"
 globset = "0.4"
 grep-regex = "0.1"
@@ -37,4 +39,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+ember-hub = { path = "../hub", features = ["fake"] }
 tempfile = "3"

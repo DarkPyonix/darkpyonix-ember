@@ -103,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [server, node, transport, client, bridge, editor-conn, editor]
+        crate: [server, node, transport, hub, client, bridge, editor-conn, editor]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always

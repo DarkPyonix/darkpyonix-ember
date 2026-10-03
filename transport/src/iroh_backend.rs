@@ -1,19 +1,24 @@
 //! iroh 1.x backend (SPEC `FR-N1`). The only module in Ember that names iroh (`FR-N5`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use iroh::address_lookup::{self, AddressLookup, EndpointData, EndpointInfo, MemoryLookup};
+use iroh::address_lookup::{
+    self, AddrFilter, AddressLookup, EndpointData, EndpointInfo, MemoryLookup, PkarrPublisher,
+    PkarrResolver,
+};
 use iroh::endpoint::{presets, ConnectionError, PathEvent, VarInt, WeakConnectionHandle};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, TransportAddr};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::{
-    AddressDirectory, BiStream, CloseReason, Connection, ConnectionBackend, PathState, PeerAddr,
-    PeerId, RelayConfig, Result, ServiceTable, TransportBackend, TransportConfig, TransportError,
+    AddressDirectory, BiStream, CloseReason, Connection, ConnectionBackend, HubDirectory, PathState,
+    PeerAddr, PeerId, RelayConfig, Result, ServiceTable, TransportBackend, TransportConfig,
+    TransportError,
 };
 
 pub(crate) struct IrohBackend {
@@ -21,7 +26,12 @@ pub(crate) struct IrohBackend {
     peer: PeerId,
     services: Arc<ServiceTable>,
     hints: MemoryLookup,
-    relays_enabled: bool,
+    relays_enabled: AtomicBool,
+    /// Relay URLs currently in the endpoint's relay map (tracked here: the endpoint does not
+    /// expose its map).
+    relays: tokio::sync::Mutex<Vec<RelayUrl>>,
+    /// Resolver through the hub directory, once enabled (its token can change later).
+    hub: Mutex<Option<HubResolver>>,
     accept_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -48,6 +58,7 @@ impl IrohBackend {
             }
         };
         let relays_enabled = !matches!(relay_mode, RelayMode::Disabled);
+        let relay_urls: Vec<RelayUrl> = relay_mode.relay_map().urls();
         builder = builder.relay_mode(relay_mode);
 
         let hints = MemoryLookup::new();
@@ -68,9 +79,14 @@ impl IrohBackend {
             peer,
             services: services.clone(),
             hints,
-            relays_enabled,
+            relays_enabled: AtomicBool::new(relays_enabled),
+            relays: tokio::sync::Mutex::new(relay_urls),
+            hub: Mutex::new(None),
             accept_task: Mutex::new(None),
         });
+        if let Some(hub) = config.hub {
+            backend.enable_hub(hub)?;
+        }
         let task = tokio::spawn(accept_loop(endpoint, services));
         *backend.accept_task.lock().unwrap() = Some(task);
         Ok(backend)
@@ -144,10 +160,83 @@ impl TransportBackend for IrohBackend {
     }
 
     async fn wait_online(&self, timeout: Duration) -> bool {
-        if !self.relays_enabled {
+        if !self.relays_enabled.load(Ordering::Relaxed) {
             return false;
         }
         tokio::time::timeout(timeout, self.endpoint.online()).await.is_ok()
+    }
+
+    fn enable_hub(&self, hub: HubDirectory) -> Result<()> {
+        let mut slot = self.hub.lock().unwrap();
+        if slot.is_none() {
+            let base = hub_pkarr_url(&hub)?;
+            let lookups = self.endpoint.address_lookup().map_err(|e| TransportError::Config(e.to_string()))?;
+            let dns = self.endpoint.dns_resolver().map_err(|e| TransportError::Config(e.to_string()))?;
+            let filter = if hub.publish_direct { AddrFilter::unfiltered() } else { AddrFilter::relay_only() };
+            // Publishes our current addresses at once (the registry replays its last data to
+            // a newly added service), then on every change and every 5 minutes.
+            let publisher = PkarrPublisher::builder(base.clone())
+                .addr_filter(filter)
+                .dns_resolver(dns.clone())
+                .build(self.endpoint.secret_key().clone(), self.endpoint.tls_config().clone());
+            lookups.add(publisher);
+            let resolver = HubResolver { base, inner: Arc::new(RwLock::new(None)) };
+            lookups.add(resolver.clone());
+            tracing::info!(url = %hub.pkarr_url, "hub address directory enabled");
+            *slot = Some(resolver);
+        }
+        drop(slot);
+        self.set_directory_token(hub.token);
+        Ok(())
+    }
+
+    fn set_directory_token(&self, token: Option<String>) {
+        let slot = self.hub.lock().unwrap();
+        let Some(hub) = slot.as_ref() else { return };
+        let resolver = match token {
+            None => None,
+            Some(token) => {
+                let mut url = hub.base.clone();
+                url.query_pairs_mut().clear().append_pair("token", &token);
+                let mut builder = PkarrResolver::builder(url);
+                match self.endpoint.dns_resolver() {
+                    Ok(dns) => builder = builder.dns_resolver(dns.clone()),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "endpoint closed; hub resolver not updated");
+                        return;
+                    }
+                }
+                Some(builder.build(self.endpoint.tls_config().clone()))
+            }
+        };
+        tracing::debug!(enabled = resolver.is_some(), "hub directory resolver updated");
+        *hub.inner.write().unwrap() = resolver;
+    }
+
+    async fn set_relays(&self, relays: RelayConfig) -> Result<()> {
+        let wanted: Vec<RelayUrl> = match relays {
+            RelayConfig::Default => iroh::endpoint::default_relay_mode().relay_map().urls(),
+            RelayConfig::Disabled => Vec::new(),
+            RelayConfig::Custom(urls) => urls
+                .iter()
+                .map(|u| u.parse::<RelayUrl>().map_err(|e| TransportError::Config(format!("relay url {u:?}: {e}"))))
+                .collect::<Result<Vec<_>>>()?,
+        };
+        let mut current = self.relays.lock().await;
+        for url in &wanted {
+            if !current.contains(url) {
+                self.endpoint.insert_relay(url.clone(), Arc::new(iroh::RelayConfig::from(url.clone()))).await;
+            }
+        }
+        for url in current.iter() {
+            if !wanted.contains(url) {
+                self.endpoint.remove_relay(url).await;
+            }
+        }
+        self.relays_enabled.store(!wanted.is_empty(), Ordering::Relaxed);
+        tracing::info!(relays = ?wanted.iter().map(|u| u.to_string()).collect::<Vec<_>>(), "relays changed");
+        *current = wanted;
+        Ok(())
     }
 
     async fn close(&self) {
@@ -348,5 +437,38 @@ impl AddressLookup for DirectoryLookup {
                 Some(Ok(address_lookup::Item::new(info, "ember-directory", None)))
             });
         Some(Box::pin(stream))
+    }
+}
+
+fn hub_pkarr_url(h: &HubDirectory) -> Result<url::Url> {
+    let url: url::Url = h
+        .pkarr_url
+        .parse()
+        .map_err(|e| TransportError::Config(format!("hub pkarr url {:?}: {e}", h.pkarr_url)))?;
+    if url.cannot_be_a_base() || url.query().is_some() {
+        return Err(TransportError::Config(format!(
+            "hub pkarr url {:?} must be an http(s) URL without a query",
+            h.pkarr_url
+        )));
+    }
+    Ok(url)
+}
+
+/// Resolves peers through the hub's pkarr endpoint with this device's token. Empty (resolves
+/// nothing) until a token is set; replaced when the token changes or is revoked.
+#[derive(Debug, Clone)]
+struct HubResolver {
+    base: url::Url,
+    inner: Arc<RwLock<Option<PkarrResolver>>>,
+}
+
+impl AddressLookup for HubResolver {
+    fn resolve(
+        &self,
+        endpoint_id: EndpointId,
+    ) -> Option<futures::stream::BoxStream<'static, Result<address_lookup::Item, address_lookup::Error>>>
+    {
+        let inner = self.inner.read().unwrap().clone()?;
+        inner.resolve(endpoint_id)
     }
 }

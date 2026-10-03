@@ -15,14 +15,17 @@
 //!   of TCP (then no `local.json` is written and `ember-term` cannot find the daemon); unset/`0`
 //!   is TCP only.
 //! - `<state dir>/transport.key`: the node's persistent identity (created on first start, 0600).
-//! - `EMBER_RELAY_URL`: relay servers (see `ember_transport::RELAY_URL_ENV`).
+//! - `EMBER_RELAY_URL`: relay servers (see `ember_transport::RELAY_URL_ENV`); overrides the hub's.
+//! - `<state dir>/hub.json`: the node's darkpyonix.dev registration (`ember-node hub register`,
+//!   [`crate::hub`]). When present, the node publishes its address to the hub's directory and
+//!   uses the hub's relay, so the server finds it by peer id alone (`FR-N2`).
 
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use ember_transport::http::HttpListener;
-use ember_transport::{PeerGate, PeerId, SecretKey, Transport, TransportConfig};
+use ember_transport::{PeerGate, PeerId, SecretKey, Transport};
 
 use crate::api::{self, Node};
 pub use crate::client::NODE_SERVICE;
@@ -107,11 +110,12 @@ pub fn allowed_peers(state_dir: Option<&Path>) -> anyhow::Result<Vec<PeerId>> {
     Ok(peers)
 }
 
-/// Binds the real transport with the node's persistent key (`<state dir>/transport.key`) and
-/// the relay from `EMBER_RELAY_URL`.
+/// Binds the real transport with the node's persistent key (`<state dir>/transport.key`): with
+/// the hub's relay and directory when the node is registered ([`crate::hub::transport_config`]),
+/// otherwise with the relay from `EMBER_RELAY_URL`.
 pub async fn bind(state_dir: &Path) -> anyhow::Result<Transport> {
     let key = SecretKey::load_or_generate(state_dir.join(KEY_FILE))?;
-    Ok(Transport::bind(TransportConfig::from_env(key)).await?)
+    Ok(Transport::bind(crate::hub::transport_config(state_dir, key)?).await?)
 }
 
 /// Starts listening on [`NODE_SERVICE`] now and returns the future that serves the node API to

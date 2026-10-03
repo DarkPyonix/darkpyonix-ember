@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::Path;
 use std::str::FromStr;
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::TransportError;
@@ -29,6 +29,14 @@ impl PeerId {
     /// The raw public key bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Whether `signature` is this peer's Ed25519 signature over `message`.
+    pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> bool {
+        match VerifyingKey::from_bytes(&self.0) {
+            Ok(key) => key.verify(message, &Signature::from_bytes(signature)).is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// First 10 hex chars, for logs.
@@ -93,6 +101,12 @@ impl SecretKey {
 
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0
+    }
+
+    /// Ed25519 signature over `message` (the same signature iroh's key produces for these
+    /// bytes; used to prove key possession to the hub).
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        SigningKey::from_bytes(&self.0).sign(message).to_bytes()
     }
 
     /// The matching public identity.

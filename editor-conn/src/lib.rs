@@ -23,7 +23,7 @@
 //! | [`uri`]       | `UriComponents` with `$mid` marshalling                           |
 //!
 //! Everything is generic over `AsyncRead + AsyncWrite`, so the same code rides a plain TCP socket,
-//! a TLS stream, or an `ember-transport` (iroh) stream later.
+//! a TLS stream, or an `ember-transport` stream later.
 //!
 //! **Version pinning.** The wire format is not a public contract. All facts here were read at
 //! Code-OSS commit [`PINNED_CODE_OSS_COMMIT`] (version [`PINNED_CODE_OSS_VERSION`]); the

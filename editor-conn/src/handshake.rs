@@ -187,7 +187,7 @@ fn parse_control(raw: &[u8]) -> Result<Value> {
 /// any `signedData` (agent server L362-364). A Microsoft build with `vsda` also accepts
 /// `signedData == connectionToken` ("web client", L363), so we send the connection token when we
 /// have one and echo the challenge otherwise. We never validate the server's signature (that
-/// needs `vsda`); authenticity of the server is the transport's job (TLS / iroh).
+/// needs `vsda`); authenticity of the server is the transport's job (TLS / ember-transport).
 pub async fn handshake(
     handle: &ConnectionHandle,
     opts: &ConnectOptions,

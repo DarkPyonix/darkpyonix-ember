@@ -118,7 +118,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-U1** | The main server holds several accounts per agent (Claude Code, Codex, Antigravity), each with isolated credentials and configuration. | Two Claude Code accounts run sessions simultaneously without sharing credentials or settings. |
 | **FR-U2** | A new session is started under a chosen account. | The session's account is shown in the conversation view and cannot silently change. |
 | **FR-U3** | Usage per account is recorded and visible; usage routing can choose the account for a new session by policy (e.g. least used, failover when one is rate-limited). | A rate-limited account is skipped by the router and the reason is shown. |
-| **FR-U4** | Sign in with OpenAI ("Sign in with ChatGPT", OAuth 2.0 / OIDC with PKCE and a loopback redirect), with a page that lets ChatGPT plan usage be consumed in addition to Codex token usage. [user] | Works for a **self-hosted** ember server only: OpenAI permits open-source, locally hosted apps to call the Responses API on the user's ChatGPT Plus/Pro plan, with a per-app weekly cap, `store:false` and `stream:true` required, and no image generation, file search, code interpreter or hosted MCP. It is never offered through `darkpyonix.dev` (remote hosting needs OpenAI's approval). Source: developers.openai.com/siwc/token-sharing-open-source, per the darkpyonix leader's research, 2026-10-03. |
+| **FR-U4** | Sign in with OpenAI ("Sign in with ChatGPT", OAuth 2.0 / OIDC with PKCE and a loopback redirect), with a page that lets ChatGPT plan usage be consumed in addition to Codex token usage. [user] | Works for a **self-hosted** ember server only: OpenAI permits open-source, locally hosted apps to call the Responses API on the user's ChatGPT Plus/Pro plan, with a per-app weekly cap, `store:false` and `stream:true` required, and no image generation, file search, code interpreter or hosted MCP. It is never offered through `darkpyonix.dev` (remote hosting needs OpenAI's approval) [user, 2026-10-03: "OpenAI 로그인은 엠버 서버에서 사용자가 자체적으로 하는걸로 하고 허브는 깃허브 로그인으로 하자"]. Source: developers.openai.com/siwc/token-sharing-open-source, per the darkpyonix leader's research, 2026-10-03. |
 | **FR-U5** | API-key providers (any OpenAI-compatible or vendor API) can be added with keys encrypted at rest. | Keys never appear in transcripts, logs or exports. |
 
 ---
@@ -128,7 +128,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel. **Transport: iroh 1.0 — decided, conditionally** [user, 2026-10-03: "P2P를 iroh로 가는건 일단 허용하는데 그게 품질이 별로면 아예 직접 구현하는거도 고민해봐"]. In-process Rust (one app on mobile), QUIC hole punching, self-hostable relay, MIT/Apache-2.0. If it misses `NFR-N1`, our own implementation is evaluated. Lives behind `FR-N5`. | Works across two different NATs with no port forwarding configured by the user. |
-| **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback — `darkpyonix.dev` runs iroh-relay and an address directory (decided with the transport) — so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
+| **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback — `darkpyonix.dev` runs iroh-relay and an address directory (decided with the transport); devices register under the user's **GitHub account** on the hub [user, 2026-10-03: "허브는 깃허브 로그인으로 하자"] — so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
 | **FR-N3** | All connections are encrypted and authenticated per device; a device can be revoked. | Revoking a device closes its connections within one heartbeat. |
 | **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium — see `proxy/docs/CONSTRAINTS.md`). |
 | **FR-N5** | All Ember code reaches the network through one transport interface (connect to a peer by its key, accept, open bidirectional streams, report path state: direct or relayed). **No iroh type appears outside the transport crate.** | Replacing the transport touches only that crate: a CI check fails if `iroh` is imported anywhere else, and the ember server and ember node test suites run unchanged against an in-memory fake transport. |
@@ -146,8 +146,77 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-W3** | Native window chrome is suppressed where the injected titlebar replaces it, without losing window controls. | Verified per platform. |
 | **FR-W4** | Two runtimes: OSE (DarkPyonix-built from MIT source, Open VSX) by default, and VSC (the user's installed Microsoft build, Microsoft Marketplace) as an option. *[provisional — from `docs/design/INTEGRATION.md`]* | Choosing VSC shows an install notice, a copyable install guide, and a command field to verify `code --version` before `code serve-web` is used. |
 | **FR-W5** | On Android and iOS the IDE window works without Node: through a `serve-web`-compatible Rust backend, or directly through web APIs with no backend. [user] | Opens and edits a project on a phone with no Node installed anywhere on the device. Only web-capable extensions run in this mode (`INTENT.md` D10). |
+| **FR-W5a** | *[provisional — `docs/design/MOBILE-NO-NODE.md`]* On Android and iOS, "Open IDE → VS Code" opens the session's project on its **current computer**: the IDE window loads that computer's own `serve-web` (OSE or VSC) through the in-app gateway (`FR-W5b`) over the transport (`FR-N5`). Node runs only on the computer. | On a phone with no Node anywhere on the device: open a project, edit and save a file, and the change is on the computer's disk. An extension with only a `main` (Node) entry installed on that computer works. An extension webview renders on a real phone (`FR-N4`). |
+| **FR-W5b** | *[provisional]* One Rust **ide-gateway** in the app process serves the IDE window from a loopback origin that the platform webview treats as a secure context, with a second secure origin for `webviewEndpoint`. It reverse-proxies HTTP and WebSocket over transport streams (mode `FR-W5a`) and serves static workbench assets and the working-copy file API (mode `FR-W5f`). | Binds loopback only and rejects requests without the per-launch token. `navigator.serviceWorker` exists in both origins on iOS and Android. No `iroh` type is imported outside the transport crate (`FR-N5`). Wi-Fi ↔ LTE switch keeps the workbench connected within `NFR-N1`'s stall bound. |
+| **FR-W5c** | *[provisional]* On Android and iOS, "Open IDE → Ember IDE" opens files of the current computer in the dioxus-compose editor core through ember node file operations (`FR-X1`) over the transport. No webview, no JS engine. | Open, edit and save a remote file from a phone, over a direct path and over the relay. If the file changed on the computer since it was opened, saving reports a conflict instead of overwriting. `NFR-L2`'s webview check covers the editor core. |
+| **FR-W5d** | *[provisional]* A project subtree can be made available offline as a **local working copy** in the app sandbox, recording each file's base content hash; the editor core edits it with no network. | In airplane mode: open, edit, save, create and delete files in the working copy; the app restarts with the edits intact. Excluded paths and the size limit are honoured. |
+| **FR-W5e** | *[provisional]* When online, working-copy changes sync to a chosen computer of the project; a file changed on both sides is never overwritten. | Edit file X offline only on the phone and file Y on both sides: X is written to the computer; Y is shown as a conflict with a three-way diff, and neither side's content is lost. |
+| **FR-W5f** | *[user — `FR-W5` "directly through web APIs with no backend"; form provisional]* Offline VS Code mode: the IDE window boots a bundled, pinned OSE web build with no `remoteAuthority`, so every extension runs in VS Code's own web-worker extension host; the working copy is exposed through a built-in `ember-fs` web extension. Configured only through the embedder API (`IWorkbenchConstructionOptions`); VS Code source is not patched (E4). | In airplane mode on Android: open the working copy, edit, save, and run a web extension (a theme, a grammar, and one language extension with a `browser` entry). The served bundle matches its pinned release (`FR-W2`'s diff check). No Node on the device. |
+| **FR-W5g** | *[provisional]* In any no-Node mode, the extensions view says for each extension whether it runs on the phone (`browser` entry) or needs a computer, and extensions without a `browser` entry are not offered for local install. | Classification comes from the extension manifest (`browser`, `main`, `extensionKind`); a `main`-only extension shows "needs a computer" and a one-tap switch to `FR-W5a`. |
+| **FR-W5h** | *[provisional]* On iOS, `FR-W5f` (downloaded extension code) ships only behind a flag, enabled after the App Review decision (`MOBILE-NO-NODE.md` Q-M3). `FR-W5a`–`FR-W5e` ship without it. | An iOS build with the flag off downloads and executes no extension code locally. |
+| **NFR-W5a** | *[provisional — initial targets, to be adjusted once by the first measurement]* Mobile IDE responsiveness. | On a reference mid-range Android phone and a reference iPhone: `FR-W5a` warm open to editable ≤ 3 s p95 over a direct path; `FR-W5c` remote file open ≤ 1 s p95 for a 100 KB file; `FR-W5f` cold open ≤ 5 s p95; IDE-window RSS recorded per mode. |
 | **FR-W6** | vscode-darkpyonix (notebook renderer) and vscode-darkpyonix-theme are installed by default. [user] | Present on first launch for both runtimes. |
 | **NFR-W1** | Extensions are tested unmodified from the marketplace matching the runtime. | Regressions block release. |
+
+> **`FR-W5a`–`FR-W5h`, `NFR-W5a`** come from `docs/design/MOBILE-NO-NODE.md` (2026-10-03, design only;
+> outside the 10-18 deadline). The phone is mainly a client of a computer's own `serve-web` (`FR-W5a`)
+> or ember node (`FR-W5c`); offline it edits a local working copy (`FR-W5d`, `FR-W5e`), optionally in
+> VS Code Web with web extensions only (`FR-W5f`). **Rejected:** a `serve-web`-protocol-compatible
+> server on the phone — the web workbench always opens a remote extension-host connection when a
+> remote exists, which E4 forbids us to answer with our own host, and with no Node every extension
+> runs in the web worker anyway. Whether this reading of `FR-W5`'s wording is right is open
+> (`MOBILE-NO-NODE.md` Q-M1).
+
+### FR-W4 acceptance — the OSE runtime
+
+OSE is built by `.github/workflows/ose.yml` from `ose/` (Code-OSS at the tag in `ose/VERSION`,
+`product.json` overrides only; see `ose/README.md`). A release (tag `ose-v*`) is accepted when,
+for every target (linux-x64, linux-arm64, darwin-arm64, darwin-x64):
+
+1. **No Microsoft marketplace or telemetry in `product.json`.** `ose/check-product.sh` passes on
+   the packaged `product.json`: `extensionsGallery` points at Open VSX
+   (`serviceUrl` `https://open-vsx.org/vscode/gallery`, `itemUrl` `https://open-vsx.org/vscode/item`,
+   resource/extension templates on `open-vsx.org`); `enableTelemetry` is not true and there is no
+   `aiConfig`; no `marketplace.visualstudio.com`, `*.vsassets.io`, `vscode-unpkg.net`, update,
+   experiments or voice endpoint appears anywhere. Remaining Microsoft hosts (the webview CDN,
+   Copilot doc links) are listed in the job log and in `ose/README.md`.
+2. **It launches.** `ose/smoke.sh` starts `bin/dpx-ose-server` with the flags `proxy/dpx` uses
+   (`DEFAULT_OSE_ARGS`: `--host --port --without-connection-token --accept-server-license-terms
+   --server-data-dir`) and the workbench page is served.
+3. **Open VSX search and install work.** `ose/smoke.sh` queries `<serviceUrl>/extensionquery` and
+   gets results, and the server CLI installs an extension (`redhat.vscode-yaml` by default) from
+   Open VSX.
+4. **Manually, once per release, on a Raspberry Pi (64-bit OS) and a Mac:** `python -m dpx.serve`
+   with `DPX_OSE_SERVER` set opens the IDE window; the Extensions view searches Open VSX and
+   installs an extension; Help → About shows "DarkPyonix OSE" and the Code-OSS version.
+
+Steps 1–3 run in CI on every build; step 1 alone runs on every pull request touching `ose/`.
+
+---
+
+## §P — Persistent work in IDE windows
+
+[user, 2026-10-03: "엠버에서 vscode나 엠버 에디터 같은 경우 그 안에서 실행 중인 작업들은 창을 끄더라도
+항상 실행되고 있어야 한다는거 잊지 마. 만약 터미널에서 뭔가를 켜놨다 하면 창 꺼도, 다른 컴퓨터에서 접속해도
+그 터미널이 보여야 하는거야."] Applies to both IDE targets that Ember hosts: the VS Code window (VS Code
+Web) and the Ember editor.
+
+**Design.** The terminal process is owned by **ember node's persistent PTY session** on that computer,
+not by the IDE window, VS Code's pty host, or the client. The IDE is only a client that attaches to it.
+This way a window close, a VS Code server restart, or a client switching device does not end it, and
+VS Code and the Ember editor see the same terminal. VS Code's own persistent terminals
+(`terminal.integrated.enablePersistentSessions`) are not relied on, because a server restart or the
+revive timeout ends them.
+
+| ID | Requirement | Acceptance criteria |
+| -- | ----------- | ------------------- |
+| **FR-P1** | Terminals, tasks and launched processes started from an IDE window keep running after every window on every device is closed. | In a VS Code window run `sleep 600; echo done`, close the window, and wait 10 minutes. The process is still alive on the computer (visible in ember node's session list) and prints `done`. The same applies to the Ember editor. |
+| **FR-P2** | Re-attaching shows the same terminal, from the same device or from any other computer or phone. Scrollback (at least 10,000 lines) and the live input state carry over: the shell prompt, a running TUI, and cursor position. | Start `htop` or a REPL in one window. Close it. Open the IDE on another computer (or phone). The same terminal appears in the terminal list with its full scrollback and the TUI redrawn, and accepts input. |
+| **FR-P3** | The same terminal can be attached from several devices and from both IDE targets at once. | A terminal opened in VS Code appears in the Ember editor's terminal list on another device. Output appears on both within 100 ms of each other on a LAN. |
+| **FR-P4** | Input from several attached clients: **all attached clients may type** and their keystrokes are serialized by ember node in arrival order. Any client can **take control**, after which other clients are read-only, with a visible "controlled by <device>" banner, until control is released or the controller detaches. The terminal size follows the controller, or the most recently active client when nobody has control. Others see the content at that size, scaled to fit. | Two devices type alternately: the output contains both inputs in order and neither is lost. Device A takes control: device B's keystrokes are refused with the banner shown, and are accepted again after A releases or detaches. Resizing on the controller resizes the PTY. |
+| **FR-P5** | VS Code tasks (`tasks.json`) and the Ember editor's run actions run in persistent sessions as well. Debug sessions keep their debuggee process running when the window closes; re-attaching the debugger is best-effort. | Start a long build task, close the window, reopen: the task's terminal is listed with its output and exits normally. A program started under the debugger is still running after the window closes. |
+| **FR-P6** | Persistent sessions are listed per computer and per project in the client, with what started them (IDE, agent, user), and can be killed from there. Sessions survive an ember server restart. Sessions survive an ember node restart only if the processes were detached from it (best-effort; documented). | Restart ember server: every terminal is still listed and attachable. The list shows the origin and allows kill. |
+| **NFR-P1** | Attach latency and overhead. | Re-attach shows the last screen in ≤ 500 ms on a LAN. Idle sessions cost ≤ 2 MB of memory each in ember node beyond the shell itself. |
 
 ---
 

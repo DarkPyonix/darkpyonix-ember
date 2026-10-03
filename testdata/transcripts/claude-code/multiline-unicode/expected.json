@@ -1,0 +1,23 @@
+{
+  "native_id": "33333333-3333-4333-8333-333333333333",
+  "cwd": "/work/프로젝트",
+  "title": null,
+  "messages": [
+    {
+      "role": "user",
+      "text": "안녕하세요!\n이 함수를 설명해 주세요:\n\n    def f(x):\n        return x * 2\n"
+    },
+    {
+      "role": "assistant",
+      "text": "이 함수는 입력값을 두 배로 만듭니다. 🙂\n\n- 입력: `x`\n- 출력: `x * 2`\t(탭)"
+    },
+    {
+      "role": "user",
+      "text": "Line separator and \"quotes\" and a back\\slash"
+    },
+    {
+      "role": "assistant",
+      "text": "Got it — 확인했습니다.\r\nWindows newline above."
+    }
+  ]
+}

@@ -124,7 +124,9 @@ darkpyonix-ember/
 │  ├─ IMPLEMENTATION.md  the IDE window's VS Code analysis (what can and cannot be replaced)
 │  ├─ BACKGROUND.md      how the 09-22 VS Code design was reached
 │  └─ design/            design material (INTEGRATION.md, decks)
+├─ server/              ember server (Rust) — main server: agents, sessions, push
 ├─ proxy/               the IDE window wrapping layer (Python, FastAPI) — working
+├─ extensions/          editor extensions: vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
 └─ LICENSE
 ```
 

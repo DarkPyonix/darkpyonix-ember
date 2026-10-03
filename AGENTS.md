@@ -67,8 +67,9 @@ propose what to add and why, and wait. Approved root entries (2026-10-03): `.git
 - **Merge gate:** wait for every check to finish and merge only if none failed. Merge with
   `gh pr merge --delete-branch`, then remove the local branch and its worktree. Delete a branch
   only after `gh pr view --json state` says `MERGED`.
-- Remove merged branches regularly. A branch whose history must be kept gets an
-  `archive/<name>` tag first, then is deleted.
+- Remove merged branches regularly, without archive tags (user, 2026-10-03: "머지된거 전부
+  정리하고, 아카이브는 왜 남겨?"). The one exception is `archive/pre-restructure`, which marks
+  the tree before the root regrouping (#60).
 - Doc-only changes may be committed on `develop` and pushed directly.
 - Subject format `<Type>: <imperative summary>` with `Feat`, `Fix`, `Refactor`, `Docs`, `Test`,
   `Chore`. Reference SPEC IDs when relevant.

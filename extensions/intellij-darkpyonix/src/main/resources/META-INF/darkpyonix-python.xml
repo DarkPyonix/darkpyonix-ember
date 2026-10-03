@@ -1,0 +1,7 @@
+<!-- Loaded only when Python support is present (com.intellij.modules.python). -->
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- FORMAT §1.3: .pynb has the same syntax as .py; add the extension to the Python file type. -->
+        <fileType name="Python" extensions="pynb"/>
+    </extensions>
+</idea-plugin>

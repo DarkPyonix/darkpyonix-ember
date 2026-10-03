@@ -54,3 +54,7 @@ build/ose/dist/
 
 # Throwaway work, probes and downloads (AGENTS.md "Where files go")
 .scratch/
+
+# Editor extension build outputs
+*.vsix
+.vscode-test/

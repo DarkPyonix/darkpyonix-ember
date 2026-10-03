@@ -19,7 +19,7 @@ async fn relays_bytes_both_ways_and_requires_the_token() {
     // Only the exact arguments the bridge promises are accepted.
     std::fs::write(
         &fake,
-        "#!/bin/sh\n[ \"$*\" = \"exec-server --listen stdio --exit-on-stdin-close\" ] || { echo \"bad args: $*\" >&2; exit 2; }\nexec cat\n",
+        "#!/bin/sh\n[ \"$*\" = \"exec-server --listen stdio\" ] || { echo \"bad args: $*\" >&2; exit 2; }\nexec cat\n",
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();

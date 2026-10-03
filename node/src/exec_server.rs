@@ -5,7 +5,7 @@
 //! execServerUrl}`. This module puts that executor on the node:
 //!
 //! - `ember-node exec-server` (see `main.rs`) replaces itself with
-//!   `codex exec-server --listen stdio --exit-on-stdin-close`. It is the one place that decides
+//!   `codex exec-server --listen stdio`. It is the one place that decides
 //!   which codex binary and flags run, so the daemon and a manual test use the same command.
 //! - `GET /v1/exec-server` (WebSocket, bearer-authenticated like every other route) starts one
 //!   such codex child per connection and relays **raw bytes**: every Binary (or
@@ -13,7 +13,7 @@
 //!   writes to stdout comes back as Binary frames, chunked arbitrarily. The relay does not parse
 //!   the protocol, so the framing on stdio (newline-delimited JSON-RPC, **[U]**) is the client's
 //!   business — ember server's relay re-frames it for codex app-server.
-//! - Closing the socket closes the child's stdin; codex exits on that (`--exit-on-stdin-close`)
+//! - Closing the socket closes the child's stdin; the stdio transport ends and codex exits
 //!   and is killed after [`EXIT_GRACE`] if it does not.
 //!
 //! Known limits: the executor is not confined by the node's path policy (codex enforces its own
@@ -44,10 +44,12 @@ pub fn codex_bin() -> PathBuf {
     std::env::var_os(CODEX_BIN_ENV).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("codex"))
 }
 
-/// Arguments after the codex binary. `--exit-on-stdin-close` is checked against codex-cli 0.155.1
+/// Arguments after the codex binary (codex-cli 0.155.1). Not `--exit-on-stdin-close`: that flag
+/// belongs to remote registration and makes codex demand `--environment-id` and `--remote`; with
+/// `--listen stdio`, codex already exits when stdin closes (checked: exit 0).
 /// `codex exec-server --help`.
-pub fn codex_args() -> [&'static str; 4] {
-    ["exec-server", "--listen", "stdio", "--exit-on-stdin-close"]
+pub fn codex_args() -> [&'static str; 3] {
+    ["exec-server", "--listen", "stdio"]
 }
 
 /// `ember-node exec-server`: become `codex exec-server` on this process's stdio. Returns only on
@@ -110,7 +112,7 @@ async fn bridge(node: Node, ws: WebSocket) {
                 break;
             }
         }
-        // Dropping stdin here is what makes codex exit (`--exit-on-stdin-close`).
+        // Dropping stdin here ends codex's stdio transport, and codex exits.
     };
     let down = async move {
         let mut buf = vec![0u8; 64 * 1024];

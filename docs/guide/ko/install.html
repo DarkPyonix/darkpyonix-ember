@@ -58,7 +58,7 @@
     <p class="lede">
       Ember는 세 프로그램으로 이루어집니다. 메인 서버의 <code>ember-server</code>, 다른 각 컴퓨터의
       <code>ember-node</code>, 그리고 내가 앉아 있는 곳의 클라이언트 <code>ember-app</code> 입니다.
-      아직 릴리스나 설치 프로그램이 없어서 <span class="pill planned">계획</span>, 각 프로그램을
+      아직 릴리스나 설치 프로그램이 없어서 <span class="pill planned">계획</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>), 각 프로그램을
       체크아웃에서 cargo로 빌드합니다.
     </p>
 
@@ -149,7 +149,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>PATH</code> 의 <code>claude</code>, <code>codex</code>, <code>agy</code></td><td>실행할 에이전트 CLI.</td></tr>
           <tr><td><code>EMBER_ACP_AGENTS</code></td><td>없음</td><td>제공할 ACP 에이전트, JSON으로. 예: <code>["omp"]</code>. <a href="agents.html">에이전트</a> 참고.</td></tr>
           <tr><td><code>EMBER_TRANSPORT</code></td><td>꺼짐</td><td><code>1</code> 이면 P2P 전송을 엽니다. 피어 주소로 추가한 컴퓨터와 허브에 필요합니다.</td></tr>
-          <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>허브. <code>off</code> 면 끕니다. <code>EMBER_TRANSPORT=1</code> 일 때만 씁니다. 기본값은 <code>https://hub.darkpyonix.dev</code> 로 바뀝니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
+          <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>허브. <code>off</code> 면 끕니다. <code>EMBER_TRANSPORT=1</code> 일 때만 씁니다. 기본값은 허브 전용 서브도메인으로 바뀝니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>허브의 릴레이</td><td>전송에 쓸 릴레이 서버.</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code>, <code>off</code>. <code>auto</code> 는 빌드에 들어 있는 기능을 씁니다.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>켜짐</td><td><code>0</code> 이면 에이전트 간 메시지를 끈 채로 시작합니다.</td></tr>

@@ -147,8 +147,8 @@ EMBER_NODE_TRANSPORT=1 ./target/release/ember-node
       <span class="pill partial">Partial</span> The hub lets every device join your GitHub account
       with a one-time code. Each device then publishes its address there and finds the others
       there, so nobody types an address. Ember's side is tested against a fake hub but has not yet
-      run against the live one, and the hub's address is changing from
-      <code>https://darkpyonix.dev</code> to <code>https://hub.darkpyonix.dev</code>
+      run against the live one, and the hub is moving from
+      <code>https://darkpyonix.dev</code> to its own subdomain, still being decided
       (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>). Until that
       lands, the built-in default is the old address, so set <code>EMBER_HUB_URL</code> to the
       hub's address on the server and on every node.

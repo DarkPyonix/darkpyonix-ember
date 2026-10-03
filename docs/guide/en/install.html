@@ -58,7 +58,7 @@
     <p class="lede">
       Ember is three programs: <code>ember-server</code> on the main server, <code>ember-node</code>
       on every other computer, and the client <code>ember-app</code> wherever you sit. There are no
-      releases or installers yet <span class="pill planned">Planned</span>, so each one is built
+      releases or installers yet <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>), so each one is built
       with cargo from a checkout.
     </p>
 
@@ -150,7 +150,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
           <tr><td><code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code></td><td><code>claude</code>, <code>codex</code>, <code>agy</code> on <code>PATH</code></td><td>Which agent CLI to run.</td></tr>
           <tr><td><code>EMBER_ACP_AGENTS</code></td><td>none</td><td>ACP agents to offer, as JSON, for example <code>["omp"]</code>. See <a href="agents.html">Agents</a>.</td></tr>
           <tr><td><code>EMBER_TRANSPORT</code></td><td>off</td><td><code>1</code> binds the peer-to-peer transport. Needed for computers added by peer address and for the hub.</td></tr>
-          <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>The hub; <code>off</code> disables it. Used only with <code>EMBER_TRANSPORT=1</code>. The default moves to <code>https://hub.darkpyonix.dev</code> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
+          <tr><td><code>EMBER_HUB_URL</code></td><td><code>https://darkpyonix.dev</code></td><td>The hub; <code>off</code> disables it. Used only with <code>EMBER_TRANSPORT=1</code>. The default moves to the hub's own subdomain (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>EMBER_RELAY_URL</code></td><td>the hub's relay</td><td>Relay server(s) for the transport.</td></tr>
           <tr><td><code>EMBER_MOUNT</code></td><td><code>auto</code></td><td><code>nfs</code>, <code>fuse</code> or <code>off</code>; <code>auto</code> uses whichever feature the build has.</td></tr>
           <tr><td><code>EMBER_A2A</code></td><td>on</td><td><code>0</code> starts agent-to-agent messaging switched off.</td></tr>

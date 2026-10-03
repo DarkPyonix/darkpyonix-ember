@@ -181,11 +181,12 @@ async fn lease(
 }
 
 async fn push(State(s): State<Arc<Sessions>>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| push_loop(socket, s))
+    // Subscribe before the upgrade response goes out, so an event stored in between is not lost.
+    let rx = s.subscribe();
+    ws.on_upgrade(move |socket| push_loop(socket, rx))
 }
 
-async fn push_loop(mut socket: WebSocket, s: Arc<Sessions>) {
-    let mut rx = s.subscribe();
+async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Push>) {
     loop {
         let msg = match rx.recv().await {
             Ok(p) => p,

@@ -1,0 +1,24 @@
+[package]
+name = "ember-client"
+version = "0.1.0"
+edition = "2021"
+description = "Ember native client core: connection, sync and state model below the UI (SPEC §L, PR-1)"
+license = "Apache-2.0"
+
+# UI-independent and mobile-safe: async I/O only (tokio), no desktop-only or UI crates. TLS is
+# left out on purpose — the transport is still being decided (SPEC §N); plain HTTP/WS for now.
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "fs", "macros"] }
+tokio-tungstenite = "0.28"
+tracing = "0.1"
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["ws"] }
+ember-server = { path = "../server" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

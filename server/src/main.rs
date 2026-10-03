@@ -96,11 +96,30 @@ async fn main() -> anyhow::Result<()> {
     // The peer-to-peer transport (FR-N1), opt-in.
     let net = if server_transport::enabled_from_env() {
         let key = server_transport::load_key(&data_dir)?;
-        let token = hub.as_ref().and_then(|h| h.active_token());
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), token)).await?;
+        let registered = hub.as_ref().is_some_and(|h| h.is_registered());
+        // The resolve token (`dpr_`) goes in the directory resolver's URL; a registration from
+        // before the hub issued them gets one now.
+        let token = match &hub {
+            Some(h) if registered => h.ensure_resolve_token().await,
+            _ => None,
+        };
+        // The hub's relay and directory from its `/v1/config` (derived when it has none). Asked
+        // only when the hub will be used now, so an unregistered server does not contact it.
+        let hub_config = match &hub {
+            Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => Some(h.discover().await),
+            Some(h) => Some(h.config()),
+            None => hub_config,
+        };
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token)).await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
+            // A link that was waiting for approval when the server stopped.
+            match h.resume_link().await {
+                Ok(Some(p)) => tracing::info!(user_code = %p.user_code, "resumed the pending hub link"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("could not resume the pending hub link: {e}"),
+            }
             let st = h.status()?;
             match (&st.device, st.revoked) {
                 (Some(d), false) => tracing::info!(hub = %st.hub_url, name = %d.name, "registered with the hub"),

@@ -142,7 +142,7 @@ async fn serve() -> anyhow::Result<()> {
                             let closed = gate.set_allowed(list.iter().copied());
                             tracing::info!(allowed = n, closed, "reloaded allowed peers");
                             if let Ok(Some(reg)) = hub::active_registration(&dir) {
-                                if let Err(e) = hub::apply_registration(&t, &reg).await {
+                                if let Err(e) = hub::apply_registration(&t, &dir, &reg).await {
                                     tracing::warn!("could not apply the hub registration: {e:#}");
                                 }
                                 if let Some(old) = watch.take() {

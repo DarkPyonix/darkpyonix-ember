@@ -17,6 +17,11 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chacha20poly1305 = "0.10"
+# Scheduled tasks (FR-A8): instants and IANA time zones for cron schedules.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+# Cron expressions for schedules (FR-A8; MIT): five fields, L/W/#, evaluated in any chrono zone.
+croner = "2"
 futures = "0.3"
 libc = "0.2"
 # Sign in with ChatGPT (FR-U4): OAuth token endpoint and the Responses API over HTTPS.

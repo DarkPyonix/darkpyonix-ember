@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use ember_client::state::{Computer, ConnectionState, Reachability, State};
 use ember_client::transcript::{Transcript, TranscriptItem};
-use ember_client::wire::SearchHit;
+use ember_client::wire::{MentionCandidate, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
 use ember_client::LauncherStatus;
 
 use crate::server::{Account, ComputerStatus};
@@ -489,6 +489,144 @@ pub fn join_projects(projects: &[String]) -> String {
     set.keys().copied().collect::<Vec<_>>().join(", ")
 }
 
+// ---- composer mentions (FR-T6) --------------------------------------------------------------
+
+/// A mention being typed at the end of the draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedMention {
+    /// Exactly as typed, `@@` included (`@@bet`, `@@"beta te`).
+    pub raw: String,
+    /// What to filter candidates by (`bet`, `beta te`).
+    pub query: String,
+}
+
+/// The `@@` mention the draft ends with, if any. `@@` counts at the start or after whitespace
+/// or an opening bracket. An unquoted mention ends at whitespace; a quoted one at its closing
+/// quote. A finished mention (followed by a space, or closed) is not "being typed".
+pub fn typed_mention(draft: &str) -> Option<TypedMention> {
+    let at = draft.rfind("@@")?;
+    let before = draft[..at].chars().last();
+    if !before.is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '[' | '{')) {
+        return None;
+    }
+    let rest = &draft[at + 2..];
+    let query = match rest.strip_prefix('"') {
+        Some(q) if !q.contains('"') && !q.contains('\n') => q,
+        Some(_) => return None,
+        None if rest.chars().any(char::is_whitespace) => return None,
+        None => rest,
+    };
+    Some(TypedMention { raw: draft[at..].to_string(), query: query.to_string() })
+}
+
+/// Candidates matching `query` (title substring or id prefix, case-insensitive), at most `n`.
+pub fn filter_mentions<'a>(all: &'a [MentionCandidate], query: &str, n: usize) -> Vec<&'a MentionCandidate> {
+    let q = query.trim().to_lowercase();
+    all.iter()
+        .filter(|c| q.is_empty() || c.id.starts_with(&q) || c.title.to_lowercase().contains(&q))
+        .take(n)
+        .collect()
+}
+
+/// What a picked candidate becomes in the sent text: `@@Title` (one word), `@@"Title"` (with
+/// spaces), or `@@<id>` when the title is ambiguous among `all`, empty or holds a quote. The
+/// server resolves all three the same way.
+pub fn mention_token(c: &MentionCandidate, all: &[MentionCandidate]) -> String {
+    let title = c.title.trim();
+    let unique = all.iter().filter(|o| o.title.trim().eq_ignore_ascii_case(title)).count() == 1;
+    if title.is_empty() || title.contains('"') || !unique {
+        format!("@@{}", c.id)
+    } else if title.chars().any(char::is_whitespace) {
+        format!("@@\"{title}\"")
+    } else {
+        format!("@@{title}")
+    }
+}
+
+/// Replace each picked mention (`(raw as typed, token)`) in `text`. The text field cannot be
+/// edited from code, so a pick is applied when the message is sent; a raw fragment the user
+/// typed on from (`@@bet` became `@@beta`) is left for the server to resolve as typed.
+pub fn apply_mentions(text: &str, picks: &[(String, String)]) -> String {
+    let mut out = text.to_string();
+    for (raw, token) in picks {
+        let mut from = 0;
+        while let Some(i) = out[from..].find(raw.as_str()).map(|i| i + from) {
+            let end = i + raw.len();
+            let ends_cleanly = out[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}'));
+            if ends_cleanly {
+                out.replace_range(i..end, token);
+                break;
+            }
+            from = end;
+        }
+    }
+    out
+}
+
+/// One row of the conversation's team panel (FR-T7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamMemberRow {
+    pub session_id: String,
+    pub name: String,
+    pub leader: bool,
+    pub agent: String,
+    /// Live status from the session record when the client has it, else the team's snapshot.
+    pub status: &'static str,
+    pub ended: bool,
+    /// This conversation.
+    pub this: bool,
+    /// Tasks assigned to this member that are not done or cancelled.
+    pub open_tasks: usize,
+}
+
+/// The team panel's member rows: leader first, then active teammates, then ended ones.
+pub fn team_member_rows(state: &State, team: &TeamView, this: &str) -> Vec<TeamMemberRow> {
+    let mut rows: Vec<TeamMemberRow> = team
+        .members
+        .iter()
+        .map(|m| {
+            let status = match state.session(&m.session_id) {
+                Some(v) => status_label(v.status),
+                None => match m.status {
+                    Some(SessionStatus::Running) => status_label(LauncherStatus::Running),
+                    Some(SessionStatus::WaitingForApproval) => status_label(LauncherStatus::WaitingForApproval),
+                    Some(SessionStatus::Failed) => status_label(LauncherStatus::Failed),
+                    Some(SessionStatus::Finished) => status_label(LauncherStatus::Finished),
+                    _ => status_label(LauncherStatus::Idle),
+                },
+            };
+            TeamMemberRow {
+                session_id: m.session_id.clone(),
+                name: m.name.clone(),
+                leader: m.role == TeamRole::Leader,
+                agent: m.agent.clone(),
+                status,
+                ended: !m.active(),
+                this: m.session_id == this,
+                open_tasks: team
+                    .tasks
+                    .iter()
+                    .filter(|t| {
+                        t.assignee.as_deref() == Some(m.session_id.as_str())
+                            && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+                    })
+                    .count(),
+            }
+        })
+        .collect();
+    rows.sort_by_key(|r| (!r.leader, r.ended));
+    rows
+}
+
+/// One task line: `#3 [in progress] Write tests · alice`.
+pub fn task_line(t: &TeamTask) -> String {
+    let who = t.assignee_name.as_deref().unwrap_or(if t.assignee.is_some() { "someone" } else { "unassigned" });
+    format!("#{} [{}] {} \u{00b7} {who}", t.number, t.status.label(), t.title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,5 +854,85 @@ mod tests {
             connection_banner(&ConnectionState::Reconnecting { attempt: 1, retry_in_ms: 1500, error: "x".into() }).unwrap().1,
             Tone::Warning
         );
+    }
+
+    fn cand(id: &str, title: &str) -> MentionCandidate {
+        MentionCandidate { id: id.into(), title: title.into(), project: "p".into(), agent: "codex".into(), status: SessionStatus::Idle }
+    }
+
+    #[test]
+    fn typed_mentions_at_the_end_of_the_draft() {
+        let t = |d: &str| typed_mention(d).map(|m| (m.raw, m.query));
+        assert_eq!(t("ask @@bet"), Some(("@@bet".into(), "bet".into())));
+        assert_eq!(t("@@"), Some(("@@".into(), String::new())));
+        assert_eq!(t("ask (@@\"beta te"), Some(("@@\"beta te".into(), "beta te".into())));
+        assert_eq!(t("ask @@beta "), None, "finished by a space");
+        assert_eq!(t("ask @@\"beta\""), None, "closed quote");
+        assert_eq!(t("mail a@@b"), None);
+        assert_eq!(t("no mention"), None);
+    }
+
+    #[test]
+    fn mention_tokens_and_replacement() {
+        let all = vec![cand("id-1", "Beta Tests"), cand("id-2", "gamma"), cand("id-3", "dup"), cand("id-4", "Dup"), cand("id-5", "say \"hi\"")];
+        assert_eq!(mention_token(&all[0], &all), "@@\"Beta Tests\"");
+        assert_eq!(mention_token(&all[1], &all), "@@gamma");
+        assert_eq!(mention_token(&all[2], &all), "@@id-3", "ambiguous titles use the id");
+        assert_eq!(mention_token(&all[4], &all), "@@id-5");
+        assert_eq!(filter_mentions(&all, "TEST", 5).len(), 1);
+        assert_eq!(filter_mentions(&all, "id-", 2).len(), 2);
+        assert_eq!(filter_mentions(&all, "", 10).len(), 5);
+
+        let picks = vec![("@@bet".to_string(), "@@\"Beta Tests\"".to_string()), ("@@gam".to_string(), "@@gamma".to_string())];
+        assert_eq!(apply_mentions("hi @@bet, and @@gam", &picks), "hi @@\"Beta Tests\", and @@gamma");
+        // Typed on after picking: left as typed.
+        assert_eq!(apply_mentions("hi @@betamax", &picks[..1]), "hi @@betamax");
+        assert_eq!(apply_mentions("plain", &picks), "plain");
+    }
+
+    #[test]
+    fn team_rows_put_the_leader_first_and_count_open_tasks() {
+        use ember_client::wire::{TeamMember, TeamTask};
+        let m = |sid: &str, name: &str, role: TeamRole, ended: Option<i64>| TeamMember {
+            session_id: sid.into(),
+            name: name.into(),
+            role,
+            joined_at: 0,
+            ended_at: ended,
+            title: name.into(),
+            agent: "codex".into(),
+            status: Some(SessionStatus::Running),
+        };
+        let task = |n: i64, status: TaskStatus, who: Option<&str>, name: Option<&str>| TeamTask {
+            id: format!("t{n}"),
+            team_id: "team".into(),
+            number: n,
+            title: format!("task {n}"),
+            detail: String::new(),
+            status,
+            assignee: who.map(String::from),
+            assignee_name: name.map(String::from),
+            created_by: "l".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let team = TeamView {
+            id: "team".into(),
+            project: "p".into(),
+            leader: "l".into(),
+            created_at: 0,
+            members: vec![m("old", "old", TeamRole::Teammate, Some(1)), m("a", "alice", TeamRole::Teammate, None), m("l", "lead", TeamRole::Leader, None)],
+            tasks: vec![
+                task(1, TaskStatus::InProgress, Some("a"), Some("alice")),
+                task(2, TaskStatus::Done, Some("a"), Some("alice")),
+                task(3, TaskStatus::Open, None, None),
+            ],
+        };
+        let rows = team_member_rows(&State::new(), &team, "a");
+        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["lead", "alice", "old"]);
+        assert!(rows[1].this && !rows[0].this && rows[2].ended);
+        assert_eq!((rows[1].open_tasks, rows[1].status), (1, "Running"));
+        assert_eq!(task_line(&team.tasks[0]), "#1 [in progress] task 1 \u{b7} alice");
+        assert_eq!(task_line(&team.tasks[2]), "#3 [open] task 3 \u{b7} unassigned");
     }
 }

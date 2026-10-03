@@ -24,6 +24,9 @@ pub enum TranscriptItem {
     Approval { seq: i64, approval_id: String, tool: String, input: serde_json::Value, state: ApprovalState },
     TurnEnded { seq: i64, outcome: TurnOutcome },
     Error { seq: i64, message: String },
+    /// A note from Ember in this session (mention outcome, loop-protection refusal, teammate
+    /// ended): not part of the agent's conversation.
+    Notice { seq: i64, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,6 +202,10 @@ impl Transcript {
             AgentEvent::Error { message } => {
                 self.items.push(TranscriptItem::Error { seq, message: message.clone() });
             }
+            AgentEvent::Notice { message } => {
+                // Does not end a streaming reply: a notice can land mid-turn.
+                self.items.push(TranscriptItem::Notice { seq, text: message.clone() });
+            }
             AgentEvent::NativeSession { .. } | AgentEvent::Unknown => {}
         }
     }
@@ -310,5 +317,13 @@ mod tests {
         }
         assert!(!t.has_gap());
         assert_eq!(t, reference);
+    }
+
+    #[test]
+    fn notices_are_their_own_rows() {
+        let mut t = Transcript::new();
+        t.apply(&ev(1, AgentEvent::UserMessage { text: "hi @@beta".into() }));
+        t.apply(&ev(2, AgentEvent::Notice { message: "Mentioned session \"beta\"".into() }));
+        assert_eq!(t.items[1], TranscriptItem::Notice { seq: 2, text: "Mentioned session \"beta\"".into() });
     }
 }

@@ -10,13 +10,19 @@
 //!   field with a submit handler; IME composition never submits). While the agent is busy a
 //!   message is queued and delivered at the next turn boundary (FR-L6), and an interrupt
 //!   button shows.
+//! - Mentions (FR-T6): typing `@@` shows matching sessions in a list above the field. The
+//!   field cannot be edited from code, so a picked session is remembered and its `@@...`
+//!   fragment is replaced by an unambiguous token when the message is sent; the server delivers
+//!   a copy to each mentioned session and notes the outcome in this transcript.
+//! - Team panel (FR-T7): when this session leads or belongs to a team, its members (with live
+//!   status, open, end) and the shared task list, kept current by push.
 
 use std::collections::HashSet;
 
 use dioxus_compose::prelude::*;
 
 use ember_client::transcript::{ApprovalState, TranscriptItem};
-use ember_client::wire::{ApprovalDecision, SessionPatch, TurnOutcome};
+use ember_client::wire::{ApprovalDecision, MentionCandidate, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
 
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
@@ -35,7 +41,8 @@ fn item_key(item: &TranscriptItem) -> String {
         | TranscriptItem::ToolCall { seq, .. }
         | TranscriptItem::Approval { seq, .. }
         | TranscriptItem::TurnEnded { seq, .. }
-        | TranscriptItem::Error { seq, .. } => *seq,
+        | TranscriptItem::Error { seq, .. }
+        | TranscriptItem::Notice { seq, .. } => *seq,
     };
     seq.to_string()
 }
@@ -55,9 +62,43 @@ pub fn ConversationView(id: String) -> Element {
     // Fetched when the view opens (and after a computer switch).
     let computer = use_signal(|| None::<CurrentComputer>);
     let ide = use_signal(|| None::<Result<IdeLaunch, String>>);
-    let load = {
+    // Sessions this one may mention (FR-T6), refreshed when a new `@@` is started.
+    let candidates = use_signal(Vec::<MentionCandidate>::new);
+    let load_candidates = {
         let id = id.clone();
         move || {
+            let sid = id.clone();
+            run(
+                async move { services().client.mention_candidates(&sid, "", Some(200)).await.map_err(|e| e.to_string()) },
+                move |r| {
+                    let mut candidates = candidates;
+                    match r {
+                        Ok(list) => candidates.set(list),
+                        // A2A off for this session, or an older server: no suggestions.
+                        Err(e) => {
+                            tracing::debug!("mention candidates: {e}");
+                            candidates.set(Vec::new());
+                        }
+                    }
+                },
+            );
+        }
+    };
+    let load = {
+        let id = id.clone();
+        let load_candidates = load_candidates.clone();
+        move || {
+            load_candidates();
+            // The team this session is in (FR-T7); push keeps it current afterwards.
+            let t = id.clone();
+            run(
+                async move { services().client.load_team(&t).await.map(|_| ()).map_err(|e| e.to_string()) },
+                |r| {
+                    if let Err(e) = r {
+                        tracing::debug!("team: {e}");
+                    }
+                },
+            );
             let a = id.clone();
             run(
                 async move { services().server.session_computer(&a).await.map_err(|e| e.to_string()) },
@@ -86,6 +127,8 @@ pub fn ConversationView(id: String) -> Element {
 
     // ---- composer state ----------------------------------------------------------------------
     let mut draft = use_signal(String::new);
+    // Picked mentions: (fragment as typed, token to send). Applied on send.
+    let mut picks = use_signal(Vec::<(String, String)>::new);
     // Changing this rebuilds the (uncontrolled) text field, which is how it is cleared.
     let mut composer_generation = use_signal(|| 0_u64);
     let expanded = use_signal(HashSet::<String>::new);
@@ -101,12 +144,14 @@ pub fn ConversationView(id: String) -> Element {
             if text.is_empty() {
                 return;
             }
+            let text = model::apply_mentions(&text, &picks.peek());
             let s = services();
             s.outbox.lock().unwrap().push(&id, text);
             s.bump_outbox();
             // Sends now if the agent is idle; otherwise it waits for the turn boundary.
             s.drive_outbox(&id);
             draft.set(String::new());
+            picks.set(Vec::new());
             composer_generation += 1;
         }
     });
@@ -307,6 +352,33 @@ pub fn ConversationView(id: String) -> Element {
             patch_session(id.clone(), SessionPatch { pinned: Some(!pinned), ..Default::default() });
         }
     };
+    // ---- mentions (FR-T6) ----------------------------------------------------------------------
+    let typed = model::typed_mention(&draft.read());
+    let suggestions: Vec<(MentionCandidate, String)> = match &typed {
+        Some(t) if !picks.read().iter().any(|(raw, _)| *raw == t.raw) => {
+            let all = candidates.read();
+            model::filter_mentions(&all, &t.query, 6)
+                .into_iter()
+                .map(|c| (c.clone(), model::mention_token(c, &all)))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let typed_raw = typed.map(|t| t.raw).unwrap_or_default();
+    let picked: Vec<String> = picks.read().iter().map(|(_, token)| token.clone()).collect();
+    let on_draft = {
+        let load_candidates = load_candidates.clone();
+        move |v: String| {
+            // A fresh `@@` refreshes the candidates (sessions come and go).
+            if model::typed_mention(&v).is_some_and(|t| t.query.is_empty())
+                && !model::typed_mention(&draft.peek()).is_some_and(|t| t.query.is_empty())
+            {
+                load_candidates();
+            }
+            draft.set(v);
+        }
+    };
+
     let compact = window.is_compact();
     let live = ui.live;
     let id_items = id.clone();
@@ -427,6 +499,7 @@ pub fn ConversationView(id: String) -> Element {
             if busy {
                 ProgressIndicator { determinate: false, fill_max_width: true }
             }
+            TeamPanel { session: id.clone() }
 
             // ---- transcript --------------------------------------------------------------------
             dioxus_compose::Box {
@@ -494,6 +567,50 @@ pub fn ConversationView(id: String) -> Element {
                 }
             }
 
+            // ---- mention suggestions (FR-T6) ------------------------------------------------------
+            if !suggestions.is_empty() {
+                Card {
+                    fill_max_width: true,
+                    padding_role: SpaceRole::Xs,
+                    Column {
+                        fill_max_width: true,
+                        Text {
+                            text: "Mention a session",
+                            type_role: TypeRole::Caption,
+                            color: Paint::Role(ColorRole::OnSurfaceVariant),
+                        }
+                        for (c, token) in suggestions.iter().cloned() {
+                            Button {
+                                key: "{c.id}",
+                                text: format!("{} \u{00b7} {} \u{00b7} {}", c.title, c.agent, c.project),
+                                variant: ButtonVariant::Text,
+                                fill_max_width: true,
+                                on_click: {
+                                    let raw = typed_raw.clone();
+                                    move |_: ()| picks.write().push((raw.clone(), token.clone()))
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            if !picked.is_empty() {
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Text {
+                        text: format!("Mentioning {}", picked.join(", ")),
+                        type_role: TypeRole::Caption,
+                        color: Paint::Role(ColorRole::OnSurfaceVariant),
+                        weight: 1.0,
+                        max_lines: 1,
+                        overflow: TextOverflow::Ellipsis,
+                    }
+                    Button { text: "Clear", variant: ButtonVariant::Text, on_click: move |_| picks.set(Vec::new()) }
+                }
+            }
+
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
@@ -507,8 +624,8 @@ pub fn ConversationView(id: String) -> Element {
                         key: "composer-{generation}",
                         weight: 1.0,
                         multiline: true,
-                        placeholder: if busy { "Queue a message for the next turn" } else { "Message" },
-                        on_value_change: move |v: String| draft.set(v),
+                        placeholder: if busy { "Queue a message for the next turn" } else { "Message (@@ mentions a session)" },
+                        on_value_change: on_draft.clone(),
                         on_submit: move |v: String| send.call(v),
                     }
                 }
@@ -763,5 +880,138 @@ fn TranscriptRow(
         TranscriptItem::Error { message, .. } => rsx! {
             Banner { text: message, tone: Tone::Error }
         },
+        TranscriptItem::Notice { text, .. } => rsx! {
+            Row {
+                fill_max_width: true,
+                alignment: Alignment::Center,
+                padding_role: SpaceRole::Xs,
+                Text {
+                    text,
+                    type_role: TypeRole::Caption,
+                    color: Paint::Role(ColorRole::OnSurfaceVariant),
+                    text_align: TextAlign::Center,
+                }
+            }
+        },
+    }
+}
+
+/// The team this session leads or belongs to (FR-T7): members with live status, and the
+/// shared task list. Nothing when it is in no team.
+#[component]
+fn TeamPanel(session: String) -> Element {
+    let ui = use_ui();
+    let mut expanded = use_signal(|| true);
+    let data = {
+        let _ = *ui.live.teams.read();
+        let _ = *ui.live.launcher.read();
+        services().client.read(|st| {
+            st.team_for_session(&session).map(|t| (t.id.clone(), t.tasks.clone(), model::team_member_rows(st, t, &session)))
+        })
+    };
+    let Some((team_id, tasks, rows)) = data else {
+        return rsx! {};
+    };
+    let active = rows.iter().filter(|r| !r.leader && !r.ended).count();
+    let open = tasks
+        .iter()
+        .filter(|t| !matches!(t.status, ember_client::wire::TaskStatus::Done | ember_client::wire::TaskStatus::Cancelled))
+        .count();
+    let end = move |team_id: String, sid: String, name: String| {
+        run(
+            async move { services().client.end_teammate(&team_id, &sid).await.map_err(|e| e.to_string()) },
+            move |r| match r {
+                Ok(_) => show_message(format!("Ended teammate {name}")),
+                Err(e) => show_message(format!("Could not end {name}: {e}")),
+            },
+        );
+    };
+    rsx! {
+        Card {
+            fill_max_width: true,
+            padding_role: SpaceRole::Sm,
+            Column {
+                fill_max_width: true,
+                space_role: SpaceRole::Xs,
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Text {
+                        text: format!(
+                            "Team \u{00b7} {active} teammate{} \u{00b7} {open} open task{}",
+                            if active == 1 { "" } else { "s" },
+                            if open == 1 { "" } else { "s" }
+                        ),
+                        type_role: TypeRole::BodyStrong,
+                        weight: 1.0,
+                    }
+                    Button {
+                        text: if expanded() { "Hide" } else { "Show" },
+                        icon: if expanded() { IconRole::Collapse } else { IconRole::More },
+                        variant: ButtonVariant::Text,
+                        on_click: move |_| expanded.set(!expanded()),
+                    }
+                }
+                if expanded() {
+                    for r in rows.iter().cloned() {
+                        Row {
+                            key: "{r.session_id}",
+                            fill_max_width: true,
+                            alignment: Alignment::CenterStart,
+                            space_role: SpaceRole::Sm,
+                            Text {
+                                text: if r.leader { format!("{} (leader)", r.name) } else { r.name.clone() },
+                                type_role: if r.this { TypeRole::BodyStrong } else { TypeRole::Body },
+                            }
+                            Text {
+                                text: if r.ended { format!("{} \u{00b7} ended", r.agent) } else { format!("{} \u{00b7} {}", r.agent, r.status) },
+                                type_role: TypeRole::Caption,
+                                color: Paint::Role(ColorRole::OnSurfaceVariant),
+                                weight: 1.0,
+                                max_lines: 1,
+                                overflow: TextOverflow::Ellipsis,
+                            }
+                            if r.open_tasks > 0 {
+                                Badge { text: format!("{} task{}", r.open_tasks, if r.open_tasks == 1 { "" } else { "s" }), tone: Tone::Accent }
+                            }
+                            if !r.this {
+                                Button {
+                                    text: "Open",
+                                    variant: ButtonVariant::Text,
+                                    on_click: {
+                                        let sid = r.session_id.clone();
+                                        move |_: ()| ui.open_conversation(&sid)
+                                    },
+                                }
+                            }
+                            if !r.leader && !r.ended {
+                                Button {
+                                    text: "End",
+                                    variant: ButtonVariant::Text,
+                                    color: Paint::Role(ColorRole::Error),
+                                    on_click: {
+                                        let (tid, sid, name) = (team_id.clone(), r.session_id.clone(), r.name.clone());
+                                        move |_: ()| end(tid.clone(), sid.clone(), name.clone())
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    if tasks.is_empty() {
+                        Text { text: "No tasks yet", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    }
+                    for t in tasks.iter().cloned() {
+                        Text {
+                            key: "{t.id}",
+                            text: model::task_line(&t),
+                            type_role: TypeRole::Caption,
+                            max_lines: 2,
+                            overflow: TextOverflow::Ellipsis,
+                        }
+                    }
+                }
+            }
+        }
     }
 }

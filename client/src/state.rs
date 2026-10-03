@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::transcript::{Applied, Transcript};
-use crate::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent};
+use crate::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView};
 
 /// Session status as the launcher shows it (FR-L2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +82,9 @@ pub enum Input {
     ComputersLoaded(Vec<Computer>),
     /// `GET /projects` answered (FR-L4).
     ProjectsLoaded(Vec<Project>),
+    /// `GET /sessions/{id}/team` answered (FR-T7): the team `session_id` leads or belongs to,
+    /// or `None`.
+    TeamLoaded { session_id: String, team: Option<TeamView> },
 }
 
 /// What an input changed. A UI redraws the named parts; the sync layer acts on `resync*`.
@@ -96,6 +99,8 @@ pub struct Changes {
     pub transcripts: BTreeSet<String>,
     pub computers: bool,
     pub connection: bool,
+    /// Teams (by id) whose members or tasks changed, or that a session joined or left.
+    pub teams: BTreeSet<String>,
     /// Open sessions whose transcript has a gap: fetch `events?after=last_seq`.
     pub resync: BTreeSet<String>,
     /// The server may have dropped messages, or an unknown session appeared: reload the session
@@ -117,6 +122,7 @@ impl Changes {
         self.transcripts.extend(other.transcripts);
         self.computers |= other.computers;
         self.connection |= other.connection;
+        self.teams.extend(other.teams);
         self.resync.extend(other.resync);
         self.resync_all |= other.resync_all;
         self.persist |= other.persist;
@@ -168,6 +174,10 @@ pub struct State {
     /// Whether `project_records` came from the server (or a cache of it); until then computer
     /// assignments are not derived from it.
     projects_known: bool,
+    /// Teams by id (FR-T7). Not cached: loaded when a conversation opens and kept by push.
+    teams: BTreeMap<String, TeamView>,
+    /// Which team each member session is in (leader and teammates, ended ones included).
+    team_of: HashMap<String, String>,
     connection: ConnectionState,
     revision: u64,
 }
@@ -183,6 +193,8 @@ impl Default for State {
             computers: Vec::new(),
             project_records: BTreeMap::new(),
             projects_known: false,
+            teams: BTreeMap::new(),
+            team_of: HashMap::new(),
             connection: ConnectionState::Offline,
             revision: 0,
         }
@@ -273,6 +285,15 @@ impl State {
         self.project_records.get(project).map(|p| p.computers.as_slice()).unwrap_or(&[])
     }
 
+    /// The team `session_id` leads or belongs to, if known.
+    pub fn team_for_session(&self, session_id: &str) -> Option<&TeamView> {
+        self.teams.get(self.team_of.get(session_id)?)
+    }
+
+    pub fn team(&self, team_id: &str) -> Option<&TeamView> {
+        self.teams.get(team_id)
+    }
+
     pub fn open_sessions(&self) -> impl Iterator<Item = &String> {
         self.open.iter()
     }
@@ -356,6 +377,15 @@ impl State {
                 ch.computers |= self.derive_computer_projects();
                 ch.persist |= ch.computers;
             }
+            Input::Push(Push::TeamUpdated { team }) => self.put_team(team, &mut ch),
+            Input::TeamLoaded { session_id, team: Some(team) } => {
+                if team.member(&session_id).is_none() {
+                    // An answer for a session the team no longer lists: only the team counts.
+                    self.unlink_session(&session_id, &mut ch);
+                }
+                self.put_team(team, &mut ch);
+            }
+            Input::TeamLoaded { session_id, team: None } => self.unlink_session(&session_id, &mut ch),
             Input::EventsFetched { session_id, events } => {
                 for ev in events {
                     if ev.session_id == session_id {
@@ -469,6 +499,31 @@ impl State {
         }
         if self.open.contains(&id) {
             self.mark_seen(&id, ch);
+        }
+    }
+
+    /// Take a whole team (push or fetch) and re-point its members at it.
+    fn put_team(&mut self, team: TeamView, ch: &mut Changes) {
+        if self.teams.get(&team.id) == Some(&team) {
+            return;
+        }
+        let id = team.id.clone();
+        // Members the new view no longer lists leave the index.
+        self.team_of.retain(|sid, tid| *tid != id || team.member(sid).is_some());
+        for m in &team.members {
+            if let Some(old) = self.team_of.insert(m.session_id.clone(), id.clone()) {
+                if old != id {
+                    ch.teams.insert(old);
+                }
+            }
+        }
+        self.teams.insert(id.clone(), team);
+        ch.teams.insert(id);
+    }
+
+    fn unlink_session(&mut self, session_id: &str, ch: &mut Changes) {
+        if let Some(old) = self.team_of.remove(session_id) {
+            ch.teams.insert(old);
         }
     }
 
@@ -755,5 +810,94 @@ mod tests {
         let c = State::from_cache(s.to_cache());
         assert_eq!(c.project_computers("alpha"), ["studio".to_string()]);
         assert_eq!(c.computers()[0].projects, vec!["empty".to_string()]);
+    }
+
+    fn member(sid: &str, name: &str, role: crate::wire::TeamRole, ended: Option<i64>) -> crate::wire::TeamMember {
+        crate::wire::TeamMember {
+            session_id: sid.into(),
+            name: name.into(),
+            role,
+            joined_at: 0,
+            ended_at: ended,
+            title: name.into(),
+            agent: "scripted".into(),
+            status: Some(SessionStatus::Idle),
+        }
+    }
+
+    fn team(id: &str, members: Vec<crate::wire::TeamMember>, tasks: Vec<crate::wire::TeamTask>) -> TeamView {
+        TeamView { id: id.into(), project: "p".into(), leader: members[0].session_id.clone(), created_at: 0, members, tasks }
+    }
+
+    fn task(n: i64, status: crate::wire::TaskStatus, assignee: Option<&str>) -> crate::wire::TeamTask {
+        crate::wire::TeamTask {
+            id: format!("task_{n}"),
+            team_id: "t1".into(),
+            number: n,
+            title: format!("task {n}"),
+            detail: String::new(),
+            status,
+            assignee: assignee.map(String::from),
+            assignee_name: None,
+            created_by: "lead".into(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn team_pushes_index_members_and_tasks() {
+        use crate::wire::{TaskStatus, TeamRole};
+        let mut s = State::new();
+        assert!(s.team_for_session("lead").is_none());
+
+        // Spawned: leader and alice point at the team.
+        let t = team("t1", vec![member("lead", "lead", TeamRole::Leader, None), member("a", "alice", TeamRole::Teammate, None)], vec![]);
+        let rev = s.revision();
+        let ch = s.apply(Input::Push(Push::TeamUpdated { team: t.clone() }));
+        assert_eq!(ch.teams, BTreeSet::from(["t1".to_string()]));
+        assert_eq!(s.revision(), rev + 1);
+        assert_eq!(s.team_for_session("a").map(|t| t.id.as_str()), Some("t1"));
+        assert_eq!(s.team_for_session("lead").unwrap().members.len(), 2);
+        // The same team again changes nothing.
+        assert!(s.apply(Input::Push(Push::TeamUpdated { team: t })).is_empty());
+
+        // A task appears and alice is ended: still a member of the record, not active.
+        let t = team(
+            "t1",
+            vec![member("lead", "lead", TeamRole::Leader, None), member("a", "alice", TeamRole::Teammate, Some(9))],
+            vec![task(1, TaskStatus::InProgress, Some("a"))],
+        );
+        let ch = s.apply(Input::Push(Push::TeamUpdated { team: t }));
+        assert!(ch.teams.contains("t1"));
+        let view = s.team_for_session("a").unwrap();
+        assert!(!view.member("a").unwrap().active());
+        assert_eq!(view.tasks[0].status, TaskStatus::InProgress);
+
+        // A member the team no longer lists leaves the index.
+        let t = team("t1", vec![member("lead", "lead", TeamRole::Leader, None)], vec![]);
+        s.apply(Input::Push(Push::TeamUpdated { team: t }));
+        assert!(s.team_for_session("a").is_none());
+        assert!(s.team_for_session("lead").is_some());
+        assert!(s.team("t1").is_some());
+    }
+
+    #[test]
+    fn team_loads_link_and_unlink_sessions() {
+        use crate::wire::TeamRole;
+        let mut s = State::new();
+        let t = team("t1", vec![member("lead", "lead", TeamRole::Leader, None), member("b", "bob", TeamRole::Teammate, None)], vec![]);
+        let ch = s.apply(Input::TeamLoaded { session_id: "b".into(), team: Some(t.clone()) });
+        assert!(ch.teams.contains("t1"));
+        assert_eq!(s.team_for_session("b").map(|t| t.id.as_str()), Some("t1"));
+        // Loading it again for the leader changes nothing.
+        assert!(s.apply(Input::TeamLoaded { session_id: "lead".into(), team: Some(t) }).is_empty());
+        // A session with no team.
+        assert!(s.apply(Input::TeamLoaded { session_id: "x".into(), team: None }).is_empty());
+        let ch = s.apply(Input::TeamLoaded { session_id: "b".into(), team: None });
+        assert!(ch.teams.contains("t1"));
+        assert!(s.team_for_session("b").is_none());
+        // Teams are not part of the cache.
+        assert!(State::from_cache(s.to_cache()).team_for_session("lead").is_none());
     }
 }

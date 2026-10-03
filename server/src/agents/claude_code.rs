@@ -77,7 +77,15 @@ impl ClaudeCodeAdapter {
         Self::new(std::env::var_os("EMBER_CLAUDE_BIN").unwrap_or_else(|| "claude".into()))
     }
 
+    #[cfg(test)]
     fn args(req: &StartRequest) -> Vec<String> {
+        Self::args_with(req, None)
+    }
+
+    /// The CLI arguments; `mcp_file` is a private file holding the `--mcp-config` JSON, used
+    /// instead of the inline JSON when an MCP server has environment (possibly secrets, which
+    /// must not appear on a command line other local users can read).
+    fn args_with(req: &StartRequest, mcp_file: Option<&std::path::Path>) -> Vec<String> {
         let mut args: Vec<String> = [
             "--print",
             "--input-format",
@@ -104,13 +112,55 @@ impl ClaudeCodeAdapter {
             // Equals form, as the SDK does, so an id can never be read as a flag.
             args.push(format!("--resume={id}"));
         }
-        if let Some(config) = mcp_config(&req.mcp_servers) {
-            // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
-            // variadic: the equals form keeps it to exactly this one value. Without
-            // `--strict-mcp-config` the user's own MCP servers stay.
+        // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
+        // variadic: the equals form keeps it to exactly this one value. Without
+        // `--strict-mcp-config` the user's own MCP servers stay.
+        if let Some(path) = mcp_file {
+            args.push(format!("--mcp-config={}", path.display()));
+        } else if let Some(config) = mcp_config(&req.mcp_servers) {
             args.push(format!("--mcp-config={config}"));
         }
         args
+    }
+}
+
+/// Whether any MCP server in `req` carries environment (which goes through a private file).
+fn mcp_needs_file(req: &StartRequest) -> bool {
+    req.mcp_servers.iter().any(|s| !s.env.is_empty())
+}
+
+/// A `--mcp-config` file readable only by this user, removed when dropped (with the run).
+pub(crate) struct PrivateConfigFile(PathBuf);
+
+impl PrivateConfigFile {
+    /// Write `contents` to a new `0600` file in `dir`.
+    pub(crate) fn create(dir: &std::path::Path, contents: &str) -> anyhow::Result<PrivateConfigFile> {
+        use std::io::Write;
+        let path = dir.join(format!("ember-mcp-{}.json", uuid::Uuid::new_v4().simple()));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&path)
+            .map_err(|e| anyhow::anyhow!("creating MCP config file {}: {e}", path.display()))?;
+        let file = PrivateConfigFile(path);
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+        Ok(file)
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for PrivateConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -125,8 +175,9 @@ fn mcp_timeout_env(req: &StartRequest) -> Option<(String, String)> {
     Some(("MCP_TIMEOUT".into(), (u64::from(secs) * 1000).to_string()))
 }
 
-/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args}}}`), or
-/// `None` when there are none.
+/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args, env?}}}`),
+/// or `None` when there are none. With `env` it may hold secrets: write it to a
+/// [`PrivateConfigFile`], never onto the command line.
 pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
     if servers.is_empty() {
         return None;
@@ -134,10 +185,14 @@ pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
     let map: serde_json::Map<String, Value> = servers
         .iter()
         .map(|s| {
-            (
-                s.name.clone(),
-                serde_json::json!({ "type": "stdio", "command": s.command, "args": s.args }),
-            )
+            let mut server =
+                serde_json::json!({ "type": "stdio", "command": s.command, "args": s.args });
+            if !s.env.is_empty() {
+                let env: serde_json::Map<String, Value> =
+                    s.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+                server["env"] = Value::Object(env);
+            }
+            (s.name.clone(), server)
         })
         .collect();
     Some(serde_json::json!({ "mcpServers": map }).to_string())
@@ -185,10 +240,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
              mounted here when the project mount is enabled — see EMBER_MOUNT)",
             req.cwd.display()
         );
+        // MCP servers with environment (FR-A7): the config goes into a private file that lives
+        // as long as the run.
+        let mcp_file = match (mcp_needs_file(&req), mcp_config(&req.mcp_servers)) {
+            (true, Some(config)) => Some(PrivateConfigFile::create(&std::env::temp_dir(), &config)?),
+            _ => None,
+        };
         let mut child = Command::new(&self.bin)
             .envs(mcp_timeout_env(&req))
             .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .args(Self::args(&req))
+            .args(Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)))
             .current_dir(&req.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -217,6 +278,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             stdin,
             state,
             request_counter: 0,
+            _mcp_file: mcp_file,
         }))
     }
 }
@@ -382,6 +444,8 @@ struct ClaudeRun {
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
     request_counter: u64,
+    /// The private `--mcp-config` file, removed with the run.
+    _mcp_file: Option<PrivateConfigFile>,
 }
 
 #[async_trait]
@@ -885,6 +949,7 @@ mod tests {
                 command: "/usr/local/bin/npx".into(),
                 args: vec!["-y".into(), "chrome-devtools-mcp@latest".into(), "--wsEndpoint=ws://x/cdp".into()],
                 startup_timeout_secs: Some(60),
+                env: Vec::new(),
             }],
             ..Default::default()
         };
@@ -896,5 +961,42 @@ mod tests {
         assert_eq!(server["command"], "/usr/local/bin/npx");
         assert_eq!(server["args"][2], "--wsEndpoint=ws://x/cdp");
         assert!(!args.contains(&"--strict-mcp-config".to_string()), "the user's servers stay");
+    }
+
+    /// FR-A7: registry servers with secret environment go through a private file, never argv.
+    #[test]
+    fn mcp_env_goes_through_a_private_file_not_the_command_line() {
+        let req = StartRequest {
+            cwd: ".".into(),
+            mcp_servers: vec![crate::agents::McpServer {
+                name: "github".into(),
+                command: "/usr/local/bin/gh-mcp".into(),
+                args: vec!["--stdio".into()],
+                startup_timeout_secs: None,
+                env: vec![("GITHUB_TOKEN".into(), "ghp_SECRET123".into())],
+            }],
+            ..Default::default()
+        };
+        assert!(mcp_needs_file(&req));
+        let config = mcp_config(&req.mcp_servers).unwrap();
+        let v: Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(v["mcpServers"]["github"]["env"]["GITHUB_TOKEN"], "ghp_SECRET123");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = PrivateConfigFile::create(dir.path(), &config).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let args = ClaudeCodeAdapter::args_with(&req, Some(file.path()));
+        let joined = args.join(" ");
+        assert!(!joined.contains("ghp_SECRET123"), "{joined}");
+        assert!(args.contains(&format!("--mcp-config={}", file.path().display())));
+        assert!(!format!("{req:?}").contains("ghp_SECRET123"), "Debug redacts MCP env");
+        let path = file.path().to_path_buf();
+        drop(file);
+        assert!(!path.exists(), "removed with the run");
     }
 }

@@ -25,6 +25,9 @@ pub enum AgentEvent {
     Usage { input_tokens: u64, output_tokens: u64 },
     TurnEnded { outcome: TurnOutcome },
     Error { message: String },
+    /// Something Ember shows in the session, not part of the agent's conversation (an A2A
+    /// message refused by loop protection, the outcome of a mention, a teammate ended).
+    Notice { message: String },
     /// An event kind this client does not know yet. Ignored by the reducer.
     #[serde(other)]
     Unknown,
@@ -206,4 +209,145 @@ pub enum Push {
     SessionUpdated { session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
     ProjectUpdated { project: Project },
+    /// A team's members or tasks changed (FR-T7): the whole team.
+    TeamUpdated { team: TeamView },
+}
+
+// ---- teams and mentions (FR-T6, FR-T7; server `a2a::team`, `a2a::mention`) -------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeamRole {
+    Leader,
+    Teammate,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Open,
+    InProgress,
+    Blocked,
+    Done,
+    Cancelled,
+    #[serde(other)]
+    Unknown,
+}
+
+impl TaskStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskStatus::Open => "open",
+            TaskStatus::InProgress => "in progress",
+            TaskStatus::Blocked => "blocked",
+            TaskStatus::Done => "done",
+            TaskStatus::Cancelled => "cancelled",
+            TaskStatus::Unknown => "unknown",
+        }
+    }
+}
+
+/// A team member. `title`, `agent` and `status` are a snapshot from when the team last
+/// changed; a UI takes live status from the session record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub session_id: String,
+    pub name: String,
+    pub role: TeamRole,
+    #[serde(default)]
+    pub joined_at: i64,
+    /// Set once the teammate was ended.
+    #[serde(default)]
+    pub ended_at: Option<i64>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub status: Option<SessionStatus>,
+}
+
+impl TeamMember {
+    pub fn active(&self) -> bool {
+        self.ended_at.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TeamTask {
+    pub id: String,
+    #[serde(default)]
+    pub team_id: String,
+    /// `#n` within the team.
+    pub number: i64,
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+    pub status: TaskStatus,
+    /// Assignee session id.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub assignee_name: Option<String>,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// A team: leader first among `members`, then teammates (ended ones included); tasks by number.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TeamView {
+    pub id: String,
+    #[serde(default)]
+    pub project: String,
+    /// The leader's session id.
+    pub leader: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub members: Vec<TeamMember>,
+    #[serde(default)]
+    pub tasks: Vec<TeamTask>,
+}
+
+impl TeamView {
+    pub fn member(&self, session_id: &str) -> Option<&TeamMember> {
+        self.members.iter().find(|m| m.session_id == session_id)
+    }
+}
+
+/// `GET /teams/{id}/mail` entry.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TeamMail {
+    pub id: i64,
+    #[serde(default)]
+    pub team_id: String,
+    pub from_session: String,
+    #[serde(default)]
+    pub from_name: Option<String>,
+    /// `None` = the whole team.
+    #[serde(default)]
+    pub to_session: Option<String>,
+    #[serde(default)]
+    pub to_name: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+/// `GET /sessions/{id}/mentions` entry: a session the composer may mention as `@@...`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct MentionCandidate {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub agent: String,
+    pub status: SessionStatus,
 }

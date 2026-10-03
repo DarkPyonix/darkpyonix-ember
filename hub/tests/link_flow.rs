@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use ember_hub::fake::FakeHub;
-use ember_hub::{check_registration, DeviceLink, HubError, LinkError, LinkPoll, RegistrationState, Role};
+use ember_hub::{check_registration, DeviceLink, HubError, LinkError, LinkPoll, LinkStatus, RegistrationState, Role};
 use ember_transport::SecretKey;
 
 const FAST: Duration = Duration::from_millis(50);
@@ -29,7 +29,9 @@ async fn approved_in_the_browser_then_claimed_once() {
     assert_eq!(reg.device.role, Role::Computer);
     assert_eq!(reg.hub_url, hub.url());
     assert!(reg.device_token.starts_with("dpd_"));
+    assert!(reg.resolve_token.as_deref().is_some_and(|t| t.starts_with("dpr_")), "claim returns a resolve token");
     assert!(!format!("{reg:?}").contains(&reg.device_token));
+    assert!(!format!("{reg:?}").contains(reg.resolve_token.as_deref().unwrap()));
 
     // The token works and says who we are.
     match check_registration(&reg.client()).await {
@@ -104,4 +106,87 @@ async fn denied_expired_and_wrong_key() {
         DeviceLink::start(&hub.client(), &SecretKey::generate(), "", Role::Computer).await,
         Err(LinkError::Hub(HubError::BadRequest(_)))
     ));
+}
+
+#[tokio::test]
+async fn a_main_server_link_needs_a_browser_session() {
+    let hub = FakeHub::start().await;
+    let server = hub.client().with_token(&hub.register(SecretKey::generate().peer_id(), "home", Role::MainServer));
+    let key = SecretKey::generate();
+    let link = DeviceLink::start(&hub.client(), &key, "second server", Role::MainServer).await.unwrap().with_poll_interval(FAST);
+    let code = link.user_code().to_string();
+    // The main server's token may look it up and deny it, not approve it (403).
+    assert_eq!(server.link_code(&code).await.unwrap().role, Role::MainServer);
+    assert!(matches!(server.decide_link_code(&code, true).await, Err(HubError::Forbidden(_))));
+    // A signed-in person can.
+    hub.browser().decide_link_code(&code, true).await.unwrap();
+    assert_eq!(link.wait().await.unwrap().device.role, Role::MainServer);
+
+    // Computer and client links: the main server's token still approves them.
+    for role in [Role::Computer, Role::Client] {
+        let k = SecretKey::generate();
+        let l = DeviceLink::start(&hub.client(), &k, "dev", role).await.unwrap().with_poll_interval(FAST);
+        server.decide_link_code(l.user_code(), true).await.unwrap();
+        assert_eq!(l.wait().await.unwrap().device.role, role);
+    }
+}
+
+#[tokio::test]
+async fn a_restarted_device_resumes_its_link_by_id() {
+    let hub = FakeHub::start().await;
+    let key = SecretKey::generate();
+    let link = DeviceLink::start(&hub.client(), &key, "pi", Role::Computer).await.unwrap();
+    let link_id = link.pending().link_id.clone();
+    drop(link); // the device restarts; it kept only the link id
+
+    let info = hub.client().link_status(&link_id).await.unwrap();
+    assert_eq!(info.status, LinkStatus::Pending);
+    assert_eq!(info.endpoint_id, key.peer_id());
+    let resumed = DeviceLink::resume_by_id(&hub.client(), &key, &link_id).await.unwrap().with_poll_interval(FAST);
+    assert_eq!(resumed.pending().verification_uri, format!("{}/link", hub.url()));
+    assert!(hub.approve(resumed.user_code()));
+    resumed.wait().await.unwrap();
+    assert_eq!(hub.client().link_status(&link_id).await.unwrap().status, LinkStatus::Claimed);
+    assert!(matches!(DeviceLink::resume_by_id(&hub.client(), &key, &link_id).await, Err(LinkError::ClaimedElsewhere)));
+
+    // Another key cannot take it over; an unknown id is an expired link; a denied one says so.
+    assert!(DeviceLink::resume_by_id(&hub.client(), &SecretKey::generate(), &link_id).await.is_err());
+    assert!(matches!(
+        DeviceLink::resume_by_id(&hub.client(), &key, "l_00000000000000000000000000000000").await,
+        Err(LinkError::Expired(_))
+    ));
+    let k2 = SecretKey::generate();
+    let l2 = DeviceLink::start(&hub.client(), &k2, "x", Role::Computer).await.unwrap();
+    hub.decide(l2.user_code(), false);
+    assert!(matches!(DeviceLink::resume_by_id(&hub.client(), &k2, &l2.pending().link_id).await, Err(LinkError::Denied)));
+}
+
+#[tokio::test]
+async fn a_removed_key_rejoins_only_after_readmission_approved_in_the_browser() {
+    let hub = FakeHub::start().await;
+    let server = hub.client().with_token(&hub.register(SecretKey::generate().peer_id(), "home", Role::MainServer));
+    let key = SecretKey::generate();
+    let old_token = hub.register(key.peer_id(), "node", Role::Computer);
+    let created = hub.devices().into_iter().find(|d| d.endpoint_id == key.peer_id()).unwrap().created_at;
+    assert!(hub.remove(&key.peer_id()));
+
+    // Not re-admitted: 409, with guidance.
+    let e = DeviceLink::start(&hub.client(), &key, "node", Role::Computer).await.unwrap_err();
+    assert!(matches!(e, LinkError::AlreadyRegistered(_)));
+    assert!(e.to_string().contains("re-admit"), "{e}");
+
+    // Only a session re-admits.
+    assert!(matches!(server.readmit(&key.peer_id()).await, Err(HubError::Forbidden(_))));
+    let r = hub.browser().readmit(&key.peer_id()).await.unwrap();
+    assert_eq!(r.endpoint_id, key.peer_id());
+    assert!(r.expires_at > ember_hub::now_secs());
+
+    let link = DeviceLink::start(&hub.client(), &key, "node", Role::Computer).await.unwrap().with_poll_interval(FAST);
+    // The main server's token cannot approve a re-admitted key's link.
+    assert!(matches!(server.decide_link_code(link.user_code(), true).await, Err(HubError::Forbidden(_))));
+    hub.browser().decide_link_code(link.user_code(), true).await.unwrap();
+    let reg = link.wait().await.unwrap();
+    assert_eq!(reg.device.created_at, created, "the same device row comes back");
+    assert_ne!(reg.device_token, old_token, "with new tokens");
+    assert!(matches!(check_registration(&reg.client()).await, RegistrationState::Active(_)));
 }

@@ -24,12 +24,15 @@ VS Code questions. Kernel, manager and hub APIs belong to `darkpyonix-core`; Emb
 
 ## Sub-agents and builds
 
-- **Sub-agents never run builds.** No `cargo build`, `test`, `check`, `clippy` or `run`, and no
-  Chrome or `code serve-web` smoke runs. They write code and tests, research, and write documents,
-  and their report says what was not compiled. (User rule, 2026-10-03: seven sub-agents building at
-  once drove the machine to load 189.)
-- The session builds and tests, one build at a time with `CARGO_BUILD_JOBS=2`, each worktree in its
-  own `target/`, or pushes and lets CI build. Never share a `CARGO_TARGET_DIR` between worktrees.
+- **Coding, research and document sub-agents never run builds.** No `cargo build`, `test`,
+  `check`, `clippy` or `run`, and no Chrome or `code serve-web` smoke runs. They write code and
+  tests, research, and write documents, and their report says what was not compiled. (User rule,
+  2026-10-03: seven sub-agents building at once drove the machine to load 189.)
+- **Builds and tests go to one temporary builder sub-agent**, one build at a time with
+  `CARGO_BUILD_JOBS=2`, each worktree in its own `target/`. The session does not build itself;
+  without a builder, push and let CI build. Never share a `CARGO_TARGET_DIR` between worktrees.
+  (User, 2026-10-03: "빌드 작업 니가 직접 하지 말고 서브 에이전트 하나 임시로 만들어서 개한테
+  시켜야지", "니가 작업 붙잡고 있으면 다른 일들도 진행이 안되잖아".)
 - Use sub-agents generously for parallel work, each in its own worktree under
   `.claude/worktrees/<name>/`.
 - `client/` depends on `server/`, and `server/` on `node/`, by path, and CI runs
@@ -43,9 +46,19 @@ throwaway work, probes and downloads in `.scratch/<name>/` (both ignored). Not `
 directory beside this checkout, not the home directory. Large files in a worktree are linked, not
 copied. If a task seems to need a path outside the repository, ask first.
 
+**The repository root is fixed.** No new folder or file at the root without the user's approval:
+propose what to add and why, and wait. Approved root entries (2026-10-03): `.github/`,
+`.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`, `README.md`, `app/`,
+`bridge/`, `client/`, `docs/`, `editor/`, `editor-conn/`, `extensions/`, `hub/`, `node/`, `ose/`,
+`proxy/`, `scripts/`, `server/`, `testdata/`, `transport/`, plus the ignored `.claude/` and
+`.scratch/`. A regrouping of these is proposed in #60 and waits for approval.
+
 ## Git
 
-- Branches: `develop` (integration, where work lands) and `main` (protected, default).
+- Branches: `develop` (integration, where work lands) and `main` (protected, default). Only
+  `main`, `develop` and `release` live on the remote permanently.
+- Work branches are named `feat/<topic>` (existing `feature/*` branches keep their names until
+  merged).
 - **Push right after every commit.** Never push to `main` directly. Force-push only with the
   user's confirmation.
 - New features: search issues first
@@ -54,8 +67,12 @@ copied. If a task seems to need a path outside the repository, ask first.
   open a PR into `develop` with `Closes #<N>`. Merge only through that PR. `develop` is not the
   default branch, so close the issue by hand after merging:
   `gh issue close <N> --comment "Landed via #<PR>"`.
-- **Merge gate:** wait for every check to finish and merge only if none failed. Delete a branch only
-  after `gh pr view --json state` says `MERGED`.
+- **Merge gate:** wait for every check to finish and merge only if none failed. Merge with
+  `gh pr merge --delete-branch`, then remove the local branch and its worktree. Delete a branch
+  only after `gh pr view --json state` says `MERGED`.
+- Remove merged branches regularly, without archive tags (user, 2026-10-03: "머지된거 전부
+  정리하고, 아카이브는 왜 남겨?"). The one exception is `archive/pre-restructure`, which marks
+  the tree before the root regrouping (#60).
 - Doc-only changes may be committed on `develop` and pushed directly.
 - Subject format `<Type>: <imperative summary>` with `Feat`, `Fix`, `Refactor`, `Docs`, `Test`,
   `Chore`. Reference SPEC IDs when relevant.

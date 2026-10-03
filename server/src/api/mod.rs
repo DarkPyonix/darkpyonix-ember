@@ -300,7 +300,8 @@ async fn send_message(
     Path(id): Path<String>,
     Json(b): Json<MessageBody>,
 ) -> ApiResult<impl IntoResponse> {
-    s.send(&id, &b.text).await?;
+    // Mentions of other sessions are delivered by the A2A hook (FR-T6).
+    s.send_from_user(&id, &b.text).await?;
     Ok(StatusCode::ACCEPTED)
 }
 

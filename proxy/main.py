@@ -108,6 +108,12 @@ async def overlay_js():
     return assets.script("overlay.js")
 
 
+@app.get("/__detach.js")
+async def detach_js():
+    """Tab detach (SPEC FR-B1/B2), injected next to overlay.js in the workbench document."""
+    return assets.script("detach.js")
+
+
 @app.get("/__kb.js")
 async def webview_kb_js():
     """The webview-frame-only keyboard policy. Never injected into the workbench, which

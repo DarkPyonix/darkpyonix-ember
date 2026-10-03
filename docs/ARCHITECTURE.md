@@ -79,6 +79,7 @@ accounts or computer switching.
 | `transport/` | the transport interface and its iroh backend (FR-N5) |
 | `client/` | the client core below the dioxus-compose UI |
 | `proxy/` | the IDE window wrapping layer (Python) |
+| `bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |
 | `extensions/` | editor extensions: `vscode-darkpyonix`, `vscode-darkpyonix-theme`, `intellij-darkpyonix` |
 
 ### 1.4 Relationship to `proxy/` today
@@ -163,6 +164,13 @@ API, not a generic transport:
   "windowId": "..."
 }
 ```
+
+Implemented as `proxy/static/detach.js` (webview) and the `bridge/` crate (native; message
+types, `WebviewBridge`, version handling). Concretely: positions are **0-based**; the payload
+crosses as a JSON string; `version` is per `kind` (`tab_detach`, `sibling_window_closed`,
+`open_window`, all 1); `tab_detach` also carries the additive fields `workspace.folder`,
+`screen`, `label`, `editor` and `sentAtMs`; the WKWebView handler is named `emberBridge`, and
+native → webview pushes call `window.__emberBridge.receive(json)`.
 
 Schemas are versioned (`"version"`) from the start — per `FR-B2`'s acceptance criteria — because
 the launcher and any number of editor windows may be running builds that drifted by a release or

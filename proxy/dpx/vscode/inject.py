@@ -6,6 +6,7 @@ There are three injection points. What goes where is the whole of this file.
 |-----------------------------------|----------------------------------|--------------------------------------|
 | The workbench main CSS            | static/overlay.css               | Mobile layout                        |
 | The top-level workbench doc (`/`) | viewport + overlay.css + overlay.js | Bar, gestures, keyboard policy    |
+|                                   | + static/detach.js + one settings default | Tab detach (SPEC FR-B1/B2)  |
 | VS Code webview host frames       | static/webview-kb.js             | Keyboard policy for extension panels |
 
 Injecting into **the top-level document only** is the load-bearing part. VS Code also
@@ -19,8 +20,8 @@ import re
 from fastapi import Request, Response
 
 from dpx import assets
-from dpx.config import ASSET_VERSION
-from dpx.vscode import proxy
+from dpx.config import ASSET_VERSION, TAB_DETACH
+from dpx.vscode import html_rewrite, proxy
 
 logger = logging.getLogger("proxy")
 
@@ -65,7 +66,7 @@ async def main_css(request: Request, path: str) -> Response:
 
 
 async def workbench_html(request: Request, path: str) -> Response:
-    """Adds the viewport meta and the overlay link/script to the top-level workbench doc."""
+    """Adds the viewport meta, the overlay link/script and detach.js to the top-level workbench doc."""
     url = proxy.upstream_url(path)
     resp = await proxy.fetch(request, url, follow_redirects=True)
     if resp is None:
@@ -73,19 +74,11 @@ async def workbench_html(request: Request, path: str) -> Response:
     if not (resp.status_code == 200 and resp.headers.get("content-type", "").startswith("text/html")):
         return await proxy.relay(request, url)
 
-    html = resp.text
-    inserts = []
-    if '<meta name="viewport"' not in html:
-        inserts.append('<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">')
-    if "/__overlay.css" not in html:
-        inserts.append(f'<link rel="stylesheet" href="/__overlay.css?v={ASSET_VERSION}">')
-    if "/__overlay.js" not in html:
-        inserts.append(f'<script src="/__overlay.js?v={ASSET_VERSION}" defer></script>')
-    if inserts:
-        html = html.replace("<head>", "<head>" + "".join(inserts), 1)
-        logger.info("Injected %s into HTML: %s", ", ".join(
-            "viewport" if "viewport" in i else ("overlay.css" if "overlay.css" in i else "overlay.js")
-            for i in inserts), path)
+    # Tab detach (detach.js + the dragToOpenWindow default) rides along unless switched off
+    # with DPX_TAB_DETACH=0. See html_rewrite.py for what is rewritten and why.
+    html, inserted = html_rewrite.workbench_inserts(resp.text, ASSET_VERSION, detach=TAB_DETACH)
+    if inserted:
+        logger.info("Injected %s into HTML: %s", ", ".join(inserted), path)
     return Response(content=html, media_type="text/html", headers=assets.NO_CACHE)
 
 

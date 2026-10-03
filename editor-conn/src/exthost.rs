@@ -10,7 +10,7 @@
 //! The extension host then blocks extension activation until the renderer has called
 //! `ExtHostWorkspace.$initializeWorkspace` (`extHostExtensionService.ts` L218) and
 //! `ExtHostConfiguration.$initializeConfiguration` (barrier in `extHostConfiguration.ts` L107-131,
-//! awaited in `api/node/extHostExtensionService.ts` L180). Upstream those calls come from the
+//! awaited in `api/node/extHostExtensionService.ts` L179). Upstream those calls come from the
 //! `MainThreadWorkspace` / `MainThreadConfiguration` constructors; here from [`bootstrap_calls`].
 //!
 //! **Minimal subset** — what Ember's editor core needs for SPEC FR-E2..E4 (diagnostics, CodeLens,
@@ -63,8 +63,9 @@ pub mod proxy {
 pub struct InitDataParams {
     pub version: String,
     pub quality: Option<String>,
-    /// Leave `None` unless it is the server's exact commit: on mismatch the extension host exits
-    /// with `VersionMismatch` (extensionHostProcess.ts L340-347).
+    /// Leave `None` unless it is the server's exact commit (the value returned by
+    /// [`crate::handshake::verify_server`], i.e. [`crate::PINNED_COMMIT`]): on mismatch the
+    /// extension host exits with `VersionMismatch` (extensionHostProcess.ts L340-347).
     pub commit: Option<String>,
     pub remote_authority: String,
     pub env: RemoteAgentEnvironment,
@@ -298,7 +299,7 @@ pub struct MarkerData {
     pub tags: Option<Vec<u8>>,
 }
 
-/// `IDocumentFilterDto` (extHost.protocol.ts L436-444).
+/// `IDocumentFilterDto` (extHost.protocol.ts L438-446).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentFilter {
@@ -345,7 +346,9 @@ fn j<T: Serialize>(v: &T) -> Arg {
     Arg::Json(serde_json::to_value(v).unwrap_or(Value::Null))
 }
 
-/// Calls that must precede extension activation (see module docs).
+/// Calls that must precede extension activation (see module docs):
+/// `ExtHostConfigurationShape.$initializeConfiguration(data)` (extHost.protocol.ts L2378) and
+/// `ExtHostWorkspaceShape.$initializeWorkspace(workspace | null, trusted)` (L2510).
 pub fn bootstrap_calls(workspace: Option<&WorkspaceData>, trusted: bool, configuration: &Value) -> Vec<Call> {
     vec![
         Call::new(proxy::EXT_HOST_CONFIGURATION, "$initializeConfiguration", vec![Arg::Json(configuration.clone())]),
@@ -428,7 +431,8 @@ pub fn contributed_configuration_defaults(extensions: &[Value]) -> Vec<(String, 
     out
 }
 
-/// `ExtHostExtensionService.$activateByEvent(activationEvent, ActivationKind.Normal)`.
+/// `ExtHostExtensionService.$activateByEvent(activationEvent, ActivationKind.Normal)`
+/// (extHost.protocol.ts L2609; `ActivationKind.Normal = 0`, `services/extensions/common/extensions.ts` L383-386).
 /// Ember must send `onLanguage:<id>` when a document of that language opens and
 /// `onCommand:<id>` before executing a contributed command (upstream: `languageService.ts` L289,
 /// `abstractExtensionService.activateByEvent`).
@@ -436,7 +440,7 @@ pub fn activate_by_event(event: &str) -> Call {
     Call::new(proxy::EXT_HOST_EXTENSION_SERVICE, "$activateByEvent", vec![Arg::Json(event.into()), Arg::Json(0.into())])
 }
 
-/// `IModelAddedData` (extHost.protocol.ts L397-405).
+/// `IModelAddedData` (extHost.protocol.ts L2390-2398).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelAddedData {
@@ -450,7 +454,7 @@ pub struct ModelAddedData {
     pub encoding: String,
 }
 
-/// `ITextEditorAddData` (extHost.protocol.ts L418-425). `options` is
+/// `ITextEditorAddData` (extHost.protocol.ts L2411-2418). `options` is
 /// `IResolvedTextEditorConfiguration`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -464,7 +468,7 @@ pub struct TextEditorAddData {
     pub editor_position: Option<i32>,
 }
 
-/// `IDocumentsAndEditorsDelta` (extHost.protocol.ts L460-466).
+/// `IDocumentsAndEditorsDelta` (extHost.protocol.ts L2453-2459).
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentsAndEditorsDelta {
@@ -481,6 +485,7 @@ pub struct DocumentsAndEditorsDelta {
     pub new_active_editor: Option<Option<String>>,
 }
 
+/// `$acceptDocumentsAndEditorsDelta(delta)` (extHost.protocol.ts L2462).
 pub fn accept_documents_and_editors_delta(delta: &DocumentsAndEditorsDelta) -> Call {
     Call::new(proxy::EXT_HOST_DOCUMENTS_AND_EDITORS, "$acceptDocumentsAndEditorsDelta", vec![j(delta)])
 }
@@ -491,7 +496,8 @@ pub fn default_editor_options(tab_size: u32, insert_spaces: bool) -> Value {
     json!({ "tabSize": tab_size, "indentSize": tab_size, "originalIndentSize": tab_size, "insertSpaces": insert_spaces, "cursorStyle": 1, "lineNumbers": 1 })
 }
 
-/// `ExtHostDocuments.$acceptModelChanged(uri, ISerializedModelContentChangedEvent, isDirty)`.
+/// `ExtHostDocuments.$acceptModelChanged(uri, ISerializedModelContentChangedEvent, isDirty)`
+/// (extHost.protocol.ts L2404; `ExtHostDocumentsShape` L2399-2405 also holds the three below).
 pub fn accept_model_changed(uri: &UriComponents, event: &crate::document::ModelContentChangedEvent, is_dirty: bool) -> Call {
     Call::new(
         proxy::EXT_HOST_DOCUMENTS,
@@ -512,7 +518,8 @@ pub fn accept_model_language_changed(uri: &UriComponents, language_id: &str) -> 
     Call::new(proxy::EXT_HOST_DOCUMENTS, "$acceptModelLanguageChanged", vec![j(uri), Arg::Json(language_id.into())])
 }
 
-/// `$provideHover(handle, resource, position, context | undefined, token)` → `HoverWithId | undefined`.
+/// `$provideHover(handle, resource, position, context | undefined, token)` → `HoverWithId | undefined`
+/// (extHost.protocol.ts L2963; `$releaseHover(handle, id)` L2964).
 pub fn provide_hover(handle: i64, uri: &UriComponents, pos: Position) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$provideHover", vec![Arg::Json(handle.into()), j(uri), j(&pos), Arg::Undefined])
         .cancellable()
@@ -522,7 +529,8 @@ pub fn release_hover(handle: i64, id: i64) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$releaseHover", vec![Arg::Json(handle.into()), Arg::Json(id.into())])
 }
 
-/// `$provideCodeLenses(handle, resource, token)` → `ICodeLensListDto | undefined`.
+/// `$provideCodeLenses(handle, resource, token)` → `ICodeLensListDto | undefined`
+/// (extHost.protocol.ts L2956; `$resolveCodeLens` L2957, `$releaseCodeLenses` L2958).
 pub fn provide_code_lenses(handle: i64, uri: &UriComponents) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$provideCodeLenses", vec![Arg::Json(handle.into()), j(uri)]).cancellable()
 }
@@ -539,7 +547,7 @@ pub fn release_code_lenses(handle: i64, cache_id: i64) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$releaseCodeLenses", vec![Arg::Json(handle.into()), Arg::Json(cache_id.into())])
 }
 
-/// `InlineCompletionContext` (languages.ts L767-777).
+/// `InlineCompletionContext` (languages.ts L767-795).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InlineCompletionContext {
@@ -553,7 +561,8 @@ pub struct InlineCompletionContext {
     pub earliest_shown_date_time: f64,
 }
 
-/// `$provideInlineCompletions(handle, resource, position, context, token)` →
+/// `$provideInlineCompletions(handle, resource, position, context, token)` (extHost.protocol.ts
+/// L2995; `$handleInlineCompletionDidShow` L2996, `…EndOfLifetime` L2998, `$freeInlineCompletionsList` L3000) →
 /// `IdentifiableInlineCompletions | undefined` (`{ items: [{ insertText, range?, command?, pid,
 /// idx, … }], pid, languageId, … }`).
 pub fn provide_inline_completions(handle: i64, uri: &UriComponents, pos: Position, ctx: &InlineCompletionContext) -> Call {
@@ -593,7 +602,7 @@ pub fn free_inline_completions_list(handle: i64, pid: i64, kind: &str) -> Call {
     )
 }
 
-/// `ExtHostCommands.$executeContributedCommand(id, ...args)` — e.g. the `command` of an accepted
+/// `ExtHostCommands.$executeContributedCommand(id, ...args)` (extHost.protocol.ts L2373) — e.g. the `command` of an accepted
 /// inline completion or a clicked CodeLens.
 pub fn execute_contributed_command(id: &str, args: &[Value]) -> Call {
     let mut a = vec![Arg::Json(id.into())];
@@ -604,7 +613,11 @@ pub fn execute_contributed_command(id: &str, args: &[Value]) -> Call {
 // ---- extension host → Ember -----------------------------------------------------------------
 
 /// Decoded `MainThread*` calls the editor core acts on. Everything else is
-/// [`MainThreadCall::Other`] and gets [`default_reply`].
+/// [`MainThreadCall::Other`] and gets [`default_reply`]. Signatures (extHost.protocol.ts at
+/// [`crate::PINNED_COMMIT`]): `MainThreadCommandsShape` L135-139, `MainThreadDiagnosticsShape`
+/// L254-257, `MainThreadLanguageFeaturesShape` `$unregister` L529, `$registerCodeLensSupport` /
+/// `$emitCodeLensEvent` L531-532, `$registerHoverProvider` L537,
+/// `$registerInlineCompletionsSupport` L558-576, `$emitInlineCompletionsChange` L577.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MainThreadCall {
     DiagnosticsChangeMany { owner: String, entries: Vec<(UriComponents, Option<Vec<MarkerData>>)> },
@@ -612,7 +625,7 @@ pub enum MainThreadCall {
     RegisterHoverProvider { handle: i64, selector: Vec<DocumentFilter> },
     RegisterCodeLensSupport { handle: i64, selector: Vec<DocumentFilter>, event_handle: Option<i64> },
     EmitCodeLensEvent { event_handle: i64 },
-    /// 17 positional args at the pinned commit (extHost.protocol.ts L556-574); only the stable
+    /// 17 positional args at the pinned commit (extHost.protocol.ts L558-576); only the stable
     /// head is decoded, the rest kept raw.
     RegisterInlineCompletionsSupport { handle: i64, selector: Vec<DocumentFilter>, extension_id: String, raw: Vec<Value> },
     EmitInlineCompletionsChange { handle: i64 },
@@ -684,15 +697,16 @@ impl MainThreadCall {
 
 /// The reply Ember gives to `MainThread*` calls it does not implement, chosen so the extension
 /// host keeps running. Most upstream methods are `void` or `Promise<void>` (→ `undefined`).
+/// Line numbers are extHost.protocol.ts at [`crate::PINNED_COMMIT`].
 /// The exceptions below would otherwise block or mislead extensions:
 ///
-/// * `MainThreadStorage.$initializeExtensionStorage` — awaited during every activation
+/// * `MainThreadStorage.$initializeExtensionStorage` (L850) — awaited during every activation
 ///   (`undefined` = no stored state).
-/// * `MainThreadWindow.$getInitialState` — `{ isFocused, isActive }`.
-/// * `MainThreadWorkspace.$checkExists` — `workspaceContains:` activation; `false` until Ember
+/// * `MainThreadWindow.$getInitialState` (L2301) — `{ isFocused, isActive }`.
+/// * `MainThreadWorkspace.$checkExists` (L1976) — `workspaceContains:` activation; `false` until Ember
 ///   implements glob search over the remote filesystem.
-/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` — trusted.
-/// * `MainThreadCommands.$getCommands` — empty list.
+/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985) — trusted.
+/// * `MainThreadCommands.$getCommands` (L139) — empty list.
 pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
     match (proxy, method) {
         (Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState") => Reply::Json(json!({ "isFocused": true, "isActive": true })),

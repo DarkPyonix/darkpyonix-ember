@@ -83,12 +83,25 @@ pub type AccountRouter =
 /// to use the A2A tool). Contributions are joined with blank lines.
 pub type InstructionsHook = Arc<dyn Fn(&SessionRecord) -> Option<String> + Send + Sync>;
 
+/// Adjusts the whole start request of an agent process (computer switching: remote executor,
+/// shell shim — `crate::computers`). Runs after the start and instructions hooks; an error fails
+/// the start rather than silently running the agent somewhere else.
+pub type StartConfigHook =
+    Arc<dyn Fn(&SessionRecord, &mut StartRequest) -> anyhow::Result<()> + Send + Sync>;
+
+/// Called with a session id before a message is delivered to its agent. A returned note is
+/// recorded as [`AgentEvent::SystemNotice`] and put in front of that one message (FR-S7 v0).
+/// The hook owns the note's lifetime: return it once.
+pub type MessageHook = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
     event_hooks: std::sync::Mutex<Vec<EventHook>>,
     account_router: std::sync::Mutex<Option<AccountRouter>>,
     instructions_hooks: std::sync::Mutex<Vec<InstructionsHook>>,
+    start_config_hooks: std::sync::Mutex<Vec<StartConfigHook>>,
+    message_hooks: std::sync::Mutex<Vec<MessageHook>>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
@@ -107,6 +120,8 @@ impl Sessions {
             event_hooks: std::sync::Mutex::new(Vec::new()),
             account_router: std::sync::Mutex::new(None),
             instructions_hooks: std::sync::Mutex::new(Vec::new()),
+            start_config_hooks: std::sync::Mutex::new(Vec::new()),
+            message_hooks: std::sync::Mutex::new(Vec::new()),
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
@@ -133,6 +148,16 @@ impl Sessions {
     /// Register a hook that adds instructions to every agent process this server starts.
     pub fn add_instructions_hook(&self, hook: InstructionsHook) {
         self.instructions_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Register a hook that may change any part of the start request.
+    pub fn add_start_config_hook(&self, hook: StartConfigHook) {
+        self.start_config_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Register a hook that may put a one-time note in front of the next message.
+    pub fn add_message_hook(&self, hook: MessageHook) {
+        self.message_hooks.lock().unwrap().push(hook);
     }
 
     pub fn store(&self) -> &Store {
@@ -221,19 +246,20 @@ impl Sessions {
             self.start_hooks.lock().unwrap().iter().flat_map(|h| h(&rec)).collect();
         let instructions: Vec<String> =
             self.instructions_hooks.lock().unwrap().iter().filter_map(|h| h(&rec)).collect();
+        let mut req = StartRequest {
+            cwd: PathBuf::from(&rec.cwd),
+            resume_native_id: rec.native_id.clone(),
+            model: rec.model.clone(),
+            env,
+            instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
+            remote: None,
+        };
+        let config_hooks: Vec<StartConfigHook> = self.start_config_hooks.lock().unwrap().clone();
+        for hook in &config_hooks {
+            hook(&rec, &mut req)?;
+        }
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
-        let run = adapter
-            .start(
-                StartRequest {
-                    cwd: PathBuf::from(&rec.cwd),
-                    resume_native_id: rec.native_id.clone(),
-                    model: rec.model.clone(),
-                    env,
-                    instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
-                },
-                tx.clone(),
-            )
-            .await?;
+        let run = adapter.start(req, tx.clone()).await?;
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let run = LiveRun { run: Arc::new(Mutex::new(run)), events: tx, generation };
         live.insert(id.to_string(), run.clone());
@@ -308,11 +334,25 @@ impl Sessions {
     pub async fn send(self: &Arc<Self>, id: &str, text: &str) -> Result<(), SessionError> {
         self.touch(id);
         let live = self.ensure_live(id).await?;
+        let hooks: Vec<MessageHook> = self.message_hooks.lock().unwrap().clone();
+        let notes: Vec<String> = hooks.iter().filter_map(|h| h(id)).collect();
+        for note in &notes {
+            live.events
+                .send(AgentEvent::SystemNotice { text: note.clone() })
+                .await
+                .map_err(|_| anyhow::anyhow!("agent for session {id} has exited"))?;
+        }
         live.events
             .send(AgentEvent::UserMessage { text: text.to_string() })
             .await
             .map_err(|_| anyhow::anyhow!("agent for session {id} has exited"))?;
-        live.run.lock().await.send(text).await?;
+        // The agent sees the notes first, then the user's words; the store keeps them apart.
+        let agent_text = if notes.is_empty() {
+            text.to_string()
+        } else {
+            format!("{}\n\n{text}", notes.join("\n\n"))
+        };
+        live.run.lock().await.send(&agent_text).await?;
         Ok(())
     }
 

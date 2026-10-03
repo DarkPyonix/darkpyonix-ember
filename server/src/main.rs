@@ -9,6 +9,7 @@ use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::a2a::{A2a, A2aConfig, A2aStore};
 use ember_server::agents::AgentAdapter;
 use ember_server::browser::{agent as browser_agent, BrowserConfig, BrowserManager};
+use ember_server::computers::{self, Computers, Registry};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 
@@ -25,6 +26,8 @@ use ember_server::store::Store;
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
 ///   `EMBER_LISTEN`, with an unspecified address replaced by loopback)
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
+/// - `EMBER_EXEC_BIN`: the `ember-exec` shim for Claude Code on other computers (default: next
+///   to this executable)
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -51,8 +54,16 @@ async fn main() -> anyhow::Result<()> {
         adapters.push(Arc::new(ScriptedAdapter));
     }
     let accounts = Accounts::open(store.clone(), &data_dir)?;
+    // Computers and switching (FR-X1–FR-X3, FR-S7 v0); tables live in the main store.
+    let computer_registry = Registry::new(store.clone());
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
+    let shim = computers::find_shim();
+    if shim.is_none() {
+        tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");
+    }
+    let computers = Computers::with_shim(computer_registry, computers::default_connector(), shim);
+    computers.install(&sessions);
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
@@ -108,8 +119,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("ember server listening on http://{addr}");
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
+    // TODO(computers): "Open IDE" still takes its per-computer targets from
+    // EMBER_IDE_COMPUTERS; derive them from the computers registry (and the session's current
+    // computer) instead of a second, hand-maintained list.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let app = ember_server::api::router(sessions.clone())
+        .merge(computers::api::router(computers, sessions.clone()))
         .merge(ember_server::api::ide::router(sessions, ide))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))

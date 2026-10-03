@@ -31,6 +31,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
+# Project mount, macOS server: loopback NFSv3 server (BSD-3-Clause). See src/computers/mount.rs.
+nfsserve = { version = "0.11", optional = true }
+
+# Project mount, Linux server: FUSE through fusermount3 (MIT; edition 2024, rustc >= 1.85).
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.18", optional = true }
+
+[features]
+# Mount a Claude Code session's project directory from its computer (src/computers/mount.rs).
+# macOS: `mount-nfs`; Linux: `mount-fuse` (or `mount-nfs`, which needs root to mount there).
+mount-nfs = ["dep:nfsserve"]
+mount-fuse = ["dep:fuser"]
 
 [dev-dependencies]
 tempfile = "3"

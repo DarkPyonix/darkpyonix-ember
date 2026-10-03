@@ -9,6 +9,14 @@
 //! | POST | `/v1/fs/read` | [`ReadRequest`] → [`ReadResponse`] |
 //! | POST | `/v1/fs/write` | [`WriteRequest`] → [`WriteResponse`] (412 on precondition) |
 //! | POST | `/v1/fs/list` | [`PathRequest`] → [`ListResponse`] |
+//! | POST | `/v1/fs/lstat` | [`PathRequest`] → [`Stat`] (final symlink not followed) |
+//! | POST | `/v1/fs/readlink` | [`PathRequest`] → [`ReadlinkResponse`] |
+//! | POST | `/v1/fs/symlink` | [`SymlinkRequest`] → [`Stat`] |
+//! | POST | `/v1/fs/mkdir` | [`MkdirRequest`] → [`Stat`] |
+//! | POST | `/v1/fs/remove` | [`RemoveRequest`] → 204 |
+//! | POST | `/v1/fs/rename` | [`RenameRequest`] → 204 |
+//! | POST | `/v1/fs/setattr` | [`SetAttrRequest`] → [`Stat`] (chmod / truncate / utimes) |
+//! | POST | `/v1/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
 //! | POST | `/v1/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/v1/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
 //! | GET (WS) | `/v1/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
@@ -32,7 +40,8 @@
 //! Closing the `/v1/exec` socket kills the command's process group; jobs are unaffected by any
 //! connection. Persistent terminal sessions (`/v1/terms`, [`crate::term`]) are owned by the
 //! daemon: closing an attach socket only detaches. Errors are [`ErrorBody`] with a matching
-//! status code.
+//! status code; file errors also carry the portable `errno` name (409 for `EEXIST` /
+//! `ENOTEMPTY`, 400 for `ENOTDIR` / `EISDIR` / `EINVAL`).
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
 //! API runs over TCP and over the peer-to-peer transport ([`crate::transport`], service
@@ -124,6 +133,14 @@ pub fn router(node: Node) -> Router {
         .route("/v1/fs/read", post(read))
         .route("/v1/fs/write", post(write))
         .route("/v1/fs/list", post(list))
+        .route("/v1/fs/lstat", post(lstat))
+        .route("/v1/fs/readlink", post(readlink))
+        .route("/v1/fs/symlink", post(symlink))
+        .route("/v1/fs/mkdir", post(mkdir))
+        .route("/v1/fs/remove", post(remove))
+        .route("/v1/fs/rename", post(rename))
+        .route("/v1/fs/setattr", post(setattr))
+        .route("/v1/fs/pwrite", post(pwrite))
         .route("/v1/fs/glob", post(glob))
         .route("/v1/fs/grep", post(grep))
         .route("/v1/exec", get(exec_ws))
@@ -174,7 +191,12 @@ struct ApiError(StatusCode, ErrorBody);
 
 impl ApiError {
     fn new(status: StatusCode, code: ErrorCode, msg: impl Into<String>) -> Self {
-        ApiError(status, ErrorBody { code, error: msg.into(), actual_sha256: None })
+        ApiError(status, ErrorBody { code, error: msg.into(), actual_sha256: None, errno: None })
+    }
+
+    fn with_errno(mut self, errno: Option<&str>) -> Self {
+        self.1.errno = errno.map(str::to_string);
+        self
     }
 }
 
@@ -199,12 +221,19 @@ impl From<PolicyError> for ApiError {
 
 impl From<FsError> for ApiError {
     fn from(e: FsError) -> Self {
-        match e {
+        let errno = e.errno();
+        let err = match e {
             FsError::Policy(p) => p.into(),
             FsError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, io.to_string())
             }
-            FsError::Io(io) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, io.to_string()),
+            FsError::Io(io) => match errno {
+                Some("EEXIST" | "ENOTEMPTY") => ApiError::new(StatusCode::CONFLICT, ErrorCode::BadRequest, io.to_string()),
+                Some("ENOTDIR" | "EISDIR" | "EINVAL" | "ENAMETOOLONG" | "ELOOP") => {
+                    ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, io.to_string())
+                }
+                _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, io.to_string()),
+            },
             FsError::BadRequest(m) => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m),
             e @ FsError::Precondition { .. } => {
                 let FsError::Precondition { actual, .. } = &e else { unreachable!() };
@@ -213,7 +242,8 @@ impl From<FsError> for ApiError {
                 err.1.actual_sha256 = actual;
                 err
             }
-        }
+        };
+        err.with_errno(errno)
     }
 }
 
@@ -256,6 +286,53 @@ async fn write(State(n): State<Node>, Json(r): Json<WriteRequest>) -> ApiResult<
 
 async fn list(State(n): State<Node>, Json(r): Json<PathRequest>) -> ApiResult<ListResponse> {
     blocking(move || fs::list(&n.0.policy, &r.path)).await
+}
+
+async fn lstat(State(n): State<Node>, Json(r): Json<PathRequest>) -> ApiResult<Stat> {
+    blocking(move || fs::lstat(&n.0.policy, &r.path)).await
+}
+
+async fn readlink(State(n): State<Node>, Json(r): Json<PathRequest>) -> ApiResult<ReadlinkResponse> {
+    blocking(move || fs::readlink(&n.0.policy, &r.path)).await
+}
+
+// Namespace and attribute changes take the write lock too, so they never interleave with a
+// write's precondition check and rename.
+
+async fn symlink(State(n): State<Node>, Json(r): Json<SymlinkRequest>) -> ApiResult<Stat> {
+    let _guard = n.0.write_lock.lock().await;
+    let n2 = n.clone();
+    blocking(move || fs::symlink(&n2.0.policy, &r)).await
+}
+
+async fn mkdir(State(n): State<Node>, Json(r): Json<MkdirRequest>) -> ApiResult<Stat> {
+    let _guard = n.0.write_lock.lock().await;
+    let n2 = n.clone();
+    blocking(move || fs::mkdir(&n2.0.policy, &r)).await
+}
+
+async fn remove(State(n): State<Node>, Json(r): Json<RemoveRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    let n2 = n.clone();
+    blocking(move || fs::remove(&n2.0.policy, &r)).await.map(|_| StatusCode::NO_CONTENT)
+}
+
+async fn rename(State(n): State<Node>, Json(r): Json<RenameRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    let n2 = n.clone();
+    blocking(move || fs::rename(&n2.0.policy, &r)).await.map(|_| StatusCode::NO_CONTENT)
+}
+
+async fn setattr(State(n): State<Node>, Json(r): Json<SetAttrRequest>) -> ApiResult<Stat> {
+    let _guard = n.0.write_lock.lock().await;
+    let n2 = n.clone();
+    blocking(move || fs::setattr(&n2.0.policy, &r)).await
+}
+
+async fn pwrite(State(n): State<Node>, Json(r): Json<PwriteRequest>) -> ApiResult<Stat> {
+    let _guard = n.0.write_lock.lock().await;
+    let n2 = n.clone();
+    blocking(move || fs::pwrite(&n2.0.policy, &r)).await
 }
 
 async fn glob(State(n): State<Node>, Json(r): Json<GlobRequest>) -> ApiResult<GlobResponse> {

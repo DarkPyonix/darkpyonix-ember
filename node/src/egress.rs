@@ -429,6 +429,7 @@ pub async fn ws(State(node): State<Node>, ws: WebSocketUpgrade) -> Response {
             code: ErrorCode::BadRequest,
             error: "egress is disabled on this node (EMBER_NODE_EGRESS)".into(),
             actual_sha256: None,
+            errno: None,
         };
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
     }

@@ -72,6 +72,20 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// The portable errno name of a failed file operation (`ENOENT`, `ENOTEMPTY`, …).
+    pub fn errno(&self) -> Option<&str> {
+        match self {
+            ClientError::Api { body, .. } => body.errno.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// True when the request never got an answer from the daemon (connection refused, reset,
+    /// timed out): the node is unreachable, as opposed to having refused the operation.
+    pub fn is_transport(&self) -> bool {
+        matches!(self, ClientError::Http(_) | ClientError::WebSocket(_))
+    }
+
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
             ClientError::Api { body, .. } => Some(body.code),
@@ -141,6 +155,20 @@ impl NodeClient {
             return Err(ClientError::Url(base));
         }
         Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into() })
+    }
+
+    /// Like [`NodeClient::new`], but every HTTP request fails after `timeout` (and connecting
+    /// after `min(timeout, 5s)`) instead of waiting forever: for callers that must not hang
+    /// when the node goes away, such as the project mount. WebSockets are not affected.
+    pub fn with_timeout(base: impl Into<String>, token: impl Into<String>, timeout: std::time::Duration) -> Result<Self> {
+        let mut c = Self::new(base, token)?;
+        if let Reach::Http { http, .. } = &mut c.reach {
+            *http = reqwest::Client::builder()
+                .timeout(timeout)
+                .connect_timeout(timeout.min(std::time::Duration::from_secs(5)))
+                .build()?;
+        }
+        Ok(c)
     }
 
     /// A client that reaches the node over the transport: `addr` is the node's identity (plus
@@ -222,6 +250,7 @@ impl NodeClient {
             code: if raw.status == StatusCode::UNAUTHORIZED { ErrorCode::Unauthorized } else { ErrorCode::Internal },
             error: text,
             actual_sha256: None,
+            errno: None,
         });
         ClientError::Api { status: raw.status.as_u16(), body }
     }
@@ -280,7 +309,7 @@ impl NodeClient {
                     .body()
                     .as_deref()
                     .and_then(|b| serde_json::from_slice(b).ok())
-                    .unwrap_or(ErrorBody { code: ErrorCode::Unauthorized, error: format!("upgrade refused: {status}"), actual_sha256: None });
+                    .unwrap_or(ErrorBody { code: ErrorCode::Unauthorized, error: format!("upgrade refused: {status}"), actual_sha256: None, errno: None });
                 Err(ClientError::Api { status, body })
             }
             Err(e) => Err(e.into()),
@@ -331,6 +360,41 @@ impl NodeClient {
         self.post("/v1/fs/list", &PathRequest { path: path.as_ref().into() }).await
     }
 
+    /// Like [`NodeClient::stat`] but a final symbolic link is described, not followed.
+    pub async fn lstat(&self, path: impl AsRef<Path>) -> Result<Stat> {
+        self.post("/v1/fs/lstat", &PathRequest { path: path.as_ref().into() }).await
+    }
+
+    pub async fn readlink(&self, path: impl AsRef<Path>) -> Result<ReadlinkResponse> {
+        self.post("/v1/fs/readlink", &PathRequest { path: path.as_ref().into() }).await
+    }
+
+    pub async fn symlink(&self, path: impl AsRef<Path>, target: impl AsRef<Path>) -> Result<Stat> {
+        self.post("/v1/fs/symlink", &SymlinkRequest { path: path.as_ref().into(), target: target.as_ref().into() })
+            .await
+    }
+
+    pub async fn mkdir(&self, req: &MkdirRequest) -> Result<Stat> {
+        self.post("/v1/fs/mkdir", req).await
+    }
+
+    pub async fn remove(&self, path: impl AsRef<Path>, recursive: bool) -> Result<()> {
+        let body = RemoveRequest { path: path.as_ref().into(), recursive };
+        self.no_content(Method::POST, "/v1/fs/remove", Some(Self::json(&body))).await
+    }
+
+    pub async fn rename(&self, req: &RenameRequest) -> Result<()> {
+        self.no_content(Method::POST, "/v1/fs/rename", Some(Self::json(req))).await
+    }
+
+    pub async fn setattr(&self, req: &SetAttrRequest) -> Result<Stat> {
+        self.post("/v1/fs/setattr", req).await
+    }
+
+    pub async fn pwrite(&self, path: impl AsRef<Path>, offset: u64, data: impl Into<Vec<u8>>) -> Result<Stat> {
+        self.post("/v1/fs/pwrite", &PwriteRequest { path: path.as_ref().into(), offset, data: data.into() }).await
+    }
+
     pub async fn glob(&self, req: &GlobRequest) -> Result<GlobResponse> {
         self.post("/v1/fs/glob", req).await
     }
@@ -352,7 +416,7 @@ impl NodeClient {
             }
             Some(ExecEvent::Error { message }) => Err(ClientError::Api {
                 status: 400,
-                body: ErrorBody { code: ErrorCode::BadRequest, error: message, actual_sha256: None },
+                body: ErrorBody { code: ErrorCode::BadRequest, error: message, actual_sha256: None, errno: None },
             }),
             other => Err(ClientError::Protocol(format!("expected started, got {other:?}"))),
         }
@@ -469,7 +533,7 @@ impl NodeClient {
             Some(TermEvent::Attached { client, term }) => Ok(TermAttachment { tx: TermSender { sink }, rx, client, term }),
             Some(TermEvent::Error { message }) => Err(ClientError::Api {
                 status: 404,
-                body: ErrorBody { code: ErrorCode::NotFound, error: message, actual_sha256: None },
+                body: ErrorBody { code: ErrorCode::NotFound, error: message, actual_sha256: None, errno: None },
             }),
             other => Err(ClientError::Protocol(format!("expected attached, got {other:?}"))),
         }

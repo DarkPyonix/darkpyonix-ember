@@ -17,8 +17,10 @@
 //! - **Claude Code**: `CLAUDE_CODE_SHELL_PREFIX` points at the `ember-exec` shim ([`shim`]), so
 //!   the Bash tool runs on the node via `/v1/exec`. The shim is a separate process that speaks
 //!   HTTP, so for a peer-addressed node it is given a loopback bridge in this process
-//!   ([`bridge`]) that carries each TCP connection over one transport stream. **Read, Edit, Write, Glob and Grep stay
-//!   local** until the project mount ([`mount`]) is implemented.
+//!   ([`bridge`]) that carries each TCP connection over one transport stream. Read, Edit, Write,
+//!   Glob and Grep reach the node through the project mount ([`mount`]): the session's cwd is
+//!   mounted here at the same path before the agent starts (when a mount mechanism is enabled —
+//!   `EMBER_MOUNT`; otherwise they stay local).
 //!
 //! Switching (FR-X3) records the new computer, describes it with its `/v1/env`, and releases the
 //! session's agent process; the next message starts (natively resumes) it with the new computer.
@@ -47,7 +49,7 @@ use serde::Serialize;
 
 use crate::agents::{AgentKind, RemoteExec, StartRequest};
 use crate::events::SessionStatus;
-use crate::session::{InstructionsHook, MessageHook, Sessions, StartConfigHook};
+use crate::session::{InstructionsHook, MessageHook, PrepareHook, Sessions, StartConfigHook};
 use crate::store::{now_ms, SessionRecord, Store};
 
 pub mod api;
@@ -530,6 +532,8 @@ pub struct Computers {
     shim: Option<PathBuf>,
     /// Codex exec-server relays, by computer id.
     relays: Mutex<HashMap<String, relay::ExecServerRelay>>,
+    /// Project mounts for Claude Code's file tools, when enabled ([`Computers::enable_mounts`]).
+    mounts: std::sync::OnceLock<(Arc<mount::ProjectMounts>, mount::CtlSocket)>,
     /// The server's transport dialer, for peer-addressed computers (`None`: no transport).
     dialer: Option<Dialer>,
     /// Loopback HTTP bridges to peer-addressed nodes (for the `ember-exec` shim), by computer id.
@@ -560,10 +564,49 @@ impl Computers {
             connector,
             shim,
             relays: Mutex::new(HashMap::new()),
+            mounts: std::sync::OnceLock::new(),
             dialer,
             bridges: Mutex::new(HashMap::new()),
             egress: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Mount Claude Code sessions' project directories from their computers (before
+    /// [`Computers::install`]). Starts the shim's control socket.
+    pub fn enable_mounts(&self, mounts: Arc<mount::ProjectMounts>) -> anyhow::Result<()> {
+        let ctl = mount::CtlSocket::start(Arc::downgrade(&mounts))?;
+        self.mounts.set((mounts, ctl)).map_err(|_| anyhow::anyhow!("project mounts already enabled"))
+    }
+
+    pub fn mounts(&self) -> Option<&Arc<mount::ProjectMounts>> {
+        self.mounts.get().map(|(m, _)| m)
+    }
+
+    /// Unmount every project (server shutdown).
+    pub async fn shutdown(&self) {
+        if let Some(m) = self.mounts() {
+            m.shutdown().await;
+        }
+    }
+
+    /// Mount (or release) the session's project directory for its next agent start: a Claude
+    /// Code session on a node gets its cwd mounted here; on this server it needs none.
+    pub async fn prepare_start(&self, rec: &SessionRecord) -> anyhow::Result<()> {
+        let Some(mounts) = self.mounts() else { return Ok(()) };
+        if rec.agent != AgentKind::ClaudeCode {
+            return Ok(());
+        }
+        let computer = match self.registry.session_computer(&rec.id)? {
+            Some(sc) => self.resolve(&sc.computer_id)?,
+            None => None,
+        };
+        match computer {
+            Some(c) => Ok(mounts.acquire(&rec.id, &c, std::path::Path::new(&rec.cwd)).await?),
+            None => {
+                mounts.release(&rec.id).await;
+                Ok(())
+            }
+        }
     }
 
     /// The transport dialer, if this server has a transport.
@@ -586,10 +629,27 @@ impl Computers {
     /// Register this service's hooks on `sessions`: the environment block as an instructions
     /// hook, the remote executor / shell shim as a start-config hook, and the FR-S7 notice as a
     /// message hook.
-    pub fn install(self: &Arc<Self>, sessions: &Sessions) {
+    pub fn install(self: &Arc<Self>, sessions: &Arc<Sessions>) {
         sessions.add_instructions_hook(self.instructions_hook());
+        sessions.add_prepare_hook(self.prepare_hook());
         sessions.add_start_config_hook(self.start_hook());
         sessions.add_message_hook(self.message_hook());
+        if let Some(mounts) = self.mounts() {
+            // Unmount projects whose sessions' agents are gone (idle release, exit, deletion).
+            let (mounts, sessions) = (Arc::downgrade(mounts), Arc::downgrade(sessions));
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tick.tick().await;
+                    let (Some(m), Some(s)) = (mounts.upgrade(), sessions.upgrade()) else { break };
+                    m.sweep(|id| {
+                        let s = s.clone();
+                        async move { s.is_live(&id).await }
+                    })
+                    .await;
+                }
+            });
+        }
     }
 
     pub fn register(&self, name: &str, url: &str, token: &str) -> Result<Computer, ComputerError> {
@@ -822,6 +882,10 @@ impl Computers {
         self.registry.set_session_computer(session_id, &target_view.id, Some(&env), notice.as_deref())?;
         // The next message starts the agent with the new computer (and natively resumes it).
         sessions.release(session_id).await.map_err(|e| ComputerError::Other(anyhow::anyhow!("{e:#}")))?;
+        // Its agent is stopped, so its old project mount can go (the next start mounts anew).
+        if let Some(m) = self.mounts() {
+            m.release(session_id).await;
+        }
         tracing::info!(session = %session_id, from = %previous_view.id, to = %target_view.id, "switched computer");
         Ok(SwitchOutcome {
             session_id: session_id.to_string(),
@@ -908,7 +972,12 @@ impl Computers {
             return Ok(());
         };
         match rec.agent {
-            AgentKind::ClaudeCode => req.env.extend(self.claude_env(&c, sc.env.as_ref())?),
+            AgentKind::ClaudeCode => {
+                req.env.extend(self.claude_env(&c, sc.env.as_ref())?);
+                if let Some((_, ctl)) = self.mounts.get() {
+                    req.env.push((mount::ENV_CTL.into(), ctl.path.to_string_lossy().into_owned()));
+                }
+            }
             AgentKind::Codex => {
                 req.remote = Some(RemoteExec {
                     environment_id: format!("ember-{}", c.id),
@@ -932,6 +1001,14 @@ impl Computers {
         })
     }
 
+    fn prepare_hook(self: &Arc<Self>) -> PrepareHook {
+        let this = self.clone();
+        Arc::new(move |rec: SessionRecord| {
+            let this = this.clone();
+            Box::pin(async move { this.prepare_start(&rec).await })
+        })
+    }
+
     fn start_hook(self: &Arc<Self>) -> StartConfigHook {
         let this = self.clone();
         Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| this.configure_start(rec, req))
@@ -939,11 +1016,18 @@ impl Computers {
 
     fn message_hook(self: &Arc<Self>) -> MessageHook {
         let this = self.clone();
-        Arc::new(move |session_id: &str| match this.registry.take_notice(session_id) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(session = %session_id, "reading computer notice failed: {e:#}");
-                None
+        Arc::new(move |session_id: &str| {
+            let switched = match this.registry.take_notice(session_id) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(session = %session_id, "reading computer notice failed: {e:#}");
+                    None
+                }
+            };
+            let outage = this.mounts().and_then(|m| m.outage_notice(session_id));
+            match (switched, outage) {
+                (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+                (a, b) => a.or(b),
             }
         })
     }
@@ -1061,6 +1145,60 @@ mod tests {
         assert!(d.contains("user pi, home /home/pi, login shell /bin/bash"), "{d}");
         assert!(d.contains("cargo (cargo 1.90.0)"), "{d}");
         assert!(d.contains("replaces any earlier description"), "{d}");
+    }
+
+    fn record(id: &str, agent: AgentKind, cwd: &std::path::Path) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            project: "acme".into(),
+            agent,
+            cwd: cwd.to_string_lossy().into_owned(),
+            model: None,
+            native_id: None,
+            status: SessionStatus::Idle,
+            title: "t".into(),
+            created_at: 0,
+            updated_at: 0,
+            last_seq: 0,
+            account_id: None,
+            account_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_sessions_on_a_node_get_their_cwd_mounted() {
+        let f = mount::tests::fx(false);
+        let proj = f.base.join("proj");
+        let c = Computers::with_shim(Registry::open_in_memory().unwrap(), default_connector(), Some("/x/ember-exec".into()));
+        c.enable_mounts(f.mounts.clone()).unwrap();
+        let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+        for s in ["claude", "codex"] {
+            c.registry().set_session_computer(s, &pi.id, Some(&sample_env()), None).unwrap();
+        }
+
+        // Codex needs no mount (its tools run on the node through the exec-server).
+        c.prepare_start(&record("codex", AgentKind::Codex, &proj)).await.unwrap();
+        assert!(f.mounted.lock().unwrap().is_empty());
+
+        let claude = record("claude", AgentKind::ClaudeCode, &proj);
+        c.prepare_start(&claude).await.unwrap();
+        assert_eq!(*f.mounted.lock().unwrap(), std::slice::from_ref(&proj));
+        let mut req = StartRequest { cwd: proj.clone(), ..Default::default() };
+        c.configure_start(&claude, &mut req).unwrap();
+        let ctl = req.env.iter().find(|(k, _)| k == mount::ENV_CTL).map(|(_, v)| v.clone()).unwrap();
+        assert!(ctl.ends_with("ctl.sock"), "{ctl}");
+
+        // Back on this server: the mount is released.
+        c.registry().set_session_computer("claude", LOCAL, None, None).unwrap();
+        c.prepare_start(&claude).await.unwrap();
+        assert!(f.mounted.lock().unwrap().is_empty());
+        assert_eq!(f.unmounts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A missing project on the node fails the start with a clear error.
+        c.registry().set_session_computer("claude", &pi.id, Some(&sample_env()), None).unwrap();
+        let e = c.prepare_start(&record("claude", AgentKind::ClaudeCode, &f.base.join("gone"))).await.unwrap_err();
+        assert!(e.to_string().contains("does not exist on computer"), "{e:#}");
+        c.shutdown().await;
     }
 
     #[test]

@@ -43,9 +43,19 @@ throwaway work, probes and downloads in `.scratch/<name>/` (both ignored). Not `
 directory beside this checkout, not the home directory. Large files in a worktree are linked, not
 copied. If a task seems to need a path outside the repository, ask first.
 
+**The repository root is fixed.** No new folder or file at the root without the user's approval:
+propose what to add and why, and wait. Approved root entries (2026-10-03): `.github/`,
+`.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`, `README.md`, `app/`,
+`bridge/`, `client/`, `docs/`, `editor/`, `editor-conn/`, `extensions/`, `hub/`, `node/`, `ose/`,
+`proxy/`, `scripts/`, `server/`, `testdata/`, `transport/`, plus the ignored `.claude/` and
+`.scratch/`. A regrouping of these is proposed in #60 and waits for approval.
+
 ## Git
 
-- Branches: `develop` (integration, where work lands) and `main` (protected, default).
+- Branches: `develop` (integration, where work lands) and `main` (protected, default). Only
+  `main`, `develop` and `release` live on the remote permanently.
+- Work branches are named `feat/<topic>` (existing `feature/*` branches keep their names until
+  merged).
 - **Push right after every commit.** Never push to `main` directly. Force-push only with the
   user's confirmation.
 - New features: search issues first
@@ -54,8 +64,11 @@ copied. If a task seems to need a path outside the repository, ask first.
   open a PR into `develop` with `Closes #<N>`. Merge only through that PR. `develop` is not the
   default branch, so close the issue by hand after merging:
   `gh issue close <N> --comment "Landed via #<PR>"`.
-- **Merge gate:** wait for every check to finish and merge only if none failed. Delete a branch only
-  after `gh pr view --json state` says `MERGED`.
+- **Merge gate:** wait for every check to finish and merge only if none failed. Merge with
+  `gh pr merge --delete-branch`, then remove the local branch and its worktree. Delete a branch
+  only after `gh pr view --json state` says `MERGED`.
+- Remove merged branches regularly. A branch whose history must be kept gets an
+  `archive/<name>` tag first, then is deleted.
 - Doc-only changes may be committed on `develop` and pushed directly.
 - Subject format `<Type>: <imperative summary>` with `Feat`, `Fix`, `Refactor`, `Docs`, `Test`,
   `Chore`. Reference SPEC IDs when relevant.

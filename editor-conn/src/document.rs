@@ -133,6 +133,15 @@ impl DocumentMirror {
         }
     }
 
+    /// Start the mirror at `version` instead of 1. Used when a document is re-announced to the
+    /// extension host (remove + add) after its content was replaced wholesale: the new
+    /// `IModelAddedData.versionId` continues past the old one, so the versions an extension sees
+    /// for one URI never go backwards (`ember-editor` `OpenDocument::reset`).
+    pub fn with_version(mut self, version: u64) -> Self {
+        self.version = version;
+        self
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -547,6 +556,18 @@ mod tests {
         }));
         assert_eq!(delta["newActiveEditor"], "e1");
         assert!(b.get(&uri).is_some());
+    }
+
+    #[test]
+    fn with_version_sets_the_added_version_and_the_floor_for_changes() {
+        let mut d = doc("x").with_version(7);
+        assert_eq!(d.added_data().version_id, 7);
+        let stale = EditorChange { edits: vec![], version: Some(7), ..Default::default() };
+        assert!(d.apply(stale).is_err());
+        let ev = d
+            .apply(EditorChange { edits: vec![TextEdit { range: r(1, 2, 1, 2), text: "y".into() }], ..Default::default() })
+            .unwrap();
+        assert_eq!(ev.version_id, 8);
     }
 
     #[test]

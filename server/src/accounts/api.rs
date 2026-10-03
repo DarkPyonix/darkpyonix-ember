@@ -8,7 +8,8 @@
 //! - `POST   /api/v1/accounts/{id}/check`      run the agent's own login status command
 //! - `POST   /api/v1/accounts/{id}/clear-limit`
 //! - `GET    /api/v1/accounts/route?agent=…`   what the router would choose now, and why
-//! - `GET    /api/v1/usage[?days=7]`           tokens per account per UTC day
+//! - `GET    /api/v1/usage[?days=7]`           tokens per account per UTC day (ChatGPT accounts
+//!   from `crate::chatgpt` included, by their account id)
 //! - `GET    /api/v1/providers`, `POST /api/v1/providers` `{label, kind, base_url?, api_key}`,
 //!   `DELETE /api/v1/providers/{id}` — responses never include the key.
 //!

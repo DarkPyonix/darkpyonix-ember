@@ -1,5 +1,9 @@
 //! Several accounts per agent, usage and routing (SPEC FR-U1, FR-U2, FR-U3, FR-U5).
 //!
+//! ChatGPT accounts (Sign in with ChatGPT, FR-U4) are a separate kind in [`crate::chatgpt`]: they
+//! hold OAuth tokens rather than an agent CLI's config directory, are never routed to agent
+//! sessions, and their per-day usage is merged into [`Accounts::usage_since`].
+//!
 //! # Isolation without patching the agent (E2, FR-U1)
 //!
 //! Each account is a directory under `<data dir>/accounts/<id>` (mode `0700`) that the agent CLI
@@ -447,7 +451,13 @@ impl Accounts {
                 reports: r.get::<_, i64>(4)? as u64,
             })
         })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut out: Vec<DailyUsage> = rows.collect::<Result<_, _>>()?;
+        drop(stmt);
+        drop(conn);
+        // ChatGPT plan usage (FR-U4) sits next to the agent accounts, keyed by its account id.
+        out.extend(crate::chatgpt::store::usage_since(&self.store, since_ms)?);
+        out.sort_by(|a, b| (&a.day, &a.account_id).cmp(&(&b.day, &b.account_id)));
+        Ok(out)
     }
 
     /// Total tokens per account today (UTC).

@@ -28,6 +28,10 @@ use ember_server::store::Store;
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
 /// - `EMBER_EXEC_BIN`: the `ember-exec` shim for Claude Code on other computers (default: next
 ///   to this executable)
+/// - `EMBER_HOSTED=1`: this server is a hosted service, not self-hosted; Sign in with ChatGPT
+///   (FR-U4) is then off, since OpenAI allows plan usage only for locally hosted apps
+/// - `EMBER_CHATGPT_REDIRECT_PORT`: port of the `http://127.0.0.1:<port>/auth/callback` sign-in
+///   redirect (default: the `EMBER_LISTEN` port)
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -115,6 +119,21 @@ async fn main() -> anyhow::Result<()> {
         browser_agent::BrowserMcp::ChromeDevtools,
     ));
 
+    // Sign in with ChatGPT (FR-U4): self-hosted only; the loopback callback is served below.
+    let chatgpt = ember_server::chatgpt::ChatGpt::new(
+        accounts.clone(),
+        ember_server::chatgpt::ChatGptConfig::from_env(addr.port()),
+    )?;
+    if !chatgpt.config().enabled {
+        tracing::info!("Sign in with ChatGPT is off: EMBER_HOSTED is set");
+    } else if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
+        tracing::warn!(
+            "ChatGPT sign-in redirects to {}, but the server listens on {addr}; paste the final \
+             URL into POST /api/v1/chatgpt/signin/complete",
+            chatgpt.config().redirect_uri()
+        );
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ember server listening on http://{addr}");
     // After binding, so agents woken by queued messages can reach the API.
@@ -128,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::api::ide::router(sessions, ide))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
+        .merge(ember_server::chatgpt::api::router(chatgpt))
         .merge(ember_server::browser::api::router(browsers.clone()));
     axum::serve(listener, app)
         .with_graceful_shutdown(async {

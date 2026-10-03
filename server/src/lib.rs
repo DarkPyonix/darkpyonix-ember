@@ -7,6 +7,7 @@ pub mod accounts;
 pub mod agents;
 pub mod api;
 pub mod browser;
+pub mod chatgpt;
 pub mod computers;
 pub mod events;
 pub mod history;

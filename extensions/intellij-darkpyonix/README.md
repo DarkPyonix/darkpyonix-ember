@@ -85,3 +85,7 @@ src/test/kotlin/...  JUnit 4 tests for the pure packages
   our save as an outside edit (and sends `doc.reloaded`) needs an end-to-end check.
 - Titles cannot be edited remotely (`CellEdit` has no `title`), so a new cell's title only lives
   in the editor buffer until the kernel re-reads the file.
+
+## License
+
+Apache-2.0, like the rest of this repository (`LICENSE`).

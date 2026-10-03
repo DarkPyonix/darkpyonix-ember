@@ -4,6 +4,7 @@
   "description": "DarkPyonix custom theme for VS Code",
   "version": "0.0.2",
   "publisher": "DarkPyonix",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.102.0"
   },

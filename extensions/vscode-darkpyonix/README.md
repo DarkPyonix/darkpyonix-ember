@@ -71,3 +71,7 @@ npm run package     # → vscode-darkpyonix-<version>.vsix
 
 `test/corpus/darkpyonix_format.py` is a copy of darkpyonix-core `docs/examples/darkpyonix_format.py`
 (FR-F1 reference file); keep it in sync when the format changes.
+
+## License
+
+Apache-2.0, like the rest of this repository (`LICENSE`).

@@ -5,8 +5,8 @@ DarkPyonix custom theme for VS Code.
 Imported from [DarkPyonix/vscode-darkpyonix-theme](https://github.com/DarkPyonix/vscode-darkpyonix-theme)@`5c2dbd78959751dcfefdc7f8570f5f84bb1078ce`
 ("Feat: Establish base theme foundation"). The upstream history (4 commits) stays in that
 repository; the files here were copied unchanged except for this README, `package.json`
-(Dark variant registered, version 0.0.2) and the new Dark theme file. The upstream MIT
-`LICENSE` is kept as is.
+(Dark variant registered, version 0.0.2, `license`) and the new Dark theme file. Like the
+rest of this repository it is licensed under Apache-2.0 (`LICENSE`); the upstream copy was MIT.
 
 ## Themes
 

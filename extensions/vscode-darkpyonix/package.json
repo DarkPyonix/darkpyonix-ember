@@ -4,7 +4,7 @@
   "description": "Open DarkPyonix .pynb/.py notebooks as notebooks: cells per the DarkPyonix format, latest run outputs, live runs and multi-client collaboration through the DarkPyonix manager.",
   "version": "0.1.0",
   "publisher": "darkpyonix",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/DarkPyonix/darkpyonix-ember.git",

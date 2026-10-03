@@ -6,6 +6,7 @@ pub mod a2a;
 pub mod accounts;
 pub mod agents;
 pub mod api;
+pub mod browser;
 pub mod events;
 pub mod history;
 pub mod session;

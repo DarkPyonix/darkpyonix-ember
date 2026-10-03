@@ -34,7 +34,8 @@
 //! status code.
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
-//! API can run over TCP today and over another stream transport (e.g. QUIC streams) later.
+//! API runs over TCP and over the peer-to-peer transport ([`crate::transport`], service
+//! `ember-node/1`, peer allow-list in front).
 //! A SOCKS5 egress for the remote browser (FR-R1) is planned as a separate listener next to this
 //! one, not as a route here.
 

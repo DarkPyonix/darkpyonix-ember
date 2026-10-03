@@ -10,6 +10,8 @@ use ember_server::a2a::{A2a, A2aConfig, A2aStore};
 use ember_server::agents::AgentAdapter;
 use ember_server::browser::{agent as browser_agent, BrowserConfig, BrowserManager};
 use ember_server::computers::{self, Computers, Registry};
+use ember_server::devices::{self, Devices};
+use ember_server::transport::{self as server_transport, ServerTransport};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 
@@ -32,6 +34,11 @@ use ember_server::store::Store;
 ///   (FR-U4) is then off, since OpenAI allows plan usage only for locally hosted apps
 /// - `EMBER_CHATGPT_REDIRECT_PORT`: port of the `http://127.0.0.1:<port>/auth/callback` sign-in
 ///   redirect (default: the `EMBER_LISTEN` port)
+/// - `EMBER_TRANSPORT=1`: bind the peer-to-peer transport (key in `<data dir>/transport.key`;
+///   peer id and address printed at start). Computers can then be registered by peer, and the
+///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
+///   `/api/v1/devices`, managed on the TCP listener only)
+/// - `EMBER_RELAY_URL`: relay server(s) for the transport
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -58,6 +65,20 @@ async fn main() -> anyhow::Result<()> {
         adapters.push(Arc::new(ScriptedAdapter));
     }
     let accounts = Accounts::open(store.clone(), &data_dir)?;
+    // Devices allowed over the transport (FR-N3); the table feeds the transport's gate.
+    let devices = Devices::open(store.clone())?;
+    // The peer-to-peer transport (FR-N1), opt-in.
+    let net = if server_transport::enabled_from_env() {
+        let t = server_transport::bind(&data_dir).await?;
+        t.wait_online(std::time::Duration::from_secs(5)).await;
+        // Printed (not only logged): the peer id goes into each node's allowed peers.
+        println!("ember server peer id: {}", t.peer_id());
+        println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
+        Some(ServerTransport::new(t))
+    } else {
+        None
+    };
+    let dialer = net.as_ref().map(|n| n.dialer.clone());
     // Computers and switching (FR-X1–FR-X3, FR-S7 v0); tables live in the main store.
     let computer_registry = Registry::new(store.clone());
     let sessions = Sessions::new(store, adapters);
@@ -66,7 +87,12 @@ async fn main() -> anyhow::Result<()> {
     if shim.is_none() {
         tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");
     }
-    let computers = Computers::with_shim(computer_registry, computers::default_connector(), shim);
+    let computers = Computers::with_transport(
+        computer_registry,
+        computers::connector(dialer.clone()),
+        shim,
+        dialer,
+    );
     computers.install(&sessions);
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
@@ -149,11 +175,37 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
         .merge(ember_server::browser::api::router(browsers.clone()));
-    axum::serve(listener, app)
+    // Over the transport: the same API to allowed devices, without device management.
+    let transport_task = match &net {
+        Some(n) => {
+            let serve = server_transport::serve(&n.transport, app.clone(), devices.gate().clone())?;
+            tracing::info!(
+                peer = %n.transport.peer_id(),
+                service = server_transport::SERVER_SERVICE,
+                devices = devices.list()?.len(),
+                "ember server serving over the transport"
+            );
+            Some(tokio::spawn(async move {
+                if let Err(e) = serve.await {
+                    tracing::error!("transport listener failed: {e}");
+                }
+            }))
+        }
+        None => None,
+    };
+    // Device management is local only (TCP).
+    let local_app = app.merge(devices::api::router(devices.clone()));
+    axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    if let Some(task) = transport_task {
+        task.abort();
+    }
+    if let Some(n) = &net {
+        n.transport.close().await;
+    }
     // Close browsers gracefully so their profiles (cookies, storage) are flushed (FR-R2).
     browsers.shutdown().await;
     Ok(())

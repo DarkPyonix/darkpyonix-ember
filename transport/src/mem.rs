@@ -14,7 +14,8 @@
 //! # });
 //! ```
 //!
-//! Streams are `tokio::io::duplex` pipes; there is no latency or loss. Path state starts as
+//! Streams are `tokio::io::duplex` pipes; there is no latency or loss. Closing or dropping a
+//! connection ends its open streams. Path state starts as
 //! `Direct { rtt: 0 }` and can be driven with [`MemNetwork::set_path`] to test path-change
 //! handling.
 
@@ -234,7 +235,19 @@ impl ConnectionBackend for MemConn {
         if let Some(r) = self.closed_reason() {
             return Err(TransportError::Closed(r));
         }
-        let (near, far) = tokio::io::duplex(PIPE_BUFFER);
+        // Two pipes joined by a pump that stops when the connection closes, so closing (or
+        // dropping) a connection ends its streams, as with QUIC: both ends then read EOF and
+        // writes fail.
+        let (near, near_inner) = tokio::io::duplex(PIPE_BUFFER);
+        let (far_inner, far) = tokio::io::duplex(PIPE_BUFFER);
+        let mut close = self.close.subscribe();
+        tokio::spawn(async move {
+            let (mut a, mut b) = (near_inner, far_inner);
+            tokio::select! {
+                _ = tokio::io::copy_bidirectional(&mut a, &mut b) => {}
+                _ = close.wait_for(Option::is_some) => {}
+            }
+        });
         let (near_r, near_w) = tokio::io::split(near);
         let (far_r, far_w) = tokio::io::split(far);
         self.outgoing

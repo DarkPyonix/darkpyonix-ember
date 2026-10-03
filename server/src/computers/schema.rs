@@ -1,4 +1,4 @@
-//! Schema for computers and each session's current computer (store migration 3).
+//! Schema for computers and each session's current computer (store migrations 3 and 5).
 
 /// Migration from `user_version` 2 to 3. See [`crate::store`] for the mechanism.
 ///
@@ -25,4 +25,11 @@ CREATE TABLE IF NOT EXISTS session_computer (
     notice      TEXT,
     switched_at INTEGER NOT NULL
 );
+";
+
+/// Migration from `user_version` 4 to 5: a computer may be addressed by transport peer
+/// (`FR-N1`) instead of an HTTP URL. `peer_json` is an `ember_transport::PeerAddr` as JSON;
+/// such rows have an empty `url`.
+pub const PEER_MIGRATION: &str = "
+ALTER TABLE computers ADD COLUMN peer_json TEXT;
 ";

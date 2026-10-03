@@ -7,6 +7,8 @@
 //! - A [`Connection`] carries any number of bidirectional streams ([`BiStream`], plain tokio
 //!   `AsyncRead + AsyncWrite`) and reports its [`PathState`] (direct or relayed).
 //! - [`http`] serves an axum router over accepted streams and dials HTTP over them.
+//! - [`PeerGate`] admits only allowed peers and closes a revoked peer's connections (`FR-N3`);
+//!   [`Dialer`] caches one outgoing connection per (peer, service) for many streams.
 //!
 //! Backends: `iroh` (feature `iroh`, default; [`Transport::bind`]) and an always-available
 //! in-memory fake ([`mem::MemNetwork`]) for other crates' tests. **No backend type appears in
@@ -14,6 +16,8 @@
 
 mod addr;
 mod config;
+mod dialer;
+pub mod gate;
 mod key;
 pub mod mem;
 
@@ -37,6 +41,8 @@ use tokio::sync::{mpsc, watch};
 
 pub use addr::{AddressDirectory, MemoryDirectory, PeerAddr};
 pub use config::{RelayConfig, TransportConfig, RELAY_URL_ENV};
+pub use dialer::Dialer;
+pub use gate::PeerGate;
 pub use key::{PeerId, SecretKey};
 
 /// Errors from the transport. Backend errors are carried as text so no backend type leaks.

@@ -11,17 +11,23 @@ alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
+# The peer-to-peer transport (SPEC FR-N1, FR-N5): serve the API and dial nodes by peer id.
+ember-transport = { path = "../transport" }
 futures = "0.3"
 globset = "0.4"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 hex = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
 ignore = "0.4"
 libc = "0.2"
 portable-pty = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_urlencoded = "0.7"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

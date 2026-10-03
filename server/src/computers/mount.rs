@@ -176,7 +176,8 @@ pub async fn run_cmd(c: &cmd::Cmd) -> anyhow::Result<()> {
     }
 }
 
-/// Unmount gently, then by force.
+/// Unmount gently, then by force. Only the NFS and FUSE mounters call it.
+#[cfg_attr(not(any(feature = "mount-nfs", feature = "mount-fuse")), allow(dead_code))]
 async fn unmount_at(os: Os, fuse: bool, at: &Path) -> anyhow::Result<()> {
     match run_cmd(&cmd::unmount(os, fuse, at, false)).await {
         Ok(()) => Ok(()),
@@ -774,7 +775,7 @@ pub(crate) mod tests {
         let proj = f.base.join("proj");
         let pi = computer("pi");
         f.mounts.acquire("s1", &pi, &proj).await.unwrap();
-        assert_eq!(*f.mounted.lock().unwrap(), [proj.clone()]);
+        assert_eq!(*f.mounted.lock().unwrap(), std::slice::from_ref(&proj));
         assert!(proj.is_dir(), "the mount point was created");
         assert!(f.mounts.covers(&proj.join("src/main.rs")));
         // A second session in the same project (or below it) shares the mount.

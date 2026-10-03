@@ -1182,7 +1182,7 @@ mod tests {
 
         let claude = record("claude", AgentKind::ClaudeCode, &proj);
         c.prepare_start(&claude).await.unwrap();
-        assert_eq!(*f.mounted.lock().unwrap(), [proj.clone()]);
+        assert_eq!(*f.mounted.lock().unwrap(), std::slice::from_ref(&proj));
         let mut req = StartRequest { cwd: proj.clone(), ..Default::default() };
         c.configure_start(&claude, &mut req).unwrap();
         let ctl = req.env.iter().find(|(k, _)| k == mount::ENV_CTL).map(|(_, v)| v.clone()).unwrap();

@@ -21,6 +21,8 @@ use ember_server::store::Store;
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
+/// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
+///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
 /// - `EMBER_IDE_COMPUTERS`, `EMBER_IDE_URL`, `EMBER_PUBLIC_URL`: "Open IDE" targets per
 ///   computer, until ember node reports them (see `api::ide::IdeConfig`)
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
@@ -60,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
     let accounts = Accounts::open(store.clone(), &data_dir)?;
     // Computers and switching (FR-X1–FR-X3, FR-S7 v0); tables live in the main store.
     let computer_registry = Registry::new(store.clone());
+    let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     let shim = computers::find_shim();
@@ -109,15 +112,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Remote browser (SPEC §R). Agents run on this machine, so they reach the CDP relay on loopback.
-    let browsers = BrowserManager::new(BrowserConfig::from_env(&data_dir));
+    // Each project's egress choice is persisted; a computer egress goes through that computer's
+    // node via a loopback SOCKS5 listener (FR-R1).
+    let browsers = BrowserManager::with_egress(
+        BrowserConfig::from_env(&data_dir),
+        Some(browser_egress_store),
+        Some(computers.clone() as Arc<dyn ember_server::browser::EgressResolver>),
+    );
     match &browsers.config().chrome {
         Some(p) => tracing::info!("remote browser: {}", p.display()),
         None => tracing::warn!("remote browser unavailable: no Chrome/Chromium found (EMBER_CHROME_BIN)"),
     }
-    sessions.add_start_hook(browser_agent::start_hook(
-        format!("http://127.0.0.1:{}", addr.port()),
-        browser_agent::BrowserMcp::ChromeDevtools,
-    ));
+    match browser_agent::from_env() {
+        Some((mcp, runner)) => {
+            tracing::info!("agents get the project browser via {mcp:?} MCP ({runner:?})");
+            sessions.add_start_config_hook(browser_agent::start_config_hook(
+                format!("http://127.0.0.1:{}", addr.port()),
+                mcp,
+                runner,
+            ));
+        }
+        None => tracing::info!("agents get no browser MCP server (EMBER_BROWSER_MCP is off)"),
+    }
 
     // Sign in with ChatGPT (FR-U4): self-hosted only; the loopback callback is served below.
     let chatgpt = ember_server::chatgpt::ChatGpt::new(
@@ -143,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     // computer) instead of a second, hand-maintained list.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let app = ember_server::api::router(sessions.clone())
-        .merge(computers::api::router(computers, sessions.clone()))
+        .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(ember_server::api::ide::router(sessions, ide))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))

@@ -10,6 +10,11 @@ use ember_node::term::pty;
 ///   `$HOME/.ember/node`)
 /// - `EMBER_NODE_KEEP_PTY=0`: do not start PTY keepers (terminal sessions end with the daemon)
 /// - `EMBER_NODE_CODEX_BIN`: codex binary for `/v1/exec-server` (default `codex` on `PATH`)
+/// - `EMBER_NODE_EGRESS=off`: refuse `/v1/egress` (the remote browser's SOCKS5 exit, FR-R1)
+/// - `EMBER_NODE_EGRESS_DENY`: denied egress destinations (`private`, `link-local`, `loopback`,
+///   CIDRs; default none)
+/// - `EMBER_NODE_SOCKS_LISTEN`: also serve plain SOCKS5 on this address (loopback clients need no
+///   authentication; others use the token as RFC 1929 password)
 ///
 /// `ember-node __keep-pty …` is the internal PTY keeper (see `ember_node::term::pty`).
 /// `ember-node exec-server` instead becomes `codex exec-server --listen stdio` on this process's
@@ -37,6 +42,11 @@ async fn serve() -> anyhow::Result<()> {
     let state_dir = cfg.state_dir.clone();
     let token = cfg.token.clone();
     let node = Node::new(cfg)?;
+    if let Some(socks) = std::env::var("EMBER_NODE_SOCKS_LISTEN").ok().filter(|s| !s.is_empty()) {
+        let listener = tokio::net::TcpListener::bind(socks.parse::<std::net::SocketAddr>()?).await?;
+        tracing::info!("SOCKS5 egress listening on {}", listener.local_addr()?);
+        tokio::spawn(ember_node::egress::serve_listener(listener, token.clone(), node.egress_policy().clone()));
+    }
     let addr = config::listen_addr()?;
     // Plain TCP for now; the transport is undecided (INTENT.md Q7). `api::serve` takes any
     // `axum::serve::Listener`, so another stream transport plugs in here.

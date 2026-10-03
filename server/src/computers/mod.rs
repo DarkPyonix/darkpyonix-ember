@@ -22,6 +22,11 @@
 //! **replaces** it (FR-S7) rather than appending to it. A session that already ran also gets a one-time notice in front of
 //! its next message: the computer changed and earlier file observations must be re-read
 //! (FR-S7 v0).
+//!
+//! A computer can also be a project browser's network egress (FR-R1): [`Computers`] runs one
+//! loopback SOCKS5 listener per such computer ([`egress`]) that forwards to the node's
+//! `/v1/egress`, and resolves `Egress::Computer` for the browser manager
+//! ([`crate::browser::EgressResolver`]).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,6 +45,7 @@ use crate::session::{InstructionsHook, MessageHook, Sessions, StartConfigHook};
 use crate::store::{now_ms, SessionRecord, Store};
 
 pub mod api;
+pub mod egress;
 pub mod mount;
 pub mod relay;
 pub mod schema;
@@ -129,6 +135,8 @@ pub enum ComputerError {
     Unreachable(String, String),
     #[error("computer {0} is the current computer of {1} session(s)")]
     InUse(String, usize),
+    #[error("computer {0} is the browser egress of project(s) {1:?}; change their egress first")]
+    EgressInUse(String, Vec<String>),
     #[error("{0}")]
     BadRequest(String),
     #[error(transparent)]
@@ -214,6 +222,13 @@ impl Registry {
         if users > 0 {
             return Err(ComputerError::InUse(id.to_string(), users as usize));
         }
+        drop(conn);
+        // Removing it would make those browsers fail to start (they never fall back to direct).
+        let projects = crate::browser::egress::projects_using_computer(&self.store, id)?;
+        if !projects.is_empty() {
+            return Err(ComputerError::EgressInUse(id.to_string(), projects));
+        }
+        let conn = self.store.conn();
         Ok(conn.execute("DELETE FROM computers WHERE id = ?1", params![id])? > 0)
     }
 
@@ -445,6 +460,8 @@ pub struct Computers {
     shim: Option<PathBuf>,
     /// Codex exec-server relays, by computer id.
     relays: Mutex<HashMap<String, relay::ExecServerRelay>>,
+    /// Browser egress listeners (loopback SOCKS5 → node `/v1/egress`), by computer id.
+    egress: Mutex<HashMap<String, egress::EgressListener>>,
 }
 
 impl Computers {
@@ -453,7 +470,13 @@ impl Computers {
     }
 
     pub fn with_shim(registry: Registry, connector: Connector, shim: Option<PathBuf>) -> Arc<Computers> {
-        Arc::new(Computers { registry, connector, shim, relays: Mutex::new(HashMap::new()) })
+        Arc::new(Computers {
+            registry,
+            connector,
+            shim,
+            relays: Mutex::new(HashMap::new()),
+            egress: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn registry(&self) -> &Registry {
@@ -490,7 +513,27 @@ impl Computers {
             return Err(ComputerError::NotFound(id.to_string()));
         }
         self.relays.lock().unwrap().remove(id);
+        self.egress.lock().unwrap().remove(id);
         Ok(())
+    }
+
+    /// The proxy URL through which a browser egresses from computer `id` (FR-R1): `None` for
+    /// [`LOCAL`] (direct), else `socks5://127.0.0.1:<port>` of this computer's loopback listener,
+    /// started on first use and kept until the computer is removed or the server stops.
+    pub fn egress_proxy(&self, id: &str) -> Result<Option<String>, ComputerError> {
+        let Some(c) = self.resolve(id)? else {
+            return Ok(None);
+        };
+        let mut listeners = self.egress.lock().unwrap();
+        if let Some(l) = listeners.get(&c.id) {
+            return Ok(Some(l.proxy_url()));
+        }
+        let node = NodeClient::new(&c.url, &c.token).map_err(|e| ComputerError::BadRequest(e.to_string()))?;
+        let l = egress::EgressListener::start(node)?;
+        let url = l.proxy_url();
+        tracing::info!(computer = %c.name, "browser egress listener on {url}");
+        listeners.insert(c.id.clone(), l);
+        Ok(Some(url))
     }
 
     /// Resolve an id ([`LOCAL`] or a registered computer).
@@ -764,6 +807,12 @@ impl Computers {
                 None
             }
         })
+    }
+}
+
+impl crate::browser::EgressResolver for Computers {
+    fn proxy_for_computer(&self, computer_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.egress_proxy(computer_id)?)
     }
 }
 

@@ -261,6 +261,124 @@ impl NodeClient {
     pub async fn events(&self, after: u64) -> Result<EventStream> {
         Ok(EventStream { ws: self.websocket(&format!("/v1/events?after={after}")).await? })
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Persistent terminal sessions (`/v1/terms`)
+
+    /// Start a persistent session, or (with `key`) return the running one with that key.
+    pub async fn term_create(&self, req: &TermCreateRequest) -> Result<TermCreateResponse> {
+        self.post("/v1/terms", req).await
+    }
+
+    /// Sessions on this computer, filtered by `q`, oldest first.
+    pub async fn terms(&self, q: &TermListQuery) -> Result<Vec<TermInfo>> {
+        let resp = self.http.get(self.url("/v1/terms")).query(q).bearer_auth(&self.token).send().await?;
+        Self::decode(resp).await
+    }
+
+    pub async fn term(&self, id: &str) -> Result<TermInfo> {
+        self.get(&format!("/v1/terms/{id}")).await
+    }
+
+    /// The session's current screen (escape sequences and plain text), without attaching.
+    pub async fn term_snapshot(&self, id: &str) -> Result<TermSnapshot> {
+        self.get(&format!("/v1/terms/{id}/snapshot")).await
+    }
+
+    /// Take or release control on behalf of an attached client (e.g. from a UI that is not
+    /// the attached process itself).
+    pub async fn term_control(&self, id: &str, client: u64, take: bool) -> Result<()> {
+        self.no_content(
+            self.http.post(self.url(&format!("/v1/terms/{id}/control"))).json(&TermControlRequest { client, take }),
+        )
+        .await
+    }
+
+    /// Signal a session (default SIGHUP, then SIGKILL after a grace period).
+    pub async fn term_kill(&self, id: &str, signal: Option<i32>) -> Result<()> {
+        self.no_content(self.http.post(self.url(&format!("/v1/terms/{id}/kill"))).json(&KillRequest { signal }))
+            .await
+    }
+
+    /// Forget a finished session.
+    pub async fn term_remove(&self, id: &str) -> Result<()> {
+        self.no_content(self.http.delete(self.url(&format!("/v1/terms/{id}")))).await
+    }
+
+    /// Attach to a session. The first events after [`TermAttachment::client`] are the snapshot
+    /// (if `hello.snapshot`) and then the live stream. Dropping the attachment detaches; it
+    /// never ends the session.
+    pub async fn term_attach(&self, id: &str, hello: &TermHello) -> Result<TermAttachment> {
+        let mut ws = self.websocket(&format!("/v1/terms/{id}/attach")).await?;
+        ws.send(Message::Text(serde_json::to_string(hello).expect("serialisable").into())).await?;
+        let (sink, stream) = ws.split();
+        let mut rx = TermReceiver { stream };
+        match rx.recv().await? {
+            Some(TermEvent::Attached { client, term }) => Ok(TermAttachment { tx: TermSender { sink }, rx, client, term }),
+            Some(TermEvent::Error { message }) => Err(ClientError::Api {
+                status: 404,
+                body: ErrorBody { code: ErrorCode::NotFound, error: message, actual_sha256: None },
+            }),
+            other => Err(ClientError::Protocol(format!("expected attached, got {other:?}"))),
+        }
+    }
+}
+
+/// A live attachment to a persistent terminal session.
+pub struct TermAttachment {
+    pub tx: TermSender,
+    pub rx: TermReceiver,
+    /// This client's id within the session.
+    pub client: u64,
+    /// The session as of the attach.
+    pub term: TermInfo,
+}
+
+impl TermAttachment {
+    pub async fn send(&mut self, input: TermInput) -> Result<()> {
+        self.tx.send(input).await
+    }
+
+    /// Next event; `None` once the daemon closed the stream (after `exit` or `error`).
+    pub async fn recv(&mut self) -> Result<Option<TermEvent>> {
+        self.rx.recv().await
+    }
+
+    pub fn into_split(self) -> (TermSender, TermReceiver) {
+        (self.tx, self.rx)
+    }
+}
+
+pub struct TermSender {
+    sink: SplitSink<Ws, Message>,
+}
+
+impl TermSender {
+    pub async fn send(&mut self, input: TermInput) -> Result<()> {
+        self.sink.send(Message::Text(serde_json::to_string(&input).expect("serialisable").into())).await?;
+        Ok(())
+    }
+
+    pub async fn input(&mut self, data: impl Into<Vec<u8>>) -> Result<()> {
+        self.send(TermInput::Input { data: data.into() }).await
+    }
+
+    /// Detach cleanly (the session keeps running).
+    pub async fn detach(mut self) -> Result<()> {
+        let _ = self.send(TermInput::Detach).await;
+        let _ = self.sink.close().await;
+        Ok(())
+    }
+}
+
+pub struct TermReceiver {
+    stream: SplitStream<Ws>,
+}
+
+impl TermReceiver {
+    pub async fn recv(&mut self) -> Result<Option<TermEvent>> {
+        next_json(&mut self.stream).await
+    }
 }
 
 /// Output of [`NodeClient::run`].

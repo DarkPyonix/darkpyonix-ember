@@ -207,6 +207,7 @@ This way a window close, a VS Code server restart, or a client switching device 
 VS Code and the Ember editor see the same terminal. VS Code's own persistent terminals
 (`terminal.integrated.enablePersistentSessions`) are not relied on, because a server restart or the
 revive timeout ends them.
+Design, attach API and VS Code settings: `docs/design/TERMINALS.md`.
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |

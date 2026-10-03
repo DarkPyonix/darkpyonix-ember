@@ -6,6 +6,8 @@ description = "Ember node: the execution daemon that carries out tool actions on
 license = "Apache-2.0"
 
 [dependencies]
+# VT model of persistent terminals (screen state + scrollback harvest); see src/term/screen.rs.
+alacritty_terminal = { version = "0.26", default-features = false }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"

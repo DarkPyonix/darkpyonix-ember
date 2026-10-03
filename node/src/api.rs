@@ -367,6 +367,17 @@ async fn exec_session(node: Node, mut ws: WebSocket) {
         kill_group(pid, libc::SIGKILL);
     }
     let _ = sink.close().await;
+    // Read whatever the client still sends until it answers the close. Dropping the socket with
+    // unread input makes the kernel reset the connection, and the client then loses the exit
+    // event it has not read yet (seen on Linux CI).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(Ok(msg)) = stream.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 #[derive(Deserialize)]

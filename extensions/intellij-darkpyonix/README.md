@@ -42,7 +42,7 @@ Install the zip with *Settings | Plugins | ⚙ | Install Plugin from Disk…*.
 | Locks: release when the caret leaves the cell or after 60 s idle; cells locked by others are read-only (guarded) and tinted, with "locked by …" | FR-S3 | `NotebookSession`, `CellDecorator` |
 | Conflicts: `409 conflict` → "Keep mine" (re-apply on the new version) / "Take theirs"; `409 locked` → "Take theirs" | FR-S2 | `NotebookSession.onEditRejected` |
 | Presence: focus and cursor (`PUT /presence`, ≤ 10/s), others' focus and line shown at the cell marker and in the tool window | FR-S4 | `NotebookSession.onCaret`, `CellDecorator` |
-| Permissions from `GET /api/v1/manager`: edits only for `editor`/`admin`; `viewer3` runs the buffer via `source` | FR-A3, FR-S8 | `NotebookSession` |
+| Permissions from `GET /api/manager`: edits only for `editor`/`admin`; `viewer3` runs the buffer via `source` | FR-A3, FR-S8 | `NotebookSession` |
 
 Settings: *Settings | Tools | DarkPyonix* (CLI path, spawn arguments, dedicated manager URL
 and token, Python for new kernels, nickname, attach-on-open, queue-when-busy). The client id

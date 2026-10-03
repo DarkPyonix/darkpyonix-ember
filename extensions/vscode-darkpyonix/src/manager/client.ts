@@ -29,7 +29,7 @@ export interface CellEdit {
   metadata?: Record<string, unknown>;
 }
 
-const API = "/api/v1";
+const API = "/api";
 
 export class ManagerClient {
   readonly base: string;

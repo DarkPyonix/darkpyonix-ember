@@ -50,7 +50,7 @@ describe("collaboration (FR-S1..S5)", () => {
     expect(host.resets).toBe(0);
     expect(host.cells.map((c) => c.cellId)).toEqual(fm.cells.map((c) => c.cell_id));
     expect(host.kernelStates).toContain("idle");
-    expect(fm.requests.some((r) => r.path.startsWith("/api/v1/kernels") && r.method === "POST")).toBe(true);
+    expect(fm.requests.some((r) => r.path.startsWith("/api/kernels") && r.method === "POST")).toBe(true);
   });
 
   it("applies another client's edit without echoing it back", async () => {
@@ -266,7 +266,7 @@ describe("runs and outputs (FR-X, FR-R4, FR-S6)", () => {
     expect(await conn.interrupt()).toBe(true);
     await conn.shutdown();
     expect(fm.requests.some((r) => r.path.includes("force=true"))).toBe(false);
-    expect(fm.requests.some((r) => r.method === "DELETE" && r.path === `/api/v1/kernels/${fm.kernelId}`)).toBe(true);
+    expect(fm.requests.some((r) => r.method === "DELETE" && r.path === `/api/kernels/${fm.kernelId}`)).toBe(true);
   });
 
   it("shows the latest outputs and stale marks from the snapshot", async () => {

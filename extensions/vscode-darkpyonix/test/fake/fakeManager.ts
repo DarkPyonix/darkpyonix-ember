@@ -224,16 +224,16 @@ export class FakeManager {
     const auth = req.headers.authorization === `Bearer ${this.token}` || url.searchParams.get("token") === this.token;
     if (!auth) return this.error(res, 401, "unauthorized", "token required");
 
-    const K = `/api/v1/kernels/${this.kernelId}`;
-    if (p === "/api/v1/manager") return this.send(res, 200, { version: "0.1.0-fake", mode: "ephemeral", pid: process.pid, started_at: new Date().toISOString(), permission: "admin" });
-    if (p === "/api/v1/kernels" && method === "GET") return this.send(res, 200, { kernels: this.kernelStarted ? [this.kernel()] : [] });
-    if (p === "/api/v1/kernels" && method === "POST") {
+    const K = `/api/kernels/${this.kernelId}`;
+    if (p === "/api/manager") return this.send(res, 200, { version: "0.1.0-fake", mode: "ephemeral", pid: process.pid, started_at: new Date().toISOString(), permission: "admin" });
+    if (p === "/api/kernels" && method === "GET") return this.send(res, 200, { kernels: this.kernelStarted ? [this.kernel()] : [] });
+    if (p === "/api/kernels" && method === "POST") {
       if (body?.path !== this.path) return this.error(res, 400, "bad_request", "unknown file");
       const existed = this.kernelStarted;
       this.kernelStarted = true;
       return this.send(res, existed ? 200 : 201, this.kernel());
     }
-    if (p === "/api/v1/documents" && method === "GET") {
+    if (p === "/api/documents" && method === "GET") {
       if (url.searchParams.get("path") !== this.path) return this.error(res, 404, "not_found", "no such file");
       return this.send(res, 200, this.snapshot());
     }

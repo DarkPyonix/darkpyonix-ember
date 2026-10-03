@@ -48,7 +48,7 @@ class ManagerClient(
         private fun enc(s: String) = URLEncoder.encode(s, StandardCharsets.UTF_8)
     }
 
-    private val api = baseUrl.trimEnd('/') + "/api/v1"
+    private val api = baseUrl.trimEnd('/') + "/api"
 
     // System
 

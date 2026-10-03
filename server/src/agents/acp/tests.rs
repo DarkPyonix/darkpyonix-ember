@@ -288,6 +288,7 @@ async fn mcp_servers_are_passed_to_session_new() {
         command: "/usr/bin/npx".into(),
         args: vec!["-y".into(), "x".into()],
         startup_timeout_secs: None,
+        env: vec![],
     }];
     let (mut run, mut rx) = start(FakeOptions::default(), s).await.unwrap();
     next(&mut rx).await;

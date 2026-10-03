@@ -490,12 +490,16 @@ fn initialize_params() -> Value {
     })
 }
 
-/// ACP `McpServerStdio` entries (`{name, command, args, env: [{name, value}]}`).
+/// ACP `McpServerStdio` entries (`{name, command, args, env: [{name, value}]}`). The environment
+/// (registry secrets, FR-A7) travels over the agent's stdin, never on a command line.
 fn mcp_servers_param(servers: &[McpServer]) -> Value {
     Value::Array(
         servers
             .iter()
-            .map(|m| json!({ "name": m.name, "command": m.command, "args": m.args, "env": [] }))
+            .map(|m| {
+                let env: Vec<Value> = m.env.iter().map(|(k, v)| json!({ "name": k, "value": v })).collect();
+                json!({ "name": m.name, "command": m.command, "args": m.args, "env": env })
+            })
             .collect(),
     )
 }

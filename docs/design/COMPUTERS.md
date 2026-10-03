@@ -109,7 +109,18 @@ force-unmounted first.
 not targets), `rename` (`overwrite`), `setattr` (chmod, truncate, utimes in one call), `pwrite`
 (in-place positional write). `Stat` and `DirEntry` gained `ino`, `nlink`, `atime_ms`,
 `ctime_ms` / `mode`; error bodies carry a portable `errno` name (`ENOTEMPTY`, …) because errno
-numbers differ between macOS and Linux. `NodeClient::with_timeout` bounds every request.
+numbers differ between macOS and Linux.
+
+**Reaching the node.** The mount opens the node's file API the way `Computers` opens every node
+client (`node_client`, via `Computers::node_fs`, which `main` passes to
+`ProjectMounts::from_env`): over HTTP for a computer registered by URL, over the peer-to-peer
+transport through the server's `Dialer` for one registered by peer address (FR-N1). Either way
+the client carries the mount's 4 s per-request deadline (`NodeClient::with_deadline`; over the
+transport it covers stream open, including a dial when no connection is cached, the HTTP
+handshake, the request and the whole response body; over HTTP reqwest's own timeouts are set
+too). A missed deadline is `ClientError::Timeout` → `ETIMEDOUT`; a failed dial or stream is
+`ClientError::Transport` → `EIO`; both count as an outage. Tests: `server/tests/peer_mount.rs`
+(a real node and a stalled peer on `MemNetwork`).
 
 **Caching and freshness.** Inode numbers are the mount's own (path ↔ id, stable across renames).
 Attributes and listings live 1 s (`EMBER_MOUNT_TTL_MS`); a listing fills the attribute cache.
@@ -146,6 +157,14 @@ whose node is unreachable fails with "computer … is unreachable".
 
 - **Not run end to end.** No real Codex turn through a remote environment and no real Claude
   Bash call through `ember-exec` has been made yet; verify both on the Pi.
+- **Peer-addressed mount: not compiled or run.** `NodeClient::with_deadline`, `Computers::node_fs`
+  and `server/tests/peer_mount.rs` were written without building. Also open: a timed-out
+  request over the transport drops its hyper `SendRequest`, but the background connection task
+  of a peer that never answers may keep its stream open until the transport connection ends
+  **[U]**; and the dialer keeps its cached connection after a timeout, so a silently dead path
+  costs one deadline per request until the transport's own idle timeout closes it and the next
+  request re-dials (forgetting the connection on timeout would also cut healthy concurrent
+  requests). WebSockets (exec, terminal attach) still have no deadline on either reach.
 - **Project mount not compiled or run.** Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
   read from their published sources. To verify on the Mac mini and the Pi: non-root
   `mount_nfs` on a user-owned directory, the exact `mount_nfs` option names (`deadtimeout`,

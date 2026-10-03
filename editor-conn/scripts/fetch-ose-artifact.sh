@@ -17,7 +17,7 @@
 #   OSE_BRANCH      only runs on this branch (default: any)
 #   OSE_RUN_ID      use this run instead of searching
 #   OSE_TARGET      linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64 (default: this machine)
-#   OSE_CACHE_DIR   where to unpack (default: ${XDG_CACHE_HOME:-~/.cache}/ember/ose)
+#   OSE_CACHE_DIR   where to unpack (default: <repo>/.scratch/ose)
 #   OSE_FORCE=1     download again even if this run is already unpacked
 set -euo pipefail
 
@@ -59,7 +59,9 @@ fi
 log "repo $repo, run $run, artifact $artifact"
 
 # ---- download, verify, unpack -------------------------------------------------------------------
-cache="${OSE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ember/ose}"
+# Inside the repository, as AGENTS.md asks: .scratch/ is ignored.
+repo_root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+cache="${OSE_CACHE_DIR:-$repo_root/.scratch/ose}"
 dest="$cache/$run-$OSE_TARGET"
 
 find_server() { find "$dest" -mindepth 3 -maxdepth 3 -path '*/bin/dpx-ose-server' -type f 2>/dev/null | head -n 1; }

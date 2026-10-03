@@ -1,0 +1,47 @@
+[package]
+name = "ember-app"
+version = "0.1.0"
+# dioxus-compose is edition 2024 / Rust 1.85; this crate follows it.
+edition = "2024"
+rust-version = "1.85"
+description = "Ember native client: launcher and conversation UI on dioxus-compose, no webview (SPEC §L, E1)"
+license = "Apache-2.0"
+publish = false
+
+# A library with a one-line binary in front of it, the shape dioxus-compose's samples use:
+# the rlib is what the binary and the tests link, and later the Android/iOS entry points.
+[lib]
+name = "ember_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ember-app"
+path = "src/main.rs"
+
+[dependencies]
+# The UI toolkit. A git dependency rather than a path one so the manifest does not depend on
+# where this checkout sits relative to the dioxus-compose checkout (a worktree is three levels
+# deeper than the main checkout). To build against a local checkout, see README.md ("Local
+# dioxus-compose"). The crate's build script fetches the renderer for its version; set
+# DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", branch = "develop" }
+
+# Everything below the UI: sync engine, state reducer, transcript, cache.
+ember-client = { path = "../client" }
+
+# The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
+# work on the UI thread).
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "fs", "macros"] }
+# Same HTTP stack as ember-client (plain HTTP for now, TLS is undecided: SPEC §N), used for the
+# endpoints ember-client does not wrap yet (accounts, computers, IDE targets).
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+# OS data directory for the cache and preferences.
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

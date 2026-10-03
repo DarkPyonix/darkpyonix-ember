@@ -1,6 +1,7 @@
 # Repository checks. Rust builds and tests run here, not on developer machines.
 #
 #   transport-isolation  scripts/check-transport-isolation.sh (SPEC FR-N5), when present
+#   no-webview           scripts/check-no-webview.sh (SPEC NFR-L2), when present
 #   rust                 cargo test for each crate dir that exists (server/, node/)
 name: checks
 
@@ -30,6 +31,21 @@ jobs:
             bash scripts/check-transport-isolation.sh
           else
             echo "scripts/check-transport-isolation.sh not present on this ref; skipping"
+          fi
+
+  no-webview:
+    name: no webview in the launcher (NFR-L2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run scripts/check-no-webview.sh
+        run: |
+          if [ -f scripts/check-no-webview.sh ]; then
+            bash scripts/check-no-webview.sh
+          else
+            echo "scripts/check-no-webview.sh not present on this ref; skipping"
           fi
 
   rust:

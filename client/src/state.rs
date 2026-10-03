@@ -483,7 +483,7 @@ impl State {
             let projects: Vec<String> = self
                 .project_records
                 .values()
-                .filter(|p| p.computers.iter().any(|id| *id == c.id))
+                .filter(|p| p.computers.contains(&c.id))
                 .map(|p| p.name.clone())
                 .collect();
             if c.projects != projects {

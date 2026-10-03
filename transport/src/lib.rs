@@ -246,6 +246,8 @@ impl ServiceTable {
         }
     }
 
+    /// The registered service names (ALPNs); only the iroh backend needs them.
+    #[cfg(feature = "iroh")]
     pub(crate) fn names(&self) -> Vec<String> {
         self.inner.lock().unwrap().keys().cloned().collect()
     }

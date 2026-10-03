@@ -42,6 +42,11 @@ MACHINE_ID_FILE = BASE_DIR / "_dpx_machine.json"
 # rotation and resize.
 ASSET_VERSION = str(int(time.time()))
 
+# --- Tab detach (SPEC FR-B1–B4) ----------------------------------------------
+# Injects static/detach.js into the workbench and turns VS Code's own drag-to-new-window
+# default off (dpx/vscode/html_rewrite.py). DPX_TAB_DETACH=0 restores stock behaviour.
+TAB_DETACH = os.environ.get("DPX_TAB_DETACH", "1").lower() not in ("0", "false", "no", "off")
+
 # --- The extension gate -----------------------------------------------------
 # The companion VS Code extension sends a heartbeat roughly every 10 seconds; if none
 # arrives within this window, the gate closes.

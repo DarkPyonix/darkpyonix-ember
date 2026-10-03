@@ -4,6 +4,7 @@
 #   editor-conn-pin      crates/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
 #                        Code-OSS tag in build/ose/VERSION (regenerated with gen_rpc_ids.sh), when present
 #   no-webview           scripts/check-no-webview.sh (SPEC NFR-L2), when present
+#   no-em-dash           scripts/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each crates/<crate> dir that exists
 name: checks
 
@@ -34,6 +35,15 @@ jobs:
           else
             echo "scripts/check-transport-isolation.sh not present on this ref; skipping"
           fi
+
+  no-em-dash:
+    name: no em-dash
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run scripts/check-no-em-dash.sh
+        run: bash scripts/check-no-em-dash.sh
 
   no-webview:
     name: no webview in the launcher (NFR-L2)

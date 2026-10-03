@@ -81,6 +81,22 @@ in `web/proxy/`, the OSE build pipeline in `build/ose/`, and shared test vectors
 - **No `Co-Authored-By` trailer and no "Generated with" line** in commits or PR bodies.
 - Do not commit `.DS_Store`, `.scratch/`, build outputs or local databases.
 
+## Writing
+
+The house style is thisisthepy/pythonx-compose `docs/style/writing.md` (develop) [user,
+2026-10-03: "문서 말투는 pythonx-compose 쪽 기준으로"]. In short: present facts in the present
+tense, and anything not built yet with its status and issue number; short declarative sentences;
+a reason beside every rule; English and Korean carry the same content without translating word
+for word; user documents in 합니다체, internal documents in 한다체.
+
+- **No em-dash (U+2014)** in documents or code (comments, doc strings, strings), because the user
+  ruled it out (2026-10-03). Use a comma, a colon or parentheses, or split the sentence. An en-dash
+  in a numeric range is fine. `scripts/check-no-em-dash.sh` enforces it in CI; recorded data
+  (`.json`, `.jsonl`) is exempt.
+- **Install and run examples use uv, ppp (pypackpack) and tcl (toolchain-lite) only**, never
+  `pip install`, because those are the toolchains the user supports (2026-10-03). Rust examples use
+  cargo; Node examples stay as they are.
+
 ## Who to ask
 
 Questions about project information or Ember's direction go to the darkpyonix leader session, not

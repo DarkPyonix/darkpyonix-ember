@@ -1,0 +1,24 @@
+[package]
+name = "ember-editor"
+version = "0.1.0"
+edition = "2021"
+description = "Ember editor core: the session layer between ember-editor-conn and the dioxus-compose code editor widget (M8, SPEC FR-E1..E4)"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "ember_editor"
+path = "src/lib.rs"
+
+[dependencies]
+# The connection layer: handshake, IPC, remote filesystem, extension-host RPC, document mirror.
+ember-editor-conn = { path = "../editor-conn" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "sync", "time", "rt", "macros", "net"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

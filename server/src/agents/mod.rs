@@ -178,7 +178,7 @@ pub struct StartRequest {
 }
 
 /// A stdio MCP server handed to an agent through its documented CLI configuration (E2).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct McpServer {
     /// Name the agent sees (a TOML bare key for Codex: letters, digits, `-`, `_`).
     pub name: String,
@@ -186,6 +186,23 @@ pub struct McpServer {
     pub args: Vec<String>,
     /// Seconds the agent should allow for the server to start (`npx` may download it first).
     pub startup_timeout_secs: Option<u32>,
+    /// Environment for the MCP server process (central registry, FR-A7). Values may be secrets:
+    /// they are never put on a command line — Claude Code reads them from a private (`0600`)
+    /// `--mcp-config` file, Codex from its own process environment through
+    /// `mcp_servers.<name>.env_vars` — and `Debug` prints only the keys.
+    pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServer")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("startup_timeout_secs", &self.startup_timeout_secs)
+            .field("env_keys", &self.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// A remote executor for an agent's tools (`docs/design/INTERCEPTION.md`, option (c)).

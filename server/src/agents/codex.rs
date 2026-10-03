@@ -160,7 +160,9 @@ impl AgentAdapter for CodexAdapter {
         } else {
             req.cwd.clone()
         };
+        let (mcp_env, _) = mcp_process_env(&req);
         let mut child = Command::new(&self.bin)
+            .envs(mcp_env.iter().map(|(k, v)| (k, v)))
             .envs(req.env.iter().map(|(k, v)| (k, v)))
             .args(app_server_args(&req))
             .current_dir(&spawn_dir)
@@ -229,10 +231,14 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
-/// `app-server` plus a `-c` override per MCP server setting.
+/// `app-server` plus a `-c` override per MCP server setting. A server's environment (FR-A7,
+/// possibly secrets) is never written here: only its variable names, as
+/// `mcp_servers.<name>.env_vars=[…]`, which makes Codex forward those variables from its own
+/// process environment ([`mcp_process_env`]) to the MCP server.
 fn app_server_args(req: &StartRequest) -> Vec<String> {
     let mut args = vec!["app-server".to_string()];
-    for m in &req.mcp_servers {
+    let (_, skipped) = mcp_process_env(req);
+    for m in req.mcp_servers.iter().filter(|m| !skipped.contains(&m.name)) {
         let key = format!("mcp_servers.{}", m.name);
         let toml_args = format!("[{}]", m.args.iter().map(|a| toml_str(a)).collect::<Vec<_>>().join(", "));
         args.push("-c".into());
@@ -243,8 +249,38 @@ fn app_server_args(req: &StartRequest) -> Vec<String> {
             args.push("-c".into());
             args.push(format!("{key}.startup_timeout_sec={secs}"));
         }
+        if !m.env.is_empty() {
+            let names = m.env.iter().map(|(k, _)| toml_str(k)).collect::<Vec<_>>().join(", ");
+            args.push("-c".into());
+            args.push(format!("{key}.env_vars=[{names}]"));
+        }
     }
     args
+}
+
+/// The app-server process environment carrying the MCP servers' variables, and the names of
+/// servers left out because one of their variables is already set to a different value by an
+/// earlier server (one process environment cannot hold both).
+fn mcp_process_env(req: &StartRequest) -> (Vec<(String, String)>, Vec<String>) {
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut skipped = Vec::new();
+    for m in &req.mcp_servers {
+        let clash = m.env.iter().any(|(k, v)| env.iter().any(|(k2, v2)| k2 == k && v2 != v));
+        if clash {
+            tracing::warn!(
+                server = %m.name,
+                "MCP server left out for Codex: an environment variable it needs is set to a different value by another MCP server"
+            );
+            skipped.push(m.name.clone());
+            continue;
+        }
+        for (k, v) in &m.env {
+            if !env.iter().any(|(k2, _)| k2 == k) {
+                env.push((k.clone(), v.clone()));
+            }
+        }
+    }
+    (env, skipped)
 }
 
 /// A TOML basic string.
@@ -942,6 +978,7 @@ mod tests {
                 command: "/opt/bin/npx".into(),
                 args: vec!["-y".into(), "@playwright/mcp@latest".into(), "--cdp-endpoint=ws://h/c".into()],
                 startup_timeout_secs: Some(60),
+                env: Vec::new(),
             }],
             ..Default::default()
         };
@@ -957,6 +994,30 @@ mod tests {
                 "mcp_servers.ember-browser.startup_timeout_sec=60",
             ]
         );
+    }
+
+    /// FR-A7: registry environment reaches the MCP server through Codex's process environment
+    /// and `env_vars`; values never appear in the arguments.
+    #[test]
+    fn mcp_env_is_forwarded_by_name_not_value() {
+        let server = |name: &str, val: &str| crate::agents::McpServer {
+            name: name.into(),
+            command: "gh-mcp".into(),
+            args: vec![],
+            startup_timeout_secs: None,
+            env: vec![("GITHUB_TOKEN".into(), val.into()), ("LOG".into(), "1".into())],
+        };
+        let req = StartRequest {
+            mcp_servers: vec![server("github", "ghp_SECRET1"), server("other", "ghp_SECRET2")],
+            ..Default::default()
+        };
+        let args = app_server_args(&req);
+        assert!(args.contains(&"mcp_servers.github.env_vars=[\"GITHUB_TOKEN\", \"LOG\"]".to_string()), "{args:?}");
+        assert!(!args.join(" ").contains("SECRET"), "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("mcp_servers.other.")), "clashing server left out");
+        let (env, skipped) = mcp_process_env(&req);
+        assert_eq!(env, [("GITHUB_TOKEN".to_string(), "ghp_SECRET1".to_string()), ("LOG".into(), "1".into())]);
+        assert_eq!(skipped, ["other".to_string()]);
     }
 
     #[test]

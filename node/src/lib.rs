@@ -18,6 +18,7 @@ pub mod client;
 pub mod config;
 pub mod envinfo;
 pub mod exec;
+pub mod exec_server;
 pub mod fs;
 pub mod jobs;
 pub mod policy;

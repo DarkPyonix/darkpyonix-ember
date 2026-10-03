@@ -121,7 +121,7 @@ impl NodeClient {
         }
     }
 
-    async fn websocket(&self, path: &str) -> Result<Ws> {
+    pub(crate) async fn websocket(&self, path: &str) -> Result<Ws> {
         let url = format!("ws{}{path}", self.base.strip_prefix("http").unwrap_or(&self.base));
         let mut req = url.into_client_request()?;
         let auth = HeaderValue::from_str(&format!("Bearer {}", self.token))

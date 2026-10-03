@@ -140,6 +140,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
         req: StartRequest,
         events: mpsc::Sender<AgentEvent>,
     ) -> anyhow::Result<Box<dyn AgentRun>> {
+        // On another computer, Bash runs there through the `ember-exec` shim, but Read/Edit/
+        // Write/Glob/Grep still use this server's disk until the project mount lands
+        // (`crate::computers::mount`), so the project path must exist here as well.
+        anyhow::ensure!(
+            req.cwd.is_dir(),
+            "working directory {} does not exist on the ember server (on another computer, Claude \
+             Code's file tools still need it here until the project mount is implemented)",
+            req.cwd.display()
+        );
         let mut child = Command::new(&self.bin)
             .envs(req.env.iter().map(|(k, v)| (k, v)))
             .args(Self::args(&req))
@@ -819,6 +828,7 @@ mod tests {
             model: Some("haiku".into()),
             env: Vec::new(),
             instructions: Some("use ember-a2a".into()),
+            remote: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(args.contains(&"--append-system-prompt=use ember-a2a".to_string()));

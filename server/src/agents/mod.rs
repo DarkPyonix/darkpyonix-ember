@@ -61,6 +61,19 @@ pub struct StartRequest {
     /// (e.g. how to use the A2A tool). Claude Code gets them via `--append-system-prompt`, Codex
     /// as the thread's `developerInstructions`.
     pub instructions: Option<String>,
+    /// Run the agent's tools on another computer through Codex's exec-server protocol. Only the
+    /// Codex adapter uses it; other adapters are redirected through `env` (shell shim).
+    pub remote: Option<RemoteExec>,
+}
+
+/// A remote executor for an agent's tools (`docs/design/INTERCEPTION.md`, option (c)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteExec {
+    /// Stable id for the environment inside the agent (one per computer).
+    pub environment_id: String,
+    /// WebSocket URL of an exec-server speaking Codex's protocol (ember server's local relay to
+    /// the node's `/v1/exec-server`).
+    pub exec_server_url: String,
 }
 
 /// Result of probing for an installed agent (FR-A6).

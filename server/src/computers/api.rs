@@ -6,7 +6,7 @@
 //! | GET    | `/api/v1/computers?probe=<bool>` | → `[ComputerStatus]` (`local` first; probe default true) |
 //! | POST   | `/api/v1/computers` | `{name, url, token}` or `{name, peer, token}` → 201 `Computer` (token never returned) |
 //! | GET    | `/api/v1/computers/{id}` | → `ComputerStatus` with `env` |
-//! | DELETE | `/api/v1/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it) |
+//! | DELETE | `/api/v1/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it); its project assignments are removed |
 //! | GET    | `/api/v1/sessions/{id}/computer` | → `CurrentComputer` |
 //! | PUT    | `/api/v1/sessions/{id}/computer` | `{computer_id}` → `SwitchOutcome` (409 mid-turn, 502 unreachable) |
 //!
@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{ComputerError, Computers};
-use crate::session::Sessions;
+use crate::session::{Push, Sessions, PUSH_VERSION};
 
 #[derive(Clone)]
 struct AppState {
@@ -113,7 +113,14 @@ async fn status(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<
 }
 
 async fn remove(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    // Removal unassigns the computer from its projects (FR-L4): tell clients.
+    let assigned = s.sessions.store().projects_of_computer(&id).map_err(ComputerError::Other)?;
     s.computers.remove(&id)?;
+    for name in assigned {
+        if let Ok(Some(project)) = s.sessions.store().project(&name) {
+            s.sessions.publish(Push::ProjectUpdated { v: PUSH_VERSION, project });
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

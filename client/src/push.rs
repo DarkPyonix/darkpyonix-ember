@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::wire::{Push, SessionRecord, SessionStatus, StoredEvent, PUSH_VERSION};
+use crate::wire::{Project, Push, SessionRecord, SessionStatus, StoredEvent, PUSH_VERSION};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum DecodeError {
@@ -39,6 +39,11 @@ struct EventBody {
 }
 
 #[derive(Deserialize)]
+struct ProjectBody {
+    project: Project,
+}
+
+#[derive(Deserialize)]
 struct LaggedBody {
     #[serde(default)]
     missed: u64,
@@ -61,6 +66,14 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
         "event" => {
             let b: EventBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::Event { status: b.status, event: b.event })
+        }
+        "session_updated" => {
+            let b: SessionCreatedBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::SessionUpdated { session: b.session })
+        }
+        "project_updated" => {
+            let b: ProjectBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ProjectUpdated { project: b.project })
         }
         "lagged" => {
             let b: LaggedBody = serde_json::from_value(value).map_err(malformed)?;
@@ -131,6 +144,33 @@ mod tests {
             }
         );
         assert_eq!(decode(r#"{"type":"lagged","v":1,"missed":3}"#).unwrap(), Push::Lagged { missed: 3 });
+    }
+
+    #[test]
+    fn decodes_session_and_project_updates() {
+        let p = decode(
+            r#"{"type":"session_updated","v":1,"session":{"id":"s","project":"p","agent":"codex","cwd":"/w",
+                "status":"finished","title":"Renamed","created_at":1,"updated_at":2,"last_seq":3,
+                "account_id":"a1","account_reason":"default","pinned":true,"archived":false}}"#,
+        )
+        .unwrap();
+        let Push::SessionUpdated { session } = p else { panic!("{p:?}") };
+        assert_eq!((session.title.as_str(), session.pinned, session.account_id.as_deref()), ("Renamed", true, Some("a1")));
+        assert_eq!(
+            decode(r#"{"type":"project_updated","v":1,"project":{"name":"p","created_at":1,"computers":["local"]}}"#).unwrap(),
+            Push::ProjectUpdated {
+                project: Project { name: "p".into(), created_at: 1, computers: vec!["local".into()] }
+            }
+        );
+        // An older server's record (no metadata fields) still decodes.
+        let p = decode(
+            r#"{"type":"session_created","v":1,"session":{"id":"s","project":"p","agent":"codex","cwd":"/w",
+                "status":"idle","title":"t","created_at":1,"updated_at":1,"last_seq":0}}"#,
+        )
+        .unwrap();
+        assert!(matches!(p, Push::SessionCreated { session } if !session.pinned && session.account_id.is_none()));
+        // A type this client does not know is reported, and the push loop skips it.
+        assert_eq!(decode(r#"{"type":"future_thing","v":1}"#), Err(DecodeError::UnknownType("future_thing".into())));
     }
 
     #[test]

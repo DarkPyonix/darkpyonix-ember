@@ -133,7 +133,8 @@ async fn main() -> anyhow::Result<()> {
         dialer,
     );
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
-    if let Some(mounts) = computers::mount::ProjectMounts::from_env() {
+    // Opened like every other node client, so computers registered by peer mount too.
+    if let Some(mounts) = computers::mount::ProjectMounts::from_env(computers.node_fs()) {
         if let Err(e) = computers.enable_mounts(mounts) {
             tracing::warn!("project mount disabled: {e:#}");
         }

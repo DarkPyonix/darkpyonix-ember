@@ -1,6 +1,8 @@
 //! The main-server endpoints `ember-client` does not wrap yet: accounts (FR-U1/U2), computers
 //! and a session's current computer (FR-X3), "Open IDE" targets (FR-L7), and session creation
-//! with an account. Shapes mirror `server/src/{accounts,computers}/api.rs` and
+//! with an account. Projects and computer assignment (FR-L4), session metadata, search and
+//! export (FR-L9, FR-S4) go through `ember_client` (`Client::patch_session`,
+//! `Client::assign_computer`, `Client::search`, `Api::export_session`). Shapes mirror `server/src/{accounts,computers}/api.rs` and
 //! `server/src/api/ide.rs`, decoded tolerantly (unknown fields ignored, optional ones
 //! defaulted) like `ember_client::wire`.
 //!
@@ -123,14 +125,6 @@ impl IdeLaunch {
     }
 }
 
-/// The account a session runs under; `ember_client::wire::SessionRecord` does not carry it yet.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct SessionAccount {
-    pub id: String,
-    #[serde(default)]
-    pub account_id: Option<String>,
-}
-
 /// `POST /api/v1/sessions` body, including the account (FR-U2) that
 /// `ember_client::wire::NewSession` does not have yet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -206,11 +200,6 @@ impl ServerApi {
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
-    /// Every session's account, from the raw session list.
-    pub async fn session_accounts(&self) -> ServerResult<Vec<SessionAccount>> {
-        Ok(Self::check(self.http.get(self.url("/sessions")).send().await?).await?.json().await?)
-    }
-
     pub async fn create_session(&self, body: &CreateSession) -> ServerResult<SessionRecord> {
         let req = self.http.post(self.url("/sessions")).json(body);
         Ok(Self::check(req.send().await?).await?.json().await?)
@@ -264,11 +253,6 @@ mod tests {
         }]))
         .unwrap();
         assert_eq!(a[0].label, "work");
-
-        let sa: Vec<SessionAccount> =
-            serde_json::from_value(json!([{ "id": "s", "project": "p", "account_id": "a1" }, { "id": "t" }])).unwrap();
-        assert_eq!(sa[0].account_id.as_deref(), Some("a1"));
-        assert_eq!(sa[1].account_id, None);
     }
 
     #[test]

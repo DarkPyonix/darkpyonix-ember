@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use dioxus_compose::prelude::*;
 
 use ember_client::transcript::{ApprovalState, TranscriptItem};
-use ember_client::wire::{ApprovalDecision, TurnOutcome};
+use ember_client::wire::{ApprovalDecision, SessionPatch, TurnOutcome};
 use ember_client::LauncherStatus;
 
 use crate::ide::{open_external, plan, IdeAction, IdeKind};
@@ -24,7 +24,7 @@ use crate::model::{self, Tone};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run, services};
 use crate::ui::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
-use crate::ui::launcher::{export, ConnectionBanner};
+use crate::ui::launcher::{export, patch_session, ConnectionBanner};
 use crate::ui::{use_ui, Route};
 
 /// A transcript row's stable key: its event sequence number.
@@ -131,12 +131,8 @@ pub fn ConversationView(id: String) -> Element {
         };
     };
 
-    let title = ui.prefs.read().titles.get(&id).cloned().unwrap_or_else(|| record.title.clone());
-    let account = {
-        let sa = ui.live.session_accounts.read();
-        let labels = model::account_labels(&ui.live.accounts.read());
-        sa.get(&id).map(|a| labels.get(a).cloned().unwrap_or_else(|| a.clone()))
-    };
+    let title = record.title.clone();
+    let account = model::account_label(record.account_id.as_deref(), &model::account_labels(&ui.live.accounts.read()));
     let busy = model::is_busy(status);
     let mut meta = vec![record.project.clone(), record.agent.clone()];
     meta.push(account.unwrap_or_else(|| "server login".into()));
@@ -303,15 +299,14 @@ pub fn ConversationView(id: String) -> Element {
             export(id.clone(), title.clone());
         }
     };
+    let pinned = record.pinned;
     let pin_this = {
         let id = id.clone();
         move |_: ()| {
             more_menu.set(false);
-            let id = id.clone();
-            ui.update_prefs(move |p| p.toggle_pin(&id));
+            patch_session(id.clone(), SessionPatch { pinned: Some(!pinned), ..Default::default() });
         }
     };
-    let pinned = ui.prefs.read().pinned.contains(&id);
     let compact = window.is_compact();
     let live = ui.live;
     let id_items = id.clone();

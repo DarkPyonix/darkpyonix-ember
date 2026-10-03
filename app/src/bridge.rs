@@ -14,8 +14,9 @@
 //!   It also covers the window between `Client::start` (before the window opened) and the
 //!   first subscription here.
 //!
-//! The same tasks refresh what the client crate does not sync yet (accounts, agents,
-//! computers, each session's account) and deliver queued messages at turn boundaries.
+//! The same tasks refresh what the client crate does not sync yet (accounts, agents, computer
+//! reachability) and deliver queued messages at turn boundaries. Session metadata, accounts
+//! per session and project assignments arrive with the client's own sync (records and push).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,8 +48,6 @@ pub struct Live {
     pub outbox: SyncSignal<u64>,
     pub accounts: SyncSignal<Vec<Account>>,
     pub agents: SyncSignal<Vec<DetectedAgent>>,
-    /// session id → account id (the client's session record does not carry it yet).
-    pub session_accounts: SyncSignal<HashMap<String, String>>,
 }
 
 impl Live {
@@ -60,7 +59,6 @@ impl Live {
             outbox: use_signal_sync(|| 0),
             accounts: use_signal_sync(Vec::new),
             agents: use_signal_sync(Vec::new),
-            session_accounts: use_signal_sync(HashMap::new),
         }
     }
 
@@ -99,7 +97,7 @@ async fn changes_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
     loop {
         tokio::select! {
             r = changes.recv() => match r {
-                Ok(ch) => on_changes(s, live, &ch, &refresh, &mut prints),
+                Ok(ch) => on_changes(s, live, &ch, &mut prints),
                 Err(RecvError::Lagged(n)) => {
                     tracing::debug!("ui bridge lagged by {n} changes; redrawing everything");
                     lagged = true;
@@ -130,25 +128,26 @@ async fn changes_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
 /// session's `last_seq` and `updated_at`, which would redraw the launcher and the navigation
 /// many times a second; they only need to redraw when this changes.
 #[derive(Default)]
-struct Fingerprints(HashMap<String, (LauncherStatus, String, String, i64)>);
+struct Fingerprints(HashMap<String, Fingerprint>);
+
+/// Status, title, project, pinned, archived, coarse activity time.
+type Fingerprint = (LauncherStatus, String, String, bool, bool, i64);
 
 /// Activity time granularity for the launcher (ordering and "5m ago").
 const LAUNCHER_TIME_STEP_MS: i64 = 30_000;
 
 impl Fingerprints {
-    /// Whether any of `ids` looks different to the launcher now, and whether any of them is
-    /// new.
-    fn changed<'a>(&mut self, s: &Services, ids: impl IntoIterator<Item = &'a String>) -> (bool, bool) {
+    /// Whether any of `ids` looks different to the launcher now.
+    fn changed<'a>(&mut self, s: &Services, ids: impl IntoIterator<Item = &'a String>) -> bool {
         let mut changed = false;
-        let mut new = false;
         s.client.read(|st| {
             for id in ids {
                 let print = st.session(id).map(|v| {
-                    (v.status, v.record.title.clone(), v.record.project.clone(), v.record.updated_at / LAUNCHER_TIME_STEP_MS)
+                    let r = v.record;
+                    (v.status, r.title.clone(), r.project.clone(), r.pinned, r.archived, r.updated_at / LAUNCHER_TIME_STEP_MS)
                 });
                 match print {
                     Some(p) => {
-                        new |= !self.0.contains_key(id);
                         if self.0.get(id) != Some(&p) {
                             self.0.insert(id.clone(), p);
                             changed = true;
@@ -158,13 +157,16 @@ impl Fingerprints {
                 }
             }
         });
-        (changed, new)
+        changed
     }
 }
 
-fn on_changes(s: &'static Services, live: Live, ch: &Changes, refresh: &Notify, prints: &mut Fingerprints) {
-    let (sessions_changed, new_sessions) = prints.changed(s, &ch.sessions);
-    if sessions_changed || ch.computers || ch.connection {
+fn on_changes(s: &'static Services, live: Live, ch: &Changes, prints: &mut Fingerprints) {
+    let sessions_changed = prints.changed(s, &ch.sessions);
+    // A project change without session changes is the project list itself (a project created
+    // or its assignment changed, FR-L4); with session changes the fingerprints decide.
+    let projects_changed = ch.projects && ch.sessions.is_empty();
+    if sessions_changed || projects_changed || ch.computers || ch.connection {
         Live::bump(live.launcher);
     }
     if !ch.transcripts.is_empty() {
@@ -173,10 +175,6 @@ fn on_changes(s: &'static Services, live: Live, ch: &Changes, refresh: &Notify, 
     // Turn boundaries show up as session status changes.
     for id in &ch.sessions {
         s.drive_outbox(id);
-    }
-    if new_sessions {
-        // Refresh the new sessions' accounts.
-        refresh.notify_one();
     }
 }
 
@@ -197,21 +195,14 @@ async fn refresh_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
     }
 }
 
-/// `full`: also probe computers and re-read accounts and agents; otherwise only the
-/// sessions' accounts (new sessions appeared).
-async fn refresh_once(s: &'static Services, mut live: Live, first: bool, full: bool) {
+/// `full`: probe computers and re-read accounts and agents; otherwise (after the bridge
+/// lagged) only reload the projects and their assignments, which push keeps current
+/// otherwise.
+async fn refresh_once(s: &'static Services, live: Live, first: bool, full: bool) {
     if full {
         refresh_slow(s, live, first).await;
-    }
-    match s.server.session_accounts().await {
-        Ok(list) => {
-            let map: HashMap<String, String> =
-                list.into_iter().filter_map(|r| r.account_id.map(|a| (r.id, a))).collect();
-            if *live.session_accounts.peek() != map {
-                live.session_accounts.set(map);
-            }
-        }
-        Err(e) => tracing::debug!("session accounts refresh failed: {e}"),
+    } else if let Err(e) = s.client.load_projects().await {
+        tracing::debug!("projects refresh failed: {e}");
     }
 }
 

@@ -26,7 +26,9 @@ use crate::api::{Api, ApiResult};
 use crate::cache;
 use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
-use crate::wire::{ApprovalDecision, DetectedAgent, NewSession, SessionRecord, PUSH_VERSION};
+use crate::wire::{
+    ApprovalDecision, DetectedAgent, NewSession, Project, Push, SearchHit, SessionPatch, SessionRecord, PUSH_VERSION,
+};
 
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -254,6 +256,40 @@ impl Client {
         self.inner.api.agents().await
     }
 
+    /// Rename, pin or archive a session (FR-L9). The state is updated from the answer at once;
+    /// the server's push tells every other client.
+    pub async fn patch_session(&self, id: &str, patch: &SessionPatch) -> ApiResult<SessionRecord> {
+        let rec = self.inner.api.patch_session(id, patch).await?;
+        self.inner.apply(Input::Push(Push::SessionUpdated { session: rec.clone() }));
+        Ok(rec)
+    }
+
+    /// Reload the project list (with computer assignments) into the state.
+    pub async fn load_projects(&self) -> ApiResult<Vec<Project>> {
+        let list = self.inner.api.projects().await?;
+        self.inner.apply(Input::ProjectsLoaded(list.clone()));
+        Ok(list)
+    }
+
+    /// Assign a computer to a project (FR-L4).
+    pub async fn assign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
+        let p = self.inner.api.assign_computer(project, computer_id).await?;
+        self.inner.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        Ok(p)
+    }
+
+    /// Unassign a computer from a project (FR-L4).
+    pub async fn unassign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
+        let p = self.inner.api.unassign_computer(project, computer_id).await?;
+        self.inner.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        Ok(p)
+    }
+
+    /// Full-text search on the server across every session's messages (FR-S4).
+    pub async fn search(&self, query: &str, limit: Option<usize>) -> ApiResult<Vec<SearchHit>> {
+        self.inner.api.search(query, limit).await
+    }
+
     /// Reload the session list and resync open sessions now.
     pub fn refresh(&self) {
         let _ = self.inner.resync.send(Resync::All);
@@ -310,6 +346,14 @@ impl Inner {
     async fn resync_all(&self) -> ApiResult<()> {
         let list = self.api.sessions(None).await?;
         self.apply(Input::SessionsLoaded(list));
+        match self.api.projects().await {
+            Ok(projects) => {
+                self.apply(Input::ProjectsLoaded(projects));
+            }
+            // A server older than the projects API (FR-L4): projects come from sessions only.
+            Err(e) if e.status() == Some(404) => {}
+            Err(e) => return Err(e),
+        }
         let open: Vec<String> = self.state.lock().unwrap().open_sessions().cloned().collect();
         for id in open {
             match self.fetch_session(&id).await {

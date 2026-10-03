@@ -175,3 +175,45 @@ async fn unknown_peers_are_refused_and_revocation_disconnects() {
     f.gate.allow(f.server_t.peer_id());
     within(wait_up(&f.client)).await;
 }
+
+#[tokio::test]
+async fn deadlines_bound_requests_over_the_transport() {
+    let f = start().await;
+    within(wait_up(&f.client)).await;
+
+    // A deadline does not get in the way of a healthy node (requests and WebSockets).
+    let bounded = f.client.clone().with_deadline(Duration::from_secs(5));
+    assert_eq!(bounded.deadline(), Some(Duration::from_secs(5)));
+    let path = f.root.join("d.txt");
+    within(bounded.write_file(&path, b"in time".to_vec(), None)).await.unwrap();
+    assert_eq!(within(bounded.read_file(&path)).await.unwrap().data, b"in time");
+    let out = within(bounded.run(shell("echo ok", &f.root))).await.unwrap();
+    assert_eq!(out.stdout, b"ok\n");
+
+    // A peer that accepts streams for the node service but never answers.
+    let stuck = f.net.transport();
+    let mut listener = stuck.listen(ember_node::client::NODE_SERVICE).unwrap();
+    let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let h = held.clone();
+    tokio::spawn(async move {
+        while let Some(conn) = listener.accept().await {
+            let h = h.clone();
+            tokio::spawn(async move {
+                while let Ok(s) = conn.accept_bi().await {
+                    h.lock().unwrap().push(s);
+                }
+            });
+        }
+    });
+    let dialer = Dialer::new(f.server_t.clone());
+    let unbounded = NodeClient::over_transport(dialer, stuck.peer_id(), TOKEN);
+    assert!(tokio::time::timeout(Duration::from_millis(300), unbounded.health()).await.is_err(), "no deadline: waits");
+
+    let bounded = unbounded.with_deadline(Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let e = within(bounded.stat(&f.root)).await.unwrap_err();
+    assert!(matches!(e, ClientError::Timeout(d) if d == Duration::from_millis(200)), "{e:?}");
+    assert!(e.is_timeout() && e.is_transport());
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    drop(held);
+}

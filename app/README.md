@@ -49,14 +49,14 @@ target, no webview API named in the app's or `ember-client`'s sources.
 | `src/bridge.rs` | `Client::subscribe` / `watch_revision` → sync signals; refresh of accounts, agents, computers |
 | `src/server.rs` | Endpoints `ember-client` does not wrap yet: accounts, computers, session computer, IDE targets, create-with-account |
 | `src/model.rs` | Pure view models: project badges, rows, search, time, outbox (FR-L6) |
-| `src/prefs.rs` | Last-used per project (FR-L8), IDE target (FR-L7), pins/archive/renames (FR-L9) |
+| `src/prefs.rs` | Per-device choices: last-used per project (FR-L8), last project, IDE target (FR-L7) |
 | `src/ide.rs` | "Open IDE": URL safety check and OS URL handler |
-| `src/export.rs` | Session export (FR-L9) |
+| `src/export.rs` | Session export (FR-L9): the server's export file plus the reduced transcript |
 | `src/ui/mod.rs` | Root: `Scaffold` + adaptive `Navigation` (bar / rail / sidebar), routes |
 | `src/ui/launcher.rs` | Main screen (FR-L1–L4) |
 | `src/ui/conversation.rs` | Conversation view (FR-L5–L7) |
 | `src/ui/new_session.rs` | New session dialog (FR-L8) |
-| `src/ui/search.rs` | Search (FR-L9) |
+| `src/ui/search.rs` | Search (FR-L9): server full-text hits (FR-S4), then title/detail matches |
 | `src/ui/compat.rs` | Stand-ins for widgets dioxus-compose does not have yet |
 
 ### Reactivity
@@ -83,10 +83,10 @@ pattern).
 
 ## Not done yet, and why
 
-- **FR-L4 assignment** (computer ↔ project): the main server has no assignment API; the list
-  shows what the client state carries.
-- **FR-L9 pin / archive / rename** are stored on this device (`prefs.json`); the server has
-  no API for them (FR-S4). Search covers the transcripts this client holds; server-side
-  full-text search is FR-S4.
+- **Search hit → message**: a hit opens its session; scrolling to the matching message
+  (`seq`) waits for a `LazyColumn` scroll-to API.
+- **FR-S5 fork**: no agent supports it yet (`can_fork: false`), so the UI offers no action.
+- Pins, archive marks and renames kept in an older `prefs.json` are not uploaded to the
+  server; they are dropped on the next prefs save.
 - **Ember IDE target**: placeholder until the editor core (M8).
 - **Auto-scroll** to the newest message: `LazyColumn` has no scroll-to API yet.

@@ -20,7 +20,10 @@ use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
-use crate::wire::{ApprovalDecision, DetectedAgent, NewSession, SessionDetail, SessionRecord, StoredEvent};
+use crate::wire::{
+    ApprovalDecision, DetectedAgent, NewSession, Project, SearchHit, SessionDetail, SessionPatch, SessionRecord,
+    StoredEvent,
+};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
 pub const SERVER_SERVICE: &str = "ember-server/1";
@@ -274,6 +277,63 @@ impl Api {
     /// Keep `id`'s agent alive while it is being viewed (FR-S6).
     pub async fn lease(&self, id: &str) -> ApiResult<Lease> {
         Self::decode(self.post(&format!("/sessions/{}/lease", seg(id)), json!({})).await?)
+    }
+
+    // ---- projects and computer assignment (FR-L4) ------------------------------------------
+
+    /// Every project with its assigned computers.
+    pub async fn projects(&self) -> ApiResult<Vec<Project>> {
+        self.get("/projects").await
+    }
+
+    /// Create a project (no error when it exists).
+    pub async fn create_project(&self, name: &str) -> ApiResult<Project> {
+        Self::decode(self.post("/projects", json!({ "name": name })).await?)
+    }
+
+    /// Assign `computer_id` (`local` = the main server) to `project`. Idempotent.
+    pub async fn assign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
+        let path = format!("/projects/{}/computers/{}", seg(project), seg(computer_id));
+        Self::decode(self.send(Method::PUT, &path, None).await?)
+    }
+
+    /// Unassign `computer_id` from `project`. Idempotent.
+    pub async fn unassign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
+        let path = format!("/projects/{}/computers/{}", seg(project), seg(computer_id));
+        Self::decode(self.send(Method::DELETE, &path, None).await?)
+    }
+
+    // ---- session metadata, search, export, fork (FR-L9, FR-S4, FR-S5) -----------------------
+
+    /// Rename, pin or archive a session; answers the updated record.
+    pub async fn patch_session(&self, id: &str, patch: &SessionPatch) -> ApiResult<SessionRecord> {
+        let body = serde_json::to_value(patch).expect("SessionPatch serialises");
+        Self::decode(self.send(Method::PATCH, &format!("/sessions/{}", seg(id)), Some(body)).await?)
+    }
+
+    /// Full-text search across every session's messages, best match first.
+    pub async fn search(&self, query: &str, limit: Option<usize>) -> ApiResult<Vec<SearchHit>> {
+        let mut q = vec![("q", query.to_string())];
+        if let Some(n) = limit {
+            q.push(("limit", n.to_string()));
+        }
+        let q = serde_urlencoded::to_string(q).map_err(|e| ApiError::Decode(e.to_string()))?;
+        self.get(&format!("/search?{q}")).await
+    }
+
+    /// The session as the server's self-contained export file (`format: "ember-transcript"`).
+    pub async fn export_session(&self, id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/sessions/{}/export", seg(id))).await
+    }
+
+    /// Fork a session (FR-S5). Every server so far answers 501 (`ApiError::Status`); check
+    /// [`SessionDetail::can_fork`] first.
+    pub async fn fork_session(&self, id: &str, after_seq: Option<i64>) -> ApiResult<SessionRecord> {
+        let body = match after_seq {
+            Some(seq) => json!({ "after_seq": seq }),
+            None => json!({}),
+        };
+        Self::decode(self.post(&format!("/sessions/{}/fork", seg(id)), body).await?)
     }
 }
 

@@ -273,3 +273,58 @@ async fn version_mismatch_is_reported_not_dropped() {
     .await;
     c.stop();
 }
+
+/// FR-L4, FR-L9, FR-S4: a second client sees pins, renames, archives and computer assignments
+/// made by the first without reloading, and server search finds messages it never loaded.
+#[tokio::test]
+async fn metadata_and_assignment_reach_a_second_client_by_push() {
+    let (s, url) = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let one = Client::new(config(&url, &dir.path().join("one.json"))).await.unwrap();
+    let two = Client::new(config(&url, &dir.path().join("two.json"))).await.unwrap();
+    one.start();
+    two.start();
+    for c in [&one, &two] {
+        until("connected", || c.read(|st| *st.connection() == ConnectionState::Connected)).await;
+    }
+
+    let id = one
+        .create_session(&NewSession {
+            project: "acme".into(),
+            agent: "scripted".into(),
+            cwd: std::env::temp_dir().to_string_lossy().into(),
+            model: None,
+            title: Some("A".into()),
+        })
+        .await
+        .unwrap()
+        .id;
+    until("session on two", || two.read(|st| st.session(&id).is_some())).await;
+    until("project on two", || two.read(|st| st.project("acme").is_some())).await;
+
+    one.patch_session(&id, &wire::SessionPatch { title: Some("Deploy".into()), pinned: Some(true), archived: None })
+        .await
+        .unwrap();
+    until("rename and pin on two", || {
+        two.read(|st| st.session(&id).is_some_and(|v| v.record.title == "Deploy" && v.record.pinned))
+    })
+    .await;
+
+    one.assign_computer("acme", "local").await.unwrap();
+    until("assignment on two", || two.read(|st| st.project_computers("acme") == ["local".to_string()])).await;
+    one.unassign_computer("acme", "local").await.unwrap();
+    until("unassignment on two", || two.read(|st| st.project_computers("acme").is_empty())).await;
+
+    s.record_event(&id, &ember_server::events::AgentEvent::UserMessage { text: "배포 스크립트가 실패했어요".into() })
+        .unwrap();
+    let hits = two.search("스크립트", None).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!((hits[0].session_id.as_str(), hits[0].seq), (id.as_str(), 1));
+    assert_eq!(hits[0].plain_snippet(), "배포 스크립트가 실패했어요");
+
+    let export = two.api().export_session(&id).await.unwrap();
+    assert_eq!(export["session"]["title"], "Deploy");
+    let detail = two.api().session(&id).await.unwrap();
+    assert!(!detail.can_fork);
+    assert_eq!(two.api().fork_session(&id, None).await.unwrap_err().status(), Some(501));
+}

@@ -48,6 +48,31 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-S6** | Idle sessions release their agent process and reconnect transparently on the next message; a session being viewed is kept alive. | Measured: an idle session's agent process exits after the idle timeout; sending a message restores it via native resume. A session open in a client is not reclaimed. |
 | **FR-S7** | *[provisional — `INTENT.md` Q4]* When a session's current computer changes, observations of the previous computer are invalidated. | v0: a system notice tells the agent the computer changed and prior file observations must be re-read before editing. Target: per-file content-hash comparison so only changed files are flagged. |
 
+### §S status — server APIs behind the launcher (FR-L4, FR-L9, FR-S4, FR-S5)
+
+- **Projects** are a table (`projects`, store migration 8), filled from existing sessions on
+  migration and on every session creation. **Computer assignment** (FR-L4) is many-to-many
+  (`project_computers`): `GET/POST /api/v1/projects`, `PUT`/`DELETE
+  /api/v1/projects/{name}/computers/{computer_id}` (`local` = the main server). Removing a
+  computer removes its assignments.
+- **Session metadata** (FR-L9): `pinned` and `archived` columns (migration 9) and the existing
+  title, changed with `PATCH /api/v1/sessions/{id}` `{title?, pinned?, archived?}`. Not activity:
+  `updated_at` is unchanged.
+- **Push** gains `session_updated` and `project_updated` (additive; `PUSH_VERSION` stays 1;
+  clients skip unknown types), so a second client sees renames, pins, archives and assignments
+  without reloading.
+- **Search** (FR-S4): an FTS5 index (`messages_fts`, `unicode61` tokenizer) of user and
+  assistant messages, kept current by a trigger on `events` and backfilled on migration.
+  `GET /api/v1/search?q=&limit=` answers `{session_id, seq, kind, snippet, title, project,
+  archived}`, best match first; each word matches as a prefix (Korean `오류` finds `오류가`).
+  The bundled SQLite (`libsqlite3-sys` with rusqlite's `bundled` feature) is compiled with
+  `SQLITE_ENABLE_FTS5`.
+- **Export** (FR-L9): `GET /api/v1/sessions/{id}/export`, `format: "ember-transcript"`, the
+  record and every stored event.
+- **Fork** (FR-S5): not implemented for any agent. `GET /sessions/{id}` reports `can_fork:
+  false` and `POST /sessions/{id}/fork` answers 501 with a reason. Codex's `thread/fork` is the
+  likely first implementation.
+
 ---
 
 ## §A — Agent wrapping (E2: native behaviour preserved)

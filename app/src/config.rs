@@ -2,8 +2,8 @@
 //!
 //! - `EMBER_SERVER_URL`: the main server, default `http://127.0.0.1:8740`.
 //! - Files live under the OS data directory (`dirs::data_dir()`), in `ember/`:
-//!   `client-cache.json` (the client's cold-start snapshot, FR-L1), `prefs.json` (last-used
-//!   choices, pins, renames) and `exports/` (FR-L9 exports).
+//!   `client-cache.json` (the client's cold-start snapshot, FR-L1), `prefs.json` (per-device
+//!   choices: last-used combination, IDE target) and `exports/` (FR-L9 exports).
 //! - `EMBER_DATA_DIR` overrides that directory (tests, portable installs).
 
 use std::path::{Path, PathBuf};

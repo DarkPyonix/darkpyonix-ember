@@ -12,6 +12,7 @@ pub mod computers;
 pub mod devices;
 pub mod events;
 pub mod history;
+pub mod projects;
 pub mod hub;
 pub mod session;
 pub mod store;

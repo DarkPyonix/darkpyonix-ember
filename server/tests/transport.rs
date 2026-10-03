@@ -103,6 +103,8 @@ fn record(id: &str, agent: AgentKind) -> SessionRecord {
         last_seq: 0,
         account_id: None,
         account_reason: None,
+        pinned: false,
+        archived: false,
     }
 }
 

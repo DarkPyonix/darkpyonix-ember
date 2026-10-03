@@ -1,4 +1,4 @@
-//! ember-editor-conn — the connection layer of Ember's editor core (M8, SPEC §E).
+//! ember-editor-conn: the connection layer of Ember's editor core (M8, SPEC §E).
 //!
 //! Ember's IDE window draws the Code-OSS workbench natively (dioxus-compose, no webview, no JS
 //! engine). Everything the workbench's JavaScript used to do to talk to a Code-OSS server is done

@@ -1,7 +1,7 @@
 //! Central MCP server registry (SPEC FR-A7).
 //!
 //! The user adds an MCP server once (`/api/v1/mcp`, [`api`]); every agent session that supports
-//! MCP gets it at process start, through [`StartRequest::mcp_servers`] — the same path as the
+//! MCP gets it at process start, through [`StartRequest::mcp_servers`], the same path as the
 //! project browser (FR-R3, `crate::browser::agent`), so Claude Code receives it in
 //! `--mcp-config`, Codex as `-c mcp_servers.<name>.…` overrides and Antigravity in its session
 //! root's `mcp_config.json`. A server applies to every project (`scope: "all"`) or to one

@@ -185,7 +185,7 @@ async fn a_hook_that_was_not_loaded_fails_the_turn() {
     let mut run =
         adapter.start(StartRequest { cwd: cwd.path().into(), ..Default::default() }, tx).await.unwrap();
     run.send("hello").await.unwrap();
-    // It prints no version either, so the run is read-only — but it does not run at all.
+    // It prints no version either, so the run is read-only, but it does not run at all.
     assert!(matches!(next(&mut rx, 20).await, AgentEvent::Notice { message } if message.contains("read-only")));
     assert!(matches!(next(&mut rx, 20).await, AgentEvent::Error { message } if message.contains("approval hook")));
     assert_eq!(next(&mut rx, 20).await, AgentEvent::TurnEnded { outcome: TurnOutcome::Failed });

@@ -13,7 +13,7 @@
 //! awaited in `api/node/extHostExtensionService.ts` L179). Upstream those calls come from the
 //! `MainThreadWorkspace` / `MainThreadConfiguration` constructors; here from [`bootstrap_calls`].
 //!
-//! **Minimal subset** — what Ember's editor core needs for SPEC FR-E2..E4 (diagnostics, CodeLens,
+//! **Minimal subset**: what Ember's editor core needs for SPEC FR-E2..E4 (diagnostics, CodeLens,
 //! hover, inline completions) plus what the extension host needs to run at all. See the table in
 //! `docs/design/EDITOR-CONNECTION.md` §4.
 
@@ -542,7 +542,7 @@ pub fn resolve_code_lens(handle: i64, lens: &Value) -> Call {
         .cancellable()
 }
 
-/// `$releaseCodeLenses(handle, cacheId)` — required, or the extension host leaks the list.
+/// `$releaseCodeLenses(handle, cacheId)`: required, or the extension host leaks the list.
 pub fn release_code_lenses(handle: i64, cache_id: i64) -> Call {
     Call::new(proxy::EXT_HOST_LANGUAGE_FEATURES, "$releaseCodeLenses", vec![Arg::Json(handle.into()), Arg::Json(cache_id.into())])
 }
@@ -602,7 +602,7 @@ pub fn free_inline_completions_list(handle: i64, pid: i64, kind: &str) -> Call {
     )
 }
 
-/// `ExtHostCommands.$executeContributedCommand(id, ...args)` (extHost.protocol.ts L2373) — e.g. the `command` of an accepted
+/// `ExtHostCommands.$executeContributedCommand(id, ...args)` (extHost.protocol.ts L2373), e.g. the `command` of an accepted
 /// inline completion or a clicked CodeLens.
 pub fn execute_contributed_command(id: &str, args: &[Value]) -> Call {
     let mut a = vec![Arg::Json(id.into())];
@@ -700,13 +700,13 @@ impl MainThreadCall {
 /// Line numbers are extHost.protocol.ts at [`crate::PINNED_COMMIT`].
 /// The exceptions below would otherwise block or mislead extensions:
 ///
-/// * `MainThreadStorage.$initializeExtensionStorage` (L850) — awaited during every activation
+/// * `MainThreadStorage.$initializeExtensionStorage` (L850): awaited during every activation
 ///   (`undefined` = no stored state).
-/// * `MainThreadWindow.$getInitialState` (L2301) — `{ isFocused, isActive }`.
-/// * `MainThreadWorkspace.$checkExists` (L1976) — `workspaceContains:` activation; `false` until Ember
+/// * `MainThreadWindow.$getInitialState` (L2301): `{ isFocused, isActive }`.
+/// * `MainThreadWorkspace.$checkExists` (L1976): `workspaceContains:` activation; `false` until Ember
 ///   implements glob search over the remote filesystem.
-/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985) — trusted.
-/// * `MainThreadCommands.$getCommands` (L139) — empty list.
+/// * `MainThreadWorkspace.$isResourceTrusted` / `$requestWorkspaceTrust` (L1986 / L1985): trusted.
+/// * `MainThreadCommands.$getCommands` (L139): empty list.
 pub fn default_reply(proxy: Option<&str>, method: &str) -> Reply {
     match (proxy, method) {
         (Some(proxy::MAIN_THREAD_WINDOW), "$getInitialState") => Reply::Json(json!({ "isFocused": true, "isActive": true })),

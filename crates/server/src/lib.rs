@@ -1,4 +1,4 @@
-//! ember server — the Ember main server (docs/ARCHITECTURE.md §1).
+//! ember server: the Ember main server (docs/ARCHITECTURE.md §1).
 //!
 //! Runs agent CLIs headless, stores every session, and pushes updates to clients.
 

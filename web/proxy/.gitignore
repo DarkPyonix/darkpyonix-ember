@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# Local state — differs per machine
+# Local state (differs per machine)
 darkpyonix.db
 _xmo_recent.json
 _dpx_machine.json

@@ -1,20 +1,20 @@
-# BACKGROUND.md — DarkPyonix (mobile VS Code Web)
+# BACKGROUND.md: DarkPyonix (mobile VS Code Web)
 
 > The full context, structure, implementation, decisions and next steps, written so another
 > developer or agent can pick the work up. The hard-won traps live in their own document:
-> **[CONSTRAINTS.md](CONSTRAINTS.md)** — read that one first if you are about to change code.
+> **[CONSTRAINTS.md](CONSTRAINTS.md)**: read that one first if you are about to change code.
 
 ---
 
 ## 1. Goal
 
-- Make **VS Code Web usable on mobile** — tablets and phones.
+- Make **VS Code Web usable on mobile**: tablets and phones.
 - Method: **DarkPyonix**, a FastAPI reverse proxy, sits in front of `code serve-web` (the
   upstream VS Code Web), intercepts requests, and **injects a mobile-responsive overlay
   (CSS + JS)** into the HTML and CSS it passes through.
 - Eventual goal: ship this mobile conversion as a **VS Code extension**. With the extension
   running, DarkPyonix injects freely; with it off, output passes through untouched. (Only the
-  receiving end is built; the gating switch and the extension itself are on hold — see §6.)
+  receiving end is built; the gating switch and the extension itself are on hold; see §6.)
 - The upstream VS Code server must not know the proxy exists, which is why the WebSocket is
   relayed too (`dpx/vscode/proxy.py`).
 
@@ -28,7 +28,7 @@
 | **The DarkPyonix proxy** | `main.py` + `dpx/` (:8888) | Relays every request upstream, injects HTML/CSS, relays WS, serves the home and login pages |
 | **The overlay** | `static/overlay.css` + `static/overlay.js` | The mobile UI injected into VS Code Web |
 | **Home launcher / login / wrapper** | `static/home.html` · `workspace_login.html` · `frame.html` | Workspace-picking home + login gate + iframe wrapper |
-| **ember** | the `darkpyonix-ember` repository | ~~The Tauri desktop shell~~ — the Tauri scaffold was deleted (2026-10-03, user decision). The client is now a dioxus-compose native app; see `../../../docs/INTENT.md` D9 |
+| **ember** | the `darkpyonix-ember` repository | ~~The Tauri desktop shell~~: the Tauri scaffold was deleted (2026-10-03, user decision). The client is now a dioxus-compose native app; see `../../../docs/INTENT.md` D9 |
 
 - Example deployment point: `my-pc.example.com`, where DarkPyonix runs.
 - `_xmo_recent.json` holds the list of recently opened workspace folders (server-side recents).
@@ -58,12 +58,12 @@ to show its chrome:
   URL as `xmochrome=on|off` to prevent a flash.
 - **Why everyone gets the wrapper**: the 48 px activity bar column that the VS Code grid
   reserves **cannot be removed with CSS** (see CONSTRAINTS.md §1). The old overlay mode, which
-  drew the bar inside the document, left a "dead white strip" exactly there — the strip the user
+  drew the bar inside the document, left a "dead white strip" exactly there: the strip the user
   pointed out in a screenshot. Only the wrapper, which pushes the column off-screen by sliding
   the iframe, removes it.
 - The login success redirect no longer appends `&xmo=frame` (`static/workspace_login.html`).
 - Legacy escape hatches: `?xmo=on` gives the in-document overlay bar without the wrapper (**the
-  dead 48 px strip comes back** — a known limitation). `?xmo=off` turns everything off.
+  dead 48 px strip comes back**, a known limitation). `?xmo=off` turns everything off.
 - Verified: at 1600 px → `chrome=off`, activity bar opacity 1, status bar `position:static` at
   the bottom. **Shrinking to 895 px → `chrome=on`, and the side bar starts at screen x=0 with no
   white strip.** Back to 1600 px → fully restored to the native state.
@@ -78,19 +78,19 @@ In portrait, pressing a button on the bar gives that thing the whole screen.
   the panel and the auxiliary side bar (one at a time), and CSS stretches `.part.sidebar` to
   the whole area below `--xmo-top-band`.
 - ⚠️ **Why CSS was necessary**: VS Code has **no "Maximize Side Bar"**, and the editor group's
-  minimum width is **220 px**, so on a 438 px workbench the side bar is **capped at 170 px** —
+  minimum width is **220 px**, so on a 438 px workbench the side bar is **capped at 170 px**,
   and at that point the sash locks to `disabled` too (measured). It is simply not possible
   natively.
-- But **stretching the part alone is not enough** — the inner pane/tree still renders at the
+- But **stretching the part alone is not enough**: the inner pane/tree still renders at the
   170 px the grid decided. `width: 100% !important` has to be applied to
   `.composite / .content / .pane / .pane-body / .split-view-view / .monaco-list …` as well for
   the content to follow. **Width beats the inline value and is not re-cancelled** (the statusbar
-  precedent in CONSTRAINTS.md §1) — what gets re-cancelled is offsets. Verified:
+  precedent in CONSTRAINTS.md §1); what gets re-cancelled is offsets. Verified:
   `contentW 390`, equal to the viewport width.
 - `--xmo-top-band` (status bar + title height) and `--xmo-frame-left` (the gutter) are measured
   by `xmoEmbedStatusTop()` and planted on `:root`.
 
-#### 🔴 Webviews do not live inside the part — so portrait full-screen must use neither `position: fixed` nor `z-index`
+#### 🔴 Webviews do not live inside the part, so portrait full-screen must use neither `position: fixed` nor `z-index`
 
 Reported by the user as "Claude Code is completely blank in portrait", and pinned down to
 appearing only under `&xmofs=nozi`.
@@ -112,11 +112,11 @@ is a top-level workbench overlay that a script positions against the view's rect
     > .split-view-view:is(:has(.part.editor), :has(.part.auxiliarybar)) { width: 0; }
   ```
   No `z-index` anywhere. Without `.visible`, **even a closed side bar** stretches to full width.
-  The editor must be matched as a **descendant** with `:has(.part.editor)` — the grid nests the
+  The editor must be matched as a **descendant** with `:has(.part.editor)`; the grid nests the
   editor and panel in a separate vertical branch, so a direct-child match fails.
 - ⚠️ **The price of a collapsed editor**: while the side bar is open the editor is 0 px, so
   opening something there (a file tab, a Claude Code session) **opens it invisibly behind the
-  side bar** — which to the user looks like "I pressed it and nothing happened". So
+  side bar**, which to the user looks like "I pressed it and nothing happened". So
   `xmoAutoHideSidebarOnEditor()` checks the active tab label every 400 ms and closes the side
   bar if the label changed while it was open (the standard phone pattern: list → tap → full
   screen). Even collapsed, **the DOM is alive, so the tab label is readable**. Verified: from
@@ -129,7 +129,7 @@ is a top-level workbench overlay that a script positions against the view's rect
   `xmoSoloPortrait`) off entirely and returns to VS Code's native layout (side bar 170 px). One
   refresh separates "the view itself is broken" from "our full-screen broke it". Measured:
   portrait 390 → slot 390 / z-index 20; with `&xmofs=off` → slot 170 / z-index auto.
-- ⚠️ **Headless Chromium does not render extension webviews at all** — blank even in stock VS
+- ⚠️ **Headless Chromium does not render extension webviews at all**: blank even in stock VS
   Code (`xmo=off`) at 1600×900. Webview problems cannot be verified with Playwright; check
   geometry (rect, computed style) there and confirm on a real device in a real browser.
 
@@ -147,7 +147,7 @@ is a top-level workbench overlay that a script positions against the view's rect
   primary side bar collapsed.
   - ⚠️ **Not possible natively**: because of the 220 px editor group minimum, even a **real**
     sash drag stops at about 41 % on a 748 px phone (measured 187 → 310). And **VS Code ignores
-    synthetic sash drags entirely** — it only processes trusted pointer events, the same
+    synthetic sash drags entirely**: it only processes trusted pointer events, the same
     property as its menus.
   - The inner aux panes need `width: 100% !important` for the content to follow, same as the
     side bar.
@@ -164,11 +164,11 @@ the **bottom** of the editor group. Desktop (chrome off) keeps it natively on to
   `.editor-container`, whose height VS Code sets to `group height − title height`). So simply
   taking `.title` out of flow with `position:absolute; bottom:0` raises the editor by exactly
   the tab height and leaves exactly that much space below. **No arithmetic on our side, and no
-  offset for VS Code to revert** — it keeps working when the group is resized.
+  offset for VS Code to revert**, so it keeps working when the group is resized.
 - `top: auto !important` matters. The moment VS Code writes an inline `top`, an absolutely
   positioned box with both top and bottom set **stretches instead of sticking to the bottom**.
 - `xmoLiftTopCovered` (the watcher that touches the same `.title`) is gated on
-  `data-mobile-overlay`, so it does not run in embed mode — no conflict.
+  `data-mobile-overlay`, so it does not run in embed mode, so there is no conflict.
 - Verified: portrait 390×844 → group 57..792, editor 57..757, tabs 757..792. Landscape 844×390
   → group 57..390, editor 57..355, tabs 355..390. Desktop 1600×900 with a mouse → `chrome=off`
   and tabs stay stock at the top of the group (35..70) with `position:relative`.
@@ -176,7 +176,7 @@ the **bottom** of the editor group. Desktop (chrome off) keeps it natively on to
 ### 🔴🔴 Blank extension webviews on a phone = connecting over plain HTTP (the final cause)
 
 The real reason behind "Claude Code does not appear on the phone". **It had nothing to do with
-our layout** — which is why all three `xmofs` switches made no difference.
+our layout**, which is why all three `xmofs` switches made no difference.
 
 | Connection | `isSecureContext` | `navigator.serviceWorker` | Webviews |
 |---|---|---|---|
@@ -186,11 +186,11 @@ our layout** — which is why all three `xmofs` switches made no difference.
 
 VS Code Web webviews relay their resources through a service worker, and a service worker only
 exists in a secure context. → **To use this on a real device, the proxy must be served over
-HTTPS.** How to obtain HTTPS is still undecided — see §7-1.
+HTTPS.** How to obtain HTTPS is still undecided (see §7-1).
 
 - How to tell the symptoms apart: if an extension panel shows **only its title and is otherwise
   empty**, check whether the address bar says `https` before suspecting layout.
-- ⚠️ Headless Chromium cannot draw these webviews even on 127.0.0.1 (which is secure) — a
+- ⚠️ Headless Chromium cannot draw these webviews even on 127.0.0.1 (which is secure); a
   separate constraint, so webviews cannot be verified with Playwright at all.
 
 ### 🔴 The activity bar overflows on short screens (reported from a real phone)
@@ -202,7 +202,7 @@ Views" (⋯) overflow menu and removes them from the DOM**. Measured:
 |---|---|---|
 | Tablet portrait 390×844 | 735 px | all 7 |
 | Phone portrait 360×692 | 583 px | all 7 |
-| **Phone landscape 748×274** | **217 px** | **1 — just the overflow chevron** |
+| **Phone landscape 748×274** | **217 px** | **1 (just the overflow chevron)** |
 
 **The list has to be read out of the overflow menu**: scanning alone never sees the hidden
 containers, which is why a newly installed extension never appeared on the bar.
@@ -210,7 +210,7 @@ containers, which is why a newly installed extension never appeared on the bar.
 it with Escape. Throughout, `:root[data-xmo-scan] .context-view { opacity:0 }` keeps it
 **invisible to the user** (measured flash = 0).
 
-- ⚠️ **The auxiliary side bar has its own overflow too** — even at 1600×1000 on desktop,
+- ⚠️ **The auxiliary side bar has its own overflow too**: even at 1600×1000 on desktop,
   `auxBar: ["Chat", "Additional Views"]`. **Codex (openai.chatgpt) never registers in the
   activity bar at all and lives in the auxiliary side bar**, so it is only discovered by reading
   that overflow. The aux composite bar is only in the DOM while that part is open, so we retry
@@ -223,17 +223,17 @@ it with Escape. Throughout, `:root[data-xmo-scan] .context-view { opacity:0 }` k
 
 Two reported symptoms came from this:
 
-1. **"In landscape, pressing a primary side bar view opens the secondary side bar"** —
+1. **"In landscape, pressing a primary side bar view opens the secondary side bar"**:
    `xmoActivateView()` had a fallback that pressed `Toggle Secondary Side Bar` *unconditionally*
    when it could not find the item. It now does that **only when the cached source is `aux`**.
-2. **"Claude Code is not visible on the phone"** — opening in landscape first left nothing to
+2. **"Claude Code is not visible on the phone"**: opening in landscape first left nothing to
    scan, so the bar was empty. The view list is now **saved to
    `localStorage['xmo_views_<folder>']`**, so the buttons survive on short screens.
 
 **How to open an overflowed container**: press the chevron to open the menu, then choose
 **with the keyboard** (`ArrowDown` × index+1, then `Enter`).
 
-- ⚠️ **VS Code menus ignore synthetic mouse events** — confirmed by measurement (the menu just
+- ⚠️ **VS Code menus ignore synthetic mouse events**: confirmed by measurement (the menu just
   stays open). Keyboard works.
 - `keyCode` cannot be set through `KeyboardEventInit`, so it must be overwritten with
   `Object.defineProperty`. VS Code's `StandardKeyboardEvent` reads exactly that value.
@@ -248,46 +248,46 @@ Two reported symptoms came from this:
   `XMO_FILES_RE`). The "more" (⋯) menu and the file long-press submenu were **deleted**.
 - **The view list is read live from the VS Code DOM, not hardcoded**
   (`.part.activitybar .composite-bar`, plus `.part.auxiliarybar` when open). That is why
-  extension views such as Claude Code and Codex appear automatically — with the old hardcoded
+  extension views such as Claude Code and Codex appear automatically; with the old hardcoded
   list they did not even show under "more". The cache (`xmoViewCache`) is sticky, so entries do
   not vanish when a part closes. VS Code's own overflow entry ("Additional Views") and
   Chat/Copilot (duplicated by the agent button) are excluded via `XMO_VIEW_SKIP`.
-- **Scrolling**: portrait — the bottom bar is `overflow-x:auto` with buttons at `flex: 0 0 20%`,
-  so **exactly 5 slots are visible and the rest are swiped horizontally**. Landscape — the left
+- **Scrolling**: portrait: the bottom bar is `overflow-x:auto` with buttons at `flex: 0 0 20%`,
+  so **exactly 5 slots are visible and the rest are swiped horizontally**. Landscape: the left
   bar is `overflow-y:auto` with buttons fixed at 40 px (dividing the full screen height into
   fifths inflates icons to 80–160 px on a tablet, so the 20 % rule is not used there) and
   scrolls vertically.
 - **Settings is pinned bottom-left in landscape only**:
   `position: fixed; left:0; bottom: var(--xf-status-h)` plus `padding-bottom: 54px` on the bar.
-  `margin-top:auto` does nothing the moment the list overflows — which is exactly when settings
-  is most needed — so it has to leave the scroll flow. In portrait it stays at the end of the
+  `margin-top:auto` does nothing the moment the list overflows, which is exactly when settings
+  is most needed, so it has to leave the scroll flow. In portrait it stays at the end of the
   scroll strip. The overlay mode's left bar is handled the same way.
 - All borders were removed from the bar and settings buttons (user request).
 - **Popup shadow = the VS Code context menu shadow**: pressing a row in our popup opens a native
   menu above it, and the differing depth looked like a rendering bug. `xmoMenuShadow()` measures
   the real value with a probe div carrying the `.context-view monaco-component` classes
-  (`0 0 12px rgba(0,0,0,.14)` — ⚠️ **not** `--vscode-widget-shadow`, which comes back
+  (`0 0 12px rgba(0,0,0,.14)`; ⚠️ **not** `--vscode-widget-shadow`, which comes back
   transparent here), passes it as `theme().menuShadow`, and the parent uses it as
   `--xf-menu-shadow`.
 - **Native menu placement**: VS Code opens the manage/account menus anchored to the *hidden
   activity bar icon*, which in portrait is at the far left of the screen, so they appeared in the
   wrong place. The parent passes the trigger button's rect in iframe coordinates via
   `__xmo.menu(codicon, aria, anchor)` and embed's `xmoPlaceMenuAt()` moves it with a transform
-  (rewriting coordinates gets re-cancelled, hence the transform — the CONSTRAINTS.md §1 pattern).
-- Tab slots are 20 %, but the **highlight pill is a fixed 52×40 px via `::before`** — painting
+  (rewriting coordinates gets re-cancelled, hence the transform, the CONSTRAINTS.md §1 pattern).
+- Tab slots are 20 %, but the **highlight pill is a fixed 52×40 px via `::before`**: painting
   the whole slot turned into a smeared 180 px band on a 900 px window. Icons ride above the pill
   with `.xmo-btn > * { position:relative; z-index:1 }`.
-- Redraw happens only when the container set changes (`barSig` / `xmoViewSig`) — regenerating
+- Redraw happens only when the container set changes (`barSig` / `xmoViewSig`): regenerating
   every tick resets the scroll position while the user is mid-swipe.
-- **Icons**, three cases: (1) codicon — the overlay uses the class as-is, but the frame parent
+- **Icons**, three cases: (1) codicon: the overlay uses the class as-is, but the frame parent
   has no codicon font, so it gets the `@font-face` URL from inside the iframe via
   `__xmo.codiconFont()`, injects it, and prints **the glyph character itself** obtained from
   `getComputedStyle(el,'::before').content`; (2) an extension `background-image`; (3) an
-  extension `uri-icon`'s **mask-image** (this is the Claude Code case — `claude-logo.svg`),
+  extension `uri-icon`'s **mask-image** (this is the Claude Code case, `claude-logo.svg`),
   rendered with `background-color: currentColor` plus the mask so it follows the theme color.
 - The settings button **reuses the same DOM node**, so the popup anchor survives a redraw.
 
-### ~~The overlay bar (legacy fallback `xmo=on`)~~ — removed
+### ~~The overlay bar (legacy fallback `xmo=on`)~~ (removed)
 
 The mode that drew the bar inside the document. Its root limitation was the **undeleteable
 48 px activity bar column** on the left; the wrapper replaced it, and it has now been taken out
@@ -296,11 +296,11 @@ of the code entirely (see §8). The workbench now always loads **inside the wrap
 
 ### Click forwarding and popups (stabilized)
 
-- `xmoActivate({codicon, aria})` — forwards a click to a native activity bar icon, preferring the
+- `xmoActivate({codicon, aria})`: forwards a click to a native activity bar icon, preferring the
   codicon class, falling back to `aria-label`, retrying up to 6 times.
-- `xmoPositionPopup` — places a popup relative to its trigger button (above in portrait, to the
+- `xmoPositionPopup`: places a popup relative to its trigger button (above in portrait, to the
   right in landscape) and clamps it to the viewport.
-- `xmoLiftContextMenu` — when a native context menu (manage/account) is covered by the bar,
+- `xmoLiftContextMenu`: when a native context menu (manage/account) is covered by the bar,
   pushes it up or right until it is fully visible (automatically, via MutationObserver).
 
 ### Home launcher and login (option B)
@@ -345,8 +345,8 @@ This lists only **what to look for inside**.
 
 | Looking for | Where |
 |---|---|
-| The path a single request takes | the `route_request` middleware in `main.py` — 7 commented steps |
-| What gets injected where | `dpx/vscode/inject.py` — laid out as one table |
+| The path a single request takes | the `route_request` middleware in `main.py`: 7 commented steps |
+| What gets injected where | `dpx/vscode/inject.py`: laid out as one table |
 | Upstream relay (Host preservation, streaming, WS) | `dpx/vscode/proxy.py` |
 | The mobile UI itself | `static/overlay.css` + `static/overlay.js` |
 | The wrapper (parent bar + iframe) | `static/frame.html` |
@@ -354,20 +354,20 @@ This lists only **what to look for inside**.
 
 ### The main functions in `static/overlay.js`
 
-- `xmoActivate`, `xmoClickAria`, `xmoClickLabel` — forwarding clicks to native icons
+- `xmoActivate`, `xmoClickAria`, `xmoClickLabel`: forwarding clicks to native icons
 - `xmoPositionPopup`, `xmoRepositionOpenPopups`, `xmoLiftContextMenu`, `xmoScheduleLift`
 - `xmoRestoreMaximized`, `xmoPartOpen`, `xmoMaximizeSoon`
-- `xmoSaveChat`, `xmoReadChatInputText`, `xmoInitChatCapture` — chat capture
+- `xmoSaveChat`, `xmoReadChatInputText`, `xmoInitChatCapture`: chat capture
 - `xmoMobileModality` (device decision), `xmoSyncThemeVars` (mirrors theme variables from
   `.monaco-workbench` onto `:root`)
-- `xmoScanViews` / `xmoScanOverflow` / `xmoViewIcon` / `xmoActivateView` / `xmoCodiconFontUrl` —
+- `xmoScanViews` / `xmoScanOverflow` / `xmoViewIcon` / `xmoActivateView` / `xmoCodiconFontUrl`:
   collecting, activating and icon-ing view containers
 - `ensureBottomBar` (bar and popup DOM), `xmoRenderViewButtons`, `apply` (overlay on/off plus
   orientation), `syncThemeColor`
 - `forceActivityBarHorizontal` / `clearForcedActivityBar`
-- `xmoSoloPortrait`, `xmoAutoHideSidebarOnEditor` — portrait full screen
-- `xmoEmbedStatusTop`, `xmoEmbedChromeRestore`, `xmoPlaceMenuAt` — embed only
-- `xmoInitTouchClickBridge` — the touch→click bridge
+- `xmoSoloPortrait`, `xmoAutoHideSidebarOnEditor`: portrait full screen
+- `xmoEmbedStatusTop`, `xmoEmbedChromeRestore`, `xmoPlaceMenuAt`: embed only
+- `xmoInitTouchClickBridge`: the touch→click bridge
 
 ### Embed mode
 
@@ -379,20 +379,20 @@ This lists only **what to look for inside**.
 ### The webview-only script
 
 `static/webview-kb.js` is a **small keyboard policy** that goes only into VS Code webview host
-frames. The full workbench overlay must never be injected into those frames — that is what froze
+frames. The full workbench overlay must never be injected into those frames; that is what froze
 Android (CONSTRAINTS.md §3).
 
 ### localStorage keys
 
-- `xmo_home_ws` — the home workspace bookmark array, `[{id,name,url,folder}]`
-- `xmo_chats_<folder>` — that workspace's recent conversations, `[{ts,text}]`
-- `xmo_last_user` — the last username logged in with (auto-fills the login page)
-- `xmo_views_<folder>` — the view containers collected in that workspace (for short screens)
-- `xmo_theme` — the home and login page palette (light/sepia/dark)
+- `xmo_home_ws`: the home workspace bookmark array, `[{id,name,url,folder}]`
+- `xmo_chats_<folder>`: that workspace's recent conversations, `[{ts,text}]`
+- `xmo_last_user`: the last username logged in with (auto-fills the login page)
+- `xmo_views_<folder>`: the view containers collected in that workspace (for short screens)
+- `xmo_theme`: the home and login page palette (light/sepia/dark)
 
 ---
 
-## 5. Deployment model — everyone runs their own instance on their own machine
+## 5. Deployment model: everyone runs their own instance on their own machine
 
 This is distributed to several people, but **it is not one instance that many people log into.**
 There is no per-user file isolation anywhere in the code (§7-3). Using one account from a laptop,
@@ -419,14 +419,14 @@ per device; three concurrent sessions confirmed by measurement).
    legacy fallback with a manual `?folder=...&xmo=on`.
 2. ~~Real authentication and tokens~~ → **done**: `dpx/auth/` (users, sessions, PBKDF2, cookie
    gate). What remains is a mechanism forcing the default password not to be used.
-3. **Extension gating** — **on hold by the user's decision.** The design is settled: a companion
+3. **Extension gating**: **on hold by the user's decision.** The design is settled: a companion
    extension sends a 10-second heartbeat to `POST /__ext/ping`, and the proxy falls back to
    passthrough if no heartbeat arrives within 30 seconds. **The receiving end
    (`/__ext/ping`, `/__ext/state`, `extension.active()`) is implemented and dormant in
    `dpx/vscode/extension.py`**; what remains is the middleware gating switch and the companion
    extension itself (tiny: a package.json plus a heartbeat extension.js). `xmo=on/frame/embed`
    will be kept as dev switches that bypass the gate.
-4. ~~**ember (Tauri)**: implement loading a webview at `{server}/` on launch.~~ Obsolete — Tauri scaffold deleted (2026-10-03).
+4. ~~**ember (Tauri)**: implement loading a webview at `{server}/` on launch.~~ Obsolete: Tauri scaffold deleted (2026-10-03).
 
 ### Already called "resolved" by the user
 
@@ -437,14 +437,14 @@ per device; three concurrent sessions confirmed by measurement).
 
 ## 7. ⛔ Open decisions
 
-These were **deliberately left empty**. The code has a slot for each but no default value —
+These were **deliberately left empty**. The code has a slot for each but no default value:
 putting in a half-thought-out default means shipping it, and then never being able to take it
 back.
 
 ### 7-1. How to obtain HTTPS for phones and tablets
 
 **Status: self-signed certificates are abandoned. No replacement has been chosen.** So the
-repository has no certificate, and **it cannot be served over HTTPS — which means extension
+repository has no certificate, and **it cannot be served over HTTPS, which means extension
 webviews (Claude Code, Codex) are blank on real devices** (§3). `localhost` on the laptop still
 works.
 
@@ -472,7 +472,7 @@ high:
 | **Tailscale** (`tailscale serve`) | Real certificates issued and renewed automatically, not tied to an IP, no port forwarding, works at home and away | A Tailscale app and account per device |
 | **Cloudflare Tunnel** | A public address, no client-side app | Needs a domain; traffic goes through CF |
 | **DDNS + Let's Encrypt (DNS-01)** | Real certificates, own infrastructure | Install certbot/acme.sh, automate 90-day renewal |
-| **mkcert + installing a root CA** | Zero external dependencies, self-contained on the LAN | A root CA on every device — **installing a CA on a phone is a real burden** |
+| **mkcert + installing a root CA** | Zero external dependencies, self-contained on the LAN | A root CA on every device; **installing a CA on a phone is a real burden** |
 
 The current leaning is **Tailscale**.
 
@@ -486,7 +486,7 @@ address or DDNS both work as-is. **The only thing that changes is how it is star
 
 1. Pick one of the four
 2. Rewrite the README's "Serving over HTTPS is mandatory for phones and tablets" section around it
-3. Confirm on a real device that extension webviews actually appear — **headless Chromium cannot
+3. Confirm on a real device that extension webviews actually appear; **headless Chromium cannot
    verify this** (it does not draw webviews at all, §3). It must be a real device in a real browser.
 
 ### 7-2. Login is a thin shell
@@ -543,7 +543,7 @@ only option. Pick the theme in VS Code with `Ctrl+K Ctrl+T`.
 - **Screens → `static/`**: `CUSTOM_OVERLAY_CSS` → `overlay.css`, `OVERLAY_BOOT_JS` →
   `overlay.js`, `FRAME_PAGE_HTML` → `frame.html`, `LOGIN_PAGE_HTML` → `workspace_login.html`,
   `WEBVIEW_KB_JS` → `webview-kb.js`, `UPSTREAM_DOWN_HTML` → `upstream_down.html`. The string
-  values were extracted with `ast`, so not one character of content changed — which is why
+  values were extracted with `ast`, so not one character of content changed, which is why
   `node --check` simply works now.
 - **Code → `dpx/`**: `config` / `assets` / `auth` (gate, api) / `vscode` (proxy, inject,
   extension) / `home` (api, workspaces) / `agents` / `hub`. `main.py` is down to 226 lines
@@ -554,14 +554,14 @@ only option. Pick the theme in VS Code with `Ctrl+K Ctrl+T`.
   in `dpx/config.py`.
 - **Personal data removed**: the DDNS address, user home paths and LAN IP were generalized out of
   the source and the documents.
-- **`.gitignore` added** — `darkpyonix.db` (password hashes plus session tokens),
+- **`.gitignore` added**: `darkpyonix.db` (password hashes plus session tokens),
   `_xmo_recent.json` (this machine's folder paths), `certs/*.pem` (private keys).
-  ⚠️ **Files already tracked are not ignored** — that needs `git rm --cached`, which had not been
+  ⚠️ **Files already tracked are not ignored**: that needs `git rm --cached`, which had not been
   done at the time of writing.
 - **Portability**: `requirements.txt` documents why the `websockets==12.0` pin is a lifeline
   (unpinning it removes the `extra_headers` argument and the WS relay dies entirely), `main.py`
   got a Python 3.10+ guard, and the README got a "First run on a new machine" section.
-- Verified with a "new machine" simulation — source only, copied into an empty folder — covering
+- Verified with a "new machine" simulation (source only, copied into an empty folder) covering
   automatic database creation, account seeding and no crash on empty state. All 16 smoke checks
   on the existing machine passed.
 
@@ -571,7 +571,7 @@ only option. Pick the theme in VS Code with `Ctrl+K Ctrl+T`.
   `:root[data-xtheme="sepia"]` wash in `CUSTOM_OVERLAY_CSS` (about 127 lines), the theme toggle
   in `#xf-settings-menu`, and embed's `applyXTheme` (which injected `data-xtheme`) were all
   deleted, because they conflicted with a real color theme. **The home and login pages' theme
-  switcher (`.xtheme`: light/sepia/dark) stays** — that is for the brand pages' colors and is a
+  switcher (`.xtheme`: light/sepia/dark) stays**; that is for the brand pages' colors and is a
   separate thing.
 - **The home and login theme switcher was added** (before that): a ☀◐☾ switcher in
   `HOME_PAGE_HTML` and `LOGIN_PAGE_HTML`, stored in `localStorage['xmo_theme']` (default sepia),
@@ -580,7 +580,7 @@ only option. Pick the theme in VS Code with `Ctrl+K Ctrl+T`.
   (`[status bar][title bar][workbench]`). Only the vertical ordering in the description below is
   inverted; the mechanism is unchanged. `metrics()` folds both rows into `titleH`, so the parent
   bar's position calculation is unaffected.
-- **The frame-mode status bar was moved below the title bar** — `xmoEmbedStatusTop()` in
+- **The frame-mode status bar was moved below the title bar**: `xmoEmbedStatusTop()` in
   `OVERLAY_BOOT_JS` (embed only): top-shift the workbench by the status bar height (plus a resize
   to force VS Code to re-measure), pin the title bar to the very top with `position:fixed` (which
   avoids the grid view's overflow clipping), then pin the status bar below it, also fixed.
@@ -589,8 +589,8 @@ only option. Pick the theme in VS Code with `Ctrl+K Ctrl+T`.
   the vertical gutter). The height is measured once and cached (to avoid flicker), and re-pinned
   by an rAF MutationObserver plus a 250 ms interval plus a resize burst. `metrics()` folds the top
   status bar into `titleH` so `xf-bar` starts below it. **Note: this involved a lot of fighting
-  with the VS Code grid — the diagnostic flags have been removed.**
-- **Frame left bar polish** — the landscape vertical bar went from `space-around` to
+  with the VS Code grid; the diagnostic flags have been removed.**
+- **Frame left bar polish**: the landscape vertical bar went from `space-around` to
   `flex-start` plus `gap`, and the settings button to `margin-top:auto` so it is **pinned to the
   bottom** (native VS Code style). The settings icon was replaced with the official codicon
   "gear" SVG at 16×16.
@@ -602,8 +602,8 @@ Three user reports addressed. Details are in §3 under "Modality", "Bar composit
 
 1. **`&xmo=frame` was stuck in the address bar and hid the normal desktop screen** → the
    parameter was dropped from the login redirect, and the server decides whether to wrap from the
-   User-Agent. **Desktop's width-based responsiveness — narrowing the window brings the overlay
-   bar — is kept.** ⚠️ At one point this was wrongly implemented as "turn the mobile UI off
+   User-Agent. **Desktop's width-based responsiveness (narrowing the window brings the overlay
+   bar) is kept.** ⚠️ At one point this was wrongly implemented as "turn the mobile UI off
    entirely on desktop" and reverted; the responsiveness has to stay alive.
 2. **The bar's color was wrong when the window was shrunk** → caused by sibling elements not
    inheriting the theme variables, which exist only on `.monaco-workbench`. Fixed by mirroring
@@ -649,7 +649,7 @@ URL**):
 
 ### Earlier
 
-- **The tablet (Galaxy Tab S7) lockup on a real device was solved** — see CONSTRAINTS.md §3. Host
+- **The tablet (Galaxy Tab S7) lockup on a real device was solved** (see CONSTRAINTS.md §3). Host
   preservation, the WS route fix, narrowed injection scope, and the switch to streaming. Frame
   mode, rotation, the status bar and the absence of freezing were all confirmed on the tablet.
   Remaining observation: re-confirm remote connection stability on a first (uncached) visit.
@@ -657,12 +657,12 @@ URL**):
   removed, horizontal sash z-bumped, vertical sash widened to 12 px (CONSTRAINTS.md §1). Both
   verified by simulating drags.
 - **The status bar occlusion in overlay mode was finally solved**: the `xmoLiftTopCovered`
-  measurement-based correction watcher was added (CONSTRAINTS.md §1) — editor tabs and maximized
+  measurement-based correction watcher was added (CONSTRAINTS.md §1): editor tabs and maximized
   panel headers, which used to be re-cancelled after a toggle, now stay below the status bar
   (verified in both directions across repeated toggles).
 - **The frame-mode parent bar active highlight** was implemented and verified
   (CONSTRAINTS.md §2), and a **`/healthz` route-ordering bug was fixed** (moved ahead of the
-  catch-all plus a middleware bypass — it now returns "ok").
+  catch-all plus a middleware bypass; it now returns "ok").
 - **Extension gating**: built out as far as the receiving plumbing, then put on hold by the user's
   decision (§6, item 3).
 - **Who owns login, confirmed**: the ember repository was the Tauri starter as-is (no login code,
@@ -675,7 +675,7 @@ URL**):
   **fully fixed** with `width: calc(100vw - 48px) !important`; (2) the top status bar covered part
   headers (editor tabs, side bar and chat headers) → solved **as of initial load** with
   `translateY` on sidebar/aux/panel plus a margin on the editor tabs, though editor tabs and
-  maximized panels get re-cancelled by VS Code after a toggle (CONSTRAINTS.md §1) — the real fix
+  maximized panels get re-cancelled by VS Code after a toggle (CONSTRAINTS.md §1); the real fix
   is frame mode.
 - **iframe wrapping was implemented and verified** (opt-in `xmo=frame`, CONSTRAINTS.md §2): the
   terminal clipping and editor tab overlap are solved at the root in frame mode. Verified with

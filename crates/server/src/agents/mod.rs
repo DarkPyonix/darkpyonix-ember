@@ -193,9 +193,9 @@ pub struct McpServer {
     /// Seconds the agent should allow for the server to start (`npx` may download it first).
     pub startup_timeout_secs: Option<u32>,
     /// Environment for the MCP server process (central registry, FR-A7). Values may be secrets:
-    /// they are never put on a command line — Claude Code reads them from a private (`0600`)
+    /// they are never put on a command line. Claude Code reads them from a private (`0600`)
     /// `--mcp-config` file, Codex from its own process environment through
-    /// `mcp_servers.<name>.env_vars` — and `Debug` prints only the keys.
+    /// `mcp_servers.<name>.env_vars`, and `Debug` prints only the keys.
     pub env: Vec<(String, String)>,
 }
 

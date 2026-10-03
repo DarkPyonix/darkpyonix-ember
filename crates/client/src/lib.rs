@@ -3,7 +3,7 @@
 //! - [`wire`]: the main server's JSON types.
 //! - [`api`]: HTTP client for `/api/v1`.
 //! - [`push`]: push-message decoding (with version check) and reconnect backoff.
-//! - [`transcript`] and [`state`]: the pure reducer a UI binds to — projects, sessions with
+//! - [`transcript`] and [`state`]: the pure reducer a UI binds to: projects, sessions with
 //!   launcher status (incl. finished-unread), transcripts, computers, connection state.
 //! - [`cache`]: the cold-start snapshot file.
 //! - [`client`]: the sync engine tying them together.

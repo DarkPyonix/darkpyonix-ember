@@ -33,7 +33,7 @@ CREATE INDEX project_computers_by_computer ON project_computers(computer_id);
 /// existing events here and kept current by a trigger on `events`, so `Store::append` needs no
 /// change and the index can never miss an event written in the same transaction.
 ///
-/// Tokenizer: `unicode61` — Hangul, CJK and other letters are token characters, so Korean words
+/// Tokenizer: `unicode61`. Hangul, CJK and other letters are token characters, so Korean words
 /// are indexed whole (`오류가`) and found by prefix (`오류*`); queries add the `*` (see
 /// `Store::search`). `remove_diacritics 2` folds Latin accents only.
 pub const META_FTS_MIGRATION: &str = "

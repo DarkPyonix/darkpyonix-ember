@@ -12,7 +12,7 @@ darkPyonix manager(FastAPI 기반)가 VSCode Web 서버를 라우팅으로 연�
 ## 런타임 구조
 
 ```
-Client (Tauri WebView — 폐기됨, 2026-10-03)
+Client (Tauri WebView, 폐기됨, 2026-10-03)
     ↕
 darkPyonix Manager (FastAPI)
     ↕ routing

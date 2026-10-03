@@ -8,16 +8,16 @@
 //! - **Playwright MCP**: `npx -y @playwright/mcp@latest --cdp-endpoint=<relay>`
 //!
 //! Both connect to an existing browser instead of launching their own, so the agent drives the
-//! project's browser — same profile, same egress, visible in the viewer. Going through the relay
+//! project's browser: same profile, same egress, visible in the viewer. Going through the relay
 //! (rather than Chrome's port) is what lets ember show "agent is active" and pause the agent while
 //! the user has taken over.
 //!
 //! Claude Code takes the servers via `--mcp-config <json>`; Codex via `-c mcp_servers.<name>.…`
 //! overrides (or the `config` map on app-server `thread/start`). Both are plain, documented CLI
-//! configuration — the agent itself is unchanged.
+//! configuration; the agent itself is unchanged.
 //!
 //! Opt-in per server: `EMBER_BROWSER_MCP=chrome-devtools|playwright|off` (default `off`). The MCP
-//! server is fetched and run by a package runner found on `PATH` — `npx` (`npx -y <pkg>`), else
+//! server is fetched and run by a package runner found on `PATH`: `npx` (`npx -y <pkg>`), else
 //! `bunx` (`bunx <pkg>`); `EMBER_BROWSER_MCP_RUNNER` names one explicitly. With no runner the
 //! setting is ignored with a warning. When enabled, [`start_config_hook`] adds the server to every
 //! agent start as a [`McpServer`] (the adapters turn it into the CLI flags) and exports
@@ -232,8 +232,8 @@ pub fn start_config_hook(base: String, mcp: BrowserMcp, runner: Runner) -> Start
 
 /// A session start hook exporting the project's browser to every agent process (environment
 /// only; superseded by [`start_config_hook`], which also wires the adapters):
-/// - `EMBER_BROWSER_CDP_WS` — the relay endpoint;
-/// - `EMBER_BROWSER_MCP_CONFIG` — the Claude Code `--mcp-config` JSON.
+/// - `EMBER_BROWSER_CDP_WS`: the relay endpoint;
+/// - `EMBER_BROWSER_MCP_CONFIG`: the Claude Code `--mcp-config` JSON.
 ///
 /// Adapters (or a wrapper) turn these into the CLI flags above; the agents themselves are not
 /// changed.

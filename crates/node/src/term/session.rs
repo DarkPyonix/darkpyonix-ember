@@ -2,8 +2,8 @@
 //! control / size policy of FR-P4.
 //!
 //! Concurrency: a session is a mutex around [`Inner`] plus three plain threads (PTY reader, PTY
-//! writer, exit waiter). Everything that changes the stream — output fed to the model, an attach
-//! taking a snapshot, input, resize — happens under the one lock, so
+//! writer, exit waiter). Everything that changes the stream (output fed to the model, an attach
+//! taking a snapshot, input, resize) happens under the one lock, so
 //!
 //! - a snapshot and the live stream that follows it never overlap or leave a gap, and
 //! - input from all clients reaches the PTY in the order the lock was taken (arrival order);

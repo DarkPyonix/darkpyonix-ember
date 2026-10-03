@@ -11,7 +11,7 @@
 //! - `GET    /api/v1/usage[?days=7]`           tokens per account per UTC day (ChatGPT accounts
 //!   from `crate::chatgpt` included, by their account id)
 //! - `GET    /api/v1/providers`, `POST /api/v1/providers` `{label, kind, base_url?, api_key}`,
-//!   `DELETE /api/v1/providers/{id}` — responses never include the key.
+//!   `DELETE /api/v1/providers/{id}`. Responses never include the key.
 //!
 //! A session's account and the routing reason are on the session record (`account_id`,
 //! `account_reason`).

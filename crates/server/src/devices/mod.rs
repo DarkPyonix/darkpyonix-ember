@@ -11,7 +11,7 @@
 //!
 //! Rows come from two places, recorded in `source`: added by hand (`local`), or synced from the
 //! user's darkpyonix.dev hub account (`hub`, opt-in: [`crate::hub`], `FR-N2`). A sync adds the
-//! account's devices and removes `hub` rows whose device the hub no longer lists — removing a
+//! account's devices and removes `hub` rows whose device the hub no longer lists, so removing a
 //! device on the hub revokes it here too. Rows added by hand are never touched by a sync.
 
 use std::sync::Arc;

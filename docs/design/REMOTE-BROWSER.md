@@ -1,4 +1,4 @@
-# Remote browser — server side (M6, SPEC §R, INTENT D6)
+# Remote browser: server side (M6, SPEC §R, INTENT D6)
 
 Code: `crates/server/src/browser/`. Stream protocol version: **1** (`browser::STREAM_VERSION`).
 
@@ -6,7 +6,7 @@ Code: `crates/server/src/browser/`. Stream protocol version: **1** (`browser::ST
 
 - One headless Chromium per project runs on ember server (`--headless=new`, 1280×800 viewport).
 - Profile: `<EMBER_DATA_DIR>/browser/<project>/profile` (FR-R2). `DELETE …/data` wipes it (FR-R4).
-- Egress (FR-R1): chosen per project — `{"kind":"direct"}`, `{"kind":"proxy","url":…}`
+- Egress (FR-R1): chosen per project: `{"kind":"direct"}`, `{"kind":"proxy","url":…}`
   (`socks5://`, `socks4://`, `http://`, `https://`; no credentials) or `{"kind":"computer","id":…}`
   (a registered computer; `local` = direct). A computer resolves, at every Chrome start, to that
   computer's loopback SOCKS5 listener in ember server (below). Loopback is sent through the proxy
@@ -26,9 +26,9 @@ Code: `crates/server/src/browser/`. Stream protocol version: **1** (`browser::ST
 | --- | --- |
 | `GET /` | `{v, chrome, browsers: [BrowserInfo]}` |
 | `GET /{project}` | `BrowserInfo` (404 if never opened) |
-| `POST /{project}` | `{egress?: string\|null, computer?: id}` — start or keep running; either given → switch to it (persisted) |
-| `GET /{project}/egress` | `{egress: Egress, proxy: string\|null, running}` — the persisted choice and the proxy Chrome last started with |
-| `PUT /{project}/egress` | `{egress: string\|null}` or `{computer: id}` — switch egress (restart, same profile; persisted). Both → 400 |
+| `POST /{project}` | `{egress?: string\|null, computer?: id}`: start or keep running; either given → switch to it (persisted) |
+| `GET /{project}/egress` | `{egress: Egress, proxy: string\|null, running}`: the persisted choice and the proxy Chrome last started with |
+| `PUT /{project}/egress` | `{egress: string\|null}` or `{computer: id}`: switch egress (restart, same profile; persisted). Both → 400 |
 | `DELETE /{project}` | stop (graceful) |
 | `DELETE /{project}/data` | clear profile; a running browser restarts empty with the same egress |
 | `POST /{project}/input` | one input message (below); 409 if no page is attached |
@@ -46,10 +46,10 @@ least one viewer is connected. All viewers share one stream (one tab, one qualit
 
 ### Server → client
 
-- **Text** `{"type":"hello","v":1,"project":…,"state":ViewState}` — first message. A client that
+- **Text** `{"type":"hello","v":1,"project":…,"state":ViewState}`: first message. A client that
   does not know `v` must say so to the user, not guess.
-- **Text** `{"type":"state","v":1,"project":…,"state":ViewState}` — on every state change.
-- **Text** `{"type":"error","v":1,"message":…}` — an input message failed.
+- **Text** `{"type":"state","v":1,"project":…,"state":ViewState}`: on every state change.
+- **Text** `{"type":"error","v":1,"message":…}`: an input message failed.
 - **Binary** frame: `[u32 big-endian header length N][N bytes UTF-8 JSON header][JPEG bytes]`.
   Header: `{"type":"frame","v":1,"seq","format":"jpeg","target_id","metadata","agent_active","takeover"}`;
   `metadata` is CDP's `ScreencastFrameMetadata` (`deviceWidth`, `deviceHeight`, `pageScaleFactor`,
@@ -72,7 +72,7 @@ metadata; the JPEG may be downscaled (`max_width/height`), so clients scale by
 | `key` | `event` (`keyDown`/`keyUp`/`rawKeyDown`/`char`), `key`, `code`, `text?`, `key_code?` (Windows VK), `modifiers` | `Input.dispatchKeyEvent` |
 | `text` | `text` | `Input.insertText` (IME, mobile keyboards) |
 | `navigate` | `url` | `Page.navigate` |
-| `reload` / `back` / `forward` | — | `Page.reload` / `history.back()` / `history.forward()` |
+| `reload` / `back` / `forward` | (none) | `Page.reload` / `history.back()` / `history.forward()` |
 | `takeover` | `on` | user takes control: agent commands are held until `on: false` |
 | `select_tab` | `target_id` or `null` (follow the newest tab) | re-attach the stream |
 | `screencast` | `quality?`, `max_width?`, `max_height?` | restarts `Page.startScreencast` |
@@ -93,7 +93,7 @@ Chrome --proxy-server=socks5://127.0.0.1:<port>
   sends hostnames to SOCKS5 proxies). Listener: one per computer, started on first use, bound to
   127.0.0.1 without authentication (Chrome cannot authenticate to SOCKS5), kept until the
   computer is removed or the server stops. Its port changes per server run, which is why the
-  computer id — not the URL — is persisted.
+  computer id (not the URL) is persisted.
 - `/v1/egress` stream format: a raw SOCKS5 (RFC 1928) byte stream in Binary frames. SOCKS5
   auth over this route is "no authentication" (the upgrade carried the node token). `CONNECT`
   only (others → reply `0x07`); IPv4, IPv6 and domain addresses. **An empty Binary frame is a
@@ -141,7 +141,7 @@ adapters turn it into flags:
 
 The relay opens one upstream DevTools connection per agent connection and passes messages
 unchanged. Each agent→browser message sets `agent_active` (true for 3 s after the last command) and,
-while the user has taken over, waits until takeover ends — so the agent pauses and then continues
+while the user has taken over, waits until takeover ends, so the agent pauses and then continues
 (FR-R3). An egress switch restarts Chrome and closes relay connections; MCP servers reconnect on
 their next tool call.
 

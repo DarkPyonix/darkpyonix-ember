@@ -1,4 +1,4 @@
-# OSE — DarkPyonix's own build of Code-OSS
+# OSE: DarkPyonix's own build of Code-OSS
 
 OSE is the default VS Code runtime of Ember's IDE window (`docs/INTENT.md` D10, `docs/SPEC.md`
 FR-W4). It is the **VS Code web server ("REH web")** compiled by DarkPyonix from the MIT-licensed
@@ -20,7 +20,7 @@ Behaviour changes for the IDE window come from `web/proxy/`.
 
 Builds run in GitHub Actions (`.github/workflows/ose.yml`), never on a developer machine:
 `build.sh` refuses to run unless `CI=true` (or `OSE_ALLOW_LOCAL_BUILD=1`). `build.sh
---product-only` is the exception — it only downloads `product.json`, applies the overrides and
+--product-only` is the exception: it only downloads `product.json`, applies the overrides and
 checks the result, so it is safe anywhere.
 
 ## Targets and releases
@@ -116,7 +116,7 @@ Server flags used here (from upstream `src/vs/server/node/serverEnvironmentServi
   `dataFolderName` `.dpx-ose`, `serverApplicationName` `dpx-ose-server` (the launcher is
   `bin/dpx-ose-server`), `serverDataFolderName` `.dpx-ose-server`, plus the matching
   `tunnelApplicationName`, `urlProtocol`, bundle/desktop ids. Nothing is named "Visual Studio Code"
-  and no Microsoft logo or icon is added — Code-OSS ships none.
+  and no Microsoft logo or icon is added (Code-OSS ships none).
 - **Open VSX.** `extensionsGallery`:
   `serviceUrl` `https://open-vsx.org/vscode/gallery` (the workbench derives `/extensionquery` and
   `/vscode/{publisher}/{name}/latest` from it), `itemUrl` `https://open-vsx.org/vscode/item`,

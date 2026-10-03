@@ -1,5 +1,5 @@
 /*
- * detach.js — tab detach for the VS Code Web IDE window (SPEC FR-B1, FR-B2, FR-B4).
+ * detach.js: tab detach for the VS Code Web IDE window (SPEC FR-B1, FR-B2, FR-B4).
  *
  * Injected into the workbench top-level document only, exactly like overlay.js (see
  * dpx/vscode/inject.py). Inside the wrapper this is the embed iframe, not frame.html.
@@ -29,7 +29,7 @@
  *                                  (or has saved view state). RELIABLE for the visible tab.
  *   - DOM fallbacks (only when the transfer is empty/unreadable):
  *       .monaco-editor[data-uri]      model URI of a visible code editor
- *       #status.editor.selection      "Ln 42, Col 7" (localised text; digits parsed) —
+ *       #status.editor.selection      "Ln 42, Col 7" (localised text; digits parsed):
  *                                     active editor only, cursor only, no selection range
  *       .lines-content style.top      = -scrollTop (Monaco viewLines); visible editor only
  *
@@ -50,7 +50,7 @@
   'use strict';
 
   // ---------------------------------------------------------------------------------------
-  // Protocol constants — keep in sync with crates/bridge/src/messages.rs
+  // Protocol constants: keep in sync with crates/bridge/src/messages.rs
   // ---------------------------------------------------------------------------------------
   var VERSIONS = { tab_detach: 1, sibling_window_closed: 1, open_window: 1 };
   var HANDLER_NAME = 'emberBridge';
@@ -72,7 +72,7 @@
     return Math.sqrt(dx * dx + dy * dy);
   }
 
-  /** Screen point inside the browser window's outer bounds — the same test VS Code uses
+  /** Screen point inside the browser window's outer bounds: the same test VS Code uses
    *  (maybeCreateAuxiliaryEditorPartAt) to decide whether a drop left the window. */
   function insideWindowBounds(screenPt, win) {
     if (!screenPt || !win) return true;
@@ -283,7 +283,7 @@
     } else if (msg.version !== expected) {
       mismatch = { kind: msg.kind, received: msg.version, expected: expected };
       if (log) log('ember-bridge: version mismatch for ' + msg.kind + ': received ' + msg.version +
-                   ', expected ' + expected + ' — delivering anyway');
+                   ', expected ' + expected + '; delivering anyway');
     }
     return { message: msg, mismatch: mismatch };
   }
@@ -492,12 +492,12 @@
       if (go()) return true;
       // Blocked: dragend is not an activation-triggering event; the drag's mousedown only
       // carries transient activation for a few seconds. A click restores it.
-      toast('Pop-up blocked — open the detached tab in a new window?', 'Open', go);
+      toast('Pop-up blocked. Open the detached tab in a new window?', 'Open', go);
       return true;
     }
 
     // dragstart: capture on the window so we see it first, then read the data VS Code
-    // writes from a listener on the tab itself — added now, so it runs after VS Code's
+    // writes from a listener on the tab itself, added now, so it runs after VS Code's
     // own target-phase listener while the DataTransfer is still writable/readable.
     win.addEventListener('dragstart', function (e) {
       tracker.reset(); drag = null;

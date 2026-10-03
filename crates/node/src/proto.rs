@@ -1,7 +1,7 @@
 //! Wire types shared by the daemon ([`crate::api`]) and the client ([`crate::client`]).
 //!
 //! Every request and response is JSON. Byte payloads (file contents, process output, stdin) are
-//! base64 strings so that one encoding carries over any transport — the node ↔ server transport
+//! base64 strings so that one encoding carries over any transport. The node ↔ server transport
 //! is not decided yet (`INTENT.md` Q7). Bump [`PROTOCOL_VERSION`] on any incompatible change.
 
 use std::collections::BTreeMap;

@@ -3,7 +3,7 @@
 | Runtime | Server                                                | Marketplace       | Default |
 |---------|-------------------------------------------------------|-------------------|---------|
 | `ose`   | Code-OSS web server built by DarkPyonix (REH web)      | Open VSX          | yes     |
-| `vsc`   | the user's Microsoft VS Code, `code serve-web`         | Microsoft         | —       |
+| `vsc`   | the user's Microsoft VS Code, `code serve-web`         | Microsoft         | (none)  |
 
 The OSE build pipeline is separate work. Here OSE is just a configured binary:
 `DPX_OSE_SERVER` (its launcher, e.g. `<build>/bin/code-server-oss`) and optionally
@@ -16,7 +16,7 @@ Pure stdlib (subprocess, zipfile, json), so it is testable without FastAPI and w
 
 Detection answers INTEGRATION.md's "verify `code --version`" step and returns install
 guidance when the runtime is missing. The UI for that flow lives in the client (later); this
-only exposes the data — `GET /__runtime` on the proxy and `python -m dpx.serve --check`.
+only exposes the data: `GET /__runtime` on the proxy and `python -m dpx.serve --check`.
 
 Default extensions: each entry is a marketplace id (`publisher.name`) or a `.vsix` path,
 installed with `<command> --install-extension <entry> --extensions-dir <data-dir>/extensions`.
@@ -52,7 +52,7 @@ DEFAULT_EXTENSIONS = ("darkpyonix.vscode-darkpyonix-theme",)
 DEFAULT_OSE_ARGS = ("--host {host} --port {port} --without-connection-token "
                     "--accept-server-license-terms --server-data-dir {data_dir}")
 
-CHECK_TIMEOUT = 15          # `code --version` — the macOS shim launches Electron's CLI
+CHECK_TIMEOUT = 15          # `code --version`: the macOS shim launches Electron's CLI
 INSTALL_TIMEOUT = 180       # one marketplace download
 
 VSC_GUIDE = {
@@ -137,7 +137,7 @@ def detect(rt: str | None = None, command: str | None = None) -> dict:
                         f"{(proc.stderr or proc.stdout or '').strip()[:300]}")
         out["install_guide"] = guide(rt)
         return out
-    # `--version` prints version, commit, architecture — one per line (both runtimes).
+    # `--version` prints version, commit, architecture, one per line (both runtimes).
     out["version"] = lines[0]
     out["commit"] = lines[1] if len(lines) > 1 else None
     out["arch"] = lines[2] if len(lines) > 2 else None
@@ -198,7 +198,7 @@ def installed_ids(extensions_dir: Path) -> set[str]:
 def prepare_data_dir(rt: str, data_dir: Path) -> None:
     """Machine settings the runtime needs before it starts.
 
-    OSE (Code-OSS) has no Marketplace signature verifier — `@vscode/vsce-sign` is Microsoft-only —
+    OSE (Code-OSS) has no Marketplace signature verifier (`@vscode/vsce-sign` is Microsoft-only),
     so every gallery install fails with "Signature verification was not executed" unless
     `extensions.verifySignature` is off. Existing machine settings are kept; only that key is set.
     VSC is left as the user configured it.

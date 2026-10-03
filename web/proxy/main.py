@@ -1,4 +1,4 @@
-"""DarkPyonix — the reverse proxy that stands in front of VS Code Web (`code serve-web`).
+"""DarkPyonix: the reverse proxy that stands in front of VS Code Web (`code serve-web`).
 
 This file does **assembly and routing only**. The modules below do the actual work.
 
@@ -30,7 +30,7 @@ from urllib.parse import quote
 if sys.version_info < (3, 10):
     raise SystemExit(
         f"DarkPyonix requires Python 3.10 or newer (this is {sys.version.split()[0]}).\n"
-        "Recreate the venv with a newer version:  python -m venv .venv"
+        "Run it under a newer one, e.g.:  uv run --python 3.12 --with-requirements requirements.txt ..."
     )
 
 from fastapi import FastAPI, Request, Response
@@ -62,12 +62,12 @@ app.add_middleware(
 
 # Auth: auth_api is a standalone FastAPI app, but it is mounted on the same origin (/auth)
 # so that the session cookie reaches the proxy (/code and friends) unchanged. The gate calls
-# validate_session() directly. (It can be split into its own process later — see the design
+# validate_session() directly. (It can be split into its own process later; see the design
 # note at the top of auth/api.py.)
 init_db()
 app.mount("/auth", auth_app)
 
-_NO_USERS_HELP = """There are no accounts — nobody can log in and no workspace will open.
+_NO_USERS_HELP = """There are no accounts: nobody can log in and no workspace will open.
   To create the first account, set these environment variables and start again:
     $env:DPX_USERNAME="<user>"; $env:DPX_PASSWORD="<password>"
   A default account (admin or similar) is deliberately not created: distributing one would
@@ -81,7 +81,7 @@ if user_count() == 0:
 # Internal JSON APIs
 app.include_router(home_api.router)      # /__workspaces, /__agents/*
 app.include_router(extension.router)     # /__ext/*  (the companion extension heartbeat)
-# /__terms/* — ember node's persistent terminals (HTTP + the attach WebSocket). Included before
+# /__terms/*: ember node's persistent terminals (HTTP + the attach WebSocket). Included before
 # the catch-all routes at the bottom, so its WebSocket route is not shadowed by the VS Code relay.
 app.include_router(terms_api.router)
 
@@ -178,7 +178,7 @@ def _serve_our_page(request: Request, path: str, xmo: str) -> Response | None:
 
 
 # =============================================================================
-# The path a single request takes — in order, top to bottom
+# The path a single request takes, in order, top to bottom
 #   1. Internal endpoints (/healthz, /__ext/*) pass straight through
 #   2. The auth gate: anything not public needs a valid session
 #   2b. Folder roots: `?folder=` / `?workspace=` outside DPX_FOLDER_ROOTS → 403
@@ -199,7 +199,7 @@ async def route_request(request: Request, call_next):
     if path == "/healthz" or path.startswith("/__ext/"):
         return await call_next(request)
 
-    # 2. The auth gate — every request bound for serve-web (editor + assets) needs a valid
+    # 2. The auth gate: every request bound for serve-web (editor + assets) needs a valid
     #    session. This replaces VS Code's connection token.
     if not is_public_path(path):
         if not validate_session(request.cookies.get(SESSION_COOKIE)):
@@ -208,7 +208,7 @@ async def route_request(request: Request, call_next):
                 return RedirectResponse(f"/login?next={quote(str(request.url))}", status_code=303)
             return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    # 2b. Folder roots — a workspace outside the configured roots is refused here, before it
+    # 2b. Folder roots: a workspace outside the configured roots is refused here, before it
     #     is recorded as recent or reaches serve-web. No roots configured = no restriction.
     refused = roots.refused_param(dict(request.query_params), FOLDER_ROOTS)
     if refused:
@@ -234,7 +234,7 @@ async def route_request(request: Request, call_next):
             workspaces.record(folder)
 
         # 5. Webview host frames. Extension panels (agent chat) are drawn inside these, and the
-        #    workbench's keyboard policy cannot see that document — which is why the soft
+        #    workbench's keyboard policy cannot see that document, which is why the soft
         #    keyboard rose every time a new conversation opened. Give those frames a small
         #    policy of their own.
         if inject.is_webview_host(path):
@@ -253,7 +253,7 @@ async def route_request(request: Request, call_next):
 
 
 # =============================================================================
-# The last gate before upstream — everything nobody above claimed
+# The last gate before upstream: everything nobody above claimed
 # =============================================================================
 @app.api_route("/{full_path:path}",
                methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])

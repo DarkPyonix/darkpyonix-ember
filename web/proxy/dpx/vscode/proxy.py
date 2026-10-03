@@ -1,4 +1,4 @@
-"""Relaying to the upstream (`code serve-web`) — HTTP and WebSocket.
+"""Relaying to the upstream (`code serve-web`): HTTP and WebSocket.
 
 This module does nothing but pass bytes through. Rewriting content (injecting the overlay
 CSS/JS) lives in inject.py, and deciding which request goes where lives in the middleware
@@ -95,7 +95,7 @@ async def relay(request: Request, url: str) -> Response:
 async def relay_websocket(websocket: WebSocket, full_path: str) -> None:
     """Bidirectional relay for the WebSockets VS Code Web uses (the extension host, etc.).
 
-    The caller must use @app.websocket — @app.websocket_route (plain starlette) does not
+    The caller must use @app.websocket; @app.websocket_route (plain starlette) does not
     inject path parameters into the handler, which crashes every connection.
     """
     subproto = websocket.headers.get("sec-websocket-protocol")

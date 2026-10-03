@@ -1,4 +1,4 @@
-# DarkPyonix — the VS Code Web wrapping layer
+# DarkPyonix: the VS Code Web wrapping layer
 
 A reverse proxy that makes VS Code Web (`code serve-web`) usable on tablets and phones.
 It serves the home launcher and the login page itself, and wraps a workspace in an iframe
@@ -13,7 +13,7 @@ an official, unmodified VS Code Web build. No upstream source is patched.
 ## ⚠️ There are two processes
 
 `code serve-web` is **stock VS Code Web and nothing else**.
-**Every screen we built — the bar, home, login, the wrapper — lives in the proxy (:8888).**
+**Every screen we built (the bar, home, login, the wrapper) lives in the proxy (:8888).**
 Going directly to the serve-web port and seeing nothing is the expected behavior.
 
 ```
@@ -34,35 +34,29 @@ is in `.gitignore` and is created automatically on first run.
 ```powershell
 Set-Location <the folder you cloned into>
 
-# 1) Virtualenv — Python 3.10 or newer is required (check with: python -V)
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# 1) uv (https://docs.astral.sh/uv/). Python 3.10 or newer is required; this fetches one
+uv python install 3.12
 
-# 2) The first account — without this there is no account, so nothing can be opened
+# 2) The first account: without this there is no account, so nothing can be opened
 $env:DPX_USERNAME="<user>"; $env:DPX_PASSWORD="<password>"
 ```
 
-⚠️ **No default account is created** — both variables must be set. Login is still a thin
+⚠️ **No default account is created**: both variables must be set. Login is still a thin
 shell (see [docs/BACKGROUND.md](docs/BACKGROUND.md)). The variables apply exactly once, when
 `darkpyonix.db` does not yet exist, so if the account already exists use
 `/auth/change-password` or delete the database and start again.
 
 That machine also needs `code serve-web` (it ships with VS Code).
 
-⚠️ **Using this from a phone or tablet requires HTTPS, and how to obtain it is undecided** —
+⚠️ **Using this from a phone or tablet requires HTTPS, and how to obtain it is undecided**;
 see the section below.
 
 ---
 
 ## Running it
 
-Once, the first time (skip if you already did the "new machine" section):
-
-```powershell
-Set-Location <the folder you cloned into>
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
+There is no separate install step: `uv run --with-requirements requirements.txt` resolves the
+dependencies on first use and caches them.
 
 Every time, in two terminals:
 
@@ -70,8 +64,8 @@ Every time, in two terminals:
 # 1) Upstream VS Code Web
 code serve-web --host 127.0.0.1 --port 9094 --without-connection-token --accept-server-license-terms
 
-# 2) The proxy — the port above must be passed as XMO_UPSTREAM_PORT (the default is 9092)
-$env:XMO_UPSTREAM_PORT="9094"; .\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8888
+# 2) The proxy: the port above must be passed as XMO_UPSTREAM_PORT (the default is 9092)
+$env:XMO_UPSTREAM_PORT="9094"; uv run --with-requirements requirements.txt uvicorn main:app --host 0.0.0.0 --port 8888
 ```
 
 If a port is stuck `LISTENING` without responding (a dead serve-web), move to the next port.
@@ -112,7 +106,7 @@ enforced**, and prints one JSON line when both answer:
 ```sh
 cd web/proxy
 export DPX_USERNAME=<user> DPX_PASSWORD=<password>     # first run only, as above
-python -m dpx.serve --runtime vsc --root ~/work --root ~/src
+uv run --with-requirements requirements.txt python -m dpx.serve --runtime vsc --root ~/work --root ~/src
 # {"event": "ready", "url": "http://127.0.0.1:53817/", "upstream_port": 53816, "roots": [...], ...}
 ```
 
@@ -121,21 +115,21 @@ if given, and removed on exit). Ctrl-C or SIGTERM stops both processes. Exit cod
 bad arguments (no root, a root that is not a directory), `3` runtime not installed,
 `4` a process failed to start or died.
 
-**Runtimes** (`INTENT.md` D10, `FR-W4`) — `--runtime` or `DPX_RUNTIME`:
+**Runtimes** (`INTENT.md` D10, `FR-W4`): `--runtime` or `DPX_RUNTIME`:
 
 | Runtime | Default | Server | Configure |
 |---|---|---|---|
 | `ose` | yes | DarkPyonix-built Code-OSS web server (Open VSX) | `DPX_OSE_SERVER` = its launcher; `DPX_OSE_ARGS` = argument template with `{host}` `{port}` `{data_dir}` (default: the REH web server's `--host --port --without-connection-token --accept-server-license-terms --server-data-dir`) |
-| `vsc` | — | the user's Microsoft VS Code, `code serve-web` | `DPX_CODE_BIN` (default `code` on `PATH`) |
+| `vsc` | no | the user's Microsoft VS Code, `code serve-web` | `DPX_CODE_BIN` (default `code` on `PATH`) |
 
 `python -m dpx.serve --runtime vsc --check` prints the runtime status as JSON
-(`installed`, `version`, `commit`, `arch`, and `install_guide` when missing) — the data
+(`installed`, `version`, `commit`, `arch`, and `install_guide` when missing), the data
 behind INTEGRATION.md's "verify `code --version`" step. A running proxy serves the same at
 `GET /__runtime` (needs a session).
 
 **Folder roots.** At least one `--root` (or `DPX_FOLDER_ROOTS`, `os.pathsep`-separated) is
-required in this mode. A `?folder=` or `?workspace=` outside every root — after resolving
-`..` and symlinks — is answered `403` before it reaches serve-web or the recent list. This
+required in this mode. A `?folder=` or `?workspace=` outside every root (after resolving
+`..` and symlinks) is answered `403` before it reaches serve-web or the recent list. This
 restricts which workspace a URL opens; it is **not** a filesystem sandbox (the extension host
 and terminal still run as the OS user). The standalone proxy honours `DPX_FOLDER_ROOTS` too,
 and with it unset keeps its old, unrestricted behaviour.
@@ -143,11 +137,11 @@ and with it unset keeps its old, unrestricted behaviour.
 **Default extensions** (`FR-W6`). Each entry of `--extension` / `DPX_DEFAULT_EXTENSIONS`
 (a marketplace id or a `.vsix` path) is installed into `<data-dir>/extensions`, the directory
 the server started with `--server-data-dir <data-dir>` loads from; an entry already there is
-skipped. The default is the DarkPyonix theme, `darkpyonix.vscode-darkpyonix-theme` — **not
+skipped. The default is the DarkPyonix theme, `darkpyonix.vscode-darkpyonix-theme`, **not
 published yet**, so until it is, its install fails with a warning (the server still starts);
 point `DPX_DEFAULT_EXTENSIONS` at the `.vsix`, or set it empty. `--data-dir` /
 `DPX_SERVER_DATA_DIR` defaults to `~/.ember/vscode-web/<runtime>`, one per runtime so the two
-marketplaces never mix — settings there are separate from a desktop VS Code's.
+marketplaces never mix; settings there are separate from a desktop VS Code's.
 
 | Option | Env | Default |
 |---|---|---|
@@ -159,7 +153,7 @@ marketplaces never mix — settings there are separate from a desktop VS Code's.
 | `--public-url` | `DPX_PUBLIC_URL` | `http://<host>:<port>/` (a wildcard bind is announced as `127.0.0.1`) |
 | `--data-dir` | `DPX_SERVER_DATA_DIR` | `~/.ember/vscode-web/<runtime>` |
 | `--extension ID_OR_VSIX` (repeatable) | `DPX_DEFAULT_EXTENSIONS` | the DarkPyonix theme |
-| `--announce-file PATH` | — | none |
+| `--announce-file PATH` | (none) | none |
 
 The URL it announces is what ember server's "Open IDE" returns as the `vscode` target
 (`EMBER_IDE_COMPUTERS` → `ide_url`, see `crates/server/src/api/ide.rs`).
@@ -172,7 +166,7 @@ Tests (stdlib only; the middleware test is skipped without FastAPI):
 ## Screen flow
 
 ```
-/                     home launcher — workspace cards
+/                     home launcher: workspace cards
   └─ [Open] ──▶ /login?...        login page
         └─ POST /auth/login ──▶ /?folder=<path>   workspace
 ```
@@ -180,14 +174,14 @@ Tests (stdlib only; the middleware test is skipped without FastAPI):
 - Workspaces (`/?folder=...`) and the serve-web assets and WebSocket **require a valid
   session**. Requesting HTML without one returns a 303 redirect to
   `/login?next=<original address>`.
-- **There is no initial account** — one is created only on first start, and only if
+- **There is no initial account**: one is created only on first start, and only if
   `DPX_USERNAME` and `DPX_PASSWORD` are both set. Without an account, the startup log warns
   and logging in is impossible.
-- ⚠️ **An account is an entry pass, not an identity** — there is no per-user file isolation,
+- ⚠️ **An account is an entry pass, not an identity**: there is no per-user file isolation,
   so whoever logs in sees the files of the OS account that started the server. Using one
   account from a laptop, a phone and a tablet at the same time is supported on purpose. See
   [docs/BACKGROUND.md](docs/BACKGROUND.md).
-- The workspace screen switches on window width — wide gives stock VS Code, narrow or touch
+- The workspace screen switches on window width: wide gives stock VS Code, narrow or touch
   gives our bar. The switch happens **without a reload**.
 
 ---
@@ -197,10 +191,10 @@ Tests (stdlib only; the middleware test is skipped without FastAPI):
 | Variable | Default | Description |
 |---|---|---|
 | `XMO_UPSTREAM_HOST` | `127.0.0.1` | serve-web host |
-| `XMO_UPSTREAM_PORT` | `9092` | serve-web port — **must be set if you started it on another port** |
-| `DPX_USERNAME` | (none) | Name of the first account — **both variables are required to create it** |
+| `XMO_UPSTREAM_PORT` | `9092` | serve-web port: **must be set if you started it on another port** |
+| `DPX_USERNAME` | (none) | Name of the first account: **both variables are required to create it** |
 | `DPX_PASSWORD` | (none) | Password of the first account. Without it, the server starts with no account |
-| `DPX_NO_ASSET_CACHE` | (none) | `1` re-reads `static/` on every request — for working on the screens |
+| `DPX_NO_ASSET_CACHE` | (none) | `1` re-reads `static/` on every request (for working on the screens) |
 | `DPX_TAB_DETACH` | `1` | `0` stops injecting `detach.js` and the `dragToOpenWindow` default → stock tab drag (see "Tab detach") |
 | `DPX_HOME` | user home | Where to look for agent session files (`~/.claude`, …) |
 | `DPX_HUB_URL` · `DPX_HUB_TOKEN` | (none) | If set, the hub connector starts alongside → [docs/HUB.md](docs/HUB.md) |
@@ -225,8 +219,9 @@ Tests (stdlib only; the middleware test is skipped without FastAPI):
   The `<script>` inside `frame.html` is still inline, so check that one in the browser console.
 - To verify layout with browser automation, install Playwright separately (it is not a runtime
   dependency, so it is not in `requirements.txt`):
-  `pip install playwright && playwright install chromium`.
-  ⚠️ **Headless Chromium cannot render extension webviews at all** — only geometry
+  `uv run --with playwright playwright install chromium`, then run the scripts with
+  `uv run --with-requirements requirements.txt --with playwright python <script>`.
+  ⚠️ **Headless Chromium cannot render extension webviews at all**: only geometry
   (coordinates, styles) can be verified there, and whether a webview actually appears is only
   confirmed on a real device.
 
@@ -240,7 +235,7 @@ the bar are decided automatically.
 The development bypass switches (`xmo=on`, `xmo=off`, `xmodebug`, `xmojs`, `xmokb`, `xmofs`)
 and the legacy overlay mode have **all been removed**. There is no switch left to touch.
 
-`xmo=embed`, `xmochrome` and `xmoorient` still exist, but they are not switches — they are
+`xmo=embed`, `xmochrome` and `xmoorient` still exist, but they are not switches; they are
 **internal values the wrapper passes to its own iframe**. Do not use them directly.
 
 ---
@@ -260,7 +255,7 @@ and the legacy overlay mode have **all been removed**. There is no switch left t
 | `/__agents/*` | Agent conversation API, used by the home screen → [AGENTS.md](AGENTS.md) |
 | `/healthz` | Health check → `ok` |
 | `/__runtime` | VS Code runtime status (installed, version, install guide) |
-| `/__ext/ping` · `/__ext/state` | Extension-gating receiver — **plumbing only, unused** |
+| `/__ext/ping` · `/__ext/state` | Extension-gating receiver: **plumbing only, unused** |
 | everything else | Proxied to serve-web (including WebSocket) |
 
 ---
@@ -274,12 +269,12 @@ and the legacy overlay mode have **all been removed**. There is no switch left t
 web/proxy/
 ├─ main.py            app assembly + request routing ← read only this for the overall flow
 ├─ dpx/
-│  ├─ serve.py        `python -m dpx.serve` — runtime server + proxy, one entry
+│  ├─ serve.py        `python -m dpx.serve`: runtime server + proxy, one entry
 │  ├─ config.py       env vars · paths · constants (every setting lives here)
 │  ├─ assets.py       serving static/ files
 │  ├─ auth/           authentication
 │  │  ├─ gate.py        which paths are open without a session
-│  │  └─ api.py         the /auth login app — users · sessions · SQLite
+│  │  └─ api.py         the /auth login app: users · sessions · SQLite
 │  ├─ vscode/         everything on the VS Code Web side
 │  │  ├─ proxy.py       upstream relay (HTTP streaming · WebSocket)
 │  │  ├─ inject.py      where the overlay CSS/JS gets injected
@@ -307,11 +302,11 @@ Every folder's `__init__.py` carries a table describing what that folder does.
 
 | File | Role |
 |---|---|
-| `darkpyonix.db` | SQLite — users and sessions |
+| `darkpyonix.db` | SQLite: users and sessions |
 | `_xmo_recent.json` | Recently opened workspace folders (contains this machine's folder paths) |
 | `_dpx_machine.json` · `_dpx_hub_state.json` | Only when using the hub |
 
-All of it is per-machine local state and is in `.gitignore`. **Do not commit it** —
+All of it is per-machine local state and is in `.gitignore`. **Do not commit it**:
 `darkpyonix.db` holds password hashes and live session tokens, and `_xmo_recent.json` holds
 this machine's folder paths verbatim.
 
@@ -329,13 +324,13 @@ this machine's folder paths verbatim.
 
 ## Tab detach (SPEC FR-B1–B4)
 
-Drag an editor tab out of its tab strip and drop it where VS Code does not take it — past
-48 px from the strip, or outside the window — and the tab moves to a new IDE window on the
+Drag an editor tab out of its tab strip and drop it where VS Code does not take it (past
+48 px from the strip, or outside the window) and the tab moves to a new IDE window on the
 same workspace, opened at the cursor. `static/detach.js` does the webview side; the native
 side is the Rust crate `crates/bridge/` (`ember-bridge`) in this repository.
 
 **Never both.** detach.js never cancels or synthesises drag events. It decides at `dragend`,
-and only when `dataTransfer.dropEffect === 'none'` — every VS Code drop target (the tab strip
+and only when `dataTransfer.dropEffect === 'none'`: every VS Code drop target (the tab strip
 = reorder, the editor area = split, terminal, explorer, chat) sets a different effect. Also
 left to VS Code: Alt-drags, multi-selected tabs, and editors without a resource (Settings,
 untitled). Dirty tabs are not detached (a toast asks to save first), because the new window
@@ -363,7 +358,7 @@ measured in a browser):
 
 Positions on the bridge are 0-based (`line`, `column`).
 
-**Transport** — one function, `send()` in detach.js:
+**Transport**: one function, `send()` in detach.js:
 
 1. Native shell: `window.webkit.messageHandlers.emberBridge.postMessage(json)` (WKWebView) or
    `window.chrome.webview.postMessage(json)` (WebView2), looked up on the workbench iframe,

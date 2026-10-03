@@ -6,9 +6,9 @@
 //! is gone. Clients are the VS Code window (through `ember-term`), the Ember editor, agents and
 //! people.
 //!
-//! - [`screen`]: the terminal model (alacritty_terminal) — snapshot on attach, 10,000 lines of
+//! - [`screen`]: the terminal model (alacritty_terminal): snapshot on attach, 10,000 lines of
 //!   scrollback.
-//! - [`session`]: one session — PTY threads, clients, input order, control, size policy.
+//! - [`session`]: one session: PTY threads, clients, input order, control, size policy.
 //! - [`pty`]: PTY spawn and the keeper process that lets a session outlive a node restart.
 //! - [`store`]: metadata on disk, so a restarted node re-adopts or reports what died.
 //!

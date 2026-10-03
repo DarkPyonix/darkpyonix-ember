@@ -31,7 +31,7 @@ Run both suites with `scripts/test-transcript-vectors.sh`.
   call**; its `text` is the tool input. A `tool` message is a **tool result**; it always has
   `tool_call_id` (`""` if the file has none) and `is_error`, and has `tool_name` when an earlier
   call with the same id names it. Fields that do not apply are omitted, not `null`.
-* Tool-call `text`: a JSON input (object/array) is written canonically — keys sorted, no
+* Tool-call `text`: a JSON input (object/array) is written canonically: keys sorted, no
   whitespace, non-ASCII unescaped. An input that is a plain string is used as-is.
 * Text from several text blocks of one native line is joined with `"\n"`; blocks that are empty
   or whitespace-only are dropped. Text is otherwise kept verbatim (no trimming). A message whose

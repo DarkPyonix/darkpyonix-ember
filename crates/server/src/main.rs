@@ -45,7 +45,7 @@ use ember_server::store::Store;
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
 /// - `EMBER_EXEC_BIN`: the `ember-exec` shim for Claude Code on other computers (default: next
 ///   to this executable)
-/// - `EMBER_MOUNT`: `auto` (default), `nfs`, `fuse` or `off` — mount a Claude Code session's
+/// - `EMBER_MOUNT`: `auto` (default), `nfs`, `fuse` or `off`. Mounts a Claude Code session's
 ///   project directory from its computer at the same path (needs the `mount-nfs` / `mount-fuse`
 ///   build feature); `EMBER_MOUNT_SHADOW=1` allows mounting over a non-empty local directory,
 ///   `EMBER_MOUNT_TTL_MS` sets the attribute cache lifetime (default 1000)

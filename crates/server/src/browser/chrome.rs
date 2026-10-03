@@ -74,7 +74,7 @@ fn playwright_chromium(home: &Path) -> Option<PathBuf> {
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
     pub chrome: PathBuf,
-    /// The persistent profile (cookies, storage, logins, history) — FR-R2.
+    /// The persistent profile (cookies, storage, logins, history), FR-R2.
     pub profile_dir: PathBuf,
     /// Egress proxy, e.g. `socks5://127.0.0.1:1080` or `http://host:3128`. `None` = direct.
     pub proxy: Option<String>,

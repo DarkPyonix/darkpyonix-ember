@@ -31,7 +31,7 @@
 //!
 //! Every node call has a deadline ([`remote_fs::CacheConfig::op_timeout`], 4 s) shorter than the
 //! NFS client's per-try timeout (5 s), and NFS mounts are `soft` with `deadtimeout`, so a lost
-//! node turns into `EIO`/`ETIMEDOUT` from the syscall — never an unkillable process. The outage is
+//! node turns into `EIO`/`ETIMEDOUT` from the syscall, never an unkillable process. The outage is
 //! also put in front of the agent's next message as a system notice
 //! ([`ProjectMounts::outage_notice`]).
 
@@ -633,7 +633,7 @@ impl ProjectMounts {
         Some(format!(
             "[Ember system notice] The project files at {} on computer \"{}\" are unreachable right now \
              ({}). Read, Edit, Write, Glob and Grep on them fail with I/O or timeout errors until the \
-             computer is back; do not retry in a loop — tell the user.",
+             computer is back; do not retry in a loop; tell the user.",
             path.display(),
             e.computer_name,
             outage.error

@@ -37,7 +37,7 @@ use ember_transport::PeerGate;
 /// `ember-node __keep-pty …` is the internal PTY keeper (see `ember_node::term::pty`).
 /// `ember-node hub <register [--name N] | status | forget>` manages the hub registration.
 /// `ember-node exec-server` instead becomes `codex exec-server --listen stdio` on this process's
-/// stdio — the same command the daemon starts for each `/v1/exec-server` connection.
+/// stdio, the same command the daemon starts for each `/v1/exec-server` connection.
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(pty::KEEPER_SUBCOMMAND) {

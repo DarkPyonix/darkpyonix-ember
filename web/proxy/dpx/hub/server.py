@@ -1,4 +1,4 @@
-"""The DarkPyonix hub — a relay server gathering several machines onto one home screen. (Optional.)
+"""The DarkPyonix hub: a relay server gathering several machines onto one home screen. (Optional.)
 
 *This file is only needed when you use more than one machine.* With just one, main.py's home
 screen already shows folders → conversations → transcripts, so there is no reason to run a hub.
@@ -17,13 +17,13 @@ disappear (it is shown offline, with the last-seen time).
 
 Authentication
 --------------
-* Browsers: the auth_api session cookie (the same login as main.py) — required on all of /api/*
+* Browsers: the auth_api session cookie (the same login as main.py), required on all of /api/*
 * Connectors: the DPX_HUB_TOKEN shared token
 
 Running it
 ----------
     set DPX_HUB_TOKEN=<any long string>
-    uvicorn hub:app --host 0.0.0.0 --port 8900
+    uv run --with-requirements requirements.txt uvicorn dpx.hub.server:app --host 0.0.0.0 --port 8900
 """
 from __future__ import annotations
 

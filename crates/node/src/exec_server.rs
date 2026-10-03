@@ -12,7 +12,7 @@
 //!   Text) frame from the client is written to the child's stdin unchanged, and whatever the child
 //!   writes to stdout comes back as Binary frames, chunked arbitrarily. The relay does not parse
 //!   the protocol, so the framing on stdio (newline-delimited JSON-RPC, **[U]**) is the client's
-//!   business — ember server's relay re-frames it for codex app-server.
+//!   business: ember server's relay re-frames it for codex app-server.
 //! - Closing the socket closes the child's stdin; the stdio transport ends and codex exits
 //!   and is killed after [`EXIT_GRACE`] if it does not.
 //!

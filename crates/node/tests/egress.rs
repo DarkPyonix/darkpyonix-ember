@@ -39,7 +39,7 @@ async fn echo() -> SocketAddr {
     addr
 }
 
-/// A local byte stream whose other end is bridged to a fresh `/v1/egress` stream — exactly what
+/// A local byte stream whose other end is bridged to a fresh `/v1/egress` stream, exactly what
 /// ember server's loopback listener does for each Chrome connection.
 async fn egress_stream(client: &NodeClient) -> tokio::io::DuplexStream {
     let ws = client.egress().await.unwrap();

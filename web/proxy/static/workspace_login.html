@@ -2,7 +2,7 @@
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DarkPyonix — 로그인</title>
+<title>DarkPyonix · 로그인</title>
 <script>(function(){try{document.documentElement.setAttribute('data-xtheme',localStorage.getItem('xmo_theme')||'sepia');}catch(e){document.documentElement.setAttribute('data-xtheme','sepia');}})();</script>
 <style>
 /* === DarkPyonix theme palettes (shared with the home launcher; persisted as `xmo_theme`). === */
@@ -78,7 +78,7 @@ document.getElementById('form').addEventListener('submit', function(e){
       if(res.ok && res.d && res.d.ok){
         try{ localStorage.setItem('xmo_last_user', user); }catch(_){}
         var nx = qp('next');   // 게이트가 redirect 하며 붙인 원래 목적지
-        // xmo 파라미터를 붙이지 않는다 — 서버가 기기(UA)를 보고 모바일이면 frame 래퍼를,
+        // xmo 파라미터를 붙이지 않는다. 서버가 기기(UA)를 보고 모바일이면 frame 래퍼를,
         // 데스크톱이면 순정 VS Code(폭이 좁아지면 오버레이 바)를 알아서 내보낸다.
         location.href = nx || (srv + '/?folder=' + encodeURIComponent(folder));
       } else { err.textContent = (res.d && res.d.error) || '로그인 실패'; }

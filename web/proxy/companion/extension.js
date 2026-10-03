@@ -1,4 +1,4 @@
-// Ember persistent terminals — the VS Code Web companion (SPEC §P, docs/design/TERMINALS.md).
+// Ember persistent terminals: the VS Code Web companion (SPEC §P, docs/design/TERMINALS.md).
 //
 // A web extension (package.json "browser"): it runs in VS Code Web's web worker extension host,
 // in the browser, and patches nothing in VS Code. Integrated terminals become Pseudoterminals
@@ -365,8 +365,8 @@ class EmberPty {
 
   displayName() {
     const base = (this.term && this.term.title) || 'terminal';
-    if (this.controller && this.controller.client !== this.client) return `${base} — controlled by ${this.controller.device}`;
-    if (this.controller && this.controller.client === this.client) return `${base} — in control`;
+    if (this.controller && this.controller.client !== this.client) return `${base} (controlled by ${this.controller.device})`;
+    if (this.controller && this.controller.client === this.client) return `${base} (in control)`;
     return base;
   }
 
@@ -506,8 +506,8 @@ function pick(obj, keys) {
 }
 
 // Debuggee side of debugpy: listen on an OS-chosen port, print it, wait for the client, run the
-// program like `python file` / `python -m module`. `debugpy` must be importable (pip install
-// debugpy, or EMBER_DEBUGPY_PATH = the directory that contains the debugpy package).
+// program like `python file` / `python -m module`. `debugpy` must be importable (e.g. `uv add
+// debugpy`), or EMBER_DEBUGPY_PATH = the directory that contains the debugpy package.
 const DEBUGPY_BOOT = [
   'import os, sys, runpy',
   "p = os.environ.pop('EMBER_DEBUGPY_PATH', '')",

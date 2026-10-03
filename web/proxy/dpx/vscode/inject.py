@@ -85,7 +85,7 @@ async def workbench_html(request: Request, path: str) -> Response:
 async def webview_kb(request: Request, path: str) -> Response:
     """Adds only the small keyboard policy to a webview host frame.
 
-    The full workbench overlay is never added — that is exactly what ran inside the
+    The full workbench overlay is never added: that is exactly what ran inside the
     extension host frame and froze Android. The webview's CSP allows script-src 'self',
     so a same-origin tag needs no CSP surgery.
     """

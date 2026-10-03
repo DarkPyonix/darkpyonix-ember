@@ -1,9 +1,9 @@
-# (Optional) The hub — when you use more than one machine
+# (Optional) The hub: when you use more than one machine
 
 **Skip this document if you only use one machine.** The default home screen
 (`../AGENTS.md`) already shows folders → conversations → transcripts. The hub is a
-separate server (`dpx/hub/`) you only run when you want **several** machines — a home
-desktop, a school laptop — on a single home screen. Shared material, such as how to add an
+separate server (`dpx/hub/`) you only run when you want **several** machines (a home
+desktop, a school laptop) on a single home screen. Shared material, such as how to add an
 adapter, is in `../AGENTS.md`.
 
 ```
@@ -23,7 +23,7 @@ adapter, is in `../AGENTS.md`.
   summaries), so the first home screen renders immediately without waking any machine.
 * Only large things, such as a full transcript, trigger an RPC to that machine on demand
   (which requires it to be powered on).
-* If a machine is off, its last snapshot remains, so the card does not disappear — it is
+* If a machine is off, its last snapshot remains, so the card does not disappear; it is
   shown as offline.
 
 ## Screen structure
@@ -35,15 +35,15 @@ machine list  →  workspace list      →  conversation list     →  full tran
 
 ## Running it
 
-### 1. The hub (one always-on machine — a home server, a VPS, or the desktop)
+### 1. The hub (one always-on machine: a home server, a VPS, or the desktop)
 
 ```bat
 set DPX_HUB_TOKEN=a-long-string-nobody-else-knows
-uvicorn dpx.hub.server:app --host 0.0.0.0 --port 8900
+uv run --with-requirements requirements.txt uvicorn dpx.hub.server:app --host 0.0.0.0 --port 8900
 ```
 
 To serve it over HTTPS, pass a certificate to uvicorn's `--ssl-keyfile` / `--ssl-certfile`.
-**How that certificate should be obtained is still undecided** — see [BACKGROUND.md](BACKGROUND.md).
+**How that certificate should be obtained is still undecided** (see [BACKGROUND.md](BACKGROUND.md)).
 
 Accounts come from the existing `darkpyonix.db` (the same users and passwords as the proxy).
 
@@ -54,7 +54,7 @@ set DPX_HUB_URL=wss://hub-address:8900/hub/connect
 set DPX_HUB_TOKEN=the-same-token-as-the-hub
 set DPX_MACHINE_NAME=home-desktop
 set DPX_PUBLIC_URL=https://my-pc.example.com:8888
-python -m dpx.hub.connector
+uv run --with-requirements requirements.txt python -m dpx.hub.connector
 ```
 
 If `DPX_HUB_URL` is set, **main.py starts the connector along with itself**
@@ -81,12 +81,12 @@ unnecessary.
 | Adapter | Reads from | Status |
 |---|---|---|
 | `claude-code` | `~/.claude/projects/*/*.jsonl` | Supported (titles, full transcripts, resume via `claude --resume`) |
-| `codex` | `~/.codex/sessions/**/*.jsonl` | Experimental — silently skips anything in an unexpected format |
+| `codex` | `~/.codex/sessions/**/*.jsonl` | Experimental (silently skips anything in an unexpected format) |
 
 ### Adding a new agent
 
 Write a module implementing `AgentAdapter` from `dpx/agents/base.py` and add one line to
-`_CANDIDATES` in `dpx/agents/__init__.py`. That is all — the connector, the hub and the home
+`_CANDIDATES` in `dpx/agents/__init__.py`. That is all: the connector, the hub and the home
 screen need no changes.
 
 ```python
@@ -116,10 +116,10 @@ user's behalf. So:
 
 * A full transcript can only be read while that machine is **powered on** (lists and
   previews are always visible, from the cache).
-* You cannot send a message from the home screen — it is read plus jump-to-VS-Code.
+* You cannot send a message from the home screen; it is read plus jump-to-VS-Code.
 * Connector auth is a single shared token. Per-machine tokens and revocation are a later
   step.
 * The hub does **not** proxy the individual machines yet. That is why "Open in VS Code"
   requires the machine to have an externally reachable address (`DPX_PUBLIC_URL`). Making
-  the hub relay HTTP over the WS tunnel would remove this constraint — the most valuable
+  the hub relay HTTP over the WS tunnel would remove this constraint, the most valuable
   next piece of work.

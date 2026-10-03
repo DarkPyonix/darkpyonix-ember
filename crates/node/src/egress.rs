@@ -9,8 +9,8 @@
 //!
 //! One WebSocket = one proxied TCP connection. The WebSocket carries a **raw SOCKS5 byte
 //! stream** (RFC 1928) in Binary frames (Text frames are treated as bytes too), chunked
-//! arbitrarily. The node runs the SOCKS5 server side; the client — ember server's loopback
-//! listener ([`bridge`]) — just copies bytes, so Chrome's own SOCKS5 client does the handshake
+//! arbitrarily. The node runs the SOCKS5 server side; the client (ember server's loopback
+//! listener, [`bridge`]) just copies bytes, so Chrome's own SOCKS5 client does the handshake
 //! end to end. Over this route no SOCKS authentication is offered (method `0x00`): the WebSocket
 //! upgrade already carried the bearer token.
 //!
@@ -33,8 +33,8 @@
 //! Default: allow every destination (the egress computer's `localhost` and LAN must be reachable,
 //! FR-R1). `EMBER_NODE_EGRESS_DENY` lists denied destinations, comma-separated: CIDRs
 //! (`10.0.0.0/8`, `fd00::/8`, a bare address = /32 or /128) and the keywords `private`
-//! (RFC 1918, CGNAT 100.64/10, IPv6 ULA fc00::/7), `link-local` (169.254/16 — includes cloud
-//! metadata endpoints — and fe80::/10), `loopback` (127/8, ::1). A domain is resolved first and
+//! (RFC 1918, CGNAT 100.64/10, IPv6 ULA fc00::/7), `link-local` (169.254/16, which includes cloud
+//! metadata endpoints, and fe80::/10), `loopback` (127/8, ::1). A domain is resolved first and
 //! every resolved address is checked; denied addresses are skipped, and if none is left the
 //! request is refused with reply `0x02`. `EMBER_NODE_EGRESS=off` disables the egress entirely.
 

@@ -1,4 +1,4 @@
-//! ember-editor — the session layer of Ember's editor core (M8, SPEC FR-E1..E4,
+//! ember-editor: the session layer of Ember's editor core (M8, SPEC FR-E1..E4,
 //! `docs/design/EDITOR-SESSION.md`).
 //!
 //! It sits between [`ember_editor_conn`] (the Code-OSS server's management and extension-host

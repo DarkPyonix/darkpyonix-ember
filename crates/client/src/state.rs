@@ -1,6 +1,6 @@
 //! The client's whole view of the main server, as a pure reducer (FR-L1–FR-L3, FR-L5).
 //!
-//! [`State::apply`] takes one [`Input`] — something the network said or the user did — and
+//! [`State::apply`] takes one [`Input`] (something the network said or the user did) and
 //! returns the [`Changes`] it caused: which projects/sessions/transcripts a UI must redraw, and
 //! which transcripts the sync layer must refetch. No I/O happens here; the connection layer
 //! ([`crate::client`]) feeds inputs in and acts on the requested resyncs.

@@ -25,13 +25,13 @@
 | `dpx/agents/base.py` | Adapter interface + shared models (Workspace / Conversation / Message) |
 | `dpx/agents/claude_code.py` | Claude Code session parser |
 | `dpx/agents/codex.py` | Codex CLI parser (experimental) |
-| `dpx/agents/__init__.py` | Registry — merges the adapters into one list |
+| `dpx/agents/__init__.py` | Registry: merges the adapters into one list |
 | `dpx/home/api.py` | The `/__agents/*` API |
 | `main.py` | Home serving (middleware) + route assembly |
 
 The screen and the API now live outside `main.py`. Home serves `static/home.html` as-is, and
 `/__agents/*` lives in the router in `dpx/home/api.py`. Proxying, injection and auth are
-`dpx/vscode/proxy.py`, `dpx/vscode/inject.py` and `dpx/auth/gate.py` respectively — the full
+`dpx/vscode/proxy.py`, `dpx/vscode/inject.py` and `dpx/auth/gate.py` respectively; the full
 map is in the "Files" section of [README.md](README.md).
 
 ## API (all of it requires a login)
@@ -46,7 +46,7 @@ map is in the "Files" section of [README.md](README.md).
 ## What changed about auth
 
 Because home shows folder paths and conversation previews, **home (`/`) and `/__workspaces`
-now require a login too** — they used to be public, which meant the machine's folder paths
+now require a login too**. They used to be public, which meant the machine's folder paths
 were visible before signing in. The `POST /__login` stub, which let any username through,
 was deleted. The real login is `POST /auth/login`, as before.
 
@@ -62,13 +62,13 @@ user's behalf. So:
 4. Pasting into the terminal resumes that conversation
 
 Doing it in one button press would require the server to run the terminal on the user's
-behalf, and that becomes a channel for running arbitrary commands remotely — so a folder
+behalf, and that becomes a channel for running arbitrary commands remotely, so a folder
 allowlist has to come first.
 
 ## Adding a new agent
 
 Implement `AgentAdapter` from `dpx/agents/base.py` and add one line to `_CANDIDATES` in
-`dpx/agents/__init__.py`. That is all — the home screen and the API need no changes.
+`dpx/agents/__init__.py`. That is all: the home screen and the API need no changes.
 
 ```python
 class MyAgentAdapter(AgentAdapter):
@@ -83,8 +83,8 @@ class MyAgentAdapter(AgentAdapter):
 
 | Adapter | Reads from | Status |
 |---|---|---|
-| `claude-code` | `~/.claude/projects/*/*.jsonl` | Supported — titles, full transcripts, `claude --resume` |
-| `codex` | `~/.codex/sessions/**/*.jsonl` | Experimental — silently skips anything in an unexpected format |
+| `claude-code` | `~/.claude/projects/*/*.jsonl` | Supported (titles, full transcripts, `claude --resume`) |
+| `codex` | `~/.codex/sessions/**/*.jsonl` | Experimental (silently skips anything in an unexpected format) |
 
 To make it look for session files elsewhere, point the `DPX_HOME` environment variable at a
 different home directory.

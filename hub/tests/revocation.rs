@@ -26,7 +26,8 @@ async fn a_removed_device_sees_revoked() {
     tokio::time::timeout(Duration::from_secs(5), rx.wait_for(RegistrationState::is_revoked)).await.unwrap().unwrap();
     // The watcher stops after a revocation (it is final).
     tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
-    assert!(matches!(client.devices().await, Err(HubError::Unauthorized(_))));
+    // The hub says so explicitly (`401 {code: device_removed}`), distinct from a bad token.
+    assert!(matches!(client.devices().await, Err(HubError::DeviceRemoved(_))));
     assert_eq!(check_registration(&client).await, RegistrationState::Revoked);
 
     // An unreachable hub is not a revocation.
@@ -39,5 +40,5 @@ async fn a_removed_device_sees_revoked() {
 async fn no_token_is_not_registered() {
     let hub = FakeHub::start().await;
     assert!(matches!(hub.client().devices().await, Err(HubError::NotRegistered)));
-    assert!(matches!(hub.client().with_token("dpd_bogus").me().await, Err(HubError::Unauthorized(_))));
+    assert!(matches!(hub.client().with_token("dpd_bogus").me().await, Err(HubError::InvalidCredentials(_))));
 }

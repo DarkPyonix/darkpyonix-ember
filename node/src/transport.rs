@@ -111,11 +111,11 @@ pub fn allowed_peers(state_dir: Option<&Path>) -> anyhow::Result<Vec<PeerId>> {
 }
 
 /// Binds the real transport with the node's persistent key (`<state dir>/transport.key`): with
-/// the hub's relay and directory when the node is registered ([`crate::hub::transport_config`]),
+/// the hub's relay and directory when the node is registered ([`crate::hub::discovered_transport_config`]),
 /// otherwise with the relay from `EMBER_RELAY_URL`.
 pub async fn bind(state_dir: &Path) -> anyhow::Result<Transport> {
     let key = SecretKey::load_or_generate(state_dir.join(KEY_FILE))?;
-    Ok(Transport::bind(crate::hub::transport_config(state_dir, key)?).await?)
+    Ok(Transport::bind(crate::hub::discovered_transport_config(state_dir, key).await?).await?)
 }
 
 /// Starts listening on [`NODE_SERVICE`] now and returns the future that serves the node API to

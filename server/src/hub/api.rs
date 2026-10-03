@@ -13,13 +13,13 @@
 //! | GET    | `/api/v1/hub/devices` | → `[HubDeviceView]` (the account's devices) |
 //! | POST   | `/api/v1/hub/devices/{endpoint_id}/computer` | `{name?, token}` → 201 `Computer` |
 //! | *admin* | | |
-//! | POST   | `/api/v1/hub/link` | `{name?}` → 202 `PendingView` (user code + verification URL); 409 if registered |
+//! | POST   | `/api/v1/hub/link` | `{name?}` → 202 `PendingView` (user code + verification URL); 409 if registered. A removed server may link again once the owner re-admitted it on darkpyonix.dev (else 409 with that advice) |
 //! | DELETE | `/api/v1/hub/link` | → 204 (stop waiting) |
-//! | POST   | `/api/v1/hub/check` | → `{state}`: `active`, `revoked`, `unreachable`, `unregistered` |
-//! | DELETE | `/api/v1/hub/registration` | → 204 (forget locally) |
+//! | POST   | `/api/v1/hub/check` | → `{state}`: `active`, `revoked`, `rejected`, `unreachable`, `unregistered` |
+//! | DELETE | `/api/v1/hub/registration[?local=1]` | → 204: leave the account (removed on the hub with the server's own token, then forgotten); `local=1` only forgets here |
 //! | DELETE | `/api/v1/hub/devices/{endpoint_id}` | → 204 (removed on the hub) |
 //! | GET    | `/api/v1/hub/link-codes/{user_code}` | → `LinkCodeInfo` |
-//! | POST   | `/api/v1/hub/link-codes/{user_code}` | `{approve}` → 204 |
+//! | POST   | `/api/v1/hub/link-codes/{user_code}` | `{approve}` → 204; 403 when the hub needs a browser session (a `main_server` link, a re-admitted device) |
 //! | POST   | `/api/v1/hub/sync-devices` | → `SyncReport` (devices allow-list ← account) |
 //! | PUT    | `/api/v1/hub/sync-devices` | `{enabled}` → 204 (periodic sync on/off) |
 //!
@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -78,6 +78,7 @@ impl IntoResponse for ApiError {
             HubApiError::AlreadyRegistered(_) => StatusCode::CONFLICT,
             HubApiError::NotFound(_) => StatusCode::NOT_FOUND,
             HubApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            HubApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             HubApiError::Link(LinkError::AlreadyRegistered(_)) => StatusCode::CONFLICT,
             HubApiError::Link(LinkError::Hub(e)) | HubApiError::Hub(e) => match e {
                 HubError::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -163,15 +164,23 @@ async fn check(State(s): State<AppState>) -> ApiResult<Response> {
     let state = match hub.check().await? {
         RegistrationState::Active(me) => json!({ "state": "active", "github_login": me.github_login }),
         RegistrationState::Revoked => json!({ "state": "revoked" }),
+        RegistrationState::Rejected(e) => json!({ "state": "rejected", "error": e }),
         RegistrationState::Unreachable(e) => json!({ "state": "unreachable", "error": e }),
         RegistrationState::Unknown => json!({ "state": "unregistered" }),
     };
     Ok(Json(state).into_response())
 }
 
-async fn forget(State(s): State<AppState>) -> ApiResult<Response> {
+#[derive(Deserialize, Default)]
+struct ForgetQuery {
+    #[serde(default)]
+    local: Option<String>,
+}
+
+async fn forget(State(s): State<AppState>, Query(q): Query<ForgetQuery>) -> ApiResult<Response> {
     let hub = hub_or_503!(s);
-    hub.forget()?;
+    let local_only = matches!(q.local.as_deref(), Some("1" | "true" | "yes"));
+    hub.leave(local_only).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

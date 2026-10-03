@@ -4,8 +4,9 @@
 //! | --- | --- |
 //! | `GET /` | list browsers |
 //! | `GET /{project}` | one browser's info and state |
-//! | `POST /{project}` `{egress?}` | start (or keep running); `egress` given → switch to it |
-//! | `PUT /{project}/egress` `{egress}` | switch egress (restart on the same profile) |
+//! | `POST /{project}` `{egress?, computer?}` | start (or keep running); egress given → switch to it |
+//! | `GET /{project}/egress` | the persisted egress choice and the proxy in use |
+//! | `PUT /{project}/egress` `{egress}` or `{computer}` | switch egress (restart on the same profile; persisted) |
 //! | `DELETE /{project}` | stop |
 //! | `DELETE /{project}/data` | clear the profile (FR-R4) |
 //! | `POST /{project}/input` | one input event (same JSON as on the view socket) |
@@ -20,7 +21,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -29,13 +30,13 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 use super::agent::{self, BrowserMcp};
-use super::{BrowserInstance, BrowserManager, InputEvent, STREAM_VERSION};
+use super::{BrowserInstance, BrowserManager, Egress, InputEvent, STREAM_VERSION};
 
 pub fn router(browsers: Arc<BrowserManager>) -> Router {
     Router::new()
         .route("/api/v1/browsers", get(list))
         .route("/api/v1/browsers/{project}", get(info).post(open).delete(stop))
-        .route("/api/v1/browsers/{project}/egress", put(egress))
+        .route("/api/v1/browsers/{project}/egress", get(get_egress).put(egress))
         .route("/api/v1/browsers/{project}/data", axum::routing::delete(clear))
         .route("/api/v1/browsers/{project}/input", post(input))
         .route("/api/v1/browsers/{project}/view", get(view))
@@ -87,6 +88,23 @@ struct OpenBody {
     /// Absent: keep the current egress. `null`: direct. A string: that proxy.
     #[serde(default, deserialize_with = "some_option")]
     egress: Option<Option<String>>,
+    /// A registered computer's id (its node's SOCKS5 exit, FR-R1); `"local"` = direct.
+    /// Exclusive with `egress`.
+    #[serde(default)]
+    computer: Option<String>,
+}
+
+/// The [`Egress`] a request asks for: `None` = unchanged.
+fn requested(egress: Option<Option<String>>, computer: Option<String>) -> ApiResult<Option<Egress>> {
+    match (egress, computer) {
+        (Some(_), Some(_)) => {
+            Err(ApiError(StatusCode::BAD_REQUEST, "give either egress or computer, not both".into()))
+        }
+        (_, Some(id)) if id == crate::computers::LOCAL => Ok(Some(Egress::Direct)),
+        (_, Some(id)) => Ok(Some(Egress::Computer { id })),
+        (Some(e), None) => Ok(Some(Egress::from_proxy(e))),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Distinguish an absent field (`None`) from an explicit `null` (`Some(None)`).
@@ -100,17 +118,25 @@ async fn open(
     body: Option<Json<OpenBody>>,
 ) -> ApiResult<impl IntoResponse> {
     let body = body.map(|b| b.0).unwrap_or_default();
-    let b = instance(&m, &project).await?;
-    match body.egress {
-        Some(e) => b.set_egress(e).await.map_err(bad)?,
-        None => b.ensure_running().await?,
-    }
+    let b = match requested(body.egress, body.computer)? {
+        Some(e) => m.set_egress(&project, e, true).await.map_err(bad)?,
+        None => {
+            let b = instance(&m, &project).await?;
+            b.ensure_running().await?;
+            b
+        }
+    };
     Ok(Json(b.info().await))
 }
 
 #[derive(Deserialize)]
 struct EgressBody {
+    /// `null`/absent with no `computer`: direct. A string: that proxy URL.
+    #[serde(default)]
     egress: Option<String>,
+    /// A registered computer's id; `"local"` = direct.
+    #[serde(default)]
+    computer: Option<String>,
 }
 
 async fn egress(
@@ -118,9 +144,18 @@ async fn egress(
     Path(project): Path<String>,
     Json(body): Json<EgressBody>,
 ) -> ApiResult<impl IntoResponse> {
-    let b = instance(&m, &project).await?;
-    b.set_egress(body.egress).await.map_err(bad)?;
+    let e = match (body.egress, body.computer) {
+        (Some(_), Some(_)) => requested(Some(None), Some(String::new()))?,
+        (None, Some(c)) => requested(None, Some(c))?,
+        (e, None) => requested(Some(e), None)?,
+    };
+    let b = m.set_egress(&project, e.unwrap_or_default(), true).await.map_err(bad)?;
     Ok(Json(b.info().await))
+}
+
+async fn get_egress(State(m): S, Path(project): Path<String>) -> ApiResult<impl IntoResponse> {
+    let b = instance(&m, &project).await?;
+    Ok(Json(json!({ "egress": b.egress_choice(), "proxy": b.egress(), "running": b.is_running().await })))
 }
 
 async fn stop(State(m): S, Path(project): Path<String>) -> ApiResult<impl IntoResponse> {

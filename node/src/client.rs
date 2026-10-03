@@ -1,5 +1,13 @@
 //! Typed client for the ember node API, used by ember server.
 //!
+//! A [`NodeClient`] reaches the node one of two ways, behind the same API:
+//!
+//! - **HTTP** ([`NodeClient::new`]): `http://host:port` over TCP.
+//! - **Transport** ([`NodeClient::over_transport`]): the peer-to-peer transport (SPEC `FR-N1`,
+//!   `FR-N5`), dialing the node by its [`PeerAddr`] for service [`NODE_SERVICE`]. Each HTTP
+//!   request runs on a fresh stream of one cached connection ([`Dialer`]); each WebSocket
+//!   (exec, events, exec-server, terminal attach) gets its own stream.
+//!
 //! ```no_run
 //! # async fn demo() -> Result<(), ember_node::client::ClientError> {
 //! use ember_node::client::NodeClient;
@@ -9,22 +17,39 @@
 //! # Ok(()) }
 //! ```
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
+use ember_transport::{Dialer, PeerAddr};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use reqwest::StatusCode;
+use http::{header, Method, StatusCode};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::WebSocketStream;
 
 use crate::proto::*;
 
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// Transport service name of the node API (`FR-N5`). Versioned with the API's major version.
+pub const NODE_SERVICE: &str = "ember-node/1";
+
+/// Host name used in requests over the transport (the stream already names the peer).
+const PEER_HOST: &str = "ember-node";
+
+/// Any byte stream a node WebSocket can run on (TCP or a transport stream).
+pub trait NodeStream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
+impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static> NodeStream for T {}
+
+/// The stream under every node WebSocket, whichever way the node is reached.
+pub type NodeIo = Box<dyn NodeStream>;
+
+type Ws = WebSocketStream<NodeIo>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -33,8 +58,13 @@ pub enum ClientError {
     Api { status: u16, body: ErrorBody },
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
+    /// The peer-to-peer transport failed (dial, stream, or HTTP over a stream).
+    #[error("transport: {0}")]
+    Transport(String),
     #[error("websocket: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
     #[error("protocol: {0}")]
     Protocol(String),
     #[error("bad url: {0}")]
@@ -74,13 +104,47 @@ impl ClientError {
     }
 }
 
+fn transport_err(e: impl fmt::Display) -> ClientError {
+    ClientError::Transport(e.to_string())
+}
+
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// How the node is reached.
+#[derive(Clone)]
+enum Reach {
+    /// `http://host:port`, no trailing path.
+    Http { base: String, http: reqwest::Client },
+    /// A peer on the transport.
+    Peer { dialer: Dialer, addr: PeerAddr },
+}
+
+/// A status and a fully read body.
+struct Raw {
+    status: StatusCode,
+    body: Bytes,
+}
 
 #[derive(Clone)]
 pub struct NodeClient {
-    base: String,
+    reach: Reach,
     token: String,
-    http: reqwest::Client,
+}
+
+impl fmt::Debug for NodeClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NodeClient({self})")
+    }
+}
+
+/// Where the client points: the base URL, or `peer:<id>`.
+impl fmt::Display for NodeClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.reach {
+            Reach::Http { base, .. } => f.write_str(base),
+            Reach::Peer { addr, .. } => write!(f, "peer:{}", addr.peer),
+        }
+    }
 }
 
 impl NodeClient {
@@ -90,7 +154,7 @@ impl NodeClient {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(ClientError::Url(base));
         }
-        Ok(Self { base, token: token.into(), http: reqwest::Client::new() })
+        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into() })
     }
 
     /// Like [`NodeClient::new`], but every HTTP request fails after `timeout` (and connecting
@@ -98,63 +162,146 @@ impl NodeClient {
     /// when the node goes away, such as the project mount. WebSockets are not affected.
     pub fn with_timeout(base: impl Into<String>, token: impl Into<String>, timeout: std::time::Duration) -> Result<Self> {
         let mut c = Self::new(base, token)?;
-        c.http = reqwest::Client::builder()
-            .timeout(timeout)
-            .connect_timeout(timeout.min(std::time::Duration::from_secs(5)))
-            .build()?;
+        if let Reach::Http { http, .. } = &mut c.reach {
+            *http = reqwest::Client::builder()
+                .timeout(timeout)
+                .connect_timeout(timeout.min(std::time::Duration::from_secs(5)))
+                .build()?;
+        }
         Ok(c)
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
+    /// A client that reaches the node over the transport: `addr` is the node's identity (plus
+    /// optional address hints), dialed through `dialer` for [`NODE_SERVICE`]. Clients sharing a
+    /// dialer share its connection to the node. The bearer token is still sent.
+    pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>, token: impl Into<String>) -> Self {
+        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into() }
     }
 
-    async fn decode<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
-        let status = resp.status();
-        if status.is_success() {
-            return Ok(resp.json().await?);
+    /// The node's transport address, when reached over the transport.
+    pub fn peer(&self) -> Option<&PeerAddr> {
+        match &self.reach {
+            Reach::Peer { addr, .. } => Some(addr),
+            Reach::Http { .. } => None,
         }
-        Err(Self::api_error(status, resp).await)
     }
 
-    async fn api_error(status: StatusCode, resp: reqwest::Response) -> ClientError {
-        let text = resp.text().await.unwrap_or_default();
+    /// The node's base URL, when reached over HTTP.
+    pub fn base_url(&self) -> Option<&str> {
+        match &self.reach {
+            Reach::Http { base, .. } => Some(base),
+            Reach::Peer { .. } => None,
+        }
+    }
+
+    /// One request/response. `json` is sent as an `application/json` body.
+    async fn send(&self, method: Method, path: &str, json: Option<Vec<u8>>, auth: bool) -> Result<Raw> {
+        match &self.reach {
+            Reach::Http { base, http } => {
+                let mut req = http.request(method, format!("{base}{path}"));
+                if auth {
+                    req = req.bearer_auth(&self.token);
+                }
+                if let Some(body) = json {
+                    req = req.header(header::CONTENT_TYPE, "application/json").body(body);
+                }
+                let resp = req.send().await?;
+                let status = resp.status();
+                Ok(Raw { status, body: resp.bytes().await? })
+            }
+            Reach::Peer { dialer, addr } => {
+                let stream = dialer.open_bi(addr, NODE_SERVICE).await.map_err(transport_err)?;
+                let mut sender = ember_transport::http::http1_handshake::<Full<Bytes>>(stream)
+                    .await
+                    .map_err(transport_err)?;
+                let mut req = hyper::Request::builder()
+                    .method(method)
+                    .uri(format!("http://{PEER_HOST}{path}"))
+                    .header(header::HOST, PEER_HOST);
+                if auth {
+                    req = req.header(header::AUTHORIZATION, format!("Bearer {}", self.token));
+                }
+                let body = match json {
+                    Some(b) => {
+                        req = req.header(header::CONTENT_TYPE, "application/json");
+                        Full::new(Bytes::from(b))
+                    }
+                    None => Full::default(),
+                };
+                let req = req.body(body).map_err(|e| ClientError::Protocol(e.to_string()))?;
+                let resp = sender.send_request(req).await.map_err(transport_err)?;
+                let status = resp.status();
+                let body = resp.into_body().collect().await.map_err(transport_err)?.to_bytes();
+                Ok(Raw { status, body })
+            }
+        }
+    }
+
+    fn decode<T: DeserializeOwned>(raw: Raw) -> Result<T> {
+        if raw.status.is_success() {
+            return serde_json::from_slice(&raw.body).map_err(|e| ClientError::Protocol(e.to_string()));
+        }
+        Err(Self::api_error(raw))
+    }
+
+    fn api_error(raw: Raw) -> ClientError {
+        let text = String::from_utf8_lossy(&raw.body).into_owned();
         let body = serde_json::from_str(&text).unwrap_or(ErrorBody {
-            code: if status == StatusCode::UNAUTHORIZED { ErrorCode::Unauthorized } else { ErrorCode::Internal },
+            code: if raw.status == StatusCode::UNAUTHORIZED { ErrorCode::Unauthorized } else { ErrorCode::Internal },
             error: text,
             actual_sha256: None,
             errno: None,
         });
-        ClientError::Api { status: status.as_u16(), body }
+        ClientError::Api { status: raw.status.as_u16(), body }
+    }
+
+    fn json<B: Serialize>(body: &B) -> Vec<u8> {
+        serde_json::to_vec(body).expect("serialisable")
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
-        let resp = self.http.post(self.url(path)).bearer_auth(&self.token).json(body).send().await?;
-        Self::decode(resp).await
+        Self::decode(self.send(Method::POST, path, Some(Self::json(body)), true).await?)
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let resp = self.http.get(self.url(path)).bearer_auth(&self.token).send().await?;
-        Self::decode(resp).await
+        Self::decode(self.send(Method::GET, path, None, true).await?)
     }
 
-    async fn no_content(&self, req: reqwest::RequestBuilder) -> Result<()> {
-        let resp = req.bearer_auth(&self.token).send().await?;
-        let status = resp.status();
-        if status.is_success() {
+    async fn no_content(&self, method: Method, path: &str, json: Option<Vec<u8>>) -> Result<()> {
+        let raw = self.send(method, path, json, true).await?;
+        if raw.status.is_success() {
             Ok(())
         } else {
-            Err(Self::api_error(status, resp).await)
+            Err(Self::api_error(raw))
         }
     }
 
     pub(crate) async fn websocket(&self, path: &str) -> Result<Ws> {
-        let url = format!("ws{}{path}", self.base.strip_prefix("http").unwrap_or(&self.base));
+        let url = match &self.reach {
+            Reach::Http { base, .. } => format!("ws{}{path}", base.strip_prefix("http").unwrap_or(base)),
+            Reach::Peer { .. } => format!("ws://{PEER_HOST}{path}"),
+        };
         let mut req = url.into_client_request()?;
         let auth = HeaderValue::from_str(&format!("Bearer {}", self.token))
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         req.headers_mut().insert("authorization", auth);
-        match tokio_tungstenite::connect_async(req).await {
+        let io: NodeIo = match &self.reach {
+            Reach::Http { .. } => {
+                let uri = req.uri();
+                if uri.scheme_str() != Some("ws") {
+                    return Err(ClientError::Url(format!("{uri}: only plain ws:// is supported over TCP")));
+                }
+                let host = uri.host().unwrap_or_default().trim_start_matches('[').trim_end_matches(']').to_string();
+                let port = uri.port_u16().unwrap_or(80);
+                let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+                let _ = tcp.set_nodelay(true);
+                Box::new(tcp)
+            }
+            Reach::Peer { dialer, addr } => {
+                Box::new(dialer.open_bi(addr, NODE_SERVICE).await.map_err(transport_err)?)
+            }
+        };
+        match tokio_tungstenite::client_async(req, io).await {
             Ok((ws, _)) => Ok(ws),
             Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
                 let status = resp.status().as_u16();
@@ -173,7 +320,8 @@ impl NodeClient {
 
     /// Unauthenticated liveness and protocol version.
     pub async fn health(&self) -> Result<Health> {
-        Ok(self.http.get(self.url("/v1/health")).send().await?.json().await?)
+        let raw = self.send(Method::GET, "/v1/health", None, false).await?;
+        serde_json::from_slice(&raw.body).map_err(|e| ClientError::Protocol(e.to_string()))
     }
 
     pub async fn env(&self) -> Result<EnvInfo> {
@@ -232,11 +380,11 @@ impl NodeClient {
 
     pub async fn remove(&self, path: impl AsRef<Path>, recursive: bool) -> Result<()> {
         let body = RemoveRequest { path: path.as_ref().into(), recursive };
-        self.no_content(self.http.post(self.url("/v1/fs/remove")).json(&body)).await
+        self.no_content(Method::POST, "/v1/fs/remove", Some(Self::json(&body))).await
     }
 
     pub async fn rename(&self, req: &RenameRequest) -> Result<()> {
-        self.no_content(self.http.post(self.url("/v1/fs/rename")).json(req)).await
+        self.no_content(Method::POST, "/v1/fs/rename", Some(Self::json(req))).await
     }
 
     pub async fn setattr(&self, req: &SetAttrRequest) -> Result<Stat> {
@@ -311,12 +459,12 @@ impl NodeClient {
     }
 
     pub async fn kill_job(&self, id: &str, signal: Option<i32>) -> Result<()> {
-        self.no_content(self.http.post(self.url(&format!("/v1/jobs/{id}/kill"))).json(&KillRequest { signal }))
+        self.no_content(Method::POST, &format!("/v1/jobs/{id}/kill"), Some(Self::json(&KillRequest { signal })))
             .await
     }
 
     pub async fn remove_job(&self, id: &str) -> Result<()> {
-        self.no_content(self.http.delete(self.url(&format!("/v1/jobs/{id}")))).await
+        self.no_content(Method::DELETE, &format!("/v1/jobs/{id}"), None).await
     }
 
     /// Subscribe to node events with `seq > after` (0 for everything still in history).
@@ -334,8 +482,12 @@ impl NodeClient {
 
     /// Sessions on this computer, filtered by `q`, oldest first.
     pub async fn terms(&self, q: &TermListQuery) -> Result<Vec<TermInfo>> {
-        let resp = self.http.get(self.url("/v1/terms")).query(q).bearer_auth(&self.token).send().await?;
-        Self::decode(resp).await
+        let query = serde_urlencoded::to_string(q).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        if query.is_empty() {
+            self.get("/v1/terms").await
+        } else {
+            self.get(&format!("/v1/terms?{query}")).await
+        }
     }
 
     pub async fn term(&self, id: &str) -> Result<TermInfo> {
@@ -351,20 +503,22 @@ impl NodeClient {
     /// the attached process itself).
     pub async fn term_control(&self, id: &str, client: u64, take: bool) -> Result<()> {
         self.no_content(
-            self.http.post(self.url(&format!("/v1/terms/{id}/control"))).json(&TermControlRequest { client, take }),
+            Method::POST,
+            &format!("/v1/terms/{id}/control"),
+            Some(Self::json(&TermControlRequest { client, take })),
         )
         .await
     }
 
     /// Signal a session (default SIGHUP, then SIGKILL after a grace period).
     pub async fn term_kill(&self, id: &str, signal: Option<i32>) -> Result<()> {
-        self.no_content(self.http.post(self.url(&format!("/v1/terms/{id}/kill"))).json(&KillRequest { signal }))
+        self.no_content(Method::POST, &format!("/v1/terms/{id}/kill"), Some(Self::json(&KillRequest { signal })))
             .await
     }
 
     /// Forget a finished session.
     pub async fn term_remove(&self, id: &str) -> Result<()> {
-        self.no_content(self.http.delete(self.url(&format!("/v1/terms/{id}")))).await
+        self.no_content(Method::DELETE, &format!("/v1/terms/{id}"), None).await
     }
 
     /// Attach to a session. The first events after [`TermAttachment::client`] are the snapshot

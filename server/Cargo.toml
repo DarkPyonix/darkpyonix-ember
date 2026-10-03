@@ -9,6 +9,8 @@ license = "Apache-2.0"
 anyhow = "1"
 # The ember node API types and typed client (computers, FR-X1–FR-X3).
 ember-node = { path = "../node" }
+# The peer-to-peer transport (SPEC FR-N1, FR-N3, FR-N5).
+ember-transport = { path = "../transport" }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
@@ -46,3 +48,4 @@ mount-fuse = ["dep:fuser"]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }

@@ -16,6 +16,12 @@
 // for terminal.integrated.defaultProfile.* / automationProfile.* (tasks run through the
 // ember-term binary, see the setup command).
 //
+// Debuggees (FR-P5): debug.registerDebugConfigurationProvider('*', {
+// resolveDebugConfigurationWithSubstitutedVariables }) turns a node/debugpy `launch` with
+// `console: integratedTerminal` into a node session + an `attach` configuration;
+// debug.onDidStart/TerminateDebugSession and debug.startDebugging (re-attach). See the section
+// "Debuggees in persistent sessions" below.
+//
 // Everything above `activate` is free of the `vscode` module, so `node --test` can exercise it.
 'use strict';
 
@@ -338,8 +344,10 @@ class EmberPty {
         const code = ev.code;
         const status = code !== null && code !== undefined ? `exit code ${code}` : ev.signal ? `signal ${ev.signal}` : 'exited';
         this.writeNote(`process ended (${status})`);
-        const task = this.term && this.term.tags && this.term.tags['ember-term.mode'] === 'task';
-        if (code === 0 && !task) this.closeEmitter.fire(0);
+        const tags = (this.term && this.term.tags) || {};
+        // Task and debuggee terminals stay open with their output, like VS Code's own.
+        const keep = tags['ember-term.mode'] === 'task' || !!tags['vscode.debug.kind'];
+        if (code === 0 && !keep) this.closeEmitter.fire(0);
         break;
       }
       case 'error':
@@ -441,6 +449,240 @@ function randomId() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Debuggees in persistent sessions (FR-P5; docs/design/TERMINALS.md §3c)
+//
+// VS Code serves a debug adapter's `runInTerminal` itself (extension host `$runInTerminal`), and
+// an extension cannot answer it: trackers only observe, and a DebugAdapterDescriptorFactory may
+// only be registered by the extension that defines the debug type. Even when that terminal is a
+// node session (automationProfile = ember-term), a *launch* debuggee dies with its adapter
+// (js-debug's watchdog kills the target, debugpy's launcher kills the debuggee). So the companion
+// rewrites a `launch` + `console: integratedTerminal` configuration, in
+// resolveDebugConfigurationWithSubstitutedVariables, into:
+//   1. a node session (origin ide-vscode) running the program with the debugger listening on
+//      127.0.0.1, port chosen by the OS (`node --inspect-brk=127.0.0.1:0`, debugpy.listen(0)),
+//   2. an `attach` configuration to the port printed by the debuggee.
+// An attach session leaves the debuggee running when it ends, and can be started again from any
+// window while the debuggee runs ("Re-attach debugger").
+
+const DEBUG_TAG = {
+  id: 'vscode.debug.id', // our id; also `__emberDebugId` in the debug configuration
+  name: 'vscode.debug.name',
+  type: 'vscode.debug.type', // the configuration's type: node, pwa-node, debugpy, python
+  kind: 'vscode.debug.kind', // node-inspect | debugpy
+  attach: 'vscode.debug.attach', // JSON attach configuration without the endpoint
+};
+const NODE_TYPES = new Set(['node', 'pwa-node']);
+const PY_TYPES = new Set(['debugpy', 'python']);
+const READY_TIMEOUT_MS = 30000;
+
+/** POSIX shell quoting. */
+function shQuote(s) {
+  s = String(s);
+  return /^[A-Za-z0-9_\/.,:=+@%-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Runs `argv` through the user's interactive login shell, as VS Code's runInTerminal does (the
+ * command is typed into a shell), so PATH from the shell profile (nvm, pyenv…) applies.
+ */
+function loginShellArgv(argv) {
+  return ['/bin/sh', '-c', 'exec "${SHELL:-/bin/sh}" -l -i -c "$1"', 'ember-debug', argv.map(shQuote).join(' ')];
+}
+
+function basename(p) {
+  return String(p).split(/[\\/]/).pop();
+}
+
+function stringEnv(env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env || {})) if (v !== null && v !== undefined) out[k] = String(v);
+  return out;
+}
+
+function pick(obj, keys) {
+  const out = {};
+  for (const k of keys) if (obj[k] !== undefined) out[k] = obj[k];
+  return out;
+}
+
+// Debuggee side of debugpy: listen on an OS-chosen port, print it, wait for the client, run the
+// program like `python file` / `python -m module`. `debugpy` must be importable (pip install
+// debugpy, or EMBER_DEBUGPY_PATH = the directory that contains the debugpy package).
+const DEBUGPY_BOOT = [
+  'import os, sys, runpy',
+  "p = os.environ.pop('EMBER_DEBUGPY_PATH', '')",
+  'if p: sys.path.insert(0, p)',
+  'import debugpy',
+  "h, port = debugpy.listen(('127.0.0.1', 0))",
+  "sys.stderr.write('[ember] debugpy listening on %s:%d\\n' % (h, port)); sys.stderr.flush()",
+  'debugpy.wait_for_client()',
+  'mode, target = sys.argv[1], sys.argv[2]',
+  'sys.argv = [target] + sys.argv[3:]',
+  "if mode == '-m': runpy.run_module(target, run_name='__main__', alter_sys=True)",
+  'else:',
+  '    sys.path.insert(0, os.path.dirname(os.path.abspath(target)))',
+  "    runpy.run_path(target, run_name='__main__')",
+].join('\n');
+
+/**
+ * Decides whether a resolved debug configuration is routed into a persistent session, and how.
+ * Returns `{ skip: reason }` or `{ kind, create, attach }`: `create` is the POST /__terms body,
+ * `attach` the attach configuration without its endpoint (see `attachFor`).
+ */
+function planDebugLaunch(config, { project, device, debugId, debugpyPath, enabled = true }) {
+  if (!enabled) return { skip: 'disabled' };
+  if (!config || config.request !== 'launch') return { skip: 'not a launch' };
+  if (config.__emberDebugId || config.emberPersistent === false) return { skip: 'opted out' };
+  if (config.console !== 'integratedTerminal') return { skip: 'console is not integratedTerminal' };
+  const cwd = config.cwd || project;
+  const env = stringEnv(config.env);
+  if (project) env.EMBER_PROJECT = project;
+  const name = config.name || 'debug';
+  const common = pick(config, ['cwd', 'skipFiles', 'outFiles', 'sourceMaps', 'resolveSourceMapLocations', 'smartStep', 'sourceMapPathOverrides', 'pauseForSourceMap', 'showAsyncStacks']);
+  let kind;
+  let argv;
+  let attach;
+  if (NODE_TYPES.has(config.type)) {
+    const runtime = config.runtimeExecutable || 'node';
+    if (!/^node(\.exe)?$/i.test(basename(runtime))) return { skip: `runtimeExecutable ${basename(runtime)} is not node` };
+    const rest = [].concat(config.program ? [config.program] : [], config.args || []);
+    if (typeof config.args === 'string' || rest.length === 0) return { skip: 'no program' };
+    kind = 'node-inspect';
+    argv = [runtime, '--inspect-brk=127.0.0.1:0', ...(config.runtimeArgs || []), ...rest];
+    attach = Object.assign(common, {
+      type: config.type,
+      request: 'attach',
+      name,
+      // --inspect-brk waits on the first line until breakpoints are set; then go on.
+      continueOnAttach: !config.stopOnEntry,
+    });
+  } else if (PY_TYPES.has(config.type)) {
+    const py = Array.isArray(config.python) ? config.python : [config.python || config.pythonPath || 'python3'];
+    const target = config.module ? ['-m', config.module] : config.program ? ['-f', config.program] : null;
+    if (!target) return { skip: 'no program or module' };
+    if (typeof config.args === 'string') return { skip: 'args as a string' };
+    kind = 'debugpy';
+    argv = [...py, ...(config.pythonArgs || []), '-c', DEBUGPY_BOOT, ...target, ...(config.args || [])];
+    if (debugpyPath) env.EMBER_DEBUGPY_PATH = debugpyPath;
+    attach = Object.assign(pick(config, ['cwd', 'justMyCode', 'rules', 'showReturnValue', 'subProcess', 'django', 'jinja', 'pyramid', 'gevent']), {
+      type: config.type,
+      request: 'attach',
+      name,
+    });
+  } else {
+    return { skip: `debug type ${config.type} is not supported` };
+  }
+  return {
+    kind,
+    attach,
+    create: {
+      program: { argv: loginShellArgv(argv) },
+      cwd,
+      env,
+      project,
+      origin: 'ide-vscode',
+      title: name,
+      key: `vscode:debug:${debugId}`,
+      tags: {
+        'vscode.device': device,
+        'vscode.companion': '1',
+        [DEBUG_TAG.id]: debugId,
+        [DEBUG_TAG.name]: name,
+        [DEBUG_TAG.type]: String(config.type),
+        [DEBUG_TAG.kind]: kind,
+        [DEBUG_TAG.attach]: JSON.stringify(attach),
+      },
+    },
+  };
+}
+
+const ANSI = /\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/** The debugger endpoint the debuggee printed, from its terminal text; the last one wins. */
+function parseDebugEndpoint(kind, text) {
+  const t = String(text || '').replace(ANSI, '').replace(/\r?\n/g, '\n');
+  // `Debugger listening on ws://127.0.0.1:9229/<uuid>` (node), our debugpy bootstrap's line.
+  const re = kind === 'node-inspect' ? /Debugger listening on ws:\/\/([^\s/]+):(\d+)\//g : /\[ember\] debugpy listening on ([^\s:]+):(\d+)/g;
+  let m;
+  let last = null;
+  while ((m = re.exec(t))) last = { host: m[1].replace(/^\[|\]$/g, ''), port: Number(m[2]) };
+  return last;
+}
+
+/** The attach configuration for a debuggee listening on `ep`, tied to its session. */
+function attachFor(kind, attach, ep, { debugId, termId }) {
+  const out = Object.assign({}, attach, { __emberDebugId: debugId, __emberTermId: termId });
+  if (kind === 'node-inspect') Object.assign(out, { address: ep.host, port: ep.port });
+  else out.connect = { host: ep.host, port: ep.port };
+  return out;
+}
+
+/** The attach configuration for a running debuggee session (re-attach), or null. */
+function reattachConfig(session, text) {
+  const tags = session.tags || {};
+  const kind = tags[DEBUG_TAG.kind];
+  if (!kind || !tags[DEBUG_TAG.attach]) return null;
+  const ep = parseDebugEndpoint(kind, text);
+  if (!ep) return null;
+  let attach;
+  try {
+    attach = JSON.parse(tags[DEBUG_TAG.attach]);
+  } catch {
+    return null;
+  }
+  // Re-attaching never resumes on its own: the debuggee is already past --inspect-brk.
+  delete attach.continueOnAttach;
+  return attachFor(kind, attach, ep, { debugId: tags[DEBUG_TAG.id], termId: session.id });
+}
+
+/**
+ * Debuggee sessions to offer "Re-attach debugger" for: running, of this project, with a debug
+ * id that no debug session in this window is attached to and that was not offered here yet.
+ */
+function planReattach(sessions, { project, attached, offered }) {
+  return sessions.filter((s) => {
+    const tags = s.tags || {};
+    const id = tags[DEBUG_TAG.id];
+    if (!id || !tags[DEBUG_TAG.kind] || s.state !== 'running' || s.origin !== 'ide-vscode') return false;
+    if (project && s.project !== project) return false;
+    return !attached.has(id) && !offered.has(id);
+  });
+}
+
+/**
+ * Starts a debuggee in a node session and waits for its debugger endpoint. `api` is a TermApi;
+ * `show(term)` shows the session's terminal. Resolves to the attach configuration; rejects with
+ * the reason (and kills the session) when the debuggee ends or prints nothing in time.
+ */
+async function launchDebuggee(plan, { api, debugId, show = () => {}, sleep, now = Date.now, timeoutMs = READY_TIMEOUT_MS, pollMs = 150 }) {
+  const res = await api.create(plan.create);
+  const term = res.term;
+  show(term);
+  const deadline = now() + timeoutMs;
+  let text = '';
+  for (;;) {
+    try {
+      const snap = await api.request('GET', `/__terms/${encodeURIComponent(term.id)}/snapshot`);
+      text = (snap && snap.text) || '';
+      const ep = parseDebugEndpoint(plan.kind, text);
+      if (ep) return attachFor(plan.kind, plan.attach, ep, { debugId, termId: term.id });
+    } catch (e) {
+      if (e.status !== 409) throw e; // 409: no screen yet
+    }
+    const info = await api.get(term.id).catch(() => null);
+    if (info && info.state !== 'running') {
+      const tail = text.trim().split('\n').slice(-3).join(' / ');
+      throw new Error(`the debuggee ended before the debugger could attach${tail ? ': ' + tail : ''}`);
+    }
+    if (now() >= deadline) {
+      await api.kill(term.id).catch(() => {});
+      throw new Error('the debuggee did not report a debugger port in time');
+    }
+    await sleep(pollMs);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Activation (the only part that needs the `vscode` module)
 
 const PROFILE_ID = 'ember.terminal';
@@ -453,6 +695,7 @@ let deactivating = false;
 function activate(context) {
   const vscode = require('vscode');
   const cfg = () => vscode.workspace.getConfiguration('ember.terminals');
+  const dcfg = () => vscode.workspace.getConfiguration('ember.debug');
   const origin = globalThis.location && globalThis.location.origin && globalThis.location.origin !== 'null' ? globalThis.location.origin : '';
   const api = new TermApi({
     baseUrl: cfg().get('proxyUrl') || origin,
@@ -517,22 +760,121 @@ function activate(context) {
     const pty = makePty({ sessionId: info.id, passive });
     shown.set(info.id, pty);
     const t = vscode.window.createTerminal({ name: info.title || 'terminal', pty, isTransient: true });
-    if (focus) t.show();
+    if (focus) t.show(focus === 'preserve');
   }
 
   async function poll() {
-    if (polling || pendingCreates > 0 || !cfg().get('autoAttach')) return;
+    const auto = cfg().get('autoAttach');
+    const offer = dcfg().get('offerReattach');
+    if (polling || pendingCreates > 0 || (!auto && !offer)) return;
     polling = true;
     try {
       const sessions = await api.list({ project: project() });
-      const pids = await Promise.all(vscode.window.terminals.map((t) => Promise.resolve(t.processId).catch(() => undefined)));
-      const localPids = new Set(pids.filter((x) => typeof x === 'number'));
-      const plan = planAutoAttach(sessions, { project: project(), shown, dismissed: dismissed(), localPids, now: Date.now() });
-      for (const s of plan) showSession(s, { passive: true, focus: false });
+      if (auto) {
+        const pids = await Promise.all(vscode.window.terminals.map((t) => Promise.resolve(t.processId).catch(() => undefined)));
+        const localPids = new Set(pids.filter((x) => typeof x === 'number'));
+        const plan = planAutoAttach(sessions, { project: project(), shown, dismissed: dismissed(), localPids, now: Date.now() });
+        for (const s of plan) showSession(s, { passive: true, focus: false });
+      }
+      if (offer) {
+        const attached = new Set([...debugSessions.values()].map((d) => d.debugId));
+        for (const s of planReattach(sessions, { project: project(), attached, offered: debugOffered })) {
+          debugOffered.add(s.tags[DEBUG_TAG.id]);
+          offerReattach(s);
+        }
+      }
     } catch {
       // The proxy or the node is not reachable; try again next round.
     } finally {
       polling = false;
+    }
+  }
+
+  // --- debuggees (FR-P5) ---------------------------------------------------------------------
+
+  const debugSessions = new Map(); // vscode DebugSession.id -> { debugId, termId, name }
+  const debugOffered = new Set(); // debug ids offered for re-attach (or started) in this window
+
+  async function snapshotText(id) {
+    const snap = await api.request('GET', `/__terms/${encodeURIComponent(id)}/snapshot`).catch(() => null);
+    return (snap && snap.text) || '';
+  }
+
+  async function reattach(session) {
+    const config = reattachConfig(session, await snapshotText(session.id));
+    if (!config) {
+      vscode.window.showWarningMessage(`Ember: could not find the debugger port of "${session.title}" in its terminal output.`);
+      return false;
+    }
+    const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+    showSession(session, { passive: false, focus: 'preserve' });
+    return vscode.debug.startDebugging(folder, config);
+  }
+
+  async function offerReattach(session) {
+    const name = session.tags[DEBUG_TAG.name] || session.title;
+    const pick = await vscode.window.showInformationMessage(
+      `Ember: "${name}" is still running from an earlier debug session. Re-attach the debugger?`,
+      'Re-attach',
+      'Stop It',
+    );
+    if (pick === 'Re-attach') await reattach(session);
+    else if (pick === 'Stop It') await api.kill(session.id).catch((e) => vscode.window.showErrorMessage(`Ember: ${e.message}`));
+  }
+
+  async function afterDebugStop(d) {
+    if (deactivating) return; // the window is going away: the debuggee keeps running
+    const mode = dcfg().get('onStop');
+    if (mode === 'keep') return;
+    // The adapter often notices a debuggee's exit before node reports it.
+    await new Promise((r) => setTimeout(r, 500));
+    const info = await api.get(d.termId).catch(() => null);
+    if (deactivating || !info || info.state !== 'running') return;
+    if (mode !== 'kill') {
+      const pick = await vscode.window.showInformationMessage(
+        `Ember: "${d.name}" keeps running in a persistent terminal after the debugger detached.`,
+        'Stop It',
+        'Keep Running',
+      );
+      if (pick !== 'Stop It') return;
+    }
+    await api.kill(d.termId).catch(() => {});
+  }
+
+  async function resolveDebuggee(folder, config) {
+    const debugId = randomId();
+    const plan = planDebugLaunch(config, {
+      project: (folder && folder.uri.path) || project(),
+      device,
+      debugId,
+      debugpyPath: dcfg().get('debugpyPath') || undefined,
+      enabled: dcfg().get('persistent'),
+    });
+    if (plan.skip) return config;
+    debugOffered.add(debugId);
+    pendingCreates++;
+    let settled = false;
+    try {
+      return await launchDebuggee(plan, {
+        api,
+        debugId,
+        sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+        show: (term) => {
+          pendingCreates--;
+          settled = true;
+          showSession(term, { passive: false, focus: 'preserve' });
+        },
+      });
+    } catch (e) {
+      if (!settled) {
+        // No session was started (ember node or the proxy is not there): debug as usual.
+        vscode.window.showWarningMessage(`Ember: "${config.name}" runs without a persistent terminal: ${e.message}`);
+        return config;
+      }
+      vscode.window.showErrorMessage(`Ember: could not start "${config.name}" in a persistent terminal: ${e.message}`);
+      return undefined;
+    } finally {
+      if (!settled) pendingCreates--;
     }
   }
 
@@ -627,6 +969,47 @@ function activate(context) {
       );
     }),
 
+    // Every debug type: only `launch` + `console: integratedTerminal` of node/pwa-node and
+    // debugpy/python are rewritten (planDebugLaunch); everything else passes through unchanged.
+    vscode.debug.registerDebugConfigurationProvider('*', {
+      resolveDebugConfigurationWithSubstitutedVariables: (folder, config) => resolveDebuggee(folder, config),
+    }),
+
+    vscode.debug.onDidStartDebugSession((s) => {
+      const c = s.configuration || {};
+      if (c.__emberDebugId) {
+        debugSessions.set(s.id, { debugId: c.__emberDebugId, termId: c.__emberTermId, name: c.name });
+        debugOffered.add(c.__emberDebugId);
+      }
+    }),
+
+    vscode.debug.onDidTerminateDebugSession((s) => {
+      const d = debugSessions.get(s.id);
+      if (!d) return;
+      debugSessions.delete(s.id);
+      afterDebugStop(d);
+    }),
+
+    vscode.commands.registerCommand('ember.debug.reattach', async () => {
+      let sessions;
+      try {
+        sessions = await api.list({ project: project(), running: true });
+      } catch (e) {
+        vscode.window.showErrorMessage(`Ember: could not list terminals: ${e.message}`);
+        return;
+      }
+      const attached = new Set([...debugSessions.values()].map((d) => d.debugId));
+      const items = planReattach(sessions, { project: project(), attached, offered: new Set() }).map((s) => ({
+        label: s.tags[DEBUG_TAG.name] || s.title,
+        description: s.tags[DEBUG_TAG.type],
+        detail: `started on ${s.tags['vscode.device'] || 'another device'}`,
+        session: s,
+      }));
+      if (!items.length) return vscode.window.showInformationMessage('Ember: no running debuggee to re-attach to.');
+      const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Running debuggees in persistent terminals' });
+      if (pick) await reattach(pick.session);
+    }),
+
     vscode.window.onDidChangeWindowState((s) => {
       if (s.focused) poll();
     }),
@@ -654,6 +1037,15 @@ module.exports = {
   planAutoAttach,
   deviceLabel,
   refusalText,
+  shQuote,
+  loginShellArgv,
+  planDebugLaunch,
+  parseDebugEndpoint,
+  attachFor,
+  reattachConfig,
+  planReattach,
+  launchDebuggee,
+  DEBUG_TAG,
   bytesToBase64,
   base64ToBytes,
   wsUrl,

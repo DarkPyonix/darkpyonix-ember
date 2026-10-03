@@ -20,12 +20,14 @@ pub struct NodeConfig {
     /// The `ember-node` binary, started as a PTY keeper per terminal session so sessions can
     /// survive a node restart. `None` disables keepers.
     pub pty_keeper: Option<PathBuf>,
+    /// Which destinations `/v1/egress` may reach (FR-R1); default: enabled, everything allowed.
+    pub egress: crate::egress::EgressPolicy,
 }
 
 impl NodeConfig {
     /// A configuration with no persistent state (tests, embedding).
     pub fn new(token: impl Into<String>, roots: Vec<PathBuf>) -> Self {
-        Self { token: token.into(), roots, state_dir: None, pty_keeper: None }
+        Self { token: token.into(), roots, state_dir: None, pty_keeper: None, egress: Default::default() }
     }
 
     /// - `EMBER_NODE_TOKEN` (required, non-empty): bearer token.
@@ -33,6 +35,8 @@ impl NodeConfig {
     /// - `EMBER_NODE_STATE_DIR`: state directory (default `$HOME/.ember/node`).
     /// - `EMBER_NODE_KEEP_PTY`: `0` disables PTY keepers (terminal sessions then end with the
     ///   daemon).
+    /// - `EMBER_NODE_EGRESS`, `EMBER_NODE_EGRESS_DENY`: the browser egress policy
+    ///   ([`crate::egress::EgressPolicy::from_env`]).
     pub fn from_env() -> anyhow::Result<Self> {
         let token = std::env::var("EMBER_NODE_TOKEN").unwrap_or_default();
         anyhow::ensure!(!token.is_empty(), "EMBER_NODE_TOKEN must be set to a non-empty secret");
@@ -47,7 +51,8 @@ impl NodeConfig {
             Ok("0") | Ok("false") | Ok("no") => None,
             _ => std::env::current_exe().ok(),
         };
-        Ok(Self { token, roots, state_dir, pty_keeper })
+        let egress = crate::egress::EgressPolicy::from_env()?;
+        Ok(Self { token, roots, state_dir, pty_keeper, egress })
     }
 }
 

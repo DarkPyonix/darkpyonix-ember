@@ -267,6 +267,7 @@ impl Sessions {
             env,
             instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
             remote: None,
+            mcp_servers: Vec::new(),
         };
         let prepare_hooks: Vec<PrepareHook> = self.prepare_hooks.lock().unwrap().clone();
         for hook in &prepare_hooks {

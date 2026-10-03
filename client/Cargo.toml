@@ -6,14 +6,22 @@ description = "Ember native client core: connection, sync and state model below 
 license = "Apache-2.0"
 
 # UI-independent and mobile-safe: async I/O only (tokio), no desktop-only or UI crates. TLS is
-# left out on purpose — the transport is still being decided (SPEC §N); plain HTTP/WS for now.
+# left out on purpose: plain HTTP/WS for local use; remote servers are reached over the
+# peer-to-peer transport (SPEC §N, encrypted end to end). The app crate binds the transport and
+# hands an `Api::over_transport` to `Client::with_api`.
 [dependencies]
+# Only the HTTP-over-streams layer; the backend feature is enabled by whoever binds a transport.
+ember-transport = { path = "../transport", default-features = false, features = ["http"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_urlencoded = "0.7"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync", "time", "fs", "macros"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "fs", "macros", "net"] }
 tokio-tungstenite = "0.28"
 tracing = "0.1"
 

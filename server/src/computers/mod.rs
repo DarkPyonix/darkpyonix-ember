@@ -1,6 +1,9 @@
 //! Computers and switching a session between them (SPEC FR-X1–FR-X3, FR-S7 v0).
 //!
-//! A *computer* is an ember node (`node/`) this server can reach by URL and bearer token. The
+//! A *computer* is an ember node (`node/`) this server can reach, with a bearer token, either by
+//! HTTP URL or by transport peer ([`ember_transport::PeerAddr`], SPEC `FR-N1`): a peer-addressed
+//! node is dialed through the server's transport ([`crate::transport`]) for `ember-node/1`, and
+//! the node admits the server only if the server's peer id is on its allow-list (`FR-N3`). The
 //! server itself is the implicit computer [`LOCAL`]. Each session has a *current computer*; a
 //! session that was never switched has none recorded and behaves exactly as before (local, no
 //! environment block).
@@ -12,10 +15,12 @@
 //!   forwards to the node's `/v1/exec-server`, which runs `codex exec-server --listen stdio`
 //!   there. Shell, PTY and file changes then run on the node.
 //! - **Claude Code**: `CLAUDE_CODE_SHELL_PREFIX` points at the `ember-exec` shim ([`shim`]), so
-//!   the Bash tool runs on the node via `/v1/exec`. Read, Edit, Write, Glob and Grep reach the
-//!   node through the project mount ([`mount`]): the session's cwd is mounted here at the same
-//!   path before the agent starts (when a mount mechanism is enabled — `EMBER_MOUNT`; otherwise
-//!   they stay local).
+//!   the Bash tool runs on the node via `/v1/exec`. The shim is a separate process that speaks
+//!   HTTP, so for a peer-addressed node it is given a loopback bridge in this process
+//!   ([`bridge`]) that carries each TCP connection over one transport stream. Read, Edit, Write,
+//!   Glob and Grep reach the node through the project mount ([`mount`]): the session's cwd is
+//!   mounted here at the same path before the agent starts (when a mount mechanism is enabled —
+//!   `EMBER_MOUNT`; otherwise they stay local).
 //!
 //! Switching (FR-X3) records the new computer, describes it with its `/v1/env`, and releases the
 //! session's agent process; the next message starts (natively resumes) it with the new computer.
@@ -24,6 +29,11 @@
 //! **replaces** it (FR-S7) rather than appending to it. A session that already ran also gets a one-time notice in front of
 //! its next message: the computer changed and earlier file observations must be re-read
 //! (FR-S7 v0).
+//!
+//! A computer can also be a project browser's network egress (FR-R1): [`Computers`] runs one
+//! loopback SOCKS5 listener per such computer ([`egress`]) that forwards to the node's
+//! `/v1/egress`, and resolves `Egress::Computer` for the browser manager
+//! ([`crate::browser::EgressResolver`]).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,6 +43,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ember_node::client::NodeClient;
 use ember_node::proto::{EnvInfo, Health, PROTOCOL_VERSION};
+use ember_transport::{Dialer, PeerAddr};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
@@ -42,6 +53,8 @@ use crate::session::{InstructionsHook, MessageHook, PrepareHook, Sessions, Start
 use crate::store::{now_ms, SessionRecord, Store};
 
 pub mod api;
+pub mod bridge;
+pub mod egress;
 pub mod mount;
 pub mod relay;
 pub mod schema;
@@ -65,8 +78,11 @@ pub const ENV_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct Computer {
     pub id: String,
     pub name: String,
-    /// `http://host:port` of the node API.
+    /// `http://host:port` of the node API; empty when the node is addressed by [`Computer::peer`].
     pub url: String,
+    /// The node's transport address, for a node reached over the transport (`FR-N1`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerAddr>,
     /// Bearer token for the node API. Never serialised to clients.
     #[serde(skip_serializing)]
     pub token: String,
@@ -78,18 +94,27 @@ pub struct Computer {
 pub struct ComputerView {
     pub id: String,
     pub name: String,
-    /// Empty for [`LOCAL`].
+    /// Empty for [`LOCAL`] and for peer-addressed computers.
     pub url: String,
+    /// The node's peer id (hex), for a computer reached over the transport.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
     pub local: bool,
 }
 
 impl ComputerView {
     pub fn local() -> Self {
-        ComputerView { id: LOCAL.into(), name: LOCAL_NAME.into(), url: String::new(), local: true }
+        ComputerView { id: LOCAL.into(), name: LOCAL_NAME.into(), url: String::new(), peer: None, local: true }
     }
 
     fn of(c: &Computer) -> Self {
-        ComputerView { id: c.id.clone(), name: c.name.clone(), url: c.url.clone(), local: false }
+        ComputerView {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            url: c.url.clone(),
+            peer: c.peer.as_ref().map(|p| p.peer.to_string()),
+            local: false,
+        }
     }
 }
 
@@ -131,6 +156,8 @@ pub enum ComputerError {
     Unreachable(String, String),
     #[error("computer {0} is the current computer of {1} session(s)")]
     InUse(String, usize),
+    #[error("computer {0} is the browser egress of project(s) {1:?}; change their egress first")]
+    EgressInUse(String, Vec<String>),
     #[error("{0}")]
     BadRequest(String),
     #[error(transparent)]
@@ -164,16 +191,34 @@ impl Registry {
     }
 
     pub fn insert(&self, name: &str, url: &str, token: &str) -> Result<Computer, ComputerError> {
+        self.insert_with(name, url, None, token)
+    }
+
+    /// A computer reached over the transport at `peer` (its `url` is empty).
+    pub fn insert_peer(&self, name: &str, peer: &PeerAddr, token: &str) -> Result<Computer, ComputerError> {
+        self.insert_with(name, "", Some(peer.clone()), token)
+    }
+
+    fn insert_with(
+        &self,
+        name: &str,
+        url: &str,
+        peer: Option<PeerAddr>,
+        token: &str,
+    ) -> Result<Computer, ComputerError> {
         let c = Computer {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             url: url.to_string(),
+            peer,
             token: token.to_string(),
             created_at: now_ms(),
         };
+        let peer_json = c.peer.as_ref().map(serde_json::to_string).transpose().map_err(anyhow::Error::from)?;
         let res = self.store.conn().execute(
-            "INSERT INTO computers (id, name, url, token, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![c.id, c.name, c.url, c.token, c.created_at],
+            "INSERT INTO computers (id, name, url, token, created_at, peer_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![c.id, c.name, c.url, c.token, c.created_at, peer_json],
         );
         match res {
             Ok(_) => Ok(c),
@@ -190,7 +235,7 @@ impl Registry {
         let conn = self.store.conn();
         Ok(conn
             .query_row(
-                "SELECT id, name, url, token, created_at FROM computers WHERE id = ?1",
+                "SELECT id, name, url, token, created_at, peer_json FROM computers WHERE id = ?1",
                 params![id],
                 row_to_computer,
             )
@@ -200,7 +245,7 @@ impl Registry {
     pub fn list(&self) -> Result<Vec<Computer>, ComputerError> {
         let conn = self.store.conn();
         let mut stmt =
-            conn.prepare("SELECT id, name, url, token, created_at FROM computers ORDER BY name")?;
+            conn.prepare("SELECT id, name, url, token, created_at, peer_json FROM computers ORDER BY name")?;
         let rows = stmt.query_map([], row_to_computer)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -216,6 +261,13 @@ impl Registry {
         if users > 0 {
             return Err(ComputerError::InUse(id.to_string(), users as usize));
         }
+        drop(conn);
+        // Removing it would make those browsers fail to start (they never fall back to direct).
+        let projects = crate::browser::egress::projects_using_computer(&self.store, id)?;
+        if !projects.is_empty() {
+            return Err(ComputerError::EgressInUse(id.to_string(), projects));
+        }
+        let conn = self.store.conn();
         Ok(conn.execute("DELETE FROM computers WHERE id = ?1", params![id])? > 0)
     }
 
@@ -288,10 +340,18 @@ impl Registry {
 }
 
 fn row_to_computer(r: &rusqlite::Row<'_>) -> rusqlite::Result<Computer> {
+    let peer_json: Option<String> = r.get(5)?;
+    let peer = match peer_json {
+        Some(j) => Some(serde_json::from_str::<PeerAddr>(&j).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+        })?),
+        None => None,
+    };
     Ok(Computer {
         id: r.get(0)?,
         name: r.get(1)?,
         url: r.get(2)?,
+        peer,
         token: r.get(3)?,
         created_at: r.get(4)?,
     })
@@ -338,11 +398,36 @@ impl NodeApi for LocalNode {
 pub type Connector =
     Arc<dyn Fn(Option<&Computer>) -> anyhow::Result<Arc<dyn NodeApi>> + Send + Sync>;
 
-/// The real connector: [`NodeClient`] for nodes, [`LocalNode`] (roots = `$HOME`) for this server.
+/// A [`NodeClient`] for `c`: over HTTP for a URL, over the transport (through `dialer`) for a
+/// peer. A peer-addressed computer without a transport is an error.
+pub fn node_client(c: &Computer, dialer: Option<&Dialer>) -> anyhow::Result<NodeClient> {
+    match &c.peer {
+        Some(addr) => {
+            let dialer = dialer.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "computer {} is reached over the transport, but this server has none (set {}=1)",
+                    c.name,
+                    crate::transport::ENABLE_ENV
+                )
+            })?;
+            Ok(NodeClient::over_transport(dialer.clone(), addr.clone(), &c.token))
+        }
+        None => Ok(NodeClient::new(&c.url, &c.token)?),
+    }
+}
+
+/// The real connector without a transport: [`NodeClient`] over HTTP for nodes, [`LocalNode`]
+/// (roots = `$HOME`) for this server. Peer-addressed computers are unreachable.
 pub fn default_connector() -> Connector {
-    Arc::new(|c: Option<&Computer>| -> anyhow::Result<Arc<dyn NodeApi>> {
+    connector(None)
+}
+
+/// The real connector: [`node_client`] for nodes (HTTP, or the transport through `dialer`),
+/// [`LocalNode`] (roots = `$HOME`) for this server.
+pub fn connector(dialer: Option<Dialer>) -> Connector {
+    Arc::new(move |c: Option<&Computer>| -> anyhow::Result<Arc<dyn NodeApi>> {
         match c {
-            Some(c) => Ok(Arc::new(NodeClient::new(&c.url, &c.token)?)),
+            Some(c) => Ok(Arc::new(node_client(c, dialer.as_ref())?)),
             None => Ok(Arc::new(LocalNode {
                 roots: std::env::var_os("HOME").map(PathBuf::from).into_iter().collect(),
             })),
@@ -449,6 +534,12 @@ pub struct Computers {
     relays: Mutex<HashMap<String, relay::ExecServerRelay>>,
     /// Project mounts for Claude Code's file tools, when enabled ([`Computers::enable_mounts`]).
     mounts: std::sync::OnceLock<(Arc<mount::ProjectMounts>, mount::CtlSocket)>,
+    /// The server's transport dialer, for peer-addressed computers (`None`: no transport).
+    dialer: Option<Dialer>,
+    /// Loopback HTTP bridges to peer-addressed nodes (for the `ember-exec` shim), by computer id.
+    bridges: Mutex<HashMap<String, bridge::NodeBridge>>,
+    /// Browser egress listeners (loopback SOCKS5 → node `/v1/egress`), by computer id.
+    egress: Mutex<HashMap<String, egress::EgressListener>>,
 }
 
 impl Computers {
@@ -457,12 +548,26 @@ impl Computers {
     }
 
     pub fn with_shim(registry: Registry, connector: Connector, shim: Option<PathBuf>) -> Arc<Computers> {
+        Self::with_transport(registry, connector, shim, None)
+    }
+
+    /// With the server's transport dialer, so computers registered by peer work: the relay and
+    /// the shim bridge dial through it. `connector` should be [`connector`]`(dialer)` (or a fake).
+    pub fn with_transport(
+        registry: Registry,
+        connector: Connector,
+        shim: Option<PathBuf>,
+        dialer: Option<Dialer>,
+    ) -> Arc<Computers> {
         Arc::new(Computers {
             registry,
             connector,
             shim,
             relays: Mutex::new(HashMap::new()),
             mounts: std::sync::OnceLock::new(),
+            dialer,
+            bridges: Mutex::new(HashMap::new()),
+            egress: Mutex::new(HashMap::new()),
         })
     }
 
@@ -502,6 +607,19 @@ impl Computers {
                 Ok(())
             }
         }
+    }
+
+    /// The transport dialer, if this server has a transport.
+    pub fn dialer(&self) -> Option<&Dialer> {
+        self.dialer.as_ref()
+    }
+
+    /// A [`NodeClient`] for a registered computer (HTTP or transport).
+    pub fn client(&self, id: &str) -> Result<NodeClient, ComputerError> {
+        let c = self.resolve(id)?.ok_or_else(|| {
+            ComputerError::BadRequest("the local computer has no node client".into())
+        })?;
+        Ok(node_client(&c, self.dialer.as_ref())?)
     }
 
     pub fn registry(&self) -> &Registry {
@@ -547,6 +665,25 @@ impl Computers {
         self.registry.insert(name, url.trim_end_matches('/'), token)
     }
 
+    /// Register a node reached over the transport (`FR-N1`) by its peer address. The node must
+    /// list this server's peer id among its allowed peers (`FR-N3`).
+    pub fn register_peer(&self, name: &str, peer: &PeerAddr, token: &str) -> Result<Computer, ComputerError> {
+        let name = name.trim();
+        if name.is_empty() || name == LOCAL || name == LOCAL_NAME {
+            return Err(ComputerError::BadRequest(format!("invalid computer name {name:?}")));
+        }
+        if token.is_empty() {
+            return Err(ComputerError::BadRequest("token must not be empty".into()));
+        }
+        if self.dialer.is_none() {
+            return Err(ComputerError::BadRequest(format!(
+                "this server has no transport; set {}=1 to register computers by peer",
+                crate::transport::ENABLE_ENV
+            )));
+        }
+        self.registry.insert_peer(name, peer, token)
+    }
+
     pub fn remove(&self, id: &str) -> Result<(), ComputerError> {
         if id == LOCAL {
             return Err(ComputerError::BadRequest("the local computer cannot be removed".into()));
@@ -555,7 +692,28 @@ impl Computers {
             return Err(ComputerError::NotFound(id.to_string()));
         }
         self.relays.lock().unwrap().remove(id);
+        self.bridges.lock().unwrap().remove(id);
+        self.egress.lock().unwrap().remove(id);
         Ok(())
+    }
+
+    /// The proxy URL through which a browser egresses from computer `id` (FR-R1): `None` for
+    /// [`LOCAL`] (direct), else `socks5://127.0.0.1:<port>` of this computer's loopback listener,
+    /// started on first use and kept until the computer is removed or the server stops.
+    pub fn egress_proxy(&self, id: &str) -> Result<Option<String>, ComputerError> {
+        let Some(c) = self.resolve(id)? else {
+            return Ok(None);
+        };
+        let mut listeners = self.egress.lock().unwrap();
+        if let Some(l) = listeners.get(&c.id) {
+            return Ok(Some(l.proxy_url()));
+        }
+        let node = NodeClient::new(&c.url, &c.token).map_err(|e| ComputerError::BadRequest(e.to_string()))?;
+        let l = egress::EgressListener::start(node)?;
+        let url = l.proxy_url();
+        tracing::info!(computer = %c.name, "browser egress listener on {url}");
+        listeners.insert(c.id.clone(), l);
+        Ok(Some(url))
     }
 
     /// Resolve an id ([`LOCAL`] or a registered computer).
@@ -574,7 +732,7 @@ impl Computers {
             Ok(Some(c)) => ComputerView::of(&c),
             _ if id == LOCAL => ComputerView::local(),
             // A record pointing at a removed computer cannot happen (remove refuses); show the id.
-            _ => ComputerView { id: id.into(), name: id.into(), url: String::new(), local: false },
+            _ => ComputerView { id: id.into(), name: id.into(), url: String::new(), peer: None, local: false },
         }
     }
 
@@ -745,9 +903,11 @@ impl Computers {
             anyhow::anyhow!("the ember-exec shim was not found; set EMBER_EXEC_BIN to run Claude Code on {}", c.name)
         })?;
         anyhow::ensure!(shim.is_absolute(), "EMBER_EXEC_BIN must be an absolute path");
+        // The shim speaks HTTP: a peer-addressed node is reached through a loopback bridge.
+        let url = if c.peer.is_some() { self.bridge_url(c)? } else { c.url.clone() };
         let mut vars = vec![
             ("CLAUDE_CODE_SHELL_PREFIX".to_string(), shim.to_string_lossy().into_owned()),
-            (shim::ENV_NODE_URL.to_string(), c.url.clone()),
+            (shim::ENV_NODE_URL.to_string(), url),
             (shim::ENV_NODE_TOKEN.to_string(), c.token.clone()),
         ];
         if let Some(sh) = env.and_then(|e| e.shell.clone()) {
@@ -762,9 +922,26 @@ impl Computers {
         if let Some(r) = relays.get(&c.id) {
             return Ok(r.url().to_string());
         }
-        let r = relay::ExecServerRelay::start(NodeClient::new(&c.url, &c.token)?)?;
+        let r = relay::ExecServerRelay::start(node_client(c, self.dialer.as_ref())?)?;
         let url = r.url().to_string();
         relays.insert(c.id.clone(), r);
+        Ok(url)
+    }
+
+    /// Loopback HTTP URL that reaches peer-addressed `c` over the transport, starting its bridge
+    /// on first use.
+    fn bridge_url(&self, c: &Computer) -> anyhow::Result<String> {
+        let mut bridges = self.bridges.lock().unwrap();
+        if let Some(b) = bridges.get(&c.id) {
+            return Ok(b.url().to_string());
+        }
+        let peer = c.peer.clone().ok_or_else(|| anyhow::anyhow!("computer {} has no peer address", c.name))?;
+        let dialer = self.dialer.clone().ok_or_else(|| {
+            anyhow::anyhow!("computer {} is reached over the transport, but this server has none", c.name)
+        })?;
+        let b = bridge::NodeBridge::start(dialer, peer)?;
+        let url = b.url().to_string();
+        bridges.insert(c.id.clone(), b);
         Ok(url)
     }
 
@@ -856,6 +1033,12 @@ impl Computers {
     }
 }
 
+impl crate::browser::EgressResolver for Computers {
+    fn proxy_for_computer(&self, computer_id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.egress_proxy(computer_id)?)
+    }
+}
+
 fn unreachable_status(computer: ComputerView, error: String) -> ComputerStatus {
     ComputerStatus { computer, reachable: Some(false), error: Some(error), version: None, env: None }
 }
@@ -913,6 +1096,26 @@ mod tests {
         assert!(json.get("token").is_none());
         assert!(r.remove(&b.id).unwrap());
         assert!(!r.remove(&b.id).unwrap());
+    }
+
+    #[test]
+    fn peer_addressed_computer_round_trips() {
+        let r = Registry::open_in_memory().unwrap();
+        let peer = ember_transport::SecretKey::generate().peer_id();
+        let addr = PeerAddr {
+            peer,
+            relays: vec!["https://relay.example".into()],
+            direct: vec!["192.0.2.1:7777".parse().unwrap()],
+        };
+        let c = r.insert_peer("gpu", &addr, "t").unwrap();
+        let back = r.get(&c.id).unwrap().unwrap();
+        assert_eq!(back, c);
+        assert_eq!(back.peer.as_ref(), Some(&addr));
+        assert_eq!(back.url, "");
+        let view = serde_json::to_value(ComputerView::of(&back)).unwrap();
+        assert_eq!(view["peer"], peer.to_string());
+        // Without a transport, a peer computer cannot be reached.
+        assert!(node_client(&back, None).is_err());
     }
 
     #[test]

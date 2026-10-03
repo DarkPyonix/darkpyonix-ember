@@ -23,7 +23,7 @@ use hyper_util::rt::TokioIo;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::{BiStream, Connection, Listener, PeerId, Result, TransportError};
+use crate::{BiStream, Connection, Listener, PeerGate, PeerId, Result, TransportError};
 
 /// Turns a transport [`Listener`] into an `axum::serve` listener: every bidirectional stream
 /// any peer opens on any accepted connection becomes one HTTP connection.
@@ -34,11 +34,30 @@ pub struct HttpListener {
 }
 
 impl HttpListener {
-    pub fn new(mut listener: Listener) -> Self {
+    /// Serves every authenticated peer. Use [`HttpListener::with_gate`] to admit only allowed
+    /// ones (`FR-N3`).
+    pub fn new(listener: Listener) -> Self {
+        Self::build(listener, None)
+    }
+
+    /// Serves only peers `gate` admits: connections from other peers are closed at accept,
+    /// before any stream is read, and revoking a peer on the gate closes its connections.
+    pub fn with_gate(listener: Listener, gate: PeerGate) -> Self {
+        Self::build(listener, Some(gate))
+    }
+
+    fn build(mut listener: Listener, gate: Option<PeerGate>) -> Self {
         let local = listener.local_peer();
         let (tx, streams) = mpsc::channel(64);
         let task = tokio::spawn(async move {
             while let Some(conn) = listener.accept().await {
+                let conn = match &gate {
+                    Some(gate) => match gate.admit(conn) {
+                        Some(c) => c,
+                        None => continue,
+                    },
+                    None => conn,
+                };
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let peer = conn.peer();
@@ -91,7 +110,18 @@ where
     B::Data: Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let stream = conn.open_bi().await?;
+    http1_handshake(conn.open_bi().await?).await
+}
+
+/// HTTP/1.1 client handshake over an already-open stream (e.g. one from
+/// [`crate::Dialer::open_bi`]). The connection task runs in the background with upgrades
+/// enabled.
+pub async fn http1_handshake<B>(stream: BiStream) -> Result<SendRequest<B>>
+where
+    B: Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
     let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|e| TransportError::Stream(format!("http handshake: {e}")))?;

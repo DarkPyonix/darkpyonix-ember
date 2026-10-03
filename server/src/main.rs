@@ -10,6 +10,8 @@ use ember_server::a2a::{A2a, A2aConfig, A2aStore};
 use ember_server::agents::AgentAdapter;
 use ember_server::browser::{agent as browser_agent, BrowserConfig, BrowserManager};
 use ember_server::computers::{self, Computers, Registry};
+use ember_server::devices::{self, Devices};
+use ember_server::transport::{self as server_transport, ServerTransport};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 
@@ -21,6 +23,8 @@ use ember_server::store::Store;
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
+/// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
+///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
 /// - `EMBER_IDE_COMPUTERS`, `EMBER_IDE_URL`, `EMBER_PUBLIC_URL`: "Open IDE" targets per
 ///   computer, until ember node reports them (see `api::ide::IdeConfig`)
 /// - `EMBER_AGENT_URL`: the server URL given to agents for A2A (default derived from
@@ -36,6 +40,11 @@ use ember_server::store::Store;
 ///   (FR-U4) is then off, since OpenAI allows plan usage only for locally hosted apps
 /// - `EMBER_CHATGPT_REDIRECT_PORT`: port of the `http://127.0.0.1:<port>/auth/callback` sign-in
 ///   redirect (default: the `EMBER_LISTEN` port)
+/// - `EMBER_TRANSPORT=1`: bind the peer-to-peer transport (key in `<data dir>/transport.key`;
+///   peer id and address printed at start). Computers can then be registered by peer, and the
+///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
+///   `/api/v1/devices`, managed on the TCP listener only)
+/// - `EMBER_RELAY_URL`: relay server(s) for the transport
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -62,15 +71,35 @@ async fn main() -> anyhow::Result<()> {
         adapters.push(Arc::new(ScriptedAdapter));
     }
     let accounts = Accounts::open(store.clone(), &data_dir)?;
+    // Devices allowed over the transport (FR-N3); the table feeds the transport's gate.
+    let devices = Devices::open(store.clone())?;
+    // The peer-to-peer transport (FR-N1), opt-in.
+    let net = if server_transport::enabled_from_env() {
+        let t = server_transport::bind(&data_dir).await?;
+        t.wait_online(std::time::Duration::from_secs(5)).await;
+        // Printed (not only logged): the peer id goes into each node's allowed peers.
+        println!("ember server peer id: {}", t.peer_id());
+        println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
+        Some(ServerTransport::new(t))
+    } else {
+        None
+    };
+    let dialer = net.as_ref().map(|n| n.dialer.clone());
     // Computers and switching (FR-X1–FR-X3, FR-S7 v0); tables live in the main store.
     let computer_registry = Registry::new(store.clone());
+    let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     let shim = computers::find_shim();
     if shim.is_none() {
         tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");
     }
-    let computers = Computers::with_shim(computer_registry, computers::default_connector(), shim);
+    let computers = Computers::with_transport(
+        computer_registry,
+        computers::connector(dialer.clone()),
+        shim,
+        dialer,
+    );
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     if let Some(mounts) = computers::mount::ProjectMounts::from_env() {
         if let Err(e) = computers.enable_mounts(mounts) {
@@ -121,15 +150,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Remote browser (SPEC §R). Agents run on this machine, so they reach the CDP relay on loopback.
-    let browsers = BrowserManager::new(BrowserConfig::from_env(&data_dir));
+    // Each project's egress choice is persisted; a computer egress goes through that computer's
+    // node via a loopback SOCKS5 listener (FR-R1).
+    let browsers = BrowserManager::with_egress(
+        BrowserConfig::from_env(&data_dir),
+        Some(browser_egress_store),
+        Some(computers.clone() as Arc<dyn ember_server::browser::EgressResolver>),
+    );
     match &browsers.config().chrome {
         Some(p) => tracing::info!("remote browser: {}", p.display()),
         None => tracing::warn!("remote browser unavailable: no Chrome/Chromium found (EMBER_CHROME_BIN)"),
     }
-    sessions.add_start_hook(browser_agent::start_hook(
-        format!("http://127.0.0.1:{}", addr.port()),
-        browser_agent::BrowserMcp::ChromeDevtools,
-    ));
+    match browser_agent::from_env() {
+        Some((mcp, runner)) => {
+            tracing::info!("agents get the project browser via {mcp:?} MCP ({runner:?})");
+            sessions.add_start_config_hook(browser_agent::start_config_hook(
+                format!("http://127.0.0.1:{}", addr.port()),
+                mcp,
+                runner,
+            ));
+        }
+        None => tracing::info!("agents get no browser MCP server (EMBER_BROWSER_MCP is off)"),
+    }
 
     // Sign in with ChatGPT (FR-U4): self-hosted only; the loopback callback is served below.
     let chatgpt = ember_server::chatgpt::ChatGpt::new(
@@ -161,11 +203,37 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
         .merge(ember_server::browser::api::router(browsers.clone()));
-    axum::serve(listener, app)
+    // Over the transport: the same API to allowed devices, without device management.
+    let transport_task = match &net {
+        Some(n) => {
+            let serve = server_transport::serve(&n.transport, app.clone(), devices.gate().clone())?;
+            tracing::info!(
+                peer = %n.transport.peer_id(),
+                service = server_transport::SERVER_SERVICE,
+                devices = devices.list()?.len(),
+                "ember server serving over the transport"
+            );
+            Some(tokio::spawn(async move {
+                if let Err(e) = serve.await {
+                    tracing::error!("transport listener failed: {e}");
+                }
+            }))
+        }
+        None => None,
+    };
+    // Device management is local only (TCP).
+    let local_app = app.merge(devices::api::router(devices.clone()));
+    axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    if let Some(task) = transport_task {
+        task.abort();
+    }
+    if let Some(n) = &net {
+        n.transport.close().await;
+    }
     // Close browsers gracefully so their profiles (cookies, storage) are flushed (FR-R2).
     browsers.shutdown().await;
     // Unmount project directories served from other computers.

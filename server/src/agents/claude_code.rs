@@ -104,8 +104,43 @@ impl ClaudeCodeAdapter {
             // Equals form, as the SDK does, so an id can never be read as a flag.
             args.push(format!("--resume={id}"));
         }
+        if let Some(config) = mcp_config(&req.mcp_servers) {
+            // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
+            // variadic: the equals form keeps it to exactly this one value. Without
+            // `--strict-mcp-config` the user's own MCP servers stay.
+            args.push(format!("--mcp-config={config}"));
+        }
         args
     }
+}
+
+/// `MCP_TIMEOUT` (milliseconds, Claude Code's MCP server start timeout) from the longest
+/// `startup_timeout_secs`, unless the server's environment already sets it. Overridden by the
+/// request's own `env`.
+fn mcp_timeout_env(req: &StartRequest) -> Option<(String, String)> {
+    let secs = req.mcp_servers.iter().filter_map(|s| s.startup_timeout_secs).max()?;
+    if std::env::var_os("MCP_TIMEOUT").is_some() {
+        return None;
+    }
+    Some(("MCP_TIMEOUT".into(), (u64::from(secs) * 1000).to_string()))
+}
+
+/// The `--mcp-config` JSON for `servers` (`{"mcpServers": {name: {type, command, args}}}`), or
+/// `None` when there are none.
+pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let map: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|s| {
+            (
+                s.name.clone(),
+                serde_json::json!({ "type": "stdio", "command": s.command, "args": s.args }),
+            )
+        })
+        .collect();
+    Some(serde_json::json!({ "mcpServers": map }).to_string())
 }
 
 #[async_trait]
@@ -151,6 +186,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             req.cwd.display()
         );
         let mut child = Command::new(&self.bin)
+            .envs(mcp_timeout_env(&req))
             .envs(req.env.iter().map(|(k, v)| (k, v)))
             .args(Self::args(&req))
             .current_dir(&req.cwd)
@@ -830,11 +866,35 @@ mod tests {
             env: Vec::new(),
             instructions: Some("use ember-a2a".into()),
             remote: None,
+            mcp_servers: Vec::new(),
         };
         let args = ClaudeCodeAdapter::args(&req);
+        assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
         assert!(args.contains(&"--append-system-prompt=use ember-a2a".to_string()));
         assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
         assert!(args.contains(&"--resume=abc".to_string()));
+    }
+
+    #[test]
+    fn args_include_the_browser_mcp_config_when_enabled() {
+        let req = StartRequest {
+            cwd: ".".into(),
+            mcp_servers: vec![crate::agents::McpServer {
+                name: "ember-browser".into(),
+                command: "/usr/local/bin/npx".into(),
+                args: vec!["-y".into(), "chrome-devtools-mcp@latest".into(), "--wsEndpoint=ws://x/cdp".into()],
+                startup_timeout_secs: Some(60),
+            }],
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        let flag = args.iter().find_map(|a| a.strip_prefix("--mcp-config=")).expect("--mcp-config");
+        let v: Value = serde_json::from_str(flag).unwrap();
+        let server = &v["mcpServers"]["ember-browser"];
+        assert_eq!(server["type"], "stdio");
+        assert_eq!(server["command"], "/usr/local/bin/npx");
+        assert_eq!(server["args"][2], "--wsEndpoint=ws://x/cdp");
+        assert!(!args.contains(&"--strict-mcp-config".to_string()), "the user's servers stay");
     }
 }

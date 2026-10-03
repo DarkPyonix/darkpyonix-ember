@@ -99,6 +99,12 @@ impl Client {
     /// [`Client::start`] to connect.
     pub async fn new(config: ClientConfig) -> ApiResult<Client> {
         let api = Api::new(&config.base_url)?;
+        Ok(Self::with_api(config, api).await)
+    }
+
+    /// Like [`Client::new`], with a ready [`Api`] — e.g. [`Api::over_transport`] to reach the
+    /// server over the peer-to-peer transport. `config.base_url` is then unused.
+    pub async fn with_api(config: ClientConfig, api: Api) -> Client {
         let state = match &config.cache_path {
             Some(p) => cache::load(p).await.map(State::from_cache).unwrap_or_default(),
             None => State::new(),
@@ -107,7 +113,7 @@ impl Client {
         let (revision, _) = watch::channel(state.revision());
         let (resync, resync_rx) = mpsc::unbounded_channel();
         let (push_mode, _) = watch::channel(PushMode::Run);
-        Ok(Client {
+        Client {
             inner: Arc::new(Inner {
                 api,
                 config,
@@ -122,7 +128,7 @@ impl Client {
                 tasks: SyncMutex::new(Vec::new()),
                 resync_rx: SyncMutex::new(Some(resync_rx)),
             }),
-        })
+        }
     }
 
     /// Start the push connection, the resync worker and the cache writer. Idempotent.
@@ -421,8 +427,8 @@ async fn connect_and_run(
         Ok(_) => {}
         Err(e) => return Ended::Lost(e.to_string()),
     }
-    let (mut ws, _) = match tokio_tungstenite::connect_async(inner.api.push_url()).await {
-        Ok(c) => c,
+    let mut ws = match inner.api.open_push().await {
+        Ok(ws) => ws,
         Err(e) => return Ended::Lost(e.to_string()),
     };
     backoff.reset();

@@ -732,7 +732,7 @@ pub(crate) mod tests {
     }
 
     fn computer(id: &str) -> Computer {
-        Computer { id: id.into(), name: format!("{id}-name"), url: "http://x:1".into(), token: "t".into(), created_at: 0 }
+        Computer { id: id.into(), name: format!("{id}-name"), url: "http://x:1".into(), token: "t".into(), created_at: 0, peer: None }
     }
 
     /// Project mounts over a fake node and a fake mounter; `base` is a temp directory that

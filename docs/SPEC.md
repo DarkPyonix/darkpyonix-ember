@@ -233,6 +233,17 @@ Design, attach API and VS Code settings: `docs/design/TERMINALS.md`.
 | **FR-P6** | Persistent sessions are listed per computer and per project in the client, with what started them (IDE, agent, user), and can be killed from there. Sessions survive an ember server restart. Sessions survive an ember node restart only if the processes were detached from it (best-effort; documented). | Restart ember server: every terminal is still listed and attachable. The list shows the origin and allows kill. |
 | **NFR-P1** | Attach latency and overhead. | Re-attach shows the last screen in ≤ 500 ms on a LAN. Idle sessions cost ≤ 2 MB of memory each in ember node beyond the shell itself. |
 
+**FR-P5 notes (debugging).** VS Code serves a debug adapter's `runInTerminal` itself and an extension
+can neither answer it (trackers only observe; a `DebugAdapterDescriptorFactory` can only be
+registered by the extension that defines the debug type), and a *launch* debuggee dies with its
+adapter anyway (js-debug's watchdog, debugpy's launcher). So the VS Code companion rewrites a
+`launch` with `"console": "integratedTerminal"` into a persistent session running the program with
+the debugger listening on 127.0.0.1 plus an **attach** configuration: Node (`node`/`pwa-node`, runtime
+`node`, via `--inspect-brk`) and Python (`debugpy`, via `debugpy.listen`). Other adapters and
+consoles are unchanged and not persistent. A window opened later offers "Re-attach the debugger"
+for this project's running debuggees. Details and the per-adapter table: `docs/design/TERMINALS.md`
+§3c.
+
 ---
 
 ## §B — Native bridge (IDE window webview ↔ native shell)

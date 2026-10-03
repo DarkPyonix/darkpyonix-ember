@@ -16,12 +16,14 @@
 //!
 //! Known limits: jobs live in the daemon's memory and do not survive a daemon restart (terminal
 //! sessions do, best effort, through their PTY keepers — see [`term`]); the path
-//! policy confines the file API and working directories, not what a command does; a remote
-//! browser egress (SOCKS5, FR-R1) will be a separate listener added next to the API.
+//! policy confines the file API and working directories, not what a command does.
+//! - [`egress`]: the SOCKS5 exit for the remote browser (FR-R1), served as `/v1/egress` (one
+//!   WebSocket per proxied TCP connection) and optionally as a plain SOCKS5 listener.
 
 pub mod api;
 pub mod client;
 pub mod config;
+pub mod egress;
 pub mod envinfo;
 pub mod exec;
 pub mod exec_server;

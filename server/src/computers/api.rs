@@ -6,7 +6,7 @@
 //! | GET    | `/api/v1/computers?probe=<bool>` | → `[ComputerStatus]` (`local` first; probe default true) |
 //! | POST   | `/api/v1/computers` | `{name, url, token}` or `{name, peer, token}` → 201 `Computer` (token never returned) |
 //! | GET    | `/api/v1/computers/{id}` | → `ComputerStatus` with `env` |
-//! | DELETE | `/api/v1/computers/{id}` | → 204 (409 while a session is on it) |
+//! | DELETE | `/api/v1/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it) |
 //! | GET    | `/api/v1/sessions/{id}/computer` | → `CurrentComputer` |
 //! | PUT    | `/api/v1/sessions/{id}/computer` | `{computer_id}` → `SwitchOutcome` (409 mid-turn, 502 unreachable) |
 //!
@@ -47,7 +47,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let code = match &self.0 {
             ComputerError::NotFound(_) | ComputerError::SessionNotFound(_) => StatusCode::NOT_FOUND,
-            ComputerError::Busy(_) | ComputerError::InUse(..) => StatusCode::CONFLICT,
+            ComputerError::Busy(_) | ComputerError::InUse(..) | ComputerError::EgressInUse(..) => {
+                StatusCode::CONFLICT
+            }
             ComputerError::Unreachable(..) => StatusCode::BAD_GATEWAY,
             ComputerError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ComputerError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,

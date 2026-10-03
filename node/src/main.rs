@@ -22,6 +22,11 @@ use ember_transport::PeerGate;
 /// - `EMBER_NODE_ALLOWED_PEERS` and `<state dir>/allowed-peers`: peer ids (ember servers) allowed
 ///   to connect over the transport (FR-N3); SIGHUP reloads the file and disconnects removed peers
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport
+/// - `EMBER_NODE_EGRESS=off`: refuse `/v1/egress` (the remote browser's SOCKS5 exit, FR-R1)
+/// - `EMBER_NODE_EGRESS_DENY`: denied egress destinations (`private`, `link-local`, `loopback`,
+///   CIDRs; default none)
+/// - `EMBER_NODE_SOCKS_LISTEN`: also serve plain SOCKS5 on this address (loopback clients need no
+///   authentication; others use the token as RFC 1929 password)
 ///
 /// `ember-node __keep-pty …` is the internal PTY keeper (see `ember_node::term::pty`).
 /// `ember-node exec-server` instead becomes `codex exec-server --listen stdio` on this process's
@@ -50,6 +55,11 @@ async fn serve() -> anyhow::Result<()> {
     let token = cfg.token.clone();
     let mode = transport::TransportMode::from_env()?;
     let node = Node::new(cfg)?;
+    if let Some(socks) = std::env::var("EMBER_NODE_SOCKS_LISTEN").ok().filter(|s| !s.is_empty()) {
+        let listener = tokio::net::TcpListener::bind(socks.parse::<std::net::SocketAddr>()?).await?;
+        tracing::info!("SOCKS5 egress listening on {}", listener.local_addr()?);
+        tokio::spawn(ember_node::egress::serve_listener(listener, token.clone(), node.egress_policy().clone()));
+    }
 
     // Every listener serves the same router (`api::serve` takes any `axum::serve::Listener`).
     let mut servers: Vec<Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>> = Vec::new();

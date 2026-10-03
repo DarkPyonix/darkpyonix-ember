@@ -26,7 +26,7 @@ async fn relays_bytes_both_ways_and_requires_the_token() {
     // The only test in this binary, so setting process environment is safe.
     std::env::set_var(CODEX_BIN_ENV, &fake);
 
-    let node = Node::new(NodeConfig { token: "t".into(), roots: vec![root.clone()], state_dir: None, pty_keeper: None }).unwrap();
+    let node = Node::new(NodeConfig::new("t", vec![root.clone()])).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(api::serve(listener, node));

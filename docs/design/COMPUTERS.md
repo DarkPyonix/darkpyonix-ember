@@ -14,6 +14,7 @@
 | HTTP API | `server/src/computers/api.rs` | `GET/POST /api/v1/computers`, `GET/DELETE /api/v1/computers/{id}`, `GET/PUT /api/v1/sessions/{id}/computer`. |
 | Codex relay | `server/src/computers/relay.rs` | Loopback WebSocket (`ws://127.0.0.1:<port>/<secret>`) that codex app-server connects to; re-frames to the node's raw `/v1/exec-server` stream. |
 | Node bridge | `node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
+| Browser egress | `server/src/computers/egress.rs`, `node/src/egress.rs` | Per computer, a loopback SOCKS5 listener (`socks5://127.0.0.1:<port>`) that a project's browser uses as `--proxy-server`; each connection becomes one node `/v1/egress` stream where the node runs SOCKS5 (FR-R1, see `REMOTE-BROWSER.md`). A computer that is some project's browser egress cannot be removed (409). |
 | Claude shim | `server/src/computers/shim.rs`, `server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/v1/exec` and carries the cwd back. |
 | Mount | `server/src/computers/mount.rs` | **Design and stub only** (`NoMount`). |
 
@@ -87,7 +88,7 @@ the prefix also wraps, run locally by default (`EMBER_EXEC_NON_TOOL=remote` send
   hooks' environment). A per-session scoped token is the fix.
 - **Codex needs a codex binary on the node** (outside FR-X5's "ember node only"), and the
   exec-server is not confined by the node's path policy.
-- **Node protocol**: `/v1/exec-server` was added without bumping `PROTOCOL_VERSION` (additive).
+- **Node protocol**: `/v1/exec-server` and `/v1/egress` were added without bumping `PROTOCOL_VERSION` (additive).
 - Codex `additionalContext` (keyed context on `turn/start`) may be a cleaner carrier for the
   environment block than `developerInstructions`; not tried.
 - Switch is refused mid-turn; whether a user should be able to force it is open (`INTENT.md` Q2).

@@ -452,3 +452,120 @@ async fn env_describes_the_computer() {
     let git = e.toolchains.get("git").expect("git on PATH");
     assert!(git.version.as_deref().unwrap_or("").starts_with("git version"), "{git:?}");
 }
+
+/// The namespace and attribute operations the project mount needs (lstat, readlink, symlink,
+/// mkdir, remove, rename, setattr, pwrite), their errno names, and the path policy on each.
+#[tokio::test]
+async fn namespace_operations_for_the_mount() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = start().await;
+    let c = &f.client;
+    let root = &f.root;
+
+    // mkdir: single level needs the parent; `parents` is mkdir -p and idempotent.
+    let e = c.mkdir(&MkdirRequest { path: root.join("a/b"), parents: false, mode: None }).await.unwrap_err();
+    assert_eq!(e.errno(), Some("ENOENT"), "{e:?}");
+    let s = c.mkdir(&MkdirRequest { path: root.join("a/b"), parents: true, mode: Some(0o750) }).await.unwrap();
+    assert_eq!(s.kind, FileKind::Dir);
+    assert_eq!(s.mode & 0o777, 0o750);
+    assert!(s.ino.is_some());
+    c.mkdir(&MkdirRequest { path: root.join("a/b"), parents: true, mode: None }).await.unwrap();
+    let e = c.mkdir(&MkdirRequest { path: root.join("a/b"), parents: false, mode: None }).await.unwrap_err();
+    assert_eq!(e.errno(), Some("EEXIST"));
+    assert!(matches!(e, ClientError::Api { status: 409, .. }), "{e:?}");
+
+    // pwrite: in place, at an offset, existing files only.
+    c.write_file(root.join("a/f.txt"), "hello world", None).await.unwrap();
+    let s = c.pwrite(root.join("a/f.txt"), 6, "WORLD!").await.unwrap();
+    assert_eq!(s.size, 12);
+    assert_eq!(std::fs::read(root.join("a/f.txt")).unwrap(), b"hello WORLD!");
+    let e = c.pwrite(root.join("a/missing"), 0, "x").await.unwrap_err();
+    assert_eq!(e.errno(), Some("ENOENT"));
+
+    // setattr: truncate, chmod, utimes in one call.
+    let s = c
+        .setattr(&SetAttrRequest {
+            path: root.join("a/f.txt"),
+            size: Some(5),
+            mode: Some(0o600),
+            atime: Some(SetTime::UnixMs(1_000_000_000_000)),
+            mtime: Some(SetTime::UnixMs(1_000_000_123_000)),
+        })
+        .await
+        .unwrap();
+    assert_eq!(s.size, 5);
+    assert_eq!(s.mode & 0o777, 0o600);
+    assert_eq!(s.mtime_ms, Some(1_000_000_123_000));
+    assert_eq!(std::fs::read(root.join("a/f.txt")).unwrap(), b"hello");
+    assert_eq!(std::fs::metadata(root.join("a/f.txt")).unwrap().permissions().mode() & 0o777, 0o600);
+    let s = c
+        .setattr(&SetAttrRequest { path: root.join("a/f.txt"), mtime: Some(SetTime::Now), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(s.mtime_ms.unwrap() > 1_000_000_123_000);
+    // Extending fills with zeros.
+    let s = c.setattr(&SetAttrRequest { path: root.join("a/f.txt"), size: Some(8), ..Default::default() }).await.unwrap();
+    assert_eq!(s.size, 8);
+    assert_eq!(std::fs::read(root.join("a/f.txt")).unwrap(), b"hello\0\0\0");
+
+    // symlink / readlink / lstat: the link itself, never followed — even when it points outside.
+    std::fs::write(f.outside.join("secret"), "s3cret").unwrap();
+    let s = c.symlink(root.join("a/out"), f.outside.join("secret")).await.unwrap();
+    assert_eq!(s.kind, FileKind::Symlink);
+    let l = c.readlink(root.join("a/out")).await.unwrap();
+    assert_eq!(l.target, f.outside.join("secret"));
+    assert_eq!(c.lstat(root.join("a/out")).await.unwrap().kind, FileKind::Symlink);
+    // stat follows it, so it is refused; reading through it too.
+    assert_eq!(c.stat(root.join("a/out")).await.unwrap_err().code(), Some(ErrorCode::ForbiddenPath));
+    assert_eq!(c.read_file(root.join("a/out")).await.unwrap_err().errno(), Some("EACCES"));
+    c.symlink(root.join("a/rel"), "f.txt").await.unwrap();
+    assert_eq!(c.readlink(root.join("a/rel")).await.unwrap().target, PathBuf::from("f.txt"));
+    assert_eq!(c.stat(root.join("a/rel")).await.unwrap().kind, FileKind::File);
+    let e = c.symlink(f.outside.join("planted"), root.join("a/f.txt")).await.unwrap_err();
+    assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
+
+    // list reports entry modes without following links.
+    let l = c.list(root.join("a")).await.unwrap();
+    let out = l.entries.iter().find(|e| e.name == "out").unwrap();
+    assert_eq!(out.kind, FileKind::Symlink);
+    assert!(out.mode.is_some() && out.ino.is_some());
+
+    // rename: files, directories, overwrite control, and links move as links.
+    c.rename(&RenameRequest { from: root.join("a/f.txt"), to: root.join("a/b/g.txt"), overwrite: true }).await.unwrap();
+    assert!(!root.join("a/f.txt").exists());
+    assert_eq!(std::fs::read(root.join("a/b/g.txt")).unwrap(), b"hello\0\0\0");
+    c.write_file(root.join("a/h.txt"), "h", None).await.unwrap();
+    let e = c
+        .rename(&RenameRequest { from: root.join("a/h.txt"), to: root.join("a/b/g.txt"), overwrite: false })
+        .await
+        .unwrap_err();
+    assert_eq!(e.errno(), Some("EEXIST"));
+    c.rename(&RenameRequest { from: root.join("a/out"), to: root.join("a/out2"), overwrite: true }).await.unwrap();
+    assert!(std::fs::symlink_metadata(root.join("a/out2")).unwrap().file_type().is_symlink());
+    assert!(f.outside.join("secret").exists());
+    let e = c
+        .rename(&RenameRequest { from: root.join("a/h.txt"), to: f.outside.join("stolen"), overwrite: true })
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
+    c.rename(&RenameRequest { from: root.join("a/b"), to: root.join("a/c"), overwrite: true }).await.unwrap();
+    assert!(root.join("a/c/g.txt").exists());
+
+    // remove: a link (not its target), an empty dir, a non-empty dir only when recursive, never
+    // a root.
+    c.remove(root.join("a/out2"), false).await.unwrap();
+    assert!(f.outside.join("secret").exists());
+    let e = c.remove(root.join("a/c"), false).await.unwrap_err();
+    assert_eq!(e.errno(), Some("ENOTEMPTY"));
+    c.remove(root.join("a/c"), true).await.unwrap();
+    assert!(!root.join("a/c").exists());
+    let e = c.remove(root.join("a/nope"), false).await.unwrap_err();
+    assert_eq!(e.code(), Some(ErrorCode::NotFound));
+    assert_eq!(e.errno(), Some("ENOENT"));
+    let e = c.remove(root.clone(), true).await.unwrap_err();
+    assert_eq!(e.errno(), Some("EBUSY"));
+    assert!(root.exists());
+    let e = c.remove(f.outside.join("secret"), false).await.unwrap_err();
+    assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
+    assert!(f.outside.join("secret").exists());
+}

@@ -140,13 +140,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
         req: StartRequest,
         events: mpsc::Sender<AgentEvent>,
     ) -> anyhow::Result<Box<dyn AgentRun>> {
-        // On another computer, Bash runs there through the `ember-exec` shim, but Read/Edit/
-        // Write/Glob/Grep still use this server's disk until the project mount lands
-        // (`crate::computers::mount`), so the project path must exist here as well.
+        // On another computer, Bash runs there through the `ember-exec` shim and Read/Edit/
+        // Write/Glob/Grep use this server's disk, where the project mount
+        // (`crate::computers::mount`) has put the node's directory at the same path — when a
+        // mount mechanism is enabled; otherwise the path must exist here as well.
         anyhow::ensure!(
             req.cwd.is_dir(),
-            "working directory {} does not exist on the ember server (on another computer, Claude \
-             Code's file tools still need it here until the project mount is implemented)",
+            "working directory {} does not exist on the ember server (on another computer it is \
+             mounted here when the project mount is enabled — see EMBER_MOUNT)",
             req.cwd.display()
         );
         let mut child = Command::new(&self.bin)

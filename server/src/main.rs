@@ -28,6 +28,10 @@ use ember_server::store::Store;
 /// - `EMBER_A2A=0`: agent-to-agent messaging starts off until a user turns it on
 /// - `EMBER_EXEC_BIN`: the `ember-exec` shim for Claude Code on other computers (default: next
 ///   to this executable)
+/// - `EMBER_MOUNT`: `auto` (default), `nfs`, `fuse` or `off` — mount a Claude Code session's
+///   project directory from its computer at the same path (needs the `mount-nfs` / `mount-fuse`
+///   build feature); `EMBER_MOUNT_SHADOW=1` allows mounting over a non-empty local directory,
+///   `EMBER_MOUNT_TTL_MS` sets the attribute cache lifetime (default 1000)
 /// - `EMBER_HOSTED=1`: this server is a hosted service, not self-hosted; Sign in with ChatGPT
 ///   (FR-U4) is then off, since OpenAI allows plan usage only for locally hosted apps
 /// - `EMBER_CHATGPT_REDIRECT_PORT`: port of the `http://127.0.0.1:<port>/auth/callback` sign-in
@@ -67,6 +71,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");
     }
     let computers = Computers::with_shim(computer_registry, computers::default_connector(), shim);
+    // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
+    if let Some(mounts) = computers::mount::ProjectMounts::from_env() {
+        if let Err(e) = computers.enable_mounts(mounts) {
+            tracing::warn!("project mount disabled: {e:#}");
+        }
+    } else {
+        tracing::info!("project mount off; Claude Code file tools stay on this server");
+    }
     computers.install(&sessions);
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
@@ -143,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
     // computer) instead of a second, hand-maintained list.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let app = ember_server::api::router(sessions.clone())
-        .merge(computers::api::router(computers, sessions.clone()))
+        .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(ember_server::api::ide::router(sessions, ide))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
@@ -156,5 +168,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     // Close browsers gracefully so their profiles (cookies, storage) are flushed (FR-R2).
     browsers.shutdown().await;
+    // Unmount project directories served from other computers.
+    computers.shutdown().await;
     Ok(())
 }

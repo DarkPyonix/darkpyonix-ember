@@ -7,7 +7,8 @@
 //!
 //! Environment: `EMBER_EXEC_NODE_URL`, `EMBER_EXEC_NODE_TOKEN` (without them everything runs
 //! locally), `EMBER_EXEC_REMOTE_SHELL` (default `bash`), `EMBER_EXEC_NON_TOOL`
-//! (`local`|`remote`), `EMBER_EXEC_FORWARD_ENV` (comma-separated names).
+//! (`local`|`remote`), `EMBER_EXEC_FORWARD_ENV` (comma-separated names), `EMBER_MOUNT_CTL`
+//! (project mount control socket, notified after each remote command).
 
 use std::os::unix::process::CommandExt;
 
@@ -41,6 +42,11 @@ fn main() {
                 }
             };
             let code = rt.block_on(shim::run_remote(&env, request, cwd_file));
+            // The command may have changed files on the node: drop the project mount's caches
+            // so Claude's next Read sees them.
+            if let Some(ctl) = std::env::var_os(ember_server::computers::mount::ENV_CTL) {
+                ember_server::computers::mount::notify_invalidate(std::path::Path::new(&ctl));
+            }
             std::process::exit(code);
         }
     }

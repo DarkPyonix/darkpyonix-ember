@@ -96,6 +96,31 @@ impl PathPolicy {
         }
         self.check(full, path)
     }
+
+    /// Resolve a path **without following its final component**: the parent directory must
+    /// exist and is canonicalised; the final name is appended as given. The entry itself may or
+    /// may not exist. Used where the operation acts on a symbolic link itself (`lstat`,
+    /// `readlink`, `remove`, `rename`, `symlink`), so a link inside a root that points outside
+    /// is still visible and removable, but never followed.
+    pub fn resolve_nofollow(&self, path: &Path) -> Result<PathBuf, PolicyError> {
+        if !path.is_absolute() {
+            return Err(PolicyError::NotAbsolute(path.to_path_buf()));
+        }
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return Err(PolicyError::Outside(path.to_path_buf()));
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            // `/` itself.
+            return self.resolve_existing(path);
+        };
+        let base = std::fs::canonicalize(parent).map_err(|e| PolicyError::Io(path.to_path_buf(), e))?;
+        self.check(base.join(name), path)
+    }
+
+    /// Whether `canonical` is one of the roots themselves (which must not be removed or moved).
+    pub fn is_root(&self, canonical: &Path) -> bool {
+        self.roots.iter().any(|r| r == canonical)
+    }
 }
 
 #[cfg(test)]
@@ -120,5 +145,29 @@ mod tests {
         assert!(p.resolve_existing(Path::new("relative")).is_err());
         let ok = p.resolve_for_write(&root.join("a/b/new.txt")).unwrap();
         assert!(ok.ends_with("root/a/b/new.txt"));
+    }
+
+    #[test]
+    fn nofollow_keeps_the_final_link_but_checks_its_parent() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        let root = base.join("root");
+        let out = base.join("out");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::os::unix::fs::symlink(&out, root.join("link")).unwrap();
+        let p = PathPolicy::new([root.clone()]).unwrap();
+
+        // The link itself is inside the root even though its target is not.
+        assert_eq!(p.resolve_nofollow(&root.join("link")).unwrap(), root.join("link"));
+        // A missing final component is fine; a missing parent is not.
+        assert_eq!(p.resolve_nofollow(&root.join("new")).unwrap(), root.join("new"));
+        assert!(matches!(p.resolve_nofollow(&root.join("a/new")), Err(PolicyError::Io(..))));
+        // Going through the link as a directory follows it, so it is refused.
+        assert!(matches!(p.resolve_nofollow(&root.join("link/x")), Err(PolicyError::Outside(_))));
+        assert!(p.resolve_nofollow(&root.join("../out")).is_err());
+        assert!(p.resolve_nofollow(Path::new("relative")).is_err());
+        assert!(p.is_root(&root));
+        assert!(!p.is_root(&root.join("link")));
     }
 }

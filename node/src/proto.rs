@@ -39,6 +39,11 @@ pub struct ErrorBody {
     /// Set on [`ErrorCode::PreconditionFailed`]: the file's current hash, `None` if it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_sha256: Option<String>,
+    /// For a failed file operation: the portable name of the OS error (`ENOENT`, `ENOTEMPTY`,
+    /// `EEXIST`, …), so a client on another OS can map it to its own errno (numbers differ
+    /// between macOS and Linux). Policy refusals are `EACCES`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errno: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,7 +116,8 @@ pub enum FileKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stat {
-    /// The canonical path (symlinks resolved).
+    /// The canonical path (symlinks resolved; for `lstat`, the parent's canonical path plus the
+    /// final component as given).
     pub path: PathBuf,
     pub kind: FileKind,
     pub size: u64,
@@ -120,6 +126,18 @@ pub struct Stat {
     /// Unix permission bits.
     pub mode: u32,
     pub readonly: bool,
+    /// Inode number on the node (absent from older nodes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ino: Option<u64>,
+    /// Hard link count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nlink: Option<u64>,
+    /// Access time, milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atime_ms: Option<u64>,
+    /// Status change time, milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctime_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +211,11 @@ pub struct DirEntry {
     pub kind: FileKind,
     pub size: u64,
     pub mtime_ms: Option<u64>,
+    /// Unix mode bits of the entry itself (not following a symlink); absent from older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ino: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +223,92 @@ pub struct ListResponse {
     pub path: PathBuf,
     /// Sorted by name.
     pub entries: Vec<DirEntry>,
+}
+
+/// `POST /v1/fs/readlink` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadlinkResponse {
+    pub path: PathBuf,
+    /// The link's target exactly as stored (may be relative, may point outside the roots).
+    pub target: PathBuf,
+}
+
+/// Create a symbolic link at `path` pointing to `target`. The target is stored as given and is
+/// not checked against the roots (following it through the file API is).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymlinkRequest {
+    pub path: PathBuf,
+    pub target: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MkdirRequest {
+    pub path: PathBuf,
+    /// Create missing parents too, and succeed if the directory already exists (`mkdir -p`).
+    #[serde(default)]
+    pub parents: bool,
+    /// Permission bits for the new directory (default 0o777 minus the daemon's umask).
+    #[serde(default)]
+    pub mode: Option<u32>,
+}
+
+/// Remove a file, symbolic link (never its target) or directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveRequest {
+    pub path: PathBuf,
+    /// For a directory: remove its contents too (`rm -r`). Without it only an empty directory is
+    /// removed (`ENOTEMPTY` otherwise).
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+/// Rename (move) within the roots. Both paths name the entries themselves: a symbolic link is
+/// moved, not its target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameRequest {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    /// Replace an existing `to` (default true, as `rename(2)`). When false an existing `to` is
+    /// `EEXIST`; the check is not atomic with the rename.
+    #[serde(default = "yes")]
+    pub overwrite: bool,
+}
+
+/// A time to set: the node's current time, or an explicit one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "ms")]
+pub enum SetTime {
+    Now,
+    /// Milliseconds since the Unix epoch.
+    UnixMs(u64),
+}
+
+/// Change attributes in one call: what NFS `SETATTR` and FUSE `setattr` need. Fields left out
+/// are unchanged. Applied in the order size, mode, times. Follows a symbolic link (like
+/// `chmod(2)`, `truncate(2)`, `utimensat(2)` without `AT_SYMLINK_NOFOLLOW`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetAttrRequest {
+    pub path: PathBuf,
+    /// Permission bits (`chmod`).
+    #[serde(default)]
+    pub mode: Option<u32>,
+    /// New length (`truncate`); extends with zeros. In place, not atomic.
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub atime: Option<SetTime>,
+    #[serde(default)]
+    pub mtime: Option<SetTime>,
+}
+
+/// Write `data` at `offset` into an existing regular file, in place (not atomic, unlike
+/// [`WriteRequest`]): the primitive a mounted filesystem's `write` needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PwriteRequest {
+    pub path: PathBuf,
+    pub offset: u64,
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

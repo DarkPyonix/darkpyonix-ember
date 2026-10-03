@@ -89,6 +89,13 @@ pub type InstructionsHook = Arc<dyn Fn(&SessionRecord) -> Option<String> + Send 
 pub type StartConfigHook =
     Arc<dyn Fn(&SessionRecord, &mut StartRequest) -> anyhow::Result<()> + Send + Sync>;
 
+/// Prepares what an agent process needs before it starts and may take time doing it (the
+/// project mount for a Claude Code session on another computer — `crate::computers::mount`).
+/// Awaited before the start-config hooks; an error fails the start.
+pub type PrepareHook = Arc<
+    dyn Fn(SessionRecord) -> futures::future::BoxFuture<'static, anyhow::Result<()>> + Send + Sync,
+>;
+
 /// Called with a session id before a message is delivered to its agent. A returned note is
 /// recorded as [`AgentEvent::SystemNotice`] and put in front of that one message (FR-S7 v0).
 /// The hook owns the note's lifetime: return it once.
@@ -101,6 +108,7 @@ pub struct Sessions {
     account_router: std::sync::Mutex<Option<AccountRouter>>,
     instructions_hooks: std::sync::Mutex<Vec<InstructionsHook>>,
     start_config_hooks: std::sync::Mutex<Vec<StartConfigHook>>,
+    prepare_hooks: std::sync::Mutex<Vec<PrepareHook>>,
     message_hooks: std::sync::Mutex<Vec<MessageHook>>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
@@ -121,6 +129,7 @@ impl Sessions {
             account_router: std::sync::Mutex::new(None),
             instructions_hooks: std::sync::Mutex::new(Vec::new()),
             start_config_hooks: std::sync::Mutex::new(Vec::new()),
+            prepare_hooks: std::sync::Mutex::new(Vec::new()),
             message_hooks: std::sync::Mutex::new(Vec::new()),
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
@@ -153,6 +162,11 @@ impl Sessions {
     /// Register a hook that may change any part of the start request.
     pub fn add_start_config_hook(&self, hook: StartConfigHook) {
         self.start_config_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Register an async hook awaited before every agent process start.
+    pub fn add_prepare_hook(&self, hook: PrepareHook) {
+        self.prepare_hooks.lock().unwrap().push(hook);
     }
 
     /// Register a hook that may put a one-time note in front of the next message.
@@ -254,6 +268,10 @@ impl Sessions {
             instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
             remote: None,
         };
+        let prepare_hooks: Vec<PrepareHook> = self.prepare_hooks.lock().unwrap().clone();
+        for hook in &prepare_hooks {
+            hook(rec.clone()).await?;
+        }
         let config_hooks: Vec<StartConfigHook> = self.start_config_hooks.lock().unwrap().clone();
         for hook in &config_hooks {
             hook(&rec, &mut req)?;

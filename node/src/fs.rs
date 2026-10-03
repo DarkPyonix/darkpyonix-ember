@@ -1,5 +1,7 @@
 //! File operations: stat, ranged read with whole-file hash, atomic write with a hash
-//! precondition, directory listing, glob and grep (FR-X1).
+//! precondition, directory listing, glob and grep (FR-X1), and the namespace operations a
+//! mounted filesystem needs (lstat, readlink, symlink, mkdir, remove, rename, setattr, pwrite;
+//! ember server's project mount, `server/src/computers/mount`).
 //!
 //! All functions are blocking; the API layer runs them on the blocking pool.
 //!
@@ -10,7 +12,7 @@
 
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -69,17 +71,214 @@ pub fn sha256_bytes(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+fn ms_of(secs: i64, nsecs: i64) -> Option<u64> {
+    (secs >= 0).then(|| secs as u64 * 1000 + (nsecs.max(0) as u64) / 1_000_000)
+}
+
+fn stat_of(path: PathBuf, m: &Metadata) -> Stat {
+    Stat {
+        kind: kind_of(m.file_type()),
+        size: m.len(),
+        mtime_ms: mtime_ms(m),
+        mode: m.permissions().mode(),
+        readonly: m.permissions().readonly(),
+        ino: Some(m.ino()),
+        nlink: Some(m.nlink()),
+        atime_ms: ms_of(m.atime(), m.atime_nsec()),
+        ctime_ms: ms_of(m.ctime(), m.ctime_nsec()),
+        path,
+    }
+}
+
+/// The portable name of an OS error number, for [`ErrorBody::errno`].
+pub fn errno_name(raw: i32) -> Option<&'static str> {
+    Some(match raw {
+        libc::EPERM => "EPERM",
+        libc::ENOENT => "ENOENT",
+        libc::EIO => "EIO",
+        libc::EACCES => "EACCES",
+        libc::EBUSY => "EBUSY",
+        libc::EEXIST => "EEXIST",
+        libc::EXDEV => "EXDEV",
+        libc::ENOTDIR => "ENOTDIR",
+        libc::EISDIR => "EISDIR",
+        libc::EINVAL => "EINVAL",
+        libc::ETXTBSY => "ETXTBSY",
+        libc::EFBIG => "EFBIG",
+        libc::ENOSPC => "ENOSPC",
+        libc::EROFS => "EROFS",
+        libc::EMLINK => "EMLINK",
+        libc::ENAMETOOLONG => "ENAMETOOLONG",
+        libc::ENOTEMPTY => "ENOTEMPTY",
+        libc::ELOOP => "ELOOP",
+        libc::EDQUOT => "EDQUOT",
+        libc::ENOTSUP => "ENOTSUP",
+        _ => return None,
+    })
+}
+
+/// [`errno_name`] for an I/O error, falling back to its kind when it carries no OS error.
+pub fn io_errno(e: &io::Error) -> Option<&'static str> {
+    if let Some(n) = e.raw_os_error().and_then(errno_name) {
+        return Some(n);
+    }
+    Some(match e.kind() {
+        io::ErrorKind::NotFound => "ENOENT",
+        io::ErrorKind::PermissionDenied => "EACCES",
+        io::ErrorKind::AlreadyExists => "EEXIST",
+        io::ErrorKind::InvalidInput => "EINVAL",
+        _ => return None,
+    })
+}
+
+impl FsError {
+    /// The portable errno name of this error, if it has one.
+    pub fn errno(&self) -> Option<&'static str> {
+        match self {
+            FsError::Policy(crate::policy::PolicyError::Io(_, e)) | FsError::Io(e) => io_errno(e),
+            FsError::Policy(crate::policy::PolicyError::Outside(_)) => Some("EACCES"),
+            FsError::Policy(crate::policy::PolicyError::NotAbsolute(_)) => Some("EINVAL"),
+            FsError::Precondition { .. } => None,
+            FsError::BadRequest(_) => Some("EINVAL"),
+        }
+    }
+}
+
+/// An OS error by number (so [`FsError::errno`] is exact); the context goes to the log, since
+/// `io::Error` cannot carry both an OS code and a custom message.
+fn io_err(raw: i32, context: String) -> FsError {
+    tracing::debug!("{context}");
+    FsError::Io(io::Error::from_raw_os_error(raw))
+}
+
 pub fn stat(policy: &PathPolicy, path: &Path) -> Result<Stat, FsError> {
     let p = policy.resolve_existing(path)?;
     let m = fs::metadata(&p)?;
-    Ok(Stat {
-        kind: kind_of(m.file_type()),
-        size: m.len(),
-        mtime_ms: mtime_ms(&m),
-        mode: m.permissions().mode(),
-        readonly: m.permissions().readonly(),
-        path: p,
-    })
+    Ok(stat_of(p, &m))
+}
+
+/// Like [`stat`] but does not follow a final symbolic link.
+pub fn lstat(policy: &PathPolicy, path: &Path) -> Result<Stat, FsError> {
+    let p = policy.resolve_nofollow(path)?;
+    let m = fs::symlink_metadata(&p)?;
+    Ok(stat_of(p, &m))
+}
+
+pub fn readlink(policy: &PathPolicy, path: &Path) -> Result<ReadlinkResponse, FsError> {
+    let p = policy.resolve_nofollow(path)?;
+    let target = fs::read_link(&p)?;
+    Ok(ReadlinkResponse { path: p, target })
+}
+
+pub fn symlink(policy: &PathPolicy, req: &SymlinkRequest) -> Result<Stat, FsError> {
+    let p = policy.resolve_nofollow(&req.path)?;
+    std::os::unix::fs::symlink(&req.target, &p)?;
+    let m = fs::symlink_metadata(&p)?;
+    Ok(stat_of(p, &m))
+}
+
+pub fn mkdir(policy: &PathPolicy, req: &MkdirRequest) -> Result<Stat, FsError> {
+    use std::os::unix::fs::DirBuilderExt;
+    let p = if req.parents { policy.resolve_for_write(&req.path)? } else { policy.resolve_nofollow(&req.path)? };
+    let mut b = fs::DirBuilder::new();
+    b.recursive(req.parents);
+    if let Some(mode) = req.mode {
+        b.mode(mode & 0o7777);
+    }
+    b.create(&p)?;
+    if req.parents {
+        // Re-check after creating: a symlink planted along the way must not take us outside.
+        policy.resolve_existing(&p)?;
+    }
+    let m = fs::symlink_metadata(&p)?;
+    Ok(stat_of(p, &m))
+}
+
+pub fn remove(policy: &PathPolicy, req: &RemoveRequest) -> Result<(), FsError> {
+    let p = policy.resolve_nofollow(&req.path)?;
+    if policy.is_root(&p) {
+        return Err(io_err(libc::EBUSY, format!("{} is an allowed root", p.display())));
+    }
+    let m = fs::symlink_metadata(&p)?;
+    if m.is_dir() {
+        if req.recursive {
+            // `remove_dir_all` does not follow symlinks inside the tree.
+            fs::remove_dir_all(&p)?;
+        } else {
+            fs::remove_dir(&p)?;
+        }
+    } else {
+        fs::remove_file(&p)?;
+    }
+    Ok(())
+}
+
+pub fn rename(policy: &PathPolicy, req: &RenameRequest) -> Result<(), FsError> {
+    let from = policy.resolve_nofollow(&req.from)?;
+    let to = policy.resolve_nofollow(&req.to)?;
+    if policy.is_root(&from) || policy.is_root(&to) {
+        return Err(io_err(libc::EBUSY, "an allowed root cannot be renamed or replaced".into()));
+    }
+    fs::symlink_metadata(&from)?;
+    if !req.overwrite && fs::symlink_metadata(&to).is_ok() {
+        return Err(io_err(libc::EEXIST, format!("{} exists", to.display())));
+    }
+    fs::rename(&from, &to)?;
+    Ok(())
+}
+
+fn timespec(t: Option<SetTime>) -> libc::timespec {
+    match t {
+        None => libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT as _ },
+        Some(SetTime::Now) => libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW as _ },
+        Some(SetTime::UnixMs(ms)) => libc::timespec {
+            tv_sec: (ms / 1000) as libc::time_t,
+            tv_nsec: ((ms % 1000) * 1_000_000) as _,
+        },
+    }
+}
+
+/// Apply size, mode and times (see [`SetAttrRequest`]). Callers serialise this with writes.
+pub fn setattr(policy: &PathPolicy, req: &SetAttrRequest) -> Result<Stat, FsError> {
+    let p = policy.resolve_existing(&req.path)?;
+    if let Some(size) = req.size {
+        let m = fs::metadata(&p)?;
+        if m.is_dir() {
+            return Err(io_err(libc::EISDIR, format!("{} is a directory", p.display())));
+        }
+        fs::OpenOptions::new().write(true).open(&p)?.set_len(size)?;
+    }
+    if let Some(mode) = req.mode {
+        fs::set_permissions(&p, fs::Permissions::from_mode(mode & 0o7777))?;
+    }
+    if req.atime.is_some() || req.mtime.is_some() {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| FsError::BadRequest("path contains NUL".into()))?;
+        let times = [timespec(req.atime), timespec(req.mtime)];
+        // SAFETY: `c` is a valid NUL-terminated path and `times` has the two entries
+        // utimensat(2) reads.
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    let m = fs::metadata(&p)?;
+    Ok(stat_of(p, &m))
+}
+
+/// Positional in-place write into an existing regular file (see [`PwriteRequest`]).
+pub fn pwrite(policy: &PathPolicy, req: &PwriteRequest) -> Result<Stat, FsError> {
+    use std::os::unix::fs::FileExt;
+    let p = policy.resolve_existing(&req.path)?;
+    let f = fs::OpenOptions::new().write(true).open(&p)?;
+    let m = f.metadata()?;
+    if !m.is_file() {
+        return Err(io_err(libc::EINVAL, format!("{} is not a regular file", p.display())));
+    }
+    f.write_all_at(&req.data, req.offset)?;
+    let m = f.metadata()?;
+    Ok(stat_of(p, &m))
 }
 
 pub fn read(policy: &PathPolicy, req: &ReadRequest) -> Result<ReadResponse, FsError> {
@@ -181,6 +380,8 @@ pub fn list(policy: &PathPolicy, path: &Path) -> Result<ListResponse, FsError> {
             kind: kind_of(m.file_type()),
             size: m.len(),
             mtime_ms: mtime_ms(&m),
+            mode: Some(m.permissions().mode()),
+            ino: Some(m.ino()),
         });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));

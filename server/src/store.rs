@@ -33,7 +33,42 @@ pub struct SessionRecord {
     pub account_id: Option<String>,
     /// Why that account was chosen (user choice or the router's reason, FR-U3).
     pub account_reason: Option<String>,
+    /// Shown first in its project (FR-L9). Changed with [`Store::update_session_meta`].
+    pub pinned: bool,
+    /// Out of the way in its project's list, still searchable (FR-L9).
+    pub archived: bool,
 }
+
+/// A change to a session's user-editable metadata (FR-L9); `None` leaves a field alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct SessionPatch {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
+    #[serde(default)]
+    pub archived: Option<bool>,
+}
+
+/// One full-text search match (FR-S4): a message in a session.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SearchHit {
+    pub session_id: String,
+    /// The matching event's sequence number, so a client can scroll to it.
+    pub seq: i64,
+    /// `user_message` or `assistant_message`.
+    pub kind: String,
+    /// Text around the match, matched terms wrapped in [`SNIPPET_OPEN`] / [`SNIPPET_CLOSE`].
+    pub snippet: String,
+    pub title: String,
+    pub project: String,
+    pub archived: bool,
+}
+
+/// Marks the start of a matched term in [`SearchHit::snippet`].
+pub const SNIPPET_OPEN: &str = "\u{00ab}";
+/// Marks the end of a matched term in [`SearchHit::snippet`].
+pub const SNIPPET_CLOSE: &str = "\u{00bb}";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredEvent {
@@ -82,6 +117,8 @@ const MIGRATIONS: &[&str] = &[
     crate::browser::egress::MIGRATION,
     crate::computers::schema::PEER_MIGRATION,
     crate::devices::schema::MIGRATION,
+    crate::projects::schema::MIGRATION,
+    crate::projects::schema::META_FTS_MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.
@@ -101,7 +138,7 @@ fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-const SESSION_COLUMNS: &str = "id, project, agent, cwd, model, native_id, status, title, created_at, updated_at, last_seq, account_id, account_reason";
+const SESSION_COLUMNS: &str = "id, project, agent, cwd, model, native_id, status, title, created_at, updated_at, last_seq, account_id, account_reason, pinned, archived";
 
 /// Current Unix time in milliseconds.
 pub fn now_ms() -> i64 {
@@ -176,11 +213,21 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
         let (account_id, reason) = account.unzip();
-        self.conn.lock().unwrap().execute(
-            "INSERT INTO sessions (id, project, agent, cwd, model, status, title, created_at, updated_at, account_id, account_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10)",
-            params![id, project, agent.as_str(), cwd, model, status_str(SessionStatus::Idle), title, now, account_id, reason],
-        )?;
+        {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            // The project exists from its first session on (FR-L1, FR-L4).
+            tx.execute(
+                "INSERT OR IGNORE INTO projects (name, created_at) VALUES (?1, ?2)",
+                params![project, now],
+            )?;
+            tx.execute(
+                "INSERT INTO sessions (id, project, agent, cwd, model, status, title, created_at, updated_at, account_id, account_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10)",
+                params![id, project, agent.as_str(), cwd, model, status_str(SessionStatus::Idle), title, now, account_id, reason],
+            )?;
+            tx.commit()?;
+        }
         Ok(self.session(&id)?.expect("just inserted"))
     }
 
@@ -256,6 +303,56 @@ impl Store {
         Ok(out)
     }
 
+    /// Change a session's title, pin or archive mark (FR-L9). Does not touch `updated_at`, which
+    /// is activity. Returns the updated record, or `None` when the session does not exist.
+    /// An empty title is refused.
+    pub fn update_session_meta(&self, id: &str, patch: &SessionPatch) -> anyhow::Result<Option<SessionRecord>> {
+        let title = patch.title.as_deref().map(str::trim);
+        anyhow::ensure!(title != Some(""), "title must not be empty");
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE sessions SET
+                 title = COALESCE(?2, title),
+                 pinned = COALESCE(?3, pinned),
+                 archived = COALESCE(?4, archived)
+             WHERE id = ?1",
+            params![id, title, patch.pinned, patch.archived],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.session(id)
+    }
+
+    /// Full-text search over every session's user and assistant messages (FR-S4), best match
+    /// first, at most `limit` hits. Uses the FTS5 index `messages_fts` (never a scan of
+    /// `events`). Each whitespace-separated word must match as a word prefix, so `오류` finds
+    /// `오류가` and `serv` finds `server`; FTS5 syntax in the query is taken literally.
+    pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+        let Some(fts) = fts_query(query) else { return Ok(Vec::new()) };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT messages_fts.session_id, messages_fts.seq, messages_fts.kind,
+                    snippet(messages_fts, 0, ?2, ?3, '\u{2026}', 16),
+                    sessions.title, sessions.project, sessions.archived
+             FROM messages_fts JOIN sessions ON sessions.id = messages_fts.session_id
+             WHERE messages_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![fts, SNIPPET_OPEN, SNIPPET_CLOSE, limit as i64], |r| {
+            Ok(SearchHit {
+                session_id: r.get(0)?,
+                seq: r.get(1)?,
+                kind: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                snippet: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                title: r.get(4)?,
+                project: r.get(5)?,
+                archived: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// After a restart, sessions that were mid-turn can no longer be: mark them idle so the next
     /// message resumes them natively.
     pub fn reset_live_statuses(&self) -> anyhow::Result<usize> {
@@ -283,7 +380,21 @@ fn row_to_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         last_seq: r.get(10)?,
         account_id: r.get(11)?,
         account_reason: r.get(12)?,
+        pinned: r.get(13)?,
+        archived: r.get(14)?,
     })
+}
+
+/// An FTS5 query for `input`: every word quoted (so `"`, `*`, `AND`, `-`… are literal) and
+/// made a prefix query, all of them required. Words without a letter or digit would tokenize
+/// to nothing and are dropped. `None` when no words are left.
+fn fts_query(input: &str) -> Option<String> {
+    let terms: Vec<String> = input
+        .split_whitespace()
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" "))
 }
 
 #[cfg(test)]
@@ -347,6 +458,84 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
         assert_eq!(store.sessions(None).unwrap().len(), 2);
+    }
+
+    /// A database at schema 7 (before projects, session metadata and search) gains them in
+    /// place: projects from its sessions, unpinned/unarchived sessions, and an index of the
+    /// messages it already holds.
+    #[test]
+    fn version_7_database_gains_projects_meta_and_search_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().enumerate().take(7) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO sessions (id, project, agent, cwd, status, title, created_at, updated_at, last_seq)
+                 VALUES ('a', 'alpha', 'codex', '/w', 'finished', 'A', 5, 9, 3),
+                        ('b', 'alpha', 'codex', '/w', 'finished', 'B', 3, 4, 0),
+                        ('c', 'beta', 'claude-code', '/w', 'idle', 'C', 7, 7, 0);
+                 INSERT INTO events (session_id, seq, at, event) VALUES
+                    ('a', 1, 5, '{\"kind\":\"user_message\",\"text\":\"배포 서버에서 오류가 났어요\"}'),
+                    ('a', 2, 6, '{\"kind\":\"assistant_delta\",\"text\":\"오류\"}'),
+                    ('a', 3, 7, '{\"kind\":\"assistant_message\",\"text\":\"The deploy server log shows an error\"}');",
+            )
+            .unwrap();
+            let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(v, 7);
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+
+        let projects = store.projects().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!((projects[0].name.as_str(), projects[0].created_at), ("alpha", 3), "earliest session");
+        assert_eq!((projects[1].name.as_str(), projects[1].created_at), ("beta", 7));
+
+        let a = store.session("a").unwrap().unwrap();
+        assert!(!a.pinned && !a.archived);
+
+        let hits = store.search("오류", 10).unwrap();
+        assert_eq!(hits.len(), 1, "deltas are not indexed: {hits:?}");
+        assert_eq!((hits[0].session_id.as_str(), hits[0].seq), ("a", 1));
+        assert!(hits[0].snippet.contains("\u{00ab}오류가\u{00bb}"), "{}", hits[0].snippet);
+        assert_eq!(store.search("deploy error", 10).unwrap()[0].seq, 3);
+
+        // New events are indexed by the trigger.
+        store.append("c", &AgentEvent::UserMessage { text: "세션 검색 테스트".into() }).unwrap();
+        let hits = store.search("검색", 10).unwrap();
+        assert_eq!((hits[0].session_id.as_str(), hits[0].seq, hits[0].project.as_str()), ("c", 1, "beta"));
+    }
+
+    #[test]
+    fn session_meta_patch_and_search_query_escaping() {
+        let store = Store::open_in_memory().unwrap();
+        let s = store.create_session("p", AgentKind::Scripted, "/tmp", None, "t").unwrap();
+        store.append(&s.id, &AgentEvent::UserMessage { text: "say \"hello\" AND -world".into() }).unwrap();
+        let before = store.session(&s.id).unwrap().unwrap();
+        let after = store
+            .update_session_meta(&s.id, &SessionPatch { title: Some("  Renamed ".into()), pinned: Some(true), archived: None })
+            .unwrap()
+            .unwrap();
+        assert_eq!((after.title.as_str(), after.pinned, after.archived), ("Renamed", true, false));
+        assert_eq!(after.updated_at, before.updated_at, "metadata is not activity");
+        let after = store.update_session_meta(&s.id, &SessionPatch { archived: Some(true), ..Default::default() }).unwrap().unwrap();
+        assert!(after.pinned && after.archived && after.title == "Renamed");
+        assert!(store.update_session_meta(&s.id, &SessionPatch { title: Some(" ".into()), ..Default::default() }).is_err());
+        assert!(store.update_session_meta("nope", &SessionPatch::default()).unwrap().is_none());
+
+        // FTS5 operators in the query are literal text, never syntax errors.
+        assert_eq!(store.search("\"hello\"", 5).unwrap().len(), 1);
+        assert_eq!(store.search("AND -world", 5).unwrap().len(), 1);
+        assert!(store.search("   ", 5).unwrap().is_empty());
+        assert!(store.search("( - *", 5).unwrap().is_empty());
+        assert!(store.search("absent", 5).unwrap().is_empty());
+        assert_eq!(fts_query("a \"b"), Some("\"a\"* \"\"\"b\"*".to_string()));
     }
 
     #[test]

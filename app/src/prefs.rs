@@ -1,11 +1,12 @@
-//! Per-user preferences kept on this device: the last-used new-session combination per project
-//! (FR-L8), the remembered "Open IDE" target (FR-L7), and pins, archive marks and renames
-//! (FR-L9).
+//! Per-device UI choices: the last-used new-session combination per project (FR-L8), the
+//! project selected last, and the remembered "Open IDE" target (FR-L7).
 //!
-//! TODO(server FR-S4): pins, archive and renames belong on the main server so every client
-//! sees them; it has no API for them yet, so they are local until it does.
+//! Pins, archive marks and titles (FR-L9) and computer assignments (FR-L4) live on the main
+//! server so every client sees them (`PATCH /sessions/{id}`, `/projects/…/computers/…`). Older
+//! prefs files carried `pinned`, `archived` and `titles`; those keys are ignored when read and
+//! dropped on the next save.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -40,13 +41,6 @@ pub struct Prefs {
     /// `ember`, `vscode` or `gateway`.
     #[serde(default)]
     pub ide_target: Option<String>,
-    #[serde(default)]
-    pub pinned: BTreeSet<String>,
-    #[serde(default)]
-    pub archived: BTreeSet<String>,
-    /// Local titles, by session id.
-    #[serde(default)]
-    pub titles: BTreeMap<String, String>,
 }
 
 fn format_default() -> u32 {
@@ -60,35 +54,6 @@ impl Default for Prefs {
             last_used: BTreeMap::new(),
             last_project: None,
             ide_target: None,
-            pinned: BTreeSet::new(),
-            archived: BTreeSet::new(),
-            titles: BTreeMap::new(),
-        }
-    }
-}
-
-impl Prefs {
-    pub fn toggle_pin(&mut self, id: &str) {
-        if !self.pinned.remove(id) {
-            self.pinned.insert(id.to_string());
-        }
-    }
-
-    pub fn toggle_archive(&mut self, id: &str) {
-        if !self.archived.remove(id) {
-            self.archived.insert(id.to_string());
-            // An archived session is out of the way; it is not also pinned to the top.
-            self.pinned.remove(id);
-        }
-    }
-
-    /// An empty title clears the local rename.
-    pub fn rename(&mut self, id: &str, title: &str) {
-        let t = title.trim();
-        if t.is_empty() {
-            self.titles.remove(id);
-        } else {
-            self.titles.insert(id.to_string(), t.to_string());
         }
     }
 }
@@ -145,17 +110,17 @@ mod tests {
     }
 
     #[test]
-    fn fr_l9_pin_archive_rename() {
-        let mut p = Prefs::default();
-        p.toggle_pin("s");
-        assert!(p.pinned.contains("s"));
-        p.toggle_archive("s");
-        assert!(p.archived.contains("s") && !p.pinned.contains("s"));
-        p.toggle_archive("s");
-        assert!(!p.archived.contains("s"));
-        p.rename("s", "  New name ");
-        assert_eq!(p.titles["s"], "New name");
-        p.rename("s", " ");
-        assert!(!p.titles.contains_key("s"));
+    fn older_prefs_with_local_pins_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(
+            &path,
+            br#"{"format":1,"ide_target":"ember","pinned":["s"],"archived":["t"],"titles":{"s":"x"}}"#,
+        )
+        .unwrap();
+        let p = load(&path);
+        assert_eq!(p.ide_target.as_deref(), Some("ember"));
+        save(&path, &p).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("pinned"), "dropped on save");
     }
 }

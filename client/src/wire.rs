@@ -77,6 +77,81 @@ pub struct SessionRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_seq: i64,
+    /// The account the session runs under (FR-U2); `None` = the server's own agent login.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Why that account was chosen (FR-U3).
+    #[serde(default)]
+    pub account_reason: Option<String>,
+    /// FR-L9. Absent from servers older than the metadata API: `false`.
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl SessionRecord {
+    /// Take the user-editable metadata (title, pin, archive) from `other`, keeping this
+    /// record's activity fields. Returns whether anything changed.
+    pub fn take_meta(&mut self, other: &SessionRecord) -> bool {
+        let changed = self.title != other.title || self.pinned != other.pinned || self.archived != other.archived;
+        self.title.clone_from(&other.title);
+        self.pinned = other.pinned;
+        self.archived = other.archived;
+        changed
+    }
+}
+
+/// A project and the computers assigned to it (server `projects::Project`, FR-L4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    #[serde(default)]
+    pub created_at: i64,
+    /// Assigned computer ids (`local` = the main server itself), sorted.
+    #[serde(default)]
+    pub computers: Vec<String>,
+}
+
+/// `PATCH /sessions/{id}` body (FR-L9); `None` fields are left alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SessionPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+}
+
+/// Start of a matched term in [`SearchHit::snippet`].
+pub const SNIPPET_OPEN: char = '\u{ab}';
+/// End of a matched term in [`SearchHit::snippet`].
+pub const SNIPPET_CLOSE: char = '\u{bb}';
+
+/// `GET /search` hit (FR-S4): one message, by session and sequence number.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SearchHit {
+    pub session_id: String,
+    pub seq: i64,
+    /// `user_message` or `assistant_message`.
+    #[serde(default)]
+    pub kind: String,
+    /// Text around the match; matched terms between [`SNIPPET_OPEN`] and [`SNIPPET_CLOSE`].
+    pub snippet: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl SearchHit {
+    /// The snippet without match markers.
+    pub fn plain_snippet(&self) -> String {
+        self.snippet.chars().filter(|c| *c != SNIPPET_OPEN && *c != SNIPPET_CLOSE).collect()
+    }
 }
 
 /// One stored event with its per-session sequence number (server `StoredEvent`).
@@ -93,6 +168,9 @@ pub struct StoredEvent {
 pub struct SessionDetail {
     pub session: SessionRecord,
     pub live: bool,
+    /// Whether the fork action is offered (FR-S5); disabled, not failing, when `false`.
+    #[serde(default)]
+    pub can_fork: bool,
 }
 
 /// `GET /agents` entry.
@@ -123,4 +201,9 @@ pub enum Push {
     Event { status: SessionStatus, event: StoredEvent },
     /// The server dropped `missed` messages for this client; it must resync from the store.
     Lagged { missed: u64 },
+    /// A session's title, pin or archive mark changed (FR-L9). Only those fields are taken
+    /// from `session`; events own the activity fields.
+    SessionUpdated { session: SessionRecord },
+    /// A project was created or its computer assignment changed (FR-L4).
+    ProjectUpdated { project: Project },
 }

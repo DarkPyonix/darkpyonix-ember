@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::transcript::{Applied, Transcript};
-use crate::wire::{AgentEvent, Push, SessionRecord, SessionStatus, StoredEvent};
+use crate::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent};
 
 /// Session status as the launcher shows it (FR-L2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,8 +37,9 @@ pub enum Reachability {
     Offline,
 }
 
-/// A computer listed at the bottom of the launcher (FR-L3). Placeholder: the main server has no
-/// computer API yet, so this is only ever filled by [`Input::ComputersLoaded`] (and the cache).
+/// A computer listed at the bottom of the launcher (FR-L3), filled by [`Input::ComputersLoaded`]
+/// (and the cache). Its `projects` are derived from the server's project assignments (FR-L4)
+/// once those have been loaded; before that they are kept as given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Computer {
     pub id: String,
@@ -79,12 +80,15 @@ pub enum Input {
     Closed(String),
     Connection(ConnectionState),
     ComputersLoaded(Vec<Computer>),
+    /// `GET /projects` answered (FR-L4).
+    ProjectsLoaded(Vec<Project>),
 }
 
 /// What an input changed. A UI redraws the named parts; the sync layer acts on `resync*`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Changes {
-    /// The project list or a project's session list/order changed.
+    /// The project list, a project's session list/order, or a session's pin/archive mark
+    /// changed.
     pub projects: bool,
     /// Sessions whose record or launcher status changed.
     pub sessions: BTreeSet<String>,
@@ -144,6 +148,9 @@ pub struct CacheSnapshot {
     /// Highest sequence the user has seen per session.
     pub last_seen: BTreeMap<String, i64>,
     pub computers: Vec<Computer>,
+    /// Projects with their computer assignments (FR-L4); empty from an older cache.
+    #[serde(default)]
+    pub projects: Vec<Project>,
 }
 
 pub const CACHE_FORMAT: u32 = 1;
@@ -156,6 +163,11 @@ pub struct State {
     last_seen: HashMap<String, i64>,
     baselined: bool,
     computers: Vec<Computer>,
+    /// Projects as the server lists them (FR-L1, FR-L4), by name.
+    project_records: BTreeMap<String, Project>,
+    /// Whether `project_records` came from the server (or a cache of it); until then computer
+    /// assignments are not derived from it.
+    projects_known: bool,
     connection: ConnectionState,
     revision: u64,
 }
@@ -169,6 +181,8 @@ impl Default for State {
             last_seen: HashMap::new(),
             baselined: false,
             computers: Vec::new(),
+            project_records: BTreeMap::new(),
+            projects_known: false,
             connection: ConnectionState::Offline,
             revision: 0,
         }
@@ -187,6 +201,8 @@ impl State {
             last_seen: c.last_seen.into_iter().collect(),
             baselined: c.baselined,
             computers: c.computers,
+            projects_known: !c.projects.is_empty(),
+            project_records: c.projects.into_iter().map(|p| (p.name.clone(), p)).collect(),
             ..State::default()
         }
     }
@@ -200,6 +216,7 @@ impl State {
             sessions,
             last_seen: self.last_seen.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             computers: self.computers.clone(),
+            projects: self.project_records.values().cloned().collect(),
         }
     }
 
@@ -214,9 +231,13 @@ impl State {
         &self.connection
     }
 
-    /// Projects by name, each with its sessions most recently active first.
+    /// Projects by name, each with its sessions most recently active first. Includes projects
+    /// the server lists that have no sessions yet.
     pub fn projects(&self) -> Vec<ProjectView> {
         let mut by_project: BTreeMap<&str, Vec<&SessionRecord>> = BTreeMap::new();
+        for name in self.project_records.keys() {
+            by_project.entry(name.as_str()).or_default();
+        }
         for s in self.sessions.values() {
             by_project.entry(&s.project).or_default().push(s);
         }
@@ -240,6 +261,16 @@ impl State {
 
     pub fn computers(&self) -> &[Computer] {
         &self.computers
+    }
+
+    /// A project as the server lists it, with its assigned computers (FR-L4).
+    pub fn project(&self, name: &str) -> Option<&Project> {
+        self.project_records.get(name)
+    }
+
+    /// Computer ids assigned to `project` (empty when none or unknown).
+    pub fn project_computers(&self, project: &str) -> &[String] {
+        self.project_records.get(project).map(|p| p.computers.as_slice()).unwrap_or(&[])
     }
 
     pub fn open_sessions(&self) -> impl Iterator<Item = &String> {
@@ -293,6 +324,38 @@ impl State {
             }
             Input::Push(Push::Event { status, event }) => self.on_event(Some(status), event, &mut ch),
             Input::Push(Push::Lagged { .. }) => ch.resync_all = true,
+            Input::Push(Push::SessionUpdated { session }) => match self.sessions.get_mut(&session.id) {
+                Some(cur) => {
+                    if cur.take_meta(&session) {
+                        // Pin and archive change list order and membership.
+                        ch.projects = true;
+                        ch.sessions.insert(session.id.clone());
+                        ch.persist = true;
+                    }
+                }
+                // Missed its creation: reload the list.
+                None => ch.resync_all = true,
+            },
+            Input::Push(Push::ProjectUpdated { project }) => {
+                self.projects_known = true;
+                if self.project_records.get(&project.name) != Some(&project) {
+                    self.project_records.insert(project.name.clone(), project);
+                    ch.projects = true;
+                    ch.persist = true;
+                    ch.computers |= self.derive_computer_projects();
+                }
+            }
+            Input::ProjectsLoaded(list) => {
+                let fresh: BTreeMap<String, Project> = list.into_iter().map(|p| (p.name.clone(), p)).collect();
+                self.projects_known = true;
+                if fresh != self.project_records {
+                    self.project_records = fresh;
+                    ch.projects = true;
+                    ch.persist = true;
+                }
+                ch.computers |= self.derive_computer_projects();
+                ch.persist |= ch.computers;
+            }
             Input::EventsFetched { session_id, events } => {
                 for ev in events {
                     if ev.session_id == session_id {
@@ -323,6 +386,7 @@ impl State {
             Input::ComputersLoaded(list) => {
                 if list != self.computers {
                     self.computers = list;
+                    self.derive_computer_projects();
                     ch.computers = true;
                     ch.persist = true;
                 }
@@ -408,6 +472,28 @@ impl State {
         }
     }
 
+    /// Set each computer's `projects` from the project assignments, once those are known.
+    /// Returns whether any computer changed.
+    fn derive_computer_projects(&mut self) -> bool {
+        if !self.projects_known {
+            return false;
+        }
+        let mut changed = false;
+        for c in &mut self.computers {
+            let projects: Vec<String> = self
+                .project_records
+                .values()
+                .filter(|p| p.computers.iter().any(|id| *id == c.id))
+                .map(|p| p.name.clone())
+                .collect();
+            if c.projects != projects {
+                c.projects = projects;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn mark_seen(&mut self, id: &str, ch: &mut Changes) {
         let Some(rec) = self.sessions.get(id) else { return };
         let seen = self.last_seen.entry(id.to_string()).or_insert(0);
@@ -438,6 +524,10 @@ mod tests {
             created_at: 0,
             updated_at: last_seq,
             last_seq,
+            account_id: None,
+            account_reason: None,
+            pinned: false,
+            archived: false,
         }
     }
 
@@ -592,5 +682,78 @@ mod tests {
         assert!(s.apply(Input::ComputersLoaded(vec![pc.clone()])).computers);
         assert_eq!(s.revision(), rev + 1);
         assert_eq!(State::from_cache(s.to_cache()).computers(), &[pc]);
+    }
+
+    #[test]
+    fn session_updated_push_changes_metadata_only() {
+        let mut s = State::new();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "p", SessionStatus::Idle, 0)]));
+        s.apply(push("a", 3, SessionStatus::Running, AgentEvent::UserMessage { text: "hi".into() }));
+
+        // The pushed record was read before the last event: its activity fields are stale.
+        let mut pushed = rec("a", "p", SessionStatus::Idle, 1);
+        pushed.title = "Renamed".into();
+        pushed.pinned = true;
+        let ch = s.apply(Input::Push(Push::SessionUpdated { session: pushed.clone() }));
+        assert!(ch.sessions.contains("a") && ch.projects && ch.persist);
+        let v = s.session("a").unwrap();
+        assert_eq!((v.record.title.as_str(), v.record.pinned, v.record.archived), ("Renamed", true, false));
+        assert_eq!((v.record.last_seq, v.status), (3, LauncherStatus::Running), "activity is kept");
+
+        // Same metadata again: nothing to redraw.
+        assert!(s.apply(Input::Push(Push::SessionUpdated { session: pushed.clone() })).is_empty());
+
+        pushed.archived = true;
+        s.apply(Input::Push(Push::SessionUpdated { session: pushed }));
+        assert!(s.session("a").unwrap().record.archived);
+        // Survives the cache.
+        assert!(State::from_cache(s.to_cache()).session("a").unwrap().record.archived);
+
+        // An update for a session we never saw: reload the list.
+        assert!(s.apply(Input::Push(Push::SessionUpdated { session: rec("ghost", "p", SessionStatus::Idle, 0) })).resync_all);
+    }
+
+    #[test]
+    fn project_updates_drive_computer_assignments() {
+        let mut s = State::new();
+        let pc = |id: &str, projects: &[&str]| Computer {
+            id: id.into(),
+            name: id.into(),
+            reachability: Reachability::Unknown,
+            projects: projects.iter().map(|p| p.to_string()).collect(),
+        };
+        // Before projects are known, a computer's projects are kept as given.
+        s.apply(Input::ComputersLoaded(vec![pc("local", &["cached"]), pc("studio", &[])]));
+        assert_eq!(s.computers()[0].projects, vec!["cached".to_string()]);
+
+        let proj = |name: &str, computers: &[&str]| Project {
+            name: name.into(),
+            created_at: 0,
+            computers: computers.iter().map(|c| c.to_string()).collect(),
+        };
+        let ch = s.apply(Input::ProjectsLoaded(vec![proj("alpha", &["studio"]), proj("empty", &[])]));
+        assert!(ch.projects && ch.computers);
+        assert!(s.computers()[0].projects.is_empty());
+        assert_eq!(s.computers()[1].projects, vec!["alpha".to_string()]);
+        // A project with no sessions is still listed.
+        assert_eq!(s.projects().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["alpha", "empty"]);
+
+        // Pushed assignment (from another client) updates in place.
+        let ch = s.apply(Input::Push(Push::ProjectUpdated { project: proj("empty", &["local", "studio"]) }));
+        assert!(ch.projects && ch.computers && ch.persist);
+        assert_eq!(s.project_computers("empty"), ["local".to_string(), "studio".to_string()]);
+        assert_eq!(s.computers()[0].projects, vec!["empty".to_string()]);
+        assert_eq!(s.computers()[1].projects, vec!["alpha".to_string(), "empty".to_string()]);
+        // Repeating it changes nothing.
+        assert!(s.apply(Input::Push(Push::ProjectUpdated { project: proj("empty", &["local", "studio"]) })).is_empty());
+
+        // Fresh computer lists keep the derived assignment.
+        s.apply(Input::ComputersLoaded(vec![pc("local", &[]), pc("studio", &[]), pc("new", &[])]));
+        assert_eq!(s.computers()[1].projects, vec!["alpha".to_string(), "empty".to_string()]);
+
+        // Projects and assignments survive the cache.
+        let c = State::from_cache(s.to_cache());
+        assert_eq!(c.project_computers("alpha"), ["studio".to_string()]);
+        assert_eq!(c.computers()[0].projects, vec!["empty".to_string()]);
     }
 }

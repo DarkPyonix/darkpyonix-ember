@@ -1,13 +1,15 @@
-//! Pure view models: what the screens show, computed from the client's [`State`] and the
-//! app's own preferences. No UI types and no I/O here, so all of it is unit-tested.
+//! Pure view models: what the screens show, computed from the client's [`State`] (which the
+//! main server keeps current, including pins, archive marks, titles and computer assignments)
+//! and the few server answers the client does not hold (accounts, search hits). No UI types
+//! and no I/O here, so all of it is unit-tested.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use ember_client::state::{Computer, ConnectionState, Reachability, State};
 use ember_client::transcript::{Transcript, TranscriptItem};
+use ember_client::wire::SearchHit;
 use ember_client::LauncherStatus;
 
-use crate::prefs::Prefs;
 use crate::server::{Account, ComputerStatus};
 
 // ---- status ------------------------------------------------------------------------------------
@@ -204,36 +206,37 @@ pub fn account_labels(accounts: &[Account]) -> HashMap<String, String> {
 
 /// What a session row needs from the outside world besides [`State`].
 pub struct RowContext<'a> {
-    pub prefs: &'a Prefs,
-    /// session id → account id.
-    pub session_accounts: &'a HashMap<String, String>,
     /// account id → label.
     pub account_labels: &'a HashMap<String, String>,
+}
+
+/// The label of a session's account, or `None` for the server's own login.
+pub fn account_label(account_id: Option<&str>, labels: &HashMap<String, String>) -> Option<String> {
+    account_id.map(|aid| labels.get(aid).cloned().unwrap_or_else(|| aid.to_string()))
 }
 
 pub fn session_row(state: &State, id: &str, cx: &RowContext<'_>) -> Option<SessionRow> {
     let v = state.session(id)?;
     let r = v.record;
-    let account = cx.session_accounts.get(id).map(|aid| cx.account_labels.get(aid).cloned().unwrap_or_else(|| aid.clone()));
     Some(SessionRow {
         id: r.id.clone(),
         project: r.project.clone(),
-        title: cx.prefs.titles.get(id).cloned().unwrap_or_else(|| r.title.clone()),
+        title: r.title.clone(),
         agent: r.agent.clone(),
         model: r.model.clone(),
-        account,
+        account: account_label(r.account_id.as_deref(), cx.account_labels),
         cwd: r.cwd.clone(),
         updated_at: r.updated_at,
         preview: state.transcript(id).and_then(preview),
         status: v.status,
-        pinned: cx.prefs.pinned.contains(id),
-        archived: cx.prefs.archived.contains(id),
+        pinned: r.pinned,
+        archived: r.archived,
     })
 }
 
 /// All projects, most recently active first, with their status summary. Archived sessions do
 /// not count toward a project's badges.
-pub fn project_cards(state: &State, prefs: &Prefs) -> Vec<ProjectCard> {
+pub fn project_cards(state: &State) -> Vec<ProjectCard> {
     let mut cards: Vec<ProjectCard> = state
         .projects()
         .into_iter()
@@ -241,10 +244,7 @@ pub fn project_cards(state: &State, prefs: &Prefs) -> Vec<ProjectCard> {
             let mut summary = ProjectSummary::default();
             let mut updated_at = 0;
             for id in &p.sessions {
-                if prefs.archived.contains(id) {
-                    continue;
-                }
-                if let Some(v) = state.session(id) {
+                if let Some(v) = state.session(id).filter(|v| !v.record.archived) {
                     summary.add(v.status);
                     updated_at = updated_at.max(v.record.updated_at);
                 }
@@ -271,20 +271,42 @@ pub fn project_sessions(state: &State, project: &str, cx: &RowContext<'_>, show_
     rows
 }
 
-/// Search across every session (FR-L9): title, project, agent, account, folder and whatever
-/// transcript text the client holds. Case-insensitive; every word must match.
-pub fn search(state: &State, query: &str, cx: &RowContext<'_>) -> Vec<SessionRow> {
+/// One search result (FR-L9): a session, and the message that matched when the match was in
+/// the conversation (FR-S4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResult {
+    pub row: SessionRow,
+    /// The matching message's sequence number (`None`: the session's details matched).
+    pub seq: Option<i64>,
+    /// Text around the match, without markers.
+    pub snippet: Option<String>,
+}
+
+/// Search results: the main server's full-text hits across every session's messages (FR-S4),
+/// best first, then sessions whose details (title, project, agent, account, folder) contain
+/// every word of `query`, case-insensitively, most recent first. A hit whose session this
+/// client does not hold (yet) is skipped; the next session list load brings it.
+pub fn search_results(state: &State, query: &str, hits: &[SearchHit], cx: &RowContext<'_>) -> Vec<SearchResult> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if words.is_empty() {
         return Vec::new();
     }
-    let mut rows: Vec<SessionRow> = state
+    let mut out: Vec<SearchResult> = hits
+        .iter()
+        .filter_map(|h| {
+            let row = session_row(state, &h.session_id, cx)?;
+            Some(SearchResult { row, seq: Some(h.seq), snippet: Some(one_line(&h.plain_snippet(), 200)) })
+        })
+        .collect();
+    let with_hits: HashSet<String> = out.iter().map(|r| r.row.id.clone()).collect();
+    let mut by_details: Vec<SessionRow> = state
         .projects()
         .into_iter()
         .flat_map(|p| p.sessions)
-        .filter_map(|id| {
-            let row = session_row(state, &id, cx)?;
-            let mut hay = format!(
+        .filter(|id| !with_hits.contains(id))
+        .filter_map(|id| session_row(state, &id, cx))
+        .filter(|row| {
+            let hay = format!(
                 "{} {} {} {} {}",
                 row.title,
                 row.project,
@@ -293,19 +315,12 @@ pub fn search(state: &State, query: &str, cx: &RowContext<'_>) -> Vec<SessionRow
                 row.cwd
             )
             .to_lowercase();
-            if let Some(t) = state.transcript(&id) {
-                for item in &t.items {
-                    if let TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } = item {
-                        hay.push(' ');
-                        hay.push_str(&text.to_lowercase());
-                    }
-                }
-            }
-            words.iter().all(|w| hay.contains(w.as_str())).then_some(row)
+            words.iter().all(|w| hay.contains(w.as_str()))
         })
         .collect();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
-    rows
+    by_details.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    out.extend(by_details.into_iter().map(|row| SearchResult { row, seq: None, snippet: None }));
+    out
 }
 
 /// Sessions for the navigation's "Conversations" section: pinned and recently active,
@@ -327,8 +342,8 @@ pub fn recent_sessions(state: &State, cx: &RowContext<'_>, n: usize) -> Vec<Sess
 
 /// Turn `GET /computers` into the client's computer list (FR-L3). A probe that did not run
 /// (`reachable: None`) keeps the last-known reachability instead of forgetting it; an
-/// offline computer stays listed. `projects` is kept from the previous list: the main server
-/// has no project assignment API yet (FR-L4).
+/// offline computer stays listed. `projects` is kept from the previous list; the client state
+/// re-derives it from the server's project assignments (FR-L4) when it takes the list.
 pub fn merge_computers(previous: &[Computer], fresh: &[ComputerStatus]) -> Vec<Computer> {
     let prev: HashMap<&str, &Computer> = previous.iter().map(|c| (c.id.as_str(), c)).collect();
     fresh
@@ -463,6 +478,11 @@ pub fn dedup(items: impl IntoIterator<Item = String>) -> Vec<String> {
     items.into_iter().filter(|s| seen.insert(s.clone())).collect()
 }
 
+/// A computer's assignment to the selected project, for the computer list's toggle (FR-L4).
+pub fn is_assigned(state: &State, project: &str, computer_id: &str) -> bool {
+    state.project_computers(project).iter().any(|c| c == computer_id)
+}
+
 /// Group names for the computers list ("p1, p2").
 pub fn join_projects(projects: &[String]) -> String {
     let set: BTreeMap<&str, ()> = projects.iter().map(|p| (p.as_str(), ())).collect();
@@ -473,7 +493,7 @@ pub fn join_projects(projects: &[String]) -> String {
 mod tests {
     use super::*;
     use ember_client::state::Input;
-    use ember_client::wire::{AgentEvent, Push, SessionRecord, SessionStatus, StoredEvent, TurnOutcome};
+    use ember_client::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent, TurnOutcome};
     use serde_json::json;
 
     fn rec(id: &str, project: &str, status: SessionStatus, at: i64) -> SessionRecord {
@@ -489,7 +509,18 @@ mod tests {
             created_at: 0,
             updated_at: at,
             last_seq: at,
+            account_id: None,
+            account_reason: None,
+            pinned: false,
+            archived: false,
         }
+    }
+
+    /// Apply a server metadata push (what a PATCH by any client produces).
+    fn meta(s: &mut State, id: &str, f: impl FnOnce(&mut SessionRecord)) {
+        let mut r = s.session(id).unwrap().record.clone();
+        f(&mut r);
+        s.apply(Input::Push(Push::SessionUpdated { session: r }));
     }
 
     fn state(recs: Vec<SessionRecord>) -> State {
@@ -498,8 +529,8 @@ mod tests {
         s
     }
 
-    fn cx<'a>(prefs: &'a Prefs, sa: &'a HashMap<String, String>, al: &'a HashMap<String, String>) -> RowContext<'a> {
-        RowContext { prefs, session_accounts: sa, account_labels: al }
+    fn cx(al: &HashMap<String, String>) -> RowContext<'_> {
+        RowContext { account_labels: al }
     }
 
     #[test]
@@ -543,35 +574,75 @@ mod tests {
 
     #[test]
     fn fr_l1_project_cards_and_rows() {
-        let s = state(vec![
-            rec("a", "alpha", SessionStatus::Running, 10),
+        let mut a = rec("a", "alpha", SessionStatus::Running, 10);
+        a.account_id = Some("acc1".into());
+        let mut s = state(vec![
+            a,
             rec("b", "alpha", SessionStatus::Finished, 30),
             rec("c", "beta", SessionStatus::WaitingForApproval, 20),
         ]);
-        let mut prefs = Prefs::default();
-        prefs.pinned.insert("a".into());
-        let sa = HashMap::from([("a".to_string(), "acc1".to_string())]);
+        meta(&mut s, "a", |r| r.pinned = true);
         let al = HashMap::from([("acc1".to_string(), "work".to_string())]);
-        let cards = project_cards(&s, &prefs);
+        let cards = project_cards(&s);
         assert_eq!(cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["alpha", "beta"]);
         assert_eq!(cards[1].summary.top, Some(LauncherStatus::WaitingForApproval));
-        let rows = project_sessions(&s, "alpha", &cx(&prefs, &sa, &al), false);
+        let rows = project_sessions(&s, "alpha", &cx(&al), false);
         assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"], "pinned first");
-        assert_eq!(rows[0].account.as_deref(), Some("work"));
+        assert_eq!(rows[0].account.as_deref(), Some("work"), "account from the session record");
+        assert_eq!(rows[1].account, None);
 
-        prefs.archived.insert("b".into());
-        assert_eq!(project_sessions(&s, "alpha", &cx(&prefs, &sa, &al), false).len(), 1);
-        assert_eq!(project_sessions(&s, "alpha", &cx(&prefs, &sa, &al), true).len(), 2);
-        assert_eq!(project_cards(&s, &prefs)[0].summary.total, 1);
+        meta(&mut s, "b", |r| r.archived = true);
+        assert_eq!(project_sessions(&s, "alpha", &cx(&al), false).len(), 1);
+        assert_eq!(project_sessions(&s, "alpha", &cx(&al), true).len(), 2);
+        assert_eq!(project_cards(&s)[0].summary.total, 1);
 
-        prefs.titles.insert("c".into(), "Renamed".into());
-        let found = search(&s, "renamed BETA", &cx(&prefs, &sa, &al));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].title, "Renamed");
-        assert!(search(&s, "  ", &cx(&prefs, &sa, &al)).is_empty());
+        meta(&mut s, "c", |r| r.title = "Renamed".into());
         assert_eq!(latest_cwd(&s, "alpha").as_deref(), Some("/w/alpha"));
-        let recent = recent_sessions(&s, &cx(&prefs, &sa, &al), 5);
+        let recent = recent_sessions(&s, &cx(&al), 5);
         assert_eq!(recent[0].id, "a", "pinned first");
+        assert!(recent.iter().all(|r| r.id != "b"), "archived sessions are not recent");
+    }
+
+    #[test]
+    fn fr_l9_search_shows_server_hits_then_detail_matches() {
+        let mut s = state(vec![
+            rec("a", "alpha", SessionStatus::Finished, 10),
+            rec("b", "beta", SessionStatus::Finished, 30),
+            rec("c", "beta", SessionStatus::Finished, 20),
+        ]);
+        meta(&mut s, "c", |r| r.title = "Deploy notes".into());
+        let al = HashMap::new();
+        let hit = |id: &str, seq: i64, snippet: &str| SearchHit {
+            session_id: id.into(),
+            seq,
+            kind: "user_message".into(),
+            snippet: snippet.into(),
+            title: String::new(),
+            project: String::new(),
+            archived: false,
+        };
+        let hits = vec![
+            hit("a", 4, "the \u{ab}deploy\u{bb} failed"),
+            hit("ghost", 1, "a session this client has not loaded"),
+        ];
+        let found = search_results(&s, "DEPLOY", &hits, &cx(&al));
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].row.id.as_str(), found[0].seq), ("a", Some(4)));
+        assert_eq!(found[0].snippet.as_deref(), Some("the deploy failed"));
+        assert_eq!((found[1].row.id.as_str(), found[1].seq, found[1].row.title.as_str()), ("c", None, "Deploy notes"));
+        // A session with a message hit is not listed again for its details.
+        let found = search_results(&s, "alpha", &[hit("a", 1, "x")], &cx(&al));
+        assert_eq!(found.len(), 1);
+        assert!(search_results(&s, "  ", &hits, &cx(&al)).is_empty());
+    }
+
+    #[test]
+    fn fr_l4_assignment_comes_from_the_server_projects() {
+        let mut s = state(vec![rec("a", "alpha", SessionStatus::Idle, 1)]);
+        s.apply(Input::ProjectsLoaded(vec![Project { name: "alpha".into(), created_at: 0, computers: vec!["local".into()] }]));
+        assert!(is_assigned(&s, "alpha", "local"));
+        assert!(!is_assigned(&s, "alpha", "studio"));
+        assert!(!is_assigned(&s, "nope", "local"));
     }
 
     #[test]
@@ -582,12 +653,11 @@ mod tests {
             status: SessionStatus::Finished,
             event: StoredEvent { session_id: "a".into(), seq: 1, at: 1, event: AgentEvent::TurnEnded { outcome: TurnOutcome::Completed } },
         }));
-        let prefs = Prefs::default();
-        let (sa, al) = (HashMap::new(), HashMap::new());
-        assert_eq!(project_cards(&s, &prefs)[0].summary.unread, 1);
+        let al = HashMap::new();
+        assert_eq!(project_cards(&s)[0].summary.unread, 1);
         s.apply(Input::Opened("a".into()));
         s.apply(Input::Closed("a".into()));
-        assert_eq!(project_sessions(&s, "p", &cx(&prefs, &sa, &al), false)[0].status, LauncherStatus::Finished);
+        assert_eq!(project_sessions(&s, "p", &cx(&al), false)[0].status, LauncherStatus::Finished);
     }
 
     #[test]

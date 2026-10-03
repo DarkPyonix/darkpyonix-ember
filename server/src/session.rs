@@ -15,17 +15,27 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, SessionStatus};
-use crate::store::{SessionRecord, Store, StoredEvent};
+use crate::projects::Project;
+use crate::store::{SessionPatch, SessionRecord, Store, StoredEvent};
 
 /// Version of the push envelope (PR-1). Bump on any incompatible change.
 pub const PUSH_VERSION: u32 = 1;
 
 /// What the server pushes to every attached client (PR-1).
+///
+/// Variants are only ever added; a client skips a `type` it does not know, so an addition does
+/// not bump [`PUSH_VERSION`].
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Push {
     SessionCreated { v: u32, session: SessionRecord },
     Event { v: u32, status: SessionStatus, event: StoredEvent },
+    /// A session's metadata changed (title, pinned, archived: FR-L9). Carries the whole record;
+    /// a client takes the metadata fields from it and keeps its own activity fields
+    /// (`last_seq`, `status`, `updated_at`), which events update.
+    SessionUpdated { v: u32, session: SessionRecord },
+    /// A project was created or its computer assignment changed (FR-L4).
+    ProjectUpdated { v: u32, project: Project },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -182,6 +192,18 @@ impl Sessions {
         self.push.subscribe()
     }
 
+    /// Push something that did not come from a session's event pump (project changes, …).
+    pub fn publish(&self, push: Push) {
+        let _ = self.push.send(push);
+    }
+
+    /// Change a session's title, pin or archive mark and push the result (FR-L9).
+    pub fn update_meta(&self, id: &str, patch: &SessionPatch) -> Result<SessionRecord, SessionError> {
+        let rec = self.store.update_session_meta(id, patch)?.ok_or_else(|| SessionError::NotFound(id.into()))?;
+        self.publish(Push::SessionUpdated { v: PUSH_VERSION, session: rec.clone() });
+        Ok(rec)
+    }
+
     pub async fn detect_agents(&self) -> Vec<Detected> {
         let mut out = Vec::new();
         for adapter in self.adapters.values() {
@@ -224,6 +246,10 @@ impl Sessions {
             choice.as_ref().map(|(id, why)| (id.as_str(), why.as_str())),
         )?;
         let _ = self.push.send(Push::SessionCreated { v: PUSH_VERSION, session: rec.clone() });
+        // The session may have created its project (FR-L1); clients listing projects learn it.
+        if let Ok(Some(project)) = self.store.project(&rec.project) {
+            let _ = self.push.send(Push::ProjectUpdated { v: PUSH_VERSION, project });
+        }
         Ok(rec)
     }
 

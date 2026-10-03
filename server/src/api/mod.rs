@@ -6,6 +6,23 @@
 //!
 //! "Open IDE" launch targets (`FR-L7`) are in [`ide`], with their own router merged in
 //! `main.rs`, since they need the IDE configuration as well as the sessions.
+//!
+//! Projects, session metadata, search and export (FR-L4, FR-L9, FR-S4, FR-S5):
+//!
+//! | Method | Path | Body → Response |
+//! | ------ | ---- | --------------- |
+//! | GET    | `/api/v1/projects` | → `[Project]` (`{name, created_at, computers}`) |
+//! | POST   | `/api/v1/projects` | `{name}` → 201 `Project` (200 when it existed) |
+//! | GET    | `/api/v1/projects/{name}` | → `Project` |
+//! | PUT    | `/api/v1/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
+//! | DELETE | `/api/v1/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
+//! | PATCH  | `/api/v1/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
+//! | GET    | `/api/v1/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
+//! | GET    | `/api/v1/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
+//! | POST   | `/api/v1/sessions/{id}/fork` | → 501 `{error, reason}`: no agent supports forking yet |
+//!
+//! Project names are path segments: clients percent-encode them. Assignment and metadata
+//! changes are pushed (`project_updated`, `session_updated`).
 
 pub mod ide;
 
@@ -16,7 +33,8 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::http::header;
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -24,14 +42,22 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::agents::AgentKind;
 use crate::events::ApprovalDecision;
+use crate::projects::ProjectError;
 use crate::session::{NewSession, Push, SessionError, Sessions, PUSH_VERSION};
+use crate::store::{now_ms, SessionPatch};
 
 pub fn router(sessions: Arc<Sessions>) -> Router {
     Router::new()
         .route("/api/v1/health", get(|| async { Json(json!({ "ok": true, "push_version": PUSH_VERSION })) }))
         .route("/api/v1/agents", get(agents))
         .route("/api/v1/sessions", get(list_sessions).post(create_session))
-        .route("/api/v1/sessions/{id}", get(get_session))
+        .route("/api/v1/sessions/{id}", get(get_session).patch(patch_session))
+        .route("/api/v1/sessions/{id}/export", get(export_session))
+        .route("/api/v1/sessions/{id}/fork", post(fork_session))
+        .route("/api/v1/search", get(search))
+        .route("/api/v1/projects", get(list_projects).post(create_project))
+        .route("/api/v1/projects/{name}", get(get_project))
+        .route("/api/v1/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
         .route("/api/v1/sessions/{id}/events", get(events))
         .route("/api/v1/sessions/{id}/messages", post(send_message))
         .route("/api/v1/sessions/{id}/approvals/{approval_id}", post(answer))
@@ -64,6 +90,17 @@ impl From<SessionError> for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+    }
+}
+
+impl From<ProjectError> for ApiError {
+    fn from(e: ProjectError) -> Self {
+        let code = match &e {
+            ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => StatusCode::NOT_FOUND,
+            ProjectError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ProjectError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(code, format!("{e:#}"))
     }
 }
 
@@ -120,7 +157,122 @@ async fn get_session(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await })))
+    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing).
+    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await, "can_fork": false })))
+}
+
+/// FR-L9: rename, pin, archive.
+async fn patch_session(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+    Json(patch): Json<SessionPatch>,
+) -> ApiResult<impl IntoResponse> {
+    if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "title must not be empty".into()));
+    }
+    Ok(Json(s.update_meta(&id, &patch)?))
+}
+
+/// Version of the export file (`format: "ember-transcript"`).
+pub const EXPORT_VERSION: u32 = 1;
+
+/// FR-L9: the session as one self-contained JSON file: its record and every stored event in
+/// order (the normalised transcript, FR-S2).
+/// Streaming deltas are included so the file replays exactly as clients saw the session.
+async fn export_session(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
+    let events = s.store().events_after(&id, 0)?;
+    let body = json!({
+        "format": "ember-transcript",
+        "version": EXPORT_VERSION,
+        "exported_at": now_ms(),
+        "session": rec,
+        "events": events,
+    });
+    let disposition = format!("attachment; filename=\"ember-session-{}.json\"", file_safe(&id));
+    Ok(([(header::CONTENT_DISPOSITION, disposition)], Json(body)))
+}
+
+/// Keep only characters safe in a quoted header filename.
+fn file_safe(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// FR-S5. No wrapped agent forks yet: Claude Code has no fork-from-turn in its headless mode
+/// and Codex's `thread/fork` is not wired into the adapter (it forks a whole thread, not from a
+/// chosen turn, and needs a second app-server thread per session). Clients read `can_fork`
+/// from `GET /sessions/{id}` and disable the action; this answers 501 for anyone who calls it.
+async fn fork_session(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
+    let reason = format!("forking is not supported for {} sessions yet", rec.agent.as_str());
+    Ok((StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": reason, "reason": reason }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+    limit: Option<usize>,
+}
+
+/// Default and maximum number of search hits.
+pub const SEARCH_LIMIT: usize = 50;
+pub const SEARCH_LIMIT_MAX: usize = 500;
+
+/// FR-S4: indexed full-text search across every session's messages.
+async fn search(State(s): State<Arc<Sessions>>, Query(q): Query<SearchQuery>) -> ApiResult<impl IntoResponse> {
+    let limit = q.limit.unwrap_or(SEARCH_LIMIT).clamp(1, SEARCH_LIMIT_MAX);
+    Ok(Json(s.store().search(&q.q, limit)?))
+}
+
+async fn list_projects(State(s): State<Arc<Sessions>>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(s.store().projects()?))
+}
+
+#[derive(Deserialize)]
+struct ProjectBody {
+    name: String,
+}
+
+async fn create_project(
+    State(s): State<Arc<Sessions>>,
+    Json(b): Json<ProjectBody>,
+) -> ApiResult<impl IntoResponse> {
+    let (project, created) = s.store().ensure_project(&b.name)?;
+    if created {
+        s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    }
+    Ok((if created { StatusCode::CREATED } else { StatusCode::OK }, Json(project)))
+}
+
+async fn get_project(State(s): State<Arc<Sessions>>, Path(name): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(s.store().project(&name)?.ok_or(ProjectError::NotFound(name))?))
+}
+
+/// FR-L4: assign a computer to a project.
+async fn assign(
+    State(s): State<Arc<Sessions>>,
+    Path((name, computer_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    let project = s.store().assign_computer(&name, &computer_id)?;
+    s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    Ok(Json(project))
+}
+
+/// FR-L4: unassign a computer from a project.
+async fn unassign(
+    State(s): State<Arc<Sessions>>,
+    Path((name, computer_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    let project = s.store().unassign_computer(&name, &computer_id)?;
+    s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    Ok(Json(project))
 }
 
 #[derive(Deserialize)]

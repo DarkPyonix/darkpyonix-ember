@@ -33,15 +33,15 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | NFR-L1 | Not measured. | #9 |
 | NFR-L2 | `scripts/check-no-webview.sh` runs in CI. | |
 | FR-S1–S4, FR-S6 | Implemented, CI. | |
-| FR-S5 | Not implemented: `can_fork: false`, `POST …/fork` answers 501. | none |
-| FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: none |
+| FR-S5 | Not implemented: `can_fork: false`, `POST …/fork` answers 501. | #78 |
+| FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: #79 |
 | FR-A1–A4 | Claude Code and Codex (#14), Antigravity (#64), ACP agents (#61) implemented, CI against recordings and fakes. Real OMP run not verified. agy shell writes fail under `--sandbox`. | #53, #65 |
 | FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is not implemented, in the server or the client. | #73 |
 | FR-A6–A8 | Implemented, CI (#14, #58). | |
 | FR-X1–X3 | Implemented, CI (#20, #34, #47, #48); verified end to end with a node on the same Mac. A switch between two physical computers is not verified; the project mount (`mount-nfs`, `mount-fuse` features) is not built in CI. | #6 |
 | FR-X4 | Implemented in ember node (`jobs.rs`), CI. | |
-| FR-X5, NFR-X1 | Not measured. | none |
-| FR-T1–T7 | Implemented, CI (#18, #59). Teams of real agents on different computers not verified. | none |
+| FR-X5, NFR-X1 | Not measured. | #81 |
+| FR-T1–T7 | Implemented, CI (#18, #59). Teams of real agents on different computers not verified. | #82 |
 | FR-R1–R4 | Implemented on ember server and node, CI (#29, #44). Acceptance runs (egress IP, login across an egress switch, takeover) not verified. | #12 |
 | FR-R5 | Not implemented: no client renders the browser. | #12 |
 | FR-U1–U3, FR-U5 | Implemented, CI (#19). | |
@@ -51,11 +51,11 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-N4 | Not verified on a real phone. | #10 |
 | NFR-N1 | Loopback bench only; the network matrix is not measured. | #10 |
 | PR-1 | Implemented with `PUSH_VERSION` 1. Dropping the `v` field (D15) is planned. | #63 |
-| FR-W1–W3 | `web/proxy/` (#1). FR-W3 not verified per platform. | none |
-| FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | none |
-| FR-W5, FR-W5a–h, NFR-W5a | Designed only (`docs/design/MOBILE-NO-NODE.md`), outside the 10-18 deadline. | none |
+| FR-W1–W3 | `web/proxy/` (#1). FR-W3 not verified per platform. | #83 |
+| FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | #83 |
+| FR-W5, FR-W5a–h, NFR-W5a | Designed only (`docs/design/MOBILE-NO-NODE.md`), outside the 10-18 deadline. | #80 |
 | FR-W6 | Extensions are in `extensions/` (#69); default install and the notebook criteria are open. | #15 |
-| NFR-W1 | No release process yet. | #72 |
+| NFR-W1 | No extension regression test yet. | #84 |
 | FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `web/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
 | NFR-P1 | Not measured. | #26 |
 | FR-B1–B4 | `detach.js` and `crates/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
@@ -121,7 +121,7 @@ installers (#72); the documents in the house writing style (#68).
   record and every stored event.
 - **Paths**: the routes above carry `/api/v1`; D15 moves them to `/api` in one change (#63,
   planned).
-- **Fork** (FR-S5): not implemented for any agent (no issue yet). `GET /sessions/{id}` reports `can_fork:
+- **Fork** (FR-S5): not implemented for any agent (#78). `GET /sessions/{id}` reports `can_fork:
   false` and `POST /sessions/{id}/fork` answers 501 with a reason. Codex's `thread/fork` is the
   likely first implementation.
 
@@ -357,7 +357,7 @@ run on real networks (#10) or against the real hub (#62).
 > server on the phone: the web workbench always opens a remote extension-host connection when a
 > remote exists, which E4 forbids us to answer with our own host, and with no Node every extension
 > runs in the web worker anyway. Whether this reading of `FR-W5`'s wording is right is open
-> (`MOBILE-NO-NODE.md` Q-M1). No issue tracks the build yet.
+> (`MOBILE-NO-NODE.md` Q-M1). The build is tracked in #80.
 
 ### FR-W4 acceptance: the OSE runtime
 

@@ -1,6 +1,6 @@
 # MOBILE-NO-NODE.md: the IDE on Android and iOS without Node (`FR-W5`)
 
-> **Status: planned, design only, 2026-10-03; no issue tracks the build yet.** [user] "이거 기능 설계는 미리 해놔. 후순위로 배치하는건
+> **Status: planned, design only, 2026-10-03; build tracked in #80.** [user] "이거 기능 설계는 미리 해놔. 후순위로 배치하는건
 > 이해하는데 기능은 미리 설계해둬야 해." `FR-W5` stays outside the 10-18 deadline (`PROJECT.md`,
 > *Excluded from this deadline*); this document fixes what will be built when it is scheduled. No
 > code exists for it. Proposed SPEC rows are in §9 and are applied to `docs/SPEC.md` §W.

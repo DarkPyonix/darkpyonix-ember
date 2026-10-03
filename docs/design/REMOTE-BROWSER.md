@@ -50,6 +50,8 @@ least one viewer is connected. All viewers share one stream (one tab, one qualit
 
 ### Server → client
 
+> The `v` field below is decided to go (INTENT D15, #85): fields are only added, unknown fields are ignored, and there is no version negotiation.
+
 - **Text** `{"type":"hello","v":1,"project":…,"state":ViewState}`: first message. A client that
   does not know `v` must say so to the user, not guess.
 - **Text** `{"type":"state","v":1,"project":…,"state":ViewState}`: on every state change.

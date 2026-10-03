@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::wire::{Project, Push, SessionRecord, SessionStatus, StoredEvent, PUSH_VERSION};
+use crate::wire::{Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView, PUSH_VERSION};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum DecodeError {
@@ -16,6 +16,9 @@ pub enum DecodeError {
     Version { server: u32, client: u32 },
     #[error("unknown push type {0:?}")]
     UnknownType(String),
+    /// A push type this client knows and deliberately does not use yet (see [`SKIPPED_TYPES`]).
+    #[error("push type {0:?} is not used by this client")]
+    Skipped(String),
     #[error("malformed push message: {0}")]
     Malformed(String),
 }
@@ -44,10 +47,20 @@ struct ProjectBody {
 }
 
 #[derive(Deserialize)]
+struct TeamBody {
+    team: TeamView,
+}
+
+#[derive(Deserialize)]
 struct LaggedBody {
     #[serde(default)]
     missed: u64,
 }
+
+/// Push types the server sends that this client knows about and ignores for now: the
+/// schedule pushes (FR-A8) have no client UI yet. Skipped quietly, unlike an unknown type.
+pub const SKIPPED_TYPES: &[&str] =
+    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run"];
 
 /// Decode one push text frame. The version is checked before anything else.
 pub fn decode(text: &str) -> Result<Push, DecodeError> {
@@ -75,10 +88,15 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
             let b: ProjectBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::ProjectUpdated { project: b.project })
         }
+        "team_updated" => {
+            let b: TeamBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::TeamUpdated { team: b.team })
+        }
         "lagged" => {
             let b: LaggedBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::Lagged { missed: b.missed })
         }
+        other if SKIPPED_TYPES.contains(&other) => Err(DecodeError::Skipped(other.to_string())),
         other => Err(DecodeError::UnknownType(other.to_string())),
     }
 }
@@ -171,6 +189,41 @@ mod tests {
         assert!(matches!(p, Push::SessionCreated { session } if !session.pinned && session.account_id.is_none()));
         // A type this client does not know is reported, and the push loop skips it.
         assert_eq!(decode(r#"{"type":"future_thing","v":1}"#), Err(DecodeError::UnknownType("future_thing".into())));
+        // The schedule pushes (FR-A8) are known and skipped on purpose.
+        assert_eq!(
+            decode(r#"{"type":"schedule_run","v":1,"run":{"id":"r"}}"#),
+            Err(DecodeError::Skipped("schedule_run".into()))
+        );
+    }
+
+    #[test]
+    fn decodes_team_updates_and_notices() {
+        let p = decode(
+            r#"{"type":"team_updated","v":1,"team":{"id":"team_1","project":"acme","leader":"s1","created_at":1,
+                "members":[{"session_id":"s1","name":"lead","role":"leader","joined_at":1,"ended_at":null,
+                            "title":"Lead","agent":"codex","status":"idle"},
+                           {"session_id":"s2","name":"alice","role":"teammate","joined_at":2,"ended_at":null,
+                            "title":"alice","agent":"codex","status":"waiting_for_approval","future":1}],
+                "tasks":[{"id":"task_1","team_id":"team_1","number":1,"title":"tests","detail":"","status":"in_progress",
+                          "assignee":"s2","assignee_name":"alice","created_by":"s1","created_at":3,"updated_at":4}]}}"#,
+        )
+        .unwrap();
+        let Push::TeamUpdated { team } = p else { panic!("{p:?}") };
+        assert_eq!(team.members[1].status, Some(SessionStatus::WaitingForApproval));
+        assert_eq!(team.tasks[0].status, crate::wire::TaskStatus::InProgress);
+        assert_eq!(team.member("s2").map(|m| m.name.as_str()), Some("alice"));
+        // A future task status still decodes.
+        let p = decode(
+            r#"{"type":"team_updated","v":1,"team":{"id":"t","leader":"s","tasks":[{"id":"x","number":1,"title":"y","status":"review"}]}}"#,
+        )
+        .unwrap();
+        assert!(matches!(p, Push::TeamUpdated { team } if team.tasks[0].status == crate::wire::TaskStatus::Unknown));
+        let p = decode(
+            r#"{"type":"event","v":1,"status":"running",
+                "event":{"session_id":"s","seq":3,"at":0,"event":{"kind":"notice","message":"Mention not delivered"}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(p, Push::Event { event: StoredEvent { event: AgentEvent::Notice { .. }, .. }, .. }));
     }
 
     #[test]

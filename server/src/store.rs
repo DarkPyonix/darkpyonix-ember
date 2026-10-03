@@ -123,6 +123,7 @@ const MIGRATIONS: &[&str] = &[
     crate::hub::schema::RESOLVE_MIGRATION,
     crate::mcp::schema::MIGRATION,
     crate::schedules::schema::MIGRATION,
+    crate::a2a::team::MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.

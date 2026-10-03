@@ -273,6 +273,17 @@ The adapters in `proxy/dpx/agents/` — which parse Claude Code and Codex transc
 unchanged, because the main server is now where those transcripts are; they are kept and
 relocated, not removed.
 
+### D15 — REST paths carry no version
+
+**Decision.** [user, 2026-10-03: "REST API의 버저닝은 죄악이야" — a principle for every REST API,
+confirmed for Ember's own through the darkpyonix leader] Ember's REST API moves from
+`/api/v1/...` to `/api/...`, in one change across server, client, app, proxy and docs after the
+root regrouping (#60). The API changes only by addition. The push WebSocket's `v` field is a wire
+format, not a REST path, and stays until the user decides on it. The hub's paths follow
+`darkpyonix-core` (its `/v1` prefix is being removed there too).
+
+Rejected: keeping `/api/v1` alongside `/api` (two names for one API).
+
 ## Open questions
 
 | ID | Question | Status |

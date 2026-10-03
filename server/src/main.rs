@@ -25,8 +25,8 @@ use ember_server::store::Store;
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
-///   configuration folder each under `<data dir>/agy/`; `EMBER_AGY_HOOK_CHECK=0` skips checking
-///   that agy loaded Ember's approval hook before a session's first turn
+///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
+///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=0` drops agy's `--sandbox`
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the

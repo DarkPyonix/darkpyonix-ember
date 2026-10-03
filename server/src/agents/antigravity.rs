@@ -1,97 +1,118 @@
-//! Antigravity adapter (SPEC FR-A1, FR-A2, FR-A5).
+//! Antigravity adapter (SPEC FR-A1, FR-A2, FR-A5; INTENT D14).
 //!
 //! Drives the unmodified `agy` CLI in its headless print mode, **one process per turn** (FR-A2):
 //!
 //! ```text
-//! agy -p <message> --output-format stream-json --add-dir <session root> \
+//! agy -p <message> --output-format stream-json --add-dir <session root> --sandbox \
 //!     --dangerously-skip-permissions [--conversation=<id>] [--model <M>]
 //! ```
 //!
 //! # Protocol sources
 //!
-//! Verified against agy 1.2.10 (`agy --help`, `agy mcp add --help`, the documentation and release
-//! notes embedded in the binary) and two recorded real turns in `tests/fixtures/agy/` (the second
-//! one resumed with `--conversation`; local paths scrubbed):
+//! Verified against agy 1.2.10 and 1.2.16 ([`PINNED_VERSION`]): `agy --help`, the documentation
+//! and release notes embedded in the binary, and recorded runs in `tests/fixtures/agy/` (local
+//! paths scrubbed; `*_1.2.16.*` are from the SPEC §A Antigravity test runs):
 //!
-//! * `agy --version` prints `1.2.10`.
+//! * `agy --version` prints `1.2.16`.
 //! * stdout, one JSON object per line (recorded):
 //!   - `{"event":"init","conversation_id":"<uuid>","init":{"model","cwd","tools":[…],
-//!     "permission_mode":"request-review"}}` — the conversation id is the native session id.
+//!     "permission_mode"}}` — the conversation id is the native session id.
 //!   - `{"event":"step_update","step_update":{"conversation_id","step_index":N,"state":"ACTIVE"|
-//!     "DONE","step_type":"user_input"|"system_message"|"agent_response"|"tool",
-//!     "duration_seconds","usage":{"input_tokens","output_tokens","thinking_tokens",
-//!     "cache_read_tokens","total_tokens"},"tool_name","tool_info":{"name","parameters":{…}}}}`.
-//!     A tool step is announced `ACTIVE` and again `DONE`; the stream carries **no tool output**.
-//!     `usage` is on `agent_response` steps and covers that model call only.
-//!   - `{"event":"result","result":{"conversation_id","status":"SUCCESS","response":"<final
-//!     text>","duration_seconds","num_turns","usage":{…},"denied_actions":[{"action":"command",
-//!     "display_name":"RunCommand"}]}}`. `result.usage` and `num_turns` cover the **whole
-//!     conversation** (the resumed recording reports both turns), so per-turn usage is summed from
-//!     the steps instead.
-//! * `--conversation <id>` continues that conversation (recorded: same id, step indices continue,
-//!   the model remembered the first turn's request).
-//! * `step_update.text_delta` (assistant text deltas) is **not recorded**: the field name comes from
-//!   the binary's JSON tags and the release note "streamed text … in `--output-format stream-json`
-//!   text deltas". Both recorded turns ended before the model wrote any text.
-//! * stderr: `AGY_ERROR: {…}` on an agent or model API failure (exit code 3) and lines with an
-//!   `error:` marker (release notes; not recorded). A soft-denied tool prints a `jetski: …` notice
-//!   (recorded, `tests/fixtures/agy/turn1_stderr.txt`).
+//!     "DONE"|"ERROR","step_type":"user_input"|"system_message"|"agent_response"|"tool",
+//!     "text_delta","duration_seconds","usage":{…},"tool_name","tool_info":{"name",
+//!     "parameters":{…},"output"?,"error"?:{"type","message"}}}}`. A tool step is announced
+//!     `ACTIVE` and again `DONE` or `ERROR`. 1.2.16 carries the tool's `output` (recorded
+//!     `turn_tool_output_1.2.16.jsonl`); 1.2.10 did not. A tool denied by a hook ends `ERROR` with
+//!     `error.message` "tool call denied by pre-tool hook: <reason>" (recorded). `usage` is on
+//!     `agent_response` steps and covers that model call only; `text_delta` is recorded on 1.2.16.
+//!   - `{"event":"result","result":{"conversation_id","status":"SUCCESS","response","num_turns",
+//!     "usage","denied_actions"?}}`. `result.usage` and `num_turns` cover the **whole
+//!     conversation**, so per-turn usage is summed from the steps instead.
+//! * `--conversation <id>` continues that conversation (recorded on 1.2.10).
+//! * stderr: `AGY_ERROR: {…}` on an agent or model API failure and lines with an `error:` marker
+//!   (release notes; not recorded).
 //!
-//! # Approvals (FR-A5)
+//! # Approvals: the reinforced hook (FR-A5, INTENT D14 [user])
 //!
-//! Print mode cannot ask for a permission: a tool that needs one is **soft-denied** and listed in
-//! `denied_actions` (recorded). A `PreToolUse` hook answering `{"decision":"allow"}`, even with
-//! `permissionOverrides: ["command(<the command>)"]`, did **not** lift that denial (recorded with
-//! 1.2.10, `turn2_resumed.jsonl`). So the adapter runs agy with `--dangerously-skip-permissions`
-//! and makes Ember's own `PreToolUse` hook the only gate: agy's hook contract says `"deny"`
-//! "hard-blocks the execution immediately", and hooks run synchronously before every tool.
+//! Print mode cannot ask for a permission (it soft-denies the tool, and a hook answering `allow`
+//! does not lift that; recorded on 1.2.10). So agy runs with `--dangerously-skip-permissions` and
+//! Ember's own `PreToolUse` hook (matcher `*`) is the only gate. What agy 1.2.16 does with a hook
+//! was measured in SPEC §A "Antigravity hook tests"; in short:
+//!
+//! * the hook runs under skip-permissions, and `deny` blocks the tool;
+//! * the hook's `timeout` is honoured (600 s held a tool for 90 s), and a hook killed at its
+//!   timeout, exiting non-zero (even with `allow` on stdout), killed by a signal, printing
+//!   garbage, `{}`, an empty or unknown decision, or missing its binary **blocks** the tool;
+//! * **but** a hook that exits 0 with an empty stdout, or answers `ask`, lets the tool **run**
+//!   (skip-permissions approves the ask). So the hook script below never prints anything except
+//!   an exact `allow` or a `deny`, and the route never answers `ask`;
+//! * sub-agents' own tool calls and `call_mcp_tool` are hooked; with several hooks `deny` wins;
+//!   parallel tool calls from one response are hooked one by one.
 //!
 //! The hook is configured through agy's own customization mechanism, not by patching agy: every
-//! session gets a private directory (the *session root*, under `<data dir>/agy/sessions/`) that is
-//! passed with `--add-dir`. A workspace's `.agents/` directory is a customization root (embedded
-//! docs: "Customization Roots", `hooks.json`); recorded: `.agents/hooks.json` in an `--add-dir`
-//! directory is loaded in print mode without the folder being trusted, the hook's working
-//! directory is that `.agents/` directory, its stdin is the documented camelCase payload
-//! (`tests/fixtures/agy/pre_tool_use.json`) and it inherits agy's environment (plus
-//! `ANTIGRAVITY_CONVERSATION_ID`).
+//! session gets a private directory (the *session root*, under `<data dir>/agy/sessions/`) passed
+//! with `--add-dir`. Its `.agents/` is a customization root, loaded in print mode without the
+//! folder being trusted (recorded on 1.2.10 and 1.2.16). Nothing in `~/.gemini` or in the project
+//! is written, so no global hook exists that the user's own agy sessions would see. The hook's
+//! working directory is that `.agents/`, its stdin is the camelCase payload
+//! (`tests/fixtures/agy/pre_tool_use.json`), and it inherits agy's environment (recorded).
 //!
 //! The session root holds:
 //! - `.agents/hooks.json`: one named hook, [`HOOK_NAME`], `PreToolUse` with matcher `*`, running
-//!   `.agents/ember-hook.sh` with a [`HOOK_TIMEOUT_SECS`] timeout;
-//! - `.agents/ember-hook.sh` (mode 0700): `curl` POSTs the payload to [`HOOK_ROUTE`] on this
-//!   server with this run's secret (`Authorization: Bearer`) and prints the reply; if the server
-//!   cannot be reached it prints `deny` (fail closed). The secret lives in this file, not in the
-//!   environment, so the agent's own shell commands do not inherit it;
-//! - `.agents/rules/ember.md`: [`StartRequest::instructions`] (A2A, the session's computer, …)
-//!   plus a note that the session root is not the project. Rules are Markdown files under
-//!   `rules/` of a customization root (embedded docs);
-//! - `.agents/mcp_config.json`: [`StartRequest::mcp_servers`] as `{"mcpServers": {name:
-//!   {"command","args"}}}` (embedded docs, "Configuration Schema"). The user's own servers in
-//!   `~/.gemini/config/mcp_config.json` stay.
+//!   `.agents/ember-hook.sh` with an explicit [`HOOK_TIMEOUT_SECS`] timeout;
+//! - `.agents/ember-hook.sh` (mode 0700): `curl` POSTs the payload to [`HOOK_ROUTE`] with this
+//!   session's token (`Authorization: Bearer`). It prints the reply only if it is exactly `allow`
+//!   or a `deny`; anything else (curl missing, server unreachable, non-2xx such as an unknown
+//!   token, an empty or odd body) prints a fixed `deny`. It always exits 0. The token lives in this
+//!   file, not in the environment, so the agent's shell commands do not inherit it;
+//! - `.agents/rules/ember.md`: [`StartRequest::instructions`] plus a note that the session root is
+//!   not the project;
+//! - `.agents/mcp_config.json`: [`StartRequest::mcp_servers`] (`{"mcpServers": {name:
+//!   {"command","args"}}}`). Loaded from the session root on 1.2.16 (recorded: the server got
+//!   `initialize` and `tools/list`).
 //!
-//! The route ([`router`], served by [`HookBroker`]) blocks until the user answers or
-//! [`APPROVAL_TIMEOUT`] passes (then `deny`). Read-only tools ([`READ_ONLY_TOOLS`]) are allowed
-//! without asking, as agy itself does for workspace reads in its default mode; every other tool,
-//! including tools this list has never heard of, asks. `AllowAlways` allows that tool name for
-//! the rest of the process. `approval_id` and `ToolCall.call_id` are both
-//! `<conversation id>:<step index>`.
+//! The route ([`router`], served by [`HookBroker`]) decides per call:
+//! 1. no turn of this session running → `deny` (late hooks after a turn ended or was cancelled);
+//! 2. the call names the session root anywhere in its arguments → `deny` (the agent must not
+//!    read the token or rewrite the hook; the reason points it at the project);
+//! 3. a read-only tool ([`READ_ONLY_TOOLS`]) whose paths stay inside the conversation's
+//!    workspaces or agy's own `brain/` folder → `allow`;
+//! 4. read-only policy ([`Policy::ReadOnly`]) → `deny` without asking;
+//! 5. a tool the user allowed always in this run → `allow`;
+//! 6. otherwise the user is asked; no answer within the approval deadline → `deny`, a notice
+//!    "approval timed out — retry", and the card is withdrawn.
 //!
-//! Before its first turn a run checks that agy actually loaded the hook (`agy -p /hooks`, a
-//! read-only print-mode slash command that starts no turn, per the release notes) and refuses to
-//! run with permissions skipped if [`HOOK_NAME`] is not listed. `EMBER_AGY_HOOK_CHECK=0` skips
-//! the check.
+//! The deadline is [`APPROVAL_TIMEOUT`], below the hook's own timeout and the hook's curl limit,
+//! so agy always gets Ember's answer. If `agy -p /hooks` reports a different `timeout_seconds`
+//! (the timeout ignored or capped), the deadline drops to [`CAPPED_APPROVAL_TIMEOUT`] (20 s, as
+//! AionUI does). Ending or interrupting a turn, and ending the run, deny every pending approval.
+//! Each run (session (re)creation) gets a fresh token, revoked when the run ends.
 //!
-//! The session root appears to the model as an extra workspace, listed first (recorded:
-//! `workspacePaths` puts `--add-dir` folders before the cwd, and the model picked it as the
-//! command's `Cwd`), which is why the rules file tells the agent to stay out of it. Roots are
-//! reused per conversation (`<data dir>/agy/conversations/<id>` names the root), because a
-//! resumed conversation keeps every folder ever added (recorded).
+//! Before **every** turn `agy -p /hooks --output-format json` must list [`HOOK_NAME`] from this
+//! session root, enabled, `PreToolUse` with matcher `*`; otherwise the turn is refused (agy
+//! has silently dropped `hooks.json` before). There is no switch to skip this.
+//!
+//! Version pin: once per run `agy --version` is compared with [`PINNED_VERSION`]. Another version
+//! gets a warning and runs read-only: without `--dangerously-skip-permissions` (agy's own
+//! headless gate soft-denies anything that needs a permission) **and** with the hook in
+//! [`Policy::ReadOnly`]. The pin moves only after the SPEC §A tests pass on the new version.
+//!
+//! `--sandbox` (agy's terminal sandbox) is on unless `EMBER_AGY_SANDBOX=0`. Recorded on 1.2.16:
+//! with it, shell commands could not write even in the project (`Operation not permitted`) while
+//! the file-edit tools could.
+//!
+//! The session root appears to the model as an extra workspace, listed first even when the project
+//! is also passed with `--add-dir` (recorded), and the model sometimes picks it as a command's
+//! `Cwd`; rule 2 above denies that with a pointer to the project. Roots are reused per conversation
+//! (`<data dir>/agy/conversations/<id>` names the root), because a resumed conversation keeps every
+//! folder ever added (recorded). `--new-project` is not used: it leaves a project file in
+//! `~/.gemini/config/projects/` per run (recorded on 1.2.16).
 //!
 //! # Not supported yet
 //!
 //! Accounts (agy has no configuration-directory variable: `~/.gemini` is fixed), sessions on
-//! another computer, tool output (not in the stream; the conversation's `transcript_full.jsonl`
-//! has it), and steering a running turn.
+//! another computer, steering a running turn, and approval cards for tools of a sub-agent are
+//! shown without a matching tool call (the sub-agent's steps are not in the parent's stream).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -116,19 +137,30 @@ use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 pub const HOOK_ROUTE: &str = "/api/v1/agents/antigravity/hook";
 /// Name of Ember's hook in `hooks.json`; also what the pre-flight check looks for.
 pub const HOOK_NAME: &str = "ember-approvals";
-/// agy's own timeout for the hook command, in seconds (agy's default is 30).
-pub const HOOK_TIMEOUT_SECS: u64 = 1800;
-/// How long the hook route waits for the user before answering `deny`. Shorter than the hook's
-/// timeouts, so agy always gets an answer from Ember rather than a killed hook.
-pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(HOOK_TIMEOUT_SECS - 60);
+/// The agy version the SPEC §A Antigravity hook tests passed on. Any other version runs read-only.
+pub const PINNED_VERSION: &str = "1.2.16";
+/// agy's own timeout for the hook command, in seconds (agy's default is 30). Measured on 1.2.16:
+/// honoured, and a hook killed at it blocks the tool.
+pub const HOOK_TIMEOUT_SECS: u64 = 3600;
+/// The hook's `curl` gives up after this long (then the hook prints `deny`): before agy's timeout.
+const HOOK_CURL_MAX_SECS: u64 = HOOK_TIMEOUT_SECS - 60;
+/// How long the route waits for the user before answering `deny`: before the hook's `curl` limit
+/// and agy's hook timeout, so agy always gets Ember's answer.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(HOOK_TIMEOUT_SECS - 120);
+/// The deadline when `agy -p /hooks` reports another timeout than [`HOOK_TIMEOUT_SECS`] (ignored
+/// or capped): AionCore measured agy 1.1.9 running the tool once a hook passed ~30 s.
+pub const CAPPED_APPROVAL_TIMEOUT: Duration = Duration::from_secs(20);
 /// After SIGINT, how long an interrupted or shut-down turn may take before SIGKILL.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 /// How long a new turn waits for the previous process to exit (agy waits for background tasks
 /// after its final answer) before killing it.
 const PREVIOUS_EXIT_GRACE: Duration = Duration::from_secs(30);
+/// Limit for `agy --version` and `agy -p /hooks`.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Tools that only read, allowed without asking. Names are agy's (the `init` event's `tools`,
-/// recorded with 1.2.10); anything else asks.
+/// Tools that only read, allowed without asking when their paths stay inside the conversation's
+/// workspaces (see [`read_paths`]). Names are agy's (the `init` event's `tools`, recorded with
+/// 1.2.10 and 1.2.16); anything else asks.
 pub const READ_ONLY_TOOLS: &[&str] = &[
     "view_file",
     "list_dir",
@@ -144,26 +176,49 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "wait_5_seconds",
 ];
 
+/// How a run's tool calls are gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Policy {
+    /// The reinforced hook asks the user (the pinned, tested agy version).
+    Gated,
+    /// Only read-only tools inside the workspaces; everything else is denied without asking.
+    /// agy also runs without `--dangerously-skip-permissions`.
+    ReadOnly,
+}
+
 pub struct AntigravityAdapter {
     bin: PathBuf,
     /// `<data dir>/agy`: session roots and the conversation → root index.
     home: PathBuf,
     hooks: Arc<HookBroker>,
+    /// Pass `--sandbox`.
+    sandbox: bool,
 }
 
 impl AntigravityAdapter {
     pub fn new(bin: impl Into<PathBuf>, home: impl Into<PathBuf>, hooks: Arc<HookBroker>) -> Self {
-        AntigravityAdapter { bin: bin.into(), home: home.into(), hooks }
+        AntigravityAdapter { bin: bin.into(), home: home.into(), hooks, sandbox: true }
+    }
+
+    /// Turn agy's terminal sandbox off (`--sandbox` is passed by default).
+    pub fn without_sandbox(mut self) -> Self {
+        self.sandbox = false;
+        self
     }
 
     /// The binary from `EMBER_AGY_BIN`, else `agy` on `PATH`; session roots under
-    /// `<data_dir>/agy`.
+    /// `<data_dir>/agy`; `EMBER_AGY_SANDBOX=0` drops `--sandbox`.
     pub fn from_env(data_dir: &Path, hooks: Arc<HookBroker>) -> Self {
-        Self::new(
+        let adapter = Self::new(
             std::env::var_os("EMBER_AGY_BIN").unwrap_or_else(|| "agy".into()),
             data_dir.join("agy"),
             hooks,
-        )
+        );
+        if std::env::var("EMBER_AGY_SANDBOX").as_deref() == Ok("0") {
+            adapter.without_sandbox()
+        } else {
+            adapter
+        }
     }
 
     /// Arguments for one turn.
@@ -172,6 +227,8 @@ impl AntigravityAdapter {
         conversation: Option<&str>,
         model: Option<&str>,
         root: &Path,
+        policy: Policy,
+        sandbox: bool,
     ) -> Vec<String> {
         // `-p <prompt>` is the recorded form. A leading "-" could be read as a flag.
         let prompt = if prompt.starts_with('-') { format!(" {prompt}") } else { prompt.to_string() };
@@ -182,9 +239,14 @@ impl AntigravityAdapter {
             "stream-json".into(),
             "--add-dir".into(),
             root.to_string_lossy().into_owned(),
-            // Ember's PreToolUse hook is the gate; see the module docs.
-            "--dangerously-skip-permissions".into(),
         ];
+        if sandbox {
+            args.push("--sandbox".into());
+        }
+        if policy == Policy::Gated {
+            // Ember's PreToolUse hook is the gate; see the module docs.
+            args.push("--dangerously-skip-permissions".into());
+        }
         if let Some(id) = conversation {
             // Equals form, so an id can never be read as a flag.
             args.push(format!("--conversation={id}"));
@@ -195,6 +257,49 @@ impl AntigravityAdapter {
         }
         args
     }
+}
+
+/// `agy --version` output → policy: the pinned version is gated, anything else read-only.
+pub fn policy_for_version(version: Option<&str>) -> Policy {
+    match version {
+        Some(v) if v == PINNED_VERSION => Policy::Gated,
+        _ => Policy::ReadOnly,
+    }
+}
+
+/// What `agy -p /hooks --output-format json` says about Ember's hook: `Ok(timeout_seconds)` when
+/// [`HOOK_NAME`] is listed from `hooks_file`, enabled, with a `PreToolUse` action matching every
+/// tool; otherwise why not. Shape recorded: `tests/fixtures/agy/hooks_list_1.2.16.json`.
+pub fn hook_listing(json_out: &str, hooks_file: &Path) -> Result<u64, String> {
+    let v: Value = json_out
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok().filter(|v| v.is_object()))
+        .or_else(|| serde_json::from_str(json_out.trim()).ok())
+        .ok_or_else(|| "its output is not JSON".to_string())?;
+    let hooks = v["command"]["data"]["hooks"]
+        .as_array()
+        .ok_or_else(|| "it lists no hooks".to_string())?;
+    let same_file = |s: &str| {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        Path::new(s) == hooks_file || canon(Path::new(s)) == canon(hooks_file)
+    };
+    let hook = hooks
+        .iter()
+        .find(|h| h["name"] == HOOK_NAME && h["source"].as_str().is_some_and(|s| same_file(s)))
+        .ok_or_else(|| format!("{HOOK_NAME} from {} is not listed", hooks_file.display()))?;
+    if hook["enabled"] != true {
+        return Err(format!("{HOOK_NAME} is listed but disabled"));
+    }
+    hook["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| {
+            a["event"] == "PreToolUse" && matches!(a["matcher"].as_str(), Some("*") | Some(""))
+        })
+        .map(|a| a["timeout_seconds"].as_u64().unwrap_or(30))
+        .ok_or_else(|| format!("{HOOK_NAME} has no PreToolUse action matching every tool"))
 }
 
 #[async_trait]
@@ -243,13 +348,16 @@ impl AgentAdapter for AntigravityAdapter {
         let (root, new_root) = session_root(&self.home, req.resume_native_id.as_deref());
         let token = uuid::Uuid::new_v4().simple().to_string();
         write_session_root(&root, &hook_url, &token, &req)?;
-        let approvals = Arc::new(RunApprovals::new(events.clone(), APPROVAL_TIMEOUT));
+        // Read-only until `agy --version` says otherwise (first turn's pre-flight).
+        let approvals = Arc::new(RunApprovals::new(events.clone(), APPROVAL_TIMEOUT, &root, Policy::ReadOnly));
+        // A fresh token per run (session (re)creation); revoked in `shutdown` / `Drop`.
         self.hooks.register(&token, approvals.clone());
         Ok(Box::new(AgyRun {
             bin: self.bin.clone(),
             home: self.home.clone(),
             root,
             new_root,
+            sandbox: self.sandbox,
             req,
             events,
             hooks: self.hooks.clone(),
@@ -257,7 +365,7 @@ impl AgentAdapter for AntigravityAdapter {
             approvals,
             state: Arc::new(StdMutex::new(TurnState::default())),
             turn_task: None,
-            hook_checked: false,
+            policy: None,
         }))
     }
 }
@@ -325,27 +433,39 @@ pub fn hooks_json(script: &Path) -> Value {
     })
 }
 
-/// The hook script: forwards the payload to Ember and prints its answer; denies when Ember
-/// cannot be reached.
+/// The `deny` the hook prints when it has no usable answer from Ember.
+pub fn hook_fallback_deny() -> Value {
+    deny_reply("Ember could not be asked about this tool call, so it was denied.")
+}
+
+/// The hook script: forwards the payload to Ember and prints its answer. It prints only an exact
+/// `allow` or a `deny` and always exits 0, because agy 1.2.16 **runs** the tool when a hook exits
+/// 0 with an empty stdout or answers `ask` (SPEC §A test 4); every other failure (curl missing,
+/// Ember unreachable, non-2xx such as an unknown token, an empty or unexpected body) prints a
+/// fixed `deny`.
 pub fn hook_script(url: &str, token: &str) -> String {
-    let deny = json!({
-        "decision": "deny",
-        "reason": "Ember could not be reached to approve this tool call.",
-    })
-    .to_string();
-    format!(
-        "#!/bin/sh\n\
-         # Written by Ember for one Antigravity session (SPEC FR-A5): agy's PreToolUse hook.\n\
-         # Asks the Ember server, which waits for the user's answer; denies if it cannot.\n\
-         curl -sS --fail --max-time {max} -X POST \\\n  \
-         -H 'Content-Type: application/json' \\\n  \
-         -H {auth} \\\n  \
-         --data-binary @- {url} 2>/dev/null || printf '%s\\n' {deny}\n",
-        max = HOOK_TIMEOUT_SECS - 10,
-        auth = shell_quote(&format!("Authorization: Bearer {token}")),
-        url = shell_quote(url),
-        deny = shell_quote(&deny),
-    )
+    const TEMPLATE: &str = r#"#!/bin/sh
+# Written by Ember for one Antigravity session (SPEC FR-A5, INTENT D14): agy's PreToolUse hook.
+# Asks the Ember server, which waits for the user's answer. Prints only an exact allow or a deny,
+# and always exits 0: agy runs the tool on an empty answer.
+deny=@DENY@
+reply=$(curl -sS --fail --max-time @MAX@ -X POST \
+  -H 'Content-Type: application/json' \
+  -H @AUTH@ \
+  --data-binary @- @URL@ 2>/dev/null)
+case "$reply" in
+  '{"decision":"allow"}') ;;
+  '{"decision":"deny"'*) ;;
+  *) reply=$deny ;;
+esac
+printf '%s\n' "$reply"
+exit 0
+"#;
+    TEMPLATE
+        .replace("@DENY@", &shell_quote(&hook_fallback_deny().to_string()))
+        .replace("@MAX@", &HOOK_CURL_MAX_SECS.to_string())
+        .replace("@AUTH@", &shell_quote(&format!("Authorization: Bearer {token}")))
+        .replace("@URL@", &shell_quote(url))
 }
 
 /// `mcp_config.json` for `servers`, or `None` when there are none.
@@ -436,8 +556,9 @@ impl HookBroker {
     }
 
     fn unregister(&self, token: &str) {
+        // Revokes the token: later hook calls get 401, which the hook turns into `deny`.
         if let Some(run) = self.runs.lock().unwrap().remove(token) {
-            run.cancel_all();
+            run.close();
         }
     }
 
@@ -509,30 +630,142 @@ pub fn deny_reply(reason: &str) -> Value {
     json!({ "decision": "deny", "reason": reason })
 }
 
+/// The paths a read-only tool reads, from its arguments (agy's argument names, recorded or from
+/// the tool schemas in the binary). `None` for a read-only tool without paths; `Some(vec![])`
+/// when a path argument is missing (then the call is not treated as local).
+pub fn read_paths<'a>(tool: &str, args: &'a Value) -> Option<Vec<&'a str>> {
+    let key = match tool {
+        "view_file" => "AbsolutePath",
+        "list_dir" => "DirectoryPath",
+        "find_by_name" => "SearchDirectory",
+        "grep_search" => "SearchPath",
+        _ => return None,
+    };
+    Some(args[key].as_str().into_iter().collect())
+}
+
+/// `path` is absolute, has no `..`, and lies under one of `bases`.
+fn inside(path: &str, bases: &[PathBuf]) -> bool {
+    let p = Path::new(path);
+    p.is_absolute()
+        && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+        && bases.iter().any(|b| p.starts_with(b))
+}
+
+/// Does any string in `v` mention `root`?
+fn mentions(v: &Value, roots: &[String]) -> bool {
+    match v {
+        Value::String(s) => roots.iter().any(|r| s.contains(r.as_str())),
+        Value::Array(a) => a.iter().any(|x| mentions(x, roots)),
+        Value::Object(o) => o.values().any(|x| mentions(x, roots)),
+        _ => false,
+    }
+}
+
 /// Pending approvals of one run.
 struct RunApprovals {
     events: mpsc::Sender<AgentEvent>,
-    timeout: Duration,
+    /// The session root as given and canonicalized: tool calls naming it are denied.
+    roots: Vec<String>,
     state: StdMutex<ApprovalState>,
 }
 
-#[derive(Default)]
 struct ApprovalState {
+    /// A turn of this run is running; hook calls outside one are denied.
+    open: bool,
+    policy: Policy,
+    timeout: Duration,
     /// approval_id -> (tool, answer channel)
     pending: HashMap<String, (String, oneshot::Sender<ApprovalDecision>)>,
     always_allowed: HashSet<String>,
 }
 
 impl RunApprovals {
-    fn new(events: mpsc::Sender<AgentEvent>, timeout: Duration) -> RunApprovals {
-        RunApprovals { events, timeout, state: StdMutex::new(ApprovalState::default()) }
+    fn new(events: mpsc::Sender<AgentEvent>, timeout: Duration, root: &Path, policy: Policy) -> RunApprovals {
+        let mut roots = vec![root.to_string_lossy().into_owned()];
+        if let Ok(c) = std::fs::canonicalize(root) {
+            let c = c.to_string_lossy().into_owned();
+            if !roots.contains(&c) {
+                roots.push(c);
+            }
+        }
+        RunApprovals {
+            events,
+            roots,
+            state: StdMutex::new(ApprovalState {
+                open: false,
+                policy,
+                timeout,
+                pending: HashMap::new(),
+                always_allowed: HashSet::new(),
+            }),
+        }
+    }
+
+    fn set_policy(&self, policy: Policy) {
+        self.state.lock().unwrap().policy = policy;
+    }
+
+    fn set_timeout(&self, timeout: Duration) {
+        self.state.lock().unwrap().timeout = timeout;
+    }
+
+    /// A turn starts: hook calls are answered.
+    fn open(&self) {
+        self.state.lock().unwrap().open = true;
+    }
+
+    /// The turn ended, was interrupted, or the run ended: deny everything pending and every later
+    /// hook call until the next turn.
+    fn close(&self) {
+        self.state.lock().unwrap().open = false;
+        self.cancel_all();
     }
 
     async fn decide(&self, payload: &Value) -> Value {
         let call = HookCall::from_payload(payload);
-        if READ_ONLY_TOOLS.contains(&call.tool.as_str())
-            || self.state.lock().unwrap().always_allowed.contains(&call.tool)
-        {
+        let (open, policy, timeout, always) = {
+            let st = self.state.lock().unwrap();
+            (st.open, st.policy, st.timeout, st.always_allowed.contains(&call.tool))
+        };
+        if !open {
+            return deny_reply("No Ember turn is running for this Antigravity session.");
+        }
+        if mentions(&call.input, &self.roots) {
+            return deny_reply(&format!(
+                "{} is Ember's configuration folder for this conversation, not the project. Work in \
+                 the project's folder instead (use it as the working directory).",
+                self.roots[0]
+            ));
+        }
+        if READ_ONLY_TOOLS.contains(&call.tool.as_str()) {
+            let mut bases: Vec<PathBuf> = payload["workspacePaths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_str().map(PathBuf::from))
+                .collect();
+            // agy's own conversation data (`brain/<id>/…`): sub-agents read their parent's
+            // transcript there (recorded).
+            if let Some(brain) = payload["artifactDirectoryPath"].as_str().and_then(|a| Path::new(a).parent()) {
+                bases.push(brain.to_path_buf());
+            }
+            let local = match read_paths(&call.tool, &call.input) {
+                None => true,
+                Some(paths) => !paths.is_empty() && paths.iter().all(|p| inside(p, &bases)),
+            };
+            if local {
+                return allow_reply();
+            }
+        }
+        if policy == Policy::ReadOnly {
+            return deny_reply(&format!(
+                "Ember runs this Antigravity session read-only (agy is not the tested version \
+                 {PINNED_VERSION}), so {} is not allowed.",
+                call.tool
+            ));
+        }
+        if always {
             return allow_reply();
         }
         let (tx, rx) = oneshot::channel();
@@ -549,12 +782,12 @@ impl RunApprovals {
             self.state.lock().unwrap().pending.remove(&call.approval_id);
             return deny_reply("The Ember session is gone.");
         }
-        match tokio::time::timeout(self.timeout, rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(ApprovalDecision::AllowOnce | ApprovalDecision::AllowAlways)) => allow_reply(),
             Ok(Ok(ApprovalDecision::Deny)) => {
                 deny_reply(&format!("The user denied {} in Ember.", call.tool))
             }
-            // Withdrawn: the turn was interrupted or the run shut down.
+            // Withdrawn by `close`: the turn ended or was stopped, or the run ended.
             Ok(Err(_)) => deny_reply("The turn was stopped in Ember."),
             Err(_) => {
                 self.state.lock().unwrap().pending.remove(&call.approval_id);
@@ -565,7 +798,16 @@ impl RunApprovals {
                         decision: ApprovalDecision::Deny,
                     })
                     .await;
-                deny_reply("Nobody answered in Ember in time.")
+                let _ = self
+                    .events
+                    .send(AgentEvent::Notice {
+                        message: format!("Approval for {} timed out — retry.", call.tool),
+                    })
+                    .await;
+                deny_reply(
+                    "Approval timed out in Ember; the user did not answer in time. Ask the user to \
+                     retry if the call is still needed.",
+                )
             }
         }
     }
@@ -584,9 +826,15 @@ impl RunApprovals {
         Ok(())
     }
 
-    /// Withdraw every pending approval (each hook answers `deny`).
+    /// Withdraw every pending approval: each waiting hook answers `deny`, and each card is
+    /// resolved as denied.
     fn cancel_all(&self) {
-        self.state.lock().unwrap().pending.clear();
+        let ids: Vec<String> = self.state.lock().unwrap().pending.drain().map(|(id, _)| id).collect();
+        for approval_id in ids {
+            let _ = self
+                .events
+                .try_send(AgentEvent::ApprovalResolved { approval_id, decision: ApprovalDecision::Deny });
+        }
     }
 }
 
@@ -611,6 +859,7 @@ struct AgyRun {
     home: PathBuf,
     root: PathBuf,
     new_root: bool,
+    sandbox: bool,
     req: StartRequest,
     events: mpsc::Sender<AgentEvent>,
     hooks: Arc<HookBroker>,
@@ -619,7 +868,8 @@ struct AgyRun {
     state: Arc<StdMutex<TurnState>>,
     /// The last turn's task; it ends when that process has exited.
     turn_task: Option<tokio::task::JoinHandle<()>>,
-    hook_checked: bool,
+    /// Decided from `agy --version` before the first turn.
+    policy: Option<Policy>,
 }
 
 impl AgyRun {
@@ -630,31 +880,63 @@ impl AgyRun {
         Ok(())
     }
 
-    /// Does agy list Ember's hook for this cwd and session root? (`agy -p /hooks`)
-    async fn check_hook(&self) -> anyhow::Result<()> {
-        if std::env::var("EMBER_AGY_HOOK_CHECK").as_deref() == Ok("0") {
-            return Ok(());
-        }
+    /// `agy --version` → policy. Another version than [`PINNED_VERSION`] is warned about and runs
+    /// read-only (INTENT D14 condition 5).
+    async fn check_version(&self) -> Policy {
         let out = Command::new(&self.bin)
-            .args(["-p", "/hooks", "--add-dir"])
+            .arg("--version")
+            .envs(self.req.env.iter().map(|(k, v)| (k, v)))
+            .current_dir(&self.req.cwd)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let version = match tokio::time::timeout(PREFLIGHT_TIMEOUT, out).await {
+            Ok(Ok(o)) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).split_whitespace().next().map(String::from)
+            }
+            _ => None,
+        };
+        let policy = policy_for_version(version.as_deref());
+        if policy == Policy::ReadOnly {
+            let found = version.as_deref().unwrap_or("an unknown version");
+            tracing::warn!(target: "ember::agy", "agy is {found}, not the tested {PINNED_VERSION}; read-only");
+            let _ = self
+                .events
+                .send(AgentEvent::Notice {
+                    message: format!(
+                        "Antigravity {found} is not the tested version {PINNED_VERSION}: this session \
+                         runs read-only (tools that change anything are denied) until Ember's hook \
+                         tests pass on it."
+                    ),
+                })
+                .await;
+        }
+        policy
+    }
+
+    /// Does agy list Ember's hook for this cwd and session root (`agy -p /hooks --output-format
+    /// json`)? Returns the hook's timeout as agy reports it.
+    async fn check_hook(&self) -> anyhow::Result<u64> {
+        let hooks_file = self.root.join(".agents").join("hooks.json");
+        let out = Command::new(&self.bin)
+            .args(["-p", "/hooks", "--output-format", "json", "--add-dir"])
             .arg(&self.root)
             .envs(self.req.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&self.req.cwd)
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output();
-        let out = tokio::time::timeout(Duration::from_secs(60), out)
+        let out = tokio::time::timeout(PREFLIGHT_TIMEOUT, out)
             .await
             .map_err(|_| anyhow::anyhow!("`agy -p /hooks` timed out"))??;
-        let listing = String::from_utf8_lossy(&out.stdout);
-        anyhow::ensure!(
-            listing.contains(HOOK_NAME),
-            "Antigravity did not load Ember's approval hook ({HOOK_NAME} in {}), so its tools \
-             cannot be gated; refusing to run. `agy -p /hooks` printed: {}",
-            self.root.join(".agents/hooks.json").display(),
-            listing.trim()
-        );
-        Ok(())
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        hook_listing(&stdout, &hooks_file).map_err(|why| {
+            anyhow::anyhow!(
+                "Antigravity did not load Ember's approval hook ({why}), so its tools cannot be \
+                 gated; refusing to run. `agy -p /hooks --output-format json` printed: {}",
+                stdout.trim()
+            )
+        })
     }
 }
 
@@ -673,11 +955,24 @@ impl AgentRun for AgyRun {
             }
         }
         anyhow::ensure!(!self.state.lock().unwrap().active, "a turn is already running");
-        if !self.hook_checked {
-            if let Err(e) = self.check_hook().await {
-                return self.fail(format!("{e:#}")).await;
+        let policy = match self.policy {
+            Some(p) => p,
+            None => {
+                let p = self.check_version().await;
+                self.approvals.set_policy(p);
+                self.policy = Some(p);
+                p
             }
-            self.hook_checked = true;
+        };
+        // Before every turn: hooks.json has been dropped silently before (INTENT D14 condition 4).
+        match self.check_hook().await {
+            Ok(timeout) if timeout == HOOK_TIMEOUT_SECS => self.approvals.set_timeout(APPROVAL_TIMEOUT),
+            Ok(timeout) => {
+                // Ignored or capped: answer before agy could give up on the hook.
+                tracing::warn!(target: "ember::agy", timeout, "agy reports another hook timeout");
+                self.approvals.set_timeout(CAPPED_APPROVAL_TIMEOUT);
+            }
+            Err(e) => return self.fail(format!("{e:#}")).await,
         }
         let conversation = {
             let st = self.state.lock().unwrap();
@@ -688,7 +983,10 @@ impl AgentRun for AgyRun {
             conversation.as_deref(),
             self.req.model.as_deref(),
             &self.root,
+            policy,
+            self.sandbox,
         );
+        self.approvals.open();
         let spawned = Command::new(&self.bin)
             .envs(self.req.env.iter().map(|(k, v)| (k, v)))
             .args(&args)
@@ -700,7 +998,10 @@ impl AgentRun for AgyRun {
             .spawn();
         let mut child = match spawned {
             Ok(c) => c,
-            Err(e) => return self.fail(format!("failed to start {}: {e}", self.bin.display())).await,
+            Err(e) => {
+                self.approvals.close();
+                return self.fail(format!("failed to start {}: {e}", self.bin.display())).await;
+            }
         };
         let seq = {
             let mut st = self.state.lock().unwrap();
@@ -741,8 +1042,8 @@ impl AgentRun for AgyRun {
             st.interrupted = true;
             (st.pid, st.seq)
         };
-        // A hook waiting on the user would hold agy up; it now answers `deny`.
-        self.approvals.cancel_all();
+        // A hook waiting on the user would hold agy up; it now answers `deny`, as does any later one.
+        self.approvals.close();
         if let Some(pid) = pid {
             signal(pid, Signal::Int);
             kill_later(self.state.clone(), pid, seq);
@@ -873,7 +1174,8 @@ impl Turn {
             st.active = false;
             (st.interrupted, st.shutting_down)
         };
-        self.approvals.cancel_all();
+        // Pending cards are denied; hooks after the turn's end too (background work, sub-agents).
+        self.approvals.close();
         if shutting_down && !interrupted {
             return;
         }
@@ -1050,9 +1352,18 @@ impl LineParser {
             }));
         }
         if !running(state) && self.tools_done.insert(idx) {
-            let error = s["error"].as_str().filter(|e| !e.is_empty());
-            // Not in the recorded stream; taken if a later version adds it.
-            let output = s["output"].as_str().or(error).unwrap_or_default();
+            let info = &s["tool_info"];
+            // Recorded on 1.2.16: `tool_info.error.message` (e.g. "tool call denied by pre-tool
+            // hook: …") and `tool_info.output`. The step-level fields are a fallback.
+            let error = info["error"]["message"]
+                .as_str()
+                .or(info["error"].as_str())
+                .or(s["error"].as_str())
+                .filter(|e| !e.is_empty());
+            let output = error
+                .or(info["output"].as_str())
+                .or(s["output"].as_str())
+                .unwrap_or_default();
             out.push(Parsed::Event(AgentEvent::ToolResult {
                 call_id: id,
                 output: output.to_string(),
@@ -1118,6 +1429,10 @@ mod tests {
     const TURN1: &str = include_str!("../../tests/fixtures/agy/turn1_denied.jsonl");
     const TURN2: &str = include_str!("../../tests/fixtures/agy/turn2_resumed.jsonl");
     const HOOK_PAYLOAD: &str = include_str!("../../tests/fixtures/agy/pre_tool_use.json");
+    const HOOKS_LIST: &str = include_str!("../../tests/fixtures/agy/hooks_list_1.2.16.json");
+    const DENIED_1_2_16: &str = include_str!("../../tests/fixtures/agy/turn_hook_denied_1.2.16.jsonl");
+    const OUTPUT_1_2_16: &str = include_str!("../../tests/fixtures/agy/turn_tool_output_1.2.16.jsonl");
+    const HOOK_FAILED_1_2_16: &str = include_str!("../../tests/fixtures/agy/step_hook_failed_1.2.16.jsonl");
     const CONV: &str = "04de067f-43aa-4026-b999-2fc0974a2069";
 
     fn parse_all(text: &str) -> Vec<Parsed> {
@@ -1184,6 +1499,44 @@ mod tests {
         assert_eq!(call.input["CommandLine"], "echo hello-ember");
     }
 
+    #[test]
+    fn recorded_hook_denial_is_a_failed_tool_with_the_reason() {
+        let out = parse_all(DENIED_1_2_16);
+        let result = out
+            .iter()
+            .find_map(|p| match p {
+                Parsed::Event(AgentEvent::ToolResult { output, is_error, .. }) => Some((output.clone(), *is_error)),
+                _ => None,
+            })
+            .expect("a tool result");
+        assert_eq!(result, ("tool call denied by pre-tool hook: test hook denies".to_string(), true));
+        assert!(matches!(out.last(), Some(Parsed::TurnEnd { error: None })));
+        // 1.2.16 streams text deltas.
+        assert!(out.iter().any(|p| matches!(p, Parsed::Event(AgentEvent::AssistantDelta { .. }))));
+
+        let out = parse_all(HOOK_FAILED_1_2_16);
+        assert!(matches!(&out[..], [
+            Parsed::Event(AgentEvent::ToolCall { .. }),
+            Parsed::Event(AgentEvent::ToolResult { output, is_error: true, .. }),
+        ] if output.contains("exit status 1")));
+    }
+
+    #[test]
+    fn recorded_tool_output_is_the_result() {
+        let out = parse_all(OUTPUT_1_2_16);
+        let results: Vec<(&str, bool)> = out
+            .iter()
+            .filter_map(|p| match p {
+                Parsed::Event(AgentEvent::ToolResult { output, is_error, .. }) => Some((output.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert!(!results.is_empty());
+        for (output, is_error) in results {
+            assert_eq!((output, is_error), ("touch: marker: Operation not permitted\r\n", false));
+        }
+    }
+
     // The following lines are hand-written (not recorded).
 
     #[test]
@@ -1234,17 +1587,95 @@ mod tests {
     }
 
     #[test]
-    fn args_cover_resume_model_and_the_session_root() {
-        let args = AntigravityAdapter::turn_args("hi", Some("abc"), Some("gemini-3.8-flash-low"), Path::new("/r"));
+    fn args_cover_resume_model_sandbox_and_the_session_root() {
+        let args = AntigravityAdapter::turn_args(
+            "hi",
+            Some("abc"),
+            Some("gemini-3.8-flash-low"),
+            Path::new("/r"),
+            Policy::Gated,
+            true,
+        );
         assert_eq!(&args[..2], ["-p", "hi"]);
         assert!(args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
         assert!(args.windows(2).any(|w| w == ["--add-dir", "/r"]));
+        assert!(args.contains(&"--sandbox".to_string()));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--conversation=abc".to_string()));
         assert!(args.windows(2).any(|w| w == ["--model", "gemini-3.8-flash-low"]));
-        let args = AntigravityAdapter::turn_args("-x", None, None, Path::new("/r"));
+        assert!(!args.contains(&"--new-project".to_string()), "it leaves a project file per run");
+        let args = AntigravityAdapter::turn_args("-x", None, None, Path::new("/r"), Policy::Gated, false);
         assert_eq!(args[1], " -x");
-        assert!(!args.iter().any(|a| a.starts_with("--conversation") || a == "--model"));
+        assert!(!args.iter().any(|a| a.starts_with("--conversation") || a == "--model" || a == "--sandbox"));
+    }
+
+    #[test]
+    fn read_only_policy_keeps_agys_own_gate() {
+        let args = AntigravityAdapter::turn_args("hi", None, None, Path::new("/r"), Policy::ReadOnly, true);
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()), "{args:?}");
+        assert!(args.contains(&"--sandbox".to_string()));
+    }
+
+    #[test]
+    fn only_the_pinned_version_is_gated() {
+        assert_eq!(policy_for_version(Some(PINNED_VERSION)), Policy::Gated);
+        assert_eq!(policy_for_version(Some("1.2.17")), Policy::ReadOnly);
+        assert_eq!(policy_for_version(Some("1.2.1")), Policy::ReadOnly);
+        assert_eq!(policy_for_version(None), Policy::ReadOnly);
+    }
+
+    #[test]
+    fn recorded_hooks_listing() {
+        // Recorded with a test hook named `ember-test-gate`; the check is by name and file.
+        let listing = HOOKS_LIST.replace("ember-test-gate", HOOK_NAME);
+        let file = Path::new("/work/agy-probe/root/.agents/hooks.json");
+        assert_eq!(hook_listing(&listing, file), Ok(3600));
+        assert!(hook_listing(HOOKS_LIST, file).unwrap_err().contains("not listed"));
+        assert!(hook_listing(&listing, Path::new("/elsewhere/.agents/hooks.json")).is_err());
+        assert!(hook_listing(&listing.replace("\"enabled\":true", "\"enabled\":false"), file)
+            .unwrap_err()
+            .contains("disabled"));
+        assert!(hook_listing(&listing.replace("\"matcher\":\"*\"", "\"matcher\":\"run_command\""), file).is_err());
+        assert!(hook_listing(&listing.replace("PreToolUse", "PostToolUse"), file).is_err());
+        assert!(hook_listing("ember-approvals\tenabled", file).is_err(), "text output is not accepted");
+        assert!(hook_listing("", file).is_err());
+        // A capped timeout is reported, not hidden.
+        assert_eq!(hook_listing(&listing.replace("3600", "30"), file), Ok(30));
+    }
+
+    #[test]
+    fn hook_script_prints_only_allow_or_deny_and_exits_zero() {
+        let script = hook_script("http://127.0.0.1:1/h", "tok");
+        // agy 1.2.16 runs the tool on an empty answer or `ask` (SPEC §A test 4).
+        assert!(script.contains(r#"'{"decision":"allow"}') ;;"#), "{script}");
+        assert!(script.contains(r#"'{"decision":"deny"'*) ;;"#), "{script}");
+        assert!(script.contains("*) reply=$deny ;;"), "{script}");
+        assert!(script.trim_end().ends_with("exit 0"), "{script}");
+        assert!(!script.contains(r#""decision":"ask""#), "{script}");
+        assert!(script.contains(&format!("--max-time {HOOK_CURL_MAX_SECS}")));
+        assert!(HOOK_CURL_MAX_SECS < HOOK_TIMEOUT_SECS);
+        assert!(APPROVAL_TIMEOUT < Duration::from_secs(HOOK_CURL_MAX_SECS));
+        assert_eq!(hook_fallback_deny()["decision"], "deny");
+        // Exactly what the route answers, byte for byte.
+        assert_eq!(allow_reply().to_string(), r#"{"decision":"allow"}"#);
+        assert!(deny_reply("x").to_string().starts_with(r#"{"decision":"deny""#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_script_denies_when_ember_is_unreachable() {
+        // Port 9 on loopback: nothing listens. curl fails; the hook must still print a deny, exit 0.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hook.sh");
+        std::fs::write(&path, hook_script("http://127.0.0.1:9/h", "t")).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["decision"], "deny");
     }
 
     #[test]
@@ -1291,16 +1722,34 @@ mod tests {
         assert!(remember_root(&home, "../x", &root).is_err());
     }
 
+    const ROOT: &str = "/nonexistent/ember-agy/sessions/r1";
+
+    fn gated(tx: mpsc::Sender<AgentEvent>, timeout: Duration) -> Arc<RunApprovals> {
+        let run = Arc::new(RunApprovals::new(tx, timeout, Path::new(ROOT), Policy::Gated));
+        run.open();
+        run
+    }
+
+    fn call(tool: &str, step: u64, args: Value) -> Value {
+        json!({
+            "conversationId": "c",
+            "stepIdx": step,
+            "toolCall": {"name": tool, "args": args},
+            "workspacePaths": [ROOT, "/work/project"],
+            "artifactDirectoryPath": "/home/user/.gemini/antigravity-cli/brain/c",
+        })
+    }
+
     #[tokio::test]
     async fn broker_waits_for_the_answer() {
         let (tx, mut rx) = mpsc::channel(16);
         let broker = HookBroker::new();
-        let run = Arc::new(RunApprovals::new(tx, Duration::from_secs(30)));
+        let run = gated(tx, Duration::from_secs(30));
         broker.register("t", run.clone());
         let payload: Value = serde_json::from_str(HOOK_PAYLOAD).unwrap();
 
         assert!(broker.handle("wrong", &payload).await.is_none());
-        let read = json!({"conversationId": "c", "stepIdx": 1, "toolCall": {"name": "view_file", "args": {}}});
+        let read = call("view_file", 1, json!({"AbsolutePath": "/work/project/a.rs"}));
         assert_eq!(broker.handle("t", &read).await, Some(allow_reply()));
 
         let b = broker.clone();
@@ -1317,32 +1766,129 @@ mod tests {
         assert_eq!(broker.handle("t", &payload).await, Some(allow_reply()));
         assert!(rx.try_recv().is_err());
 
-        // Another tool is denied; an unregistered run withdraws what is pending.
-        let write = json!({"conversationId": "c", "stepIdx": 9, "toolCall": {"name": "write_to_file", "args": {}}});
+        // Another tool is denied.
+        let write = call("write_to_file", 9, json!({"TargetFile": "/work/project/b"}));
         let b = broker.clone();
         let w = write.clone();
         let waiting = tokio::spawn(async move { b.handle("t", &w).await });
         let Some(AgentEvent::ApprovalRequested { approval_id, .. }) = rx.recv().await else { panic!() };
         run.answer(&approval_id, ApprovalDecision::Deny).unwrap();
         assert_eq!(waiting.await.unwrap().unwrap()["decision"], "deny");
+
+        // Revoking the token denies what is pending, resolves its card, and forgets the token.
         let b = broker.clone();
-        let waiting = tokio::spawn(async move { b.handle("t", &write).await });
-        let _ = rx.recv().await;
+        let w = write.clone();
+        let waiting = tokio::spawn(async move { b.handle("t", &w).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, .. }) = rx.recv().await else { panic!() };
         broker.unregister("t");
         assert_eq!(waiting.await.unwrap().unwrap()["decision"], "deny");
+        assert_eq!(
+            rx.recv().await,
+            Some(AgentEvent::ApprovalResolved { approval_id, decision: ApprovalDecision::Deny })
+        );
+        assert!(broker.handle("t", &write).await.is_none(), "the token is revoked (401 → hook denies)");
     }
 
     #[tokio::test]
-    async fn unanswered_approval_times_out_as_deny() {
+    async fn turn_end_denies_pending_cards_and_later_hooks() {
         let (tx, mut rx) = mpsc::channel(16);
-        let run = RunApprovals::new(tx, Duration::from_millis(50));
+        let run = gated(tx, Duration::from_secs(30));
+        let r = run.clone();
+        let waiting = tokio::spawn(async move { r.decide(&call("run_command", 3, json!({"CommandLine": "ls"}))).await });
+        let Some(AgentEvent::ApprovalRequested { approval_id, .. }) = rx.recv().await else { panic!() };
+        run.close();
+        assert_eq!(waiting.await.unwrap()["decision"], "deny");
+        assert_eq!(
+            rx.recv().await,
+            Some(AgentEvent::ApprovalResolved { approval_id, decision: ApprovalDecision::Deny })
+        );
+        // No turn: even a read is denied, without asking.
+        let read = call("view_file", 4, json!({"AbsolutePath": "/work/project/a"}));
+        assert_eq!(run.decide(&read).await["decision"], "deny");
+        assert!(rx.try_recv().is_err());
+        run.open();
+        assert_eq!(run.decide(&read).await, allow_reply());
+    }
+
+    #[tokio::test]
+    async fn reads_are_free_only_inside_the_workspaces() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let run = gated(tx, Duration::from_millis(50));
+        for ok in [
+            call("view_file", 1, json!({"AbsolutePath": "/work/project/src/a.rs"})),
+            call("list_dir", 2, json!({"DirectoryPath": "/work/project"})),
+            call("grep_search", 3, json!({"SearchPath": "/work/project", "Query": "x"})),
+            call("find_by_name", 4, json!({"SearchDirectory": "/work/project/src"})),
+            // A sub-agent reading its parent's transcript in agy's brain folder (recorded).
+            call("view_file", 5, json!({"AbsolutePath": "/home/user/.gemini/antigravity-cli/brain/p/logs/t.jsonl"})),
+            call("command_status", 6, json!({"CommandId": "1"})),
+        ] {
+            assert_eq!(run.decide(&ok).await, allow_reply(), "{ok}");
+        }
+        assert!(rx.try_recv().is_err(), "nothing was asked");
+        for asks in [
+            call("view_file", 7, json!({"AbsolutePath": "/home/user/.ssh/id_ed25519"})),
+            call("view_file", 8, json!({"AbsolutePath": "/work/project/../../etc/passwd"})),
+            call("view_file", 9, json!({"AbsolutePath": "relative.txt"})),
+            call("view_file", 10, json!({})),
+        ] {
+            assert_eq!(run.decide(&asks).await["decision"], "deny", "{asks}");
+            assert!(matches!(rx.recv().await, Some(AgentEvent::ApprovalRequested { .. })), "{asks}");
+            while let Ok(ev) = rx.try_recv() {
+                assert!(matches!(ev, AgentEvent::ApprovalResolved { .. } | AgentEvent::Notice { .. }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_session_root_is_off_limits() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let run = gated(tx, Duration::from_secs(30));
+        for c in [
+            // Recorded on 1.2.16: the model chose the session root as the command's Cwd.
+            call("run_command", 1, json!({"CommandLine": "touch marker", "Cwd": ROOT})),
+            call("view_file", 2, json!({"AbsolutePath": format!("{ROOT}/.agents/ember-hook.sh")})),
+            call("write_to_file", 3, json!({"TargetFile": format!("{ROOT}/.agents/hooks.json")})),
+            call("run_command", 4, json!({"CommandLine": format!("cat {ROOT}/.agents/ember-hook.sh"), "Cwd": "/work/project"})),
+        ] {
+            let reply = run.decide(&c).await;
+            assert_eq!(reply["decision"], "deny", "{c}");
+            assert!(reply["reason"].as_str().unwrap().contains("not the project"));
+        }
+        assert!(rx.try_recv().is_err(), "denied without asking");
+    }
+
+    #[tokio::test]
+    async fn read_only_policy_denies_without_asking() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let run = Arc::new(RunApprovals::new(tx, Duration::from_secs(30), Path::new(ROOT), Policy::ReadOnly));
+        run.open();
+        assert_eq!(run.decide(&call("view_file", 1, json!({"AbsolutePath": "/work/project/a"}))).await, allow_reply());
+        let reply = run.decide(&call("run_command", 2, json!({"CommandLine": "ls", "Cwd": "/work/project"}))).await;
+        assert_eq!(reply["decision"], "deny");
+        assert!(reply["reason"].as_str().unwrap().contains("read-only"));
+        assert_eq!(run.decide(&call("view_file", 3, json!({"AbsolutePath": "/etc/hosts"}))).await["decision"], "deny");
+        assert!(rx.try_recv().is_err(), "read-only never asks");
+        // A later switch to gated (the pinned version) asks again.
+        run.set_policy(Policy::Gated);
+        run.set_timeout(Duration::from_millis(20));
+        let _ = run.decide(&call("run_command", 4, json!({"CommandLine": "ls"}))).await;
+        assert!(matches!(rx.recv().await, Some(AgentEvent::ApprovalRequested { .. })));
+    }
+
+    #[tokio::test]
+    async fn unanswered_approval_times_out_as_deny_with_a_retry_notice() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let run = gated(tx, Duration::from_millis(50));
         let payload: Value = serde_json::from_str(HOOK_PAYLOAD).unwrap();
         let reply = run.decide(&payload).await;
         assert_eq!(reply["decision"], "deny");
+        assert!(reply["reason"].as_str().unwrap().contains("timed out"));
         assert!(matches!(rx.recv().await, Some(AgentEvent::ApprovalRequested { .. })));
         assert!(matches!(
             rx.recv().await,
             Some(AgentEvent::ApprovalResolved { decision: ApprovalDecision::Deny, .. })
         ));
+        assert!(matches!(rx.recv().await, Some(AgentEvent::Notice { message }) if message.contains("timed out — retry")));
     }
 }

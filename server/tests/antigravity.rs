@@ -57,7 +57,7 @@ async fn detect_reports_version_or_not_installed() {
     let home = tempfile::tempdir().unwrap();
     let d = AntigravityAdapter::new(fake_bin(), home.path(), HookBroker::new()).detect().await;
     assert!(d.installed);
-    assert_eq!(d.version.as_deref(), Some("9.9.9"));
+    assert_eq!(d.version.as_deref(), Some(antigravity::PINNED_VERSION));
     let d = AntigravityAdapter::new("/nonexistent/agy", home.path(), HookBroker::new()).detect().await;
     assert!(!d.installed);
 }
@@ -107,7 +107,7 @@ async fn fake_cli_turns_with_hook_approvals_resume_and_interrupt() {
     assert_eq!(
         tail,
         [
-            &AgentEvent::ToolResult { call_id: "fake-conv:2".into(), output: String::new(), is_error: false },
+            &AgentEvent::ToolResult { call_id: "fake-conv:2".into(), output: "hi\n".into(), is_error: false },
             // Per-turn usage from the steps (output + thinking), not the conversation total.
             &AgentEvent::Usage { input_tokens: 3, output_tokens: 5 },
             &AgentEvent::AssistantMessage { text: "done".into() },
@@ -148,13 +148,17 @@ async fn fake_cli_turns_with_hook_approvals_resume_and_interrupt() {
     }
     run.shutdown().await.unwrap();
 
+    // The hook check runs before every turn (INTENT D14 condition 4).
     let args = std::fs::read_to_string(cwd.path().join("args.log")).unwrap();
     let lines: Vec<&str> = args.lines().collect();
-    assert_eq!(lines.len(), 5, "hook check + 4 turns: {args}");
-    assert!(lines[0].starts_with("-p /hooks --add-dir "), "{args}");
-    assert!(lines[1].contains("--dangerously-skip-permissions") && lines[1].contains("--model m1"));
-    assert!(!lines[1].contains("--conversation"), "{args}");
-    for l in &lines[2..] {
+    assert_eq!(lines.len(), 8, "a hook check before each of 4 turns: {args}");
+    for pair in lines.chunks(2) {
+        assert!(pair[0].starts_with("-p /hooks --output-format json --add-dir "), "{args}");
+        assert!(pair[1].contains("--output-format stream-json"), "{args}");
+        assert!(pair[1].contains("--dangerously-skip-permissions") && pair[1].contains("--sandbox"), "{args}");
+    }
+    assert!(lines[1].contains("--model m1") && !lines[1].contains("--conversation"), "{args}");
+    for l in [lines[3], lines[5], lines[7]] {
         assert!(l.contains("--conversation=fake-conv"), "{args}");
     }
     let decisions = std::fs::read_to_string(cwd.path().join("decisions.log")).unwrap();
@@ -181,10 +185,89 @@ async fn a_hook_that_was_not_loaded_fails_the_turn() {
     let mut run =
         adapter.start(StartRequest { cwd: cwd.path().into(), ..Default::default() }, tx).await.unwrap();
     run.send("hello").await.unwrap();
+    // It prints no version either, so the run is read-only — but it does not run at all.
+    assert!(matches!(next(&mut rx, 20).await, AgentEvent::Notice { message } if message.contains("read-only")));
     assert!(matches!(next(&mut rx, 20).await, AgentEvent::Error { message } if message.contains("approval hook")));
     assert_eq!(next(&mut rx, 20).await, AgentEvent::TurnEnded { outcome: TurnOutcome::Failed });
     let args = std::fs::read_to_string(cwd.path().join("args.log")).unwrap();
-    assert_eq!(args.lines().count(), 1, "only the check ran: {args}");
+    assert!(args.lines().any(|l| l.starts_with("-p /hooks --output-format json")), "{args}");
+    assert!(!args.contains("stream-json"), "no turn ran: {args}");
+}
+
+#[tokio::test]
+async fn another_agy_version_runs_read_only() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let adapter = AntigravityAdapter::new(fake_bin(), home.path(), serve_hooks().await);
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = adapter
+        .start(
+            StartRequest {
+                cwd: cwd.path().to_path_buf(),
+                env: vec![("FAKE_AGY_VERSION".into(), "9.9.9".into())],
+                ..Default::default()
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    run.send("hello").await.unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let ev = next(&mut rx, 20).await;
+        assert!(!matches!(ev, AgentEvent::ApprovalRequested { .. }), "read-only never asks");
+        let done = matches!(ev, AgentEvent::TurnEnded { .. });
+        seen.push(ev);
+        if done {
+            break;
+        }
+    }
+    assert!(matches!(&seen[0], AgentEvent::Notice { message } if message.contains("9.9.9") && message.contains("read-only")));
+    assert!(seen.iter().any(|e| matches!(e, AgentEvent::ToolResult { is_error: true, .. })));
+    run.shutdown().await.unwrap();
+    let decisions = std::fs::read_to_string(cwd.path().join("decisions.log")).unwrap();
+    let d: serde_json::Value = serde_json::from_str(decisions.trim()).unwrap();
+    assert_eq!(d["decision"], "deny");
+    assert!(d["reason"].as_str().unwrap().contains("read-only"));
+    let args = std::fs::read_to_string(cwd.path().join("args.log")).unwrap();
+    assert!(!args.contains("--dangerously-skip-permissions"), "agy's own gate stays on: {args}");
+}
+
+#[tokio::test]
+async fn a_hook_call_after_the_run_ended_is_denied_by_the_hook() {
+    // The token is revoked with the run: the route answers 401 and the hook script prints deny.
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let adapter = AntigravityAdapter::new(fake_bin(), home.path(), serve_hooks().await);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut run = adapter.start(StartRequest { cwd: cwd.path().to_path_buf(), ..Default::default() }, tx).await.unwrap();
+    run.shutdown().await.unwrap();
+    let script = std::fs::read_dir(home.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join(".agents/ember-hook.sh");
+    let mut child = std::process::Command::new("sh")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"conversationId":"c","stepIdx":1,"toolCall":{"name":"run_command","args":{}}}"#)
+            .unwrap();
+    }
+    let out = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()).await.unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["decision"], "deny");
 }
 
 /// Collect events until `TurnEnded`, answering approvals with `decide`.

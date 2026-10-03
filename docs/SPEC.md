@@ -91,6 +91,54 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 > The 09-22 transcript parsers in `proxy/dpx/agents/` (Claude Code, Codex) satisfy part of
 > `FR-A3` for reading existing history and are kept (`INTENT.md` D13).
 
+### §A Antigravity — the reinforced hook (FR-A5, `INTENT.md` D14) [user]
+
+Antigravity (`agy`) has no headless approval channel and no ACP. Ember runs it with
+`--dangerously-skip-permissions --sandbox` and makes its own `PreToolUse` hook (matcher `*`, in a
+per-session folder passed with `--add-dir`) the only gate. **[user, 2026-10-03]** the "reinforced
+hook" design, relayed by the darkpyonix leader. Implementation: `server/src/agents/antigravity.rs`.
+
+| ID | Requirement | Acceptance criteria |
+| -- | ----------- | ------------------- |
+| **FR-A5a** | The hook config sets an explicit `timeout` (3600 s); Ember answers `deny` before it expires (route 3480 s < hook curl 3540 s < agy 3600 s) and shows "approval timed out — retry". If agy reports another timeout, Ember denies at 20 s. | Unit tests `unanswered_approval_times_out_as_deny_with_a_retry_notice`, `recorded_hooks_listing`; test 3 below. |
+| **FR-A5b** | The hook prints exactly `allow` or a `deny` and exits 0 on any error (curl missing, unreachable server, non-2xx, unknown or revoked token, empty or unexpected body). It never answers `ask`. | `hook_script_*` unit tests, `a_hook_call_after_the_run_ended_is_denied_by_the_hook`; tests 4. |
+| **FR-A5c** | A fresh random token per run, revoked when it ends. Ending, interrupting or shutting down a turn denies every pending approval and resolves its card; hook calls outside a turn are denied. | `broker_waits_for_the_answer`, `turn_end_denies_pending_cards_and_later_hooks`. |
+| **FR-A5d** | Before **every** turn `agy -p /hooks --output-format json` must list Ember's hook from this session's folder, enabled, `PreToolUse` matcher `*`; otherwise the turn is refused. | `a_hook_that_was_not_loaded_fails_the_turn`, `recorded_hooks_listing`. |
+| **FR-A5e** | `--sandbox` is passed (off only with `EMBER_AGY_SANDBOX=0`). The agy version is pinned (`PINNED_VERSION` = 1.2.16); another version gets a notice and runs read-only: no `--dangerously-skip-permissions`, only read-only tools inside the workspaces, everything else denied without asking. | `only_the_pinned_version_is_gated`, `read_only_policy_*`, `another_agy_version_runs_read_only`. |
+| **FR-A5f** | No global agy configuration is written: the hook lives in the session folder, so the user's own agy sessions are unaffected. Tool calls naming the session folder are denied (it holds the token and the hook). Read-only tools are free only inside the workspaces and agy's `brain/`; elsewhere they ask. | `the_session_root_is_off_limits`, `reads_are_free_only_inside_the_workspaces`. |
+
+**Hook tests on agy 1.2.16** (2026-10-03, macOS, model `gemini-3.6-flash-low`; standalone
+`sh` hook logging its stdin; throwaway folders under `.scratch/agy-tests/`; harmless commands
+only). Every run: `agy -p "<prompt>" --output-format stream-json --add-dir <folder>/root
+--new-project --model gemini-3.6-flash-low --dangerously-skip-permissions [extra]` from
+`<folder>/work`, `root/.agents/hooks.json` = one `PreToolUse` hook, matcher `*`. The prompt asked for
+`touch marker` unless noted; "marker" = whether the file appeared anywhere in the folder.
+Recordings: `server/tests/fixtures/agy/*_1.2.16.*`.
+
+| # | Test | Setup | Observed | Result |
+| - | ---- | ----- | -------- | ------ |
+| 0 | Hook loaded from an untrusted `--add-dir` folder | `agy -p /hooks --output-format json --add-dir root` | JSON `command.data.hooks[]` with `name`, `enabled`, `source` (the file), `actions[].event/matcher/timeout_seconds` (3600) | PASS |
+| 1 | Hook runs under skip-permissions | hook answers `allow`, timeout 3600 | hook called once (payload logged), `touch` ran: marker created (in the session folder: the model chose it as `Cwd`) | PASS |
+| 2 | `deny` blocks | hook `deny`; also with `--sandbox` | step `ERROR`, `tool call denied by pre-tool hook: …`; no marker, both runs | PASS |
+| 3 | Long timeout holds the tool | (a) timeout 600, hook sleeps 90 s then `deny`; (b) no timeout (default 30), sleeps 45 s then `deny`; (c) timeout 600, sleeps 70 s then `allow` | (a) tool waited 90.3 s, denied, no marker; (b) hook killed at 31 s, `failed: command failed: signal: killed`, **no marker** (AionCore saw 1.1.9 run the tool here); (c) tool ran after 70.2 s | PASS |
+| 4 | Hook failures | exit 1, no output; exit 2 with `allow` on stdout; `kill -9` itself; prints `this is not json {`; command `/nonexistent/…` | all: step `ERROR` (`exit status 1` / `exit status 2` / `signal: killed` / `failed to unmarshal result` / `exit status 127`), no marker | PASS |
+| 4+ | Other outputs (extra probes) | exit 0 with: empty stdout (blank line, or zero bytes); `{}`; `{"decision":""}`; `{"decision":"maybe"}`; `{"decision":"ask"}` | **empty stdout → tool RAN**; **`ask` → tool RAN** (skip-permissions approves it); `{}`, `""`, `maybe` → denied | FAIL-OPEN, compensated: Ember's hook never prints empty or `ask` (FR-A5b) |
+| 5 | Sub-agents, `call_mcp_tool`, browser | (s) hook denies only `run_command`, prompt delegates `touch` to `invoke_subagent`; (m) hook `deny`, stdio test MCP server in `root/.agents/mcp_config.json`; (b) hook `deny`, `open_browser_url file://…` | (s) the sub-agent's `run_command` reached the hook (its own `conversationId`), denied, no marker; (m) MCP server got `initialize`/`tools/list`, `call_mcp_tool {ServerName, ToolName}` reached the hook, denied, server never got `tools/call`; (b) model reported the browser tools unavailable (no browser connected), no tool call | PASS (s, m); browser **untestable** here |
+| 6 | Several hooks: deny wins | `a-allow`+`b-deny`; `a-deny`+`b-allow`; `allow` and `deny` hooks in two `--add-dir` folders | denied in all three; hooks run in order, `allow` does not stop later hooks, `deny` does | PASS |
+| 7 | Parallel tool calls | one response with three `run_command` (`touch m1/m2/m3`), hook sleeps 5 s then `deny` | three hook calls (steps 2, 3, 4), run one after another, all denied, no markers | PASS |
+
+Other observations (1.2.16): the hook inherits agy's environment; the session folder is listed
+first in `workspacePaths` even when the project is also passed with `--add-dir`, and the model
+picked it as `Cwd` (FR-A5f denies that); `--sandbox` refused shell writes even in the project
+(`touch: marker: Operation not permitted`) while `write_to_file` worked; the stream now carries
+`tool_info.output`, `tool_info.error.message` and `text_delta`; `--new-project` left one project
+file per run in `~/.gemini/config/projects/` (not used by the adapter; the test files were
+removed). Not verified: browser tools; the read-only fallback against a real different agy
+version; the end-to-end adapter test (`EMBER_E2E_AGY=1`) on 1.2.16.
+
+**Outcome:** tests 1–7 pass on 1.2.16 (browser tools untestable); Antigravity sessions on 1.2.16
+run gated, any other version read-only.
+
 ---
 
 ## §X — Execution on computers (D4)

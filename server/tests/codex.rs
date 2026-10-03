@@ -84,6 +84,7 @@ async fn codex_read_edit_run_with_approval_then_resume() {
         instructions: None,
         remote: None,
         mcp_servers: Vec::new(),
+        computer: None,
     };
     let mut run = adapter.start(req, tx).await.unwrap();
     let thread_id = match rx.recv().await.unwrap() {
@@ -125,6 +126,7 @@ async fn codex_read_edit_run_with_approval_then_resume() {
         instructions: None,
         remote: None,
         mcp_servers: Vec::new(),
+        computer: None,
     };
     let mut run = adapter.start(req, tx).await.unwrap();
     assert_eq!(rx.recv().await.unwrap(), AgentEvent::NativeSession { native_id: thread_id });

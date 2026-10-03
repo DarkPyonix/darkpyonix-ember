@@ -11,6 +11,7 @@ One folder, one concern.
 | `home/`          | The back end of the home screen — conversation API, recent folders |
 | `agents/`        | Agent conversation adapters (Claude Code, Codex)            |
 | `hub/`           | The hub showing several machines on one home screen (optional) |
+| `serve.py`       | `python -m dpx.serve` — runtime server + proxy in one non-interactive entry |
 
 App assembly and request routing live in `main.py` at the repository root.
 """

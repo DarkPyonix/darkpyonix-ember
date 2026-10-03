@@ -1,0 +1,408 @@
+//! Wire types shared by the daemon ([`crate::api`]) and the client ([`crate::client`]).
+//!
+//! Every request and response is JSON. Byte payloads (file contents, process output, stdin) are
+//! base64 strings so that one encoding carries over any transport — the node ↔ server transport
+//! is not decided yet (`INTENT.md` Q7). Bump [`PROTOCOL_VERSION`] on any incompatible change.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// Incremented on incompatible wire changes; reported by `/v1/health`.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Serde helper: `Vec<u8>` as a standard base64 string.
+pub mod b64 {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&STANDARD.encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        STANDARD.decode(s).map_err(serde::de::Error::custom)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Errors
+
+/// Body of every non-2xx response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErrorBody {
+    pub code: ErrorCode,
+    pub error: String,
+    /// Set on [`ErrorCode::PreconditionFailed`]: the file's current hash, `None` if it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    Unauthorized,
+    /// The path resolves outside every allowed root.
+    ForbiddenPath,
+    NotFound,
+    PreconditionFailed,
+    BadRequest,
+    Internal,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Health and environment
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Health {
+    pub ok: bool,
+    pub version: String,
+    pub protocol: u32,
+}
+
+/// Description of the computer, for the agent's replaceable environment block (FR-X3, FR-S7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvInfo {
+    /// `std::env::consts::OS`: `macos`, `linux`, …
+    pub os: String,
+    /// Human-readable OS release, e.g. `macOS 26.5` or the `PRETTY_NAME` of `/etc/os-release`.
+    pub os_version: Option<String>,
+    /// Kernel release (`uname -r`).
+    pub kernel: Option<String>,
+    /// `std::env::consts::ARCH`: `aarch64`, `x86_64`, …
+    pub arch: String,
+    pub hostname: String,
+    pub user: Option<String>,
+    pub home: Option<PathBuf>,
+    /// The user's login shell (`$SHELL`).
+    pub shell: Option<String>,
+    /// The roots file and exec operations are confined to.
+    pub roots: Vec<PathBuf>,
+    /// Toolchains found on the daemon's `PATH`, keyed by tool name.
+    pub toolchains: BTreeMap<String, Toolchain>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Toolchain {
+    pub path: PathBuf,
+    /// First non-empty line of `<tool> --version` (or the tool's equivalent).
+    pub version: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Files
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathRequest {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stat {
+    /// The canonical path (symlinks resolved).
+    pub path: PathBuf,
+    pub kind: FileKind,
+    pub size: u64,
+    /// Modification time, milliseconds since the Unix epoch.
+    pub mtime_ms: Option<u64>,
+    /// Unix permission bits.
+    pub mode: u32,
+    pub readonly: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadRequest {
+    pub path: PathBuf,
+    /// First byte to return (default 0).
+    #[serde(default)]
+    pub offset: u64,
+    /// Maximum bytes to return (default and cap: [`MAX_READ`]).
+    #[serde(default)]
+    pub len: Option<u64>,
+    /// Hash the whole file (default true). Turn off for large files when only a range is needed.
+    #[serde(default = "yes")]
+    pub hash: bool,
+}
+
+/// Largest range one read returns.
+pub const MAX_READ: u64 = 16 * 1024 * 1024;
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadResponse {
+    pub path: PathBuf,
+    /// Size of the whole file.
+    pub size: u64,
+    pub mtime_ms: Option<u64>,
+    /// SHA-256 of the **whole file** (hex), the observation key of FR-S7. `None` if `hash: false`.
+    pub sha256: Option<String>,
+    pub offset: u64,
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
+    /// True when the returned range reaches the end of the file.
+    pub eof: bool,
+}
+
+/// Write precondition, checked under the daemon's write lock immediately before the rename.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "sha256")]
+pub enum Expect {
+    /// The file must not exist (create-only).
+    Absent,
+    /// The file must exist with exactly this SHA-256 (hex).
+    Sha256(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteRequest {
+    pub path: PathBuf,
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
+    #[serde(default)]
+    pub expect: Option<Expect>,
+    /// Create missing parent directories (inside an allowed root).
+    #[serde(default)]
+    pub create_parents: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteResponse {
+    pub path: PathBuf,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub kind: FileKind,
+    pub size: u64,
+    pub mtime_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListResponse {
+    pub path: PathBuf,
+    /// Sorted by name.
+    pub entries: Vec<DirEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobRequest {
+    /// Directory to search under.
+    pub root: PathBuf,
+    /// Glob matched against the path relative to `root`; `*` does not cross `/`, `**` does.
+    pub pattern: String,
+    /// Skip files ignored by `.gitignore`/`.ignore` and hidden files (default true, like `rg`).
+    #[serde(default = "yes")]
+    pub respect_ignore: bool,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobResponse {
+    /// Absolute paths, most recently modified first.
+    pub paths: Vec<PathBuf>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrepRequest {
+    /// File or directory to search.
+    pub root: PathBuf,
+    /// Regular expression (Rust `regex` syntax, as ripgrep).
+    pub pattern: String,
+    /// Only search files whose path relative to `root` matches this glob.
+    #[serde(default)]
+    pub glob: Option<String>,
+    #[serde(default)]
+    pub case_insensitive: bool,
+    #[serde(default = "yes")]
+    pub respect_ignore: bool,
+    /// Maximum matching lines returned (default 1000).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrepMatch {
+    pub path: PathBuf,
+    /// 1-based.
+    pub line: u64,
+    /// The matching line without its terminator, lossily decoded, truncated to 2000 bytes.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrepResponse {
+    pub matches: Vec<GrepMatch>,
+    pub truncated: bool,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commands
+
+/// What to run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Program {
+    /// Run this argv directly (no shell).
+    Argv(Vec<String>),
+    /// Run through `/bin/sh -c`. Use `Argv(["zsh", "-lc", …])` for another shell.
+    Shell(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub program: Program,
+    /// Working directory; must be inside an allowed root.
+    pub cwd: PathBuf,
+    /// Variables added to (or overriding) the daemon's environment.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Start from an empty environment instead of the daemon's.
+    #[serde(default)]
+    pub env_clear: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PtySize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// First message a client sends on `/v1/exec`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecRequest {
+    #[serde(flatten)]
+    pub command: CommandSpec,
+    /// Run under a pseudo-terminal of this size. Output then arrives as `stdout` only.
+    #[serde(default)]
+    pub pty: Option<PtySize>,
+}
+
+/// Client → daemon messages on `/v1/exec` after the [`ExecRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ExecInput {
+    Stdin {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// Close stdin (pipe mode). In PTY mode send `\x04` as stdin instead.
+    CloseStdin,
+    /// PTY mode only.
+    Resize { size: PtySize },
+    /// Signal the process group (default `SIGTERM`).
+    Kill {
+        #[serde(default)]
+        signal: Option<i32>,
+    },
+}
+
+/// Daemon → client messages on `/v1/exec`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ExecEvent {
+    Started { pid: u32 },
+    Stdout {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    Stderr {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// Last message. Exactly one of `code` and `signal` is set.
+    Exit { code: Option<i32>, signal: Option<i32> },
+    /// The command could not be started or the session failed; last message.
+    Error { message: String },
+}
+
+// ---------------------------------------------------------------------------------------------
+// Background jobs (FR-X4)
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRequest {
+    #[serde(flatten)]
+    pub command: CommandSpec,
+    /// Free-form label shown in listings (e.g. the session that started it).
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    Running,
+    Exited,
+    Signaled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobInfo {
+    pub id: String,
+    pub label: Option<String>,
+    pub program: Program,
+    pub cwd: PathBuf,
+    pub pid: Option<u32>,
+    pub state: JobState,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub started_ms: u64,
+    pub finished_ms: Option<u64>,
+    /// Total bytes of output produced so far (stdout and stderr together).
+    pub output_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobDetail {
+    #[serde(flatten)]
+    pub info: JobInfo,
+    /// The last bytes of combined stdout+stderr, lossily decoded.
+    pub tail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KillRequest {
+    #[serde(default)]
+    pub signal: Option<i32>,
+}
+
+/// Node → server notifications on `/v1/events?after=<seq>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeEvent {
+    /// Strictly increasing for the daemon's lifetime; resume with `after=<last seen>`.
+    pub seq: u64,
+    /// Identifies this daemon run; a change means sequence numbers restarted.
+    pub boot_id: String,
+    #[serde(flatten)]
+    pub kind: NodeEventKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum NodeEventKind {
+    JobStarted { job: JobInfo },
+    JobFinished {
+        job: JobInfo,
+        /// Output tail at completion (same as [`JobDetail::tail`]).
+        tail: String,
+    },
+}

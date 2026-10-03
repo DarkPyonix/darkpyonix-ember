@@ -174,7 +174,7 @@ impl OpenWindow {
         let folder = self.workspace.as_ref()?.folder.as_deref()?;
         let mut q = format!("/?folder={}", encode_uri_component(folder));
         if let Some(uri) = &self.file_uri {
-            let has_query_or_fragment = uri.contains(|c: char| c == '?' || c == '#');
+            let has_query_or_fragment = uri.contains(['?', '#']);
             let payload: Vec<[String; 2]> = match self.cursor {
                 Some(c) if !has_query_or_fragment => vec![
                     [

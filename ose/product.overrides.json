@@ -1,0 +1,37 @@
+{
+  "nameShort": "DarkPyonix OSE",
+  "nameLong": "DarkPyonix OSE",
+  "applicationName": "dpx-ose",
+  "dataFolderName": ".dpx-ose",
+  "sharedDataFolderName": ".dpx-ose-shared",
+  "serverApplicationName": "dpx-ose-server",
+  "serverDataFolderName": ".dpx-ose-server",
+  "tunnelApplicationName": "dpx-ose-tunnel",
+  "urlProtocol": "dpx-ose",
+  "linuxIconName": "dpx-ose",
+  "linuxDesktopName": "com.darkpyonix.OSE",
+  "darwinBundleIdentifier": "com.darkpyonix.ose",
+  "win32MutexName": "dpxose",
+  "win32DirName": "DarkPyonix OSE",
+  "win32NameVersion": "DarkPyonix OSE",
+  "win32RegValueName": "DarkPyonixOSE",
+  "win32AppUserModelId": "DarkPyonix.OSE",
+  "win32ShellNameShort": "DarkPyonix &OSE",
+  "quality": "stable",
+  "licenseName": "MIT",
+  "licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+  "serverLicenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+  "reportIssueUrl": "https://github.com/DarkPyonix/darkpyonix-ember/issues/new",
+  "enableTelemetry": false,
+  "extensionsGallery": {
+    "serviceUrl": "https://open-vsx.org/vscode/gallery",
+    "itemUrl": "https://open-vsx.org/vscode/item",
+    "publisherUrl": "https://open-vsx.org/namespace",
+    "extensionUrlTemplate": "https://open-vsx.org/vscode/gallery/{publisher}/{name}/latest",
+    "resourceUrlTemplate": "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+    "controlUrl": "https://raw.githubusercontent.com/EclipseFdn/publish-extensions/refs/heads/master/extension-control/extensions.json"
+  },
+  "linkProtectionTrustedDomains": [
+    "https://open-vsx.org"
+  ]
+}

@@ -34,6 +34,9 @@ pub enum SessionError {
     NotFound(String),
     #[error("agent {0} is not available on this server")]
     AgentUnavailable(&'static str),
+    /// The requested account cannot be used, or the router found none available (FR-U2/U3).
+    #[error("{0}")]
+    Account(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -63,9 +66,29 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Contributes environment variables to an agent process when its session starts.
 pub type StartHook = Arc<dyn Fn(&SessionRecord) -> Vec<(String, String)> + Send + Sync>;
 
+/// Observes every event after it is stored (e.g. rate-limit detection, FR-U3). Runs inline on
+/// the session's event pump, so it must be quick.
+pub type EventHook = Arc<dyn Fn(&StoredEvent) + Send + Sync>;
+
+/// An account chosen for a new session: `(account id, reason)`.
+pub type AccountChoice = (String, String);
+
+/// Picks the account for a new session (FR-U2, FR-U3). Given the agent and the account the
+/// client asked for (`None` = let the router choose), returns the account to use, `Ok(None)` to
+/// use the server's own agent login, or `Err(reason)` when no account may be used.
+pub type AccountRouter =
+    Arc<dyn Fn(AgentKind, Option<&str>) -> Result<Option<AccountChoice>, String> + Send + Sync>;
+
+/// Contributes system-level instructions to an agent process when its session starts (e.g. how
+/// to use the A2A tool). Contributions are joined with blank lines.
+pub type InstructionsHook = Arc<dyn Fn(&SessionRecord) -> Option<String> + Send + Sync>;
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
+    event_hooks: std::sync::Mutex<Vec<EventHook>>,
+    account_router: std::sync::Mutex<Option<AccountRouter>>,
+    instructions_hooks: std::sync::Mutex<Vec<InstructionsHook>>,
     adapters: HashMap<AgentKind, Arc<dyn AgentAdapter>>,
     live: Mutex<HashMap<String, LiveRun>>,
     push: broadcast::Sender<Push>,
@@ -81,6 +104,9 @@ impl Sessions {
         Arc::new(Sessions {
             store,
             start_hooks: std::sync::Mutex::new(Vec::new()),
+            event_hooks: std::sync::Mutex::new(Vec::new()),
+            account_router: std::sync::Mutex::new(None),
+            instructions_hooks: std::sync::Mutex::new(Vec::new()),
             adapters: adapters.into_iter().map(|a| (a.kind(), a)).collect(),
             live: Mutex::new(HashMap::new()),
             push,
@@ -92,6 +118,21 @@ impl Sessions {
     /// Register a hook that adds environment to every agent process this server starts.
     pub fn add_start_hook(&self, hook: StartHook) {
         self.start_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Register a hook that sees every stored event.
+    pub fn add_event_hook(&self, hook: EventHook) {
+        self.event_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Install the account router used by [`Sessions::create_with_account`].
+    pub fn set_account_router(&self, router: AccountRouter) {
+        *self.account_router.lock().unwrap() = Some(router);
+    }
+
+    /// Register a hook that adds instructions to every agent process this server starts.
+    pub fn add_instructions_hook(&self, hook: InstructionsHook) {
+        self.instructions_hooks.lock().unwrap().push(hook);
     }
 
     pub fn store(&self) -> &Store {
@@ -114,24 +155,52 @@ impl Sessions {
     }
 
     pub fn create(&self, new: NewSession) -> Result<SessionRecord, SessionError> {
+        self.create_with_account(new, None)
+    }
+
+    /// Create a session under `account`, or under the router's choice when `None` (FR-U2). The
+    /// account is fixed for the session's lifetime.
+    pub fn create_with_account(
+        &self,
+        new: NewSession,
+        account: Option<&str>,
+    ) -> Result<SessionRecord, SessionError> {
         if !self.adapters.contains_key(&new.agent) {
             return Err(SessionError::AgentUnavailable(new.agent.as_str()));
         }
-        let rec = self.store.create_session(
+        let router = self.account_router.lock().unwrap().clone();
+        let choice = match (router, account) {
+            (Some(route), requested) => route(new.agent, requested).map_err(SessionError::Account)?,
+            (None, Some(id)) => {
+                return Err(SessionError::Account(format!("account {id}: accounts are not enabled")))
+            }
+            (None, None) => None,
+        };
+        let rec = self.store.create_session_with_account(
             &new.project,
             new.agent,
             &new.cwd.to_string_lossy(),
             new.model.as_deref(),
             &new.title,
+            choice.as_ref().map(|(id, why)| (id.as_str(), why.as_str())),
         )?;
         let _ = self.push.send(Push::SessionCreated { v: PUSH_VERSION, session: rec.clone() });
         Ok(rec)
+    }
+
+    /// Record and push an event that did not come from the agent (e.g. an A2A notice).
+    pub fn record_event(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
+        self.record(session_id, event)
     }
 
     /// Record and push one event.
     fn record(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
         let (stored, status) = self.store.append(session_id, event)?;
         self.touch(session_id);
+        let hooks = self.event_hooks.lock().unwrap().clone();
+        for hook in hooks {
+            hook(&stored);
+        }
         let _ = self.push.send(Push::Event { v: PUSH_VERSION, status, event: stored });
         Ok(())
     }
@@ -150,6 +219,8 @@ impl Sessions {
             .clone();
         let env: Vec<(String, String)> =
             self.start_hooks.lock().unwrap().iter().flat_map(|h| h(&rec)).collect();
+        let instructions: Vec<String> =
+            self.instructions_hooks.lock().unwrap().iter().filter_map(|h| h(&rec)).collect();
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
         let run = adapter
             .start(
@@ -158,6 +229,7 @@ impl Sessions {
                     resume_native_id: rec.native_id.clone(),
                     model: rec.model.clone(),
                     env,
+                    instructions: (!instructions.is_empty()).then(|| instructions.join("\n\n")),
                 },
                 tx.clone(),
             )

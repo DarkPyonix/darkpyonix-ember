@@ -42,7 +42,8 @@ from dpx.auth.api import SESSION_COOKIE, auth_app, init_db, user_count, validate
 from dpx.auth.gate import is_public_path
 from dpx.home import api as home_api
 from dpx.home import workspaces
-from dpx.vscode import extension, inject, proxy
+from dpx.config import FOLDER_ROOTS
+from dpx.vscode import extension, inject, proxy, roots, runtime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("proxy")
@@ -128,6 +129,13 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.get("/__runtime")
+def vscode_runtime():
+    """The VSC runtime check (INTEGRATION.md "VSC 런타임 설정 흐름"): is `code` installed,
+    which version, and install guidance if not. Needs a session (it names local paths)."""
+    return JSONResponse(runtime.detect())
+
+
 # Must be registered **before** the catch-all below. Otherwise it is shadowed, goes upstream
 # and 404s.
 @app.get("/healthz")
@@ -168,6 +176,7 @@ def _serve_our_page(request: Request, path: str, xmo: str) -> Response | None:
 # The path a single request takes — in order, top to bottom
 #   1. Internal endpoints (/healthz, /__ext/*) pass straight through
 #   2. The auth gate: anything not public needs a valid session
+#   2b. Folder roots: `?folder=` / `?workspace=` outside DPX_FOLDER_ROOTS → 403
 #   3. Our screens (home, login, the frame wrapper) are served from static/ and end here
 #   4. The workbench main CSS → with the overlay CSS appended
 #   5. Webview host frames → with the keyboard policy JS added
@@ -193,6 +202,14 @@ async def route_request(request: Request, call_next):
                 # A top-level navigation → send it to the login page, preserving the destination
                 return RedirectResponse(f"/login?next={quote(str(request.url))}", status_code=303)
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    # 2b. Folder roots — a workspace outside the configured roots is refused here, before it
+    #     is recorded as recent or reaches serve-web. No roots configured = no restriction.
+    refused = roots.refused_param(dict(request.query_params), FOLDER_ROOTS)
+    if refused:
+        logger.info(">> REFUSED %s outside folder roots", refused)
+        return JSONResponse({"error": f"{refused} is outside the allowed folder roots"},
+                            status_code=403)
 
     xmo = request.query_params.get("xmo", "").lower()
 

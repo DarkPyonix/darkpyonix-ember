@@ -1,0 +1,32 @@
+[package]
+name = "ember-node"
+version = "0.1.0"
+edition = "2021"
+description = "Ember node: the execution daemon that carries out tool actions on each computer"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+futures = "0.3"
+globset = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+hex = "0.4"
+ignore = "0.4"
+libc = "0.2"
+portable-pty = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -109,7 +109,9 @@ def read_tail_lines(path: Path, max_bytes: int = TAIL_BYTES) -> list[str]:
             data = f.read()
     except Exception:
         return []
-    return data.decode("utf-8", "replace").splitlines()
+    # split on "\n" only: str.splitlines() also breaks on U+2028/U+0085, which JSON writers
+    # leave unescaped inside strings, and would cut such a line in two.
+    return data.decode("utf-8", "replace").split("\n")
 
 
 def read_head_lines(path: Path, count: int = 40) -> list[str]:

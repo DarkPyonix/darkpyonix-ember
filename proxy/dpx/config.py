@@ -8,6 +8,8 @@ import os
 import time
 from pathlib import Path
 
+from dpx.vscode.roots import parse_roots
+
 # --- Upstream: stock VS Code Web (`code serve-web`) -------------------------
 # If it was started on a different port, XMO_UPSTREAM_PORT must say so (default 9092).
 UPSTREAM_HOST = os.environ.get("XMO_UPSTREAM_HOST", "127.0.0.1")
@@ -15,6 +17,12 @@ UPSTREAM_PORT = int(os.environ.get("XMO_UPSTREAM_PORT", "9092"))
 UPSTREAM_SCHEME = "http"
 UPSTREAM_BASE = f"{UPSTREAM_SCHEME}://{UPSTREAM_HOST}:{UPSTREAM_PORT}"
 UPSTREAM_WS_SCHEME = "ws" if UPSTREAM_SCHEME == "http" else "wss"
+
+# --- Folder roots -------------------------------------------------------------
+# Which folders `?folder=` / `?workspace=` may open (dpx/vscode/roots.py). Separated by
+# os.pathsep. Unset = no restriction (the standalone proxy's original behaviour); the
+# `python -m dpx.serve` launcher always sets it.
+FOLDER_ROOTS = parse_roots(os.environ.get("DPX_FOLDER_ROOTS"))
 
 # --- Paths ------------------------------------------------------------------
 # BASE_DIR = the repository root. This file lives in dpx/, so go up two levels.

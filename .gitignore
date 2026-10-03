@@ -47,3 +47,7 @@ dist-ssr
 
 # Isolated worktrees for parallel agents
 .claude/worktrees/
+
+# OSE build workdir and packages (ose/build.sh; builds run in CI)
+ose/.work/
+ose/dist/

@@ -309,6 +309,11 @@ async fn agent_relay_activity_and_takeover() {
 
     let (mut agent, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
     let b = m.get("agent").await.unwrap();
+    // The relay counts the connection once it has attached upstream, just after the upgrade.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while b.state().borrow().agent_connections != 1 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(b.state().borrow().agent_connections, 1);
 
     let call = |id: u64| Message::Text(json!({ "id": id, "method": "Browser.getVersion" }).to_string().into());

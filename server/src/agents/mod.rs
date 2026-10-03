@@ -57,6 +57,10 @@ pub struct StartRequest {
     /// Extra environment for the agent process, from the session's start hooks (account
     /// isolation, A2A runtime credentials, …). Applied on top of the server's environment.
     pub env: Vec<(String, String)>,
+    /// Extra system-level instructions for the agent, from the session's instruction hooks
+    /// (e.g. how to use the A2A tool). Claude Code gets them via `--append-system-prompt`, Codex
+    /// as the thread's `developerInstructions`.
+    pub instructions: Option<String>,
 }
 
 /// Result of probing for an installed agent (FR-A6).

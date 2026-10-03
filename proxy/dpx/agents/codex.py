@@ -25,6 +25,15 @@ def _payload(obj: dict) -> dict:
     return p if isinstance(p, dict) else obj
 
 
+# Context Codex injects as "user" input blocks; not something the user typed.
+_INJECTED = ("<environment_context>", "<user_instructions>", "<recommended_plugins>",
+             "<permissions instructions>", "# AGENTS.md instructions")
+
+
+def _is_injected(block) -> bool:
+    return isinstance(block, dict) and str(block.get("text") or "").startswith(_INJECTED)
+
+
 def _message_of(obj: dict) -> Message | None:
     p = _payload(obj)
     if p.get("type") not in ("message", "response_item", None):
@@ -33,7 +42,10 @@ def _message_of(obj: dict) -> Message | None:
     role = p.get("role")
     if role not in ("user", "assistant", "system"):
         return None
-    text, kind = flatten_content(p.get("content"))
+    content = p.get("content")
+    if role == "user" and isinstance(content, list):
+        content = [b for b in content if not _is_injected(b)]
+    text, kind = flatten_content(content)
     if not text.strip():
         return None
     return Message(role=role, text=text, ts=_ts(obj.get("timestamp") or p.get("timestamp")), kind=kind)
@@ -116,7 +128,7 @@ class CodexAdapter(AgentAdapter):
         if not path:
             return []
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
         except Exception:
             return []
         out = [m for m in (_message_of(o) for o in iter_json(lines)) if m]

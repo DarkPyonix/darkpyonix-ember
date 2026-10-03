@@ -97,6 +97,9 @@ impl CodexAdapter {
         if let Some(sandbox) = &self.sandbox {
             p.insert("sandbox".into(), json!(sandbox));
         }
+        if let Some(text) = &req.instructions {
+            p.insert("developerInstructions".into(), json!(text));
+        }
         p
     }
 }
@@ -450,6 +453,11 @@ struct Mapper {
     last_total_tokens: Option<u64>,
     /// An `Error` was already emitted for this turn.
     turn_errored: bool,
+    /// Reset times (Unix ms) of the windows the latest `account/rateLimits/updated` showed
+    /// exhausted, and whether a
+    /// `RateLimited` was already emitted for the current exhaustion.
+    limit_resets: Vec<i64>,
+    limit_reported: bool,
 }
 
 impl Mapper {
@@ -488,8 +496,26 @@ impl Mapper {
             "error" if p["willRetry"] != json!(true) => {
                 self.turn_errored = true;
                 let message = str_at(p, "/error/message").unwrap_or("codex error").to_string();
-                vec![AgentEvent::Error { message }]
+                let mut out = Vec::new();
+                // `codexErrorInfo` is `"usageLimitExceeded"` (plan quota) or
+                // `"rateLimitExceeded"` (HTTP 429 after retries) per the 0.155.1 schema
+                // (`ErrorNotification` → `TurnError.codexErrorInfo`).
+                if matches!(
+                    str_at(p, "/error/codexErrorInfo"),
+                    Some("usageLimitExceeded" | "rateLimitExceeded")
+                ) {
+                    self.limit_reported = true;
+                    let resets_at = self.limit_resets.iter().copied().max();
+                    out.push(AgentEvent::RateLimited { resets_at, message: message.clone() });
+                }
+                out.push(AgentEvent::Error { message });
+                out
             }
+            // `{"rateLimits":{"primary":{"usedPercent":…,"windowDurationMins":…,"resetsAt":<unix s>},
+            // "secondary":…,"rateLimitReachedType":…}}` (0.155.1 schema,
+            // `AccountRateLimitsUpdatedNotification`). Updates are sparse: absent windows keep their
+            // last value. A window at 100% or a reached-type means the account is exhausted.
+            "account/rateLimits/updated" => self.rate_limits_updated(&p["rateLimits"]),
             "serverRequest/resolved" => {
                 let id = &p["requestId"];
                 self.approvals.retain(|_, a| &a.rpc_id != id);
@@ -497,6 +523,36 @@ impl Mapper {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn rate_limits_updated(&mut self, rl: &Value) -> Vec<AgentEvent> {
+        let windows: Vec<&Value> =
+            ["primary", "secondary"].iter().map(|k| &rl[*k]).filter(|w| w.is_object()).collect();
+        if windows.is_empty() && rl["rateLimitReachedType"].is_null() {
+            return Vec::new();
+        }
+        let exhausted: Vec<i64> = windows
+            .iter()
+            .filter(|w| w["usedPercent"].as_i64().unwrap_or(0) >= 100)
+            .filter_map(|w| w["resetsAt"].as_i64().map(|s| s * 1000))
+            .collect();
+        let reached = !rl["rateLimitReachedType"].is_null()
+            || windows.iter().any(|w| w["usedPercent"].as_i64().unwrap_or(0) >= 100);
+        if !windows.is_empty() {
+            self.limit_resets = exhausted.clone();
+        }
+        if !reached {
+            self.limit_reported = false;
+            return Vec::new();
+        }
+        if std::mem::replace(&mut self.limit_reported, true) {
+            return Vec::new();
+        }
+        let kind = rl["rateLimitReachedType"].as_str().unwrap_or("rate_limit_reached");
+        vec![AgentEvent::RateLimited {
+            resets_at: exhausted.into_iter().max(),
+            message: format!("Codex {kind}"),
+        }]
     }
 
     fn turn_completed(&mut self, p: &Value) -> Vec<AgentEvent> {
@@ -790,6 +846,15 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn instructions_become_developer_instructions() {
+        let req = StartRequest { instructions: Some("use ember-a2a".into()), ..Default::default() };
+        let p = CodexAdapter::new("codex").thread_params(&req);
+        assert_eq!(p.get("developerInstructions"), Some(&json!("use ember-a2a")));
+        let p = CodexAdapter::new("codex").thread_params(&StartRequest::default());
+        assert!(!p.contains_key("developerInstructions"));
+    }
+
     const SESSION: &str = include_str!("../../tests/fixtures/codex/session.jsonl");
     const SYNTHETIC: &str = include_str!("../../tests/fixtures/codex/synthetic.jsonl");
 
@@ -941,6 +1006,36 @@ mod tests {
                 AgentEvent::TurnEnded { outcome: TurnOutcome::Failed },
             ]
         );
+    }
+
+    #[test]
+    fn rate_limits_and_usage_limit_errors_become_rate_limited() {
+        let mut m = Mapper::default();
+        let below = json!({"rateLimits": {"primary": {"usedPercent": 80, "windowDurationMins": 300, "resetsAt": 1_790_990_000}}});
+        assert!(m.on_notification("account/rateLimits/updated", &below).is_empty());
+        let full = json!({"rateLimits": {"primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1_790_990_000}, "rateLimitReachedType": "rate_limit_reached"}});
+        let limited = AgentEvent::RateLimited {
+            resets_at: Some(1_790_990_000_000),
+            message: "Codex rate_limit_reached".into(),
+        };
+        assert_eq!(m.on_notification("account/rateLimits/updated", &full), [limited]);
+        // Reported once per exhaustion.
+        assert!(m.on_notification("account/rateLimits/updated", &full).is_empty());
+        let err = json!({"threadId": "t", "turnId": "u", "willRetry": false,
+            "error": {"message": "You've hit your usage limit.", "codexErrorInfo": "usageLimitExceeded"}});
+        assert_eq!(
+            m.on_notification("error", &err),
+            [
+                AgentEvent::RateLimited {
+                    resets_at: Some(1_790_990_000_000),
+                    message: "You've hit your usage limit.".into(),
+                },
+                AgentEvent::Error { message: "You've hit your usage limit.".into() },
+            ]
+        );
+        let other = json!({"threadId": "t", "turnId": "u", "willRetry": false,
+            "error": {"message": "bad", "codexErrorInfo": "badRequest"}});
+        assert_eq!(m.on_notification("error", &other), [AgentEvent::Error { message: "bad".into() }]);
     }
 
     #[test]

@@ -70,7 +70,18 @@ view, ember server calls that computer's darkpyonix manager HTTP API over the tu
 (`darkpyonix-core/docs/ARCHITECTURE.md` §6). The kernel stack knows nothing about conversations,
 accounts or computer switching.
 
-### 1.3 Relationship to `proxy/` today
+### 1.3 Repository layout
+
+| Path | What |
+| ---- | ---- |
+| `server/` | ember server (Rust) |
+| `node/` | ember node, the execution daemon (Rust) |
+| `transport/` | the transport interface and its iroh backend (FR-N5) |
+| `client/` | the client core below the dioxus-compose UI |
+| `proxy/` | the IDE window wrapping layer (Python) |
+| `extensions/` | editor extensions: `vscode-darkpyonix`, `vscode-darkpyonix-theme`, `intellij-darkpyonix` |
+
+### 1.4 Relationship to `proxy/` today
 
 `proxy/` (merged in #1) is a FastAPI service in front of `code serve-web`. Its parts map onto this
 topology as follows (`INTENT.md` D13, *[provisional]*):

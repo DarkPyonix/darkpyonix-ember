@@ -193,10 +193,28 @@ Ember's wrapping layer, whose current implementation is `proxy/` (merged in #1).
 지워."). The Tauri parts of `docs/design/INTEGRATION.md` are marked obsolete; its VS Code runtime
 choice (D10) and mobile WebView notes still apply to the IDE window.
 
+### D9a — "Open IDE" has three different implementations; Ember's own is the editor core
+
+**Decision.** [user, 2026-10-03: "vscode 옵션은 ide를 웹으로 띄우는거고, gateway는 컴퓨터에 깔려있는
+jetbrains gateway에 명령을 내려서 띄우는거고, 엠버 자체는 에디터 코어로 구현해야지? … 그게 바로
+dioxus-compose를 구현하고 있는 이유일텐데?"]
+- **VS Code** — VS Code Web on the session's computer, wrapped by `proxy/` (D11).
+- **Gateway** — a command to the JetBrains Gateway installed on that computer.
+- **Ember** — our editor core, drawn by `dioxus-compose`: no webview and no JavaScript engine.
+  dioxus-compose rebuilds the Code-OSS workbench DOM in Rust and renders it with Code-OSS's CSS. A
+  native code editor widget replaces Monaco. Ember owns the connection layer: the Code-OSS server's
+  management and extension-host connections, the remote filesystem, and the per-category bridges
+  (`docs/design/EDITOR-CONNECTION.md`).
+
+**Consequence.** M8 (the editor core) is in scope and dated (`PROJECT.md`). The official Node
+Extension Host is still never reimplemented (E4): the editor core speaks Code-OSS's own
+renderer ↔ extension-host protocol to it. That protocol is internal, so each OSE build pins one
+Code-OSS commit, and the actor table is generated from that commit.
+
 ### D10 — Two VS Code runtimes: OSE by default, the official build as an option
 
-**Decision.** [provisional — from `docs/design/INTEGRATION.md`, user-committed 2026-10-02; the
-brief itself names no build] The IDE window supports two VS Code runtimes:
+**Decision.** [user, 2026-10-03: "이거 기본값은 OSE 빌드본으로 하고, 유저가 세팅에서 바꿀 수 있도록
+하는거 아니었나?"; `docs/design/INTEGRATION.md`] The IDE window supports two VS Code runtimes:
 
 | | OSE | VSC |
 | - | --- | --- |
@@ -207,6 +225,17 @@ brief itself names no build] The IDE window supports two VS Code runtimes:
 
 **Consequence for E4.** The 09-22 rule "the official marketplace must work" became "the marketplace
 matching the chosen runtime works" — the OSE default cannot reach the Microsoft Marketplace.
+
+**Licence of Microsoft's VS Code Server.** [darkpyonix leader's reading, 2026-10-03, not legal
+advice] Its licence (code.visualstudio.com/license/server) allows using it "with Microsoft Visual
+Studio Code to develop and test your applications". It forbids hosting, sharing, publishing,
+renting or leasing it, and forbids combining it "with any of your applications for others to use".
+So:
+- OSE is the default.
+- VSC is offered only as the user's own `code serve-web` from their own Microsoft install, labelled
+  as the user's responsibility.
+- Ember never downloads, bundles or installs Microsoft's server.
+- OSE uses Open VSX only; the Microsoft Marketplace's terms are for Microsoft products.
 
 **Mobile without Node.** [user] On Android and iOS the IDE window must work without Node, through a
 `serve-web`-compatible Rust backend or by direct local access through web APIs. This does **not**

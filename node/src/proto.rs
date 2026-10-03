@@ -405,4 +405,283 @@ pub enum NodeEventKind {
         /// Output tail at completion (same as [`JobDetail::tail`]).
         tail: String,
     },
+    /// A persistent terminal session was created (or re-adopted after a node restart).
+    TermStarted { term: TermInfo },
+    /// A persistent terminal session's process exited, was killed, or was found lost.
+    TermFinished { term: TermInfo },
+}
+
+// ---------------------------------------------------------------------------------------------
+// Persistent terminal sessions (SPEC §P, docs/design/TERMINALS.md)
+
+/// What started a persistent terminal session (FR-P6).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum TermOrigin {
+    /// A VS Code (IDE window) terminal, task or debuggee.
+    IdeVscode,
+    /// The Ember editor's terminal panel or run action.
+    IdeEmber,
+    /// An agent's tool call.
+    Agent,
+    /// Started by hand (e.g. `ember-term` in a plain terminal).
+    User,
+}
+
+impl TermOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TermOrigin::IdeVscode => "ide-vscode",
+            TermOrigin::IdeEmber => "ide-ember",
+            TermOrigin::Agent => "agent",
+            TermOrigin::User => "user",
+        }
+    }
+}
+
+impl std::str::FromStr for TermOrigin {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "ide-vscode" => TermOrigin::IdeVscode,
+            "ide-ember" => TermOrigin::IdeEmber,
+            "agent" => TermOrigin::Agent,
+            "user" => TermOrigin::User,
+            other => return Err(format!("unknown origin {other:?} (ide-vscode, ide-ember, agent, user)")),
+        })
+    }
+}
+
+/// `POST /v1/terms`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermCreateRequest {
+    /// What to run. `None`: the login shell of the daemon's user (`$SHELL`, else `/bin/sh`;
+    /// with `-l` on macOS, as VS Code does).
+    #[serde(default)]
+    pub program: Option<Program>,
+    /// Working directory; must be inside an allowed root.
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Start from an empty environment plus `env` (a client forwarding its whole environment).
+    #[serde(default)]
+    pub env_clear: bool,
+    /// Initial size (default 24×80). Later the size follows the attached clients (FR-P4).
+    #[serde(default)]
+    pub size: Option<PtySize>,
+    pub origin: TermOrigin,
+    /// The project the session belongs to (normally the workspace folder's absolute path);
+    /// listings filter on it.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Display name; the program's OSC title is reported separately.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Idempotency key: if a **running** session already has this key, it is returned instead
+    /// of starting a new one (`created: false`). The attach-or-create primitive.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Free-form labels for clients (e.g. `vscode.pid`, `vscode.mode`).
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermCreateResponse {
+    /// False when `key` matched a running session.
+    pub created: bool,
+    pub term: TermInfo,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TermState {
+    Running,
+    /// The process exited (or was killed).
+    Exited,
+    /// Found running in the metadata of a previous node run but could not be re-adopted: the
+    /// process died with that node, or its PTY could not be recovered.
+    Lost,
+}
+
+/// One attached client.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TermClient {
+    /// Unique within the session for the daemon's lifetime.
+    pub client: u64,
+    /// Human-readable device / window label shown in "controlled by <device>".
+    pub device: String,
+    /// Client kind, e.g. `ember-term`, `ember-editor`, `agent`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The client's process id on this computer, if it runs here (ember-term).
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub read_only: bool,
+    /// The client's own viewport size, if it reported one.
+    #[serde(default)]
+    pub size: Option<PtySize>,
+    pub attached_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TermInfo {
+    pub id: String,
+    #[serde(default)]
+    pub key: Option<String>,
+    /// The requested title, else the program's last OSC title, else the program name.
+    pub title: String,
+    pub origin: TermOrigin,
+    #[serde(default)]
+    pub project: Option<String>,
+    /// The argv actually started.
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    /// The session leader (the shell); `None` once finished.
+    pub pid: Option<u32>,
+    pub state: TermState,
+    /// Exit status. Both `None` after `Exited` means unknown (the process was re-adopted after
+    /// a node restart and is not the daemon's child, so its status cannot be collected).
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub size: PtySize,
+    pub created_ms: u64,
+    pub finished_ms: Option<u64>,
+    /// Last output or input.
+    pub last_activity_ms: u64,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    pub clients: Vec<TermClient>,
+    /// The client that has taken control, if any (FR-P4).
+    pub controller: Option<TermClient>,
+    /// A PTY keeper holds the session's PTY, so the process survives an ember node restart
+    /// (best effort).
+    pub survives_node_restart: bool,
+    /// This session was re-adopted from a previous node run.
+    pub adopted: bool,
+    /// Attaching yields a screen snapshot (false for lost sessions and for finished sessions
+    /// loaded from disk).
+    pub has_screen: bool,
+}
+
+/// `GET /v1/terms` query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TermListQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TermOrigin>,
+    /// Only running (`true`) or only finished (`false`) sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<bool>,
+}
+
+/// `GET /v1/terms/{id}/snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermSnapshot {
+    pub size: PtySize,
+    /// Escape sequences that redraw scrollback, screen, cursor and modes on a reset terminal.
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
+    /// The visible screen as plain text, one line per row (trailing blanks trimmed).
+    pub text: String,
+}
+
+/// `POST /v1/terms/{id}/control`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermControlRequest {
+    /// The attached client that takes or releases control.
+    pub client: u64,
+    pub take: bool,
+}
+
+/// First message a client sends on `/v1/terms/{id}/attach`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermHello {
+    pub device: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// The client's viewport size.
+    #[serde(default)]
+    pub size: Option<PtySize>,
+    /// Count this attach as activity, so the session takes this client's size when nobody has
+    /// control. A background re-attach (e.g. restoring the terminal list) sets `false`.
+    #[serde(default)]
+    pub active: bool,
+    /// Never send input (viewer).
+    #[serde(default)]
+    pub read_only: bool,
+    /// Send a [`TermEvent::Snapshot`] first (default true).
+    #[serde(default = "yes")]
+    pub snapshot: bool,
+}
+
+/// Client → daemon messages on `/v1/terms/{id}/attach` after the [`TermHello`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum TermInput {
+    /// Keystrokes / paste. Serialized with other clients' input in arrival order.
+    Input {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// This client's viewport size.
+    Resize { size: PtySize },
+    TakeControl,
+    ReleaseControl,
+    /// Signal the session (default SIGHUP, escalating to SIGKILL after a grace period).
+    Kill {
+        #[serde(default)]
+        signal: Option<i32>,
+    },
+    /// Detach (same as closing the socket). Never ends the session.
+    Detach,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TermRefusal {
+    /// Another client has control.
+    Controlled,
+    /// This client attached read-only.
+    ReadOnly,
+    /// The session is not running.
+    NotRunning,
+}
+
+/// Daemon → client messages on `/v1/terms/{id}/attach`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum TermEvent {
+    /// First message: this client's id and the session.
+    Attached { client: u64, term: TermInfo },
+    /// Reset the terminal, then write `data` (scrollback, screen, cursor, modes, title).
+    /// Sent once, right after `attached`; `output` continues exactly where it ends.
+    Snapshot {
+        size: PtySize,
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// Raw PTY output.
+    Output {
+        #[serde(with = "b64")]
+        data: Vec<u8>,
+    },
+    /// The PTY size changed.
+    Resized { size: PtySize },
+    /// Control changed hands (`None`: released; everyone may type).
+    Control { controller: Option<TermClient> },
+    /// This client's input was not delivered.
+    Refused { reason: TermRefusal, controller: Option<TermClient> },
+    /// The set of attached clients changed.
+    Clients { clients: Vec<TermClient> },
+    /// The program set (or reset) its title.
+    Title { title: Option<String> },
+    /// The process exited; last message. Both `None`: status unknown (re-adopted session).
+    Exit { code: Option<i32>, signal: Option<i32> },
+    /// Attach failed, or this client was dropped (e.g. too slow); last message.
+    Error { message: String },
 }

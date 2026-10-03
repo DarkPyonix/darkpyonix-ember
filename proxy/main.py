@@ -13,6 +13,7 @@ This file does **assembly and routing only**. The modules below do the actual wo
 | `dpx/auth/`              | The login app (`/auth`) + the session gate           |
 | `dpx/vscode/`            | Upstream relay, overlay injection, the extension gate |
 | `dpx/home/`              | The home screen API + the recent workspace record    |
+| `dpx/terms/`             | ember node's persistent terminals, relayed (`/__terms/*`) |
 | `dpx/agents/`            | Agent conversation adapters (Claude Code, Codex)     |
 | `dpx/hub/`               | The hub showing several machines on one home (optional) |
 
@@ -42,6 +43,7 @@ from dpx.auth.api import SESSION_COOKIE, auth_app, init_db, user_count, validate
 from dpx.auth.gate import is_public_path
 from dpx.home import api as home_api
 from dpx.home import workspaces
+from dpx.terms import api as terms_api
 from dpx.vscode import extension, inject, proxy
 
 logging.basicConfig(level=logging.INFO)
@@ -78,6 +80,9 @@ if user_count() == 0:
 # Internal JSON APIs
 app.include_router(home_api.router)      # /__workspaces, /__agents/*
 app.include_router(extension.router)     # /__ext/*  (the companion extension heartbeat)
+# /__terms/* — ember node's persistent terminals (HTTP + the attach WebSocket). Included before
+# the catch-all routes at the bottom, so its WebSocket route is not shadowed by the VS Code relay.
+app.include_router(terms_api.router)
 
 
 @app.on_event("startup")

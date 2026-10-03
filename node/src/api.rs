@@ -18,9 +18,19 @@
 //! | POST | `/v1/jobs/{id}/kill` | [`KillRequest`] → 204 |
 //! | DELETE | `/v1/jobs/{id}` | → 204 (409 while running) |
 //! | GET (WS) | `/v1/events?after=<seq>` | receive [`NodeEvent`]s |
+//! | POST | `/v1/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
+//! | GET  | `/v1/terms?project=&origin=&running=` | → `[TermInfo]` |
+//! | GET  | `/v1/terms/{id}` | → [`TermInfo`] |
+//! | GET  | `/v1/terms/{id}/snapshot` | → [`TermSnapshot`] |
+//! | GET (WS) | `/v1/terms/{id}/attach` | send [`TermHello`], then [`TermInput`]s; receive [`TermEvent`]s |
+//! | POST | `/v1/terms/{id}/control` | [`TermControlRequest`] → 204 |
+//! | POST | `/v1/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
+//! | DELETE | `/v1/terms/{id}` | → 204 (409 while running) |
 //!
 //! Closing the `/v1/exec` socket kills the command's process group; jobs are unaffected by any
-//! connection. Errors are [`ErrorBody`] with a matching status code.
+//! connection. Persistent terminal sessions (`/v1/terms`, [`crate::term`]) are owned by the
+//! daemon: closing an attach socket only detaches. Errors are [`ErrorBody`] with a matching
+//! status code.
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
 //! API can run over TCP today and over another stream transport (e.g. QUIC streams) later.
@@ -46,11 +56,13 @@ use crate::fs::{self, FsError};
 use crate::jobs::{Jobs, Removal};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
+use crate::term::Terms;
 
 struct Inner {
     token: String,
     policy: PathPolicy,
     jobs: Arc<Jobs>,
+    terms: Arc<Terms>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -63,16 +75,23 @@ pub struct Node(Arc<Inner>);
 impl Node {
     pub fn new(config: NodeConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.token.is_empty(), "token must not be empty");
+        let jobs = Jobs::new();
+        let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
         Ok(Self(Arc::new(Inner {
             token: config.token,
             policy: PathPolicy::new(config.roots)?,
-            jobs: Jobs::new(),
+            jobs,
+            terms,
             write_lock: tokio::sync::Mutex::new(()),
         })))
     }
 
     pub fn jobs(&self) -> &Arc<Jobs> {
         &self.0.jobs
+    }
+
+    pub fn terms(&self) -> &Arc<Terms> {
+        &self.0.terms
     }
 
     pub fn policy(&self) -> &PathPolicy {
@@ -103,6 +122,12 @@ pub fn router(node: Node) -> Router {
         .route("/v1/jobs/{id}", get(get_job).delete(remove_job))
         .route("/v1/jobs/{id}/kill", post(kill_job))
         .route("/v1/events", get(events_ws))
+        .route("/v1/terms", get(list_terms).post(create_term))
+        .route("/v1/terms/{id}", get(get_term).delete(remove_term))
+        .route("/v1/terms/{id}/snapshot", get(term_snapshot))
+        .route("/v1/terms/{id}/attach", get(term_attach_ws))
+        .route("/v1/terms/{id}/control", post(term_control))
+        .route("/v1/terms/{id}/kill", post(kill_term))
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
         .route("/v1/health", get(health))
@@ -406,4 +431,154 @@ async fn events_session(node: Node, mut ws: WebSocket, after: u64) {
         }
     }
     let _ = ws.send(Message::Close(None)).await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Persistent terminal sessions
+
+fn no_term(id: &str) -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, format!("no terminal session {id}"))
+}
+
+async fn create_term(
+    State(n): State<Node>,
+    Json(r): Json<TermCreateRequest>,
+) -> Result<(StatusCode, Json<TermCreateResponse>), ApiError> {
+    let cwd = n.0.policy.resolve_existing(&r.cwd)?;
+    let terms = n.0.terms.clone();
+    // Spawning forks and may start a keeper: keep it off the async workers.
+    let res = tokio::task::spawn_blocking(move || terms.create(&r, cwd))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string()))?
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")))?;
+    let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
+    Ok((status, Json(res)))
+}
+
+async fn list_terms(State(n): State<Node>, Query(q): Query<TermListQuery>) -> Json<Vec<TermInfo>> {
+    Json(n.0.terms.list(&q))
+}
+
+async fn get_term(State(n): State<Node>, Path(id): Path<String>) -> ApiResult<TermInfo> {
+    n.0.terms.get(&id).map(|s| Json(s.info())).ok_or_else(|| no_term(&id))
+}
+
+async fn term_snapshot(State(n): State<Node>, Path(id): Path<String>) -> ApiResult<TermSnapshot> {
+    let s = n.0.terms.get(&id).ok_or_else(|| no_term(&id))?;
+    s.snapshot().map(Json).ok_or_else(|| {
+        ApiError::new(StatusCode::CONFLICT, ErrorCode::BadRequest, "this session has no screen (lost, or finished before the node restarted)")
+    })
+}
+
+async fn term_control(
+    State(n): State<Node>,
+    Path(id): Path<String>,
+    Json(r): Json<TermControlRequest>,
+) -> Result<StatusCode, ApiError> {
+    let s = n.0.terms.get(&id).ok_or_else(|| no_term(&id))?;
+    s.control(r.client, r.take)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| ApiError::new(StatusCode::CONFLICT, ErrorCode::BadRequest, e))
+}
+
+async fn kill_term(
+    State(n): State<Node>,
+    Path(id): Path<String>,
+    body: Option<Json<KillRequest>>,
+) -> Result<StatusCode, ApiError> {
+    let signal = body.and_then(|Json(b)| b.signal);
+    if n.0.terms.kill(&id, signal) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(no_term(&id))
+    }
+}
+
+async fn remove_term(State(n): State<Node>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    match n.0.terms.remove(&id) {
+        Removal::Removed => Ok(StatusCode::NO_CONTENT),
+        Removal::Unknown => Err(no_term(&id)),
+        Removal::StillRunning => Err(ApiError::new(StatusCode::CONFLICT, ErrorCode::BadRequest, "session is still running")),
+    }
+}
+
+async fn term_attach_ws(State(n): State<Node>, Path(id): Path<String>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| term_attach_session(n, id, socket))
+}
+
+async fn term_attach_session(node: Node, id: String, mut ws: WebSocket) {
+    let hello: TermHello = loop {
+        match ws.recv().await {
+            Some(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
+                Ok(h) => break h,
+                Err(e) => {
+                    send_json(&mut ws, &TermEvent::Error { message: format!("bad hello: {e}") }).await;
+                    return;
+                }
+            },
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            _ => return,
+        }
+    };
+    let Some(session) = node.0.terms.get(&id) else {
+        send_json(&mut ws, &TermEvent::Error { message: format!("no terminal session {id}") }).await;
+        return;
+    };
+    let (client, mut rx) = match session.attach(hello) {
+        Ok(x) => x,
+        Err(message) => {
+            send_json(&mut ws, &TermEvent::Error { message }).await;
+            return;
+        }
+    };
+    tracing::debug!(term = %id, client, "terminal client attached");
+    let (mut sink, mut stream) = ws.split();
+    let mut saw_last = false;
+    let mut dropped = false;
+    loop {
+        tokio::select! {
+            ev = rx.recv() => {
+                let Some(ev) = ev else { dropped = true; break };
+                let last = matches!(ev, TermEvent::Exit { .. } | TermEvent::Error { .. });
+                let text = serde_json::to_string(&ev).expect("serialisable");
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+                if last {
+                    saw_last = true;
+                    break;
+                }
+            }
+            msg = stream.next() => {
+                let input = match msg {
+                    Some(Ok(Message::Text(t))) => serde_json::from_str::<TermInput>(&t),
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => continue,
+                };
+                match input {
+                    Ok(TermInput::Input { data }) => session.input(client, data),
+                    Ok(TermInput::Resize { size }) => session.resize(client, size),
+                    Ok(TermInput::TakeControl) => {
+                        if let Err(e) = session.control(client, true) {
+                            tracing::debug!(term = %id, client, "take control: {e}");
+                        }
+                    }
+                    Ok(TermInput::ReleaseControl) => {
+                        let _ = session.control(client, false);
+                    }
+                    Ok(TermInput::Kill { signal }) => session.kill(signal),
+                    Ok(TermInput::Detach) => break,
+                    Err(e) => tracing::debug!(term = %id, client, "bad terminal input: {e}"),
+                }
+            }
+        }
+    }
+    // Detach only: the session (and its process) is owned by the daemon, not by this socket.
+    session.detach(client);
+    if !saw_last && dropped && session.is_running() {
+        let ev = TermEvent::Error { message: "dropped: this client fell behind; re-attach for a fresh snapshot".into() };
+        let _ = sink.send(Message::Text(serde_json::to_string(&ev).expect("serialisable").into())).await;
+    }
+    let _ = sink.close().await;
+    tracing::debug!(term = %id, client, "terminal client detached");
 }

@@ -426,6 +426,12 @@ impl RpcPeer {
         (peer, rx)
     }
 
+    /// The extension-host connection under this peer, e.g. for [`crate::exthost::terminate`]
+    /// (mirrors [`crate::ipc::IpcClient::connection`]).
+    pub fn connection(&self) -> &ConnectionHandle {
+        &self.handle
+    }
+
     /// Start a call to an `ExtHost*` actor by name.
     pub fn start_call(&self, proxy: &str, method: &str, args: Vec<Arg>, cancellable: bool) -> Result<PendingCall> {
         let rpc_id = rpc_ids::id_of(proxy).ok_or_else(|| Error::UnknownProxy(proxy.to_owned()))?;

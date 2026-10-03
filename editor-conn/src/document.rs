@@ -19,7 +19,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::exthost::{self, Call, DocumentsAndEditorsDelta, ModelAddedData, Range};
+use crate::exthost::{self, Call, DocumentsAndEditorsDelta, ModelAddedData, Range, Selection, TextEditorAddData};
 use crate::uri::UriComponents;
 use crate::{Error, Result};
 
@@ -350,6 +350,38 @@ impl DocumentBridge {
         vec![exthost::activate_by_event(&format!("onLanguage:{language_id}")), exthost::accept_documents_and_editors_delta(&delta)]
     }
 
+    /// Like [`Self::open`], and also show the document in one visible, active text editor
+    /// (`ITextEditorAddData` + `newActiveEditor` in the same delta, as `MainThreadDocumentsAndEditors`
+    /// sends when a file opens in an editor). Extensions that only act on visible documents
+    /// (`window.activeTextEditor`, `visibleTextEditors`) need this. The cursor is at 1:1, the
+    /// whole document is the visible range, the editor is in the first group (view column 0),
+    /// options are [`exthost::default_editor_options`]`(4, true)`. Later selection / visible-range
+    /// changes (`ExtHostEditors.$acceptEditorPropertiesChanged`) are not modelled yet.
+    pub fn open_in_editor(&mut self, uri: UriComponents, text: &str, language_id: &str, editor_id: &str) -> Vec<Call> {
+        let doc = DocumentMirror::new(uri.clone(), text, language_id);
+        let editor = TextEditorAddData {
+            id: editor_id.to_owned(),
+            document_uri: uri.clone(),
+            options: exthost::default_editor_options(4, true),
+            selections: vec![Selection {
+                selection_start_line_number: 1,
+                selection_start_column: 1,
+                position_line_number: 1,
+                position_column: 1,
+            }],
+            visible_ranges: vec![doc.full_range()],
+            editor_position: Some(0),
+        };
+        let delta = DocumentsAndEditorsDelta {
+            added_documents: Some(vec![doc.added_data()]),
+            added_editors: Some(vec![editor]),
+            new_active_editor: Some(Some(editor_id.to_owned())),
+            ..Default::default()
+        };
+        self.docs.insert(uri.key(), doc);
+        vec![exthost::activate_by_event(&format!("onLanguage:{language_id}")), exthost::accept_documents_and_editors_delta(&delta)]
+    }
+
     pub fn close(&mut self, uri: &UriComponents) -> Option<Call> {
         self.docs.remove(&uri.key())?;
         let delta = DocumentsAndEditorsDelta { removed_documents: Some(vec![uri.clone()]), ..Default::default() };
@@ -497,6 +529,24 @@ mod tests {
             .unwrap();
         assert_eq!((c.proxy, c.method), ("ExtHostDocuments", "$acceptModelChanged"));
         assert_eq!(c.args[2], Arg::Json(true.into()));
+    }
+
+    #[test]
+    fn open_in_editor_adds_an_active_editor_in_the_same_delta() {
+        let mut b = DocumentBridge::new();
+        let uri = UriComponents::remote("h", "/w/a.json");
+        let calls = b.open_in_editor(uri.clone(), "{}\n", "json", "e1");
+        assert_eq!(calls[0].args[0], Arg::Json("onLanguage:json".into()));
+        let delta = calls[1].args[0].as_json().unwrap();
+        assert_eq!(delta["addedDocuments"][0]["languageId"], "json");
+        assert_eq!(delta["addedEditors"][0]["id"], "e1");
+        assert_eq!(delta["addedEditors"][0]["documentUri"]["path"], "/w/a.json");
+        assert_eq!(delta["addedEditors"][0]["editorPosition"], 0);
+        assert_eq!(delta["addedEditors"][0]["visibleRanges"][0], serde_json::json!({
+            "startLineNumber": 1, "startColumn": 1, "endLineNumber": 2, "endColumn": 1
+        }));
+        assert_eq!(delta["newActiveEditor"], "e1");
+        assert!(b.get(&uri).is_some());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 #   transport-isolation  scripts/check-transport-isolation.sh (SPEC FR-N5), when present
 #   editor-conn-pin      editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
 #                        Code-OSS tag in ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   no-webview           scripts/check-no-webview.sh (SPEC NFR-L2), when present
 #   rust                 cargo test for each crate dir that exists
 name: checks
 
@@ -32,6 +33,21 @@ jobs:
             bash scripts/check-transport-isolation.sh
           else
             echo "scripts/check-transport-isolation.sh not present on this ref; skipping"
+          fi
+
+  no-webview:
+    name: no webview in the launcher (NFR-L2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run scripts/check-no-webview.sh
+        run: |
+          if [ -f scripts/check-no-webview.sh ]; then
+            bash scripts/check-no-webview.sh
+          else
+            echo "scripts/check-no-webview.sh not present on this ref; skipping"
           fi
 
   editor-conn-pin:

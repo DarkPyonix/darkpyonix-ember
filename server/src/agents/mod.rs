@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::events::{AgentEvent, ApprovalDecision};
 
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod scripted;
@@ -22,6 +23,8 @@ pub mod scripted;
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    /// Google Antigravity's `agy` CLI.
+    Antigravity,
     /// In-process fake used by tests; never offered to users.
     Scripted,
 }
@@ -31,6 +34,7 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude-code",
             AgentKind::Codex => "codex",
+            AgentKind::Antigravity => "antigravity",
             AgentKind::Scripted => "scripted",
         }
     }
@@ -39,6 +43,7 @@ impl AgentKind {
         match s {
             "claude-code" => Some(AgentKind::ClaudeCode),
             "codex" => Some(AgentKind::Codex),
+            "antigravity" => Some(AgentKind::Antigravity),
             "scripted" => Some(AgentKind::Scripted),
             _ => None,
         }
@@ -59,14 +64,15 @@ pub struct StartRequest {
     pub env: Vec<(String, String)>,
     /// Extra system-level instructions for the agent, from the session's instruction hooks
     /// (e.g. how to use the A2A tool). Claude Code gets them via `--append-system-prompt`, Codex
-    /// as the thread's `developerInstructions`.
+    /// as the thread's `developerInstructions`, Antigravity as a rules file in its session root.
     pub instructions: Option<String>,
     /// Run the agent's tools on another computer through Codex's exec-server protocol. Only the
     /// Codex adapter uses it; other adapters are redirected through `env` (shell shim).
     pub remote: Option<RemoteExec>,
     /// Extra stdio MCP servers for this agent process (e.g. the project's browser, FR-R3), added
     /// to the agent's own configuration: Claude Code via `--mcp-config`, Codex via `-c
-    /// mcp_servers.<name>.…` overrides. The user's own MCP servers stay.
+    /// mcp_servers.<name>.…` overrides, Antigravity via `mcp_config.json` in its session root.
+    /// The user's own MCP servers stay.
     pub mcp_servers: Vec<McpServer>,
 }
 

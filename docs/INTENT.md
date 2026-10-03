@@ -273,6 +273,37 @@ The adapters in `proxy/dpx/agents/` — which parse Claude Code and Codex transc
 unchanged, because the main server is now where those transcripts are; they are kept and
 relocated, not removed.
 
+### D14 — Antigravity runs without its own prompts; Ember's reinforced hook is the only gate
+
+**Decision.** [user, 2026-10-03: the "reinforced hook" design, relayed by the darkpyonix leader]
+agy's print mode cannot ask for a permission: it soft-denies every non-read-only tool, and a
+`PreToolUse` hook answering `allow` does not lift that (agy 1.2.10, recorded). So Ember runs
+`agy -p … --output-format stream-json --dangerously-skip-permissions` (AionUI does the same) and
+makes its own `PreToolUse` hook (matcher `*`) the only gate:
+
+1. The hook config sets an explicit `timeout`, and Ember answers `deny` before it expires. agy
+   drops a hook that answers too late and **runs the tool** (AionCore measured ~30 s on 1.1.9 and
+   denies at 20 s). If the timeout is ignored or capped, Ember denies at 20–25 s and offers a retry.
+2. The hook process prints a valid `deny` and exits 0 on any error (missing environment, parse
+   failure, non-2xx, unreachable server, unknown session).
+3. The callback is authenticated by a fresh random token per session, re-issued when the session is
+   recreated and revoked when it ends. Ending or cancelling a turn denies every pending approval.
+4. Before every run `agy -p /hooks --output-format json` must list Ember's hook, else the run is
+   refused (hooks.json has been silently dropped in the past).
+5. `--sandbox` is used as well, and the agy version is pinned. Another version is warned about and
+   runs read-only until the tests below pass on it.
+6. A global hook, if used, passes through when Ember's environment is absent, so the user's own agy
+   sessions are unaffected.
+
+Before merge, these must pass on the pinned version and be recorded in SPEC §A (run only in
+`.scratch/` with harmless commands): the hook runs under skip-permissions; `deny` blocks; a long
+`timeout` holds the tool; hook failure, crash, garbage and missing binary do not run the tool;
+sub-agents, `call_mcp_tool` and browser tools are hooked; `deny` wins among several hooks; parallel
+tool calls are each gated. If any fails, Antigravity sessions ship read-only.
+
+Rejected: Antigravity sessions read-only until agy can ask headlessly (loses the agent); hooks in
+the project's `.agents/` (writes into the user's repository).
+
 ## Open questions
 
 | ID | Question | Status |
@@ -282,7 +313,7 @@ relocated, not removed.
 | **Q3** | When a session moves, does an open IDE window follow it, or stay with its computer? | Open |
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal only |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional] |
-| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | **Claude Code:** `--print` stream-json with `--permission-prompt-tool stdio` (#14). **Codex:** `codex app-server` directly (#14); the maintained ACP adapter (`agentclientprotocol/codex-acp`) is itself a translation layer over app-server, so it can only lose detail (approval choices, turn steering, thread ids, usage), and the older one compiles Codex internals pinned to an old release, breaking FR-A1. Others: open. |
+| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | **Claude Code:** `--print` stream-json with `--permission-prompt-tool stdio` (#14). **Codex:** `codex app-server` directly (#14); the maintained ACP adapter (`agentclientprotocol/codex-acp`) is itself a translation layer over app-server, so it can only lose detail (approval choices, turn steering, thread ids, usage), and the older one compiles Codex internals pinned to an old release, breaking FR-A1. **Antigravity** — decided in D14 [user]: `agy -p … --output-format stream-json`, one process per turn, `--conversation=<id>` for native resume (agy 1.2.10, recorded in `server/tests/fixtures/agy/`). Print mode cannot ask for a permission: it soft-denies the tool, and a `PreToolUse` hook answering `allow` (even with `permissionOverrides`) did not lift that (recorded). So Ember runs agy with `--dangerously-skip-permissions` and makes its own `PreToolUse` hook the only gate: the hook (`curl` to a local route holding a per-run secret) blocks until the user answers, `deny` hard-blocks, an unreachable server denies, and before the first turn `agy -p /hooks` must list the hook or the turn is refused. The hook, a rules file (instructions) and `mcp_config.json` live in a per-session folder passed with `--add-dir`, agy's own customization root (`.agents/`); nothing in agy or in the user's `~/.gemini` or project is changed. Costs: the folder shows up to the model as an extra, first-listed workspace (the rules file tells it to stay out), the stream carries no tool output, and agy has no config-dir variable, so Antigravity accounts (D7) are not possible yet. Rejected: hooks in `~/.gemini/config/hooks.json` (shared by every agy run and cannot hold per-session MCP servers), hooks in the project's `.agents/` (writes into the user's repository), `--input-format stream-json` (one process per session, but its input schema is undocumented). Others: open. |
 | **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed — deleted** [user, 2026-10-03] |
 | **Q9** | `proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `proxy/docs/BACKGROUND.md` §7-3. | Open |

@@ -71,6 +71,9 @@ pub fn config_env_var(agent: AgentKind) -> &'static str {
     match agent {
         AgentKind::ClaudeCode => "CLAUDE_CONFIG_DIR",
         AgentKind::Codex => "CODEX_HOME",
+        // agy has no configuration-directory variable (`~/.gemini` is fixed, agy 1.2.10), so
+        // accounts are refused for it (`Accounts::create`); this name is never read by agy.
+        AgentKind::Antigravity => "EMBER_AGY_ACCOUNT_DIR",
         AgentKind::Scripted => "EMBER_SCRIPTED_HOME",
     }
 }
@@ -234,6 +237,11 @@ impl Accounts {
     }
 
     pub fn create(&self, agent: AgentKind, label: &str) -> anyhow::Result<Account> {
+        anyhow::ensure!(
+            agent != AgentKind::Antigravity,
+            "Antigravity accounts are not supported yet: agy keeps its login in ~/.gemini and has \
+             no variable to point it at another directory"
+        );
         let id = uuid::Uuid::new_v4().to_string();
         let dir = self.root.join(&id);
         make_private_dir(&dir)?;
@@ -371,6 +379,12 @@ impl Accounts {
                 "Run on the server as the user ember runs as. On a headless server add \
                  --device-auth to the login command.",
             ),
+            AgentKind::Antigravity => (
+                String::new(),
+                String::new(),
+                String::new(),
+                "Antigravity accounts are not supported yet.",
+            ),
             AgentKind::Scripted => (String::new(), String::new(), String::new(), "test agent"),
         };
         LoginInstructions {
@@ -389,6 +403,7 @@ impl Accounts {
             .ok_or_else(|| AccountError::NotFound(id.into()))?;
         let status = match acc.agent {
             AgentKind::Scripted => "logged_in",
+            AgentKind::Antigravity => "unknown",
             agent => {
                 let bin = self
                     .bins

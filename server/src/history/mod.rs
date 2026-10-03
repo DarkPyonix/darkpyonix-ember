@@ -109,6 +109,9 @@ pub fn import_file(agent: AgentKind, path: &Path) -> anyhow::Result<Transcript> 
     match agent {
         AgentKind::ClaudeCode => Ok(claude_code::parse(&text)),
         AgentKind::Codex => Ok(codex::parse(&text)),
+        AgentKind::Antigravity => {
+            anyhow::bail!("importing Antigravity history is not supported yet")
+        }
         AgentKind::Scripted => anyhow::bail!("the scripted agent has no native history"),
     }
 }

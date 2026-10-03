@@ -13,6 +13,7 @@
 //! | POST | `/v1/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
 //! | GET (WS) | `/v1/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
 //! | GET (WS) | `/v1/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
+//! | GET (WS) | `/v1/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
 //! | POST | `/v1/jobs` | [`JobRequest`] → [`JobInfo`] |
 //! | GET  | `/v1/jobs` | → `[JobInfo]` |
 //! | GET  | `/v1/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
@@ -35,8 +36,8 @@
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
 //! API can run over TCP today and over another stream transport (e.g. QUIC streams) later.
-//! A SOCKS5 egress for the remote browser (FR-R1) is planned as a separate listener next to this
-//! one, not as a route here.
+//! The remote browser's SOCKS5 egress (FR-R1) is the `/v1/egress` route, so it rides the same
+//! authenticated transport; an optional plain SOCKS5 listener is in [`crate::egress`].
 
 use std::sync::Arc;
 
@@ -64,6 +65,7 @@ struct Inner {
     policy: PathPolicy,
     jobs: Arc<Jobs>,
     terms: Arc<Terms>,
+    egress: Arc<crate::egress::EgressPolicy>,
     /// Serialises writes so a hash precondition and the rename that follows it are atomic with
     /// respect to other writes through this daemon.
     write_lock: tokio::sync::Mutex<()>,
@@ -83,6 +85,7 @@ impl Node {
             policy: PathPolicy::new(config.roots)?,
             jobs,
             terms,
+            egress: Arc::new(config.egress),
             write_lock: tokio::sync::Mutex::new(()),
         })))
     }
@@ -97,6 +100,10 @@ impl Node {
 
     pub fn policy(&self) -> &PathPolicy {
         &self.0.policy
+    }
+
+    pub fn egress_policy(&self) -> &Arc<crate::egress::EgressPolicy> {
+        &self.0.egress
     }
 }
 
@@ -120,6 +127,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/fs/grep", post(grep))
         .route("/v1/exec", get(exec_ws))
         .route("/v1/exec-server", get(crate::exec_server::ws))
+        .route("/v1/egress", get(crate::egress::ws))
         .route("/v1/jobs", get(list_jobs).post(start_job))
         .route("/v1/jobs/{id}", get(get_job).delete(remove_job))
         .route("/v1/jobs/{id}/kill", post(kill_job))

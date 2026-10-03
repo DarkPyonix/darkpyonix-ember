@@ -42,6 +42,16 @@
 //! `item/permissions/requestApproval`, and the legacy `execCommandApproval` / `applyPatchApproval`.
 //! Any other server request gets a JSON-RPC error so Codex never waits on us.
 //!
+//! # Extra MCP servers
+//!
+//! [`StartRequest::mcp_servers`] (e.g. the project's browser, FR-R3) are added with app-server's
+//! documented `-c key=value` config overrides (`codex app-server --help`, codex-cli 0.155.1):
+//! `-c mcp_servers.<name>.command="…"`, `-c mcp_servers.<name>.args=[…]` and
+//! `-c mcp_servers.<name>.startup_timeout_sec=<n>` (values are TOML). They layer on top of the
+//! user's `config.toml`, so the user's own servers stay. (`thread/start`/`thread/resume` also take
+//! a `config` map, but whether it can add MCP servers to an already-running app-server is
+//! unverified, so the process-level overrides are used.)
+//!
 //! Codex's own settings (approval policy, sandbox, model, config.toml) apply as they do natively
 //! (FR-A4); the adapter only overrides what the session asks for (model, cwd) or what it was built
 //! with ([`CodexAdapter::with_approval_policy`], [`CodexAdapter::with_sandbox`]).
@@ -152,7 +162,7 @@ impl AgentAdapter for CodexAdapter {
         };
         let mut child = Command::new(&self.bin)
             .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .arg("app-server")
+            .args(app_server_args(&req))
             .current_dir(&spawn_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -217,6 +227,29 @@ impl AgentAdapter for CodexAdapter {
 
         Ok(Box::new(CodexRun { conn, child: Some(child), events, thread_id, environments }))
     }
+}
+
+/// `app-server` plus a `-c` override per MCP server setting.
+fn app_server_args(req: &StartRequest) -> Vec<String> {
+    let mut args = vec!["app-server".to_string()];
+    for m in &req.mcp_servers {
+        let key = format!("mcp_servers.{}", m.name);
+        let toml_args = format!("[{}]", m.args.iter().map(|a| toml_str(a)).collect::<Vec<_>>().join(", "));
+        args.push("-c".into());
+        args.push(format!("{key}.command={}", toml_str(&m.command)));
+        args.push("-c".into());
+        args.push(format!("{key}.args={toml_args}"));
+        if let Some(secs) = m.startup_timeout_secs {
+            args.push("-c".into());
+            args.push(format!("{key}.startup_timeout_sec={secs}"));
+        }
+    }
+    args
+}
+
+/// A TOML basic string.
+fn toml_str(s: &str) -> String {
+    crate::browser::agent::toml_str(s)
 }
 
 /// `codex-cli 0.155.1` → `0.155.1`.
@@ -898,6 +931,32 @@ mod tests {
                 (v["dir"].as_str().unwrap().to_string(), v["msg"].clone())
             })
             .collect()
+    }
+
+    #[test]
+    fn mcp_servers_become_config_overrides() {
+        assert_eq!(app_server_args(&StartRequest::default()), ["app-server"]);
+        let req = StartRequest {
+            mcp_servers: vec![crate::agents::McpServer {
+                name: "ember-browser".into(),
+                command: "/opt/bin/npx".into(),
+                args: vec!["-y".into(), "@playwright/mcp@latest".into(), "--cdp-endpoint=ws://h/c".into()],
+                startup_timeout_secs: Some(60),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            app_server_args(&req),
+            [
+                "app-server",
+                "-c",
+                "mcp_servers.ember-browser.command=\"/opt/bin/npx\"",
+                "-c",
+                "mcp_servers.ember-browser.args=[\"-y\", \"@playwright/mcp@latest\", \"--cdp-endpoint=ws://h/c\"]",
+                "-c",
+                "mcp_servers.ember-browser.startup_timeout_sec=60",
+            ]
+        );
     }
 
     #[test]

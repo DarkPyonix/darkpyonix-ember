@@ -79,6 +79,7 @@ const MIGRATIONS: &[&str] = &[
     crate::accounts::schema::MIGRATION,
     crate::computers::schema::MIGRATION,
     crate::chatgpt::schema::MIGRATION,
+    crate::browser::egress::MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.

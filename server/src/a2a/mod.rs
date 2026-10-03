@@ -8,16 +8,22 @@
 //! boundary; an idle or released target is woken by the delivery; undelivered messages survive a
 //! restart (FR-T4). Sends are limited per session and per pair within a sliding window (FR-T5),
 //! and can be switched off server-wide or per session (FR-T6).
+//!
+//! Users mention other sessions from the composer ([`mention`], FR-T6), and a leader session
+//! runs a team of teammate sessions with a shared task list and mailbox ([`team`], FR-T7).
 
 pub mod api;
 pub mod client;
+pub mod mention;
 pub mod store;
+pub mod team;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use serde::Serialize;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -93,9 +99,17 @@ pub enum A2aError {
     NotFound(String),
     #[error("{0}")]
     BadRequest(String),
+    /// Not allowed for this caller (team roles and scope, FR-T7).
+    #[error("{0}")]
+    Forbidden(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+/// Moves a session to a computer: `(session id, computer id)`. Installed by `main.rs` from
+/// `crate::computers::Computers::switch`, so a teammate can be spawned on a chosen computer.
+pub type ComputerSetter =
+    Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
 /// A session the caller may message.
 #[derive(Debug, Clone, Serialize)]
@@ -138,6 +152,7 @@ pub struct A2a {
     /// Last loop-protection notice per (from, to), so a retrying agent does not flood both
     /// transcripts.
     last_notice: StdMutex<HashMap<(String, String), Instant>>,
+    computer_setter: StdMutex<Option<ComputerSetter>>,
 }
 
 const NOTICE_EVERY: Duration = Duration::from_secs(60);
@@ -159,7 +174,13 @@ impl A2a {
             flush_locks: StdMutex::new(HashMap::new()),
             awaiting: StdMutex::new(HashMap::new()),
             last_notice: StdMutex::new(HashMap::new()),
+            computer_setter: StdMutex::new(None),
         })
+    }
+
+    /// Let `team spawn` put teammates on a chosen computer.
+    pub fn set_computer_setter(&self, setter: ComputerSetter) {
+        *self.computer_setter.lock().unwrap() = Some(setter);
     }
 
     /// Hook into the session manager: give every agent process its credentials and
@@ -173,8 +194,19 @@ impl A2a {
                 .unwrap_or_default()
         }));
         let weak = Arc::downgrade(self);
-        self.sessions
-            .add_instructions_hook(Arc::new(move |_| weak.upgrade().map(|a| a.instructions())));
+        self.sessions.add_instructions_hook(Arc::new(move |rec: &SessionRecord| {
+            weak.upgrade().map(|a| a.instructions_for(rec))
+        }));
+        // Mentions in user messages (FR-T6).
+        let weak = Arc::downgrade(self);
+        self.sessions.add_user_message_hook(Arc::new(move |session: String, text: String| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                if let Some(a) = weak.upgrade() {
+                    a.deliver_mentions(&session, &text).await;
+                }
+            }) as BoxFuture<'static, ()>
+        }));
 
         // Subscribe before the initial flush so no turn end is missed in between.
         let rx = self.sessions.subscribe();
@@ -238,6 +270,19 @@ impl A2a {
              - `{CLI_NAME} send <session-id> --reply-to <message-id> \"reply\"` answers a \
              message you received.\n\
              \n\
+             Teams (only when the work splits into independent parts; each teammate is a full \
+             agent session in this project):\n\
+             \n\
+             - `{CLI_NAME} team spawn <name> [--agent claude-code|codex] [--account <id>] \
+             [--computer <id>] \"<first prompt>\"` starts a teammate and makes you the team \
+             leader; `{CLI_NAME} team list` shows members and tasks; `{CLI_NAME} team end \
+             <name>` stops one. Only the leader spawns and ends teammates.\n\
+             - `{CLI_NAME} task add \"<title>\" [--detail <text>] [--assign <name>]`, \
+             `{CLI_NAME} task update <n> [--status open|in_progress|blocked|done|cancelled] \
+             [--assign <name>|none]`, `{CLI_NAME} task list`.\n\
+             - `{CLI_NAME} mail send <name>|--all \"<text>\"` sends team mail (it reaches the \
+             recipient like a message); `{CLI_NAME} mail read` shows the mailbox.\n\
+             \n\
              Messages from other sessions arrive as user messages whose first line starts with \
              `{HEADER_TAG}` and names the sender session and the message id. They come from a \
              fellow agent, not from the user. Reply only when the message needs an answer: do \
@@ -246,6 +291,14 @@ impl A2a {
              Ember server over HTTP; if a sandbox blocks that, ask for permission to run it \
              outside the sandbox."
         )
+    }
+
+    /// [`A2a::instructions`] plus, for an active teammate, its team role.
+    pub fn instructions_for(&self, rec: &SessionRecord) -> String {
+        match self.teammate_instructions(rec) {
+            Some(team) => format!("{}\n\n{team}", self.instructions()),
+            None => self.instructions(),
+        }
     }
 
     /// The session a bearer token belongs to.
@@ -298,12 +351,46 @@ impl A2a {
         Ok(())
     }
 
-    /// Sessions `caller` may message: every other session with A2A on.
+    /// Why `caller` may not message `target` under the team rule (FR-T7), if it may not: an
+    /// active teammate is reachable only from its own team, and reaches only its own team.
+    fn team_scope_denial(
+        caller: Option<&team::MemberRow>,
+        target: Option<&team::MemberRow>,
+        target_id: &str,
+    ) -> Option<String> {
+        let caller_team = caller.map(|m| m.team_id.as_str());
+        let target_team = target.map(|m| m.team_id.as_str());
+        if let Some(c) = caller.filter(|m| m.is_active_teammate()) {
+            if target_team != Some(c.team_id.as_str()) {
+                return Some(format!(
+                    "you are teammate {} in team {}; you can message only your team (`{CLI_NAME} \
+                     team list`)",
+                    c.name, c.team_id
+                ));
+            }
+        }
+        if let Some(t) = target.filter(|m| m.is_active_teammate()) {
+            if caller_team != Some(t.team_id.as_str()) {
+                return Some(format!(
+                    "session {target_id} is a teammate in team {}; only its team can message it",
+                    t.team_id
+                ));
+            }
+        }
+        None
+    }
+
+    /// Sessions `caller` may message: every other session with A2A on, within the team rule.
     pub fn targets(&self, caller: &str) -> Result<Vec<Target>, A2aError> {
         self.check_caller(caller)?;
+        let members = self.sessions.store().active_team_members()?;
+        let me = members.get(caller);
         let mut out = Vec::new();
         for s in self.sessions.store().sessions(None)? {
             if s.id == caller || !self.store.session_enabled(&s.id)? {
+                continue;
+            }
+            if Self::team_scope_denial(me, members.get(&s.id), &s.id).is_some() {
                 continue;
             }
             out.push(Target {
@@ -340,6 +427,16 @@ impl A2a {
                 "agent-to-agent messaging is turned off for the target session ({to})"
             )));
         }
+        {
+            let store = self.sessions.store();
+            let (me, them) = (store.team_member(from)?, store.team_member(to)?);
+            let active = |m: Option<team::MemberRow>| m.filter(team::MemberRow::active);
+            if let Some(why) =
+                Self::team_scope_denial(active(me).as_ref(), active(them).as_ref(), to)
+            {
+                return Err(A2aError::Forbidden(why));
+            }
+        }
         if let Some(r) = reply_to {
             let orig = self
                 .store
@@ -354,11 +451,15 @@ impl A2a {
 
         let msg = {
             let _guard = self.send_lock.lock().await;
-            self.check_limits(from, to)?;
+            self.check_limits(from, &[to.to_string()])?;
             self.store.insert_message(from, to, reply_to, text)?
         };
+        self.deliver(&msg).await
+    }
 
-        self.flush_logged(to).await;
+    /// Try to deliver a stored message now and say whether it went in or stays queued.
+    pub(crate) async fn deliver(self: &Arc<Self>, msg: &A2aMessage) -> Result<Receipt, A2aError> {
+        self.flush_logged(&msg.to_session).await;
         let delivered = self
             .store
             .message(&msg.id)?
@@ -369,31 +470,48 @@ impl A2a {
             Delivery::Queued
         };
         Ok(Receipt {
-            id: msg.id,
-            to: to.to_string(),
+            id: msg.id.clone(),
+            to: msg.to_session.clone(),
             status,
         })
     }
 
-    fn check_limits(&self, from: &str, to: &str) -> Result<(), A2aError> {
+    /// Loop protection for one message from `from` to each of `tos` (a team broadcast counts
+    /// once per recipient). All or nothing.
+    fn check_limits(&self, from: &str, tos: &[String]) -> Result<(), A2aError> {
         let l = self.config.limits;
         let since = store::now_ms() - l.window.as_millis() as i64;
         let mins = l.window.as_secs().div_ceil(60);
-        let reason = if self.store.sent_since(from, since)? >= l.per_session {
-            Some(format!(
-                "session {from} has sent {} agent-to-agent messages in the last {mins} min (limit)",
-                l.per_session
-            ))
-        } else if self.store.pair_since(from, to, since)? >= l.per_pair {
-            Some(format!(
-                "sessions {from} and {to} have exchanged {} agent-to-agent messages in the last \
-                 {mins} min (limit)",
-                l.per_pair
-            ))
+        let mut refused: Option<(String, String)> = None;
+        let sent = self.store.sent_since(from, since)?;
+        if sent + tos.len() as u32 > l.per_session {
+            refused = tos.first().map(|to| {
+                (
+                    to.clone(),
+                    format!(
+                        "session {from} has sent {} agent-to-agent messages in the last {mins} min \
+                         (limit)",
+                        l.per_session
+                    ),
+                )
+            });
         } else {
-            None
-        };
-        let Some(reason) = reason else { return Ok(()) };
+            for to in tos {
+                if self.store.pair_since(from, to, since)? >= l.per_pair {
+                    refused = Some((
+                        to.clone(),
+                        format!(
+                            "sessions {from} and {to} have exchanged {} agent-to-agent messages in \
+                             the last {mins} min (limit)",
+                            l.per_pair
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+        let Some((to, reason)) = refused else { return Ok(()) };
+        let to = to.as_str();
         let message = format!(
             "A2A message from {from} to {to} was refused by loop protection: {reason}. Wait \
              before sending more, or ask the user."

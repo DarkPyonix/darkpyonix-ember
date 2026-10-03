@@ -27,7 +27,8 @@ use crate::cache;
 use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, NewSession, Project, Push, SearchHit, SessionPatch, SessionRecord, PUSH_VERSION,
+    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
+    SessionRecord, TeamMail, TeamMember, TeamView, PUSH_VERSION,
 };
 
 #[derive(Debug, Clone)]
@@ -290,6 +291,28 @@ impl Client {
         self.inner.api.search(query, limit).await
     }
 
+    // ---- teams and mentions (FR-T6, FR-T7) ---------------------------------------------------
+
+    /// Load the team `session_id` leads or belongs to into the state; push keeps it current.
+    pub async fn load_team(&self, session_id: &str) -> ApiResult<Option<TeamView>> {
+        self.inner.fetch_team(session_id).await
+    }
+
+    /// A team's mail (not kept in the state).
+    pub async fn team_mail(&self, team_id: &str, after: i64, limit: Option<usize>) -> ApiResult<Vec<TeamMail>> {
+        self.inner.api.team_mail(team_id, after, limit).await
+    }
+
+    /// End a teammate as the user. The server pushes the changed team.
+    pub async fn end_teammate(&self, team_id: &str, session_id: &str) -> ApiResult<TeamMember> {
+        self.inner.api.end_teammate(team_id, session_id).await
+    }
+
+    /// Sessions a message typed in `session_id` may mention.
+    pub async fn mention_candidates(&self, session_id: &str, query: &str, limit: Option<usize>) -> ApiResult<Vec<MentionCandidate>> {
+        self.inner.api.mention_candidates(session_id, query, limit).await
+    }
+
     /// Reload the session list and resync open sessions now.
     pub fn refresh(&self) {
         let _ = self.inner.resync.send(Resync::All);
@@ -343,6 +366,12 @@ impl Inner {
         Ok(n)
     }
 
+    async fn fetch_team(&self, session_id: &str) -> ApiResult<Option<TeamView>> {
+        let team = self.api.session_team(session_id).await?;
+        self.apply(Input::TeamLoaded { session_id: session_id.to_string(), team: team.clone() });
+        Ok(team)
+    }
+
     async fn resync_all(&self) -> ApiResult<()> {
         let list = self.api.sessions(None).await?;
         self.apply(Input::SessionsLoaded(list));
@@ -361,6 +390,10 @@ impl Inner {
                 // Deleted or unknown on this server: nothing to catch up.
                 Err(e) if e.status() == Some(404) => {}
                 Err(e) => return Err(e),
+            }
+            // Team changes may have been missed too. Best effort: an older server has no teams.
+            if let Err(e) = self.fetch_team(&id).await {
+                tracing::debug!(session = %id, "team refresh failed: {e}");
             }
         }
         Ok(())

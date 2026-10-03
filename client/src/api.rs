@@ -21,8 +21,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, NewSession, Project, SearchHit, SessionDetail, SessionPatch, SessionRecord,
-    StoredEvent,
+    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
+    SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
@@ -334,6 +334,45 @@ impl Api {
             None => json!({}),
         };
         Self::decode(self.post(&format!("/sessions/{}/fork", seg(id)), body).await?)
+    }
+
+    // ---- teams and mentions (FR-T6, FR-T7) ---------------------------------------------------
+
+    /// The team `id` leads or belongs to (`None` when it is in none).
+    pub async fn session_team(&self, id: &str) -> ApiResult<Option<TeamView>> {
+        self.get(&format!("/sessions/{}/team", seg(id))).await
+    }
+
+    pub async fn team(&self, team_id: &str) -> ApiResult<TeamView> {
+        self.get(&format!("/teams/{}", seg(team_id))).await
+    }
+
+    /// A team's mail, oldest first: the last `limit` (server default 20), or the first after
+    /// mail number `after`.
+    pub async fn team_mail(&self, team_id: &str, after: i64, limit: Option<usize>) -> ApiResult<Vec<TeamMail>> {
+        let mut q = vec![("after", after.to_string())];
+        if let Some(n) = limit {
+            q.push(("limit", n.to_string()));
+        }
+        let q = serde_urlencoded::to_string(q).map_err(|e| ApiError::Decode(e.to_string()))?;
+        self.get(&format!("/teams/{}/mail?{q}", seg(team_id))).await
+    }
+
+    /// End a teammate as the user: its agent stops and it leaves the team.
+    pub async fn end_teammate(&self, team_id: &str, session_id: &str) -> ApiResult<TeamMember> {
+        let path = format!("/teams/{}/members/{}/end", seg(team_id), seg(session_id));
+        Self::decode(self.post(&path, json!({})).await?)
+    }
+
+    /// Sessions a message typed in `id` may mention as `@@...`, filtered by `query` (title
+    /// substring or id prefix).
+    pub async fn mention_candidates(&self, id: &str, query: &str, limit: Option<usize>) -> ApiResult<Vec<MentionCandidate>> {
+        let mut q = vec![("q", query.to_string())];
+        if let Some(n) = limit {
+            q.push(("limit", n.to_string()));
+        }
+        let q = serde_urlencoded::to_string(q).map_err(|e| ApiError::Decode(e.to_string()))?;
+        self.get(&format!("/sessions/{}/mentions?{q}", seg(id))).await
     }
 }
 

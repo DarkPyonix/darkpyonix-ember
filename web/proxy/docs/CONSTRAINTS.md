@@ -1,4 +1,4 @@
-# CONSTRAINTS.md — read this before touching the code
+# CONSTRAINTS.md: read this before touching the code
 
 These are the constraints and traps that cost the most time. Every entry here is a measured
 finding against a real VS Code Web build, not a guess. Where an entry says something does not
@@ -19,7 +19,7 @@ Consequently:
 - ❌ **What does not work**:
   - `.part.editor { top }` → the grid cancels it; the editor does not move.
   - Shrinking `.monaco-workbench` height → ignored; the editor overflows to window height.
-  - The terminal's xterm is a **fixed-size canvas** VS Code sized to the window — CSS cannot
+  - The terminal's xterm is a **fixed-size canvas** VS Code sized to the window, so CSS cannot
     reflow it.
 - **Residual overlap**: (1) roughly the bottom two terminal rows sit behind the bottom bar
   (scrollable, minor); (2) the editor tab bar can slightly overlap the top status bar (pixel
@@ -28,7 +28,7 @@ Consequently:
 ### What the cancellation actually is (measured)
 
 On initial load, margin and transform offsets do apply. But **after a layout event (toggling a
-panel, maximizing, …) VS Code re-cancels the offsets on the editor and the panel** — transforms
+panel, maximizing, …) VS Code re-cancels the offsets on the editor and the panel**, transforms
 included; it moves the base position back so the net result is zero. Side bar and auxiliary
 side bar part transforms do survive, as measured.
 
@@ -50,19 +50,19 @@ lift is 0, so nothing moves unnecessarily.
 
 **Verified portrait and landscape, three toggle cycles each: clear at every step, lift values
 pinned at 17/22 with no drift.** Side effect: a lifted tab covers the top 17–22 px of the
-content below it (the breadcrumb area) — minor. It runs alongside the static CSS offset (the
+content below it (the breadcrumb area), which is minor. It runs alongside the static CSS offset (the
 editor-tab margin used for initial load).
 
 ### Part-level `translateY` has been removed entirely
 
-Not only did it get re-cancelled — it **misaligned the resize sashes (which live outside the
+Not only did it get re-cancelled: it **misaligned the resize sashes (which live outside the
 part) from the visual boundary** and broke drag-resizing. Title occlusion is handled solely by
 the watcher above.
 
 ### Sash touch targets and reachability
 
 1. Horizontal sash `z-index: 1005` (above statusbar's 1004), so the only active sash of a
-   maximized panel — the top one, which was buried under the statusbar — can be grabbed. The
+   maximized panel (the top one, which was buried under the statusbar) can be grabbed. The
    cost is a 4 px click band lost on the statusbar.
 2. Vertical sash width 12 px, as a touch target.
 
@@ -85,7 +85,7 @@ the high-level `window.__xmo` API (filesTap / terminal / agent / view / menu / t
 parent bar to call. Chat capture works in embed mode too.
 
 **Verified with Playwright at 390×844 and 844×390**: the workbench lays out at exactly the
-iframe size, and the status bar, chat input and terminal all appear fully above the bar —
+iframe size, and the status bar, chat input and terminal all appear fully above the bar:
 **the overlap disappears entirely.** The terminal clipping and editor tab overlap are solved at
 the root in frame mode.
 
@@ -93,7 +93,7 @@ Frame mode does not move the status bar to the top (there is nothing to occlude,
 natively at the bottom).
 
 ⚠️ **CSS trap**: an iframe is a replaced element, so it does not stretch when given `top` plus
-`bottom` — it collapses to its intrinsic 300×150. Always use explicit `width`/`height`. There
+`bottom`; it collapses to its intrinsic 300×150. Always use explicit `width`/`height`. There
 is a comment about this in `static/frame.html`.
 
 ### Parent bar active highlight
@@ -105,7 +105,7 @@ maximized are both reflected accurately (verified).
 ### Bar placement
 
 Redesigned after user feedback ("like vscode.dev"). In embed mode the native activity bar is
-made transparent — the DOM stays, so clicks can still be forwarded to it.
+made transparent: the DOM stays, so clicks can still be forwarded to it.
 
 - **Landscape**: the iframe takes the full width and the parent bar is **overlaid on the column
   the activity bar vacated** (top = below the titlebar, bottom = above the statusbar, measured
@@ -125,7 +125,7 @@ gets the stock screen plus a width-responsive overlay bar.
 
 ---
 
-## 3. 🔥 Root causes of the tablet lockup (all fixed — read this)
+## 3. 🔥 Root causes of the tablet lockup (all fixed; read this)
 
 On a real device (a Galaxy Tab) the whole workspace froze the moment it opened. The cause was
 **three latent proxy bugs stacking up**. On the desktop, every one of them happened to be
@@ -137,7 +137,7 @@ masked.
    that address happened to work, so everything looked fine; on the tablet it was a dead
    address → remote connection failure → boot loop → renderer hang.
    **Fix: preserve the client's Host all the way to the upstream** (two places: `proxy.relay`
-   and `proxy.fetch`). This is also why **connecting from any host works automatically** — and
+   and `proxy.fetch`). This is also why **connecting from any host works automatically**, and
    why moving to DDNS, a tunnel or Tailscale requires no code change.
 
 2. **A WebSocket route that died instantly.** `@app.websocket_route` does not inject path
@@ -147,7 +147,7 @@ masked.
 
 3. **Injection scope was too wide.** The middleware injected into every HTML response, so the
    overlay JS reached **VS Code's internal documents too
-   (`webWorkerExtensionHostIframe.html`)**, contaminating the extension host — and the service
+   (`webWorkerExtensionHostIframe.html`)**, contaminating the extension host, and the service
    worker then cached the contaminated copy, which contaminated even the stock test.
    **Fix: inject only when `path == "/"`; CSS merging also honors `xmo=off` on the referrer;
    added an `xmojs=off` bisection switch.**
@@ -170,11 +170,11 @@ first load very slow and triggered remote-connection timeouts. 16.6 MB now takes
 
 ## 4. Touch does not produce a click inside VS Code
 
-Measured: tapping the command center delivers only `touchstart`/`touchend` into the iframe —
+Measured: tapping the command center delivers only `touchstart`/`touchend` into the iframe:
 **no native `click` is generated at all**, because VS Code's own gesture handling swallows it.
 That is why title bar controls looked dead on a phone.
 
-- Fix: `xmoInitTouchClickBridge()` — if no click arrives within 350 ms of a `touchend` on a
+- Fix: `xmoInitTouchClickBridge()`: if no click arrives within 350 ms of a `touchend` on a
   title bar control, we synthesize and dispatch one.
 - ⚠️ **It must be dispatched on `e.target`, the deepest element.** Measured: dispatching on the
   `.command-center` container does **nothing**; dispatching on the lowest element returned by
@@ -185,16 +185,16 @@ That is why title bar controls looked dead on a phone.
 
 ---
 
-## 5. The phone keyboard policy — "it appears only when tapped"
+## 5. The phone keyboard policy: "it appears only when tapped"
 
 The soft keyboard used to rise on its own and refuse to go away. The original approach was
 "dismiss when tapping outside"; on the user's suggestion it became **never raise it in the
 first place**.
 
 - ⚠️ **In VS Code 1.132 the editor input surface is not a textarea.** It uses the EditContext
-  API — a `div.native-edit-context` (measured: that is `activeElement` right after load). That
+  API: a `div.native-edit-context` (measured: that is `activeElement` right after load). That
   is why code which only blurred textarea/input did nothing.
-- **Scope is everything** (per the user's request): editor, terminal, search box, chat — the
+- **Scope is everything** (per the user's request): editor, terminal, search box, chat: the
   autofocus of every input is suppressed. The one exception is the quick input, because it is
   opened by pressing the command center (not a text surface), and suppressing it would make the
   palette untypeable.
@@ -207,7 +207,7 @@ first place**.
   hidden `textarea.xterm-helper-textarea` behind it).
 - A tap on the parent bar never reaches iframe focus, so it is forwarded via
   `__xmo.dismissKeyboard()`.
-- Kill switch **`&xmokb=off`** — disables all of it immediately if the intent detection gets it
+- Kill switch **`&xmokb=off`**: disables all of it immediately if the intent detection gets it
   wrong and blocks typing.
 
 ---
@@ -219,7 +219,7 @@ Injecting this setting through `configurationDefaults` in the
 **does actually work** (all four values confirmed by measurement). It is still unusable for us:
 
 - `hidden`: the column disappears completely (`.part.activitybar` becomes 0×0 and the side bar
-  sits at x=0), but **the icon DOM disappears with it** — and our bar forwards clicks to those
+  sits at x=0), but **the icon DOM disappears with it**, and our bar forwards clicks to those
   items and reads their icons and labels.
 - `top` / `bottom`: the icons move **inside the side bar part** (`part sidebar … .composite-bar`),
   so they vanish when the side bar is closed.
@@ -267,5 +267,5 @@ bars matches the viewport width exactly (previously +48 px in the 910–812 rang
   wide). **Opening a new page** applies 390×844 portrait correctly. Confirm the real
   orientation with `matchMedia('(orientation: portrait)')`.
 - During development Copilot was not signed in, so pressing Enter in chat neither sends nor
-  clears the input — captures can therefore run together with the previous text. With a real
+  clears the input; captures can therefore run together with the previous text. With a real
   signed-in session it clears.

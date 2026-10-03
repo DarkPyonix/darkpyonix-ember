@@ -1,4 +1,4 @@
-//! `ember-term` — attach the terminal it runs in to an ember node persistent session.
+//! `ember-term`: attach the terminal it runs in to an ember node persistent session.
 //!
 //! It is the shell of VS Code's terminal profiles (SPEC §P, `docs/design/TERMINALS.md`): VS Code
 //! starts it in its own PTY, and it pipes that PTY to a session owned by ember node, so the

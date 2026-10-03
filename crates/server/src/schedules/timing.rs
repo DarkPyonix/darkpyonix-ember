@@ -4,7 +4,7 @@
 //! of week; `L`, `W`, `#` and `@daily`-style nicknames) and evaluated in an IANA time zone from
 //! `chrono-tz`, so "09:00 Europe/Berlin" stays 09:00 local across daylight-saving changes.
 //! Around a change:
-//! - a wall-clock time that occurs twice (autumn, clocks go back) fires once — [`next_after`]
+//! - a wall-clock time that occurs twice (autumn, clocks go back) fires once: [`next_after`]
 //!   skips an occurrence with the same local time as the one it continues from;
 //! - a wall-clock time that does not exist (spring, clocks go forward) follows `croner`'s
 //!   handling; the result is always a real instant after the previous one.

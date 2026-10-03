@@ -66,10 +66,10 @@
 //!
 //! # OMP (oh-my-pi) preset
 //!
-//! `omp acp` — the `acp` subcommand of `omp` runs the ACP server over stdio
+//! `omp acp`: the `acp` subcommand of `omp` runs the ACP server over stdio
 //! (`packages/coding-agent/src/commands/acp.ts` and `src/modes/acp/acp-agent.ts` in
-//! <https://github.com/can1357/oh-my-pi>, release v18.5.0, 2026-10-03; README "ACP — speak to
-//! editors"). Read from source, not run (OMP is not installed here): it answers
+//! <https://github.com/can1357/oh-my-pi>, release v18.5.0, 2026-10-03; README section "ACP",
+//! speak to editors). Read from source, not run (OMP is not installed here): it answers
 //! `protocolVersion` 1 with `loadSession: true` and `sessionCapabilities {list, fork, resume,
 //! close}`, offers permission options `allow_once` / `allow_always` / `reject_once` /
 //! `reject_always`, routes `bash` through `terminal/create` (argv `[<bash>, "-l", "-c", cmd]`),

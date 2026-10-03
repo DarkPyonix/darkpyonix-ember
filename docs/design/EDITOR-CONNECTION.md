@@ -1,4 +1,4 @@
-# EDITOR-CONNECTION.md — How Ember's editor core talks to a Code-OSS server
+# EDITOR-CONNECTION.md: How Ember's editor core talks to a Code-OSS server
 
 > Status: design + first code (`crates/editor-conn/`, package `ember-editor-conn`), **not compiled yet**.
 > Milestone: M8 (`PROJECT.md`), SPEC §E (`FR-E1`–`FR-E5`). Written 2026-10-03.
@@ -189,7 +189,7 @@ timeouts are retried (L698-728).
 A lost management connection is fatal to the window upstream. A lost extension-host connection
 is not (`reconnectionFailureIsFatal`, L754-787).
 
-### 3.6 IPC channel protocol (`ipc.ts`) — management connection
+### 3.6 IPC channel protocol (`ipc.ts`): management connection
 
 - **Values** (`serialize`/`deserialize`, L268-327) are a one-byte tag followed by the value:
   `0` undefined, `1` string, `2` Buffer, `3` VSBuffer, `4` array, `5` JSON object, `6` int32.
@@ -317,14 +317,14 @@ Every message starts with `type u8` and `req u32be`. The body depends on the typ
 | 2 | RequestJSONArgsWithCancellation | same as 1 |
 | 3 | RequestMixedArgs | `rpcId u8`, `method`, `u8 count`, then per arg: a type byte and its payload |
 | 4 | RequestMixedArgsWithCancellation | same as 3 |
-| 5 | Acknowledged | — |
-| 6 | Cancel | — |
-| 7 | ReplyOKEmpty (`undefined`) | — |
+| 5 | Acknowledged | (none) |
+| 6 | Cancel | (none) |
+| 7 | ReplyOKEmpty (`undefined`) | (none) |
 | 8 | ReplyOKVSBuffer | `u32 len` + bytes |
 | 9 | ReplyOKJSON | longString |
 | 10 | ReplyOKJSONWithBuffers | `u32 count`, longString JSON with `{"$$ref$$": i}` placeholders, then `count` buffers |
 | 11 | ReplyErrError | longString: JSON of `{$isError, name, message, stack}` |
-| 12 | ReplyErrEmpty | — |
+| 12 | ReplyErrEmpty | (none) |
 
 Mixed-mode argument types: `1` = JSON string, `2` = VSBuffer, `3` = object with buffers,
 `4` = `undefined`.

@@ -1,4 +1,4 @@
-# EDITOR-SESSION.md — The editor session between editor-conn and the CodeEditor widget
+# EDITOR-SESSION.md: The editor session between editor-conn and the CodeEditor widget
 
 > Status: design + first code (`crates/editor/`, package `ember-editor`), **not compiled yet**.
 > Milestone: M8 (`PROJECT.md`), issue #32, SPEC §E (`FR-E1`–`FR-E4`). Written 2026-10-03.
@@ -39,8 +39,8 @@ before any provider request made at version *n*, because both are effects of the
 | `SessionUpdate` | `Opened{uri, generation, text, language_id, tab_width}`, `OpenFailed`, `Command{uri, WidgetCommand}`, `Decorations{uri, generation, Vec<Decoration>}`, `Hover(HoverPopup)`, `HoverHidden`, `Dirty`, `Saved`, `SaveFailed`, `ExternalChange{ChangedWhileDirty \| Deleted}`, `RunCommand{CommandDto}`, `Desync`, `Closed`, `ConnectionLost` |
 | `WidgetEvent` | `CodeChanged{version, range, text}`, `CodeEditRejected{…}`, `CodeHovered{decoration, pos, phase}`, `CodeSaveRequested{version}`, `DecorationActivated{decoration}` |
 | `WidgetCommand` | `SetText{generation, text}` (new node, key = generation), `EditCode{request_id, base_version, range, text}` |
-| `Decoration` | `{id: DecorationId(u64 ≠ 0), version, kind: Underline\|CodeLens\|HoverAnchor\|GhostText, severity, color: 0, range, text}` — the FR-38 44-byte record |
-| `SessionCore` | `new(LanguageRegistry, CoreOptions, now)`, `handle(now, Input) -> Vec<Effect>`, `next_wake()`, `resync(now, uri)` — for tests and for a driver on another transport |
+| `Decoration` | `{id: DecorationId(u64 ≠ 0), version, kind: Underline\|CodeLens\|HoverAnchor\|GhostText, severity, color: 0, range, text}`, the FR-38 44-byte record |
+| `SessionCore` | `new(LanguageRegistry, CoreOptions, now)`, `handle(now, Input) -> Vec<Effect>`, `next_wake()`, `resync(now, uri)`, for tests and for a driver on another transport |
 | helpers | `coords` (`WidgetPos`/`WidgetRange` ↔ `IPosition`/`IRange`, UTF-16 ↔ byte/char, `transform_range`), `selector::score` (port of `languages.score`), `languages::LanguageRegistry`, `ids::DecorationIds` |
 
 ## 3. Documents and versions

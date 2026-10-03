@@ -1,5 +1,5 @@
 //! NFSv3 front end for [`RemoteFs`] (feature `mount-nfs`), served on `127.0.0.1:<ephemeral>` by
-//! the `nfsserve` crate and mounted with the OS's own NFS client (`mount_nfs` on macOS — no
+//! the `nfsserve` crate and mounted with the OS's own NFS client (`mount_nfs` on macOS, no
 //! kernel extension; see [`super::cmd`]).
 //!
 //! Written against `nfsserve` 0.11.0 (`vfs::NFSFileSystem`, `tcp::NFSTcpListener`), read from
@@ -85,7 +85,7 @@ fn name(f: &filename3) -> &OsStr {
 }
 
 /// NFS has no ETIMEDOUT; an outage is `NFS3ERR_IO` (never `JUKEBOX`, which makes clients retry
-/// forever — exactly the hang this mount must avoid).
+/// forever, exactly the hang this mount must avoid).
 pub fn nfs_status(e: FsErr) -> nfsstat3 {
     match e {
         FsErr::NoEnt => nfsstat3::NFS3ERR_NOENT,

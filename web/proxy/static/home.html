@@ -2,10 +2,10 @@
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>DarkPyonix — 워크스페이스</title>
+<title>DarkPyonix · 워크스페이스</title>
 <script>(function(){try{document.documentElement.setAttribute('data-xtheme',localStorage.getItem('xmo_theme')||'sepia');}catch(e){document.documentElement.setAttribute('data-xtheme','sepia');}})();</script>
 <style>
-/* 3테마(라이트/세피아/다크) — 로그인 화면과 같은 `xmo_theme` 키를 공유한다. */
+/* 3테마(라이트/세피아/다크): 로그인 화면과 같은 `xmo_theme` 키를 공유한다. */
 :root[data-xtheme="light"]{ --bg:#f4f4f5; --card:#ffffff; --ink:#2b2b2b; --muted:#8a8a8f; --line:#ececee; --brand:#c0392b; --accent:#f5821f; --ico-bg:#fff3e8; --ico-add-bg:#eeeeee; --chip:#eeeeee; --btn2-fg:#555555; --dash:#d7d7db; --shadow:rgba(0,0,0,.10); }
 :root[data-xtheme="sepia"]{ --bg:#efe6d8; --card:#fbf7f1; --ink:#3a352e; --muted:#9a8f83; --line:#e6ddd0; --brand:#b23a2e; --accent:#c8632a; --ico-bg:#f3e7d6; --ico-add-bg:#e9ddc9; --chip:#e9ddc9; --btn2-fg:#6b5f52; --dash:#d9ccb8; --shadow:rgba(120,80,50,.14); }
 :root[data-xtheme="dark"]{ --bg:#1f1c19; --card:#2a2622; --ink:#e8e0d4; --muted:#a59a8c; --line:#38322c; --brand:#d0654f; --accent:#e08a4a; --ico-bg:#382e24; --ico-add-bg:#332c24; --chip:#38322c; --btn2-fg:#cabfae; --dash:#4a4038; --shadow:rgba(0,0,0,.5); }
@@ -106,7 +106,7 @@ code{ font-family:ui-monospace,Consolas,monospace; background:var(--chip); borde
 // 폴더 목록은 세 곳을 합친다.
 //   1) 에이전트 대화가 있는 폴더(서버가 ~/.claude 등을 읽어 알려줌)
 //   2) 서버가 기억하는 최근 워크스페이스(_xmo_recent.json)
-//   3) 브라우저 localStorage 북마크(사용자가 직접 추가 — 다른 서버 URL 도 가능)
+//   3) 브라우저 localStorage 북마크(사용자가 직접 추가, 다른 서버 URL 도 가능)
 // ---------------------------------------------------------------------------
 var LS = 'xmo_home_ws';
 var view = document.getElementById('view');
@@ -360,7 +360,7 @@ function resumeIn(agent, cid, folder){
       };
       if(cmd && navigator.clipboard && navigator.clipboard.writeText){
         navigator.clipboard.writeText(cmd).then(function(){
-          toast('이어가기 명령을 복사했습니다 — 터미널에 붙여넣으세요');
+          toast('이어가기 명령을 복사했습니다. 터미널에 붙여넣으세요');
           setTimeout(go, 800);
         }, function(){ toast('이어가기 명령: ' + cmd); setTimeout(go, 1500); });
       } else if(cmd){

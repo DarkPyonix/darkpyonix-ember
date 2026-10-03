@@ -23,7 +23,7 @@
 //!    `remoteextensionsenvironment.getEnvironmentData`, then `remoteFilesystem`
 //!    mkdir / writeFile / stat / readFile / readdir / rename / stat (EntryNotFound) / delete in a
 //!    temp workspace folder, then watch a file, change it with `std::fs`, and receive `fileChange`.
-//! 3. `remoteExtensionsScanner.scanExtensions` — the built-in `vscode.json-language-features` must
+//! 3. `remoteExtensionsScanner.scanExtensions`: the built-in `vscode.json-language-features` must
 //!    be in it (the server scans `<appRoot>/extensions` itself; nothing extra is installed).
 //! 4. Extension-host connection: handshake, Ready → init data → Initialized,
 //!    `$initializeConfiguration` (defaults from every scanned extension's
@@ -339,7 +339,7 @@ async fn respond_loop(
                         let _ = diag.send(DiagEvent::Changed { owner, entries });
                     }
                     Ok(_) => {}
-                    Err(e) => eprintln!("[live-ose] cannot parse {name}: {e} — args {}", args_preview(&r.args)),
+                    Err(e) => eprintln!("[live-ose] cannot parse {name}: {e}; args {}", args_preview(&r.args)),
                 }
                 peer.respond(r.req, Ok(live_reply(r.proxy, &r.method, seq)));
             }

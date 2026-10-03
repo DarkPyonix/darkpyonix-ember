@@ -129,7 +129,7 @@ test('control changes the name; refusals notify, throttled', async () => {
   assert.equal(ws.sent[0].active, false, 'a background re-show is passive');
   ws.emit({ type: 'attached', client: 2, term: info() });
   ws.emit({ type: 'control', controller: { client: 9, device: 'phone' } });
-  assert.equal(t.names.at(-1), 'zsh — controlled by phone');
+  assert.equal(t.names.at(-1), 'zsh (controlled by phone)');
   t.pty.handleInput('x');
   ws.emit({ type: 'refused', reason: 'controlled', controller: { client: 9, device: 'phone' } });
   ws.emit({ type: 'refused', reason: 'controlled', controller: { client: 9, device: 'phone' } });
@@ -143,7 +143,7 @@ test('control changes the name; refusals notify, throttled', async () => {
   assert.deepEqual(ws.sent.at(-1), { type: 'take_control' });
   ws.emit({ type: 'control', controller: { client: 2, device: 'laptop' } });
   assert.ok(t.pty.hasControl());
-  assert.equal(t.names.at(-1), 'zsh — in control');
+  assert.equal(t.names.at(-1), 'zsh (in control)');
   t.pty.releaseControl();
   assert.deepEqual(ws.sent.at(-1), { type: 'release_control' });
   ws.emit({ type: 'control', controller: null });

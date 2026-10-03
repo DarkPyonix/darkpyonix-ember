@@ -1,4 +1,4 @@
-//! Code-OSS IPC (`src/vs/base/parts/ipc/common/ipc.ts`) — the channel protocol the management
+//! Code-OSS IPC (`src/vs/base/parts/ipc/common/ipc.ts`): the channel protocol the management
 //! connection speaks.
 //!
 //! Wire format of one regular message: `serialize(header) ++ serialize(body)`.

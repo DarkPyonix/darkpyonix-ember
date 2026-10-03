@@ -1,4 +1,4 @@
-# ember-app — Ember's native client (M3, SPEC §L)
+# ember-app: Ember's native client (M3, SPEC §L)
 
 The launcher and conversation UI, written in Rust on
 [dioxus-compose](https://github.com/DarkPyonix/dioxus-compose): `rsx!` components drawn by a

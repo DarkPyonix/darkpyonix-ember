@@ -12,7 +12,7 @@ use anyhow::{bail, Context};
 use serde_json::{json, Value};
 
 const USAGE: &str = "\
-ember-a2a — message other agent sessions in Ember, and schedule prompts
+ember-a2a: message other agent sessions in Ember, and schedule prompts
 
 Usage:
   ember-a2a list [--json]

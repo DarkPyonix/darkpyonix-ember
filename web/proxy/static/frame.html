@@ -13,7 +13,7 @@
   @media (max-width: 420px) { :root { --xf-bar: 52px; } }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: var(--xf-bg); }
-  /* NOTE: an iframe is a replaced element — top+bottom (or left+right) does NOT
+  /* NOTE: an iframe is a replaced element: top+bottom (or left+right) does NOT
      stretch it; it falls back to the intrinsic 300x150. Width/height must be explicit. */
   #xf-frame { position: fixed; border: 0; background: var(--xf-bg); top: env(safe-area-inset-top, 0px); }
   #xf-bar { position: fixed; display: flex; background: var(--xf-bg); z-index: 10; }
@@ -22,7 +22,7 @@
      view container (Claude, Codex, …) simply extends the strip. */
   #xf-bar::-webkit-scrollbar { display: none; }
   /* CHROME OFF (wide window / mouse): no bar, iframe fills everything, and the embed is
-     told to restore VS Code's own activity + status bars — indistinguishable from opening
+     told to restore VS Code's own activity + status bars, indistinguishable from opening
      VS Code Web directly. Higher specificity than the orientation rules below, on purpose. */
   :root[data-xf-chrome="off"] #xf-bar { display: none; }
   :root[data-xf-chrome="off"] #xf-frame { left: 0; top: 0; width: 100%; height: 100%; }
@@ -41,7 +41,7 @@
   @media (orientation: landscape) {
     /* vscode.dev-style: the iframe spans the FULL width (title/status bars run
        edge-to-edge), and our bar sits ON TOP of the empty column left by the
-       hidden native activity bar — between the title row and the status row. */
+       hidden native activity bar, between the title row and the status row. */
     #xf-frame { left: 0; width: 100%;
                 height: calc(100% - env(safe-area-inset-top, 0px)); }
     #xf-bar { left: 0; top: calc(env(safe-area-inset-top, 0px) + var(--xf-title-h, 35px));
@@ -56,7 +56,7 @@
        height, so five equal slots would blow each icon up to 80-160px on a tablet. */
     #xf-bar .xf-btn { width: 40px; height: 40px; flex: 0 0 40px; }
     /* Settings sits at the BOTTOM-LEFT, native VS Code style. It has to leave the scroll
-       flow (position: fixed) — `margin-top: auto` does nothing once the list overflows,
+       flow (position: fixed); `margin-top: auto` does nothing once the list overflows,
        which is exactly when you still want Settings reachable. The bar reserves
        padding-bottom for it so the last scrollable icon never hides underneath. */
     #xf-bar .xf-btn[data-kind="settings"] {
@@ -69,7 +69,7 @@
             align-items: center; justify-content: center;
             background: transparent; border: 0; color: var(--xf-fg); cursor: pointer; padding: 0; }
   /* The tap slot is 20% of the bar (5 across at any width), but the highlight pill stays
-     icon-sized — a slot-wide pill looked stretched once the window got wider than a phone. */
+     icon-sized: a slot-wide pill looked stretched once the window got wider than a phone. */
   .xf-btn::before { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
                     width: 100%; max-width: 52px; height: 40px; border-radius: 12px;
                     background: transparent; transition: background .12s ease; }
@@ -90,7 +90,7 @@
   #xf-backdrop { position: fixed; inset: 0; z-index: 20; display: none; background: transparent; }
   #xf-backdrop.open { display: block; }
   /* --xf-menu-shadow is the shadow VS Code's OWN context menus use, measured live inside
-     the iframe (__xmo.theme().menuShadow) — tapping a row in here opens exactly such a
+     the iframe (__xmo.theme().menuShadow): tapping a row in here opens exactly such a
      menu on top of ours, and two different depths in one gesture read as a glitch. */
   .xf-popup { position: fixed; z-index: 21; display: none; min-width: 208px; padding: 6px; border-radius: 12px;
               background: var(--xf-bg); border: 1px solid var(--xf-border);
@@ -124,12 +124,12 @@
   var splash = document.getElementById('xf-splash');
 
   // Evaluated here (before the iframe src is set) so the initial state rides along in the
-  // URL — otherwise a desktop load would briefly show the embed with its native bars hidden
+  // URL; otherwise a desktop load would briefly show the embed with its native bars hidden
   // before the parent could turn the chrome off.
   var chromeMq = matchMedia('(pointer: coarse), (max-width: 1366px)');
   // THE orientation. The iframe must never decide this for itself: the wrapper makes it 48px
   // wider (hidden gutter) and a bar shorter, so a near-square window (e.g. 910x912) reads
-  // landscape inside while the device is portrait — and the embed then skipped its portrait
+  // landscape inside while the device is portrait, and the embed then skipped its portrait
   // compensation, pushing the title bar's right end 48px off-screen.
   var portraitMq = matchMedia('(orientation: portrait)');
 
@@ -143,7 +143,7 @@
   frame.src = '/?' + qp.toString();
   frame.addEventListener('load', function(){ splash.classList.add('done'); }, false);
   var seg = folder.replace(/\\/g, '/').replace(/\/+$/, '').split('/');
-  document.title = (seg[seg.length - 1] || 'DarkPyonix') + ' — DarkPyonix';
+  document.title = (seg[seg.length - 1] || 'DarkPyonix') + ' · DarkPyonix';
 
   function api(){ try { return frame.contentWindow.__xmo || null; } catch(e){ return null; } }
 
@@ -228,12 +228,12 @@
 
   // --- nav bar: 홈 · 에이전트 · 터미널 · (네이티브 뷰 컨테이너 전부) · 설정 -------------
   // The middle section is read live from VS Code (__xmo.views()), so extension-contributed
-  // containers (Claude, Codex, …) appear on their own — no hard-coded list to fall out of
+  // containers (Claude, Codex, …) appear on their own, with no hard-coded list to fall out of
   // date, and nothing hidden behind a "더보기" popup any more.
   var settingsBtn = iconBtn('settings', 'settings', function(b){ settingsMenu.classList.contains('open') ? closeAll() : openPopup(settingsMenu, b); });
   var FILES_RE = /^(explorer|탐색기)/i;   // pulled out of the view list so it can sit right after 홈
 
-  // The parent page has no codicon CSS at all — pull the font out of the iframe once so
+  // The parent page has no codicon CSS at all: pull the font out of the iframe once so
   // the glyphs reported by views() render exactly like they do inside VS Code.
   var codiconLoaded = false;
   function ensureCodiconFont(){
@@ -270,7 +270,7 @@
     return b;
   }
 
-  // Rebuild only when the container set actually changed — rebuilding every tick would
+  // Rebuild only when the container set actually changed: rebuilding every tick would
   // reset the bar's scroll position while the user is swiping it.
   var barSig = null;
   function renderBar(){
@@ -313,7 +313,7 @@
 
   // --- popups ---
   // VS Code anchors the Manage / Accounts context menu to the HIDDEN activity-bar icon,
-  // which in portrait sits at the far left — the menu opened nowhere near the button that
+  // which in portrait sits at the far left, so the menu opened nowhere near the button that
   // asked for it. Hand the embed the trigger's rect (in iframe coordinates) so it can put
   // the menu where the user actually tapped.
   function anchorInFrame(btn){
@@ -366,11 +366,11 @@
     } catch(e){}
   }
   // --- responsive chrome -----------------------------------------------------------
-  // The wrapper is served to EVERY client, so it is the wrapper — not the server — that
+  // The wrapper is served to EVERY client, so it is the wrapper (not the server) that
   // decides whether the mobile chrome is on. Wide window with a mouse => hand the whole
   // viewport to the iframe and let VS Code show its own bars. Narrow or touch => our bar,
   // and the iframe slides left by the gutter so VS Code's dead activity-bar column (which
-  // no CSS can remove — see HANDOFF §5) ends up off-screen instead of as a blank strip.
+  // no CSS can remove; see HANDOFF §5) ends up off-screen instead of as a blank strip.
   var chromeOn = null;
   function applyChrome(){
     var on = chromeMq.matches;
@@ -387,7 +387,7 @@
   applyChrome();
   try { chromeMq.addEventListener('change', applyChrome); } catch(e){}
   // Touching our bar lives in the PARENT document, so it cannot blur the iframe's focused
-  // input by itself — ask the embed to do it, or the phone keyboard stays up.
+  // input by itself: ask the embed to do it, or the phone keyboard stays up.
   ['pointerdown', 'touchstart'].forEach(function(ev){
     bar.addEventListener(ev, function(){
       var a = api(); if(a && a.dismissKeyboard){ try { a.dismissKeyboard(); } catch(e){} }
@@ -403,7 +403,7 @@
 
   // Android Chrome "desktop site" mode fakes a Linux-desktop UA and ignores the
   // viewport meta (layout viewport pinned to ~1200px, rotation never updates it,
-  // touch coordinates drift) — everything looks broken. Detect and tell the user.
+  // touch coordinates drift), and everything looks broken. Detect and tell the user.
   if(navigator.maxTouchPoints > 0 && /X11; Linux x86_64/.test(navigator.userAgent)){
     var warn = el('div', null, null);
     warn.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);z-index:50;' +

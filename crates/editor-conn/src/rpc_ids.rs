@@ -5,7 +5,7 @@
 //! `ProxyIdentifier.nid`, assigned by a global counter in **declaration order** of the
 //! `createProxyIdentifier(...)` calls (`proxyIdentifier.ts` L42: `this.nid = (++ProxyIdentifier.count)`).
 //! At the pinned commit those calls exist only in `extHost.protocol.ts` (`MainContext` L4046-4134,
-//! then `ExtHostContext` L4136-4218), so the numbering is fully determined by that file — and
+//! then `ExtHostContext` L4136-4218), so the numbering is fully determined by that file, and
 //! **any insertion upstream shifts every later id**. This is the single most fragile fact in the
 //! whole connection; see `docs/design/EDITOR-CONNECTION.md` §5.
 //!

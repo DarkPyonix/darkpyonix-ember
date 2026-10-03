@@ -7,8 +7,8 @@
 //!
 //! **Keeper.** When the last master fd closes, the kernel hangs up the terminal and the shell
 //! receives SIGHUP. So that a session survives an ember node restart (FR-P6, best effort), node
-//! hands a duplicate of the master to a tiny per-session keeper process — `ember-node
-//! __keep-pty` — started in its own session (`setsid`), so it is outside node's process group and
+//! hands a duplicate of the master to a tiny per-session keeper process (`ember-node
+//! __keep-pty`) started in its own session (`setsid`), so it is outside node's process group and
 //! is not killed with it. The keeper does nothing but hold the fd and hand it back over a unix
 //! socket (`SCM_RIGHTS`) to whoever asks: the restarted node. It exits when the session's process
 //! is gone or when node tells it to (`Q`). While no node runs, nobody reads the PTY: the program

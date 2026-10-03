@@ -7,7 +7,7 @@
 //! * `$resolveCodeLens(handle, lens, token)` → `ICodeLensDto | undefined` for lenses that came
 //!   without a `command` (pass the lens back exactly as received, `cacheId` included).
 //! * `$releaseCodeLenses(handle, cacheId)` once a list is replaced or its document closes
-//!   (upstream: `CodeLensList.dispose`, `mainThreadLanguageFeatures.ts` L193-201) — otherwise the
+//!   (upstream: `CodeLensList.dispose`, `mainThreadLanguageFeatures.ts` L193-201); otherwise the
 //!   extension host keeps every list.
 //! * `ICommandDto = { $ident?, id, title, tooltip?, arguments? }`. For a command with arguments
 //!   the extension host sends its internal delegating command (`__vsc<uuid>`, registered through

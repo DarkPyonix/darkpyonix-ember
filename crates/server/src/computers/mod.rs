@@ -19,7 +19,7 @@
 //!   HTTP, so for a peer-addressed node it is given a loopback bridge in this process
 //!   ([`bridge`]) that carries each TCP connection over one transport stream. Read, Edit, Write,
 //!   Glob and Grep reach the node through the project mount ([`mount`]): the session's cwd is
-//!   mounted here at the same path before the agent starts (when a mount mechanism is enabled —
+//!   mounted here at the same path before the agent starts (when a mount mechanism is enabled,
 //!   `EMBER_MOUNT`; otherwise they stay local).
 //!
 //! Switching (FR-X3) records the new computer, describes it with its `/v1/env`, and releases the

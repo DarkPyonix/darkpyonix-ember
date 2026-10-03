@@ -39,6 +39,6 @@ def folder_key(path: str) -> str:
 
 
 def folder_name(path: str) -> str:
-    """The last segment of the path — the name shown on the card."""
+    """The last segment of the path, the name shown on the card."""
     s = str(path or "").replace("\\", "/").rstrip("/")
     return s.split("/")[-1] or s

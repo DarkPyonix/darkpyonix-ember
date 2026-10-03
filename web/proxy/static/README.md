@@ -1,4 +1,4 @@
-# static/ — pages and injected assets
+# static/: pages and injected assets
 
 These files used to live as Python strings inside `main.py` (`CUSTOM_OVERLAY_CSS`,
 `OVERLAY_BOOT_JS`, `FRAME_PAGE_HTML`, …). No editor could highlight them and `main.py`
@@ -9,14 +9,14 @@ reads and serves them.
 
 | File | When it is served | Served by |
 |---|---|---|
-| `home.html` | `GET /` (no folder) — the home launcher: folders → conversations → transcript | `main._serve_our_page` |
-| `frame.html` | `GET /?folder=…` — the workspace wrapper (parent page + VS Code iframe) | `main._serve_our_page` |
-| `workspace_login.html` | `GET /login` — the workspace login page | `main._serve_our_page` |
+| `home.html` | `GET /` (no folder): the home launcher: folders → conversations → transcript | `main._serve_our_page` |
+| `frame.html` | `GET /?folder=…`: the workspace wrapper (parent page + VS Code iframe) | `main._serve_our_page` |
+| `workspace_login.html` | `GET /login`: the workspace login page | `main._serve_our_page` |
 | `upstream_down.html` | The 502 explainer shown when `code serve-web` is down | `dpx.vscode.proxy.upstream_down` |
 | `overlay.css` | `GET /__overlay.css`, and appended after the workbench's main CSS | `dpx.vscode.inject.main_css` |
-| `overlay.js` | `GET /__overlay.js` — injected into the workbench top-level document only | `dpx.vscode.inject.workbench_html` |
-| `webview-kb.js` | `GET /__kb.js` — injected into VS Code webview host frames only | `dpx.vscode.inject.webview_kb` |
-| `detach.js` | `GET /__detach.js` — tab detach, injected into the workbench top-level document only (next to `overlay.js`) | `dpx.vscode.inject.workbench_html` |
+| `overlay.js` | `GET /__overlay.js`: injected into the workbench top-level document only | `dpx.vscode.inject.workbench_html` |
+| `webview-kb.js` | `GET /__kb.js`: injected into VS Code webview host frames only | `dpx.vscode.inject.webview_kb` |
+| `detach.js` | `GET /__detach.js`: tab detach, injected into the workbench top-level document only (next to `overlay.js`) | `dpx.vscode.inject.workbench_html` |
 
 ## Files the hub (`dpx/hub/server.py`) uses
 

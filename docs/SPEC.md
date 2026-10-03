@@ -1,4 +1,4 @@
-# SPEC.md — DarkPyonix Ember
+# SPEC.md: DarkPyonix Ember
 
 Functional (`FR-*`), non-functional (`NFR-*`) and protocol (`PR-*`) requirements. Every
 implementation traces to an ID here; a requirement with no test is not done.
@@ -7,7 +7,7 @@ implementation traces to an ID here; a requirement with no test is not done.
 > launcher section (§L) is rewritten. The IDE window (§W), its bridge (§B), the kernel (§K) and
 > the editor-core draft (§E, formerly §M) are kept with small changes.
 >
-> Tags: **[user]** — from the user's brief. **[provisional]** — team proposal, not confirmed by
+> Tags: **[user]**: from the user's brief. **[provisional]**: team proposal, not confirmed by
 > the user; may be overturned. Requirements without a tag follow directly from a `[user]` decision
 > in `INTENT.md`.
 
@@ -18,7 +18,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 ---
 
-## §L — Launcher and conversation UI (dioxus-compose, no webview: E1)
+## §L: Launcher and conversation UI (dioxus-compose, no webview: E1)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
@@ -36,7 +36,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 ---
 
-## §S — Sessions and transcripts (main server: E3)
+## §S: Sessions and transcripts (main server: E3)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
@@ -46,9 +46,9 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 | **FR-S4** | Full-text search across all sessions' messages. | Indexed search (not a linear scan); results link to the matching message. |
 | **FR-S5** | A session can be forked from any completed turn where the agent supports it. | The fork records its parent and turn; agents that cannot fork have the action disabled, not failing. |
 | **FR-S6** | Idle sessions release their agent process and reconnect transparently on the next message; a session being viewed is kept alive. | Measured: an idle session's agent process exits after the idle timeout; sending a message restores it via native resume. A session open in a client is not reclaimed. |
-| **FR-S7** | *[provisional — `INTENT.md` Q4]* When a session's current computer changes, observations of the previous computer are invalidated. | v0: a system notice tells the agent the computer changed and prior file observations must be re-read before editing. Target: per-file content-hash comparison so only changed files are flagged. |
+| **FR-S7** | *[provisional, `INTENT.md` Q4]* When a session's current computer changes, observations of the previous computer are invalidated. | v0: a system notice tells the agent the computer changed and prior file observations must be re-read before editing. Target: per-file content-hash comparison so only changed files are flagged. |
 
-### §S status — server APIs behind the launcher (FR-L4, FR-L9, FR-S4, FR-S5)
+### §S status: server APIs behind the launcher (FR-L4, FR-L9, FR-S4, FR-S5)
 
 - **Projects** are a table (`projects`, store migration 8), filled from existing sessions on
   migration and on every session creation. **Computer assignment** (FR-L4) is many-to-many
@@ -75,12 +75,12 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 ---
 
-## §A — Agent wrapping (E2: native behaviour preserved)
+## §A: Agent wrapping (E2: native behaviour preserved)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-A1** | Claude Code, Codex, Antigravity and OMP (oh-my-pi) run on the main server as their own unmodified CLIs. [user] | Each agent's version is the vendor's release; no agent binary or package is patched. |
-| **FR-A2** | Each agent is driven through its own non-interactive protocol, chosen per agent: Claude Code via `--print --input-format stream-json --output-format stream-json` with `--permission-prompt-tool stdio`; Codex via `codex app-server` JSON-RPC; Antigravity via its stream-json print mode, one process per turn; other agents — including OMP — via the Agent Client Protocol (ACP). *[provisional]* ACP is also a candidate for Claude Code, Codex and Gemini through their ACP adapters; the per-agent choice compares native-behaviour preservation (E2) between the vendor's own headless protocol and its ACP adapter (`INTENT.md` Q6). | An integration test per agent runs a turn that reads a file, edits it and runs a command, and verifies the normalised events (`FR-A3`). |
+| **FR-A2** | Each agent is driven through its own non-interactive protocol, chosen per agent: Claude Code via `--print --input-format stream-json --output-format stream-json` with `--permission-prompt-tool stdio`; Codex via `codex app-server` JSON-RPC; Antigravity via its stream-json print mode, one process per turn; other agents (including OMP) via the Agent Client Protocol (ACP). *[provisional]* ACP is also a candidate for Claude Code, Codex and Gemini through their ACP adapters; the per-agent choice compares native-behaviour preservation (E2) between the vendor's own headless protocol and its ACP adapter (`INTENT.md` Q6). | An integration test per agent runs a turn that reads a file, edits it and runs a command, and verifies the normalised events (`FR-A3`). |
 | **FR-A3** | All agents' output is normalised into one event model (message, tool call, tool result, approval request, usage, turn end) driving one session state machine. | Adding an agent requires an adapter only; the UI, storage and A2A need no change. Matches `web/proxy/dpx/agents/`'s adapter rule. |
 | **FR-A4** | The agent's own settings, models, modes, session IDs and resume keep working as they do natively. | A session started in Ember can be resumed with the agent's own CLI on the main server, and vice versa where the agent supports it. |
 | **FR-A5** | Tool approvals: allow once, always allow (for this session and tool kind), deny; a list of pending approvals; an opt-in mode that approves everything. | For agents with no headless approval channel (Antigravity), approval is obtained through the agent's own hook mechanism (a pre-tool-use hook calling back to the main server), not by patching the agent. |
@@ -105,7 +105,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 > transcript import for ACP agents; instructions reach agents without an instructions flag in
 > front of the first prompt of each process.
 
-### §A Antigravity — the reinforced hook (FR-A5, `INTENT.md` D14) [user]
+### §A Antigravity: the reinforced hook (FR-A5, `INTENT.md` D14) [user]
 
 Antigravity (`agy`) has no headless approval channel and no ACP. Ember runs it with
 `--dangerously-skip-permissions --sandbox` and makes its own `PreToolUse` hook (matcher `*`, in a
@@ -114,7 +114,7 @@ hook" design, relayed by the darkpyonix leader. Implementation: `crates/server/s
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
-| **FR-A5a** | The hook config sets an explicit `timeout` (3600 s); Ember answers `deny` before it expires (route 3480 s < hook curl 3540 s < agy 3600 s) and shows "approval timed out — retry". If agy reports another timeout, Ember denies at 20 s. | Unit tests `unanswered_approval_times_out_as_deny_with_a_retry_notice`, `recorded_hooks_listing`; test 3 below. |
+| **FR-A5a** | The hook config sets an explicit `timeout` (3600 s); Ember answers `deny` before it expires (route 3480 s < hook curl 3540 s < agy 3600 s) and shows "approval timed out; retry". If agy reports another timeout, Ember denies at 20 s. | Unit tests `unanswered_approval_times_out_as_deny_with_a_retry_notice`, `recorded_hooks_listing`; test 3 below. |
 | **FR-A5b** | The hook prints exactly `allow` or a `deny` and exits 0 on any error (curl missing, unreachable server, non-2xx, unknown or revoked token, empty or unexpected body). It never answers `ask`. | `hook_script_*` unit tests, `a_hook_call_after_the_run_ended_is_denied_by_the_hook`; tests 4. |
 | **FR-A5c** | A fresh random token per run, revoked when it ends. Ending, interrupting or shutting down a turn denies every pending approval and resolves its card; hook calls outside a turn are denied. | `broker_waits_for_the_answer`, `turn_end_denies_pending_cards_and_later_hooks`. |
 | **FR-A5d** | Before **every** turn `agy -p /hooks --output-format json` must list Ember's hook from this session's folder, enabled, `PreToolUse` matcher `*`; otherwise the turn is refused. | `a_hook_that_was_not_loaded_fails_the_turn`, `recorded_hooks_listing`. |
@@ -155,20 +155,20 @@ run gated, any other version read-only.
 
 ---
 
-## §X — Execution on computers (D4)
+## §X: Execution on computers (D4)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-X1** | Each computer runs one **ember node** (execution daemon) that carries out tool actions for sessions (file read/write, directory listing, search, command execution with PTY) and streams results back to the main server. | A CLI on the main server, wrapped, performs a read-edit-run cycle whose effects appear on the target computer's disk and processes only. |
 | **FR-X2** | The wrapping is transparent to the agent: paths, working directory and environment the agent sees are the target computer's. | The agent's own "print working directory" and environment queries report the target computer's values. |
-| **FR-X3** | A session's current computer can be switched. *[Who triggers it is open — `INTENT.md` Q2.]* | After a switch, the next tool action runs on the new computer; the environment description given to the agent is replaced, not appended (`FR-S7`). |
-| **FR-X4** | *[provisional — `INTENT.md` Q5]* A background job started on one computer keeps running after the session switches away, and its completion is reported into the session. | Start a long build on A, switch to B, finish the build on A: the session receives the result. |
+| **FR-X3** | A session's current computer can be switched. *[Who triggers it is open: `INTENT.md` Q2.]* | After a switch, the next tool action runs on the new computer; the environment description given to the agent is replaced, not appended (`FR-S7`). |
+| **FR-X4** | *[provisional, `INTENT.md` Q5]* A background job started on one computer keeps running after the session switches away, and its completion is reported into the session. | Start a long build on A, switch to B, finish the build on A: the session receives the result. |
 | **FR-X5** | ember node is the only Ember component required on a computer for agent work; it does not run agent CLIs or store transcripts. | Measured: daemon RSS stays bounded and independent of the number of sessions using that computer. |
 | **NFR-X1** | *[provisional]* Before and after moving agents to the main server, measure whether local slowdown came from agent runtimes and transcripts (memory) or from builds and tests (CPU). | If CPU dominates, add a concurrency limit per computer on the main server. |
 
 ---
 
-## §T — Agent-to-agent messaging (D5)
+## §T: Agent-to-agent messaging (D5)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
@@ -180,7 +180,7 @@ run gated, any other version read-only.
 | **FR-T6** | Users can mention another session from the composer, and can turn A2A off per user or per session. | Off means sends to and from that session are rejected with a clear reason. |
 | **FR-T7** | A leader session can spawn teammate sessions, assign tasks, and read a shared task list and mailbox. | Tasks and mailbox are stored on the main server; each teammate keeps its own approvals. |
 
-### §T status — teams and mentions (FR-T6, FR-T7, issue #55)
+### §T status: teams and mentions (FR-T6, FR-T7, issue #55)
 
 - **Teams** *[provisional]* (store migration 11: `teams`, `team_members`, `team_tasks`,
   `team_mail`). The first `ember-a2a team spawn` makes the calling session the leader of a new
@@ -220,7 +220,7 @@ run gated, any other version read-only.
 
 ---
 
-## §R — Remote browser and agent browser use (D6)
+## §R: Remote browser and agent browser use (D6)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
@@ -236,32 +236,32 @@ run gated, any other version read-only.
 
 ---
 
-## §U — Accounts and usage (D7)
+## §U: Accounts and usage (D7)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-U1** | The main server holds several accounts per agent (Claude Code, Codex, Antigravity), each with isolated credentials and configuration. | Two Claude Code accounts run sessions simultaneously without sharing credentials or settings. |
 | **FR-U2** | A new session is started under a chosen account. | The session's account is shown in the conversation view and cannot silently change. |
 | **FR-U3** | Usage per account is recorded and visible; usage routing can choose the account for a new session by policy (e.g. least used, failover when one is rate-limited). | A rate-limited account is skipped by the router and the reason is shown. |
-| **FR-U4** | Sign in with OpenAI ("Sign in with ChatGPT", OAuth 2.0 / OIDC with PKCE and a loopback redirect), with a page that lets ChatGPT plan usage be consumed in addition to Codex token usage. [user] | Works for a **self-hosted** ember server only: OpenAI permits open-source, locally hosted apps to call the Responses API on the user's ChatGPT Plus/Pro plan, with a per-app weekly cap, `store:false` and `stream:true` required, and no image generation, file search, code interpreter or hosted MCP. It is never offered through `darkpyonix.dev` (remote hosting needs OpenAI's approval) [user, 2026-10-03: "OpenAI 로그인은 엠버 서버에서 사용자가 자체적으로 하는걸로 하고 허브는 깃허브 로그인으로 하자"]. Source: developers.openai.com/siwc/token-sharing-open-source, per the darkpyonix leader's research, 2026-10-03; endpoints, dynamic client registration (`dynamic_agent_client`) and limits verified against the sub-pages the same day — see `docs/design/CHATGPT-SIGNIN.md`. Off when `EMBER_HOSTED=1`. |
+| **FR-U4** | Sign in with OpenAI ("Sign in with ChatGPT", OAuth 2.0 / OIDC with PKCE and a loopback redirect), with a page that lets ChatGPT plan usage be consumed in addition to Codex token usage. [user] | Works for a **self-hosted** ember server only: OpenAI permits open-source, locally hosted apps to call the Responses API on the user's ChatGPT Plus/Pro plan, with a per-app weekly cap, `store:false` and `stream:true` required, and no image generation, file search, code interpreter or hosted MCP. It is never offered through `darkpyonix.dev` (remote hosting needs OpenAI's approval) [user, 2026-10-03: "OpenAI 로그인은 엠버 서버에서 사용자가 자체적으로 하는걸로 하고 허브는 깃허브 로그인으로 하자"]. Source: developers.openai.com/siwc/token-sharing-open-source, per the darkpyonix leader's research, 2026-10-03; endpoints, dynamic client registration (`dynamic_agent_client`) and limits verified against the sub-pages the same day (see `docs/design/CHATGPT-SIGNIN.md`). Off when `EMBER_HOSTED=1`. |
 | **FR-U5** | API-key providers (any OpenAI-compatible or vendor API) can be added with keys encrypted at rest. | Keys never appear in transcripts, logs or exports. |
 
 ---
 
-## §N — Networking (D8)
+## §N: Networking (D8)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
-| **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel. **Transport: iroh 1.0 — decided, conditionally** [user, 2026-10-03: "P2P를 iroh로 가는건 일단 허용하는데 그게 품질이 별로면 아예 직접 구현하는거도 고민해봐"]. In-process Rust (one app on mobile), QUIC hole punching, self-hostable relay, MIT/Apache-2.0. If it misses `NFR-N1`, our own implementation is evaluated. Lives behind `FR-N5`. | Works across two different NATs with no port forwarding configured by the user. |
-| **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback — `darkpyonix.dev` runs iroh-relay and an address directory (decided with the transport); devices register under the user's **GitHub account** on the hub [user, 2026-10-03: "허브는 깃허브 로그인으로 하자"] — so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
+| **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel. **Transport: iroh 1.0, decided, conditionally** [user, 2026-10-03: "P2P를 iroh로 가는건 일단 허용하는데 그게 품질이 별로면 아예 직접 구현하는거도 고민해봐"]. In-process Rust (one app on mobile), QUIC hole punching, self-hostable relay, MIT/Apache-2.0. If it misses `NFR-N1`, our own implementation is evaluated. Lives behind `FR-N5`. | Works across two different NATs with no port forwarding configured by the user. |
+| **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback: `darkpyonix.dev` runs iroh-relay and an address directory (decided with the transport); devices register under the user's **GitHub account** on the hub [user, 2026-10-03: "허브는 깃허브 로그인으로 하자"], so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
 | **FR-N3** | All connections are encrypted and authenticated per device; a device can be revoked. | Revoking a device closes its connections within one heartbeat. |
-| **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium — see `web/proxy/docs/CONSTRAINTS.md`). |
+| **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium; see `web/proxy/docs/CONSTRAINTS.md`). |
 | **FR-N5** | All Ember code reaches the network through one transport interface (connect to a peer by its key, accept, open bidirectional streams, report path state: direct or relayed). **No iroh type appears outside the transport crate.** | Replacing the transport touches only that crate: a CI check fails if `iroh` is imported anywhere else, and the ember server and ember node test suites run unchanged against an in-memory fake transport. |
 | **NFR-N1** | Transport quality bar. **If iroh misses any line after tuning, our own implementation is evaluated** (`FR-N1`). Initial targets, set before measurement; the first M5 measurement may adjust a target once, with the measured data and reason recorded here. | Measured on the real network matrix: home router ↔ school/office network, home ↔ LTE hotspot, and symmetric NAT on one side; 20 runs per pair. <br>• **Direct-path success:** ≥ 85% across the matrix excluding symmetric-NAT pairs; symmetric-NAT pairs must still connect via relay 100%. <br>• **Direct-path overhead:** RTT ≤ raw path + 5 ms (p50) and + 15 ms (p95); throughput ≥ 80% of a raw TCP transfer over the same path. <br>• **Connection setup:** first byte ≤ 1.5 s p95 (relay allowed); direct path established ≤ 5 s p95 when one exists. <br>• **Relay → direct upgrade:** ≤ 10 s p95 after a direct path becomes possible; direct → relay fallback with no stream reset. <br>• **Network change** (Wi-Fi ↔ LTE): open streams survive; stall ≤ 3 s p95. <br>• **Mobile:** an idle background connection adds ≤ 2%/hour battery drain (Android and iOS); reconnect on foreground ≤ 1 s p95. |
 | **PR-1** | Main server → client push channel for session status, transcript updates, computer reachability and assignments. | Versioned schema; a version mismatch is detected and reported, not silently dropped. |
 
 
-### §N status — transport wiring (M5, issue #10)
+### §N status: transport wiring (M5, issue #10)
 
 Where the acceptance criteria stand after wiring `ember-transport` into the real connections.
 Not yet built or run at the time of writing; the evidence column names the tests that will
@@ -276,24 +276,24 @@ check it.
 
 ---
 
-## §W — IDE window (VS Code Web, wrapped)
+## §W: IDE window (VS Code Web, wrapped)
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-W1** | The IDE window serves VS Code Web for the session's project and current computer, so that only API and data traffic crosses the network on repeat loads. | Static workbench assets are cached; a cold open on a slow link renders the shell promptly and degrades gracefully. |
 | **FR-W2** | The wrapping layer applies CSS/DOM overrides for a native-feeling titlebar and a responsive layout for tablet and phone widths, on an unmodified VS Code Web build. | Implemented today by `web/proxy/` (the iframe wrapper, overlay, keyboard policy). A CI check diffs the served bundle against its pinned release. |
 | **FR-W3** | Native window chrome is suppressed where the injected titlebar replaces it, without losing window controls. | Verified per platform. |
-| **FR-W4** | Two runtimes: OSE (DarkPyonix-built from MIT source, Open VSX) by default, and VSC (the user's installed Microsoft build, Microsoft Marketplace) as an option. *[provisional — from `docs/design/INTEGRATION.md`]* | Choosing VSC shows an install notice, a copyable install guide, and a command field to verify `code --version` before `code serve-web` is used. |
+| **FR-W4** | Two runtimes: OSE (DarkPyonix-built from MIT source, Open VSX) by default, and VSC (the user's installed Microsoft build, Microsoft Marketplace) as an option. *[provisional, from `docs/design/INTEGRATION.md`]* | Choosing VSC shows an install notice, a copyable install guide, and a command field to verify `code --version` before `code serve-web` is used. |
 | **FR-W5** | On Android and iOS the IDE window works without Node: through a `serve-web`-compatible Rust backend, or directly through web APIs with no backend. [user] | Opens and edits a project on a phone with no Node installed anywhere on the device. Only web-capable extensions run in this mode (`INTENT.md` D10). |
-| **FR-W5a** | *[provisional — `docs/design/MOBILE-NO-NODE.md`]* On Android and iOS, "Open IDE → VS Code" opens the session's project on its **current computer**: the IDE window loads that computer's own `serve-web` (OSE or VSC) through the in-app gateway (`FR-W5b`) over the transport (`FR-N5`). Node runs only on the computer. | On a phone with no Node anywhere on the device: open a project, edit and save a file, and the change is on the computer's disk. An extension with only a `main` (Node) entry installed on that computer works. An extension webview renders on a real phone (`FR-N4`). |
+| **FR-W5a** | *[provisional, `docs/design/MOBILE-NO-NODE.md`]* On Android and iOS, "Open IDE → VS Code" opens the session's project on its **current computer**: the IDE window loads that computer's own `serve-web` (OSE or VSC) through the in-app gateway (`FR-W5b`) over the transport (`FR-N5`). Node runs only on the computer. | On a phone with no Node anywhere on the device: open a project, edit and save a file, and the change is on the computer's disk. An extension with only a `main` (Node) entry installed on that computer works. An extension webview renders on a real phone (`FR-N4`). |
 | **FR-W5b** | *[provisional]* One Rust **ide-gateway** in the app process serves the IDE window from a loopback origin that the platform webview treats as a secure context, with a second secure origin for `webviewEndpoint`. It reverse-proxies HTTP and WebSocket over transport streams (mode `FR-W5a`) and serves static workbench assets and the working-copy file API (mode `FR-W5f`). | Binds loopback only and rejects requests without the per-launch token. `navigator.serviceWorker` exists in both origins on iOS and Android. No `iroh` type is imported outside the transport crate (`FR-N5`). Wi-Fi ↔ LTE switch keeps the workbench connected within `NFR-N1`'s stall bound. |
 | **FR-W5c** | *[provisional]* On Android and iOS, "Open IDE → Ember IDE" opens files of the current computer in the dioxus-compose editor core through ember node file operations (`FR-X1`) over the transport. No webview, no JS engine. | Open, edit and save a remote file from a phone, over a direct path and over the relay. If the file changed on the computer since it was opened, saving reports a conflict instead of overwriting. `NFR-L2`'s webview check covers the editor core. |
 | **FR-W5d** | *[provisional]* A project subtree can be made available offline as a **local working copy** in the app sandbox, recording each file's base content hash; the editor core edits it with no network. | In airplane mode: open, edit, save, create and delete files in the working copy; the app restarts with the edits intact. Excluded paths and the size limit are honoured. |
 | **FR-W5e** | *[provisional]* When online, working-copy changes sync to a chosen computer of the project; a file changed on both sides is never overwritten. | Edit file X offline only on the phone and file Y on both sides: X is written to the computer; Y is shown as a conflict with a three-way diff, and neither side's content is lost. |
-| **FR-W5f** | *[user — `FR-W5` "directly through web APIs with no backend"; form provisional]* Offline VS Code mode: the IDE window boots a bundled, pinned OSE web build with no `remoteAuthority`, so every extension runs in VS Code's own web-worker extension host; the working copy is exposed through a built-in `ember-fs` web extension. Configured only through the embedder API (`IWorkbenchConstructionOptions`); VS Code source is not patched (E4). | In airplane mode on Android: open the working copy, edit, save, and run a web extension (a theme, a grammar, and one language extension with a `browser` entry). The served bundle matches its pinned release (`FR-W2`'s diff check). No Node on the device. |
+| **FR-W5f** | *[user: `FR-W5` "directly through web APIs with no backend"; form provisional]* Offline VS Code mode: the IDE window boots a bundled, pinned OSE web build with no `remoteAuthority`, so every extension runs in VS Code's own web-worker extension host; the working copy is exposed through a built-in `ember-fs` web extension. Configured only through the embedder API (`IWorkbenchConstructionOptions`); VS Code source is not patched (E4). | In airplane mode on Android: open the working copy, edit, save, and run a web extension (a theme, a grammar, and one language extension with a `browser` entry). The served bundle matches its pinned release (`FR-W2`'s diff check). No Node on the device. |
 | **FR-W5g** | *[provisional]* In any no-Node mode, the extensions view says for each extension whether it runs on the phone (`browser` entry) or needs a computer, and extensions without a `browser` entry are not offered for local install. | Classification comes from the extension manifest (`browser`, `main`, `extensionKind`); a `main`-only extension shows "needs a computer" and a one-tap switch to `FR-W5a`. |
 | **FR-W5h** | *[provisional]* On iOS, `FR-W5f` (downloaded extension code) ships only behind a flag, enabled after the App Review decision (`MOBILE-NO-NODE.md` Q-M3). `FR-W5a`–`FR-W5e` ship without it. | An iOS build with the flag off downloads and executes no extension code locally. |
-| **NFR-W5a** | *[provisional — initial targets, to be adjusted once by the first measurement]* Mobile IDE responsiveness. | On a reference mid-range Android phone and a reference iPhone: `FR-W5a` warm open to editable ≤ 3 s p95 over a direct path; `FR-W5c` remote file open ≤ 1 s p95 for a 100 KB file; `FR-W5f` cold open ≤ 5 s p95; IDE-window RSS recorded per mode. |
+| **NFR-W5a** | *[provisional: initial targets, to be adjusted once by the first measurement]* Mobile IDE responsiveness. | On a reference mid-range Android phone and a reference iPhone: `FR-W5a` warm open to editable ≤ 3 s p95 over a direct path; `FR-W5c` remote file open ≤ 1 s p95 for a 100 KB file; `FR-W5f` cold open ≤ 5 s p95; IDE-window RSS recorded per mode. |
 | **FR-W6** | vscode-darkpyonix (notebook renderer) and vscode-darkpyonix-theme are installed by default. [user] | Present on first launch for both runtimes. |
 | **NFR-W1** | Extensions are tested unmodified from the marketplace matching the runtime. | Regressions block release. |
 
@@ -301,12 +301,12 @@ check it.
 > outside the 10-18 deadline). The phone is mainly a client of a computer's own `serve-web` (`FR-W5a`)
 > or ember node (`FR-W5c`); offline it edits a local working copy (`FR-W5d`, `FR-W5e`), optionally in
 > VS Code Web with web extensions only (`FR-W5f`). **Rejected:** a `serve-web`-protocol-compatible
-> server on the phone — the web workbench always opens a remote extension-host connection when a
+> server on the phone: the web workbench always opens a remote extension-host connection when a
 > remote exists, which E4 forbids us to answer with our own host, and with no Node every extension
 > runs in the web worker anyway. Whether this reading of `FR-W5`'s wording is right is open
 > (`MOBILE-NO-NODE.md` Q-M1).
 
-### FR-W4 acceptance — the OSE runtime
+### FR-W4 acceptance: the OSE runtime
 
 OSE is built by `.github/workflows/ose.yml` from `build/ose/` (Code-OSS at the tag in `build/ose/VERSION`,
 `product.json` overrides only; see `build/ose/README.md`). A release (tag `ose-v*`) is accepted when,
@@ -333,7 +333,7 @@ Steps 1–3 run in CI on every build; step 1 alone runs on every pull request to
 
 ---
 
-## §P — Persistent work in IDE windows
+## §P: Persistent work in IDE windows
 
 [user, 2026-10-03: "엠버에서 vscode나 엠버 에디터 같은 경우 그 안에서 실행 중인 작업들은 창을 끄더라도
 항상 실행되고 있어야 한다는거 잊지 마. 만약 터미널에서 뭔가를 켜놨다 하면 창 꺼도, 다른 컴퓨터에서 접속해도
@@ -371,7 +371,7 @@ for this project's running debuggees. Details and the per-adapter table: `docs/d
 
 ---
 
-## §B — Native bridge (IDE window webview ↔ native shell)
+## §B: Native bridge (IDE window webview ↔ native shell)
 
 Unchanged in substance from 09-22; see `ARCHITECTURE.md` §3 and `INTENT.md` D11.
 
@@ -408,7 +408,7 @@ No platform webview implementation yet. Details and field reliability: `web/prox
 
 ---
 
-## §K — DarkPyonix kernel
+## §K: DarkPyonix kernel
 
 The kernel, manager and hub contracts are defined in `darkpyonix-core`: `docs/PROTOCOL.md`
 (kernel wire protocol), `docs/api/manager.openapi.yaml`, `docs/api/hub.openapi.yaml`,
@@ -421,7 +421,7 @@ The kernel, manager and hub contracts are defined in `darkpyonix-core`: `docs/PR
 
 ---
 
-## §E — Editor core (long-term draft, gated)
+## §E: Editor core (long-term draft, gated)
 
 Formerly §M. Not committed; kept so that work, if it starts, starts from a written spec. See
 `IMPLEMENTATION.md`.
@@ -431,5 +431,5 @@ Formerly §M. Not committed; kept so that work, if it starts, starts from a writ
 | **FR-E1** | Compose-native text buffer and cursor/selection model, IME-correct for CJK, reusing `dioxus-compose`'s IME work. |
 | **FR-E2** | Diagnostics from unmodified extensions render correctly positioned. |
 | **FR-E3** | CodeLens and hover overlays from unmodified extensions render correctly positioned. |
-| **FR-E4** | Inline completion (ghost text) providers work — the highest priority within §E. |
+| **FR-E4** | Inline completion (ghost text) providers work; this is the highest priority within §E. |
 | **FR-E5** | Extension webview panels still work, contained to their panel. |

@@ -4,7 +4,7 @@ Sessions are stored at
     ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
 
 Unlike Claude Code, this format changes fairly often, so unrecognized lines are skipped
-silently and only what can be read is shown — a parse failure must not take the whole list
+silently and only what can be read is shown: a parse failure must not take the whole list
 down with it. The workspace path comes from session_meta's cwd, falling back to a cwd found
 anywhere in the payload.
 """

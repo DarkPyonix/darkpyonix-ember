@@ -16,7 +16,7 @@
 //! * `agy --version` prints `1.2.16`.
 //! * stdout, one JSON object per line (recorded):
 //!   - `{"event":"init","conversation_id":"<uuid>","init":{"model","cwd","tools":[…],
-//!     "permission_mode"}}` — the conversation id is the native session id.
+//!     "permission_mode"}}`: the conversation id is the native session id.
 //!   - `{"event":"step_update","step_update":{"conversation_id","step_index":N,"state":"ACTIVE"|
 //!     "DONE"|"ERROR","step_type":"user_input"|"system_message"|"agent_response"|"tool",
 //!     "text_delta","duration_seconds","usage":{…},"tool_name","tool_info":{"name",
@@ -81,7 +81,7 @@
 //! 4. read-only policy ([`Policy::ReadOnly`]) → `deny` without asking;
 //! 5. a tool the user allowed always in this run → `allow`;
 //! 6. otherwise the user is asked; no answer within the approval deadline → `deny`, a notice
-//!    "approval timed out — retry", and the card is withdrawn.
+//!    "approval timed out; retry", and the card is withdrawn.
 //!
 //! The deadline is [`APPROVAL_TIMEOUT`], below the hook's own timeout and the hook's curl limit,
 //! so agy always gets Ember's answer. If `agy -p /hooks` reports a different `timeout_seconds`
@@ -832,7 +832,7 @@ impl RunApprovals {
                 let _ = self
                     .events
                     .send(AgentEvent::Notice {
-                        message: format!("Approval for {} timed out — retry.", call.tool),
+                        message: format!("Approval for {} timed out; retry.", call.tool),
                     })
                     .await;
                 deny_reply(
@@ -1928,6 +1928,6 @@ mod tests {
             rx.recv().await,
             Some(AgentEvent::ApprovalResolved { decision: ApprovalDecision::Deny, .. })
         ));
-        assert!(matches!(rx.recv().await, Some(AgentEvent::Notice { message }) if message.contains("timed out — retry")));
+        assert!(matches!(rx.recv().await, Some(AgentEvent::Notice { message }) if message.contains("timed out; retry")));
     }
 }

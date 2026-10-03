@@ -27,16 +27,16 @@
   // Scanning the real composite bar picks up whatever the user has installed.
   // ACTIVITY BAR ONLY, on purpose: the secondary side bar keeps its own visible tab strip
   // (Chat / Claude Code / Codex) above the panel, so mirroring it into our bar was pure
-  // duplication — and it made containers that live nowhere in the activity bar look as if
+  // duplication, and it made containers that live nowhere in the activity bar look as if
   // they did. Our bar adds home/agent/terminal/settings, which a phone has no other way to
   // reach; it does not invent entries VS Code already shows somewhere else.
   const XMO_VIEW_SOURCES = [
     ['activity', '.monaco-workbench .part.activitybar .composite-bar .actions-container > .action-item']
   ];
   // Skip the chat/agent container (it has its own dedicated bar button) and VS Code's own
-  // "Additional Views" overflow chevron — our bar scrolls instead of overflowing.
+  // "Additional Views" overflow chevron; our bar scrolls instead of overflowing.
   const XMO_VIEW_SKIP = /^(chat|copilot|채팅|additional views|추가 보기|more actions)\b/i;
-  // Sticky cache: an entry survives while its part is closed — AND across reloads, because a
+  // Sticky cache: an entry survives while its part is closed, AND across reloads, because a
   // short viewport (landscape phone: activity bar ~217px) hides EVERY container behind the
   // overflow chevron, so a fresh load there would otherwise find nothing to put in the bar.
   // Seeded from localStorage per workspace; activation goes through the overflow menu.
@@ -177,10 +177,10 @@
       setTimeout(function(){ document.documentElement.removeAttribute('data-xmo-scan'); done(); }, 200);
     }, 500);
   }
-  // Driving the overflow menu: VS Code's menus ignore SYNTHETIC mouse events (verified —
+  // Driving the overflow menu: VS Code's menus ignore SYNTHETIC mouse events (verified:
   // the menu just stayed open) but do respond to keyboard. So navigate with ArrowDown to
   // the row index and press Enter. `keyCode` is not settable through KeyboardEventInit,
-  // hence the defineProperty — VS Code's StandardKeyboardEvent reads exactly that.
+  // hence the defineProperty; VS Code's StandardKeyboardEvent reads exactly that.
   function xmoSendKey(name, keyCode){
     const t = document.activeElement || document.body;
     ['keydown', 'keyup'].forEach(function(type){
@@ -217,7 +217,7 @@
     xmoSendKey('Enter', 13);
     return true;
   }
-  // Keys go to document.activeElement — which is not the menu when it was opened by a tap.
+  // Keys go to document.activeElement, which is not the menu when it was opened by a tap.
   function xmoFocusMenu(menu){
     if(!menu) return;
     const a = document.activeElement;
@@ -229,7 +229,7 @@
     } catch(e){}
   }
   // Row text carries the keybinding too ("Source ControlCtrl+Shift+G"), so match on prefix.
-  // The menu can take a moment to render — keep looking for ~3s.
+  // The menu can take a moment to render: keep looking for ~3s.
   function xmoClickMenuRow(label, tries){
     tries = tries || 0;
     const want = label.trim().toLowerCase();
@@ -321,7 +321,7 @@
   }
   function xmoRestoreMaximized(){ xmoClickLabel('Restore Panel'); xmoClickLabel('Restore Secondary Side Bar'); }
   // Drag a sash for real, so VS Code re-lays out and the pane CONTENT re-fits (a CSS resize
-  // would only move the frame — §5). VS Code's Sash listens for pointer events.
+  // would only move the frame, see §5). VS Code's Sash listens for pointer events.
   function xmoSashDrag(sash, toX){
     const r = sash.getBoundingClientRect();
     const y = Math.round(r.top + r.height / 2), x0 = Math.round(r.left + r.width / 2);
@@ -334,7 +334,7 @@
     send('pointerup', Math.round(toX), 0);
   }
   // LANDSCAPE: the agent panel shares the screen with the workspace 50/50 instead of taking
-  // it all — you can watch the edit land in the editor while you talk to the agent.
+  // it all: you can watch the edit land in the editor while you talk to the agent.
   function xmoAuxHalfSoon(tries){
     if(xmoPortrait()) return;
     tries = tries || 0;
@@ -361,7 +361,7 @@
   }
   // Portrait: whatever the user just opened should own the whole screen. Closing the panel
   // and the secondary side bar first lets VS Code lay the primary side bar out full width by
-  // itself — it squeezes the editor group down to a couple of pixels without complaint — so
+  // itself (it squeezes the editor group down to a couple of pixels without complaint), so
   // the view's CONTENT re-fits too. (A CSS stretch of `.part.sidebar` only moved the frame;
   // the tree inside kept its old width. HANDOFF §5.)
   function xmoSoloPortrait(){
@@ -432,7 +432,7 @@
   }
   // Embed mode: the parent bar told us which button opened this menu, so put the menu next
   // to THAT button instead of wherever VS Code anchored it (the hidden activity-bar icon,
-  // far away on the left). Nudge with a transform — invisible to VS Code's own layout, so
+  // far away on the left). Nudge with a transform, invisible to VS Code's own layout, so
   // it survives the relayouts that would undo a left/top rewrite (same trick as the lift).
   function xmoPlaceMenuAt(anchor){
     if(!anchor) return;
@@ -468,7 +468,7 @@
   // Portrait: the side bar owns the whole screen and the editor slot is collapsed to 0, so
   // anything that OPENS AN EDITOR from the side bar (a file, a Claude Code session, a diff)
   // would appear behind it and read as "nothing happened". Close the side bar the moment an
-  // editor opens — the standard phone pattern: list → tap → full-screen content.
+  // editor opens: the standard phone pattern: list → tap → full-screen content.
   // The editor DOM is intact while collapsed (only its width is 0), so the tab label is
   // still readable and usable as the change signal.
   let xmoLastEditorKey = null;
@@ -526,18 +526,18 @@
   }
   let xmoChatCaptureReady = false;
   // Android: tapping the title bar's command centre ("Open Quick Access") did nothing.
-  // Measured — a real mouse click opens the quick input, a pure touch sequence does not:
+  // Measured: a real mouse click opens the quick input, a pure touch sequence does not:
   // VS Code's own gesture handling swallows touches on elements it has not registered, so
   // the browser never synthesizes the follow-up click. Bridge it: if a touch on those
   // controls is NOT followed by a click, dispatch one ourselves.
   let xmoTapPending = null;
   // Context menu rows are a harder case than the title bar: a tap does nothing at all
-  // (reported on the notebook cell menu — "Cut Cell … Toggle Cell Toolbar Position"), and
+  // (reported on the notebook cell menu: "Cut Cell … Toggle Cell Toolbar Position"), and
   // the click bridge below cannot help, because these menus ignore synthesized mouse events
   // by design. Drive the selection with the keyboard instead, exactly like xmoClickMenuRow.
   // A terminal opened at another size comes back mis-measured. VS Code lays the panel out
   // on window resize, and our bar/maximize dance changes the panel size without one, so
-  // nudge it — xterm re-measures the cell grid and reflows on that pass.
+  // nudge it: xterm re-measures the cell grid and reflows on that pass.
   function xmoRelayoutSoon(){
     [120, 400, 900, 1600].forEach(function(t){
       setTimeout(function(){
@@ -556,7 +556,7 @@
       const idx = rows.indexOf(row);
       if(idx < 0) return;
       // Stop the browser's follow-up click: it lands outside anything the menu listens to
-      // and just dismisses it — which would race the keys we are about to send.
+      // and just dismisses it, which would race the keys we are about to send.
       e.preventDefault();
       xmoFocusMenu(menu);
       xmoMenuActivateIndex(rows, idx);
@@ -568,7 +568,7 @@
       if(!e.target || !e.target.closest) return;
       // closest() only decides WHETHER to bridge. The click itself must be dispatched on
       // the deepest touched element: the command centre ignores a sequence aimed at the
-      // container (verified — container = nothing happens, e.target = quick input opens).
+      // container (verified: container = nothing happens, e.target = quick input opens).
       const scope = e.target.closest('.part.titlebar .command-center')
                  || e.target.closest('.part.titlebar .action-item');
       if(!scope) return;
@@ -581,7 +581,7 @@
     }, true);
   }
   // Phone keyboard policy: the keyboard must appear only AFTER the user taps a text
-  // surface — never on its own. VS Code focuses the editor's input surface the moment a
+  // surface, never on its own. VS Code focuses the editor's input surface the moment a
   // file opens, which popped the soft keyboard unasked and then would not go away.
   // Two tools, because one does not fit every widget: BLUR where dropping the focus is
   // harmless (editor, terminal, search box, chat), and a HOLD (inputmode=none) where the
@@ -590,16 +590,16 @@
   // NOT a textarea (measured: activeElement on load = DIV.native-edit-context). Blurring
   // only textarea/input therefore did nothing.
   const XMO_KB_INPUT = 'textarea, input, [contenteditable="true"], .native-edit-context';
-  // Tapping any of these counts as "the user asked for the keyboard" — text surfaces plus
+  // Tapping any of these counts as "the user asked for the keyboard": text surfaces plus
   // the terminal body (xterm's own input is a hidden textarea behind a canvas).
   // The quick input is deliberately NOT in this list: it opens from the command centre, and
   // its LIST is for reading. Only its input box (.monaco-inputbox, already here) means
-  // "I want to type" — a tap on a result row must not drag the keyboard back up.
+  // "I want to type": a tap on a result row must not drag the keyboard back up.
   const XMO_KB_SURFACE = '.monaco-editor, .interactive-input-part,' +
     ' .monaco-inputbox, .suggest-widget, .xterm, .terminal, .terminal-wrapper, ' + XMO_KB_INPUT;
   // Surfaces we must never blur: VS Code hides the quick input the moment its input loses
   // focus, so the old blur-everything policy would have closed the palette the user just
-  // opened — which is why quick access used to be exempted and popped the keyboard.
+  // opened, which is why quick access used to be exempted and popped the keyboard.
   const XMO_KB_HOLD = '.quick-input-widget';
   let xmoTappedInput = false;
   function xmoIsKbInput(el){ return !!(el && el.closest && el.closest(XMO_KB_INPUT)); }
@@ -619,7 +619,7 @@
     if(prev) el.setAttribute('inputmode', prev); else el.removeAttribute('inputmode');
   }
   // The tap often lands on a wrapper (.view-line, the input box border, the xterm canvas),
-  // never on the field itself — so release everything held inside the tapped surface.
+  // never on the field itself, so release everything held inside the tapped surface.
   function xmoKbReleaseIn(el){
     if(!el) return;
     xmoKbRelease(el);
@@ -638,7 +638,7 @@
   // Keyboard policy and DISMISSAL policy are different questions for the quick input.
   // The policy above never blurs it, because a blur is exactly what VS Code closes it on
   // and its list must survive a tap. But a tap on the workbench OUTSIDE the widget is a
-  // click-away and must close it — on a desktop the click moves focus and does this for
+  // click-away and must close it; on a desktop the click moves focus and does this for
   // free; on a phone the tap lands on nothing focusable, so the palette used to just sit
   // there. Blur it ourselves, and fall back to its own dismiss key if it holds on.
   function xmoQuickInputOpen(){
@@ -663,7 +663,7 @@
       // here, in the capture phase, so it is gone before the browser reacts to the tap.
       if(surface) xmoKbReleaseIn(surface);
       else if(t && t.closest(XMO_KB_HOLD)){
-        // Inside the quick input but not on its box — a list row. Leave focus (and the
+        // Inside the quick input but not on its box: a list row. Leave focus (and the
         // widget) alone; the keyboard stays down because the hold is still on.
       } else {
         xmoBlurInput();                        // tapped elsewhere -> put the keyboard away
@@ -714,11 +714,11 @@
   // not at the bottom). Shift the whole workbench down by the bar height so VS Code re-lays its parts
   // into the shorter area, keep the title bar pinned to the very top, and pin the status
   // bar into the gap. Writes are no-ops once everything already matches, so this is safe
-  // to run every frame — which is what keeps the bar from ever being left at VS Code's
+  // to run every frame, which is what keeps the bar from ever being left at VS Code's
   // relaid-out (possibly off-screen) position when the viewport size changes.
   let xmoStatusBusy = false;
   let xmoLastTitleH = 0;
-  let xmoStatusH = 0;   // measured ONCE and cached — a fluctuating value made the title flicker
+  let xmoStatusH = 0;   // measured ONCE and cached; a fluctuating value made the title flicker
   // Undo everything xmoEmbedStatusTop() pinned, so VS Code lays the title/status bars out
   // natively again. Needed the moment the parent turns its chrome off (window widened).
   function xmoEmbedChromeRestore(){
@@ -758,7 +758,7 @@
     }
     // 2) Align each bar's leftmost CONTENT to screen x=0. The frame slides the whole iframe
     //    left (portrait) to hide the native activity-bar column, so shift the fixed bars right
-    //    by that amount — BUT VS Code also offsets the items INSIDE each bar (reserving the
+    //    by that amount, BUT VS Code also offsets the items INSIDE each bar (reserving the
     //    activity-bar column), so subtract that measured internal offset. Over-shifting leaves
     //    the left looking empty; under-shifting clips the first item. Measuring both removes
     //    the guesswork (title bar and status bar can have different internal offsets).
@@ -774,7 +774,7 @@
     const statusLeft = Math.max(0, frameLeft - sOff);
     // 3) TITLE BAR pinned fixed directly BELOW the status bar. position:fixed escapes BOTH the
     //    workbench and the grid-view overflow:hidden that clipped the translated title bar down
-    //    to a sliver. (Row order is status-on-top, title under it — see step 4.)
+    //    to a sliver. (Row order is status-on-top, title under it; see step 4.)
     const tb = document.querySelector('.monaco-workbench .part.titlebar');
     let titleH = xmoLastTitleH || 35;
     const tOff = xmoItemOff(tb, '.window-appicon, .menubar, .action-item, .codicon');
@@ -784,7 +784,7 @@
       else if(xmoLastTitleH) titleH = xmoLastTitleH;
       const tPx = titleH + 'px';
       // Check EVERY property we set, not just a few: VS Code writes `style.width` inline on
-      // its own layout pass, and per CSSOM that drops our `!important` — the title bar then
+      // its own layout pass, and per CSSOM that drops our `!important`, so the title bar then
       // kept the full iframe width (48px wider than the screen) and hung off the right edge.
       if(tb.style.position !== 'fixed' || tb.style.top !== want || tb.style.height !== tPx ||
          tb.style.left !== titleLeftPx || tb.style.right !== '0px' || tb.style.width !== 'auto'){
@@ -799,10 +799,10 @@
         tb.style.removeProperty('transform');
       }
     }
-    // 4) STATUS BAR pinned fixed at the VERY TOP row (above the title bar) — the connection
+    // 4) STATUS BAR pinned fixed at the VERY TOP row (above the title bar): the connection
     //    state is what matters most on a phone, so it gets the topmost strip. Write only on a
     //    real difference so running every frame is free while still correcting any relayout.
-    // Publish the measured geometry so CSS can use it — the portrait full-screen side bar
+    // Publish the measured geometry so CSS can use it: the portrait full-screen side bar
     // has to start below the status+title band and right of the hidden gutter.
     const rs = document.documentElement.style;
     const bandPx = (H + titleH) + 'px', leftPx = frameLeft + 'px';
@@ -889,7 +889,7 @@
       view: function(codicon, aria){ xmoRestoreMaximized(); xmoActivate({codicon: codicon, aria: aria}); },
       // `anchor` = the parent button's rect in iframe coordinates (optional).
       menu: function(codicon, aria, anchor){ xmoActivate({codicon: codicon, aria: aria}); xmoPlaceMenuSoon(anchor); },
-      // Every view container VS Code's ACTIVITY BAR currently offers — explorer/search/git/
+      // Every view container VS Code's ACTIVITY BAR currently offers: explorer/search/git/
       // ... PLUS whatever extensions register there (Claude, ...). The parent renders one bar
       // button per entry, so a newly installed extension shows up without any code change.
       // Secondary-side-bar-only containers are deliberately absent: VS Code already shows
@@ -959,7 +959,7 @@
           fgActive: cs.getPropertyValue('--vscode-activityBar-foreground').trim(),
           border: cs.getPropertyValue('--vscode-panel-border').trim(),
           // The exact shadow VS Code puts on its context menus, so the parent's popup can
-          // wear the same one — tapping a row in that popup opens such a menu right on top
+          // wear the same one: tapping a row in that popup opens such a menu right on top
           // of it, and two different depths in one gesture read as a rendering glitch.
           menuShadow: xmoMenuShadow(),
           dark: !!b && (b.classList.contains('vs-dark') || b.classList.contains('hc-black'))

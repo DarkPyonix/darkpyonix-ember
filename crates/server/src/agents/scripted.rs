@@ -1,7 +1,7 @@
 //! A fake agent for tests: deterministic, no process, no network.
 //!
 //! On each message it emits a native-session event (first turn only), one tool call that needs
-//! approval, and — once approved — a tool result, an assistant reply echoing the message, and
+//! approval, and (once approved) a tool result, an assistant reply echoing the message, and
 //! `TurnEnded`. A message containing "slow" waits until interrupted.
 
 use std::sync::Arc;

@@ -10,7 +10,7 @@
 //! **Why `alacritty_terminal`** (and not `vt100`): its grid exposes the scrollback history
 //! (`history_size`, negative line indices) and lets us drop it (`clear_history`). That lets this
 //! model *harvest* lines as they scroll off the top and store them compactly as SGR-encoded text
-//! (≈ the size of the text itself) instead of as cell grids (24 bytes per cell — 10,000 lines × 80
+//! (≈ the size of the text itself) instead of as cell grids (24 bytes per cell: 10,000 lines × 80
 //! columns would be ≈ 19 MB per session, far above NFR-P1's 2 MB). `vt100` keeps its scrollback
 //! as full rows of 30+ byte cells with no way to drain it. alacritty is also the emulator behind
 //! the Alacritty terminal and Zed, so its VT coverage is broad and maintained.

@@ -51,7 +51,7 @@ impl UriComponents {
         Self::new(SCHEME_REMOTE, authority, path)
     }
 
-    /// `file://<path>` — what a server-side URI looks like before the transformer maps it back.
+    /// `file://<path>`: what a server-side URI looks like before the transformer maps it back.
     pub fn file(path: &str) -> Self {
         Self::new("file", "", path)
     }

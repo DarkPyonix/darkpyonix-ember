@@ -3,7 +3,7 @@
 //!
 //! 1. [`DeviceLink::start`]: `POST /v1/device-links {endpoint_id, name, role}` returns a user
 //!    code, a verification URL and a challenge.
-//! 2. The person opens the verification URL (signed in with GitHub) and approves the code — or
+//! 2. The person opens the verification URL (signed in with GitHub) and approves the code, or
 //!    types the code into their ember server, which approves it with its own device token.
 //! 3. [`DeviceLink::poll`] / [`DeviceLink::wait`]: the device signs
 //!    `darkpyonix-hub/v2/link\n<link_id>\n<challenge>` with its endpoint key and posts it every

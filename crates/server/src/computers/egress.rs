@@ -9,7 +9,7 @@
 //! The listener does not parse SOCKS5: each accepted connection gets its own `/v1/egress` stream
 //! and bytes are copied unchanged ([`ember_node::egress::bridge`]), so Chrome's SOCKS5 client
 //! talks to the node's SOCKS5 server end to end and DNS is resolved on the node. Chrome cannot
-//! authenticate to a SOCKS5 proxy, so the listener is bound to loopback without authentication —
+//! authenticate to a SOCKS5 proxy, so the listener is bound to loopback without authentication:
 //! any local process on the ember server can use it while it runs (the same trust boundary as the
 //! browser's unauthenticated DevTools port).
 

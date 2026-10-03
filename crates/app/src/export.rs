@@ -3,7 +3,7 @@
 //! The main server builds the file (`GET /sessions/{id}/export`: `format: "ember-transcript"`,
 //! the session record and every stored event), so it never depends on what this client
 //! happened to have loaded. The app adds `transcript`, the events reduced by the client's own
-//! reducer — the representation every client renders (FR-S2) — so the file is readable without
+//! reducer (the representation every client renders, FR-S2), so the file is readable without
 //! replaying it.
 
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 """Folder roots: which folders a workspace URL (`?folder=` / `?workspace=`) may open.
 
-With no roots configured (`DPX_FOLDER_ROOTS` unset), every folder is allowed — the original
+With no roots configured (`DPX_FOLDER_ROOTS` unset), every folder is allowed: the original
 behaviour of the standalone proxy. The `python -m dpx.serve` launcher always configures at
 least one root, and then any folder outside them is refused with 403 before the request
 reaches serve-web.

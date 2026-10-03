@@ -83,7 +83,7 @@ pub struct BrowserInfo {
 }
 
 /// Input from a viewer (WebSocket text message or `POST …/input`). Coordinates are CSS pixels in
-/// the page viewport — the frame metadata's `deviceWidth` × `deviceHeight` space.
+/// the page viewport, the frame metadata's `deviceWidth` × `deviceHeight` space.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputEvent {

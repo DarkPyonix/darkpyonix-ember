@@ -5,7 +5,7 @@ proxy's unit tests run. Requirements:
 `docs/SPEC.md` §P, FR-P1–FR-P6, NFR-P1.
 
 Terminals, tasks and other processes started from an IDE window must keep running when every
-window is closed, and must reappear — same scrollback, same screen, same running TUI — on any
+window is closed, and must reappear (same scrollback, same screen, same running TUI) on any
 device. To get that, **ember node owns the process**. The IDE windows (VS Code Web and the Ember
 editor), agents and people are clients that attach and detach.
 
@@ -33,7 +33,7 @@ someone kills it. Attaching and detaching never start or stop it.
 |---|---|
 | Create | argv (or the user's login shell: `$SHELL`, `-l` on macOS as VS Code does), cwd (inside the allowed roots), env (added to the daemon's, or `env_clear` + the client's whole env), initial size, **origin** (`ide-vscode`, `ide-ember`, `agent`, `user`), **project**, title, tags. `key` makes create idempotent: a running session with the same key is returned (`created: false`). `EMBER_TERM_ID` is set in the session; `EMBER_NODE_TOKEN` is removed. |
 | Attach | Any number of WebSocket clients. Each gets `attached`, then a **snapshot**, then the live byte stream, which continues exactly where the snapshot ends (both happen under the session lock). |
-| VT model | `alacritty_terminal` emulator fed with every byte. Scrollback: lines that scroll off are harvested and stored SGR-encoded (≈ text size), **10,000 logical lines** (soft-wrapped rows joined), capped at 3 MB. The snapshot is `ESC c` + scrollback + screen (primary, and the alternate screen when a TUI runs) + cursor, pen, input modes (app cursor/keypad, mouse modes, bracketed paste, focus, kitty keyboard flags, cursor style) + title. Gaps: scroll region, origin mode, saved cursor, charsets, tab stops, OSC 8 links — a TUI repaints these on its next full redraw (any resize causes one). |
+| VT model | `alacritty_terminal` emulator fed with every byte. Scrollback: lines that scroll off are harvested and stored SGR-encoded (≈ text size), **10,000 logical lines** (soft-wrapped rows joined), capped at 3 MB. The snapshot is `ESC c` + scrollback + screen (primary, and the alternate screen when a TUI runs) + cursor, pen, input modes (app cursor/keypad, mouse modes, bracketed paste, focus, kitty keyboard flags, cursor style) + title. Gaps: scroll region, origin mode, saved cursor, charsets, tab stops, OSC 8 links; a TUI repaints these on its next full redraw (any resize causes one). |
 | Input | All interactive clients may type. Input is queued to one writer thread under the session lock, so keystrokes from all clients reach the PTY **in arrival order**, and a program that stops reading never blocks the node. Terminal *answers* (cursor position reports, device attributes, focus events, OSC/DCS replies) are forwarded only from the client whose size the PTY follows, so the program gets exactly one answer; with no interactive client attached, the model answers. |
 | Control | `take_control` (any interactive client, also from another controller) makes everyone else read-only; their input is **refused** with a `refused` event naming the controller. Released by `release_control` or when the controller detaches. Also over HTTP (`POST /v1/terms/{id}/control`) for UIs that hold the client id. |
 | Size | The PTY (and the model) follow the **controller**; with none, the **most recently active** client (last to type, or an attach with `active: true`); with none, the last attached client that reported a size. A passive attach (`active: false`, e.g. restoring a terminal list) never resizes. Clients whose viewport differs render the PTY's size (`resized` events) and scale it to fit. |
@@ -43,7 +43,7 @@ someone kills it. Attaching and detaching never start or stop it.
 | Metadata | `<state>/terms/<id>.json` (atomic writes, dir `0700`): id, key, origin, project, argv, cwd, tags, pid, state, exit status, size, times, keeper socket. State dir: `EMBER_NODE_STATE_DIR`, default `~/.ember/node`. |
 | Events | `term_started` / `term_finished` (with the full `TermInfo`) on `/v1/events`, next to the job events, so ember server keeps a per-computer list without polling. |
 
-### Surviving restarts (FR-P6) — best effort
+### Surviving restarts (FR-P6): best effort
 
 - **ember server restart, client restart, window close, VS Code server restart:** nothing happens
   to the session; ember server and the IDEs are only clients.
@@ -160,14 +160,14 @@ over the node link.
 
 Two pieces, both on the VS Code extension/settings surface:
 
-**a) Companion web extension — `web/proxy/companion/`** (integrated terminals). A `browser`-only
+**a) Companion web extension: `web/proxy/companion/`** (integrated terminals). A `browser`-only
 extension, so it runs in VS Code Web's web worker extension host. It contributes the terminal
 profile **"Ember (persistent)"** (`contributes.terminal.profiles` +
 `window.registerTerminalProfileProvider`) whose `TerminalProfile` carries a
 **`Pseudoterminal`**: `open` creates a session (`origin: ide-vscode`, project = first workspace
 folder path, a fresh `key`) and attaches over `wss://<proxy>/__terms/{id}/attach`; `handleInput`,
 `setDimensions` and `close` map to `input`, `resize`, `detach`; `onDidChangeName` shows
-"— controlled by <device>". On activation (`onStartupFinished`), on window focus and every 5 s
+"(controlled by <device>)". On activation (`onStartupFinished`), on window focus and every 5 s
 while focused, it lists the project's sessions and shows the ones not yet in the window with
 `window.createTerminal({ name, pty, isTransient: true })` (passive attach): running VS Code
 terminals from any device, plus VS Code tasks that finished in the last 10 minutes (their output).
@@ -189,7 +189,7 @@ Install: copy `web/proxy/companion/` into the VS Code server's extensions direct
 `darkpyonix.ember-terminals-0.1.0/` (for `code serve-web`, the `extensions` folder under its server
 data dir, or pass `--extensions-dir`), or package it with `vsce package` and install the `.vsix`.
 
-**b) `ember-term` binary — `crates/node/src/bin/ember-term.rs`** (tasks; also usable as a plain profile).
+**b) `ember-term` binary: `crates/node/src/bin/ember-term.rs`** (tasks; also usable as a plain profile).
 A small client that attaches the terminal it runs in to a node session: `ember-term` (new shell),
 `ember-term -c "<cmd>"` (new session running `$SHELL -c`, exits with its status), `ember-term
 attach <id> [--passive]`, `attach-or-create --key k [-- argv]`, `list`, `kill`. It forwards its
@@ -214,14 +214,14 @@ terminal → ember-term gets SIGHUP and detaches → the build keeps running. Re
 the companion shows the task's session with its scrollback; it ends with its exit status. VS Code's
 own task state (problem matchers, "task is running") does not carry over to a re-shown session.
 
-**c) Debuggees (FR-P5) — in the companion.** Requirement: a program started under the debugger
+**c) Debuggees (FR-P5), in the companion.** Requirement: a program started under the debugger
 keeps running when the window closes; re-attaching the debugger is best-effort.
 
 *Why not just serve `runInTerminal` from a persistent session.* With `"console":
 "integratedTerminal"` the adapter sends the DAP reverse request `runInTerminal`, which VS Code
 answers itself in the extension host that runs the adapter (`ExtHostDebugService.$runInTerminal`,
 [`src/vs/workbench/api/node/extHostDebugService.ts`](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/api/node/extHostDebugService.ts)):
-it creates a terminal with `getDefaultShell(true)` / `getDefaultShellArgs(true)` — the
+it creates a terminal with `getDefaultShell(true)` / `getDefaultShellArgs(true)`, the
 **automation profile** (`terminal.integrated.automationProfile.<os>`, "for automation-related
 terminal usage like tasks and debug",
 [`terminalPlatformConfiguration.ts`](https://github.com/microsoft/vscode/blob/main/src/vs/platform/terminal/common/terminalPlatformConfiguration.ts);
@@ -233,7 +233,7 @@ checks `hasChildProcesses(terminal.processId)`) and returns the shell's pid.
   profile (ours has no `path`) falls back to the system shell (`_getUnresolvedDefaultProfile`,
   [`terminalProfileResolverService.ts`](https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/terminal/browser/terminalProfileResolverService.ts)).
   `automationProfile` = `ember-term` (the setup command writes it) *does* put the debuggee into a
-  node session — but that is not enough, see below — and since ember-term has no child process,
+  node session (but that is not enough, see below), and since ember-term has no child process,
   VS Code considers that terminal idle and may type the next debug launch into it.
 - A **`DebugAdapterTracker`** (`vscode.debug.registerDebugAdapterTrackerFactory`) only observes:
   `onWillReceiveMessage` / `onDidSendMessage` return `void`, and the message is forwarded right
@@ -271,13 +271,13 @@ in time). For a `launch` with `"console": "integratedTerminal"` of a supported t
    interactive login shell (`/bin/sh -c 'exec "$SHELL" -l -i -c "$1"'`), as runInTerminal's typed
    command would, so nvm/pyenv PATHs apply:
    - Node (`node`, `pwa-node`): `<runtimeExecutable or node> --inspect-brk=127.0.0.1:0
-     <runtimeArgs> <program> <args>` — port 0 lets the OS choose; Node prints `Debugger listening
+     <runtimeArgs> <program> <args>`; port 0 lets the OS choose; Node prints `Debugger listening
      on ws://127.0.0.1:<port>/<uuid>`.
    - Python (`debugpy`, `python`): `<python> -c <bootstrap> -f <program>|-m <module> <args>`; the
      bootstrap calls `debugpy.listen(("127.0.0.1", 0))` (returns the port actually used,
      [`public_api.py`](https://github.com/microsoft/debugpy/blob/main/src/debugpy/public_api.py)),
      prints `[ember] debugpy listening on 127.0.0.1:<port>`, `wait_for_client()`, then runs the
-     program with `runpy`. debugpy must be importable by that interpreter (`pip install debugpy`),
+     program with `runpy`. debugpy must be importable by that interpreter (for a uv project, `uv add debugpy`),
      or `ember.debug.debugpyPath` names the directory that contains it (e.g. the Python Debugger
      extension's `bundled/libs`).
 2. The session's terminal is shown in the window right away (it is the debuggee's console, also
@@ -302,7 +302,7 @@ terminal stays open after the program exits, with the output.
 
 *Re-attach (best-effort).* Every poll (activation, focus, 5 s) also lists this project's running
 sessions tagged `vscode.debug.kind` whose debug id no debug session of this window is attached to,
-and offers once per window "Re-attach the debugger? — Re-attach / Stop It". Re-attach reads the
+and offers once per window "Re-attach the debugger? Re-attach / Stop It". Re-attach reads the
 endpoint again from the session's text (scrollback) and calls `vscode.debug.startDebugging(folder,
 <attach configuration>)`. The command *Ember: Re-attach Debugger to a Running Debuggee…* does the
 same on demand. `ember.debug.offerReattach` turns the offer off.
@@ -310,9 +310,9 @@ same on demand. `ember.debug.offerReattach` turns the offer off.
 | Adapter / configuration | Debuggee survives the window | Re-attach |
 |---|---|---|
 | js-debug `node` / `pwa-node`, launch, `integratedTerminal`, runtime `node` | yes (node session + `--inspect-brk`) | yes, by inspector port (any device; the port is on 127.0.0.1 of the workspace computer, where the adapter runs). Breakpoints, stepping, source maps as in attach. Not carried over: child-process auto-attach (`autoAttachChildProcesses`), restart of the process from the debug toolbar, `envFile` (not read), `console` output in the Debug Console. |
-| js-debug with `runtimeExecutable` npm/yarn/tsx/…, `program`-less configs, `args` as a string | no — passed through unchanged | — |
-| debugpy / python, launch, `integratedTerminal`, `program` or `module` | yes, if `debugpy` is importable (or `ember.debug.debugpyPath`) | yes, `connect` to the listening port (assumes debugpy's listener accepts a new client after the previous one disconnected — not verified). Not carried over: `stopOnEntry`, `envFile`, `sudo`, `autoReload`, `redirectOutput`. |
-| `internalConsole` / `externalTerminal`, `pwa-chrome`/`msedge`, `lldb`, `cppdbg`, `go`, others | no (unchanged; the adapter owns the debuggee) | — |
+| js-debug with `runtimeExecutable` npm/yarn/tsx/…, `program`-less configs, `args` as a string | no, passed through unchanged | (none) |
+| debugpy / python, launch, `integratedTerminal`, `program` or `module` | yes, if `debugpy` is importable (or `ember.debug.debugpyPath`) | yes, `connect` to the listening port (assumes debugpy's listener accepts a new client after the previous one disconnected; not verified). Not carried over: `stopOnEntry`, `envFile`, `sudo`, `autoReload`, `redirectOutput`. |
+| `internalConsole` / `externalTerminal`, `pwa-chrome`/`msedge`, `lldb`, `cppdbg`, `go`, others | no (unchanged; the adapter owns the debuggee) | (none) |
 
 Not taken: setting `automationProfile` to `ember-term` for debug only (it applies to tasks and debug
 alike and is already what the setup command writes) does not make a launch debuggee survive, for

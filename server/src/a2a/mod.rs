@@ -36,6 +36,8 @@ pub use store::{A2aMessage, A2aStore};
 pub const CLI_NAME: &str = "ember-a2a";
 /// Marks the first line of every delivered message.
 pub const HEADER_TAG: &str = "[ember a2a]";
+/// Marks the first line of every scheduled prompt (FR-A8).
+const SCHEDULE_TAG: &str = crate::schedules::HEADER_TAG;
 
 /// Loop protection limits (FR-T5).
 #[derive(Debug, Clone, Copy)]
@@ -289,7 +291,23 @@ impl A2a {
              not send acknowledgements or thanks, and do not keep an exchange going for its own \
              sake. Sends are rate-limited and loops are stopped. The command talks to the local \
              Ember server over HTTP; if a sandbox blocks that, ask for permission to run it \
-             outside the sandbox."
+             outside the sandbox.\n\
+             \n\
+             # Scheduled prompts (Ember schedules)\n\
+             \n\
+             When the user asks for something to happen later or repeatedly (\"every morning\", \
+             \"in two hours\", \"each Friday\"), create a schedule with the same command:\n\
+             \n\
+             - `{CLI_NAME} schedule add --cron \"0 9 * * 1-5\" --tz Asia/Seoul \"<prompt>\"` \
+             (five-field cron in an IANA time zone), `--every 2h`, or `--at \
+             2026-10-04T09:00:00+09:00` (once). By default the prompt is sent into this session; \
+             add `--new [--title <title>]` to start a new session in this project each time, and \
+             `--catch-up` to run the latest trigger missed while the server was down.\n\
+             - `{CLI_NAME} schedule list` shows this project's schedules; `{CLI_NAME} schedule rm \
+             <schedule-id>` deletes one.\n\
+             \n\
+             Scheduled prompts arrive as user messages whose first line starts with \
+             `{SCHEDULE_TAG}`. Create schedules only when the user asked for one."
         )
     }
 

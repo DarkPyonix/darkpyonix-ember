@@ -120,6 +120,9 @@ const MIGRATIONS: &[&str] = &[
     crate::projects::schema::MIGRATION,
     crate::projects::schema::META_FTS_MIGRATION,
     crate::hub::schema::MIGRATION,
+    crate::hub::schema::RESOLVE_MIGRATION,
+    crate::mcp::schema::MIGRATION,
+    crate::schedules::schema::MIGRATION,
     crate::a2a::team::MIGRATION,
 ];
 

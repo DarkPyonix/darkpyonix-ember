@@ -204,7 +204,13 @@ pub(crate) fn toml_str(s: &str) -> String {
 /// The browser MCP server for `project`, as the adapters take it.
 pub fn mcp_server(base: &str, project: &str, mcp: BrowserMcp, runner: &Runner) -> McpServer {
     let (command, args) = mcp.command_with(runner, &cdp_ws_url(base, project));
-    McpServer { name: MCP_NAME.into(), command, args, startup_timeout_secs: Some(MCP_STARTUP_TIMEOUT_SECS) }
+    McpServer {
+        name: MCP_NAME.into(),
+        command,
+        args,
+        startup_timeout_secs: Some(MCP_STARTUP_TIMEOUT_SECS),
+        env: Vec::new(),
+    }
 }
 
 /// Give every agent the project's browser (FR-R3): adds the MCP server to the start request (the

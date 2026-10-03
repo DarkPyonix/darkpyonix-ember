@@ -54,10 +54,11 @@ async fn publish_and_resolve_through_the_hub() {
     let hub = FakeHub::start().await;
     let (ka, kb) = (SecretKey::generate(), SecretKey::generate());
     let ta = hub.register(ka.peer_id(), "server", Role::MainServer);
-    let tb = hub.register(kb.peer_id(), "node", Role::Computer);
+    hub.register(kb.peer_id(), "node", Role::Computer);
 
-    let a = bind(&hub, ka.clone(), Some(ta.clone())).await;
-    let b = bind(&hub, kb.clone(), Some(tb)).await;
+    // The resolver's URL carries the read-only resolve token, never the device token (NFR-H2).
+    let a = bind(&hub, ka.clone(), hub.resolve_token(&ka.peer_id())).await;
+    let b = bind(&hub, kb.clone(), hub.resolve_token(&kb.peer_id())).await;
     spawn_echo(&b, "echo");
     wait_published(&hub, &b.peer_id()).await;
 
@@ -80,8 +81,8 @@ async fn publish_and_resolve_through_the_hub() {
 async fn unregistered_endpoints_are_not_published_and_tokenless_peers_resolve_nothing() {
     let hub = FakeHub::start().await;
     let kb = SecretKey::generate();
-    let tb = hub.register(kb.peer_id(), "node", Role::Computer);
-    let b = bind(&hub, kb, Some(tb)).await;
+    hub.register(kb.peer_id(), "node", Role::Computer);
+    let b = bind(&hub, kb.clone(), hub.resolve_token(&kb.peer_id())).await;
     spawn_echo(&b, "echo");
     wait_published(&hub, &b.peer_id()).await;
 
@@ -92,8 +93,12 @@ async fn unregistered_endpoints_are_not_published_and_tokenless_peers_resolve_no
     assert!(hub.record(&stranger.peer_id()).is_none());
 
     // Registering later and setting the token at runtime enables resolving.
-    let token = hub.register(stranger.peer_id(), "late", Role::Computer);
-    stranger.set_directory_token(Some(token));
+    // A device token in the resolver URL is refused by the hub; the resolve token works.
+    let device_token = hub.register(stranger.peer_id(), "late", Role::Computer);
+    stranger.set_directory_token(Some(device_token));
+    let r = tokio::time::timeout(Duration::from_secs(5), stranger.connect(b.peer_id(), "echo")).await;
+    assert!(!matches!(r, Ok(Ok(_))), "a device token must not resolve through /pkarr?token=");
+    stranger.set_directory_token(hub.resolve_token(&stranger.peer_id()));
     let conn = tokio::time::timeout(Duration::from_secs(15), stranger.connect(b.peer_id(), "echo"))
         .await
         .expect("connect timed out")

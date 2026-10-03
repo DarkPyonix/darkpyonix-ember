@@ -7,7 +7,15 @@
 //!    types the code into their ember server, which approves it with its own device token.
 //! 3. [`DeviceLink::poll`] / [`DeviceLink::wait`]: the device signs
 //!    `darkpyonix-hub/v2/link\n<link_id>\n<challenge>` with its endpoint key and posts it every
-//!    `interval` seconds until it is approved (device token, shown once), denied or expired.
+//!    `interval` seconds until it is approved (device token and resolve token, shown once),
+//!    denied or expired.
+//! 4. A device that restarted while waiting reads the link back with
+//!    [`DeviceLink::resume_by_id`] (`GET /v1/device-links/{link_id}`, no credentials).
+//!
+//! A removed key gets `409` from step 1 until the account owner re-admits it on the hub
+//! (`POST /v1/devices/{id}/readmit`, a signed-in session, FR-H11); within the next 15 minutes
+//! it may link again, a signed-in person approves it, and the same device comes back with new
+//! tokens.
 
 use std::time::Duration;
 
@@ -15,7 +23,7 @@ use ember_transport::SecretKey;
 
 use crate::client::{HubClient, HubError};
 use crate::registration::{now_secs, Registration};
-use crate::types::{ClaimOutcome, LinkRequest, PendingLink, Role};
+use crate::types::{ClaimOutcome, LinkRequest, LinkStatus, PendingLink, Role};
 
 /// The bytes signed to claim a link.
 pub fn link_message(link_id: &str, challenge: &str) -> Vec<u8> {
@@ -29,8 +37,16 @@ pub enum LinkError {
     Denied,
     #[error("the link expired before it was approved (user code {0})")]
     Expired(String),
-    #[error("this endpoint is already registered with the hub (or was removed; removed keys are not reused): {0}")]
+    #[error(
+        "this endpoint is already registered with the hub, or was removed from its account ({0}). \
+         A removed device can rejoin after the account owner re-admits it on the hub (signed in: \
+         remove → re-admit, valid 15 minutes) and then approves its new link in the browser"
+    )]
     AlreadyRegistered(String),
+    /// The link was claimed, but the tokens never reached this device (it restarted between the
+    /// claim and saving them). The device is registered without usable tokens.
+    #[error("the link was already claimed but this device did not keep its tokens: remove the device on the hub, re-admit it, and link again")]
+    ClaimedElsewhere,
     #[error(transparent)]
     Hub(#[from] HubError),
 }
@@ -69,6 +85,27 @@ impl DeviceLink {
         Self { client: client.without_token(), key: key.clone(), pending, poll_interval: None }
     }
 
+    /// Reads a link started before a restart (`GET /v1/device-links/{link_id}`) and resumes
+    /// it when it is still pending or approved-but-unclaimed. A denied, expired (or deleted)
+    /// or already claimed link is an error, as is one for another key.
+    pub async fn resume_by_id(client: &HubClient, key: &SecretKey, link_id: &str) -> Result<Self, LinkError> {
+        let info = client.link_status(link_id).await.map_err(|e| match e {
+            HubError::NotFound(_) => LinkError::Expired(String::new()),
+            e => LinkError::Hub(e),
+        })?;
+        if info.endpoint_id != key.peer_id() {
+            return Err(HubError::Decode(format!("link {link_id} belongs to {}, not this endpoint", info.endpoint_id)).into());
+        }
+        match info.status {
+            LinkStatus::Pending | LinkStatus::Approved if info.expires_at >= now_secs() => {
+                Ok(Self::resume(client, key, info.to_pending()))
+            }
+            LinkStatus::Pending | LinkStatus::Approved | LinkStatus::Expired => Err(LinkError::Expired(info.user_code)),
+            LinkStatus::Denied => Err(LinkError::Denied),
+            LinkStatus::Claimed => Err(LinkError::ClaimedElsewhere),
+        }
+    }
+
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = Some(interval);
         self
@@ -96,7 +133,7 @@ impl DeviceLink {
         let sig = self.key.sign(&link_message(&self.pending.link_id, &self.pending.challenge));
         match self.client.claim(&self.pending.link_id, &hex::encode(sig)).await {
             Ok(ClaimOutcome::Pending) => Ok(LinkPoll::Pending),
-            Ok(ClaimOutcome::Approved { device, device_token }) => {
+            Ok(ClaimOutcome::Approved { device, device_token, resolve_token }) => {
                 if device.endpoint_id != self.key.peer_id() {
                     return Err(HubError::Decode(format!(
                         "hub registered {} instead of this endpoint {}",
@@ -110,6 +147,7 @@ impl DeviceLink {
                     hub_url: self.client.base_url().to_string(),
                     device,
                     device_token,
+                    resolve_token,
                     registered_at: now_secs(),
                     revoked_at: None,
                 }))

@@ -528,6 +528,7 @@ async fn connect_and_run(
                         inner.apply(Input::Push(p));
                     }
                     Err(DecodeError::Version { server, .. }) => break Ended::Incompatible { server },
+                    Err(DecodeError::Skipped(kind)) => tracing::trace!("ignoring push {kind}"),
                     // An unknown push type from a compatible server is additive: skip it.
                     Err(e) => tracing::warn!("skipping push message: {e}"),
                 },

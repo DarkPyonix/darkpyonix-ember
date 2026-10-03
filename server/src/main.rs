@@ -14,6 +14,8 @@ use ember_server::devices::{self, Devices};
 use ember_server::hub::ServerHub;
 use ember_transport::Transport;
 use ember_server::transport::{self as server_transport, ServerTransport};
+use ember_server::mcp::McpRegistry;
+use ember_server::schedules::{Scheduler, SystemClock};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 
@@ -96,11 +98,30 @@ async fn main() -> anyhow::Result<()> {
     // The peer-to-peer transport (FR-N1), opt-in.
     let net = if server_transport::enabled_from_env() {
         let key = server_transport::load_key(&data_dir)?;
-        let token = hub.as_ref().and_then(|h| h.active_token());
-        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), token)).await?;
+        let registered = hub.as_ref().is_some_and(|h| h.is_registered());
+        // The resolve token (`dpr_`) goes in the directory resolver's URL; a registration from
+        // before the hub issued them gets one now.
+        let token = match &hub {
+            Some(h) if registered => h.ensure_resolve_token().await,
+            _ => None,
+        };
+        // The hub's relay and directory from its `/v1/config` (derived when it has none). Asked
+        // only when the hub will be used now, so an unregistered server does not contact it.
+        let hub_config = match &hub {
+            Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => Some(h.discover().await),
+            Some(h) => Some(h.config()),
+            None => hub_config,
+        };
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), registered, token)).await?;
         if let Some(h) = &hub {
             h.attach_transport(t.clone());
             let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
+            // A link that was waiting for approval when the server stopped.
+            match h.resume_link().await {
+                Ok(Some(p)) => tracing::info!(user_code = %p.user_code, "resumed the pending hub link"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("could not resume the pending hub link: {e}"),
+            }
             let st = h.status()?;
             match (&st.device, st.revoked) {
                 (Some(d), false) => tracing::info!(hub = %st.hub_url, name = %d.name, "registered with the hub"),
@@ -120,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
     // Computers and switching (FR-X1–FR-X3, FR-S7 v0); tables live in the main store.
     let computer_registry = Registry::new(store.clone());
     let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
+    let store_for_mcp = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     let shim = computers::find_shim();
@@ -219,6 +241,9 @@ async fn main() -> anyhow::Result<()> {
         }
         None => tracing::info!("agents get no browser MCP server (EMBER_BROWSER_MCP is off)"),
     }
+    // The central MCP registry (FR-A7): after the browser hook, so its server keeps its name.
+    let mcp = McpRegistry::open(store_for_mcp.clone(), &data_dir)?;
+    mcp.install(&sessions);
 
     // Sign in with ChatGPT (FR-U4): self-hosted only; the loopback callback is served below.
     let chatgpt = ember_server::chatgpt::ChatGpt::new(
@@ -239,6 +264,25 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("ember server listening on http://{addr}");
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
+    // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
+    let scheduler = Scheduler::new(sessions.clone(), Arc::new(SystemClock));
+    {
+        let (computers, sessions) = (computers.clone(), sessions.clone());
+        let place = move |session_id: String,
+                          computer_id: String|
+              -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            let (computers, sessions) = (computers.clone(), sessions.clone());
+            Box::pin(async move {
+                computers
+                    .switch(&sessions, &session_id, &computer_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
+        };
+        scheduler.set_computer_placer(Arc::new(place));
+    }
+    let _scheduler_task = scheduler.start();
     // TODO(computers): "Open IDE" still takes its per-computer targets from
     // EMBER_IDE_COMPUTERS; derive them from the computers registry (and the session's current
     // computer) instead of a second, hand-maintained list.
@@ -246,6 +290,9 @@ async fn main() -> anyhow::Result<()> {
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(ember_server::api::ide::router(sessions, ide))
+        .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
+        .merge(ember_server::schedules::api::router(scheduler))
+        .merge(ember_server::mcp::api::router(mcp))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))

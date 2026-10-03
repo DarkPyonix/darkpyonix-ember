@@ -16,6 +16,9 @@ pub enum DecodeError {
     Version { server: u32, client: u32 },
     #[error("unknown push type {0:?}")]
     UnknownType(String),
+    /// A push type this client knows and deliberately does not use yet (see [`SKIPPED_TYPES`]).
+    #[error("push type {0:?} is not used by this client")]
+    Skipped(String),
     #[error("malformed push message: {0}")]
     Malformed(String),
 }
@@ -54,6 +57,11 @@ struct LaggedBody {
     missed: u64,
 }
 
+/// Push types the server sends that this client knows about and ignores for now: the
+/// schedule pushes (FR-A8) have no client UI yet. Skipped quietly, unlike an unknown type.
+pub const SKIPPED_TYPES: &[&str] =
+    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run"];
+
 /// Decode one push text frame. The version is checked before anything else.
 pub fn decode(text: &str) -> Result<Push, DecodeError> {
     let malformed = |e: serde_json::Error| DecodeError::Malformed(e.to_string());
@@ -88,6 +96,7 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
             let b: LaggedBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::Lagged { missed: b.missed })
         }
+        other if SKIPPED_TYPES.contains(&other) => Err(DecodeError::Skipped(other.to_string())),
         other => Err(DecodeError::UnknownType(other.to_string())),
     }
 }
@@ -180,6 +189,11 @@ mod tests {
         assert!(matches!(p, Push::SessionCreated { session } if !session.pinned && session.account_id.is_none()));
         // A type this client does not know is reported, and the push loop skips it.
         assert_eq!(decode(r#"{"type":"future_thing","v":1}"#), Err(DecodeError::UnknownType("future_thing".into())));
+        // The schedule pushes (FR-A8) are known and skipped on purpose.
+        assert_eq!(
+            decode(r#"{"type":"schedule_run","v":1,"run":{"id":"r"}}"#),
+            Err(DecodeError::Skipped("schedule_run".into()))
+        );
     }
 
     #[test]

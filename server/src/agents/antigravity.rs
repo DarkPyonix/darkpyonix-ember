@@ -67,8 +67,9 @@
 //!   file, not in the environment, so the agent's shell commands do not inherit it;
 //! - `.agents/rules/ember.md`: [`StartRequest::instructions`] plus a note that the session root is
 //!   not the project;
-//! - `.agents/mcp_config.json`: [`StartRequest::mcp_servers`] (`{"mcpServers": {name:
-//!   {"command","args"}}}`). Loaded from the session root on 1.2.16 (recorded: the server got
+//! - `.agents/mcp_config.json` (mode 0600): [`StartRequest::mcp_servers`] (`{"mcpServers": {name:
+//!   {"command","args","env"}}}`; `env` only when the server has one, and its values may be
+//!   secrets, hence the mode). Loaded from the session root on 1.2.16 (recorded: the server got
 //!   `initialize` and `tools/list`).
 //!
 //! The route ([`router`], served by [`HookBroker`]) decides per call:
@@ -402,6 +403,27 @@ fn remember_root(home: &Path, conversation: &str, root: &Path) -> anyhow::Result
     Ok(())
 }
 
+/// Write `bytes` to `path` readable by the owner only (`0600` on Unix), also when it existed.
+fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        // `mode` applies only on creation; tighten a file left by an older run.
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(bytes)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 fn make_private_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -468,14 +490,23 @@ exit 0
         .replace("@URL@", &shell_quote(url))
 }
 
-/// `mcp_config.json` for `servers`, or `None` when there are none.
+/// `mcp_config.json` for `servers`, or `None` when there are none. Each server's `env` (central
+/// registry, FR-A7) goes into its entry; the file is written owner-only.
 pub fn mcp_config(servers: &[McpServer]) -> Option<Value> {
     if servers.is_empty() {
         return None;
     }
     let map: serde_json::Map<String, Value> = servers
         .iter()
-        .map(|s| (s.name.clone(), json!({ "command": s.command, "args": s.args })))
+        .map(|s| {
+            let mut entry = json!({ "command": s.command, "args": s.args });
+            if !s.env.is_empty() {
+                let env: serde_json::Map<String, Value> =
+                    s.env.iter().map(|(k, v)| (k.clone(), Value::String(v.clone()))).collect();
+                entry["env"] = Value::Object(env);
+            }
+            (s.name.clone(), entry)
+        })
         .collect();
     Some(json!({ "mcpServers": map }))
 }
@@ -518,7 +549,7 @@ fn write_session_root(root: &Path, hook_url: &str, token: &str, req: &StartReque
     )?;
     let mcp = agents.join("mcp_config.json");
     match mcp_config(&req.mcp_servers) {
-        Some(cfg) => std::fs::write(&mcp, serde_json::to_vec_pretty(&cfg)?)?,
+        Some(cfg) => write_private_file(&mcp, &serde_json::to_vec_pretty(&cfg)?)?,
         None => {
             let _ = std::fs::remove_file(&mcp);
         }
@@ -1692,6 +1723,7 @@ mod tests {
                 command: "npx".into(),
                 args: vec!["-y".into(), "x".into()],
                 startup_timeout_secs: Some(60),
+                env: vec![("API_KEY".into(), "s3cret".into())],
             }],
             ..Default::default()
         };
@@ -1711,6 +1743,13 @@ mod tests {
         let mcp: Value = serde_json::from_slice(&std::fs::read(agents.join("mcp_config.json")).unwrap()).unwrap();
         assert_eq!(mcp["mcpServers"]["ember-browser"]["command"], "npx");
         assert_eq!(mcp["mcpServers"]["ember-browser"]["args"][1], "x");
+        assert_eq!(mcp["mcpServers"]["ember-browser"]["env"]["API_KEY"], "s3cret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(agents.join("mcp_config.json")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "MCP env values may be secrets");
+        }
 
         // Without MCP servers the file goes; a resume finds the same root.
         write_session_root(&root, "u", "t", &StartRequest { cwd: dir.path().into(), ..Default::default() }).unwrap();

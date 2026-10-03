@@ -282,7 +282,7 @@ fn row_to_schedule(r: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     Ok(Schedule {
         id: r.get(0)?,
         project: r.get(1)?,
-        agent: AgentKind::parse(&agent).unwrap_or(AgentKind::Scripted),
+        agent: AgentKind::from_stored(&agent).unwrap_or(AgentKind::Scripted),
         account_id: r.get(3)?,
         computer_id: r.get(4)?,
         cwd: r.get(5)?,

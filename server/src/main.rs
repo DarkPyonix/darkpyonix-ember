@@ -7,6 +7,7 @@ use ember_server::agents::antigravity::{self, AntigravityAdapter, HookBroker};
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::scripted::ScriptedAdapter;
+use ember_server::agents::acp::{self, AcpAdapter};
 use ember_server::a2a::{A2a, A2aConfig, A2aStore};
 use ember_server::agents::AgentAdapter;
 use ember_server::browser::{agent as browser_agent, BrowserConfig, BrowserManager};
@@ -30,6 +31,10 @@ use ember_server::store::Store;
 ///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
 ///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=0` drops agy's `--sandbox`
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
+/// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
+///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
+///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
+///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary). See `agents::acp`.
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
@@ -88,6 +93,11 @@ async fn main() -> anyhow::Result<()> {
     ];
     if std::env::var("EMBER_SCRIPTED_AGENT").as_deref() == Ok("1") {
         adapters.push(Arc::new(ScriptedAdapter));
+    }
+    // Configured ACP agents (FR-A2); registering them makes their names valid agent kinds.
+    for config in acp::configs_from_env()? {
+        tracing::info!(agent = %config.name, command = %config.command.display(), "ACP agent configured");
+        adapters.push(Arc::new(AcpAdapter::new(config)?));
     }
     let accounts = Accounts::open(store.clone(), &data_dir)?;
     // Devices allowed over the transport (FR-N3); the table feeds the transport's gate.

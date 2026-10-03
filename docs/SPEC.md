@@ -91,6 +91,20 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 > The 09-22 transcript parsers in `proxy/dpx/agents/` (Claude Code, Codex) satisfy part of
 > `FR-A3` for reading existing history and are kept (`INTENT.md` D13).
 
+> **ACP adapter (`FR-A2`, #53).** `server/src/agents/acp.rs` is one generic ACP client (protocol
+> version 1, schema `schema-v1.24.1`): `initialize`, `session/new`, native resume through
+> `session/resume` (or `session/load` with the replay dropped), `session/prompt`, `session/cancel`;
+> `session/update` mapped to `FR-A3` events; `session/request_permission` mapped to `FR-A5`
+> approvals by option kind (`allow_once` / `allow_always` / `reject_once`); the client methods
+> `fs/read_text_file`, `fs/write_text_file` and `terminal/*` served on the main server, or on the
+> session's computer through its node API (`FR-X1`). ACP agents are configured, not compiled in
+> (`EMBER_ACP_AGENTS`, preset `omp` = `omp acp`), and appear as agent kinds by their configured
+> name. *[provisional]* Covered by tests against an in-process fake ACP agent; the `FR-A2`
+> acceptance test against real OMP (`server/tests/acp_omp.rs`, `EMBER_E2E_OMP=1`) has not been
+> run (OMP is not installed on the main server). Gaps: no account isolation (`FR-U2`) or
+> transcript import for ACP agents; instructions reach agents without an instructions flag in
+> front of the first prompt of each process.
+
 ### §A Antigravity — the reinforced hook (FR-A5, `INTENT.md` D14) [user]
 
 Antigravity (`agy`) has no headless approval channel and no ACP. Ember runs it with

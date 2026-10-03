@@ -75,6 +75,10 @@ pub fn config_env_var(agent: AgentKind) -> &'static str {
         // accounts are refused for it (`Accounts::create`); this name is never read by agy.
         AgentKind::Antigravity => "EMBER_AGY_ACCOUNT_DIR",
         AgentKind::Scripted => "EMBER_SCRIPTED_HOME",
+        // ACP agents have no documented config-directory variable Ember can rely on (each agent
+        // differs); the account directory is exported under this name and the agent ignores it.
+        // Account isolation for ACP agents is not implemented (`docs/INTENT.md` Q6).
+        AgentKind::Acp(_) => "EMBER_ACP_HOME",
     }
 }
 
@@ -145,7 +149,7 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     let agent: String = r.get(1)?;
     Ok(Account {
         id: r.get(0)?,
-        agent: AgentKind::parse(&agent).unwrap_or(AgentKind::Scripted),
+        agent: AgentKind::from_stored(&agent).unwrap_or(AgentKind::Scripted),
         label: r.get(2)?,
         config_dir: r.get(3)?,
         status: r.get(4)?,
@@ -386,6 +390,13 @@ impl Accounts {
                 "Antigravity accounts are not supported yet.",
             ),
             AgentKind::Scripted => (String::new(), String::new(), String::new(), "test agent"),
+            AgentKind::Acp(_) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                "ACP agent: log in with the agent's own CLI on the server. Ember does not isolate \
+                 accounts for ACP agents yet.",
+            ),
         };
         LoginInstructions {
             env: HashMap::from([(var, acc.config_dir.clone())]),
@@ -404,6 +415,8 @@ impl Accounts {
         let status = match acc.agent {
             AgentKind::Scripted => "logged_in",
             AgentKind::Antigravity => "unknown",
+            // No portable login-status command exists for ACP agents.
+            AgentKind::Acp(_) => "unknown",
             agent => {
                 let bin = self
                     .bins

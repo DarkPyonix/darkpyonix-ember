@@ -374,7 +374,7 @@ fn row_to_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     Ok(SessionRecord {
         id: r.get(0)?,
         project: r.get(1)?,
-        agent: AgentKind::parse(&agent).unwrap_or(AgentKind::Scripted),
+        agent: AgentKind::from_stored(&agent).unwrap_or(AgentKind::Scripted),
         cwd: r.get(3)?,
         model: r.get(4)?,
         native_id: r.get(5)?,

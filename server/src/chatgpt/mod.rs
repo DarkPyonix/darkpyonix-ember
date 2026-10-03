@@ -547,10 +547,7 @@ impl ChatGpt {
             return false;
         }
         // Not before the server's earliest refresh time, unless the token is about to lapse.
-        match l.earliest_refresh_at {
-            Some(e) if now < e && exp - now > 30_000 => false,
-            _ => true,
-        }
+        !matches!(l.earliest_refresh_at, Some(e) if now < e && exp - now > 30_000)
     }
 
     /// A valid access token for `id`, refreshed first when it is close to expiry.

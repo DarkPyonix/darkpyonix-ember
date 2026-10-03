@@ -31,9 +31,15 @@ pub struct Pkce {
     pub challenge: String,
 }
 
+impl Default for Pkce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Pkce {
     pub fn new() -> Pkce {
-        let verifier = Zeroizing::new(URL_SAFE_NO_PAD.encode(&*random_32()));
+        let verifier = Zeroizing::new(URL_SAFE_NO_PAD.encode(*random_32()));
         let challenge = s256(&verifier);
         Pkce {
             verifier,
@@ -49,7 +55,7 @@ pub fn s256(verifier: &str) -> String {
 
 /// A fresh random value for `state` or `nonce` (256 bits, base64url).
 pub fn random_token() -> String {
-    URL_SAFE_NO_PAD.encode(&*random_32())
+    URL_SAFE_NO_PAD.encode(*random_32())
 }
 
 /// Everything that goes into the authorization URL.
@@ -269,8 +275,8 @@ mod tests {
         assert_eq!(a.challenge, s256(&a.verifier));
         // RFC 7636 Appendix B test vector.
         assert_eq!(
-            s256("dBjftJeZ4CVP-mJ0kYmbizBsfVwYWvXg23ON6Z08SZw"),
-            "E9Melhoa2OwvFrEMTJguCQaoeJ1M8TsZQqfY6UdVFLI"
+            s256("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
         assert_ne!(random_token(), random_token());
     }

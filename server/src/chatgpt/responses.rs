@@ -216,7 +216,7 @@ pub fn listed_models(v: &Value) -> Vec<Value> {
     let list = v["models"].as_array().or_else(|| v["data"].as_array());
     list.map(|l| {
         l.iter()
-            .filter(|m| m["visibility"].as_str().map_or(true, |x| x == "list"))
+            .filter(|m| m["visibility"].as_str().is_none_or(|x| x == "list"))
             .cloned()
             .collect()
     })

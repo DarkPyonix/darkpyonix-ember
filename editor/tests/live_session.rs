@@ -127,7 +127,7 @@ async fn live_session_json_diagnostics_save_and_reload() {
         eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
         return;
     };
-    let root = std::env::temp_dir().join(format!("ember-sess-{}", &uuid_short()));
+    let root = std::env::temp_dir().join(format!("ember-sess-{}", uuid_short()));
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
     let ws = root.join("ws");

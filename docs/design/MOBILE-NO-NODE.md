@@ -37,11 +37,11 @@ What this document has to decide:
 | E1, `NFR-L2` | Launcher and conversation screens never contain a webview. | Any VS Code Web mode lives only in the IDE window. The gateway (§6) is a library, not a screen. |
 | E4, `IMPLEMENTATION.md` §1 | VS Code is wrapped, never modified; the Extension Host is never reimplemented. | Rules out a "fake" remote extension host (§4.1). Only VS Code's own web-worker extension host may run on the phone. |
 | `IMPLEMENTATION.md` §2 | Static workbench serving is substitutable; the Extension Host is not. | The phone may serve workbench bytes itself; it must not stand in for the server's extension host. |
-| D9, 10-03 decisions [user, relayed by the leader; not yet written into `INTENT.md`] | Ember's own IDE is a **dioxus-compose editor core** — no webview, **no JS engine**. The VS Code target is VS Code Web wrapped by `proxy/`. Default runtime is **OSE** (Code-OSS + Open VSX). | The editor core cannot run any VS Code extension itself. VS Code compatibility on the phone comes only from VS Code Web. |
+| D9, 10-03 decisions [user, relayed by the leader; not yet written into `INTENT.md`] | Ember's own IDE is a **dioxus-compose editor core** — no webview, **no JS engine**. The VS Code target is VS Code Web wrapped by `web/proxy/`. Default runtime is **OSE** (Code-OSS + Open VSX). | The editor core cannot run any VS Code extension itself. VS Code compatibility on the phone comes only from VS Code Web. |
 | D10 | Marketplace follows the runtime: Open VSX for OSE. | Offline web extensions on the phone come from Open VSX. |
 | E3, D3 | Conversations, agents and credentials live on the main server. | The phone never needs to run agents. Its IDE is for looking and editing. |
 | `FR-N1`, `FR-N5` | All traffic goes through one transport interface (iroh behind it). | The IDE window reaches remote computers through that interface, not through a separate tunnel. |
-| `FR-N4`, `proxy/README.md` | VS Code Web webviews need service workers, so they need a secure context. | On a phone the IDE window must load from an origin the platform webview treats as secure (§5). |
+| `FR-N4`, `web/proxy/README.md` | VS Code Web webviews need service workers, so they need a secure context. | On a phone the IDE window must load from an origin the platform webview treats as secure (§5). |
 
 ## 3. What VS Code actually requires — sources
 
@@ -244,7 +244,7 @@ talks to a real `serve-web` on a computer through a Rust gateway — rather than
 │  ┌──────────────────────────────┐                   ┌─────────────────────────────────────┐   │
 │  │ launcher · conversations     │  Open IDE ───────▶│ WKWebView / Android WebView         │   │
 │  │ ─────────────────────────────│                   │  VS Code Web workbench (OSE/VSC)    │   │
-│  │ editor core (Ember IDE)      │                   │  + proxy/ overlay (FR-W2)           │   │
+│  │ editor core (Ember IDE)      │                   │  + web/proxy/ overlay (FR-W2)       │   │
 │  │  ├ remote doc ─┐             │                   │  + ember-fs web extension (mode B)  │   │
 │  │  └ local doc ─┐│             │                   └──────────────┬──────────────────────┘   │
 │  └───────────────┼┼─────────────┘                                  │ http(s)+ws, loopback     │
@@ -322,7 +322,7 @@ create(document.body, {
 | Phase | Delivers | SPEC | Depends on |
 | ----- | -------- | ---- | ---------- |
 | **P0 — now** | This document; three spikes, each a day or less, before any build: (1) WKWebView service worker on a loopback origin with App-Bound Domains, (2) Android WebView service worker on `WebViewAssetLoader` vs loopback, (3) pinned OSE web build booted with no `remoteAuthority` and a test-web-style FS extension, size measured. | — | nothing |
-| **P1 — phone as client, VS Code target** | ide-gateway in reverse-proxy mode; "Open IDE → VS Code" on a phone opens the current computer's `serve-web` over the transport; extension webviews render. | `FR-W5a`, `FR-W5b` | M5 (transport), M7 (`FR-W1`, `proxy/` overlay) |
+| **P1 — phone as client, VS Code target** | ide-gateway in reverse-proxy mode; "Open IDE → VS Code" on a phone opens the current computer's `serve-web` over the transport; extension webviews render. | `FR-W5a`, `FR-W5b` | M5 (transport), M7 (`FR-W1`, `web/proxy/` overlay) |
 | **P2 — phone as client, Ember IDE target** | Editor core opens/edits/saves remote files via ember node; conflict check by hash. | `FR-W5c` | §E editor core, M2 (ember node) |
 | **P3 — offline, editor core** | Working copy, offline editing, sync with conflicts. | `FR-W5d`, `FR-W5e` | P2 |
 | **P4 — offline VS Code (B), Android** | Bundled pinned OSE web build, `ember-fs`, web extensions from Open VSX, compatibility labels. | `FR-W5f`, `FR-W5g` | P3 working copy, OSE build pipeline (`FR-W4`) |

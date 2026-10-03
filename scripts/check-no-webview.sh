@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # SPEC NFR-L2 (E1): the launcher and conversation UI never allocate a webview.
 #
-# 1. Sources: no webview API is named in launcher-process code (app/ and client/).
+# 1. Sources: no webview API is named in launcher-process code (crates/app/ and crates/client/).
 # 2. Manifests: no webview crate is declared there.
 # 3. Dependency graph: if cargo is available, no webview crate is reachable from ember-app on
 #    any target (`cargo tree --target all`; resolves the graph without compiling).
 #
-# app/tests/no_webview.rs runs the same checks under `cargo test`.
+# crates/app/tests/no_webview.rs runs the same checks under `cargo test`.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 dirs=()
-for d in app client; do
+for d in crates/app crates/client; do
   [ -d "$d" ] && dirs+=("$d")
 done
 if [ "${#dirs[@]}" -eq 0 ]; then
@@ -45,8 +45,8 @@ for d in "${dirs[@]}"; do
   fi
 done
 
-if [ -f app/Cargo.toml ] && command -v cargo >/dev/null 2>&1; then
-  tree="$(cargo tree --manifest-path app/Cargo.toml --target all --edges normal,build --prefix none --format '{p}' 2>&1)" || {
+if [ -f crates/app/Cargo.toml ] && command -v cargo >/dev/null 2>&1; then
+  tree="$(cargo tree --manifest-path crates/app/Cargo.toml --target all --edges normal,build --prefix none --format '{p}' 2>&1)" || {
     echo "cargo tree failed:" >&2
     echo "$tree" >&2
     exit 1

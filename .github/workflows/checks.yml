@@ -1,10 +1,10 @@
 # Repository checks. Rust builds and tests run here, not on developer machines.
 #
 #   transport-isolation  scripts/check-transport-isolation.sh (SPEC FR-N5), when present
-#   editor-conn-pin      editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
-#                        Code-OSS tag in ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   editor-conn-pin      crates/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
+#                        Code-OSS tag in build/ose/VERSION (regenerated with gen_rpc_ids.sh), when present
 #   no-webview           scripts/check-no-webview.sh (SPEC NFR-L2), when present
-#   rust                 cargo test for each crate dir that exists
+#   rust                 cargo test for each crates/<crate> dir that exists
 name: checks
 
 on:
@@ -51,19 +51,19 @@ jobs:
           fi
 
   editor-conn-pin:
-    name: editor-conn pin (rpc_ids vs ose/VERSION)
+    name: editor-conn pin (rpc_ids vs build/ose/VERSION)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - name: Regenerate rpc_ids.rs at the ose/VERSION tag and compare
+      - name: Regenerate rpc_ids.rs at the build/ose/VERSION tag and compare
         run: |
           set -euo pipefail
-          if [ ! -f editor-conn/scripts/gen_rpc_ids.sh ] || [ ! -f ose/VERSION ]; then
-            echo "editor-conn/scripts/gen_rpc_ids.sh or ose/VERSION not present on this ref; skipping"
+          if [ ! -f crates/editor-conn/scripts/gen_rpc_ids.sh ] || [ ! -f build/ose/VERSION ]; then
+            echo "crates/editor-conn/scripts/gen_rpc_ids.sh or build/ose/VERSION not present on this ref; skipping"
             exit 0
           fi
-          tag="$(tr -d '[:space:]' < ose/VERSION)"
+          tag="$(tr -d '[:space:]' < build/ose/VERSION)"
           src="$RUNNER_TEMP/vscode"
           # Shallow, blobless, sparse: only src/vs is needed (the script scans it for
           # createProxyIdentifier calls).
@@ -73,25 +73,25 @@ jobs:
           commit="$(git -C "$src" rev-parse HEAD)"
           echo "Code-OSS $tag = $commit"
 
-          bash editor-conn/scripts/gen_rpc_ids.sh "$src" > "$RUNNER_TEMP/generated.txt"
-          sed -n '/^pub const PROXY_IDS: &\[&str\] = &\[$/,/^\];$/p' editor-conn/src/rpc_ids.rs \
+          bash crates/editor-conn/scripts/gen_rpc_ids.sh "$src" > "$RUNNER_TEMP/generated.txt"
+          sed -n '/^pub const PROXY_IDS: &\[&str\] = &\[$/,/^\];$/p' crates/editor-conn/src/rpc_ids.rs \
             | sed '1d;$d' > "$RUNNER_TEMP/current.txt"
           if [ ! -s "$RUNNER_TEMP/current.txt" ]; then
-            echo "::error file=editor-conn/src/rpc_ids.rs::PROXY_IDS table not found"
+            echo "::error file=crates/editor-conn/src/rpc_ids.rs::PROXY_IDS table not found"
             exit 1
           fi
 
           fail=0
           if ! diff -u "$RUNNER_TEMP/current.txt" "$RUNNER_TEMP/generated.txt"; then
-            echo "::error file=editor-conn/src/rpc_ids.rs::PROXY_IDS differs from gen_rpc_ids.sh at Code-OSS $tag; regenerate it"
+            echo "::error file=crates/editor-conn/src/rpc_ids.rs::PROXY_IDS differs from gen_rpc_ids.sh at Code-OSS $tag; regenerate it"
             fail=1
           fi
-          if ! grep -qx "pub const PINNED_VERSION: &str = \"$tag\";" editor-conn/src/lib.rs; then
-            echo "::error file=editor-conn/src/lib.rs::PINNED_VERSION is not \"$tag\" (ose/VERSION)"
+          if ! grep -qx "pub const PINNED_VERSION: &str = \"$tag\";" crates/editor-conn/src/lib.rs; then
+            echo "::error file=crates/editor-conn/src/lib.rs::PINNED_VERSION is not \"$tag\" (build/ose/VERSION)"
             fail=1
           fi
-          if ! grep -qx "pub const PINNED_COMMIT: &str = \"$commit\";" editor-conn/src/lib.rs; then
-            echo "::error file=editor-conn/src/lib.rs::PINNED_COMMIT is not \"$commit\" (Code-OSS $tag)"
+          if ! grep -qx "pub const PINNED_COMMIT: &str = \"$commit\";" crates/editor-conn/src/lib.rs; then
+            echo "::error file=crates/editor-conn/src/lib.rs::PINNED_COMMIT is not \"$commit\" (Code-OSS $tag)"
             fail=1
           fi
           exit "$fail"
@@ -113,16 +113,16 @@ jobs:
       - id: present
         name: Crate present?
         run: |
-          if [ -f "${{ matrix.crate }}/Cargo.toml" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
-          else echo "${{ matrix.crate }}/Cargo.toml not present on this ref; skipping"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -f "crates/${{ matrix.crate }}/Cargo.toml" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
+          else echo "crates/${{ matrix.crate }}/Cargo.toml not present on this ref; skipping"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
       - uses: dtolnay/rust-toolchain@stable
         if: steps.present.outputs.yes == 'true'
       - uses: Swatinem/rust-cache@v2
         if: steps.present.outputs.yes == 'true'
         with:
-          workspaces: ${{ matrix.crate }}
+          workspaces: crates/${{ matrix.crate }}
       - name: cargo test
         if: steps.present.outputs.yes == 'true'
-        working-directory: ${{ matrix.crate }}
+        working-directory: crates/${{ matrix.crate }}
         run: |
           if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi

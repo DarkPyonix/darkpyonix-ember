@@ -1,6 +1,6 @@
 #!/bin/sh
 # One-time privileged setup of project mount points for ember server
-# (server/src/computers/mount.rs, docs/design/COMPUTERS.md § Project mount).
+# (crates/server/src/computers/mount.rs, docs/design/COMPUTERS.md § Project mount).
 #
 # A node's project directory is mounted on the server at the same absolute path. The mount itself
 # needs no root (macOS mount_nfs / Linux fusermount3 on a directory the server user owns), but

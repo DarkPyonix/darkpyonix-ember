@@ -117,7 +117,7 @@ CLI, stores every transcript, and manages every account. Computers connect to it
 connect to a computer for a conversation's history.
 
 **Implementation language.** [user, 2026-10-03] ember server is written in Rust ("ember server는
-rust로 하면 된단다"). The Python transcript parsers in `proxy/dpx/agents/` stay where they are; the
+rust로 하면 된단다"). The Python transcript parsers in `web/proxy/dpx/agents/` stay where they are; the
 Rust server's parsers share test vectors with them so both read history identically.
 
 **Why.** It is the direct fix for motivation 1. It also gives, for free, sessions that survive the
@@ -180,14 +180,14 @@ tunnel implemented in Rust or an existing mesh product (the brief named "tailcat
 allowed **iroh** conditionally — see Q7 and SPEC `NFR-N1`). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
 so that, as with Paseo, users do not have to think about connectivity.
 
-**Consequence.** This also settles the HTTPS problem `proxy/` has had for phones and tablets
-(`proxy/docs/BACKGROUND.md` §7-1), whichever transport is chosen — [provisional].
+**Consequence.** This also settles the HTTPS problem `web/proxy/` has had for phones and tablets
+(`web/proxy/docs/BACKGROUND.md` §7-1), whichever transport is chosen — [provisional].
 
 ### D9 — The client is native (dioxus-compose); the IDE window is wrapped VS Code Web
 
 **Decision.** [user, 2026-10-03] The launcher and the conversation screens are built on
 `dioxus-compose` with no webview (E1). The IDE window is a webview running VS Code Web through
-Ember's wrapping layer, whose current implementation is `proxy/` (merged in #1).
+Ember's wrapping layer, whose current implementation is `web/proxy/` (merged in #1).
 
 **Tauri.** [user, 2026-10-03] The Tauri scaffold has been deleted ("Tauri 스캐폴드가 왜 필요해?
 지워."). The Tauri parts of `docs/design/INTEGRATION.md` are marked obsolete; its VS Code runtime
@@ -198,7 +198,7 @@ choice (D10) and mobile WebView notes still apply to the IDE window.
 **Decision.** [user, 2026-10-03: "vscode 옵션은 ide를 웹으로 띄우는거고, gateway는 컴퓨터에 깔려있는
 jetbrains gateway에 명령을 내려서 띄우는거고, 엠버 자체는 에디터 코어로 구현해야지? … 그게 바로
 dioxus-compose를 구현하고 있는 이유일텐데?"]
-- **VS Code** — VS Code Web on the session's computer, wrapped by `proxy/` (D11).
+- **VS Code** — VS Code Web on the session's computer, wrapped by `web/proxy/` (D11).
 - **Gateway** — a command to the JetBrains Gateway installed on that computer.
 - **Ember** — our editor core, drawn by `dioxus-compose`: no webview and no JavaScript engine.
   dioxus-compose rebuilds the Code-OSS workbench DOM in Rust and renders it with Code-OSS's CSS. A
@@ -249,7 +249,7 @@ These were decided for the IDE window and are unchanged in substance. Their full
 09-22 version of this document (git history) and in `IMPLEMENTATION.md`:
 
 - **Wrap, don't fork.** Behaviour changes to VS Code Web come from CSS/DOM injection and a bridge on
-  top of an unmodified build. `proxy/` is that layer.
+  top of an unmodified build. `web/proxy/` is that layer.
 - **Tab detach is emulated** by detecting the gesture in the webview and opening a new window with
   the file's state, not ported from Electron.
 - **The webview ↔ native bridge** uses each platform's own message-handler API
@@ -264,12 +264,12 @@ These were decided for the IDE window and are unchanged in substance. Their full
 now defined in `darkpyonix-core` (`docs/PROTOCOL.md`, `docs/api/*`). Ember depends on that
 contract, not on the kernel's internals.
 
-### D13 — `proxy/`'s hub is transitional; its agent adapters are kept and moved to the main server
+### D13 — `web/proxy/`'s hub is transitional; its agent adapters are kept and moved to the main server
 
-**Decision.** [provisional] `proxy/dpx/hub/` puts several computers on one home screen by having
+**Decision.** [provisional] `web/proxy/dpx/hub/` puts several computers on one home screen by having
 each computer report the transcripts it holds locally (`~/.claude`, `~/.codex`). E3 replaces that
 model: transcripts live on the main server, not on the computers. The hub is marked transitional.
-The adapters in `proxy/dpx/agents/` — which parse Claude Code and Codex transcripts — stay useful
+The adapters in `web/proxy/dpx/agents/` — which parse Claude Code and Codex transcripts — stay useful
 unchanged, because the main server is now where those transcripts are; they are kept and
 relocated, not removed.
 
@@ -332,7 +332,7 @@ Rejected: keeping `/api/v1` alongside `/api` (two names for one API).
 | **Q3** | When a session moves, does an open IDE window follow it, or stay with its computer? | Open |
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal only |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional] |
-| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | **Claude Code:** `--print` stream-json with `--permission-prompt-tool stdio` (#14). **Codex:** `codex app-server` directly (#14); the maintained ACP adapter (`agentclientprotocol/codex-acp`) is itself a translation layer over app-server, so it can only lose detail (approval choices, turn steering, thread ids, usage), and the older one compiles Codex internals pinned to an old release, breaking FR-A1. **Antigravity** — decided in D14 [user]: `agy -p … --output-format stream-json`, one process per turn, `--conversation=<id>` for native resume (agy 1.2.10, recorded in `server/tests/fixtures/agy/`). Print mode cannot ask for a permission: it soft-denies the tool, and a `PreToolUse` hook answering `allow` (even with `permissionOverrides`) did not lift that (recorded). So Ember runs agy with `--dangerously-skip-permissions` and makes its own `PreToolUse` hook the only gate: the hook (`curl` to a local route holding a per-run secret) blocks until the user answers, `deny` hard-blocks, an unreachable server denies, and before every turn `agy -p /hooks --output-format json` must list the hook or the turn is refused (D14; tested on 1.2.16 in SPEC §A). The hook, a rules file (instructions) and `mcp_config.json` live in a per-session folder passed with `--add-dir`, agy's own customization root (`.agents/`); nothing in agy or in the user's `~/.gemini` or project is changed. Costs: the folder shows up to the model as an extra, first-listed workspace (the rules file tells it to stay out), the stream carried no tool output on 1.2.10 (1.2.16 has it), and agy has no config-dir variable, so Antigravity accounts (D7) are not possible yet. Rejected: hooks in `~/.gemini/config/hooks.json` (shared by every agy run and cannot hold per-session MCP servers), hooks in the project's `.agents/` (writes into the user's repository), `--input-format stream-json` (one process per session, but its input schema is undocumented). **OMP and other ACP agents** *[provisional]*: the agent's own ACP server over stdio, through one generic ACP client (#53, ACP protocol v1); OMP's is `omp acp` (oh-my-pi v18.5.0, read from source, not yet run). Ember is the ACP client, so file reads/writes and shell commands that the agent routes through `fs/*` and `terminal/*` are executed by Ember itself, which is the interception point: they run on the session's computer through its node, with no shim. Tools the agent does not route through ACP (search, LSP, …) still read the main server's filesystem, which the project mount covers. Rejected: OMP's own `--mode rpc` NDJSON protocol (OMP-specific; ACP serves every ACP agent with one adapter). Claude Code / Codex through ACP adapters stays rejected as above. Others (Gemini): open. |
+| **Q6** | For each wrapped CLI, where exactly is the interception point — shell, PTY, filesystem or tool protocol — that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | **Claude Code:** `--print` stream-json with `--permission-prompt-tool stdio` (#14). **Codex:** `codex app-server` directly (#14); the maintained ACP adapter (`agentclientprotocol/codex-acp`) is itself a translation layer over app-server, so it can only lose detail (approval choices, turn steering, thread ids, usage), and the older one compiles Codex internals pinned to an old release, breaking FR-A1. **Antigravity** — decided in D14 [user]: `agy -p … --output-format stream-json`, one process per turn, `--conversation=<id>` for native resume (agy 1.2.10, recorded in `crates/server/tests/fixtures/agy/`). Print mode cannot ask for a permission: it soft-denies the tool, and a `PreToolUse` hook answering `allow` (even with `permissionOverrides`) did not lift that (recorded). So Ember runs agy with `--dangerously-skip-permissions` and makes its own `PreToolUse` hook the only gate: the hook (`curl` to a local route holding a per-run secret) blocks until the user answers, `deny` hard-blocks, an unreachable server denies, and before every turn `agy -p /hooks --output-format json` must list the hook or the turn is refused (D14; tested on 1.2.16 in SPEC §A). The hook, a rules file (instructions) and `mcp_config.json` live in a per-session folder passed with `--add-dir`, agy's own customization root (`.agents/`); nothing in agy or in the user's `~/.gemini` or project is changed. Costs: the folder shows up to the model as an extra, first-listed workspace (the rules file tells it to stay out), the stream carried no tool output on 1.2.10 (1.2.16 has it), and agy has no config-dir variable, so Antigravity accounts (D7) are not possible yet. Rejected: hooks in `~/.gemini/config/hooks.json` (shared by every agy run and cannot hold per-session MCP servers), hooks in the project's `.agents/` (writes into the user's repository), `--input-format stream-json` (one process per session, but its input schema is undocumented). **OMP and other ACP agents** *[provisional]*: the agent's own ACP server over stdio, through one generic ACP client (#53, ACP protocol v1); OMP's is `omp acp` (oh-my-pi v18.5.0, read from source, not yet run). Ember is the ACP client, so file reads/writes and shell commands that the agent routes through `fs/*` and `terminal/*` are executed by Ember itself, which is the interception point: they run on the session's computer through its node, with no shim. Tools the agent does not route through ACP (search, LSP, …) still read the main server's filesystem, which the project mount covers. Rejected: OMP's own `--mode rpc` NDJSON protocol (OMP-specific; ACP serves every ACP agent with one adapter). Claude Code / Codex through ACP adapters stays rejected as above. Others (Gemini): open. |
 | **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed — deleted** [user, 2026-10-03] |
-| **Q9** | `proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `proxy/docs/BACKGROUND.md` §7-3. | Open |
+| **Q9** | `web/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `web/proxy/docs/BACKGROUND.md` §7-3. | Open |

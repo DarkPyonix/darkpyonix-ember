@@ -9,14 +9,14 @@
 
 | Piece | Where | What it does |
 |-|-|-|
-| Registry | `server/src/computers/mod.rs` (`Registry`) | Tables `computers(id, name, url, token, created_at)` and `session_computer(session_id, computer_id, env_json, notice, switched_at)` in `ember.db`, created by store migration 3 (`computers/schema.rs`) and read through the main `Store` connection, like `accounts`. |
+| Registry | `crates/server/src/computers/mod.rs` (`Registry`) | Tables `computers(id, name, url, token, created_at)` and `session_computer(session_id, computer_id, env_json, notice, switched_at)` in `ember.db`, created by store migration 3 (`computers/schema.rs`) and read through the main `Store` connection, like `accounts`. |
 | Service | `computers::Computers` | Register / list / probe (`/v1/health`, `/v1/env`) / remove; a session's current computer; `switch`. Installs three hooks on `Sessions`: an instructions hook (environment block), a start-config hook (Codex remote executor / Claude Code shell shim), and a message hook (the FR-S7 notice). |
-| HTTP API | `server/src/computers/api.rs` | `GET/POST /api/v1/computers`, `GET/DELETE /api/v1/computers/{id}`, `GET/PUT /api/v1/sessions/{id}/computer`. |
-| Codex relay | `server/src/computers/relay.rs` | Loopback WebSocket (`ws://127.0.0.1:<port>/<secret>`) that codex app-server connects to; re-frames to the node's raw `/v1/exec-server` stream. |
-| Node bridge | `node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
-| Browser egress | `server/src/computers/egress.rs`, `node/src/egress.rs` | Per computer, a loopback SOCKS5 listener (`socks5://127.0.0.1:<port>`) that a project's browser uses as `--proxy-server`; each connection becomes one node `/v1/egress` stream where the node runs SOCKS5 (FR-R1, see `REMOTE-BROWSER.md`). A computer that is some project's browser egress cannot be removed (409). |
-| Claude shim | `server/src/computers/shim.rs`, `server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/v1/exec` and carries the cwd back. |
-| Mount | `server/src/computers/mount.rs` (+ `mount/`) | Mounts a Claude Code session's cwd from its node at the same path: `remote_fs.rs` (node-backed filesystem with caches), `nfs.rs` (loopback NFSv3, feature `mount-nfs`), `fuse.rs` (Linux FUSE, feature `mount-fuse`), `cmd.rs` (mount commands, mount point checks). **Written, not compiled or run** — see § Project mount. |
+| HTTP API | `crates/server/src/computers/api.rs` | `GET/POST /api/v1/computers`, `GET/DELETE /api/v1/computers/{id}`, `GET/PUT /api/v1/sessions/{id}/computer`. |
+| Codex relay | `crates/server/src/computers/relay.rs` | Loopback WebSocket (`ws://127.0.0.1:<port>/<secret>`) that codex app-server connects to; re-frames to the node's raw `/v1/exec-server` stream. |
+| Node bridge | `crates/node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
+| Browser egress | `crates/server/src/computers/egress.rs`, `crates/node/src/egress.rs` | Per computer, a loopback SOCKS5 listener (`socks5://127.0.0.1:<port>`) that a project's browser uses as `--proxy-server`; each connection becomes one node `/v1/egress` stream where the node runs SOCKS5 (FR-R1, see `REMOTE-BROWSER.md`). A computer that is some project's browser egress cannot be removed (409). |
+| Claude shim | `crates/server/src/computers/shim.rs`, `crates/server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/v1/exec` and carries the cwd back. |
+| Mount | `crates/server/src/computers/mount.rs` (+ `mount/`) | Mounts a Claude Code session's cwd from its node at the same path: `remote_fs.rs` (node-backed filesystem with caches), `nfs.rs` (loopback NFSv3, feature `mount-nfs`), `fuse.rs` (Linux FUSE, feature `mount-fuse`), `cmd.rs` (mount commands, mount point checks). **Written, not compiled or run** — see § Project mount. |
 
 The local server is the implicit computer `local`. A session with no `session_computer` row
 behaves exactly as before this change: no environment block, nothing redirected.
@@ -119,7 +119,7 @@ the client carries the mount's 4 s per-request deadline (`NodeClient::with_deadl
 transport it covers stream open, including a dial when no connection is cached, the HTTP
 handshake, the request and the whole response body; over HTTP reqwest's own timeouts are set
 too). A missed deadline is `ClientError::Timeout` → `ETIMEDOUT`; a failed dial or stream is
-`ClientError::Transport` → `EIO`; both count as an outage. Tests: `server/tests/peer_mount.rs`
+`ClientError::Transport` → `EIO`; both count as an outage. Tests: `crates/server/tests/peer_mount.rs`
 (a real node and a stalled peer on `MemNetwork`).
 
 **Caching and freshness.** Inode numbers are the mount's own (path ↔ id, stable across renames).
@@ -158,7 +158,7 @@ whose node is unreachable fails with "computer … is unreachable".
 - **Not run end to end.** No real Codex turn through a remote environment and no real Claude
   Bash call through `ember-exec` has been made yet; verify both on the Pi.
 - **Peer-addressed mount: not compiled or run.** `NodeClient::with_deadline`, `Computers::node_fs`
-  and `server/tests/peer_mount.rs` were written without building. Also open: a timed-out
+  and `crates/server/tests/peer_mount.rs` were written without building. Also open: a timed-out
   request over the transport drops its hyper `SendRequest`, but the background connection task
   of a peer that never answers may keep its stream open until the transport connection ends
   **[U]**; and the dialer keeps its cached connection after a timeout, so a silently dead path

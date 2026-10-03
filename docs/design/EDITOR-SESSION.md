@@ -1,6 +1,6 @@
 # EDITOR-SESSION.md — The editor session between editor-conn and the CodeEditor widget
 
-> Status: design + first code (`editor/`, package `ember-editor`), **not compiled yet**.
+> Status: design + first code (`crates/editor/`, package `ember-editor`), **not compiled yet**.
 > Milestone: M8 (`PROJECT.md`), issue #32, SPEC §E (`FR-E1`–`FR-E4`). Written 2026-10-03.
 > Builds on `EDITOR-CONNECTION.md` (§6 step 3 and 4 of its plan).
 
@@ -203,7 +203,7 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
 
 ## 7. Uncertain APIs (not compiled, not run)
 
-- **Nothing in `editor/` has been compiled or run.** The unit tests (`src/*`) and the pure flow
+- **Nothing in `crates/editor/` has been compiled or run.** The unit tests (`src/*`) and the pure flow
   tests (`tests/engine_flow.rs`) were checked by reading only. The live test
   (`tests/live_session.rs`, `#[ignore]`, `EMBER_OSE_SERVER`) has never run.
 - `tokio::select!` handlers that reassign a variable borrowed by a branch future

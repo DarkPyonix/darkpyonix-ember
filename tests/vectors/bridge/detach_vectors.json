@@ -1,0 +1,110 @@
+{
+  "$comment": "Shared by web/proxy/tests/js/detach.test.js (buildWorkspaceQuery) and crates/bridge/src/messages.rs (OpenWindow::vscode_web_path). Positions are 0-based; the URL carries 1-based line:column. expectedPath null = no browser-fallback URL can be built.",
+  "cases": [
+    {
+      "name": "cursor and selection",
+      "detach": {
+        "kind": "tab_detach",
+        "version": 1,
+        "sourceWindowId": "win-a",
+        "workspace": {
+          "folder": "/Users/me/work/proj"
+        },
+        "fileUri": "vscode-remote://localhost:8888/Users/me/work/proj/src/main.rs",
+        "cursor": {
+          "line": 41,
+          "column": 6
+        },
+        "scroll": {
+          "top": 1180,
+          "left": 0
+        },
+        "selection": {
+          "start": {
+            "line": 39,
+            "column": 0
+          },
+          "end": {
+            "line": 41,
+            "column": 6
+          }
+        }
+      },
+      "expectedPath": "/?folder=%2FUsers%2Fme%2Fwork%2Fproj&payload=%5B%5B%22openFile%22%2C%22vscode-remote%3A%2F%2Flocalhost%3A8888%2FUsers%2Fme%2Fwork%2Fproj%2Fsrc%2Fmain.rs%3A42%3A7%22%5D%2C%5B%22gotoLineMode%22%2C%22true%22%5D%5D"
+    },
+    {
+      "name": "no cursor: plain openFile",
+      "detach": {
+        "kind": "tab_detach",
+        "version": 1,
+        "sourceWindowId": "win-a",
+        "workspace": {
+          "folder": "/Users/me/My Project"
+        },
+        "fileUri": "vscode-remote://host.example:8888/Users/me/My%20Project/%ED%95%9C%EA%B8%80.md",
+        "cursor": null,
+        "scroll": null,
+        "selection": null
+      },
+      "expectedPath": "/?folder=%2FUsers%2Fme%2FMy%20Project&payload=%5B%5B%22openFile%22%2C%22vscode-remote%3A%2F%2Fhost.example%3A8888%2FUsers%2Fme%2FMy%2520Project%2F%25ED%2595%259C%25EA%25B8%2580.md%22%5D%5D"
+    },
+    {
+      "name": "uri with query: no line suffix",
+      "detach": {
+        "kind": "tab_detach",
+        "version": 1,
+        "sourceWindowId": "win-a",
+        "workspace": {
+          "folder": "C:\\work\\proj"
+        },
+        "fileUri": "vscode-remote://localhost:8888/c%3A/work/proj/a.py?x=1",
+        "cursor": {
+          "line": 0,
+          "column": 0
+        },
+        "scroll": null,
+        "selection": null
+      },
+      "expectedPath": "/?folder=C%3A%5Cwork%5Cproj&payload=%5B%5B%22openFile%22%2C%22vscode-remote%3A%2F%2Flocalhost%3A8888%2Fc%253A%2Fwork%2Fproj%2Fa.py%3Fx%3D1%22%5D%5D"
+    },
+    {
+      "name": "unreserved and non-ASCII folder",
+      "detach": {
+        "kind": "tab_detach",
+        "version": 1,
+        "sourceWindowId": "win-a",
+        "workspace": {
+          "folder": "/Users/me/프로젝트 (old)'s!*~_.-"
+        },
+        "fileUri": "vscode-remote://localhost:8888/Users/me/x.ts",
+        "cursor": {
+          "line": 9,
+          "column": 3
+        },
+        "scroll": {
+          "top": 0,
+          "left": 12
+        },
+        "selection": null
+      },
+      "expectedPath": "/?folder=%2FUsers%2Fme%2F%ED%94%84%EB%A1%9C%EC%A0%9D%ED%8A%B8%20(old)'s!*~_.-&payload=%5B%5B%22openFile%22%2C%22vscode-remote%3A%2F%2Flocalhost%3A8888%2FUsers%2Fme%2Fx.ts%3A10%3A4%22%5D%2C%5B%22gotoLineMode%22%2C%22true%22%5D%5D"
+    },
+    {
+      "name": "no workspace folder: no URL",
+      "detach": {
+        "kind": "tab_detach",
+        "version": 1,
+        "sourceWindowId": "win-a",
+        "workspace": null,
+        "fileUri": "vscode-remote://localhost:8888/tmp/a.txt",
+        "cursor": {
+          "line": 1,
+          "column": 1
+        },
+        "scroll": null,
+        "selection": null
+      },
+      "expectedPath": null
+    }
+  ]
+}

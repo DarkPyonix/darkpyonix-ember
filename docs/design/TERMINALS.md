@@ -1,7 +1,8 @@
 # Persistent terminals (SPEC §P)
 
-Status: implemented, **not yet compiled or run** (written without a build); the companion's and the
-proxy's unit tests run. Requirements:
+Status: **partial.** ember node's persistent sessions and the VS Code companion are implemented
+(#37, #42); `crates/node` tests run in CI (Linux; `tests/terms.rs` is known to fail on macOS). The
+Ember editor's terminal panel is not built and the acceptance runs are not verified (#26). Requirements:
 `docs/SPEC.md` §P, FR-P1–FR-P6, NFR-P1.
 
 Terminals, tasks and other processes started from an IDE window must keep running when every
@@ -318,7 +319,7 @@ Not taken: setting `automationProfile` to `ember-term` for debug only (it applie
 alike and is already what the setup command writes) does not make a launch debuggee survive, for
 the adapter reasons above.
 
-## 4. Tests (written, not run)
+## 4. Tests
 
 - `crates/node/tests/terms.rs`: create / attach / detach / re-attach with snapshot; a session outliving
   every client (a socket dropped without detach); two clients typing alternately (both see both
@@ -338,8 +339,6 @@ the adapter reasons above.
 
 ## 5. Open problems
 
-- Not compiled: alacritty_terminal 0.26 API details (see the report of the change), `portable-pty`
-  0.9 `CommandBuilder::env_remove`, axum/tokio-tungstenite usage follow the existing code.
 - Debuggees (FR-P5), not run against a real VS Code / js-debug / debugpy yet: only `node`/`pwa-node`
   with runtime `node` and debugpy are persistent (table in §3c). The re-attach endpoint is read from
   the session's scrollback, so a debuggee that printed more than 10,000 lines since it started can

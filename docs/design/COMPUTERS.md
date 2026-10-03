@@ -1,6 +1,8 @@
 # COMPUTERS.md: computers, switching and tool interception (#6)
 
-> Status: **implemented, not yet run end to end** (2026-10-03). Covers SPEC `FR-X2`, `FR-X3` and
+> Status: **implemented** (#34, #47, #48), tests run in CI; verified end to end with a node on the
+> same Mac (Codex and Claude Code); a switch between two physical computers and the project mount
+> (features `mount-nfs`, `mount-fuse`, not built in CI) are not verified (#6). Covers SPEC `FR-X2`, `FR-X3` and
 > `FR-S7` v0 on ember server. The mechanism choice is in `INTERCEPTION.md`; this note records
 > what was built, what it relies on, and what is still open. **[V]** = verified locally (evidence
 > named), **[U]** = unverified.
@@ -155,17 +157,18 @@ whose node is unreachable fails with "computer … is unreachable".
 
 ## Open problems
 
-- **Not run end to end.** No real Codex turn through a remote environment and no real Claude
-  Bash call through `ember-exec` has been made yet; verify both on the Pi.
-- **Peer-addressed mount: not compiled or run.** `NodeClient::with_deadline`, `Computers::node_fs`
-  and `crates/server/tests/peer_mount.rs` were written without building. Also open: a timed-out
+- **Run end to end on one Mac only** (#6, 2026-10-03): a Codex turn and a Claude Code Bash call
+  ran on a node registered as a separate computer. Still to verify on the Pi.
+- **Peer-addressed mount: not run against a real mount.** `NodeClient::with_deadline` and
+  `Computers::node_fs` build in CI; `crates/server/tests/peer_mount.rs` needs a mount feature,
+  which CI does not enable. Also open: a timed-out
   request over the transport drops its hyper `SendRequest`, but the background connection task
   of a peer that never answers may keep its stream open until the transport connection ends
   **[U]**; and the dialer keeps its cached connection after a timeout, so a silently dead path
   costs one deadline per request until the transport's own idle timeout closes it and the next
   request re-dials (forgetting the connection on timeout would also cut healthy concurrent
   requests). WebSockets (exec, terminal attach) still have no deadline on either reach.
-- **Project mount not compiled or run.** Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
+- **Project mount not built in CI or run** (features off by default). Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
   read from their published sources. To verify on the Mac mini and the Pi: non-root
   `mount_nfs` on a user-owned directory, the exact `mount_nfs` option names (`deadtimeout`,
   `nonegnamecache`, `actimeo`, `retrycnt`), macOS NFS client behaviour with nfsserve

@@ -1,6 +1,8 @@
 # Hub integration: Ember on darkpyonix.dev (FR-N2)
 
-Status: **implemented, not compiled yet** (written without running cargo). Contract:
+Status: **implemented** (#50, #57); tests run in CI against `ember_hub::fake::FakeHub`, not yet
+against the real hub. Planned: the default hub address off the root domain and hub paths without
+`/v1` (#62, draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42). Contract:
 `darkpyonix-core` `docs/api/hub.openapi.yaml` (info v0.3.0) and SPEC FR-H1, FR-H8–H11,
 NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember-gaps`, base
 `feat/m4-hub-workers`). Worker source `crates/hub/worker/src/`.

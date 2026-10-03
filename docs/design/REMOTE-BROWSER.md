@@ -1,5 +1,9 @@
 # Remote browser: server side (M6, SPEC §R, INTENT D6)
 
+Status: **partial.** Server side, node egress and the agent's browser MCP are implemented (#29,
+#44) and tested in CI; no client renders the browser yet (FR-R5), and the acceptance runs with a
+real Chrome and a real node are not verified (#12).
+
 Code: `crates/server/src/browser/`. Stream protocol version: **1** (`browser::STREAM_VERSION`).
 
 ## Model

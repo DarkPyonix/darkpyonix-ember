@@ -1,6 +1,7 @@
 # INTERCEPTION.md: running a wrapped CLI's tools on an ember node
 
-> Status: **design note for #6** (2026-10-03). Nothing here is implemented yet. It answers part
+> Status: **implemented** as recorded in `COMPUTERS.md` (#34, #47, #48); this note keeps the
+> reasoning. Design note for #6 (2026-10-03). It answers part
 > of `INTENT.md` Q6 for D4/E2. The question is how an unmodified Claude Code or Codex process on
 > ember server can have its tool actions (file read, edit and write, glob and grep, shell) carried
 > out on the session's current computer through **ember node** (`crates/node/`), while the agent keeps

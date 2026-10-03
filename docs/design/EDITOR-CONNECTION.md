@@ -1,6 +1,9 @@
 # EDITOR-CONNECTION.md: How Ember's editor core talks to a Code-OSS server
 
-> Status: design + first code (`crates/editor-conn/`, package `ember-editor-conn`), **not compiled yet**.
+> Status: **partial.** `crates/editor-conn/` (package `ember-editor-conn`, #33, #35) builds and its
+> tests run in CI, with the proxy table pinned to OSE's Code-OSS (`editor-conn-pin` check); the live
+> test against a real OSE server landed in #40 and runs by hand. Reconnect, the transport swap and
+> the client integration are open (#32).
 > Milestone: M8 (`PROJECT.md`), SPEC §E (`FR-E1`–`FR-E5`). Written 2026-10-03.
 
 ## 1. Why this exists
@@ -465,14 +468,13 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 
 ## 6. Plan
 
-1. **Done in this change (not compiled):**
+1. **Done (#33):**
    - `crates/editor-conn/` crate: framing, the `PersistentProtocol` state machine and driver, upgrade and
      handshake, the reconnect loop, the IPC client, the `remoteFilesystem` client, the management
      calls, the RPC codec and peer, the pinned proxy table and its generator script, init data,
      the typed subset with default replies, and the document bridge.
    - Unit tests against hand-built frames, plus a fake-server handshake over `tokio::io::duplex`.
-2. **Compile, test, and run against a live OSE server.** The harness is written (not compiled or
-   run yet): `crates/editor-conn/tests/live_ose.rs`, `#[ignore]` and gated on `EMBER_OSE_SERVER` (the
+2. **Compile, test, and run against a live OSE server.** Done in #40; the harness: `crates/editor-conn/tests/live_ose.rs`, `#[ignore]` and gated on `EMBER_OSE_SERVER` (the
    `bin/dpx-ose-server` of an unpacked OSE build; `crates/editor-conn/scripts/fetch-ose-artifact.sh`
    downloads the newest `ose` workflow artifact for the current platform and prints that path).
    It starts the server on a free port with `--without-connection-token` and a temp
@@ -490,7 +492,7 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
    the `DocumentBridge`, the provider registries (handle → selector), and request routing:
    `provide_hover(uri, pos)` picks the providers whose selectors match and fans out.
    Selector matching needs `languages.score` semantics (language, scheme, glob pattern).
-   **Written (not compiled), with step 4's three bridges:** `crates/editor/` (package `ember-editor`),
+   **Written (#46, CI), with step 4's three bridges:** `crates/editor/` (package `ember-editor`),
    designed in `EDITOR-SESSION.md`. Reconnect is still to do.
 4. **FR-E2 → FR-E3 → FR-E4** in that order, as `IMPLEMENTATION.md` §3 sets out. Each is a
    registry plus a request/response pair plus widget rendering.

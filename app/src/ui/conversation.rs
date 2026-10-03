@@ -172,7 +172,6 @@ pub fn ConversationView(id: String) -> Element {
 
     // ---- actions -------------------------------------------------------------------------------
     let open_ide = {
-        let ide = ide;
         move |kind: IdeKind| {
             ui.update_prefs(|p| p.ide_target = Some(kind.key().to_string()));
             let launch = ide.read().clone();
@@ -420,8 +419,7 @@ pub fn ConversationView(id: String) -> Element {
                             variant: ButtonVariant::Text,
                             fill_max_width: true,
                             on_click: {
-                                let open_ide = open_ide.clone();
-                                move |_: ()| {
+                                                                move |_: ()| {
                                     ide_menu.set(false);
                                     open_ide(kind);
                                 }

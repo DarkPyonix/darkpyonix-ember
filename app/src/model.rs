@@ -304,7 +304,7 @@ pub fn search(state: &State, query: &str, cx: &RowContext<'_>) -> Vec<SessionRow
             words.iter().all(|w| hay.contains(w.as_str())).then_some(row)
         })
         .collect();
-    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
     rows
 }
 
@@ -365,7 +365,7 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
         ConnectionState::Offline => Some(("Offline: showing cached data".into(), Tone::Neutral)),
         ConnectionState::Connecting { .. } => Some(("Connecting to the main server\u{2026}".into(), Tone::Neutral)),
         ConnectionState::Reconnecting { retry_in_ms, error, .. } => Some((
-            format!("Disconnected ({error}). Retrying in {}s", (retry_in_ms + 999) / 1000),
+            format!("Disconnected ({error}). Retrying in {}s", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
         ConnectionState::Incompatible { server, client } => Some((

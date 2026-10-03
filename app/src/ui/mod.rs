@@ -101,7 +101,7 @@ impl Ui {
         let prefs = self.prefs.read();
         let session_accounts = self.live.session_accounts.read();
         let labels = model::account_labels(&self.live.accounts.read());
-        let cx = RowContext { prefs: &*prefs, session_accounts: &*session_accounts, account_labels: &labels };
+        let cx = RowContext { prefs: &prefs, session_accounts: &session_accounts, account_labels: &labels };
         services().client.read(|s| f(s, &cx))
     }
 }

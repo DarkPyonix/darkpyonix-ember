@@ -44,7 +44,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn banned_crate(name: &str) -> bool {
-    BANNED_CRATES.iter().any(|b| name == *b || name.starts_with(&format!("{b}-")) || name.starts_with(&format!("tauri-")))
+    BANNED_CRATES.iter().any(|b| name == *b || name.starts_with(&format!("{b}-")) || name.starts_with(&"tauri-".to_string()))
 }
 
 /// Package names in the resolved dependency graph (all platforms, all edge kinds).

@@ -24,7 +24,7 @@ path = "src/main.rs"
 # deeper than the main checkout). To build against a local checkout, see README.md ("Local
 # dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", branch = "develop" }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "b71b20e" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }

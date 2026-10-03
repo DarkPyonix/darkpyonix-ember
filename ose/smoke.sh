@@ -27,6 +27,12 @@ trap cleanup EXIT
 echo "== 1. product.json"
 "$here/check-product.sh" "$dir/product.json"
 
+# Code-OSS has no Marketplace signature verifier (@vscode/vsce-sign is Microsoft-only), so
+# installs fail with "Signature verification was not executed" unless verification is off.
+# proxy/dpx/vscode/runtime.py writes the same machine setting for the OSE runtime.
+mkdir -p "$tmp/data/data/Machine"
+printf '{ "extensions.verifySignature": false }\n' > "$tmp/data/data/Machine/settings.json"
+
 echo "== 2. server starts and serves the workbench"
 port="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
 # Same flags as DEFAULT_OSE_ARGS in proxy/dpx/vscode/runtime.py, plus telemetry off.

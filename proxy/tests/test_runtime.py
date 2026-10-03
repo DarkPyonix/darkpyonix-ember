@@ -159,3 +159,24 @@ class ExtensionsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrepareDataDirTest(unittest.TestCase):
+    def test_ose_turns_off_signature_verification_and_keeps_other_settings(self):
+        import json, tempfile
+        from pathlib import Path
+        from dpx.vscode import runtime
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "data" / "Machine" / "settings.json"
+            p.parent.mkdir(parents=True)
+            p.write_text('{"editor.fontSize": 14}')
+            runtime.prepare_data_dir("ose", Path(d))
+            self.assertEqual(json.loads(p.read_text()), {"editor.fontSize": 14, "extensions.verifySignature": False})
+
+    def test_vsc_is_left_alone(self):
+        import tempfile
+        from pathlib import Path
+        from dpx.vscode import runtime
+        with tempfile.TemporaryDirectory() as d:
+            runtime.prepare_data_dir("vsc", Path(d))
+            self.assertFalse((Path(d) / "data").exists())

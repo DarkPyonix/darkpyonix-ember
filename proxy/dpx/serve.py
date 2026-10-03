@@ -215,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir is None:
         args.data_dir = DEFAULT_DATA_DIR / args.runtime
     args.data_dir.mkdir(parents=True, exist_ok=True)
+    runtime.prepare_data_dir(args.runtime, args.data_dir)
     entries = args.extension if args.extension is not None else runtime.default_extensions()
     ext = runtime.ensure_extensions(entries, args.data_dir / "extensions", rt["path"])
 

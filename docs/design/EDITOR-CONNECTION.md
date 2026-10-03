@@ -471,10 +471,20 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
      calls, the RPC codec and peer, the pinned proxy table and its generator script, init data,
      the typed subset with default replies, and the document bridge.
    - Unit tests against hand-built frames, plus a fake-server handshake over `tokio::io::duplex`.
-2. **Compile, test, and run against a live OSE server.** Start `code-server`/`server-web` with
-   `--connection-token`. Run an integration test under `editor-conn/tests/` (gated by an env var):
-   connect management, stat and read a file, open the ext-host connection, see `Initialized`, open
-   a `.rs` document, and receive `$changeMany` from a diagnostics extension. Capture real frames
+2. **Compile, test, and run against a live OSE server.** The harness is written (not compiled or
+   run yet): `editor-conn/tests/live_ose.rs`, `#[ignore]` and gated on `EMBER_OSE_SERVER` (the
+   `bin/dpx-ose-server` of an unpacked OSE build; `editor-conn/scripts/fetch-ose-artifact.sh`
+   downloads the newest `ose` workflow artifact for the current platform and prints that path).
+   It starts the server on a free port with `--without-connection-token` and a temp
+   `--server-data-dir` (with `extensions.verifySignature: false`, as `ose/smoke.sh`), then over
+   plain TCP: `verify_server`; management handshake, IPC, `getEnvironmentData`, the
+   `remoteFilesystem` commands and a watch event; `scanExtensions` (the built-in
+   `vscode.json-language-features` must be listed); the extension-host bootstrap, both
+   `$initialize*` calls, `DocumentBridge::open_in_editor` on a JSON file, an edit that breaks it,
+   and `MainThreadDiagnostics.$changeMany` from the JSON language server; then a clean shutdown.
+   Each step prints its time. Run:
+   `cargo test --manifest-path editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture`
+   (`EMBER_OSE_VERBOSE=1` lists every extension-host call). Still to do: capture real frames
    into `testdata/editor-conn/` and replay them in unit tests.
 3. **Session object.** Add an `EditorSession` that owns both connections, the reconnect policy,
    the `DocumentBridge`, the provider registries (handle → selector), and request routing:
@@ -499,9 +509,9 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 | `remote_fs` | `RemoteFs::{stat, read_file, write_file, readdir, mkdir, delete, rename, subscribe_changes, watch, unwatch}` |
 | `management` | `get_environment_data`, `scan_extensions`, `RemoteAgentConnectionContext` |
 | `exthost` | `InitDataParams::to_json`; `initialize(conn, &init)` → `(RpcPeer, RpcEvent rx)`; `bootstrap_calls`; `configuration_init_data`; typed `Call` builders for the subset; `MainThreadCall::parse`; `default_reply` |
-| `rpc` | `RpcMessage::{encode, decode}`; `RpcPeer::{start_call, call, fire, cancel, respond}`; `Arg`; `Reply` |
+| `rpc` | `RpcMessage::{encode, decode}`; `RpcPeer::{start_call, call, fire, cancel, respond, connection}`; `Arg`; `Reply` |
 | `rpc_ids` | `id_of(name)`, `name_of(id)`, `PROXY_IDS` |
-| `document` | `DocumentMirror::{apply, replace_all, set_eol, position_from_byte, offset_at}`; `DocumentBridge::{open, change, close, saved, set_language}` |
+| `document` | `DocumentMirror::{apply, replace_all, set_eol, position_from_byte, offset_at}`; `DocumentBridge::{open, open_in_editor, change, close, saved, set_language}` (`open_in_editor` also adds one visible, active editor) |
 
 ### 6.2 What the dioxus-compose code-editor widget must provide
 

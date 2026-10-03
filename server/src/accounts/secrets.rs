@@ -84,7 +84,9 @@ impl SecretBox {
         }
     }
 
-    fn seal(&self, plaintext: &[u8], aad: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    /// Encrypt `plaintext`, bound to `aad`. Returns `(nonce, ciphertext)`. Also used for the
+    /// ChatGPT sign-in tokens (`crate::chatgpt`), with their own AAD prefix.
+    pub(crate) fn seal(&self, plaintext: &[u8], aad: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ct = self
             .cipher
@@ -99,7 +101,12 @@ impl SecretBox {
         (nonce.to_vec(), ct)
     }
 
-    fn open(&self, nonce: &[u8], ct: &[u8], aad: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    pub(crate) fn open(
+        &self,
+        nonce: &[u8],
+        ct: &[u8],
+        aad: &[u8],
+    ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         anyhow::ensure!(nonce.len() == NONCE_LEN, "bad nonce length");
         let pt = self
             .cipher
@@ -109,6 +116,14 @@ impl SecretBox {
             })?;
         Ok(Zeroizing::new(pt))
     }
+}
+
+/// 32 bytes from the OS RNG (PKCE verifiers, OAuth `state` and `nonce`).
+pub(crate) fn random_32() -> Zeroizing<[u8; KEY_LEN]> {
+    let key = XChaCha20Poly1305::generate_key(&mut OsRng);
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    out.copy_from_slice(key.as_slice());
+    out
 }
 
 trait Mode0600 {

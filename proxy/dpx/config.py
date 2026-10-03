@@ -54,3 +54,15 @@ EXT_TTL_SECONDS = 30.0
 
 # How many recent workspaces to remember.
 RECENT_LIMIT = 20
+
+# --- ember node: persistent terminal sessions (SPEC §P, dpx/terms/) -----------
+# The proxy relays `/__terms/*` to the ember node daemon on this computer. By default it finds
+# the daemon through the endpoint file the daemon writes at start
+# (`$EMBER_NODE_STATE_DIR/local.json`, default `~/.ember/node/local.json`), re-read on every
+# request so a node restart on another port is picked up. DPX_EMBER_NODE_URL +
+# DPX_EMBER_NODE_TOKEN override it (both must be set). The token never reaches the browser.
+EMBER_NODE_URL = os.environ.get("DPX_EMBER_NODE_URL", "")
+EMBER_NODE_TOKEN = os.environ.get("DPX_EMBER_NODE_TOKEN", "")
+EMBER_NODE_STATE_DIR = Path(
+    os.environ.get("EMBER_NODE_STATE_DIR") or (Path.home() / ".ember" / "node")
+)

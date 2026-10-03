@@ -1,4 +1,5 @@
-//! Background jobs (FR-X4) and the node → server event log.
+//! Background jobs (FR-X4) and the node → server event log (which also carries persistent
+//! terminal start/finish events, see [`crate::term`]).
 //!
 //! A job is owned by the daemon, not by the request or connection that started it, so it keeps
 //! running when that connection drops or the session moves to another computer. Its combined
@@ -76,7 +77,7 @@ impl Jobs {
         &self.boot_id
     }
 
-    fn emit(&self, kind: NodeEventKind) {
+    pub(crate) fn emit(&self, kind: NodeEventKind) {
         let mut log = self.log.lock().unwrap();
         let ev = NodeEvent { seq: log.next_seq, boot_id: self.boot_id.clone(), kind };
         log.next_seq += 1;

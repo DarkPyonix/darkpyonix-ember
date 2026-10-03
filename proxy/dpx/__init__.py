@@ -8,6 +8,7 @@ One folder, one concern.
 | `assets.py`      | Helpers that read `static/` files and turn them into responses |
 | `auth/`          | Login, sessions, the gate                                   |
 | `vscode/`        | Everything VS Code Web — relaying, injection, the companion-extension gate |
+| `terms/`         | ember node's persistent terminals, relayed as `/__terms/*`   |
 | `home/`          | The back end of the home screen — conversation API, recent folders |
 | `agents/`        | Agent conversation adapters (Claude Code, Codex)            |
 | `hub/`           | The hub showing several machines on one home screen (optional) |

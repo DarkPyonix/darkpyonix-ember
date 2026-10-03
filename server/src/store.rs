@@ -74,8 +74,12 @@ CREATE TABLE IF NOT EXISTS events (
 
 /// Migrations, in order: entry `i` brings `PRAGMA user_version` from `i` to `i + 1`. Each runs in
 /// its own transaction together with the version bump. Append only; never edit a shipped entry.
-const MIGRATIONS: &[&str] =
-    &[SCHEMA_V1, crate::accounts::schema::MIGRATION, crate::computers::schema::MIGRATION];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA_V1,
+    crate::accounts::schema::MIGRATION,
+    crate::computers::schema::MIGRATION,
+    crate::chatgpt::schema::MIGRATION,
+];
 
 /// Bring `conn` up to the latest schema version.
 fn migrate(conn: &mut Connection) -> anyhow::Result<()> {

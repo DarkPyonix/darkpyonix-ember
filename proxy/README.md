@@ -287,6 +287,7 @@ proxy/
 │  │  ├─ roots.py       folder roots (`?folder=` restriction)
 │  │  ├─ runtime.py     OSE / VSC runtime check · server command · default extensions
 │  │  └─ extension.py   companion-extension heartbeat gate + /__ext/*
+│  ├─ terms/          ember node's persistent terminals relayed as /__terms/* (SPEC §P)
 │  ├─ home/           the back end of the home screen
 │  │  ├─ api.py         /__agents/* · /__workspaces
 │  │  └─ workspaces.py  the record of recently opened folders
@@ -294,6 +295,8 @@ proxy/
 │  └─ hub/            several machines on one home screen (optional) → docs/HUB.md
 │     ├─ server.py
 │     └─ connector.py
+├─ companion/         VS Code web extension: integrated terminals as ember node sessions
+│                      (docs/design/TERMINALS.md at the repository root)
 ├─ static/            screen HTML · CSS · JS → static/README.md
 └─ tests/             unittest (stdlib; FastAPI only for the middleware test)
 ```

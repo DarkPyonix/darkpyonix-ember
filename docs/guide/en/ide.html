@@ -155,7 +155,7 @@
     <p>
       With <code>EMBER_IDE_COMPUTERS</code> unset there is one computer, <code>local</code>, whose
       <code>ide_url</code> is <code>EMBER_IDE_URL</code>. <code>server_url</code> defaults to
-      <code>EMBER_PUBLIC_URL</code>. Moving these targets onto the registered computers of
+      <code>EMBER_PUBLIC_URL</code>, else the host the request came to. Moving these targets onto the registered computers of
       <a href="computers.html">Computers and the hub</a> is an open item in the server code.
     </p>
 
@@ -187,7 +187,7 @@
     </p>
     <p>
       On each computer, start the runtime and the proxy with one command from
-      <code>web/proxy</code>. It needs at least one <code>--root</code>: a folder outside every
+      <code>web/proxy</code>. It needs at least one <code>--root</code> (or <code>DPX_FOLDER_ROOTS</code>): a folder outside every
       root is refused with 403.
     </p>
 
@@ -251,7 +251,8 @@ uv run --with-requirements requirements.txt python -m dpx.serve --runtime vsc --
     </p>
     <p>
       The connection layer (<code>ember-editor-conn</code>) and the session layer
-      (<code>ember-editor</code>) exist as first code, written but not yet compiled. Until the
+      (<code>ember-editor</code>) exist as first code. They build and pass their tests in CI; the end-to-end
+      test against a real OSE server is opt-in and not part of CI. Until the
       editor works end to end, choosing Ember IDE shows a placeholder. Track it in
       <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>.
     </p>

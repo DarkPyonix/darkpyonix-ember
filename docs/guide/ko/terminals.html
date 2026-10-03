@@ -137,16 +137,17 @@
           <code>extensions</code> 폴더입니다.</li>
       <li><strong>Ember (persistent)</strong> 프로필로 터미널을 엽니다.</li>
       <li>새 터미널과 작업의 기본값으로 삼으려면 명령 팔레트에서
-          <em>Ember: Use Persistent Terminals for New Terminals and Tasks</em> 를 실행합니다. 아래
-          설정을 써 줍니다.</li>
+          <em>Ember: Use Persistent Terminals for New Terminals and Tasks</em> 를 실행합니다. 이 명령은
+          기본 프로필을 바꾸고, 컴퓨터에 있는 <code>ember-term</code> 경로를 입력하면 작업용 자동화
+          프로필도 설정합니다. 아래 마지막 설정은 이 명령이 써 주지 않으므로 직접 추가합니다.</li>
     </ol>
 
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
-      <figcaption>jsonc: 설정 명령이 써 주는 사용자 설정</figcaption>
+      <figcaption>jsonc: 사용자 설정 (설정 명령은 앞의 두 개를 써 줍니다)</figcaption>
 <pre><code><span class="at">"terminal.integrated.defaultProfile.osx"</span>:   <span class="s">"Ember (persistent)"</span>,   <span class="c">// .linux 도 같습니다</span>
 <span class="c">// 작업: VS Code는 자동화 셸을 `&lt;path&gt; -c "&lt;command line&gt;"` 로 실행합니다.</span>
-<span class="at">"terminal.integrated.automationProfile.osx"</span>: { <span class="at">"path"</span>: <span class="s">"/Users/me/.cargo/bin/ember-term"</span> }, <span class="c">// .linux 도 같습니다</span>
-<span class="c">// ember-term이 작업에 작업 디렉터리 대신 워크스페이스를 태그로 붙이게 합니다.</span>
+<span class="at">"terminal.integrated.automationProfile.osx"</span>: { <span class="at">"path"</span>: <span class="s">"/Users/me/.cargo/bin/ember-term"</span>, <span class="at">"args"</span>: [] }, <span class="c">// .linux 도 같습니다</span>
+<span class="c">// 직접 추가: ember-term이 작업에 작업 디렉터리 대신 워크스페이스를 태그로 붙이게 합니다.</span>
 <span class="at">"terminal.integrated.env.osx"</span>: { <span class="at">"EMBER_PROJECT"</span>: <span class="s">"${workspaceFolder}"</span> }</code></pre>
     </figure>
 

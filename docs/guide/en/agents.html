@@ -179,7 +179,7 @@
       <li>The hook answers only <code>allow</code> or <code>deny</code>. Any error (server
           unreachable, unknown token, odd reply) becomes <code>deny</code>.</li>
       <li>An unanswered card is denied after 58 minutes, before agy's own hook timeout, with an
-          "approval timed out, retry" notice.</li>
+          "Approval for <em>tool</em> timed out; retry." notice.</li>
       <li>Before every turn Ember checks that agy has loaded the hook. If not, the turn is
           refused.</li>
       <li>Each run has a fresh token, revoked when it ends. Ending or interrupting a turn denies

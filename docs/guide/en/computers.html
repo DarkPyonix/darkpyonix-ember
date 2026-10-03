@@ -208,8 +208,8 @@ curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/comput
 
     <h2 id="assign">Assigning computers to projects</h2>
     <p>
-      The launcher lists computers at the bottom with their reachability (online, offline or
-      unknown) and the projects each serves. With a project selected, each computer has a switch,
+      The launcher lists computers at the bottom with their reachability ("Online", "Offline", or
+      "Checking&hellip;" while it is not yet known) and the projects each serves. With a project selected, each computer has a switch,
       "Assign to <em>project</em>". A project can have many computers and a computer many
       projects. The API equivalent is
       <code>PUT /api/v1/projects/{name}/computers/{computer_id}</code>, and <code>DELETE</code> on

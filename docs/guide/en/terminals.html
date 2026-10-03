@@ -138,15 +138,17 @@
       <li>Open a terminal with the profile <strong>Ember (persistent)</strong>.</li>
       <li>To make it the default for new terminals and tasks, run
           <em>Ember: Use Persistent Terminals for New Terminals and Tasks</em> from the command
-          palette. It writes the settings below.</li>
+          palette. It sets the default profile, and, if you give it the path of
+          <code>ember-term</code> on the computer, the automation profile for tasks. The last
+          setting below is not written by the command; add it yourself.</li>
     </ol>
 
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
-      <figcaption>jsonc: user settings the setup command writes</figcaption>
+      <figcaption>jsonc: user settings (the setup command writes the first two)</figcaption>
 <pre><code><span class="at">"terminal.integrated.defaultProfile.osx"</span>:   <span class="s">"Ember (persistent)"</span>,   <span class="c">// and .linux</span>
 <span class="c">// Tasks: VS Code runs automation shells as `&lt;path&gt; -c "&lt;command line&gt;"`.</span>
-<span class="at">"terminal.integrated.automationProfile.osx"</span>: { <span class="at">"path"</span>: <span class="s">"/Users/me/.cargo/bin/ember-term"</span> }, <span class="c">// and .linux</span>
-<span class="c">// Lets ember-term tag a task with the workspace instead of its working directory.</span>
+<span class="at">"terminal.integrated.automationProfile.osx"</span>: { <span class="at">"path"</span>: <span class="s">"/Users/me/.cargo/bin/ember-term"</span>, <span class="at">"args"</span>: [] }, <span class="c">// and .linux</span>
+<span class="c">// Added by hand: lets ember-term tag a task with the workspace instead of its working directory.</span>
 <span class="at">"terminal.integrated.env.osx"</span>: { <span class="at">"EMBER_PROJECT"</span>: <span class="s">"${workspaceFolder}"</span> }</code></pre>
     </figure>
 

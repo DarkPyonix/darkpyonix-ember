@@ -205,7 +205,7 @@ curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/comput
 
     <h2 id="assign">프로젝트에 배정하기</h2>
     <p>
-      런처 아래쪽에는 컴퓨터가 연결 상태(online, offline, unknown)와 맡은 프로젝트와 함께 나열됩니다.
+      런처 아래쪽에는 컴퓨터가 연결 상태("Online", "Offline", 아직 모르면 "Checking&hellip;")와 맡은 프로젝트와 함께 나열됩니다.
       프로젝트를 고른 상태에서는 컴퓨터마다 "Assign to <em>project</em>" 스위치가 있습니다. 한 프로젝트에
       여러 컴퓨터를, 한 컴퓨터에 여러 프로젝트를 배정할 수 있습니다. API로는
       <code>PUT /api/v1/projects/{name}/computers/{computer_id}</code> 이고, 같은 경로에

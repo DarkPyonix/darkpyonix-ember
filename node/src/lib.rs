@@ -8,6 +8,8 @@
 //!   TCP, or the peer-to-peer transport via [`transport`].
 //! - [`transport`]: serving the API over the transport (service `ember-node/1`) to allowed
 //!   peers only (SPEC `FR-N1`, `FR-N3`).
+//! - [`hub`]: registering this computer to the user's darkpyonix.dev account, and the hub's
+//!   address directory and relay (SPEC `FR-N2`).
 //! - [`client`]: the typed client ember server uses, over HTTP or the transport.
 //! - [`proto`]: wire types shared by both.
 //! - [`term`]: persistent terminal sessions (SPEC §P) — owned by the daemon, attachable by many
@@ -28,6 +30,7 @@ pub mod envinfo;
 pub mod exec;
 pub mod exec_server;
 pub mod fs;
+pub mod hub;
 pub mod jobs;
 pub mod policy;
 pub mod proto;

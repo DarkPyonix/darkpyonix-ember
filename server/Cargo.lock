@@ -785,6 +785,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
+name = "ember-hub"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "ember-transport",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ember-node"
 version = "0.1.0"
 dependencies = [
@@ -792,6 +808,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "ember-hub",
  "ember-transport",
  "futures",
  "globset",
@@ -826,6 +843,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chacha20poly1305",
+ "ember-hub",
  "ember-node",
  "ember-transport",
  "fuser",
@@ -868,6 +886,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

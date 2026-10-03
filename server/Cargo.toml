@@ -11,6 +11,8 @@ anyhow = "1"
 ember-node = { path = "../node" }
 # The peer-to-peer transport (SPEC FR-N1, FR-N3, FR-N5).
 ember-transport = { path = "../transport" }
+# The darkpyonix.dev hub: registration, device list, address directory (SPEC FR-N2).
+ember-hub = { path = "../hub" }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
@@ -45,6 +47,7 @@ mount-nfs = ["dep:nfsserve"]
 mount-fuse = ["dep:fuser"]
 
 [dev-dependencies]
+ember-hub = { path = "../hub", features = ["fake"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

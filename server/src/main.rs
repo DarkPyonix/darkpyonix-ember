@@ -11,6 +11,8 @@ use ember_server::agents::AgentAdapter;
 use ember_server::browser::{agent as browser_agent, BrowserConfig, BrowserManager};
 use ember_server::computers::{self, Computers, Registry};
 use ember_server::devices::{self, Devices};
+use ember_server::hub::ServerHub;
+use ember_transport::Transport;
 use ember_server::transport::{self as server_transport, ServerTransport};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
@@ -44,7 +46,13 @@ use ember_server::store::Store;
 ///   peer id and address printed at start). Computers can then be registered by peer, and the
 ///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
 ///   `/api/v1/devices`, managed on the TCP listener only)
-/// - `EMBER_RELAY_URL`: relay server(s) for the transport
+/// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`; `off` disables).
+///   With the transport on, the server can register to the user's GitHub account there
+///   (`POST /api/v1/hub/link`, local only), then publishes its address and resolves computers
+///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides
+///   the relay derived from the hub URL; `EMBER_HUB_SYNC_DEVICES=1` keeps the devices
+///   allow-list in sync with the account's devices
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -73,9 +81,33 @@ async fn main() -> anyhow::Result<()> {
     let accounts = Accounts::open(store.clone(), &data_dir)?;
     // Devices allowed over the transport (FR-N3); the table feeds the transport's gate.
     let devices = Devices::open(store.clone())?;
+    // The darkpyonix.dev hub (FR-N2): only with the transport, and unless turned off.
+    let hub_config = if server_transport::enabled_from_env() { ember_hub::HubConfig::from_env() } else { None };
+    let hub = match &hub_config {
+        Some(cfg) => Some(ServerHub::new(
+            cfg.clone(),
+            store.clone(),
+            accounts.clone(),
+            server_transport::load_key(&data_dir)?,
+            devices.clone(),
+        )),
+        None => None,
+    };
     // The peer-to-peer transport (FR-N1), opt-in.
     let net = if server_transport::enabled_from_env() {
-        let t = server_transport::bind(&data_dir).await?;
+        let key = server_transport::load_key(&data_dir)?;
+        let token = hub.as_ref().and_then(|h| h.active_token());
+        let t = Transport::bind(server_transport::config_with_hub(key, hub_config.as_ref(), token)).await?;
+        if let Some(h) = &hub {
+            h.attach_transport(t.clone());
+            let _watch = h.spawn_watch(ember_server::hub::WATCH_PERIOD);
+            let st = h.status()?;
+            match (&st.device, st.revoked) {
+                (Some(d), false) => tracing::info!(hub = %st.hub_url, name = %d.name, "registered with the hub"),
+                (Some(_), true) => tracing::warn!(hub = %st.hub_url, "the hub removed this server; register again with a new key"),
+                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/v1/hub/link)"),
+            }
+        }
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
@@ -203,7 +235,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
-        .merge(ember_server::browser::api::router(browsers.clone()));
+        .merge(ember_server::browser::api::router(browsers.clone()))
+        .merge(ember_server::hub::api::router(hub.clone(), computers.clone()));
     // Over the transport: the same API to allowed devices, without device management.
     let transport_task = match &net {
         Some(n) => {
@@ -222,8 +255,10 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
-    // Device management is local only (TCP).
-    let local_app = app.merge(devices::api::router(devices.clone()));
+    // Device management and the hub are local only (TCP).
+    let local_app = app
+        .merge(devices::api::router(devices.clone()))
+        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
     axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

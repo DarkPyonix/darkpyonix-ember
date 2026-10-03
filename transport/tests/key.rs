@@ -45,3 +45,15 @@ fn peer_id_display_parse_and_serde() {
 fn distinct_keys_distinct_ids() {
     assert_ne!(SecretKey::generate().peer_id(), SecretKey::generate().peer_id());
 }
+
+#[test]
+fn sign_and_verify() {
+    let key = SecretKey::generate();
+    let msg = b"darkpyonix-hub/v2/link\nl_00\nabcd";
+    let sig = key.sign(msg);
+    assert!(key.peer_id().verify(msg, &sig));
+    assert!(!key.peer_id().verify(b"other", &sig));
+    assert!(!SecretKey::generate().peer_id().verify(msg, &sig));
+    // Deterministic (RFC 8032).
+    assert_eq!(sig, key.sign(msg));
+}

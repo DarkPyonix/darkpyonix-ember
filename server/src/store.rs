@@ -119,6 +119,7 @@ const MIGRATIONS: &[&str] = &[
     crate::devices::schema::MIGRATION,
     crate::projects::schema::MIGRATION,
     crate::projects::schema::META_FTS_MIGRATION,
+    crate::hub::schema::MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.

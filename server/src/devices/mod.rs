@@ -7,8 +7,12 @@
 //!
 //! Managing devices is a local, administrative action: the [`api`] router is served on the
 //! server's TCP listener only, never over the transport (a device must not be able to add or
-//! revoke devices). Registration through the darkpyonix.dev hub (`FR-N2`, GitHub sign-in) will
-//! add rows here; it is out of scope for now.
+//! revoke devices).
+//!
+//! Rows come from two places, recorded in `source`: added by hand (`local`), or synced from the
+//! user's darkpyonix.dev hub account (`hub`, opt-in: [`crate::hub`], `FR-N2`). A sync adds the
+//! account's devices and removes `hub` rows whose device the hub no longer lists — removing a
+//! device on the hub revokes it here too. Rows added by hand are never touched by a sync.
 
 use std::sync::Arc;
 
@@ -27,6 +31,21 @@ pub struct Device {
     pub peer_id: PeerId,
     pub name: String,
     pub created_at: i64,
+    /// `local` (added by hand) or `hub` (synced from the hub account).
+    pub source: String,
+}
+
+/// Where a device row came from.
+pub const SOURCE_LOCAL: &str = "local";
+pub const SOURCE_HUB: &str = "hub";
+
+/// What a hub sync changed.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SyncReport {
+    pub added: Vec<PeerId>,
+    pub removed: Vec<PeerId>,
+    /// Connections closed by the removals.
+    pub closed: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,36 +86,80 @@ impl Devices {
 
     pub fn list(&self) -> Result<Vec<Device>, DeviceError> {
         let conn = self.store.conn();
-        let mut stmt = conn.prepare("SELECT peer_id, name, created_at FROM devices ORDER BY created_at, name")?;
+        let mut stmt =
+            conn.prepare("SELECT peer_id, name, created_at, source FROM devices ORDER BY created_at, name")?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (peer, name, created_at) = row?;
+            let (peer, name, created_at, source) = row?;
             match peer.parse::<PeerId>() {
-                Ok(peer_id) => out.push(Device { peer_id, name, created_at }),
+                Ok(peer_id) => out.push(Device { peer_id, name, created_at, source }),
                 Err(e) => tracing::warn!("ignoring device row with invalid peer id {peer:?}: {e}"),
             }
         }
         Ok(out)
     }
 
-    /// Allows `peer`. Adding an existing peer renames it.
+    /// Allows `peer`. Adding an existing peer renames it (and makes it a hand-added row, which a
+    /// hub sync leaves alone).
     pub fn add(&self, peer: PeerId, name: &str) -> Result<Device, DeviceError> {
         let name = name.trim();
         if name.is_empty() {
             return Err(DeviceError::BadRequest("device name must not be empty".into()));
         }
-        let d = Device { peer_id: peer, name: name.to_string(), created_at: now_ms() };
+        let d = Device { peer_id: peer, name: name.to_string(), created_at: now_ms(), source: SOURCE_LOCAL.into() };
         self.store.conn().execute(
-            "INSERT INTO devices (peer_id, name, created_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(peer_id) DO UPDATE SET name = ?2",
-            params![peer.to_string(), d.name, d.created_at],
+            "INSERT INTO devices (peer_id, name, created_at, source) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(peer_id) DO UPDATE SET name = ?2, source = ?4",
+            params![peer.to_string(), d.name, d.created_at, SOURCE_LOCAL],
         )?;
         self.gate.allow(peer);
         tracing::info!(peer = %peer.fmt_short(), name = %d.name, "device allowed");
         Ok(d)
+    }
+
+    /// Makes the `hub` rows equal to `listed` (the hub account's devices, without this server):
+    /// adds missing ones, renames, and revokes `hub` rows no longer listed. Hand-added rows are
+    /// not changed (a listed peer that already has a local row stays local).
+    pub fn sync_from_hub(&self, listed: &[(PeerId, String)]) -> Result<SyncReport, DeviceError> {
+        let current = self.list()?;
+        let mut report = SyncReport::default();
+        for (peer, name) in listed {
+            let name = name.trim();
+            let name = if name.is_empty() { "hub device" } else { name };
+            match current.iter().find(|d| d.peer_id == *peer) {
+                Some(d) if d.source != SOURCE_HUB => continue,
+                Some(d) if d.name == name => continue,
+                Some(_) => {
+                    self.store.conn().execute(
+                        "UPDATE devices SET name = ?2 WHERE peer_id = ?1 AND source = 'hub'",
+                        params![peer.to_string(), name],
+                    )?;
+                }
+                None => {
+                    self.store.conn().execute(
+                        "INSERT INTO devices (peer_id, name, created_at, source) VALUES (?1, ?2, ?3, 'hub')
+                         ON CONFLICT(peer_id) DO NOTHING",
+                        params![peer.to_string(), name, now_ms()],
+                    )?;
+                    self.gate.allow(*peer);
+                    report.added.push(*peer);
+                }
+            }
+        }
+        for d in current.iter().filter(|d| d.source == SOURCE_HUB) {
+            if !listed.iter().any(|(p, _)| *p == d.peer_id) {
+                self.store
+                    .conn()
+                    .execute("DELETE FROM devices WHERE peer_id = ?1 AND source = 'hub'", params![d.peer_id.to_string()])?;
+                report.closed += self.gate.revoke(&d.peer_id);
+                report.removed.push(d.peer_id);
+                tracing::info!(peer = %d.peer_id.fmt_short(), "device removed on the hub; revoked here");
+            }
+        }
+        Ok(report)
     }
 
     /// Revokes `peer`: removes it and closes its open connections. Returns how many
@@ -143,5 +206,30 @@ mod tests {
         assert!(!d.gate().is_allowed(&b));
         assert!(matches!(d.remove(&b), Err(DeviceError::NotFound(_))));
         assert_eq!(d.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hub_sync_adds_renames_and_revokes_only_hub_rows() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let d = Devices::open(store).unwrap();
+        let (mine, h1, h2) =
+            (SecretKey::generate().peer_id(), SecretKey::generate().peer_id(), SecretKey::generate().peer_id());
+        d.add(mine, "by hand").unwrap();
+
+        let r = d.sync_from_hub(&[(h1, "phone".into()), (h2, "tablet".into()), (mine, "renamed on hub".into())]).unwrap();
+        assert_eq!(r.added, vec![h1, h2]);
+        assert!(d.gate().is_allowed(&h1) && d.gate().is_allowed(&h2));
+        let list = d.list().unwrap();
+        let by = |p: PeerId| list.iter().find(|x| x.peer_id == p).unwrap().clone();
+        assert_eq!((by(mine).name.as_str(), by(mine).source.as_str()), ("by hand", SOURCE_LOCAL));
+        assert_eq!(by(h1).source, SOURCE_HUB);
+
+        // h2 removed on the hub, h1 renamed, and the hand-added row is not listed at all.
+        let r = d.sync_from_hub(&[(h1, "my phone".into())]).unwrap();
+        assert_eq!(r.removed, vec![h2]);
+        assert!(r.added.is_empty());
+        assert!(!d.gate().is_allowed(&h2));
+        assert!(d.gate().is_allowed(&mine), "hand-added devices survive a sync");
+        assert_eq!(d.list().unwrap().iter().find(|x| x.peer_id == h1).unwrap().name, "my phone");
     }
 }

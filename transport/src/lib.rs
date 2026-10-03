@@ -40,7 +40,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
 pub use addr::{AddressDirectory, MemoryDirectory, PeerAddr};
-pub use config::{RelayConfig, TransportConfig, RELAY_URL_ENV};
+pub use config::{HubDirectory, RelayConfig, TransportConfig, RELAY_URL_ENV};
 pub use dialer::Dialer;
 pub use gate::PeerGate;
 pub use key::{PeerId, SecretKey};
@@ -205,6 +205,17 @@ pub(crate) trait TransportBackend: Send + Sync + 'static {
     fn local_addr(&self) -> PeerAddr;
     fn add_peer_addr(&self, addr: PeerAddr);
     async fn wait_online(&self, timeout: Duration) -> bool;
+    /// Sets or clears the hub token used to resolve peers through the hub directory. Backends
+    /// without a hub directory ignore it.
+    fn set_directory_token(&self, _token: Option<String>) {}
+    /// Starts publishing to and resolving through the hub directory (no-op where unsupported).
+    fn enable_hub(&self, _hub: HubDirectory) -> Result<()> {
+        Ok(())
+    }
+    /// Replaces the relay servers at runtime (no-op where unsupported).
+    async fn set_relays(&self, _relays: RelayConfig) -> Result<()> {
+        Ok(())
+    }
     async fn close(&self);
 }
 
@@ -315,6 +326,25 @@ impl Transport {
     /// Remembers an address hint for a peer (used by later `connect(peer_id, ..)` calls).
     pub fn add_peer_addr(&self, addr: PeerAddr) {
         self.inner.add_peer_addr(addr)
+    }
+
+    /// Sets (after hub registration) or clears (on revocation) the device token with which peers
+    /// are resolved through the hub directory ([`TransportConfig::hub`]). No effect without one.
+    pub fn set_directory_token(&self, token: Option<String>) {
+        self.inner.set_directory_token(token)
+    }
+
+    /// Starts using the hub's address directory on a running transport (publish our record,
+    /// resolve peers with `hub.token`), e.g. right after the device registered with the hub.
+    /// Calling it again only updates the token. The in-memory backend ignores it.
+    pub fn enable_hub(&self, hub: HubDirectory) -> Result<()> {
+        self.inner.enable_hub(hub)
+    }
+
+    /// Replaces the relay servers on a running transport (e.g. switch to the hub's relay after
+    /// registration). The in-memory backend ignores it.
+    pub async fn set_relays(&self, relays: RelayConfig) -> Result<()> {
+        self.inner.set_relays(relays).await
     }
 
     /// Waits until the endpoint is connected to its home relay. Returns `false` on timeout or

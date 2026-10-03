@@ -1,0 +1,32 @@
+[package]
+name = "ember-hub"
+version = "0.1.0"
+edition = "2021"
+description = "Ember's darkpyonix.dev hub client: device registration (GitHub account), device list, address directory (SPEC FR-N2)"
+license = "Apache-2.0"
+
+[features]
+# An in-process fake of the hub (the subset of hub.openapi.yaml Ember uses), for tests.
+fake = ["dep:axum"]
+
+[dependencies]
+# PeerId / SecretKey (signing the link challenge), TransportConfig + HubDirectory, RelayConfig.
+# Only the transport's own types: the backend is never named here (SPEC FR-N5).
+ember-transport = { path = "../transport", default-features = false }
+base64 = "0.22"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time", "fs", "macros", "net"] }
+tracing = "0.1"
+
+axum = { version = "0.8", optional = true }
+
+[dev-dependencies]
+ember-hub = { path = ".", features = ["fake"] }
+# The real backend for the publish/resolve test (tests/directory.rs).
+ember-transport = { path = "../transport" }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

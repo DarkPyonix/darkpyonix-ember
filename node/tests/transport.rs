@@ -166,12 +166,7 @@ async fn unknown_peers_are_refused_and_revocation_disconnects() {
     let mut events = within(f.client.events(0)).await.unwrap();
     assert_eq!(f.gate.revoke(&f.server_t.peer_id()), 1);
     let ended = within(async {
-        loop {
-            match events.recv().await {
-                Ok(Some(_)) => continue,
-                Ok(None) | Err(_) => break,
-            }
-        }
+        while let Ok(Some(_)) = events.recv().await {}
     });
     ended.await;
     assert!(within(f.client.health()).await.is_err());

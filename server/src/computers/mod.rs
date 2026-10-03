@@ -595,10 +595,13 @@ impl Computers {
     }
 
     /// Mount (or release) the session's project directory for its next agent start: a Claude
-    /// Code session on a node gets its cwd mounted here; on this server it needs none.
+    /// Code or ACP session on a node gets its cwd mounted here; on this server it needs none.
     pub async fn prepare_start(&self, rec: &SessionRecord) -> anyhow::Result<()> {
         let Some(mounts) = self.mounts() else { return Ok(()) };
-        if rec.agent != AgentKind::ClaudeCode {
+        // Claude Code's own file tools need the project here. An ACP agent's file and shell tools
+        // go through the ACP client methods (served on the computer), but its other built-in
+        // tools (search, LSP, …) read the cwd directly, so it gets the same mount.
+        if !matches!(rec.agent, AgentKind::ClaudeCode | AgentKind::Acp(_)) {
             return Ok(());
         }
         let computer = match self.registry.session_computer(&rec.id)? {
@@ -997,6 +1000,11 @@ impl Computers {
                 });
             }
             AgentKind::Scripted => {}
+            // ACP agents ask the client (Ember) to read/write files and run commands; the ACP
+            // adapter serves those requests through this computer's node API.
+            AgentKind::Acp(_) => {
+                req.computer = Some(node_client(&c, self.dialer.as_ref())?);
+            }
         }
         Ok(())
     }

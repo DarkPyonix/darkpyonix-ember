@@ -72,6 +72,10 @@ pub fn config_env_var(agent: AgentKind) -> &'static str {
         AgentKind::ClaudeCode => "CLAUDE_CONFIG_DIR",
         AgentKind::Codex => "CODEX_HOME",
         AgentKind::Scripted => "EMBER_SCRIPTED_HOME",
+        // ACP agents have no documented config-directory variable Ember can rely on (each agent
+        // differs); the account directory is exported under this name and the agent ignores it.
+        // Account isolation for ACP agents is not implemented (`docs/INTENT.md` Q6).
+        AgentKind::Acp(_) => "EMBER_ACP_HOME",
     }
 }
 
@@ -142,7 +146,7 @@ fn row_to_account(r: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     let agent: String = r.get(1)?;
     Ok(Account {
         id: r.get(0)?,
-        agent: AgentKind::parse(&agent).unwrap_or(AgentKind::Scripted),
+        agent: AgentKind::from_stored(&agent).unwrap_or(AgentKind::Scripted),
         label: r.get(2)?,
         config_dir: r.get(3)?,
         status: r.get(4)?,
@@ -372,6 +376,13 @@ impl Accounts {
                  --device-auth to the login command.",
             ),
             AgentKind::Scripted => (String::new(), String::new(), String::new(), "test agent"),
+            AgentKind::Acp(_) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                "ACP agent: log in with the agent's own CLI on the server. Ember does not isolate \
+                 accounts for ACP agents yet.",
+            ),
         };
         LoginInstructions {
             env: HashMap::from([(var, acc.config_dir.clone())]),
@@ -389,6 +400,8 @@ impl Accounts {
             .ok_or_else(|| AccountError::NotFound(id.into()))?;
         let status = match acc.agent {
             AgentKind::Scripted => "logged_in",
+            // No portable login-status command exists for ACP agents.
+            AgentKind::Acp(_) => "unknown",
             agent => {
                 let bin = self
                     .bins

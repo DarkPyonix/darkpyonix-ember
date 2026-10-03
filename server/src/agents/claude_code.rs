@@ -867,6 +867,7 @@ mod tests {
             instructions: Some("use ember-a2a".into()),
             remote: None,
             mcp_servers: Vec::new(),
+            computer: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));

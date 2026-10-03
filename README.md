@@ -46,6 +46,8 @@ goes to whichever office the work needs.
 The UX deliberately follows **JetBrains Gateway**: a light front door, heavier sessions opened on
 demand.
 
+**User guide** (English and Korean), from building it to your first conversation: <https://darkpyonix.dev/darkpyonix-ember/>
+
 ---
 
 ## 🏗 Architecture, one paragraph

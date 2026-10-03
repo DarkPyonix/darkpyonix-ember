@@ -13,7 +13,7 @@
 | Service | `computers::Computers` | Register / list / probe (`/v1/health`, `/v1/env`) / remove; a session's current computer; `switch`. Installs three hooks on `Sessions`: an instructions hook (environment block), a start-config hook (Codex remote executor / Claude Code shell shim), and a message hook (the FR-S7 notice). |
 | HTTP API | `server/src/computers/api.rs` | `GET/POST /api/v1/computers`, `GET/DELETE /api/v1/computers/{id}`, `GET/PUT /api/v1/sessions/{id}/computer`. |
 | Codex relay | `server/src/computers/relay.rs` | Loopback WebSocket (`ws://127.0.0.1:<port>/<secret>`) that codex app-server connects to; re-frames to the node's raw `/v1/exec-server` stream. |
-| Node bridge | `node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio --exit-on-stdin-close` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
+| Node bridge | `node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
 | Claude shim | `server/src/computers/shim.rs`, `server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/v1/exec` and carries the cwd back. |
 | Mount | `server/src/computers/mount.rs` | **Design and stub only** (`NoMount`). |
 
@@ -69,7 +69,7 @@ the prefix also wraps, run locally by default (`EMBER_EXEC_NON_TOOL=remote` send
 | `ThreadStartParams.environments` and `TurnStartParams.environments: TurnEnvironmentParams[] = {environmentId, cwd, runtimeWorkspaceRoots?}`; absent from the non-experimental output; `ThreadResumeParams` has none | [V] same, diffed against `generate-ts` without `--experimental` |
 | `InitializeCapabilities {experimentalApi, requestAttestation, …}` opts into the experimental API | [V] same |
 | `developerInstructions` on `thread/start` and `thread/resume` | [V] same; whether it replaces or merges with config's instructions on resume is [U] |
-| `codex exec-server --listen stdio` and `--exit-on-stdin-close` | [V] `codex exec-server --help` |
+| `codex exec-server --listen stdio`; it exits when stdin closes. `--exit-on-stdin-close` requires `--environment-id`/`--remote` (remote registration only) | [V] `codex exec-server --help` + manual run, and an end-to-end Codex turn on a node |
 | exec-server stdio framing is newline-delimited JSON; its WebSocket form is one message per Text frame | [U] (the relay assumes both) |
 | codex keeps the URL path (`/<secret>`) when connecting to `execServerUrl` | [U] |
 | Claude Code builds `… && eval <cmd> && pwd -P >| <cwd-file>` and, with the prefix set, runs `$SHELL -c -l "<quoted prefix> <quoted command>"` (prefix split at its last ` -` so trailing flags stay flags) | [V] `claude` 2.1.288 binary strings (functions building the exec command and joining the prefix) |

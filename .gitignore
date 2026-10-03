@@ -51,3 +51,6 @@ dist-ssr
 # OSE build workdir and packages (ose/build.sh; builds run in CI)
 ose/.work/
 ose/dist/
+
+# Throwaway work, probes and downloads (AGENTS.md "Where files go")
+.scratch/

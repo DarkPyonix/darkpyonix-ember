@@ -8,6 +8,10 @@
 //!   request runs on a fresh stream of one cached connection ([`Dialer`]); each WebSocket
 //!   (exec, events, exec-server, terminal attach) gets its own stream.
 //!
+//! [`NodeClient::with_deadline`] bounds every HTTP request the same way on both reaches (for the
+//! transport: stream open, HTTP handshake, request and the whole response body). WebSockets are
+//! not bounded.
+//!
 //! ```no_run
 //! # async fn demo() -> Result<(), ember_node::client::ClientError> {
 //! use ember_node::client::NodeClient;
@@ -19,6 +23,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ember_transport::{Dialer, PeerAddr};
 use futures::stream::{SplitSink, SplitStream};
@@ -61,6 +66,9 @@ pub enum ClientError {
     /// The peer-to-peer transport failed (dial, stream, or HTTP over a stream).
     #[error("transport: {0}")]
     Transport(String),
+    /// The request missed the client's deadline ([`NodeClient::with_deadline`]).
+    #[error("request timed out after {0:?}")]
+    Timeout(Duration),
     #[error("websocket: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
     #[error("io: {0}")]
@@ -81,9 +89,22 @@ impl ClientError {
     }
 
     /// True when the request never got an answer from the daemon (connection refused, reset,
-    /// timed out): the node is unreachable, as opposed to having refused the operation.
+    /// timed out, peer-to-peer dial or stream failure): the node is unreachable, as opposed to
+    /// having refused the operation.
     pub fn is_transport(&self) -> bool {
-        matches!(self, ClientError::Http(_) | ClientError::WebSocket(_))
+        matches!(
+            self,
+            ClientError::Http(_) | ClientError::WebSocket(_) | ClientError::Transport(_) | ClientError::Timeout(_)
+        )
+    }
+
+    /// True when the request missed a deadline (the client's own, or reqwest's for HTTP).
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            ClientError::Timeout(_) => true,
+            ClientError::Http(h) => h.is_timeout(),
+            _ => false,
+        }
     }
 
     pub fn code(&self) -> Option<ErrorCode> {
@@ -129,6 +150,8 @@ struct Raw {
 pub struct NodeClient {
     reach: Reach,
     token: String,
+    /// Bound on each HTTP request ([`NodeClient::with_deadline`]); `None` waits forever.
+    deadline: Option<Duration>,
 }
 
 impl fmt::Debug for NodeClient {
@@ -154,28 +177,50 @@ impl NodeClient {
         if !base.starts_with("http://") && !base.starts_with("https://") {
             return Err(ClientError::Url(base));
         }
-        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into() })
+        Ok(Self { reach: Reach::Http { base, http: reqwest::Client::new() }, token: token.into(), deadline: None })
     }
 
     /// Like [`NodeClient::new`], but every HTTP request fails after `timeout` (and connecting
     /// after `min(timeout, 5s)`) instead of waiting forever: for callers that must not hang
     /// when the node goes away, such as the project mount. WebSockets are not affected.
-    pub fn with_timeout(base: impl Into<String>, token: impl Into<String>, timeout: std::time::Duration) -> Result<Self> {
-        let mut c = Self::new(base, token)?;
-        if let Reach::Http { http, .. } = &mut c.reach {
-            *http = reqwest::Client::builder()
-                .timeout(timeout)
-                .connect_timeout(timeout.min(std::time::Duration::from_secs(5)))
-                .build()?;
+    /// Same as `NodeClient::new(base, token)?.with_deadline(timeout)`.
+    pub fn with_timeout(base: impl Into<String>, token: impl Into<String>, timeout: Duration) -> Result<Self> {
+        Ok(Self::new(base, token)?.with_deadline(timeout))
+    }
+
+    /// Every HTTP request of this client (and of its clones) fails with
+    /// [`ClientError::Timeout`] after `deadline` instead of waiting forever, whichever way the
+    /// node is reached. Over the transport the deadline covers opening the stream (including
+    /// dialing a connection that is not cached), the HTTP handshake, the request and reading
+    /// the whole response. Over HTTP the reqwest client additionally gets
+    /// `timeout(deadline)` and `connect_timeout(min(deadline, 5s))`. WebSockets (exec, events,
+    /// terminal attach) are not affected.
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        if let Reach::Http { http, .. } = &mut self.reach {
+            match reqwest::Client::builder()
+                .timeout(deadline)
+                .connect_timeout(deadline.min(Duration::from_secs(5)))
+                .build()
+            {
+                Ok(c) => *http = c,
+                // The outer deadline below still applies.
+                Err(e) => tracing::debug!(error = %e, "node client: keeping the default HTTP client"),
+            }
         }
-        Ok(c)
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// The per-request deadline, if any ([`NodeClient::with_deadline`]).
+    pub fn deadline(&self) -> Option<Duration> {
+        self.deadline
     }
 
     /// A client that reaches the node over the transport: `addr` is the node's identity (plus
     /// optional address hints), dialed through `dialer` for [`NODE_SERVICE`]. Clients sharing a
     /// dialer share its connection to the node. The bearer token is still sent.
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>, token: impl Into<String>) -> Self {
-        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into() }
+        Self { reach: Reach::Peer { dialer, addr: addr.into() }, token: token.into(), deadline: None }
     }
 
     /// The node's transport address, when reached over the transport.
@@ -194,8 +239,17 @@ impl NodeClient {
         }
     }
 
-    /// One request/response. `json` is sent as an `application/json` body.
+    /// One request/response under the client's deadline. `json` is sent as an
+    /// `application/json` body.
     async fn send(&self, method: Method, path: &str, json: Option<Vec<u8>>, auth: bool) -> Result<Raw> {
+        let fut = self.send_unbounded(method, path, json, auth);
+        match self.deadline {
+            Some(d) => tokio::time::timeout(d, fut).await.unwrap_or(Err(ClientError::Timeout(d))),
+            None => fut.await,
+        }
+    }
+
+    async fn send_unbounded(&self, method: Method, path: &str, json: Option<Vec<u8>>, auth: bool) -> Result<Raw> {
         match &self.reach {
             Reach::Http { base, http } => {
                 let mut req = http.request(method, format!("{base}{path}"));

@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use ember_node::client::NodeClient;
+use ember_transport::Dialer;
 
 use super::Computer;
 
@@ -288,14 +288,24 @@ pub fn mounter_for(settings: &MountSettings) -> Arc<dyn Mounter> {
 // ---------------------------------------------------------------------------------------------
 // Orchestration
 
-/// Opens the node file API for a computer.
+/// Opens the node file API for a computer; the `Duration` is the per-request deadline.
 pub type NodeFsConnector = Arc<dyn Fn(&Computer, Duration) -> anyhow::Result<Arc<dyn NodeFs>> + Send + Sync>;
 
-/// [`NodeClient`] with a request timeout.
-pub fn default_node_fs() -> NodeFsConnector {
-    Arc::new(|c: &Computer, timeout: Duration| -> anyhow::Result<Arc<dyn NodeFs>> {
-        Ok(Arc::new(NodeClient::with_timeout(&c.url, &c.token, timeout)?))
+/// The node file API as [`super::Computers`] reaches the computer ([`super::node_client`]):
+/// over HTTP for a URL, over the transport through `dialer` for a peer-addressed computer,
+/// with every request bounded by the deadline
+/// ([`ember_node::client::NodeClient::with_deadline`]). Use [`super::Computers::node_fs`] to
+/// get one with the server's own dialer.
+pub fn node_fs(dialer: Option<Dialer>) -> NodeFsConnector {
+    Arc::new(move |c: &Computer, timeout: Duration| -> anyhow::Result<Arc<dyn NodeFs>> {
+        Ok(Arc::new(super::node_client(c, dialer.as_ref())?.with_deadline(timeout)))
     })
+}
+
+/// [`node_fs`] without a transport: URL-addressed computers only (a peer-addressed one fails
+/// to connect with a clear error).
+pub fn default_node_fs() -> NodeFsConnector {
+    node_fs(None)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -368,15 +378,16 @@ impl ProjectMounts {
         })
     }
 
-    /// From the environment, or `None` when mounting is off.
-    pub fn from_env() -> Option<Arc<ProjectMounts>> {
+    /// From the environment, or `None` when mounting is off. `connect` opens a computer's
+    /// file API: pass [`super::Computers::node_fs`] so peer-addressed computers mount too.
+    pub fn from_env(connect: NodeFsConnector) -> Option<Arc<ProjectMounts>> {
         let settings = MountSettings::from_env();
         if settings.mechanism == Mechanism::Off {
             return None;
         }
         let mounter = mounter_for(&settings);
         tracing::info!(mechanism = mounter.name(), "project mount enabled");
-        Some(Self::new(mounter, default_node_fs(), settings))
+        Some(Self::new(mounter, connect, settings))
     }
 
     pub fn settings(&self) -> &MountSettings {

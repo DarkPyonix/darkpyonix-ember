@@ -40,19 +40,42 @@ pub async fn save(path: &Path, snap: &CacheSnapshot) -> Result<(), CacheError> {
     }
     let tmp = tmp_path(path);
     tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, path).await?;
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.into());
+    }
     Ok(())
 }
 
+/// A temp file unique to this write, so concurrent saves (the debounced writer and an explicit
+/// flush) never rename each other's file away.
 fn tmp_path(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(".tmp");
+    name.push(format!(".{}.{n}.tmp", std::process::id()));
     path.with_file_name(name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_saves_do_not_race_on_the_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let snap = CacheSnapshot { format: CACHE_FORMAT, ..Default::default() };
+        let saves: Vec<_> = (0..32).map(|_| save(&path, &snap)).collect();
+        for r in futures_util::future::join_all(saves).await {
+            r.unwrap();
+        }
+        assert!(load(&path).await.is_some());
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().filter(|e| {
+            e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp")
+        });
+        assert_eq!(leftovers.count(), 0);
+    }
 
     #[tokio::test]
     async fn round_trip_and_tolerate_garbage() {

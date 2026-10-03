@@ -62,7 +62,7 @@ impl RelayConfig {
 /// The in-memory backend ignores this setting.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HubDirectory {
-    /// `https://darkpyonix.dev/pkarr` (no trailing slash, no query).
+    /// `https://hub.darkpyonix.dev/pkarr` (no trailing slash, no query).
     pub pkarr_url: String,
     /// This device's hub token (`dpd_...`), for resolving.
     pub token: Option<String>,
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn hub_directory_debug_redacts_the_token() {
-        let h = HubDirectory::new("https://darkpyonix.dev/pkarr").token(Some("dpd_secret".into()));
+        let h = HubDirectory::new("https://hub.darkpyonix.dev/pkarr").token(Some("dpd_secret".into()));
         let text = format!("{h:?}");
         assert!(!text.contains("dpd_secret"), "{text}");
         assert!(h.publish_direct);

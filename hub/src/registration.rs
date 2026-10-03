@@ -345,7 +345,7 @@ mod tests {
         let file = RegistrationFile::in_dir(&dir.path().join("state"));
         assert!(file.load().unwrap().is_none());
         let reg = Registration {
-            hub_url: "https://darkpyonix.dev".into(),
+            hub_url: "https://hub.darkpyonix.dev".into(),
             device: Device {
                 endpoint_id: SecretKey::generate().peer_id(),
                 name: "mini".into(),

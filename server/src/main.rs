@@ -47,7 +47,7 @@ use ember_server::store::Store;
 ///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
 ///   `/api/v1/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
-/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`; `off` disables).
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://hub.darkpyonix.dev`; `off` disables).
 ///   With the transport on, the server can register to the user's GitHub account there
 ///   (`POST /api/v1/hub/link`, local only), then publishes its address and resolves computers
 ///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides

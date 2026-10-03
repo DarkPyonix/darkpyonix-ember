@@ -2,7 +2,7 @@
 //! `darkpyonix-core/docs/api/hub.openapi.yaml` v0.3.0 with the FR-H1/H8–H11/NFR-H2 additions of
 //! darkpyonix-core PR #34, branch `feat/m4-hub-ember-gaps`).
 //!
-//! - [`HubConfig`]: which hub (`EMBER_HUB_URL`, default `https://darkpyonix.dev`), its relay and
+//! - [`HubConfig`]: which hub (`EMBER_HUB_URL`, default `https://hub.darkpyonix.dev`), its relay and
 //!   its address directory, turned into a [`ember_transport::TransportConfig`].
 //! - [`HubClient`]: typed calls for the part of the hub API Ember uses (device links, link codes,
 //!   devices, addresses, `/v1/me`).

@@ -12,6 +12,7 @@
 //! | POST | `/v1/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/v1/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
 //! | GET (WS) | `/v1/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
+//! | GET (WS) | `/v1/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
 //! | POST | `/v1/jobs` | [`JobRequest`] → [`JobInfo`] |
 //! | GET  | `/v1/jobs` | → `[JobInfo]` |
 //! | GET  | `/v1/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
@@ -99,6 +100,7 @@ pub fn router(node: Node) -> Router {
         .route("/v1/fs/glob", post(glob))
         .route("/v1/fs/grep", post(grep))
         .route("/v1/exec", get(exec_ws))
+        .route("/v1/exec-server", get(crate::exec_server::ws))
         .route("/v1/jobs", get(list_jobs).post(start_job))
         .route("/v1/jobs/{id}", get(get_job).delete(remove_job))
         .route("/v1/jobs/{id}/kill", post(kill_job))

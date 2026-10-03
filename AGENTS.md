@@ -24,12 +24,15 @@ VS Code questions. Kernel, manager and hub APIs belong to `darkpyonix-core`; Emb
 
 ## Sub-agents and builds
 
-- **Sub-agents never run builds.** No `cargo build`, `test`, `check`, `clippy` or `run`, and no
-  Chrome or `code serve-web` smoke runs. They write code and tests, research, and write documents,
-  and their report says what was not compiled. (User rule, 2026-10-03: seven sub-agents building at
-  once drove the machine to load 189.)
-- The session builds and tests, one build at a time with `CARGO_BUILD_JOBS=2`, each worktree in its
-  own `target/`, or pushes and lets CI build. Never share a `CARGO_TARGET_DIR` between worktrees.
+- **Coding, research and document sub-agents never run builds.** No `cargo build`, `test`,
+  `check`, `clippy` or `run`, and no Chrome or `code serve-web` smoke runs. They write code and
+  tests, research, and write documents, and their report says what was not compiled. (User rule,
+  2026-10-03: seven sub-agents building at once drove the machine to load 189.)
+- **Builds and tests go to one temporary builder sub-agent**, one build at a time with
+  `CARGO_BUILD_JOBS=2`, each worktree in its own `target/`. The session does not build itself;
+  without a builder, push and let CI build. Never share a `CARGO_TARGET_DIR` between worktrees.
+  (User, 2026-10-03: "빌드 작업 니가 직접 하지 말고 서브 에이전트 하나 임시로 만들어서 개한테
+  시켜야지", "니가 작업 붙잡고 있으면 다른 일들도 진행이 안되잖아".)
 - Use sub-agents generously for parallel work, each in its own worktree under
   `.claude/worktrees/<name>/`.
 - `client/` depends on `server/`, and `server/` on `node/`, by path, and CI runs

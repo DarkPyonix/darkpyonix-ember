@@ -16,6 +16,8 @@ use ember_server::store::Store;
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
+/// - `EMBER_IDE_COMPUTERS`, `EMBER_IDE_URL`, `EMBER_PUBLIC_URL`: "Open IDE" targets per
+///   computer, until ember node reports them (see `api::ide::IdeConfig`)
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -64,6 +66,9 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ember server listening on http://{addr}");
-    axum::serve(listener, ember_server::api::router(sessions)).await?;
+    let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    let app = ember_server::api::router(sessions.clone())
+        .merge(ember_server::api::ide::router(sessions, ide));
+    axum::serve(listener, app).await?;
     Ok(())
 }

@@ -3,6 +3,11 @@
 //! All routes live under `/api/v1`. The push channel is a WebSocket at `/api/v1/push`; on connect
 //! a client sends nothing and receives every [`Push`] from then on. To catch up after a gap, it
 //! reads `/sessions/{id}/events?after=<seq>` and then relies on the stream.
+//!
+//! "Open IDE" launch targets (`FR-L7`) are in [`ide`], with their own router merged in
+//! `main.rs`, since they need the IDE configuration as well as the sessions.
+
+pub mod ide;
 
 use std::path::PathBuf;
 use std::sync::Arc;

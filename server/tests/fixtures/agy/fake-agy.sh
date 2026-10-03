@@ -39,7 +39,8 @@ answer=$(printf '%s' '{"conversationId":"'$c'","stepIdx":2,"toolCall":{"name":"r
   | (cd "$root/.agents" && sh ./ember-hook.sh))
 echo "$answer" >> "$here/decisions.log"
 case "$answer" in
-  *'"allow"'*) echo '{"event":"step_update","step_update":{"conversation_id":"'$c'","step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hi"},"output":"hi\n"}}}' ;;
+  # printf, not echo: dash's echo would turn the JSON escape \n into a newline.
+  *'"allow"'*) printf '%s\n' '{"event":"step_update","step_update":{"conversation_id":"'$c'","step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hi"},"output":"hi\n"}}}' ;;
   *) echo '{"event":"step_update","step_update":{"conversation_id":"'$c'","step_index":2,"state":"ERROR","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo hi"},"error":{"type":"TOOL_ERROR","message":"tool call denied by pre-tool hook"}}}}' ;;
 esac
 case "$prompt" in

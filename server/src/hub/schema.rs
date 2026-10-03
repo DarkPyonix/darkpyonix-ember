@@ -1,4 +1,4 @@
-//! Schema for the server's hub registration (store migration 8, FR-N2).
+//! Schema for the server's hub registration (store migration 10, FR-N2).
 
 /// Migration from `user_version` 7 to 8. See [`crate::store`] for the mechanism.
 pub const MIGRATION: &str = "

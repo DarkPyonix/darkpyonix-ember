@@ -49,7 +49,6 @@ struct Fixture {
     server_hub: Arc<ServerHub>,
     computers: Arc<Computers>,
     devices: Arc<Devices>,
-    store: Arc<Store>,
     app: axum::Router,
     net: MemNetwork,
     server_t: Transport,
@@ -59,7 +58,7 @@ struct Fixture {
 async fn fixture() -> Fixture {
     let hub = FakeHub::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open_in_memory().unwrap());
+    let store = Arc::new(Store::open(&dir.path().join("ember.db")).unwrap());
     let accounts = Accounts::with_secrets(store.clone(), &dir.path().join("accounts"), SecretBox::ephemeral()).unwrap();
     let devices = Devices::open(store.clone()).unwrap();
     let net = MemNetwork::new();
@@ -81,7 +80,7 @@ async fn fixture() -> Fixture {
     let app = ember_server::hub::api::router(Some(server_hub.clone()), computers.clone())
         .merge(ember_server::hub::api::admin_router(Some(server_hub.clone()), computers.clone()))
         .merge(computers::api::router(computers.clone(), sessions.clone()));
-    Fixture { hub, server_hub, computers, devices, store, app, net, server_t, _dir: dir }
+    Fixture { hub, server_hub, computers, devices, app, net, server_t, _dir: dir }
 }
 
 async fn register_server(f: &Fixture) {
@@ -132,9 +131,9 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
     register_server(&f).await;
     // The token is sealed at rest: the raw row does not contain it.
     let reg = f.server_hub.registration().unwrap().unwrap();
-    let raw: Vec<u8> = f
-        .store
-        .conn()
+    // A second connection to the same database file, as anything reading the disk would see it.
+    let raw: Vec<u8> = rusqlite::Connection::open(f._dir.path().join("ember.db"))
+        .unwrap()
         .query_row("SELECT token_ciphertext FROM hub_registration", [], |r| r.get(0))
         .unwrap();
     assert!(!raw.windows(reg.device_token.len()).any(|w| w == reg.device_token.as_bytes()));

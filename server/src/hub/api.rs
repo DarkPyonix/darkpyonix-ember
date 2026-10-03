@@ -105,6 +105,8 @@ impl From<HubApiError> for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+// An axum Response is the natural error for a handler helper; its size does not matter here.
+#[allow(clippy::result_large_err)]
 fn hub(s: &AppState) -> Result<&Arc<ServerHub>, Response> {
     s.hub.as_ref().ok_or_else(|| {
         (

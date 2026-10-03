@@ -8,6 +8,9 @@
 //! `PUT`/`GET /pkarr/{key}` (the pkarr relay protocol, with signature check). Not served: GitHub
 //! sign-in, the relay, shares, names.
 
+// Every handler here returns an axum Response as its error; that type's size does not matter in a test fake.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

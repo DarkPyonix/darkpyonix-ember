@@ -68,7 +68,7 @@
       <span class="label">현재 상태</span>
       <p>
         <span class="pill partial">부분</span> ember node 쪽과 VS Code Web 쪽은 구현되어 있고,
-        <code>crates/node/tests/terms.rs</code> 와 컴패니언 확장 자체의 테스트가 있습니다. 실제 창을
+        <code>ember/node/tests/terms.rs</code> 와 컴패니언 확장 자체의 테스트가 있습니다. 실제 창을
         닫고 두 번째 기기에서 터미널을 다시 여는 종단 간 확인은 아직 하지 않았습니다. Ember
         에디터의 터미널 패널과 Ember 클라이언트의 터미널 목록은 계획 단계입니다. 진행은
         <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/26">#26</a> 에서 확인합니다.
@@ -126,12 +126,12 @@
     <h2 id="vscode">VS Code Web에서</h2>
     <p>
       VS Code Web은 작은 웹 확장인 <strong>Ember persistent terminals</strong> 컴패니언
-      (<code>web/proxy/companion/</code>)으로 영구 터미널에 닿습니다. 이 확장은 브라우저의 확장
+      (<code>ember/proxy/companion/</code>)으로 영구 터미널에 닿습니다. 이 확장은 브라우저의 확장
       호스트에서 돌고 프록시를 거쳐 node와 대화하므로, node 토큰은 브라우저에 가지 않습니다. VS Code
       소스는 고치지 않습니다.
     </p>
     <ol>
-      <li><code>web/proxy/companion/</code> 을 VS Code 서버의 확장 폴더에
+      <li><code>ember/proxy/companion/</code> 을 VS Code 서버의 확장 폴더에
           <code>darkpyonix.ember-terminals-0.1.0/</code> 이라는 이름으로 복사합니다.
           <code>dpx.serve</code> 라면 <code>~/.ember/vscode-web/&lt;runtime&gt;</code> 아래의
           <code>extensions</code> 폴더입니다.</li>

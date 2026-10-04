@@ -162,7 +162,7 @@
     <h2 id="vscode">VS Code Web <span class="pill partial">Partial</span></h2>
     <p>
       The VS Code choice is VS Code Web served on the computer itself and wrapped by Ember's
-      proxy (<code>web/proxy/</code>). The proxy adds a title bar and a touch layout for narrow
+      proxy (<code>ember/proxy/</code>). The proxy adds a title bar and a touch layout for narrow
       windows on top of an unmodified VS Code build; on a wide window you see stock VS Code.
       There are two runtimes:
     </p>
@@ -187,13 +187,13 @@
     </p>
     <p>
       On each computer, start the runtime and the proxy with one command from
-      <code>web/proxy</code>. It needs at least one <code>--root</code> (or <code>DPX_FOLDER_ROOTS</code>): a folder outside every
+      <code>ember/proxy</code>. It needs at least one <code>--root</code> (or <code>DPX_FOLDER_ROOTS</code>): a folder outside every
       root is refused with 403.
     </p>
 
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell, on the computer</figcaption>
-<pre><code>cd web/proxy
+<pre><code>cd ember/proxy
 export DPX_USERNAME=<span class="s">&lt;user&gt;</span> DPX_PASSWORD=<span class="s">&lt;password&gt;</span>   <span class="c"># first run only: creates the proxy's login</span>
 uv run --with-requirements requirements.txt python -m dpx.serve --runtime vsc --root ~/work
 <span class="c"># {"event": "ready", "url": "http://127.0.0.1:53817/", ...}</span></code></pre>

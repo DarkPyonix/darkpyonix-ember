@@ -12,12 +12,17 @@
 디자인으로 가야 해."
 
 Ember's A2A fits the way each agent already talks to other agents, and the agent chooses it before
-its own built-in means. A CLI or an MCP server is only the carrier. The test is behavioural: given a
+its own built-in means. Ember never blocks or intercepts those built-ins [user, 2026-10-04: "send
+message도 그냥 거르지 말고 모델이 알아서 쓰도록 하는게 맞는거 같아"]: its tools have to win by name,
+description and loading alone. A CLI or an MCP server is only the carrier. The test is behavioural: given a
 natural request such as "ask the reviewer" or "다른 에이전트에게 물어봐", does the agent call Ember
 first? Today's `ember-a2a` CLI plus instructions text does not pass that test against Claude Code,
 because Claude Code has its own peer tools that are always loaded.
 
 ## What each agent has today
+
+The "levers" below were surveyed; those that disable or intercept a built-in (deny rules, feature
+flags, redirect hooks) are recorded for reference only and are not part of the design.
 
 | Agent | Built-in means | How Ember can come first | Strongest lever | Risk |
 |---|---|---|---|---|
@@ -46,9 +51,10 @@ answered.
 **(B) Same-shaped Ember tools first.** An `ember` MCP server with `alwaysLoad`, tools
 `list_agents` and `send_message` using the native argument names (`to`, `message`), descriptions
 that open with the user's verbs ("ask, consult, tell, list the other agents and sessions, on any
-Ember computer and any model"), the built-ins denied, and a PreToolUse hook that answers a native
-call with "Use mcp__ember__send_message to reach other sessions in Ember". Supported surfaces only.
-This is the draft direction for every agent.
+Ember computer and any model"), and the server's instructions saying that these reach every Ember
+session while the built-ins reach only the agent's own. The built-ins stay enabled; nothing is
+denied and no hook redirects a call. Supported surfaces only. This is the direction for every
+agent.
 
 ## Keeping the runtime token out of the shell
 
@@ -76,17 +82,40 @@ ordered tool calls (Claude and Antigravity stream-json, `codex exec --json`, ACP
   opinion from another model", "tell payments the schema changed", "which agents are running",
   "다른 에이전트에게 물어봐"), plus negative controls ("spawn a helper to search the repo").
 - N: 30 per prompt per condition; 50 for a go or no-go decision; record model and CLI versions.
-- Conditions, cumulative: no Ember; CLI and instructions (today); MCP deferred; MCP always loaded;
-  plus appended prompt; plus built-ins denied; plus hook.
-- Metrics: first-choice Ember rate among A2A attempts, native leakage at any position, detours
+- Built-ins stay enabled in every condition. Conditions, cumulative: no Ember; CLI and
+  instructions (today); MCP deferred; MCP always loaded; plus appended prompt.
+- Metrics: first-choice Ember rate among A2A attempts, native calls at any position (counted as
+  failures, never blocked), detours
   (tool search, `--help`) before the first Ember call, delivery confirmed by the recorder, wrong
   targets, false positives on negatives.
 - Leakage detectors: native tool names per agent, shell access to `cc-socks`, and any send the
   model claims that the recorder did not see.
 - Re-run on every CLI version bump.
 
-Draft targets, for the user's decision: at least 95% Ember-first, zero leakage once the built-ins
-are denied, at most 2% false positives.
+Targets [user, 2026-10-04: "초안대로 확정하면 되긴 할거같은데"]: at least 95% Ember-first with
+the built-ins enabled, at most 2% false positives, re-measured whenever an agent CLI version
+changes.
+
+## Completion and idle reports (FR-T8)
+
+[user, 2026-10-04: "AionUI는 리더한테 각자 작업이 끝났고 한거가 전부 다 보고가 들어가더라고 idle로
+들어가면 리더가 바로 확인 없이 알게되는 방식인거 같던데 그런 인터렉션이 필요할거같아."]
+
+A session doing delegated work (an A2A request, a team task, a spawn) reports back on its own, so
+the delegator never polls. Claude Code does this with `SendMessage`'s `notify_when_idle` and with
+subagent hand-backs; AionUI's teammates report to the lead when they go idle.
+
+- **When:** the turn ends and the session is idle; an error ends the turn; an approval or a
+  question waits on a person; no progress for a configurable stall time.
+- **What:** the outcome (done, failed, needs input, stalled), a summary of the last response, files
+  changed and PRs or commits created in the turn, the error for a failure, and a link to the full
+  transcript.
+- **To whom:** the team leader for a team task, otherwise the sender of the message the session
+  was working on. A session with no delegator sends nothing.
+- **Noise:** one report per real turn end (deduplicated by session and turn, with a short settle
+  window for automatic follow-ups); at most one stall report per stall; reports count toward loop
+  protection and never start a reply turn on their own.
+- **How it arrives:** as one A2A message in the receiver's own idiom (FR-T2).
 
 ## Sources
 

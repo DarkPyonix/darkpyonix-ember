@@ -35,7 +35,9 @@ checks the result, so it is safe anywhere.
 Each build produces `dpx-ose-<tag>-<target>.tar.gz` and its `.sha256`. The archive is
 self-contained: it bundles the Node runtime pinned in upstream `remote/.npmrc`, so the host does
 not need Node. Pushing a tag `ose-v<tag>` (for example `ose-v1.139.1`, or `ose-v1.139.1-dpx.2` for a
-rebuild) runs the matrix and publishes a GitHub release with all archives and `SHA256SUMS`.
+rebuild) runs the matrix in `test-ose.yml`. When that run succeeds, `publish-ose.yml` downloads
+that run's archives, checks them against their checksums and publishes a GitHub release with all
+archives and `SHA256SUMS`, so the release holds exactly the files the build produced.
 
 To move to a new Code-OSS release: change `VERSION`, open a PR (the `product` job checks the new
 upstream `product.json` against the overrides in seconds), then run the workflow manually or tag.

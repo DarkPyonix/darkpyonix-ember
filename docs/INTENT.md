@@ -158,7 +158,12 @@ local to the server, regardless of which computers the sessions are working on.
 그렇게 쓰게 하는 디자인으로 가야 해."] A2A fits the way each agent already talks to other agents,
 and the agent chooses it before its own built-in means (for Claude Code, `ListAgents`,
 `SendMessage` and `Agent`). Whether it arrives as a CLI or an MCP server is a detail; the test is
-whether the agent reaches for it first on a natural request. Research and the draft design:
+whether the agent reaches for it first on a natural request. Ember never blocks or intercepts the
+agent's built-ins [user, 2026-10-04: "send message도 그냥 거르지 말고 모델이 알아서 쓰도록 하는게
+맞는거 같아"]: its tools win by name, description and loading alone, measured with the built-ins
+enabled (≥ 95% Ember-first, ≤ 2% false positives, re-measured on every agent CLI version change;
+[user, 2026-10-04: "초안대로 확정하면 되긴 할거같은데"]). A session that finishes delegated work
+reports back to the delegator on its own, so the delegator never polls (FR-T8). Research and the draft design:
 `docs/design/A2A-NATIVE.md` (#102).
 
 **Rejected alternative.** A shared file that agents read and write. It is what users do today, and

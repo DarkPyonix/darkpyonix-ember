@@ -32,7 +32,7 @@
 //! of truth for the pin in this crate:
 //!
 //! - a unit test fails if [`PINNED_VERSION`] differs from `build/ose/VERSION`;
-//! - CI (`.github/workflows/checks.yml`, job `editor-conn-pin`) regenerates [`rpc_ids::PROXY_IDS`]
+//! - CI (`.github/workflows/test.yml`, job `editor-conn-pin`) regenerates [`rpc_ids::PROXY_IDS`]
 //!   at the `build/ose/VERSION` tag and fails if the table or [`PINNED_COMMIT`] differ;
 //! - at connect time [`handshake::verify_server`] reads the server's `GET /version` and refuses any
 //!   other commit with [`Error::UnsupportedServerVersion`].

@@ -21,7 +21,7 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 ## Status (2026-10-04)
 
 What exists on `develop`, checked against the code, CI and the issues. **CI** means the crate is
-in `.github/workflows/checks.yml`'s `cargo test` matrix (server, node, transport, hub, client,
+in `.github/workflows/test.yml`'s `cargo test` matrix (server, node, transport, hub, client,
 bridge, editor-conn, editor), which passes on `develop`. `crates/app` (`ember-app`, the native UI)
 is not in that matrix, because it pulls `dioxus-compose` as a git dependency; the session builds it.
 Live agent tests (`EMBER_E2E_*`) and anything that needs a second computer, a real network, a
@@ -361,7 +361,7 @@ run on real networks (#10) or against the real hub (#62).
 
 ### FR-W4 acceptance: the OSE runtime
 
-OSE is built by `.github/workflows/ose.yml` from `build/ose/` (Code-OSS at the tag in `build/ose/VERSION`,
+OSE is built by `.github/workflows/test-ose.yml` from `build/ose/` (Code-OSS at the tag in `build/ose/VERSION`,
 `product.json` overrides only; see `build/ose/README.md`). A release (tag `ose-v*`) is accepted when,
 for every target (linux-x64, linux-arm64, darwin-arm64, darwin-x64):
 

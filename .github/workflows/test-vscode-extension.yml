@@ -1,4 +1,4 @@
-name: extensions / vscode-darkpyonix
+name: VS Code extension
 
 # Type check, unit and integration tests (vitest, against the fake manager) and packaging of the
 # VS Code extensions. The in-VS Code e2e run (npm run test:e2e) needs an installed VS Code and is
@@ -6,9 +6,9 @@ name: extensions / vscode-darkpyonix
 
 on:
   push:
-    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/extensions-vscode.yml"]
+    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/test-vscode-extension.yml"]
   pull_request:
-    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/extensions-vscode.yml"]
+    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/test-vscode-extension.yml"]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   notebook:
+    name: Package notebook extension
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -40,6 +41,7 @@ jobs:
           path: extensions/vscode-darkpyonix/*.vsix
 
   theme:
+    name: Package theme
     runs-on: ubuntu-latest
     defaults:
       run:

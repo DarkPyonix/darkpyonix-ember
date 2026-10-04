@@ -6,7 +6,7 @@
 #   no-webview           scripts/check-no-webview.sh (SPEC NFR-L2), when present
 #   no-em-dash           scripts/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each crates/<crate> dir that exists
-name: checks
+name: Test
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   transport-isolation:
-    name: transport isolation (FR-N5)
+    name: Transport isolation (FR-N5)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -37,7 +37,7 @@ jobs:
           fi
 
   no-em-dash:
-    name: no em-dash
+    name: No em-dash
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -46,7 +46,7 @@ jobs:
         run: bash scripts/check-no-em-dash.sh
 
   no-webview:
-    name: no webview in the launcher (NFR-L2)
+    name: No webview in the launcher (NFR-L2)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -61,7 +61,7 @@ jobs:
           fi
 
   editor-conn-pin:
-    name: editor-conn pin (rpc_ids vs build/ose/VERSION)
+    name: Editor-conn pin matches OSE
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -107,7 +107,7 @@ jobs:
           exit "$fail"
 
   rust:
-    name: cargo test ${{ matrix.crate }}
+    name: Cargo test (${{ matrix.crate }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

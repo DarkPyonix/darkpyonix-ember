@@ -1,0 +1,9 @@
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/work/project","sessionId":"77777777-7777-4777-8777-777777777777","version":"2.1.0","gitBranch":"main","type":"user","message":{"role":"user","content":"First question."},"uuid":"00000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:01.000Z"}
+this line is not json
+
+[1, 2, 3]
+{"type":"user","message":
+{"parentUuid":"00000000-0000-4000-8000-000000000001","isSidechain":false,"userType":"external","cwd":"/work/project","sessionId":"77777777-7777-4777-8777-777777777777","version":"2.1.0","gitBranch":"main","type":"assistant","message":{"model":"claude-test","id":"msg_0001","type":"message","role":"assistant","content":[{"type":"text","text":"First answer."}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}},"uuid":"00000000-0000-4000-8000-000000000002","timestamp":"2026-01-02T03:04:02.000Z"}
+   
+{"parentUuid":"00000000-0000-4000-8000-000000000002","isSidechain":false,"userType":"external","cwd":"/work/project","sessionId":"77777777-7777-4777-8777-777777777777","version":"2.1.0","gitBranch":"main","type":"user","message":{"role":"user","content":"Second question."},"uuid":"00000000-0000-4000-8000-000000000003","timestamp":"2026-01-02T03:04:03.000Z"}
+{"parentUuid":"00000000-0000-4000-8000-000000000003","isSidechain":false,"userType":"external","cwd":"/work/project","sessionId":"77777777-7777-4777-8777-777777777777","version":"2.1.0","gitBranch":"main","type":"assistant","message":{"model":"claude-test","id":"msg_0

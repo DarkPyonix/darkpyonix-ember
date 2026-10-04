@@ -1,0 +1,36 @@
+# Publishes develop to main through the append-only `release` branch (.github/scripts/publish-release.sh).
+# main is never written here; the user merges the release → main PR.
+name: release
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Publish release and open the PR to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Run a copy: the script checks out `release`, which would change the file under bash.
+        run: |
+          cp .github/scripts/publish-release.sh "$RUNNER_TEMP/publish-release.sh"
+          bash "$RUNNER_TEMP/publish-release.sh"

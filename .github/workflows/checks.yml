@@ -1,0 +1,138 @@
+# Repository checks. Rust builds and tests run here, not on developer machines.
+#
+#   transport-isolation  scripts/check-transport-isolation.sh (SPEC FR-N5), when present
+#   editor-conn-pin      crates/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
+#                        Code-OSS tag in build/ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   no-webview           scripts/check-no-webview.sh (SPEC NFR-L2), when present
+#   no-em-dash           scripts/check-no-em-dash.sh (AGENTS.md writing rules)
+#   rust                 cargo test for each crates/<crate> dir that exists
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  transport-isolation:
+    name: transport isolation (FR-N5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run scripts/check-transport-isolation.sh
+        run: |
+          if [ -f scripts/check-transport-isolation.sh ]; then
+            bash scripts/check-transport-isolation.sh
+          else
+            echo "scripts/check-transport-isolation.sh not present on this ref; skipping"
+          fi
+
+  no-em-dash:
+    name: no em-dash
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run scripts/check-no-em-dash.sh
+        run: bash scripts/check-no-em-dash.sh
+
+  no-webview:
+    name: no webview in the launcher (NFR-L2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run scripts/check-no-webview.sh
+        run: |
+          if [ -f scripts/check-no-webview.sh ]; then
+            bash scripts/check-no-webview.sh
+          else
+            echo "scripts/check-no-webview.sh not present on this ref; skipping"
+          fi
+
+  editor-conn-pin:
+    name: editor-conn pin (rpc_ids vs build/ose/VERSION)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Regenerate rpc_ids.rs at the build/ose/VERSION tag and compare
+        run: |
+          set -euo pipefail
+          if [ ! -f crates/editor-conn/scripts/gen_rpc_ids.sh ] || [ ! -f build/ose/VERSION ]; then
+            echo "crates/editor-conn/scripts/gen_rpc_ids.sh or build/ose/VERSION not present on this ref; skipping"
+            exit 0
+          fi
+          tag="$(tr -d '[:space:]' < build/ose/VERSION)"
+          src="$RUNNER_TEMP/vscode"
+          # Shallow, blobless, sparse: only src/vs is needed (the script scans it for
+          # createProxyIdentifier calls).
+          git clone --quiet --depth 1 --branch "$tag" --filter=blob:none --sparse \
+            https://github.com/microsoft/vscode.git "$src"
+          git -C "$src" sparse-checkout set src/vs
+          commit="$(git -C "$src" rev-parse HEAD)"
+          echo "Code-OSS $tag = $commit"
+
+          bash crates/editor-conn/scripts/gen_rpc_ids.sh "$src" > "$RUNNER_TEMP/generated.txt"
+          sed -n '/^pub const PROXY_IDS: &\[&str\] = &\[$/,/^\];$/p' crates/editor-conn/src/rpc_ids.rs \
+            | sed '1d;$d' > "$RUNNER_TEMP/current.txt"
+          if [ ! -s "$RUNNER_TEMP/current.txt" ]; then
+            echo "::error file=crates/editor-conn/src/rpc_ids.rs::PROXY_IDS table not found"
+            exit 1
+          fi
+
+          fail=0
+          if ! diff -u "$RUNNER_TEMP/current.txt" "$RUNNER_TEMP/generated.txt"; then
+            echo "::error file=crates/editor-conn/src/rpc_ids.rs::PROXY_IDS differs from gen_rpc_ids.sh at Code-OSS $tag; regenerate it"
+            fail=1
+          fi
+          if ! grep -qx "pub const PINNED_VERSION: &str = \"$tag\";" crates/editor-conn/src/lib.rs; then
+            echo "::error file=crates/editor-conn/src/lib.rs::PINNED_VERSION is not \"$tag\" (build/ose/VERSION)"
+            fail=1
+          fi
+          if ! grep -qx "pub const PINNED_COMMIT: &str = \"$commit\";" crates/editor-conn/src/lib.rs; then
+            echo "::error file=crates/editor-conn/src/lib.rs::PINNED_COMMIT is not \"$commit\" (Code-OSS $tag)"
+            fail=1
+          fi
+          exit "$fail"
+
+  rust:
+    name: cargo test ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [server, node, transport, hub, client, bridge, editor-conn, editor]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - id: present
+        name: Crate present?
+        run: |
+          if [ -f "crates/${{ matrix.crate }}/Cargo.toml" ]; then echo "yes=true" >> "$GITHUB_OUTPUT"
+          else echo "crates/${{ matrix.crate }}/Cargo.toml not present on this ref; skipping"; echo "yes=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.present.outputs.yes == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.present.outputs.yes == 'true'
+        with:
+          workspaces: crates/${{ matrix.crate }}
+      - name: cargo test
+        if: steps.present.outputs.yes == 'true'
+        working-directory: crates/${{ matrix.crate }}
+        run: |
+          if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi

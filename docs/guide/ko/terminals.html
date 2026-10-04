@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>영구 터미널 · Ember 가이드</title>
+<meta name="description" content="모든 창을 닫아도 계속 돌고 어느 기기에서나 다시 보이는 터미널: 누가 소유하는지, 여는 방법과 붙는 방법, 그리고 누가 제어권을 갖는지.">
+<link rel="alternate" hreflang="en" href="../en/terminals.html">
+<link rel="alternate" hreflang="ko" href="terminals.html">
+<link rel="alternate" hreflang="x-default" href="../en/terminals.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>가이드</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">메뉴</button>
+  <nav class="langswitch" aria-label="언어">
+    <a href="../en/terminals.html" hreflang="en">EN</a>
+    <a href="terminals.html" aria-current="true" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="다크" data-light="라이트" aria-pressed="false">다크</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="가이드">
+      <h2>가이드</h2>
+      <ul>
+        <li><a href="index.html">개요</a></li>
+        <li><a href="install.html">설치</a></li>
+        <li><a href="first-conversation.html">첫 대화</a></li>
+        <li><a href="computers.html">컴퓨터와 허브</a></li>
+        <li><a href="ide.html">IDE 열기</a></li>
+        <li><a href="terminals.html" aria-current="page">영구 터미널</a></li>
+        <li><a href="browser.html">원격 브라우저</a></li>
+        <li><a href="agents.html">에이전트</a></li>
+        <li><a href="troubleshooting.html">문제 해결</a></li>
+      </ul>
+      <h2>이 페이지</h2>
+      <ul>
+        <li><a href="#owner">터미널의 주인</a></li>
+        <li><a href="#survives">무엇을 견디는가</a></li>
+        <li><a href="#vscode">VS Code Web에서</a></li>
+        <li><a href="#ember-term">어느 셸에서나: ember-term</a></li>
+        <li><a href="#control">누가 제어하는가</a></li>
+        <li><a href="#screen">스크롤백과 끝난 터미널</a></li>
+        <li><a href="#debug">디버깅</a></li>
+        <li><a href="#api">클라이언트 개발자용</a></li>
+        <li><a href="#gaps">아직 없는 것</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">영구 터미널</p>
+    <h1>영구 터미널</h1>
+    <p class="lede">
+      터미널에서 빌드를 시작하고 창을 닫아도 빌드는 계속 돕니다. 나중에 다른 컴퓨터나 휴대폰에서
+      IDE를 열면, 같은 터미널이 스크롤백과 실행 중인 프로그램을 그대로 가진 채 보입니다. 이
+      페이지는 그 동작 방식과 사용법을 설명합니다.
+    </p>
+
+    <div class="note">
+      <span class="label">현재 상태</span>
+      <p>
+        <span class="pill partial">부분</span> ember node 쪽과 VS Code Web 쪽은 구현되어 있고,
+        <code>crates/node/tests/terms.rs</code> 와 컴패니언 확장 자체의 테스트가 있습니다. 실제 창을
+        닫고 두 번째 기기에서 터미널을 다시 여는 종단 간 확인은 아직 하지 않았습니다. Ember
+        에디터의 터미널 패널과 Ember 클라이언트의 터미널 목록은 계획 단계입니다. 진행은
+        <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/26">#26</a> 에서 확인합니다.
+      </p>
+    </div>
+
+    <h2 id="owner">터미널의 주인</h2>
+    <p>
+      터미널 프로세스는 그것이 도는 컴퓨터의 <strong>ember node</strong> 가 소유합니다. IDE 창도,
+      VS Code 자체의 터미널 호스트도, 클라이언트도 아닙니다. 창, 에이전트, 사람은 모두 터미널에
+      붙었다 떨어지는 클라이언트입니다. 붙고 떨어지는 일은 프로그램을 시작하거나 멈추지 않고,
+      프로그램은 스스로 끝나거나 누군가 죽일 때까지 돕니다.
+    </p>
+    <p>
+      그래서 한 터미널을 VS Code Web과, 나중에는 Ember 에디터에서 동시에 볼 수 있습니다. VS Code
+      자체의 영구 터미널에는 기대지 않습니다. VS Code 서버가 재시작하거나 되살리기 제한 시간이
+      지나면 끝나기 때문입니다.
+    </p>
+    <p>
+      터미널마다 <strong>출처</strong>(<code>ide-vscode</code>, <code>ide-ember</code>,
+      <code>agent</code>, <code>user</code>), 프로젝트, 제목, 태그를 기록합니다. 그래서 목록에서
+      터미널이 어디서 왔는지 보여 줄 수 있습니다.
+    </p>
+
+    <h2 id="survives">무엇을 견디는가</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">일어난 일</th><th scope="col">터미널에 생기는 일</th></tr></thead>
+        <tbody>
+          <tr><td>창을 닫거나 새로 고침</td><td>아무 일도 없습니다. 창은 떨어지기만 합니다.</td></tr>
+          <tr><td>다른 기기에서 IDE를 엶</td><td>터미널이 스크롤백, 화면과 함께 다시 목록에 나옵니다.</td></tr>
+          <tr><td>VS Code 서버나 ember server 재시작</td><td>아무 일도 없습니다. 둘 다 클라이언트일 뿐입니다.</td></tr>
+          <tr><td>ember node 재시작</td><td>최선을 다합니다. 프로그램은 작은 PTY 키퍼 프로세스 덕에 살아남고, 재시작한 node가 다시 넘겨받습니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      키퍼는 자기 프로세스 세션에서 터미널 핸들의 사본을 쥐고 있으므로, node가 끝나도 셸이 끊기지
+      않습니다. 이 설계에서 몇 가지 한계가 따라옵니다.
+    </p>
+    <ul>
+      <li>정상 종료 뒤에는 스크롤백과 화면이 이어집니다. 충돌 뒤에는 넘겨받은 터미널이 빈 화면으로
+          시작하고, 프로그램이 다시 그리면 채워집니다.</li>
+      <li>node가 없는 동안에는 아무도 터미널을 읽지 않습니다. 프로그램은 커널 버퍼가 찰 때까지
+          돌다가 기다립니다. 그 버퍼의 출력은 사라지지 않습니다.</li>
+      <li>넘겨받은 프로그램의 종료 상태는 알 수 없습니다.</li>
+      <li>서비스 관리자가 데몬과 함께 키퍼를 죽이면 안 됩니다. systemd는
+          <code>KillMode=process</code>, launchd는 <code>AbandonProcessGroup=true</code> 를 씁니다.
+          저장소에는 아직 이 유닛 파일이 없습니다.</li>
+      <li>node의 터미널 코드는 Unix 전용이라서 Windows에는 키퍼가 없습니다.</li>
+      <li><code>EMBER_NODE_KEEP_PTY=0</code> 은 키퍼를 끕니다. 그러면 터미널은 데몬과 함께
+          끝납니다.</li>
+    </ul>
+
+    <h2 id="vscode">VS Code Web에서</h2>
+    <p>
+      VS Code Web은 작은 웹 확장인 <strong>Ember persistent terminals</strong> 컴패니언
+      (<code>web/proxy/companion/</code>)으로 영구 터미널에 닿습니다. 이 확장은 브라우저의 확장
+      호스트에서 돌고 프록시를 거쳐 node와 대화하므로, node 토큰은 브라우저에 가지 않습니다. VS Code
+      소스는 고치지 않습니다.
+    </p>
+    <ol>
+      <li><code>web/proxy/companion/</code> 을 VS Code 서버의 확장 폴더에
+          <code>darkpyonix.ember-terminals-0.1.0/</code> 이라는 이름으로 복사합니다.
+          <code>dpx.serve</code> 라면 <code>~/.ember/vscode-web/&lt;runtime&gt;</code> 아래의
+          <code>extensions</code> 폴더입니다.</li>
+      <li><strong>Ember (persistent)</strong> 프로필로 터미널을 엽니다.</li>
+      <li>새 터미널과 작업의 기본값으로 삼으려면 명령 팔레트에서
+          <em>Ember: Use Persistent Terminals for New Terminals and Tasks</em> 를 실행합니다. 이 명령은
+          기본 프로필을 바꾸고, 컴퓨터에 있는 <code>ember-term</code> 경로를 입력하면 작업용 자동화
+          프로필도 설정합니다. 아래 마지막 설정은 이 명령이 써 주지 않으므로 직접 추가합니다.</li>
+    </ol>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>jsonc: 사용자 설정 (설정 명령은 앞의 두 개를 써 줍니다)</figcaption>
+<pre><code><span class="at">"terminal.integrated.defaultProfile.osx"</span>:   <span class="s">"Ember (persistent)"</span>,   <span class="c">// .linux 도 같습니다</span>
+<span class="c">// 작업: VS Code는 자동화 셸을 `&lt;path&gt; -c "&lt;command line&gt;"` 로 실행합니다.</span>
+<span class="at">"terminal.integrated.automationProfile.osx"</span>: { <span class="at">"path"</span>: <span class="s">"/Users/me/.cargo/bin/ember-term"</span>, <span class="at">"args"</span>: [] }, <span class="c">// .linux 도 같습니다</span>
+<span class="c">// 직접 추가: ember-term이 작업에 작업 디렉터리 대신 워크스페이스를 태그로 붙이게 합니다.</span>
+<span class="at">"terminal.integrated.env.osx"</span>: { <span class="at">"EMBER_PROJECT"</span>: <span class="s">"${workspaceFolder}"</span> }</code></pre>
+    </figure>
+
+    <p>
+      창이 시작될 때, 포커스를 얻을 때, 그리고 포커스가 있는 동안 5초마다 컴패니언은 프로젝트의
+      터미널을 조회하고 창에 아직 없는 것을 보여 줍니다. 어느 기기에서 열었든 실행 중인 VS Code
+      터미널과, 최근 10분 안에 끝난 작업이 출력과 함께 나옵니다.
+    </p>
+    <ul>
+      <li><strong>터미널 탭을 직접 닫으면</strong>(휴지통 아이콘) 프로그램을 죽입니다.
+          <code>ember.terminals.killOnClose</code> 설정이 이것을 정합니다.</li>
+      <li><strong>창을 닫거나 새로 고치면</strong> 떨어지기만 합니다.</li>
+      <li>다른 명령: <em>Ember: Attach to a Persistent Terminal…</em>(출처와 상관없이 컴퓨터의 모든
+          터미널), <em>New Persistent Terminal</em>, <em>Take Control of Terminal</em>,
+          <em>Release Control of Terminal</em>, <em>Kill Persistent Terminal</em>.</li>
+    </ul>
+    <p>
+      <code>tasks.json</code> 의 작업은 <code>ember-term</code> 을 거쳐 영구 터미널에서 돕니다. 창이
+      닫히면 VS Code가 언젠가 작업 터미널을 정리하고, 그때 <code>ember-term</code> 은 떨어지기만
+      하므로 빌드는 계속 돕니다. VS Code 자체의 작업 상태(문제 매처, "작업 실행 중")는 다시 보인
+      터미널로 이어지지 않습니다.
+    </p>
+
+    <h2 id="ember-term">어느 셸에서나: ember-term</h2>
+    <p>
+      <code>ember-term</code> 은 ember node와 함께 빌드되는 작은 바이너리입니다. 자신이 도는
+      터미널을 node 세션에 붙이므로, 일반 터미널 프로필로도 쓸 수 있습니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸</figcaption>
+<pre><code>ember-term                              <span class="c"># 새 영구 셸</span>
+ember-term -c <span class="s">"make -j8"</span>                  <span class="c"># 새 세션에서 명령 실행, 그 종료 상태로 끝남</span>
+ember-term attach &lt;id&gt; [--passive]      <span class="c"># 기존 세션에 붙기</span>
+ember-term attach-or-create --key dev -- npm run dev
+ember-term list
+ember-term kill &lt;id&gt;</code></pre>
+    </figure>
+
+    <p>
+      node는 <code>EMBER_NODE_URL</code> 과 <code>EMBER_NODE_TOKEN</code>, 또는
+      <code>~/.ember/node/local.json</code> 으로 찾습니다. 자신의 환경 변수를 모두 넘기고, SIGHUP을
+      받으면 프로그램을 끝내지 않고 떨어지기만 합니다.
+    </p>
+
+    <h2 id="control">누가 제어하는가</h2>
+    <p>
+      한 터미널에 여러 기기가 동시에 붙을 수 있습니다. 기본적으로는 모두 입력할 수 있습니다.
+    </p>
+    <ul>
+      <li><strong>입력.</strong> 붙어 있는 모든 클라이언트의 키 입력은 node가 받은 순서대로
+          프로그램에 들어갑니다. 그래서 두 기기가 번갈아 입력해도 어느 쪽 입력도 사라지지
+          않습니다.</li>
+      <li><strong>제어권 가져오기.</strong> 어느 클라이언트든 제어권을 가져올 수 있습니다. 나머지는
+          모두 읽기 전용이 되고 "controlled by &lt;device&gt;" 배너를 봅니다. 그들의 입력은 쌓이지
+          않고 거절됩니다. 제어권은 제어하는 쪽이 놓거나 떨어지면 끝납니다.</li>
+      <li><strong>크기.</strong> 터미널은 제어하는 쪽의 크기를 따릅니다. 제어하는 쪽이 없으면 가장
+          최근에 입력하거나 포커스를 준 클라이언트를 따릅니다. 창이 터미널 목록을 되살리는 것 같은
+          수동 붙기는 크기를 바꾸지 않습니다.</li>
+      <li><strong>화면 크기가 다를 때.</strong> 다른 클라이언트는 터미널을 실제 크기로 그립니다.
+          VS Code는 확장 터미널을 축소하지 못하므로 더 작은 VS Code 창에서는 줄이 꺾여 보입니다.
+          Ember 에디터는 화면에 맞게 축소하도록 설계되어 있습니다.</li>
+      <li><strong>느린 클라이언트.</strong> 한참 뒤처진 클라이언트는 끊기고, 다시 붙어 새 화면을
+          받습니다. 프로그램이나 다른 클라이언트를 느리게 하지 않습니다.</li>
+    </ul>
+
+    <h2 id="screen">스크롤백과 끝난 터미널</h2>
+    <p>
+      node는 모든 바이트를 받는 터미널 모델을 유지합니다. 붙으면 먼저 스냅샷(스크롤백, 화면, 커서,
+      입력 모드, 실행 중인 전체 화면 프로그램 포함)을 보내고, 이어서 실시간 스트림을 보냅니다. 둘
+      사이에는 빈틈도 겹침도 없습니다.
+    </p>
+    <ul>
+      <li>스크롤백은 10,000줄까지, 터미널마다 3&nbsp;MB 상한으로 보관합니다.</li>
+      <li>스냅샷에 들어가지 않는 세부 사항이 몇 가지 있습니다(스크롤 영역, 저장된 커서, 문자 집합,
+          탭 위치, 하이퍼링크). 전체 화면 프로그램은 다음 전체 다시 그리기 때 이것을 다시 그리고,
+          크기를 바꾸면 언제나 다시 그립니다.</li>
+      <li>끝난 터미널은 목록에 남습니다(최근 100개). 최근 20개는 화면을 보관하므로, 끝난 작업에
+          붙으면 출력과 종료 상태를 볼 수 있습니다.</li>
+    </ul>
+
+    <h2 id="debug">디버깅</h2>
+    <p>
+      디버거로 시작한 프로그램은 보통 창이 닫힐 때 디버그 어댑터와 함께 죽습니다. 컴패니언은
+      <code>"console": "integratedTerminal"</code> 을 쓰는 <code>launch</code> 를 바꿔 써서, 두 경우에
+      이를 막습니다. 프로그램은 127.0.0.1에서 디버거가 기다리는 영구 터미널에서 돌고, VS Code는
+      거기에 attach합니다.
+    </p>
+    <ul>
+      <li>Node(<code>node</code>, <code>pwa-node</code>, 런타임 <code>node</code>):
+          <code>--inspect-brk</code> 로.</li>
+      <li>Python(<code>debugpy</code>): <code>debugpy.listen</code> 으로. 그 인터프리터가 debugpy를
+          import할 수 있어야 하고, 아니면 <code>ember.debug.debugpyPath</code> 에 debugpy가 든 폴더를
+          적습니다.</li>
+    </ul>
+    <p>
+      나중에 연 창은 프로젝트에서 실행 중인 디버기에 대해 "디버거 다시 붙이기"를 제안합니다.
+      <em>Ember: Re-attach Debugger to a Running Debuggee…</em> 로 직접 실행할 수도 있습니다. 다른
+      디버그 어댑터와 콘솔은 그대로 두며 영구적이지 않습니다. 구성마다
+      <code>"emberPersistent": false</code> 로, 전체는 <code>ember.debug.persistent</code> 로 끕니다.
+      이 경로는 아직 실제 VS Code, js-debug, debugpy로 돌려 보지 않았습니다.
+    </p>
+
+    <h2 id="api">클라이언트 개발자용</h2>
+    <p>
+      모든 클라이언트는 node 토큰으로 인증하는 같은 node API를 씁니다. 프록시를 거치면 같은 경로가
+      <code>/__terms</code> 아래에 있고, 대신 프록시의 세션 쿠키를 씁니다.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">경로</th><th scope="col">하는 일</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /v1/terms</code></td><td>세션을 만듭니다. <code>key</code> 를 주면 있으면 붙고 없으면 만듭니다.</td></tr>
+          <tr><td><code>GET /v1/terms?project=&amp;origin=&amp;running=</code></td><td>세션 목록, 오래된 것부터.</td></tr>
+          <tr><td><code>GET /v1/terms/{id}/snapshot</code></td><td>붙지 않고 현재 화면만 가져옵니다.</td></tr>
+          <tr><td><code>GET /v1/terms/{id}/attach</code></td><td>WebSocket: hello를 보낸 뒤 입력을 보내고 이벤트를 받습니다.</td></tr>
+          <tr><td><code>POST /v1/terms/{id}/control</code></td><td>제어권을 가져오거나 놓습니다.</td></tr>
+          <tr><td><code>POST /v1/terms/{id}/kill</code></td><td>SIGHUP, 3초 뒤 SIGKILL.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      Rust 클라이언트는 <code>ember-node</code> 의 <code>NodeClient::term_create</code>,
+      <code>term_attach</code> 와 다른 <code>term_*</code> 메서드를 씁니다.
+    </p>
+
+    <h2 id="gaps">아직 없는 것</h2>
+    <ul>
+      <li>같은 세션에 붙는 Ember 에디터의 터미널 패널
+          (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>).</li>
+      <li>Ember 클라이언트의 컴퓨터별, 프로젝트별 터미널 목록(출처 표시와 종료 포함)
+          (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/26">#26</a>).</li>
+      <li>메인 서버를 통해서만 컴퓨터에 닿는 클라이언트를 위해 ember server가 붙기를 중계하는
+          기능.</li>
+      <li>측정: 다시 붙기 500&nbsp;ms 목표와 유휴 터미널당 2&nbsp;MB는 추정치이고 측정하지
+          않았습니다.</li>
+    </ul>
+
+    <nav class="pagenav" aria-label="페이지 이동">
+      <a class="prev" href="ide.html"><span>이전</span>&larr; IDE 열기</a>
+      <a class="next" href="browser.html"><span>다음</span>원격 브라우저 &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>이 가이드는 2026-10-03 기준 저장소 내용과 대조했습니다</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

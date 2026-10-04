@@ -1,0 +1,3 @@
+# Always store LF in the repository, so that cloning on Windows, macOS or Linux
+# never produces a whole-file diff from line endings alone.
+* text=auto eol=lf

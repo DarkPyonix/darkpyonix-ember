@@ -1,0 +1,7 @@
+{"timestamp":"2026-01-02T03:04:01.000Z","type":"session_meta","payload":{"id":"0199aaaa-0000-7000-8000-000000000004","timestamp":"2026-01-02T03:04:00.000Z","cwd":"/work/project","originator":"codex_cli_rs","cli_version":"0.50.0","instructions":null,"git":{"branch":"main"}}}
+{"timestamp":"2026-01-02T03:04:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Summarise the design doc."}]}}
+{"timestamp":"2026-01-02T03:04:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The doc proposes a single SQLite store."}]}}
+{"timestamp":"2026-01-02T03:04:04.000Z","type":"compacted","payload":{"message":"Summary of the conversation so far: the doc proposes a single SQLite store.","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Summarise the design doc."}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The doc proposes a single SQLite store."}]}]}}
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"event_msg","payload":{"type":"context_compacted"}}
+{"timestamp":"2026-01-02T03:04:06.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"What are the risks?"}]}}
+{"timestamp":"2026-01-02T03:04:07.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Write contention under many sessions."}]}}

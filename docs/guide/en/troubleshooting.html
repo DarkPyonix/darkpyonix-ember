@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting · Ember guide</title>
+<meta name="description" content="The error messages ember server, ember node and the Ember client print, what each means and what to do, where the logs are, and known macOS notes.">
+<link rel="alternate" hreflang="en" href="troubleshooting.html">
+<link rel="alternate" hreflang="ko" href="../ko/troubleshooting.html">
+<link rel="alternate" hreflang="x-default" href="troubleshooting.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="troubleshooting.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/troubleshooting.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html" aria-current="page">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#logs">Where the logs are</a></li>
+        <li><a href="#client">The client</a></li>
+        <li><a href="#sessions">Starting a session</a></li>
+        <li><a href="#computers">Computers and switching</a></li>
+        <li><a href="#mount">The project mount</a></li>
+        <li><a href="#hub">The hub</a></li>
+        <li><a href="#agents">Agents</a></li>
+        <li><a href="#other">Other features</a></li>
+        <li><a href="#macos">Known macOS notes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Troubleshooting</p>
+    <h1>What Ember prints when something is wrong</h1>
+    <p class="lede">
+      Every message on this page is quoted from the code. Find the one you see, and the text
+      beside it says what it means and what to do. Most problems are one of three things: a
+      program that is not where the server looks for it, a computer the server cannot reach, or a
+      path that does not exist where the agent runs.
+    </p>
+
+    <h2 id="logs">Where the logs are</h2>
+    <p>
+      <code>ember-server</code> and <code>ember-node</code> write their logs to the terminal they
+      run in (standard output). They write no log file, so redirect the output if you want to keep
+      it. <code>RUST_LOG</code> sets the level for both, for example <code>RUST_LOG=debug</code>;
+      the default is <code>info</code>. The client logs to its terminal too, filtered by
+      <code>EMBER_LOG</code>.
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>RUST_LOG=info ./target/release/ember-server 2&gt;&amp;1 | tee -a ember-server.log
+curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+    </figure>
+    <p>
+      Warnings at start are worth reading: the server says there which optional pieces it could not
+      find (<code>ember-exec</code>, <code>ember-a2a</code>, a browser) and which features are off.
+    </p>
+
+    <h2 id="client">The client</h2>
+    <h3>It exits at once with "Set EMBER_SERVER_URL"</h3>
+    <p>
+      <code>ember-app: &hellip;. Set EMBER_SERVER_URL to the main server, e.g. http://127.0.0.1:8740</code>
+      means the URL could not be parsed. Use a full URL with the scheme, such as
+      <code>http://127.0.0.1:8740</code>. The exit code is 2.
+    </p>
+    <h3>It shows old data and nothing updates</h3>
+    <p>
+      The client draws its cached projects and sessions before the server answers, so a window
+      with content does not prove the server is reachable. Check the health route above from the
+      machine running the client. If the server runs elsewhere, remember it listens on loopback by
+      default (see the SSH forward in <a href="install.html#server">Install</a>).
+    </p>
+    <h3>The build stops in dioxus-compose</h3>
+    <p>
+      The client's build fetches a Compose renderer that matches the pinned dioxus-compose commit.
+      If it cannot, build the renderer from dioxus-compose and set
+      <code>DIOXUS_COMPOSE_RENDERER_DIR</code> to its absolute path. A renderer built from another
+      schema stops the build with "this renderer was generated from a different schema than this
+      crate", and a variable that points at an empty folder stops it with
+      "<code>DIOXUS_COMPOSE_RENDERER_DIR is set to &hellip;, but no renderer is there</code>".
+    </p>
+
+    <h2 id="sessions">Starting a session</h2>
+    <h3>"agent &hellip; is not available on this server"</h3>
+    <p>
+      The agent's CLI was not found on the main server. Install it for the user that runs
+      <code>ember-server</code>, or point the server at it with <code>EMBER_CLAUDE_BIN</code>,
+      <code>EMBER_CODEX_BIN</code> or <code>EMBER_AGY_BIN</code>. An ACP agent must also be listed
+      in <code>EMBER_ACP_AGENTS</code>. <code>GET /api/v1/agents</code> shows what the server
+      detected and which versions.
+    </p>
+    <h3>"working directory &hellip; does not exist on the ember server"</h3>
+    <p>
+      For Claude Code the full text is "working directory &hellip; does not exist on the ember server (on another
+      computer it is mounted here when the project mount is enabled; see EMBER_MOUNT)"; Antigravity's ends after "server". A Claude
+      Code or Antigravity session runs in that folder on the main server. Create it, or fix the
+      path in "Folder on the computer". For a session on another computer, build the server with
+      the project mount (<a href="computers.html#mount">Computers and the hub</a>).
+    </p>
+    <h3>"Started on the main server: could not switch computer (&hellip;)"</h3>
+    <p>
+      The session was created, but moving it to the computer you picked failed. The reason in the
+      parentheses is one of the switch errors below. The session works on the main server; switch
+      it again once the computer answers.
+    </p>
+    <h3>Every new session is refused with an account reason</h3>
+    <p>
+      When an agent has accounts but none is available (all rate-limited or logged out), the
+      server refuses to start a session rather than fall back to another login, and gives the
+      reason. <code>GET /api/v1/accounts/route?agent=claude-code</code> shows what the router would
+      pick now and why. <code>POST /api/v1/accounts/{id}/check</code> runs the agent's own login
+      status command, and <code>POST /api/v1/accounts/{id}/clear-limit</code> clears a rate-limit
+      mark.
+    </p>
+
+    <h2 id="computers">Computers and switching</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Message</th><th scope="col">What to do</th></tr></thead>
+        <tbody>
+          <tr><td><code>session &hellip; is mid-turn; switch computers when the turn is over</code></td><td>Answer the pending approval or press Stop, then switch.</td></tr>
+          <tr><td><code>computer &hellip; is unreachable: &hellip;</code></td><td>The node did not answer its health check. Check it runs, that <code>EMBER_NODE_LISTEN</code> is reachable from the main server (or the transport is on), and that the token matches.</td></tr>
+          <tr><td><code>computer &hellip; is reached over the transport, but this server has none (set EMBER_TRANSPORT=1)</code></td><td>The computer was added by peer address; restart the server with <code>EMBER_TRANSPORT=1</code>.</td></tr>
+          <tr><td><code>no allowed peers: every transport connection will be refused</code> (node log)</td><td>Add the server's peer id to <code>~/.ember/node/allowed-peers</code> or <code>EMBER_NODE_ALLOWED_PEERS</code>, then send the node <code>SIGHUP</code>.</td></tr>
+          <tr><td><code>EMBER_NODE_TOKEN must be set to a non-empty secret</code></td><td>The node needs its token in the environment before it starts.</td></tr>
+          <tr><td><code>path is outside the allowed roots: &hellip;</code></td><td>The session's folder is outside <code>EMBER_NODE_ROOTS</code> on that computer. Widen the roots or use a folder inside them.</td></tr>
+          <tr><td><code>the ember-exec shim was not found; set EMBER_EXEC_BIN to run Claude Code on &hellip;</code></td><td>Keep <code>ember-exec</code> next to <code>ember-server</code> (the build puts them together), or set <code>EMBER_EXEC_BIN</code>.</td></tr>
+          <tr><td><code>Antigravity sessions cannot run on another computer yet</code></td><td>Keep Antigravity sessions on the main server.</td></tr>
+          <tr><td><code>computer &hellip; is the current computer of &hellip; session(s)</code></td><td>Move those sessions before removing the computer.</td></tr>
+          <tr><td><code>computer &hellip; is the browser egress of project(s) &hellip;; change their egress first</code></td><td>Point those projects' remote browser at another computer first.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="mount">The project mount</h2>
+    <p>
+      <span class="pill partial">Partial</span> These messages come from code that has not yet run
+      on real hardware (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Message</th><th scope="col">What to do</th></tr></thead>
+        <tbody>
+          <tr><td><code>cannot mount &hellip;: this ember server was built without a project mount (features mount-nfs on macOS, mount-fuse on Linux)</code></td><td>Rebuild the server with the feature for its OS, or keep the project path present on the main server.</td></tr>
+          <tr><td><code>&hellip; cannot be created by this user (&hellip;). &hellip;</code></td><td>The mount point needs a one-time privileged setup. Run <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> as the server's user; it uses <code>sudo</code> and prints each command first.</td></tr>
+          <tr><td><code>&hellip; exists on this server and is not empty; &hellip;</code></td><td>A local folder sits at the same path. Move it away, or set <code>EMBER_MOUNT_SHADOW=1</code> to mount over it.</td></tr>
+          <tr><td><code>project mount: &hellip; does not exist on computer "&hellip;"</code></td><td>The folder is missing on that computer. Create it there or fix the session's folder.</td></tr>
+          <tr><td><code>project mount: &hellip; is outside the directories its ember node allows (its roots)</code></td><td>Widen <code>EMBER_NODE_ROOTS</code> on that computer.</td></tr>
+          <tr><td><code>project mount: &hellip; is already mounted from another computer (&hellip;)</code></td><td>Two computers cannot serve the same path at once. Move one of the sessions.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="hub">The hub</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Message</th><th scope="col">What to do</th></tr></thead>
+        <tbody>
+          <tr><td>HTTP 503 from any <code>/api/v1/hub</code> route</td><td>The hub is off: the server runs without <code>EMBER_TRANSPORT=1</code>, or with <code>EMBER_HUB_URL=off</code>.</td></tr>
+          <tr><td><code>this server is not registered with the hub; start with POST /api/v1/hub/link</code></td><td>Link the server first (<a href="computers.html#hub-server">Computers and the hub</a>).</td></tr>
+          <tr><td><code>the hub is off (EMBER_HUB_URL=off)</code> (<code>ember-node hub register</code>)</td><td>Unset <code>EMBER_HUB_URL</code> or set it to the hub's address.</td></tr>
+          <tr><td><code>cannot reach the hub: &hellip;</code></td><td>Check the network and <code>EMBER_HUB_URL</code>. The default address is changing (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
+          <tr><td><code>the link expired before it was approved (user code &hellip;)</code></td><td>Run the link again and approve it sooner.</td></tr>
+          <tr><td><code>this endpoint is already registered with the hub, or was removed from its account (&hellip;)</code></td><td>A removed device can rejoin after the account owner re-admits it on the hub (valid 15 minutes) and approves its new link in the browser.</td></tr>
+          <tr><td><code>state: removed from the account (&hellip;)</code> (<code>ember-node hub status</code>)</td><td>Someone removed this computer on the hub; it is no longer published. Re-admit it on the hub, then <code>ember-node hub register</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="agents">Agents</h2>
+    <h3>Antigravity: "Operation not permitted" on shell writes</h3>
+    <p>
+      <span class="pill partial">Partial</span> On macOS, with agy 1.2.16 and <code>--sandbox</code>
+      (Ember's default), commands such as <code>touch</code> fail with
+      <code>Operation not permitted</code> even inside the project, while agy's own file-writing
+      tool works. The cause is being investigated with <code>--sandbox</code> kept on
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a>).
+      <code>EMBER_AGY_SANDBOX=0</code> drops the flag, at the cost of agy's own sandbox.
+    </p>
+    <h3>Antigravity: "Approval for &hellip; timed out; retry."</h3>
+    <p>
+      An Antigravity approval was not answered within 58 minutes, so Ember denied it before agy's
+      hook timed out. Send the request again.
+    </p>
+    <h3>Agents cannot message each other</h3>
+    <p>
+      The server logs <code>ember-a2a not found next to the server binary; agents cannot use
+      A2A</code>. Keep <code>ember-a2a</code> beside <code>ember-server</code>. Also check that
+      the server was not started with <code>EMBER_A2A=0</code>.
+    </p>
+
+    <h2 id="other">Other features</h2>
+    <ul>
+      <li><code>remote browser unavailable: no Chrome/Chromium found (EMBER_CHROME_BIN)</code>: install Chrome or Chromium on the main server, or set <code>EMBER_CHROME_BIN</code>. See <a href="browser.html">Remote browser</a>.</li>
+      <li>"The Ember IDE arrives with the editor core (M8). Use VS Code or Gateway for now.": Ember's own IDE window is not built yet (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>). See <a href="ide.html">Opening an IDE</a>.</li>
+      <li><code>&hellip; session(s) were mid-turn at shutdown; marked idle for resume</code> at server start is not an error: those sessions resume with your next message.</li>
+    </ul>
+
+    <h2 id="macos">Known macOS notes</h2>
+    <ul>
+      <li><strong>Mount points under <code>/home</code>.</strong> On macOS <code>/home</code> is an automount, so a node path such as <code>/home/pi/proj</code> cannot simply be created on a Mac main server. <code>scripts/ember-mount-setup.sh</code> handles it (it edits <code>/etc/auto_master</code>); a new top-level folder such as <code>/srv</code> needs <code>/etc/synthetic.conf</code> and a reboot.</li>
+      <li><strong>NFS without root.</strong> The macOS mount relies on <code>mount_nfs</code> working without <code>sudo</code> on a folder the user owns. That is documented upstream but not yet verified on Ember's Mac mini (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).</li>
+      <li><strong>Claude Code accounts and the keychain.</strong> Claude Code keeps a login in the macOS login keychain, so log an account out with its own <code>auth logout</code> command before deleting it.</li>
+      <li><strong>The client's look.</strong> The client has run against a live server on macOS, but nobody has yet checked its layout on a real display (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/9">#9</a>).</li>
+    </ul>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="agents.html"><span>Previous</span>&larr; Agents</a>
+      <a class="next" href="index.html"><span>Next</span>Overview &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

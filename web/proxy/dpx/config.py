@@ -1,0 +1,68 @@
+"""Every environment variable, path and constant, in one place.
+
+No setting that belongs here may be buried in the code elsewhere. Anything changed at
+run time arrives as an `XMO_*` or `DPX_*` environment variable (see the README's
+"Running it" section).
+"""
+import os
+import time
+from pathlib import Path
+
+from dpx.vscode.roots import parse_roots
+
+# --- Upstream: stock VS Code Web (`code serve-web`) -------------------------
+# If it was started on a different port, XMO_UPSTREAM_PORT must say so (default 9092).
+UPSTREAM_HOST = os.environ.get("XMO_UPSTREAM_HOST", "127.0.0.1")
+UPSTREAM_PORT = int(os.environ.get("XMO_UPSTREAM_PORT", "9092"))
+UPSTREAM_SCHEME = "http"
+UPSTREAM_BASE = f"{UPSTREAM_SCHEME}://{UPSTREAM_HOST}:{UPSTREAM_PORT}"
+UPSTREAM_WS_SCHEME = "ws" if UPSTREAM_SCHEME == "http" else "wss"
+
+# --- Folder roots -------------------------------------------------------------
+# Which folders `?folder=` / `?workspace=` may open (dpx/vscode/roots.py). Separated by
+# os.pathsep. Unset = no restriction (the standalone proxy's original behaviour); the
+# `python -m dpx.serve` launcher always sets it.
+FOLDER_ROOTS = parse_roots(os.environ.get("DPX_FOLDER_ROOTS"))
+
+# --- Paths ------------------------------------------------------------------
+# BASE_DIR = the repository root. This file lives in dpx/, so go up two levels.
+# Runtime state files (the database, the recent list, hub state) all live at the root:
+# inside the package they would mix code with data, and the data would follow the
+# package around every time it moved.
+BASE_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = BASE_DIR / "static"
+RECENT_FILE = BASE_DIR / "_xmo_recent.json"
+DB_FILE = BASE_DIR / "darkpyonix.db"
+HUB_STATE_FILE = BASE_DIR / "_dpx_hub_state.json"
+MACHINE_ID_FILE = BASE_DIR / "_dpx_machine.json"
+
+# --- Cache busting for injected assets --------------------------------------
+# Regenerated every time the process starts (uvicorn --reload restarts on each edit),
+# so CSS/JS changes show up immediately and media queries are re-evaluated on
+# rotation and resize.
+ASSET_VERSION = str(int(time.time()))
+
+# --- Tab detach (SPEC FR-B1–B4) ----------------------------------------------
+# Injects static/detach.js into the workbench and turns VS Code's own drag-to-new-window
+# default off (dpx/vscode/html_rewrite.py). DPX_TAB_DETACH=0 restores stock behaviour.
+TAB_DETACH = os.environ.get("DPX_TAB_DETACH", "1").lower() not in ("0", "false", "no", "off")
+
+# --- The extension gate -----------------------------------------------------
+# The companion VS Code extension sends a heartbeat roughly every 10 seconds; if none
+# arrives within this window, the gate closes.
+EXT_TTL_SECONDS = 30.0
+
+# How many recent workspaces to remember.
+RECENT_LIMIT = 20
+
+# --- ember node: persistent terminal sessions (SPEC §P, dpx/terms/) -----------
+# The proxy relays `/__terms/*` to the ember node daemon on this computer. By default it finds
+# the daemon through the endpoint file the daemon writes at start
+# (`$EMBER_NODE_STATE_DIR/local.json`, default `~/.ember/node/local.json`), re-read on every
+# request so a node restart on another port is picked up. DPX_EMBER_NODE_URL +
+# DPX_EMBER_NODE_TOKEN override it (both must be set). The token never reaches the browser.
+EMBER_NODE_URL = os.environ.get("DPX_EMBER_NODE_URL", "")
+EMBER_NODE_TOKEN = os.environ.get("DPX_EMBER_NODE_TOKEN", "")
+EMBER_NODE_STATE_DIR = Path(
+    os.environ.get("EMBER_NODE_STATE_DIR") or (Path.home() / ".ember" / "node")
+)

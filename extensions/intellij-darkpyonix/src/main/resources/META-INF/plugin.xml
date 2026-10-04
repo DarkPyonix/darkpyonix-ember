@@ -1,0 +1,53 @@
+<!-- https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>dev.darkpyonix.intellij</id>
+    <name>DarkPyonix Notebooks</name>
+    <vendor url="https://github.com/DarkPyonix">DarkPyonix</vendor>
+    <description><![CDATA[
+        <p>Run and share <b>DarkPyonix</b> notebooks (<code>.pynb</code>, and <code>.py</code> files with
+        <code># %% [type]</code> cells) from PyCharm and IntelliJ IDEA.</p>
+        <ul>
+            <li>Run and interrupt cells from the gutter; outputs of the latest run appear per cell in the
+                DarkPyonix tool window and stay live while the kernel runs.</li>
+            <li>Kernels belong to the file, not the IDE: closing the IDE keeps the kernel, and the CLI,
+                VS Code, Ember and agents see the same kernel.</li>
+            <li>Collaborative editing: cell locks, other people's focus and cursor, conflict handling.</li>
+        </ul>
+        <p>Needs the <code>darkpyonix</code> CLI; a manager is discovered or started automatically.</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <!-- With Python support (PyCharm, or IDEA with the Python plugin) .pynb opens as Python. -->
+    <depends optional="true" config-file="darkpyonix-python.xml">com.intellij.modules.python</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <editorFactoryListener implementation="dev.darkpyonix.intellij.editor.NotebookEditorFactoryListener"/>
+        <toolWindow id="DarkPyonix" anchor="right" secondary="false" icon="AllIcons.Actions.Execute"
+                    factoryClass="dev.darkpyonix.intellij.toolwindow.OutputsToolWindowFactory"/>
+        <notificationGroup id="DarkPyonix" displayType="BALLOON"/>
+        <applicationConfigurable parentId="tools" id="dev.darkpyonix.intellij.settings" displayName="DarkPyonix"
+                                 instance="dev.darkpyonix.intellij.settings.DarkPyonixConfigurable"/>
+    </extensions>
+
+    <actions>
+        <group id="DarkPyonix.Group" text="DarkPyonix" popup="true">
+            <action id="DarkPyonix.RunCell" class="dev.darkpyonix.intellij.actions.RunCellAction"
+                    text="Run Cell" description="Run the DarkPyonix cell at the caret" icon="AllIcons.Actions.Execute">
+                <keyboard-shortcut keymap="$default" first-keystroke="control alt shift ENTER"/>
+            </action>
+            <action id="DarkPyonix.RunAll" class="dev.darkpyonix.intellij.actions.RunAllAction"
+                    text="Run All Cells" description="Run the whole notebook" icon="AllIcons.Actions.Rerun"/>
+            <action id="DarkPyonix.Interrupt" class="dev.darkpyonix.intellij.actions.InterruptAction"
+                    text="Interrupt Kernel" description="Raise KeyboardInterrupt in the running cell; the namespace is kept"
+                    icon="AllIcons.Actions.Suspend"/>
+            <action id="DarkPyonix.Connect" class="dev.darkpyonix.intellij.actions.ConnectAction"
+                    text="Start or Attach Kernel" description="Find a manager (or start one) and attach to this file's kernel"
+                    icon="AllIcons.Actions.Refresh"/>
+            <action id="DarkPyonix.Restart" class="dev.darkpyonix.intellij.actions.RestartKernelAction"
+                    text="Restart Kernel…" description="Soft or hard restart of this file's kernel"
+                    icon="AllIcons.Actions.Restart"/>
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </group>
+    </actions>
+</idea-plugin>

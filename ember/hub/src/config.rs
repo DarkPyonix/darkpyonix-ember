@@ -10,7 +10,7 @@ use crate::types::HubInfo;
 pub const HUB_URL_ENV: &str = "EMBER_HUB_URL";
 /// The hub's relay, when it cannot be derived from the hub URL (or to override it).
 pub const HUB_RELAY_URL_ENV: &str = "EMBER_HUB_RELAY_URL";
-pub const DEFAULT_HUB_URL: &str = "https://darkpyonix.dev";
+pub const DEFAULT_HUB_URL: &str = "https://api.darkpyonix.dev";
 
 /// Where [`HubConfig::relay_url`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub enum RelaySource {
 /// A hub: its API base URL, its relay and its address directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubConfig {
-    /// `https://darkpyonix.dev` (no trailing slash).
+    /// `https://api.darkpyonix.dev` (no trailing slash).
     pub url: String,
     /// The hub's (first) relay (`/relay` on the relay host, given to the transport as the relay
     /// base URL). `None` when it could not be derived (an IP-address hub, e.g. a test fake) and
@@ -154,8 +154,15 @@ impl HubConfig {
         if host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
             return None;
         }
+        // A hub on its own subdomain (`api.darkpyonix.dev`, or `hub.<domain>`) has its relay beside it
+        // (`relay.darkpyonix.dev`), not under it.
+        let domain = ["api.", "hub."]
+            .iter()
+            .find_map(|p| host.strip_prefix(p))
+            .filter(|d| d.contains('.'))
+            .unwrap_or(host);
         let mut relay = url.clone();
-        relay.set_host(Some(&format!("relay.{host}"))).ok()?;
+        relay.set_host(Some(&format!("relay.{domain}"))).ok()?;
         relay.set_path("");
         Some(relay.as_str().trim_end_matches('/').to_string())
     }
@@ -197,9 +204,9 @@ mod tests {
     #[test]
     fn hub_urls() {
         let d = HubConfig::parse("", None).unwrap();
-        assert_eq!(d.url, "https://darkpyonix.dev");
-        assert_eq!(d.relay_url.as_deref(), Some("https://relay.darkpyonix.dev"));
-        assert_eq!(d.pkarr_url(), "https://darkpyonix.dev/pkarr");
+        assert_eq!(d.url, "https://api.darkpyonix.dev");
+        assert_eq!(d.relay_url.as_deref(), Some("https://relay.darkpyonix.dev"), "the relay is a sibling of the hub");
+        assert_eq!(d.pkarr_url(), "https://api.darkpyonix.dev/pkarr");
         assert!(HubConfig::parse("off", None).is_none());
 
         let local = HubConfig::parse("http://127.0.0.1:9000/", None).unwrap();
@@ -210,6 +217,10 @@ mod tests {
 
         let staging = HubConfig::new("https://staging.darkpyonix.dev");
         assert_eq!(staging.relay_url.as_deref(), Some("https://relay.staging.darkpyonix.dev"));
+        let staging_hub = HubConfig::new("https://hub.staging.darkpyonix.dev");
+        assert_eq!(staging_hub.relay_url.as_deref(), Some("https://relay.staging.darkpyonix.dev"));
+        let bare = HubConfig::new("https://hub.example");
+        assert_eq!(bare.relay_url.as_deref(), Some("https://relay.hub.example"), "a two-label host keeps its name");
     }
 
     #[test]
@@ -238,7 +249,7 @@ mod tests {
         // An empty advertisement keeps the derived values.
         let mut c = HubConfig::new("https://hub.example.net");
         c.apply_info(HubInfo::default());
-        assert_eq!(c.relay_url.as_deref(), Some("https://relay.hub.example.net"));
+        assert_eq!(c.relay_url.as_deref(), Some("https://relay.example.net"));
         assert_eq!(c.relay_source, RelaySource::Derived);
         assert_eq!(c.pkarr_url(), "https://hub.example.net/pkarr");
         // A hub that serves /config serves the documented `wait` on GET /devices.

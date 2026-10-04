@@ -59,7 +59,7 @@ async fn config_falls_back_to_derivation_on_404_and_when_unreachable() {
     drop(hub);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(HubConfig::new(&url).discover().await, HubConfig::new(&url));
-    assert_eq!(HubConfig::new("https://hub.example.net").relay_url.as_deref(), Some("https://relay.hub.example.net"));
+    assert_eq!(HubConfig::new("https://hub.example.net").relay_url.as_deref(), Some("https://relay.example.net"));
 }
 
 #[tokio::test]

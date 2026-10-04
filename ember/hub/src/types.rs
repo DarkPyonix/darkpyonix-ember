@@ -162,10 +162,10 @@ pub struct HubInfo {
     /// P2P relays for the transport (`https://relay.darkpyonix.dev/`).
     #[serde(default)]
     pub relay_urls: Vec<String>,
-    /// Base URL for the pkarr publisher and resolver (`https://darkpyonix.dev/pkarr`).
+    /// Base URL for the pkarr publisher and resolver (`https://api.darkpyonix.dev/pkarr`).
     #[serde(default)]
     pub pkarr_url: Option<String>,
-    /// Where a person approves user codes (`https://darkpyonix.dev/link`).
+    /// Where a person approves user codes (`https://api.darkpyonix.dev/link`).
     #[serde(default)]
     pub link_url: Option<String>,
 }

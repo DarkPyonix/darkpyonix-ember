@@ -136,7 +136,7 @@ struct ResolveToken {
 }
 
 impl HubClient {
-    /// A client for the hub at `base` (`https://darkpyonix.dev`), without a token.
+    /// A client for the hub at `base` (`https://api.darkpyonix.dev`), without a token.
     pub fn new(base: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
@@ -390,8 +390,8 @@ mod tests {
 
     #[test]
     fn token_is_not_in_debug_output() {
-        let c = HubClient::new("https://darkpyonix.dev/").with_token("dpd_secret");
-        assert_eq!(c.base_url(), "https://darkpyonix.dev");
+        let c = HubClient::new("https://api.darkpyonix.dev/").with_token("dpd_secret");
+        assert_eq!(c.base_url(), "https://api.darkpyonix.dev");
         assert!(!format!("{c:?}").contains("dpd_secret"));
         assert_eq!(encode(" bcdf-ghjk "), "bcdf-ghjk");
         assert_eq!(encode("a/b"), "a%2Fb");

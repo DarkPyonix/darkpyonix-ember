@@ -23,7 +23,7 @@ use ember_transport::PeerGate;
 /// - `EMBER_NODE_ALLOWED_PEERS` and `<state dir>/allowed-peers`: peer ids (ember servers) allowed
 ///   to connect over the transport (FR-N3); SIGHUP reloads the file and disconnects removed peers
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
-/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`, `off` disables);
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`, `off` disables);
 ///   `ember-node hub register` joins this computer to the user's GitHub account there (the
 ///   registration is kept in `<state dir>/hub.json`); a registered node publishes its address
 ///   through the hub and uses its relay (FR-N2). `EMBER_NODE_HUB_ALLOW_SERVERS=1` also admits

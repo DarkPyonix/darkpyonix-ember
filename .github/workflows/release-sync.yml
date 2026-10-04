@@ -31,7 +31,4 @@ jobs:
       - name: Publish release and open the PR to main
         env:
           GH_TOKEN: ${{ github.token }}
-        # Run a copy: the script checks out `release`, which would change the file under bash.
-        run: |
-          cp .github/scripts/release/sync-release.sh "$RUNNER_TEMP/sync-release.sh"
-          bash "$RUNNER_TEMP/sync-release.sh"
+        run: bash .github/scripts/release/sync-release.sh

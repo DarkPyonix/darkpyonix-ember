@@ -79,7 +79,7 @@
     </p>
     <p>
       The same is available over the API, which is what the client calls:
-      <code>POST /api/v1/projects</code> with <code>{"name": "my-project"}</code>.
+      <code>POST /api/projects</code> with <code>{"name": "my-project"}</code>.
     </p>
 
     <h2 id="new-session">Starting a session</h2>
@@ -127,7 +127,7 @@
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell, on the main server</figcaption>
-<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/accounts \
+<pre><code>curl -X POST http://127.0.0.1:8740/api/accounts \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"agent": "claude-code", "label": "work"}'</span>
 <span class="c"># "login": {"login": "CLAUDE_CONFIG_DIR=... claude auth login", ...}</span></code></pre>

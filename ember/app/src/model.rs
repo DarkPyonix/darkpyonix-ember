@@ -383,10 +383,6 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
             format!("Disconnected ({error}). Retrying in {}s", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
-        ConnectionState::Incompatible { server, client } => Some((
-            format!("This app speaks push v{client}, the server v{server}. Update one of them."),
-            Tone::Error,
-        )),
     }
 }
 

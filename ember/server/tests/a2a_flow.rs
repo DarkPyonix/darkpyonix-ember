@@ -203,7 +203,7 @@ async fn send(
     call(
         &w.app,
         "POST",
-        "/api/v1/a2a/messages",
+        "/api/a2a/messages",
         Some(&token),
         Some(json!({ "to": to, "text": text, "reply_to": reply_to })),
     )
@@ -226,10 +226,10 @@ async fn agents_get_credentials_and_instructions() {
         .contains("ember-a2a send <session-id> --reply-to"));
 
     // No or a bad token is refused.
-    let (st, v) = call(&w.app, "GET", "/api/v1/a2a/targets", None, None).await;
+    let (st, v) = call(&w.app, "GET", "/api/a2a/targets", None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
     assert_eq!(v["code"], "unauthorized");
-    let (st, _) = call(&w.app, "GET", "/api/v1/a2a/targets", Some("nope"), None).await;
+    let (st, _) = call(&w.app, "GET", "/api/a2a/targets", Some("nope"), None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
 
@@ -245,7 +245,7 @@ async fn two_sessions_exchange_a_message_and_a_reply() {
     let (st, targets) = call(
         &w.app,
         "GET",
-        "/api/v1/a2a/targets",
+        "/api/a2a/targets",
         Some(&w.agents.token(&a)),
         None,
     )
@@ -524,7 +524,7 @@ async fn a2a_can_be_switched_off_per_session_and_globally() {
     let (st, v) = call(
         &w.app,
         "PUT",
-        &format!("/api/v1/sessions/{b}/a2a"),
+        &format!("/api/sessions/{b}/a2a"),
         None,
         Some(json!({"enabled": false})),
     )
@@ -533,7 +533,7 @@ async fn a2a_can_be_switched_off_per_session_and_globally() {
     let (_, v) = call(
         &w.app,
         "GET",
-        &format!("/api/v1/sessions/{b}/a2a"),
+        &format!("/api/sessions/{b}/a2a"),
         None,
         None,
     )
@@ -558,7 +558,7 @@ async fn a2a_can_be_switched_off_per_session_and_globally() {
     let (_, t) = call(
         &w.app,
         "GET",
-        "/api/v1/a2a/targets",
+        "/api/a2a/targets",
         Some(&w.agents.token(&a)),
         None,
     )
@@ -568,7 +568,7 @@ async fn a2a_can_be_switched_off_per_session_and_globally() {
     call(
         &w.app,
         "PUT",
-        &format!("/api/v1/sessions/{b}/a2a"),
+        &format!("/api/sessions/{b}/a2a"),
         None,
         Some(json!({"enabled": true})),
     )
@@ -580,7 +580,7 @@ async fn a2a_can_be_switched_off_per_session_and_globally() {
     let (st, _) = call(
         &w.app,
         "PUT",
-        "/api/v1/a2a/settings",
+        "/api/a2a/settings",
         None,
         Some(json!({"enabled": false})),
     )
@@ -595,15 +595,15 @@ async fn a2a_can_be_switched_off_per_session_and_globally() {
     let (st, _) = call(
         &w.app,
         "GET",
-        "/api/v1/a2a/targets",
+        "/api/a2a/targets",
         Some(&w.agents.token(&a)),
         None,
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    let (_, v) = call(&w.app, "GET", "/api/v1/a2a/settings", None, None).await;
+    let (_, v) = call(&w.app, "GET", "/api/a2a/settings", None, None).await;
     assert_eq!(v, json!({"enabled": false}));
-    let (st, _) = call(&w.app, "GET", "/api/v1/sessions/nope/a2a", None, None).await;
+    let (st, _) = call(&w.app, "GET", "/api/sessions/nope/a2a", None, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 

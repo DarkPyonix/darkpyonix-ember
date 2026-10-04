@@ -7,7 +7,7 @@
 //!   the server's `secret.key` (the FR-U5 scheme, AAD `ember/hub-device-token/v1:<endpoint>`) in
 //!   `hub_registration` (store migration 8), and switches the running transport to the hub's
 //!   directory and relay.
-//! - **Discovery.** [`ServerHub::discover`] reads the hub's `GET /v1/config` (relay URLs, pkarr
+//! - **Discovery.** [`ServerHub::discover`] reads the hub's `GET /config` (relay URLs, pkarr
 //!   URL, link page, API version); a hub without it (`404`) keeps the derived
 //!   `https://relay.<host>` and `<hub>/pkarr`.
 //! - **Revocation.** [`ServerHub::check`] (and the watcher from [`ServerHub::spawn_watch`]) asks
@@ -15,7 +15,7 @@
 //!   codes) means the hub removed this server. That is recorded (`revoked_at`), shown in
 //!   [`HubStatus`], logged, and the token is no longer used. `401 {code: invalid_credentials}`
 //!   is reported but does not revoke. When the hub offers the device-list long-poll the watcher
-//!   holds `GET /v1/devices?wait=` ([`ember_hub::DeviceWatcher`]) and sees a removal at once;
+//!   holds `GET /devices?wait=` ([`ember_hub::DeviceWatcher`]) and sees a removal at once;
 //!   otherwise it asks every [`WATCH_PERIOD`].
 //! - **Computers from the hub.** [`ServerHub::add_computer`] registers one of the account's
 //!   devices as a computer by its endpoint id alone: no `PeerAddr` is pasted, the transport
@@ -63,7 +63,7 @@ pub fn server_app() -> DeviceApp {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HubApiError {
-    #[error("this server is not registered with the hub; start with POST /api/v1/hub/link")]
+    #[error("this server is not registered with the hub; start with POST /api/hub/link")]
     NotRegistered,
     #[error("the hub removed this server (revoked at {0}); its key cannot rejoin: remove transport.key and the registration, restart, and register again")]
     Revoked(i64),
@@ -115,18 +115,16 @@ impl From<&PendingLink> for PendingView {
     }
 }
 
-/// `GET /api/v1/hub`.
+/// `GET /api/hub`.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubStatus {
     pub hub_url: String,
     pub relay_url: Option<String>,
-    /// Every relay in use (the hub's `/v1/config` list, or the derived / explicit one).
+    /// Every relay in use (the hub's `/config` list, or the derived / explicit one).
     pub relay_urls: Vec<String>,
     /// `derived`, `explicit` or `hub`.
     pub relay_source: &'static str,
     pub pkarr_url: String,
-    /// The hub's `api_version` from `/v1/config`; `None` when it does not serve it.
-    pub api_version: Option<u64>,
     /// The device list is followed by long-poll (else polled every minute).
     pub long_poll: bool,
     /// This server's transport identity (its endpoint id on the hub).
@@ -142,7 +140,7 @@ pub struct HubStatus {
     pub sync_devices: bool,
 }
 
-/// One of the account's devices, as `GET /api/v1/hub/devices` shows it.
+/// One of the account's devices, as `GET /api/hub/devices` shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubDeviceView {
     #[serde(flatten)]
@@ -219,7 +217,7 @@ impl ServerHub {
         self.config.lock().unwrap().clone()
     }
 
-    /// Asks the hub for its relays, directory and API version (`GET /v1/config`) and keeps them;
+    /// Asks the hub for its relays and directory (`GET /config`) and keeps them;
     /// a hub without the endpoint, or one that cannot be reached, leaves the derived values.
     /// Called at start when the server is registered (or the hub was named explicitly) and when
     /// a registration completes, so an unregistered server does not contact the hub.
@@ -352,7 +350,7 @@ impl ServerHub {
     }
 
     /// Leaves the account: removes this server on the hub with its own token
-    /// (`DELETE /v1/devices/{own id}`, FR-H1), then forgets the local registration and stops
+    /// (`DELETE /devices/{own id}`, FR-H1), then forgets the local registration and stops
     /// using the hub directory. `local_only` skips the hub (it then keeps listing the device
     /// until removed there). An already removed or unknown device on the hub is fine; an
     /// unreachable hub is an error unless `local_only`.
@@ -411,7 +409,7 @@ impl ServerHub {
         reg.resolve_token
     }
 
-    /// Reports this server's app on the hub (`PATCH /v1/devices/{own id} {app}`, FR-H10): after
+    /// Reports this server's app on the hub (`PATCH /devices/{own id} {app}`, FR-H10): after
     /// registering and at start. Failures are logged (the record is a hint).
     pub async fn publish_app(&self) {
         let Ok(Some(reg)) = self.registration() else { return };
@@ -481,7 +479,6 @@ impl ServerHub {
                 ember_hub::RelaySource::Hub => "hub",
             },
             pkarr_url: config.pkarr_url(),
-            api_version: config.info.as_ref().and_then(|i| i.api_version.clone()),
             long_poll: config.supports_devices_wait(),
             endpoint_id: self.peer_id(),
             registered: reg.as_ref().is_some_and(|r| !r.is_revoked()),
@@ -518,7 +515,7 @@ impl ServerHub {
         Ok(self.follow_link(link))
     }
 
-    /// Resumes a link this server started before it restarted (`GET /v1/device-links/{id}`).
+    /// Resumes a link this server started before it restarted (`GET /device-links/{id}`).
     /// `Ok(None)` when there was none, or it was denied, expired or claimed (then forgotten).
     pub async fn resume_link(self: &Arc<Self>) -> Result<Option<PendingView>, HubApiError> {
         let Some((hub_url, link_id, expires_at)) = self.stored_pending_link()? else { return Ok(None) };
@@ -627,8 +624,8 @@ impl ServerHub {
     /// Watches the registration (and syncs devices when that is on). Stops once revoked.
     ///
     /// When the hub advertises the device-list long-poll (after [`ServerHub::discover`]), a held
-    /// `GET /v1/devices?wait=` both notices this server's removal and delivers device-list
-    /// changes as they happen; otherwise `GET /v1/me` (and the list, when syncing) every
+    /// `GET /devices?wait=` both notices this server's removal and delivers device-list
+    /// changes as they happen; otherwise `GET /me` (and the list, when syncing) every
     /// `period`.
     pub fn spawn_watch(self: &Arc<Self>, period: Duration) -> JoinHandle<()> {
         let weak = Arc::downgrade(self);

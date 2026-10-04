@@ -1,4 +1,4 @@
-//! "Open IDE" launch targets: FR-L7 (`GET /api/v1/sessions/{id}/ide`).
+//! "Open IDE" launch targets: FR-L7 (`GET /api/sessions/{id}/ide`).
 
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ fn target<'a>(v: &'a Value, kind: &str) -> &'a Value {
 #[tokio::test]
 async fn default_computer_targets() {
     let (s, id) = setup("/Users/me/acme app");
-    let (status, v) = get(s, config(), &format!("/api/v1/sessions/{id}/ide")).await;
+    let (status, v) = get(s, config(), &format!("/api/sessions/{id}/ide")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["project"], "acme");
     assert_eq!(v["folder"], "/Users/me/acme app");
@@ -97,7 +97,7 @@ async fn default_computer_targets() {
 #[tokio::test]
 async fn remote_computer_by_query() {
     let (s, id) = setup("/home/me/acme");
-    let (status, v) = get(s, config(), &format!("/api/v1/sessions/{id}/ide?computer=studio")).await;
+    let (status, v) = get(s, config(), &format!("/api/sessions/{id}/ide?computer=studio")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v["computer"]["name"], "studio");
     assert_eq!(v["computer"]["local"], false);
@@ -116,7 +116,7 @@ async fn unconfigured_computer_and_host_fallback() {
     let (s, id) = setup("/p");
     let mut cfg = config();
     cfg.server_url = None;
-    let (status, v) = get(s, cfg, &format!("/api/v1/sessions/{id}/ide?computer=bare")).await;
+    let (status, v) = get(s, cfg, &format!("/api/sessions/{id}/ide?computer=bare")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(target(&v, "vscode")["available"], false);
     assert!(target(&v, "vscode")["reason"].as_str().unwrap().contains("dpx.serve"));
@@ -126,9 +126,9 @@ async fn unconfigured_computer_and_host_fallback() {
 #[tokio::test]
 async fn unknown_session_and_computer_are_404() {
     let (s, id) = setup("/p");
-    let (status, _) = get(s.clone(), config(), "/api/v1/sessions/nope/ide").await;
+    let (status, _) = get(s.clone(), config(), "/api/sessions/nope/ide").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, v) = get(s, config(), &format!("/api/v1/sessions/{id}/ide?computer=ghost")).await;
+    let (status, v) = get(s, config(), &format!("/api/sessions/{id}/ide?computer=ghost")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(v["error"].as_str().unwrap().contains("ghost"));
 }

@@ -24,7 +24,7 @@ pub enum ServerError {
 
 pub type ServerResult<T> = Result<T, ServerError>;
 
-/// `GET /api/v1/accounts` entry.
+/// `GET /api/accounts` entry.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Account {
     pub id: String,
@@ -39,7 +39,7 @@ pub struct Account {
     pub limited: bool,
 }
 
-/// `GET /api/v1/computers` entry (`ComputerStatus`, flattened `ComputerView`).
+/// `GET /api/computers` entry (`ComputerStatus`, flattened `ComputerView`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ComputerStatus {
     pub id: String,
@@ -63,7 +63,7 @@ pub struct ComputerView {
     pub local: bool,
 }
 
-/// `GET /api/v1/sessions/{id}/computer`.
+/// `GET /api/sessions/{id}/computer`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CurrentComputer {
     pub session_id: String,
@@ -74,7 +74,7 @@ pub struct CurrentComputer {
     pub notice_pending: bool,
 }
 
-/// `PUT /api/v1/sessions/{id}/computer` answer.
+/// `PUT /api/sessions/{id}/computer` answer.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SwitchOutcome {
     pub session_id: String,
@@ -109,7 +109,7 @@ pub struct IdeComputer {
     pub local: bool,
 }
 
-/// `GET /api/v1/sessions/{id}/ide`.
+/// `GET /api/sessions/{id}/ide`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IdeLaunch {
     pub session: String,
@@ -125,7 +125,7 @@ impl IdeLaunch {
     }
 }
 
-/// `POST /api/v1/sessions` body, including the account (FR-U2) that
+/// `POST /api/sessions` body, including the account (FR-U2) that
 /// `ember_client::wire::NewSession` does not have yet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CreateSession {
@@ -153,7 +153,7 @@ impl ServerApi {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}/api/v1{path}", self.base)
+        format!("{}/api{path}", self.base)
     }
 
     async fn check(res: reqwest::Response) -> ServerResult<reqwest::Response> {

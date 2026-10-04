@@ -141,7 +141,7 @@ async fn http_create_send_and_read_events() {
     let res = app
         .clone()
         .oneshot(
-            Request::post("/api/v1/sessions")
+            Request::post("/api/sessions")
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -156,7 +156,7 @@ async fn http_create_send_and_read_events() {
     let res = app
         .clone()
         .oneshot(
-            Request::post(format!("/api/v1/sessions/{id}/messages"))
+            Request::post(format!("/api/sessions/{id}/messages"))
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"text":"hi"}"#))
                 .unwrap(),
@@ -168,7 +168,7 @@ async fn http_create_send_and_read_events() {
 
     let res = app
         .clone()
-        .oneshot(Request::get(format!("/api/v1/sessions/{id}/events?after=1")).body(Body::empty()).unwrap())
+        .oneshot(Request::get(format!("/api/sessions/{id}/events?after=1")).body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -178,7 +178,7 @@ async fn http_create_send_and_read_events() {
     assert_eq!(events[0]["event"]["kind"], "user_message");
 
     let res = app
-        .oneshot(Request::get("/api/v1/sessions/nope/events").body(Body::empty()).unwrap())
+        .oneshot(Request::get("/api/sessions/nope/events").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);

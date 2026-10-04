@@ -197,7 +197,7 @@ test('status bar cursor text parses across locales', () => {
 });
 
 // ---------------------------------------------------------------- FR-B2 message
-test('the detach message carries the ARCHITECTURE §3 fields and a version', () => {
+test('the detach message carries the ARCHITECTURE §3 fields and no version', () => {
   const m = d.buildDetachMessage({
     sourceWindowId: 'win-a', folder: '/Users/me/proj', fileUri: URI,
     cursor: { line: 41, column: 6 }, selection: { start: { line: 39, column: 0 }, end: { line: 41, column: 6 } },
@@ -205,7 +205,7 @@ test('the detach message carries the ARCHITECTURE §3 fields and a version', () 
     stateSource: 'dataTransfer', sentAtMs: 1
   });
   assert.equal(m.kind, 'tab_detach');
-  assert.equal(m.version, d.VERSIONS.tab_detach);
+  assert.equal('version' in m, false);
   for (const k of ['sourceWindowId', 'fileUri', 'cursor', 'scroll', 'selection']) assert.ok(k in m, k);
   assert.deepEqual(m.workspace, { folder: '/Users/me/proj' });
   assert.equal(m.editor, 'vscode-web');
@@ -213,29 +213,19 @@ test('the detach message carries the ARCHITECTURE §3 fields and a version', () 
   assert.deepEqual(JSON.parse(JSON.stringify(m)), m);
 });
 
-test('incoming: matching versions pass, mismatches are logged and still delivered', () => {
+test('incoming: unknown fields are ignored, unknown kinds are logged and still delivered', () => {
   const logs = [];
   const log = (...a) => logs.push(a.join(' '));
-  let r = d.decodeIncoming(JSON.stringify({ kind: 'sibling_window_closed', version: 1, windowId: 'w' }), log);
-  assert.equal(r.mismatch, null);
+  let r = d.decodeIncoming(JSON.stringify({ kind: 'sibling_window_closed', windowId: 'w', newField: 1 }), log);
+  assert.equal(r.unknownKind, false);
   assert.equal(r.message.windowId, 'w');
   assert.equal(logs.length, 0);
 
-  r = d.decodeIncoming({ kind: 'sibling_window_closed', version: 2, windowId: 'w', extra: true }, log);
-  assert.deepEqual(r.mismatch, { kind: 'sibling_window_closed', received: 2, expected: 1 });
-  assert.equal(r.message.windowId, 'w');
+  r = d.decodeIncoming({ kind: 'from_the_future' }, log);
+  assert.equal(r.unknownKind, true);
   assert.equal(logs.length, 1);
 
-  r = d.decodeIncoming({ kind: 'from_the_future', version: 1 }, log);
-  assert.equal(r.mismatch.expected, null);
-  assert.equal(logs.length, 2);
-
   assert.equal(d.decodeIncoming('nope', log), null);
-});
-
-test('additive fields need no version bump', () => {
-  const r = d.decodeIncoming({ kind: 'sibling_window_closed', version: 1, windowId: 'w', newField: 1 });
-  assert.equal(r.mismatch, null);
 });
 
 // ---------------------------------------------------------------- browser fallback URL
@@ -272,7 +262,7 @@ test('transport: WKWebView handler, WebView2, parent frame, then browser fallbac
   const top = { webkit: { messageHandlers: { emberBridge: { postMessage: (s) => sent.push(['top', s]) } } } };
   top.parent = top; top.top = top;
   const child = { parent: top, top };
-  const r = d.send(child, { kind: 'tab_detach', version: 1 }, () => assert.fail('no fallback'));
+  const r = d.send(child, { kind: 'tab_detach' }, () => assert.fail('no fallback'));
   assert.deepEqual(r, { transport: 'webkit', ok: true });
   assert.equal(sent.at(-1)[0], 'top');
   assert.equal(typeof sent.at(-1)[1], 'string');   // JSON string on the wire

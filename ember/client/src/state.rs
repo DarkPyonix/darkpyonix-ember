@@ -59,9 +59,6 @@ pub enum ConnectionState {
     Connected,
     /// Lost or failed; retrying after a backoff.
     Reconnecting { attempt: u32, retry_in_ms: u64, error: String },
-    /// The server speaks a push version this client does not. Not retried: the user must update
-    /// one side.
-    Incompatible { server: u32, client: u32 },
 }
 
 /// Something that happened, fed to [`State::apply`].

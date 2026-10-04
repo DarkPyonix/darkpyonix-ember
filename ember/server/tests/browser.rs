@@ -214,7 +214,7 @@ async fn view_stream_frames_and_click() {
     tokio::spawn(async move { axum::serve(api, router).await.unwrap() });
 
     let (mut ws, _) =
-        tokio_tungstenite::connect_async(format!("ws://{api_addr}/api/v1/browsers/view/view"))
+        tokio_tungstenite::connect_async(format!("ws://{api_addr}/api/browsers/view/view"))
             .await
             .unwrap();
     let hello: Value = match ws.next().await.unwrap().unwrap() {
@@ -222,7 +222,6 @@ async fn view_stream_frames_and_click() {
         other => panic!("expected hello, got {other:?}"),
     };
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["v"], 1);
 
     let b = m.get("view").await.unwrap();
     b.wait_page(Duration::from_secs(30)).await.unwrap();
@@ -308,11 +307,11 @@ async fn agent_relay_activity_and_takeover() {
 
     // Discovery document, as browser MCP servers read it.
     let ver: Value = serde_json::from_str(
-        &http_get(api_addr, "/api/v1/browsers/agent/cdp/json/version").await,
+        &http_get(api_addr, "/api/browsers/agent/cdp/json/version").await,
     )
     .unwrap();
     let ws_url = ver["webSocketDebuggerUrl"].as_str().unwrap().to_string();
-    assert_eq!(ws_url, format!("ws://{api_addr}/api/v1/browsers/agent/cdp"));
+    assert_eq!(ws_url, format!("ws://{api_addr}/api/browsers/agent/cdp"));
 
     let (mut agent, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
     let b = m.get("agent").await.unwrap();
@@ -352,7 +351,7 @@ async fn agent_relay_activity_and_takeover() {
     }
 
     let cfg: Value =
-        serde_json::from_str(&http_get(api_addr, "/api/v1/browsers/agent/agent-config").await).unwrap();
+        serde_json::from_str(&http_get(api_addr, "/api/browsers/agent/agent-config").await).unwrap();
     assert_eq!(cfg["cdp_ws"], ws_url);
     b.stop().await;
 }

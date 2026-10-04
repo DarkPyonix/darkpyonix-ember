@@ -2,7 +2,7 @@
 //!
 //! A *computer* is an ember node (`ember/node/`) this server can reach, with a bearer token, either by
 //! HTTP URL or by transport peer ([`ember_transport::PeerAddr`], SPEC `FR-N1`): a peer-addressed
-//! node is dialed through the server's transport ([`crate::transport`]) for `ember-node/1`, and
+//! node is dialed through the server's transport ([`crate::transport`]) for `ember-node`, and
 //! the node admits the server only if the server's peer id is on its allow-list (`FR-N3`). The
 //! server itself is the implicit computer [`LOCAL`]. Each session has a *current computer*; a
 //! session that was never switched has none recorded and behaves exactly as before (local, no
@@ -12,17 +12,17 @@
 //!
 //! - **Codex**: the start request carries a [`RemoteExec`]; the Codex adapter registers it with
 //!   `environment/add`. The exec-server URL is a loopback relay in this process ([`relay`]) that
-//!   forwards to the node's `/v1/exec-server`, which runs `codex exec-server --listen stdio`
+//!   forwards to the node's `/exec-server`, which runs `codex exec-server --listen stdio`
 //!   there. Shell, PTY and file changes then run on the node.
 //! - **Claude Code**: `CLAUDE_CODE_SHELL_PREFIX` points at the `ember-exec` shim ([`shim`]), so
-//!   the Bash tool runs on the node via `/v1/exec`. The shim is a separate process that speaks
+//!   the Bash tool runs on the node via `/exec`. The shim is a separate process that speaks
 //!   HTTP, so for a peer-addressed node it is given a loopback bridge in this process
 //!   ([`bridge`]) that carries each TCP connection over one transport stream. Read, Edit, Write,
 //!   Glob and Grep reach the node through the project mount ([`mount`]): the session's cwd is
 //!   mounted here at the same path before the agent starts (when a mount mechanism is enabled,
 //!   `EMBER_MOUNT`; otherwise they stay local).
 //!
-//! Switching (FR-X3) records the new computer, describes it with its `/v1/env`, and releases the
+//! Switching (FR-X3) records the new computer, describes it with its `/env`, and releases the
 //! session's agent process; the next message starts (natively resumes) it with the new computer.
 //! The description is contributed through the session's instructions hooks
 //! ([`Sessions::add_instructions_hook`]), which are evaluated at every start, so a switch
@@ -32,7 +32,7 @@
 //!
 //! A computer can also be a project browser's network egress (FR-R1): [`Computers`] runs one
 //! loopback SOCKS5 listener per such computer ([`egress`]) that forwards to the node's
-//! `/v1/egress`, and resolves `Egress::Computer` for the browser manager
+//! `/egress`, and resolves `Egress::Computer` for the browser manager
 //! ([`crate::browser::EgressResolver`]).
 
 use std::collections::HashMap;
@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ember_node::client::NodeClient;
-use ember_node::proto::{EnvInfo, Health, PROTOCOL_VERSION};
+use ember_node::proto::{EnvInfo, Health};
 use ember_transport::{Dialer, PeerAddr};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -65,9 +65,9 @@ pub const LOCAL: &str = "local";
 /// Display name of [`LOCAL`].
 pub const LOCAL_NAME: &str = "this server";
 
-/// How long a reachability probe (`/v1/health`) may take.
+/// How long a reachability probe (`/health`) may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long `/v1/env` may take (it probes toolchain versions).
+/// How long `/env` may take (it probes toolchain versions).
 pub const ENV_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------------------------
@@ -137,7 +137,7 @@ pub struct ComputerStatus {
 #[derive(Debug, Clone)]
 pub struct SessionComputer {
     pub computer_id: String,
-    /// The computer's `/v1/env` at the time of the switch.
+    /// The computer's `/env` at the time of the switch.
     pub env: Option<EnvInfo>,
     /// Notice still to be delivered with the next message (FR-S7 v0).
     pub notice: Option<String>,
@@ -391,7 +391,7 @@ pub struct LocalNode {
 #[async_trait]
 impl NodeApi for LocalNode {
     async fn health(&self) -> anyhow::Result<Health> {
-        Ok(Health { ok: true, version: env!("CARGO_PKG_VERSION").into(), protocol: PROTOCOL_VERSION })
+        Ok(Health { ok: true, version: env!("CARGO_PKG_VERSION").into() })
     }
 
     async fn env(&self) -> anyhow::Result<EnvInfo> {
@@ -543,7 +543,7 @@ pub struct Computers {
     dialer: Option<Dialer>,
     /// Loopback HTTP bridges to peer-addressed nodes (for the `ember-exec` shim), by computer id.
     bridges: Mutex<HashMap<String, bridge::NodeBridge>>,
-    /// Browser egress listeners (loopback SOCKS5 → node `/v1/egress`), by computer id.
+    /// Browser egress listeners (loopback SOCKS5 → node `/egress`), by computer id.
     egress: Mutex<HashMap<String, egress::EgressListener>>,
 }
 
@@ -751,7 +751,7 @@ impl Computers {
         }
     }
 
-    /// Probe one computer: `/v1/health`, and `/v1/env` when `with_env`.
+    /// Probe one computer: `/health`, and `/env` when `with_env`.
     async fn probe(&self, c: Option<&Computer>, with_env: bool) -> ComputerStatus {
         let view = c.map(ComputerView::of).unwrap_or_else(ComputerView::local);
         let api = match (self.connector)(c) {
@@ -763,11 +763,8 @@ impl Computers {
             Ok(Err(e)) => return unreachable_status(view, format!("{e:#}")),
             Err(_) => return unreachable_status(view, "health check timed out".into()),
         };
-        if !health.ok || health.protocol != PROTOCOL_VERSION {
-            return unreachable_status(
-                view,
-                format!("node protocol {} (this server speaks {PROTOCOL_VERSION})", health.protocol),
-            );
+        if !health.ok {
+            return unreachable_status(view, "node reports it is not healthy".into());
         }
         let mut status = ComputerStatus {
             computer: view,

@@ -280,7 +280,7 @@ impl Env {
     async fn start(&self, body: Value) -> Value {
         let r = self
             .http
-            .post(format!("{}/api/v1/chatgpt/signin", self.ember))
+            .post(format!("{}/api/chatgpt/signin", self.ember))
             .json(&body)
             .send()
             .await
@@ -346,13 +346,13 @@ async fn sign_in_uses_pkce_and_state_and_tokens_never_leave_the_server() {
     assert_eq!(tr[0]["client_id"], ISSUED_CLIENT);
 
     let (code, st) = e
-        .get_json(&format!("/api/v1/chatgpt/signin/{}", s["state"].as_str().unwrap()))
+        .get_json(&format!("/api/chatgpt/signin/{}", s["state"].as_str().unwrap()))
         .await;
     assert_eq!(code, 200);
     let st: Value = serde_json::from_str(&st).unwrap();
     assert_eq!(st["status"], "signed_in");
 
-    let (code, list) = e.get_json("/api/v1/chatgpt/accounts").await;
+    let (code, list) = e.get_json("/api/chatgpt/accounts").await;
     assert_eq!(code, 200);
     assert_no_secrets(&list);
     let list: Value = serde_json::from_str(&list).unwrap();
@@ -392,7 +392,7 @@ async fn callback_is_validated() {
         .await;
     assert_eq!(code, 400);
     assert!(page.contains("unknown or expired"), "{page}");
-    let (_, st) = e.get_json(&format!("/api/v1/chatgpt/signin/{state}")).await;
+    let (_, st) = e.get_json(&format!("/api/chatgpt/signin/{state}")).await;
     assert!(st.contains("pending"), "{st}");
     assert!(e.fake.token_requests.lock().unwrap().is_empty());
 
@@ -404,7 +404,7 @@ async fn callback_is_validated() {
         .await;
     assert_eq!(code, 400);
     assert!(page.contains("access_denied"), "{page}");
-    let (_, st) = e.get_json(&format!("/api/v1/chatgpt/signin/{state}")).await;
+    let (_, st) = e.get_json(&format!("/api/chatgpt/signin/{state}")).await;
     assert!(st.contains("failed") && st.contains("access_denied"), "{st}");
     assert!(e.fake.token_requests.lock().unwrap().is_empty());
 
@@ -447,7 +447,7 @@ async fn callback_is_validated() {
     let location = r.headers()["location"].to_str().unwrap().to_string();
     let r = e
         .http
-        .post(format!("{}/api/v1/chatgpt/signin/complete", e.ember))
+        .post(format!("{}/api/chatgpt/signin/complete", e.ember))
         .json(&json!({ "callback_url": location }))
         .send()
         .await
@@ -461,7 +461,7 @@ async fn callback_is_validated() {
 #[tokio::test]
 async fn hosted_server_never_offers_chatgpt_sign_in() {
     let e = env_with(false).await;
-    let (code, body) = e.get_json("/api/v1/chatgpt").await;
+    let (code, body) = e.get_json("/api/chatgpt").await;
     assert_eq!(code, 200);
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["enabled"], false);
@@ -469,14 +469,14 @@ async fn hosted_server_never_offers_chatgpt_sign_in() {
 
     let r = e
         .http
-        .post(format!("{}/api/v1/chatgpt/signin", e.ember))
+        .post(format!("{}/api/chatgpt/signin", e.ember))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 403);
     let (code, _) = e.get_json("/auth/callback?code=c&state=s").await;
     assert_eq!(code, 403);
-    let (code, _) = e.get_json("/api/v1/chatgpt/accounts").await;
+    let (code, _) = e.get_json("/api/chatgpt/accounts").await;
     assert_eq!(code, 403);
     assert!(matches!(
         e.chatgpt.responses("x", json!({"model": "m", "input": []})).await,
@@ -525,7 +525,7 @@ async fn responses_are_shaped_streamed_and_counted() {
     assert_eq!(sent[0].1["instructions"], "be brief");
 
     // Usage shows up with the other accounts' usage.
-    let (_, usage) = e.get_json("/api/v1/usage?days=1").await;
+    let (_, usage) = e.get_json("/api/usage?days=1").await;
     let usage: Value = serde_json::from_str(&usage).unwrap();
     let row = usage
         .as_array()
@@ -534,7 +534,7 @@ async fn responses_are_shaped_streamed_and_counted() {
         .find(|r| r["account_id"] == id.as_str())
         .unwrap();
     assert_eq!((row["input_tokens"].as_u64(), row["output_tokens"].as_u64()), (Some(12), Some(3)));
-    let (_, list) = e.get_json("/api/v1/chatgpt/accounts").await;
+    let (_, list) = e.get_json("/api/chatgpt/accounts").await;
     assert!(list.contains("\"tokens_today\":15"), "{list}");
 
     // Refused before any request leaves the server.
@@ -568,7 +568,7 @@ async fn the_weekly_cap_pauses_the_account() {
     let err = e.chatgpt.responses(&id, req.clone()).await.unwrap_err();
     assert!(matches!(err, ChatGptError::UsageLimited { .. }), "{err}");
     assert_eq!(err.http_status(), 429);
-    let (_, list) = e.get_json("/api/v1/chatgpt/accounts").await;
+    let (_, list) = e.get_json("/api/chatgpt/accounts").await;
     assert!(list.contains("\"limited\":true"), "{list}");
 
     // Paused: the next request does not reach OpenAI.
@@ -613,7 +613,7 @@ async fn tokens_refresh_before_expiry_and_a_dead_refresh_token_signs_out() {
     // The refresh endpoint (forced) through the API; the rotated token is used next time.
     let r = e
         .http
-        .post(format!("{}/api/v1/chatgpt/accounts/{id}/refresh", e.ember))
+        .post(format!("{}/api/chatgpt/accounts/{id}/refresh", e.ember))
         .send()
         .await
         .unwrap();
@@ -639,7 +639,7 @@ async fn sign_out_revokes_and_forgets() {
     let id = e.sign_in().await;
     let r = e
         .http
-        .delete(format!("{}/api/v1/chatgpt/accounts/{id}", e.ember))
+        .delete(format!("{}/api/chatgpt/accounts/{id}", e.ember))
         .send()
         .await
         .unwrap();

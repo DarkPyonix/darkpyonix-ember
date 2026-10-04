@@ -145,49 +145,49 @@ impl Client {
     }
 
     pub fn targets(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/targets", None)
+        self.ok("GET", "/api/a2a/targets", None)
     }
 
     pub fn send(&self, to: &str, text: &str, reply_to: Option<&str>) -> anyhow::Result<Value> {
         let body = json!({ "to": to, "text": text, "reply_to": reply_to });
-        self.ok("POST", "/api/v1/a2a/messages", Some(&body))
+        self.ok("POST", "/api/a2a/messages", Some(&body))
     }
 
     pub fn show(&self, id: &str) -> anyhow::Result<Value> {
-        self.ok("GET", &format!("/api/v1/a2a/messages/{id}"), None)
+        self.ok("GET", &format!("/api/a2a/messages/{id}"), None)
     }
 
     pub fn team(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/team", None)
+        self.ok("GET", "/api/a2a/team", None)
     }
 
     pub fn spawn(&self, body: &Value) -> anyhow::Result<Value> {
-        self.ok("POST", "/api/v1/a2a/team/members", Some(body))
+        self.ok("POST", "/api/a2a/team/members", Some(body))
     }
 
     pub fn end(&self, member: &str) -> anyhow::Result<Value> {
-        self.ok("DELETE", &format!("/api/v1/a2a/team/members/{}", path_seg(member)), None)
+        self.ok("DELETE", &format!("/api/a2a/team/members/{}", path_seg(member)), None)
     }
 
     pub fn tasks(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/team/tasks", None)
+        self.ok("GET", "/api/a2a/team/tasks", None)
     }
 
     pub fn add_task(&self, body: &Value) -> anyhow::Result<Value> {
-        self.ok("POST", "/api/v1/a2a/team/tasks", Some(body))
+        self.ok("POST", "/api/a2a/team/tasks", Some(body))
     }
 
     pub fn update_task(&self, number: &str, body: &Value) -> anyhow::Result<Value> {
-        self.ok("PATCH", &format!("/api/v1/a2a/team/tasks/{}", path_seg(number)), Some(body))
+        self.ok("PATCH", &format!("/api/a2a/team/tasks/{}", path_seg(number)), Some(body))
     }
 
     pub fn send_mail(&self, to: Option<&str>, text: &str) -> anyhow::Result<Value> {
         let body = json!({ "to": to, "text": text });
-        self.ok("POST", "/api/v1/a2a/team/mail", Some(&body))
+        self.ok("POST", "/api/a2a/team/mail", Some(&body))
     }
 
     pub fn read_mail(&self, after: i64, limit: Option<usize>) -> anyhow::Result<Value> {
-        let mut path = format!("/api/v1/a2a/team/mail?after={after}");
+        let mut path = format!("/api/a2a/team/mail?after={after}");
         if let Some(n) = limit {
             path.push_str(&format!("&limit={n}"));
         }
@@ -195,15 +195,15 @@ impl Client {
     }
 
     pub fn schedules(&self) -> anyhow::Result<Value> {
-        self.ok("GET", "/api/v1/a2a/schedules", None)
+        self.ok("GET", "/api/a2a/schedules", None)
     }
 
     pub fn add_schedule(&self, body: &Value) -> anyhow::Result<Value> {
-        self.ok("POST", "/api/v1/a2a/schedules", Some(body))
+        self.ok("POST", "/api/a2a/schedules", Some(body))
     }
 
     pub fn remove_schedule(&self, id: &str) -> anyhow::Result<Value> {
-        self.ok("DELETE", &format!("/api/v1/a2a/schedules/{}", path_seg(id)), None)
+        self.ok("DELETE", &format!("/api/a2a/schedules/{}", path_seg(id)), None)
     }
 }
 

@@ -135,7 +135,7 @@ use super::{AgentAdapter, AgentKind, AgentRun, Detected, McpServer, StartRequest
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// The route agy's `PreToolUse` hook calls (local listener only).
-pub const HOOK_ROUTE: &str = "/api/v1/agents/antigravity/hook";
+pub const HOOK_ROUTE: &str = "/api/agents/antigravity/hook";
 /// Name of Ember's hook in `hooks.json`; also what the pre-flight check looks for.
 pub const HOOK_NAME: &str = "ember-approvals";
 /// The agy version the SPEC §A Antigravity hook tests passed on. Any other version runs read-only.

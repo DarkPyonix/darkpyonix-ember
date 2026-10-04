@@ -75,7 +75,7 @@
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
 <pre><code>RUST_LOG=info ./target/release/ember-server 2&gt;&amp;1 | tee -a ember-server.log
-curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+curl http://127.0.0.1:8740/api/health   <span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <p>
       시작할 때의 경고는 읽어 볼 만합니다. 서버는 그때 찾지 못한 선택 요소(<code>ember-exec</code>,
@@ -112,7 +112,7 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
       기준으로 설치하거나, <code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>,
       <code>EMBER_AGY_BIN</code> 으로 서버에 위치를 알려 주세요. ACP 에이전트는
       <code>EMBER_ACP_AGENTS</code> 에도 있어야 합니다. 서버가 감지한 에이전트와 버전은
-      <code>GET /api/v1/agents</code> 로 볼 수 있습니다.
+      <code>GET /api/agents</code> 로 볼 수 있습니다.
     </p>
     <h3>"working directory &hellip; does not exist on the ember server"</h3>
     <p>
@@ -131,9 +131,9 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
     <p>
       에이전트에 계정이 있지만 쓸 수 있는 계정이 없으면(모두 사용 한도에 걸렸거나 로그아웃), 서버는 다른
       로그인으로 넘어가지 않고 이유와 함께 세션 시작을 거부합니다.
-      <code>GET /api/v1/accounts/route?agent=claude-code</code> 는 라우터가 지금 무엇을 왜 고를지
-      보여 줍니다. <code>POST /api/v1/accounts/{id}/check</code> 는 에이전트 자체의 로그인 상태
-      명령을 실행하고, <code>POST /api/v1/accounts/{id}/clear-limit</code> 는 사용 한도 표시를
+      <code>GET /api/accounts/route?agent=claude-code</code> 는 라우터가 지금 무엇을 왜 고를지
+      보여 줍니다. <code>POST /api/accounts/{id}/check</code> 는 에이전트 자체의 로그인 상태
+      명령을 실행하고, <code>POST /api/accounts/{id}/clear-limit</code> 는 사용 한도 표시를
       지웁니다.
     </p>
 
@@ -180,8 +180,8 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
       <table>
         <thead><tr><th scope="col">메시지</th><th scope="col">할 일</th></tr></thead>
         <tbody>
-          <tr><td><code>/api/v1/hub</code> 경로가 HTTP 503으로 응답</td><td>허브가 꺼져 있습니다: 서버가 <code>EMBER_TRANSPORT=1</code> 없이, 또는 <code>EMBER_HUB_URL=off</code> 로 실행되었습니다.</td></tr>
-          <tr><td><code>this server is not registered with the hub; start with POST /api/v1/hub/link</code></td><td>먼저 서버를 연결합니다(<a href="computers.html#hub-server">컴퓨터와 허브</a>).</td></tr>
+          <tr><td><code>/api/hub</code> 경로가 HTTP 503으로 응답</td><td>허브가 꺼져 있습니다: 서버가 <code>EMBER_TRANSPORT=1</code> 없이, 또는 <code>EMBER_HUB_URL=off</code> 로 실행되었습니다.</td></tr>
+          <tr><td><code>this server is not registered with the hub; start with POST /api/hub/link</code></td><td>먼저 서버를 연결합니다(<a href="computers.html#hub-server">컴퓨터와 허브</a>).</td></tr>
           <tr><td><code>the hub is off (EMBER_HUB_URL=off)</code>(<code>ember-node hub register</code>)</td><td><code>EMBER_HUB_URL</code> 을 지우거나 허브 주소로 설정합니다.</td></tr>
           <tr><td><code>cannot reach the hub: &hellip;</code></td><td>네트워크와 <code>EMBER_HUB_URL</code> 을 확인합니다. 기본 주소는 바뀌는 중입니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
           <tr><td><code>the link expired before it was approved (user code &hellip;)</code></td><td>연결을 다시 시작하고 더 빨리 승인합니다.</td></tr>

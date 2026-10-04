@@ -1,8 +1,7 @@
 //! The sync engine: keeps a [`State`] in step with one main server (PR-1, FR-L1, FR-S6).
 //!
 //! - **Push**: one WebSocket, reconnected with exponential backoff. Before each connect the
-//!   server's push version is checked (`/health`), and every message's `v` is checked again; a
-//!   mismatch becomes [`ConnectionState::Incompatible`] and stops reconnecting.
+//!   server is probed (`/health`). Unknown message types and fields are skipped.
 //! - **Gap recovery**: after every (re)connect and on `lagged`, the session list is reloaded and
 //!   every open session fetches `events?after=<last applied seq>`. Transcripts drop duplicates
 //!   and hold early events by sequence number, so nothing is lost or applied twice.
@@ -28,7 +27,7 @@ use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
 use crate::wire::{
     ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
-    SessionRecord, TeamMail, TeamMember, TeamView, PUSH_VERSION,
+    SessionRecord, TeamMail, TeamMember, TeamView,
 };
 
 #[derive(Debug, Clone)]
@@ -448,8 +447,6 @@ async fn cache_writer(inner: Arc<Inner>) {
 }
 
 enum Ended {
-    /// Server push version differs: stop.
-    Incompatible { server: u32 },
     /// Connection lost or failed: retry.
     Lost(String),
     /// Paused by the app.
@@ -470,13 +467,6 @@ async fn push_loop(inner: Arc<Inner>) {
         inner.apply(Input::Connection(ConnectionState::Connecting { attempt: backoff.attempt() }));
         let ended = connect_and_run(&inner, &mut mode, &mut backoff).await;
         match ended {
-            Ended::Incompatible { server } => {
-                inner.apply(Input::Connection(ConnectionState::Incompatible { server, client: PUSH_VERSION }));
-                // Only an explicit pause/resume (e.g. after the user updated) retries.
-                if mode.changed().await.is_err() {
-                    return;
-                }
-            }
             Ended::Paused => {}
             Ended::Lost(error) => {
                 let delay = backoff.next_delay();
@@ -500,7 +490,6 @@ async fn connect_and_run(
     backoff: &mut Backoff,
 ) -> Ended {
     match inner.api.health().await {
-        Ok(h) if h.push_version != PUSH_VERSION => return Ended::Incompatible { server: h.push_version },
         Ok(_) => {}
         Err(e) => return Ended::Lost(e.to_string()),
     }
@@ -527,9 +516,8 @@ async fn connect_and_run(
                     Ok(p) => {
                         inner.apply(Input::Push(p));
                     }
-                    Err(DecodeError::Version { server, .. }) => break Ended::Incompatible { server },
                     Err(DecodeError::Skipped(kind)) => tracing::trace!("ignoring push {kind}"),
-                    // An unknown push type from a compatible server is additive: skip it.
+                    // An unknown push type is additive: skip it.
                     Err(e) => tracing::warn!("skipping push message: {e}"),
                 },
                 Some(Ok(Message::Close(_))) | None => break Ended::Lost("push connection closed".into()),

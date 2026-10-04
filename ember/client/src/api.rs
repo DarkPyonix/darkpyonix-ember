@@ -1,4 +1,4 @@
-//! HTTP client for the main server's `/api/v1` (see `ember/server/src/api/mod.rs`).
+//! HTTP client for the main server's `/api` (see `ember/server/src/api/mod.rs`).
 //!
 //! An [`Api`] reaches the server one of two ways, behind the same methods:
 //!
@@ -26,7 +26,7 @@ use crate::wire::{
 };
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
-pub const SERVER_SERVICE: &str = "ember-server/1";
+pub const SERVER_SERVICE: &str = "ember-server";
 
 /// Host name used in requests over the transport (the stream already names the peer).
 const PEER_HOST: &str = "ember-server";
@@ -67,7 +67,6 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Health {
     pub ok: bool,
-    pub push_version: u32,
 }
 
 /// `POST /sessions/{id}/lease` answer.
@@ -132,22 +131,22 @@ impl Api {
         }
     }
 
-    /// The push WebSocket URL (`ws(s)://…/api/v1/push`).
+    /// The push WebSocket URL (`ws(s)://…/api/push`).
     pub fn push_url(&self) -> String {
         match &self.reach {
             Reach::Http(_) => {
                 let rest = self.base.strip_prefix("http").unwrap_or(&self.base);
-                format!("ws{rest}/api/v1/push")
+                format!("ws{rest}/api/push")
             }
-            Reach::Peer { .. } => format!("ws://{PEER_HOST}/api/v1/push"),
+            Reach::Peer { .. } => format!("ws://{PEER_HOST}/api/push"),
         }
     }
 
-    /// `path` is below `/api/v1` and may carry a query string.
+    /// `path` is below `/api` and may carry a query string.
     async fn send(&self, method: Method, path: &str, json: Option<serde_json::Value>) -> ApiResult<Raw> {
         match &self.reach {
             Reach::Http(http) => {
-                let mut req = http.request(method, format!("{}/api/v1{path}", self.base));
+                let mut req = http.request(method, format!("{}/api{path}", self.base));
                 if let Some(body) = json {
                     req = req.json(&body);
                 }
@@ -161,7 +160,7 @@ impl Api {
                     ember_transport::http::http1_handshake::<Full<Bytes>>(stream).await.map_err(peer_err)?;
                 let mut req = hyper::Request::builder()
                     .method(method)
-                    .uri(format!("http://{PEER_HOST}/api/v1{path}"))
+                    .uri(format!("http://{PEER_HOST}/api{path}"))
                     .header(header::HOST, PEER_HOST);
                 let body = match json {
                     Some(v) => {
@@ -203,7 +202,7 @@ impl Api {
         Self::check(self.send(Method::POST, path, Some(body)).await?)
     }
 
-    /// Opens the push WebSocket (`/api/v1/push`).
+    /// Opens the push WebSocket (`/api/push`).
     pub async fn open_push(&self) -> ApiResult<PushSocket> {
         let url = self.push_url();
         let io: Box<dyn PushIo> = match &self.reach {
@@ -413,8 +412,8 @@ mod tests {
     #[test]
     fn urls() {
         let api = Api::new("http://h:1/").unwrap();
-        assert_eq!(api.push_url(), "ws://h:1/api/v1/push");
-        assert_eq!(Api::new("https://h").unwrap().push_url(), "wss://h/api/v1/push");
+        assert_eq!(api.push_url(), "ws://h:1/api/push");
+        assert_eq!(Api::new("https://h").unwrap().push_url(), "wss://h/api/push");
         assert!(Api::new("h:1").is_err());
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
         assert_eq!(authority_addr("h:1"), ("h".to_string(), 1));

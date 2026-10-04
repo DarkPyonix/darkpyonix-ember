@@ -88,12 +88,12 @@ async fn fixture() -> Fixture {
 }
 
 async fn register_server(f: &Fixture) {
-    let (st, pending) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home server" }))).await;
+    let (st, pending) = call(&f.app, Method::POST, "/api/hub/link", Some(json!({ "name": "home server" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{pending}");
     let code = pending["user_code"].as_str().unwrap().to_string();
     assert!(pending["verification_uri_complete"].as_str().unwrap().ends_with(&code));
     // Shown in the status while waiting.
-    let (_, status) = call(&f.app, Method::GET, "/api/v1/hub", None).await;
+    let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
     assert_eq!(status["pending"]["user_code"], code);
     assert_eq!(status["registered"], false);
 
@@ -101,7 +101,7 @@ async fn register_server(f: &Fixture) {
     assert!(f.hub.approve(&code));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let (_, status) = call(&f.app, Method::GET, "/api/v1/hub", None).await;
+        let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
         if status["registered"] == true {
             assert_eq!(status["device"]["role"], "main_server");
             assert_eq!(status["device"]["name"], "home server");
@@ -129,7 +129,7 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
     let f = fixture().await;
 
     // Before registering, hub calls say so.
-    let (st, _) = call(&f.app, Method::GET, "/api/v1/hub/devices", None).await;
+    let (st, _) = call(&f.app, Method::GET, "/api/hub/devices", None).await;
     assert_eq!(st, StatusCode::CONFLICT);
 
     register_server(&f).await;
@@ -142,14 +142,14 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
         .unwrap();
     assert!(!raw.windows(reg.device_token.len()).any(|w| w == reg.device_token.as_bytes()));
     // Registering twice is refused.
-    let (st, _) = call(&f.app, Method::POST, "/api/v1/hub/link", None).await;
+    let (st, _) = call(&f.app, Method::POST, "/api/hub/link", None).await;
     assert_eq!(st, StatusCode::CONFLICT);
 
     // A node joins the account (registered on its own; see ember/node/tests/hub.rs for its link).
     let (node_t, _node_dir) = start_node(&f.net, &f.server_t);
     f.hub.register(node_t.peer_id(), "gpu box", Role::Computer);
 
-    let (st, list) = call(&f.app, Method::GET, "/api/v1/hub/devices", None).await;
+    let (st, list) = call(&f.app, Method::GET, "/api/hub/devices", None).await;
     assert_eq!(st, StatusCode::OK, "{list}");
     let list = list.as_array().unwrap();
     assert_eq!(list.len(), 2);
@@ -160,25 +160,25 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
 
     // Pick it: only the endpoint id (from the list) and the node's API token.
     let node_id = node_t.peer_id().to_string();
-    let (st, c) = call(&f.app, Method::POST, &format!("/api/v1/hub/devices/{node_id}/computer"), Some(json!({ "token": TOKEN }))).await;
+    let (st, c) = call(&f.app, Method::POST, &format!("/api/hub/devices/{node_id}/computer"), Some(json!({ "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::CREATED, "{c}");
     assert_eq!(c["name"], "gpu box");
     assert_eq!(c["peer"]["peer"], node_id);
     let cid = c["id"].as_str().unwrap().to_string();
 
     // It is reachable over the transport by peer id alone.
-    let (st, status) = call(&f.app, Method::GET, &format!("/api/v1/computers/{cid}"), None).await;
+    let (st, status) = call(&f.app, Method::GET, &format!("/api/computers/{cid}"), None).await;
     assert_eq!(st, StatusCode::OK, "{status}");
     assert_eq!(status["reachable"], true, "{status}");
 
     // The list now shows the computer; this server itself and unknown devices are refused.
-    let (_, list) = call(&f.app, Method::GET, "/api/v1/hub/devices", None).await;
+    let (_, list) = call(&f.app, Method::GET, "/api/hub/devices", None).await;
     assert_eq!(list.as_array().unwrap().iter().find(|d| d["name"] == "gpu box").unwrap()["computer_id"], cid);
     let me = f.server_t.peer_id().to_string();
-    let (st, _) = call(&f.app, Method::POST, &format!("/api/v1/hub/devices/{me}/computer"), Some(json!({ "token": TOKEN }))).await;
+    let (st, _) = call(&f.app, Method::POST, &format!("/api/hub/devices/{me}/computer"), Some(json!({ "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     let stranger = SecretKey::generate().peer_id().to_string();
-    let (st, _) = call(&f.app, Method::POST, &format!("/api/v1/hub/devices/{stranger}/computer"), Some(json!({ "token": TOKEN }))).await;
+    let (st, _) = call(&f.app, Method::POST, &format!("/api/hub/devices/{stranger}/computer"), Some(json!({ "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert_eq!(f.computers.registry().list().unwrap().len(), 1);
 }
@@ -195,16 +195,16 @@ async fn the_server_approves_a_nodes_user_code() {
         .with_poll_interval(Duration::from_millis(50));
     let code = link.user_code().to_string();
 
-    let (st, info) = call(&f.app, Method::GET, &format!("/api/v1/hub/link-codes/{code}"), None).await;
+    let (st, info) = call(&f.app, Method::GET, &format!("/api/hub/link-codes/{code}"), None).await;
     assert_eq!(st, StatusCode::OK, "{info}");
     assert_eq!(info["endpoint_id"], node_key.peer_id().to_string());
     assert_eq!(info["role"], "computer");
-    let (st, _) = call(&f.app, Method::POST, &format!("/api/v1/hub/link-codes/{code}"), Some(json!({ "approve": true }))).await;
+    let (st, _) = call(&f.app, Method::POST, &format!("/api/hub/link-codes/{code}"), Some(json!({ "approve": true }))).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let reg = tokio::time::timeout(Duration::from_secs(10), link.wait()).await.unwrap().unwrap();
     assert_eq!(reg.device.name, "pi");
     // Decided codes are gone.
-    let (st, _) = call(&f.app, Method::GET, &format!("/api/v1/hub/link-codes/{code}"), None).await;
+    let (st, _) = call(&f.app, Method::GET, &format!("/api/hub/link-codes/{code}"), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
@@ -217,23 +217,23 @@ async fn devices_allow_list_syncs_from_the_hub() {
     f.hub.register(phone, "phone", Role::Computer);
     f.hub.register(laptop, "laptop", Role::Computer);
 
-    let (st, report) = call(&f.app, Method::POST, "/api/v1/hub/sync-devices", None).await;
+    let (st, report) = call(&f.app, Method::POST, "/api/hub/sync-devices", None).await;
     assert_eq!(st, StatusCode::OK, "{report}");
     assert_eq!(report["added"].as_array().unwrap().len(), 2);
     assert!(f.devices.gate().is_allowed(&phone) && f.devices.gate().is_allowed(&laptop));
     assert!(!f.devices.gate().is_allowed(&f.server_t.peer_id()), "the server is not its own device");
 
     // Removed on the hub (through the server) → revoked here.
-    let (st, _) = call(&f.app, Method::PUT, "/api/v1/hub/sync-devices", Some(json!({ "enabled": true }))).await;
+    let (st, _) = call(&f.app, Method::PUT, "/api/hub/sync-devices", Some(json!({ "enabled": true }))).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _) = call(&f.app, Method::DELETE, &format!("/api/v1/hub/devices/{phone}"), None).await;
+    let (st, _) = call(&f.app, Method::DELETE, &format!("/api/hub/devices/{phone}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(!f.devices.gate().is_allowed(&phone));
     assert!(f.devices.gate().is_allowed(&laptop));
 
     // Removed in the browser → the next sync revokes it.
     assert!(f.hub.remove(&laptop));
-    let (_, report) = call(&f.app, Method::POST, "/api/v1/hub/sync-devices", None).await;
+    let (_, report) = call(&f.app, Method::POST, "/api/hub/sync-devices", None).await;
     assert_eq!(report["removed"], json!([laptop.to_string()]));
     assert!(!f.devices.gate().is_allowed(&laptop));
 }
@@ -242,24 +242,24 @@ async fn devices_allow_list_syncs_from_the_hub() {
 async fn revocation_on_the_hub_is_detected_and_surfaced() {
     let f = fixture().await;
     register_server(&f).await;
-    let (_, state) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    let (_, state) = call(&f.app, Method::POST, "/api/hub/check", None).await;
     assert_eq!(state["state"], "active");
     assert_eq!(state["github_login"], "octocat");
 
     // The owner removes the server in the browser.
     assert!(f.hub.remove(&f.server_t.peer_id()));
-    let (_, state) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    let (_, state) = call(&f.app, Method::POST, "/api/hub/check", None).await;
     assert_eq!(state["state"], "revoked");
-    let (_, status) = call(&f.app, Method::GET, "/api/v1/hub", None).await;
+    let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
     assert_eq!(status["revoked"], true);
     assert_eq!(status["registered"], false);
     assert!(status["revoked_at"].is_i64());
     // Calls needing the token answer 410 Gone with the reason.
-    let (st, body) = call(&f.app, Method::GET, "/api/v1/hub/devices", None).await;
+    let (st, body) = call(&f.app, Method::GET, "/api/hub/devices", None).await;
     assert_eq!(st, StatusCode::GONE, "{body}");
     assert!(body["error"].as_str().unwrap().contains("removed"));
     // A removed key cannot simply link again: the hub refuses until the owner re-admits it.
-    let (st, body) = call(&f.app, Method::POST, "/api/v1/hub/link", None).await;
+    let (st, body) = call(&f.app, Method::POST, "/api/hub/link", None).await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
 }
 
@@ -269,7 +269,7 @@ async fn revocation_is_noticed_by_any_hub_call_and_by_the_watcher() {
     register_server(&f).await;
     assert!(f.hub.remove(&f.server_t.peer_id()));
     // A device-list call gets 401 and records the revocation.
-    let (st, _) = call(&f.app, Method::GET, "/api/v1/hub/devices", None).await;
+    let (st, _) = call(&f.app, Method::GET, "/api/hub/devices", None).await;
     assert_eq!(st, StatusCode::GONE);
     assert!(f.server_hub.status().unwrap().revoked);
 
@@ -282,8 +282,8 @@ async fn revocation_is_noticed_by_any_hub_call_and_by_the_watcher() {
 async fn long_poll_watcher_sees_removal_at_once_and_syncs_devices() {
     let f = fixture().await;
     register_server(&f).await;
-    // Registration asked the hub's /v1/config: the fake offers the long-poll.
-    let (_, status) = call(&f.app, Method::GET, "/api/v1/hub", None).await;
+    // Registration asked the hub's /config: the fake offers the long-poll.
+    let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
     assert_eq!(status["long_poll"], true, "{status}");
     assert_eq!(status["pkarr_url"], format!("{}/pkarr", f.hub.url()));
     assert_eq!(status["relay_source"], "derived");
@@ -315,12 +315,12 @@ async fn a_rejected_token_is_not_a_revocation() {
     // `401 {code: invalid_credentials}` (a token the hub does not know) does not revoke.
     let e = f.hub.client().with_token("dpd_unknown").devices().await.unwrap_err();
     assert!(!e.is_revocation(), "{e:?}");
-    let (st, body) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    let (st, body) = call(&f.app, Method::POST, "/api/hub/check", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body["state"], "active");
     // `401 {code: device_removed}` does.
     assert!(f.hub.remove(&f.server_t.peer_id()));
-    let (_, body) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    let (_, body) = call(&f.app, Method::POST, "/api/hub/check", None).await;
     assert_eq!(body["state"], "revoked");
     assert!(f.server_hub.status().unwrap().revoked);
 }
@@ -342,7 +342,7 @@ async fn registration_keeps_a_sealed_resolve_token_and_reports_the_app() {
     let device = f.hub.devices().into_iter().find(|d| d.endpoint_id == me).unwrap();
     let app = device.app.expect("app reported");
     assert_eq!(app.kind, "ember-server");
-    assert_eq!(app.services, vec!["ember-server-v1"]);
+    assert_eq!(app.services, vec!["ember-server"]);
 }
 
 #[tokio::test]
@@ -352,12 +352,12 @@ async fn a_main_server_code_is_approved_in_the_browser_not_by_the_server() {
     let link = DeviceLink::start(&f.hub.client(), &SecretKey::generate(), "second", Role::MainServer).await.unwrap();
     let code = link.user_code().to_string();
     let (st, body) =
-        call(&f.app, Method::POST, &format!("/api/v1/hub/link-codes/{code}"), Some(json!({ "approve": true }))).await;
+        call(&f.app, Method::POST, &format!("/api/hub/link-codes/{code}"), Some(json!({ "approve": true }))).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
     assert!(body["error"].as_str().unwrap().contains("/link?code="), "{body}");
     // Denying is allowed.
     let (st, _) =
-        call(&f.app, Method::POST, &format!("/api/v1/hub/link-codes/{code}"), Some(json!({ "approve": false }))).await;
+        call(&f.app, Method::POST, &format!("/api/hub/link-codes/{code}"), Some(json!({ "approve": false }))).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(!f.server_hub.status().unwrap().revoked, "a 403 is not a revocation");
 }
@@ -367,7 +367,7 @@ async fn leaving_removes_the_server_on_the_hub() {
     let f = fixture().await;
     register_server(&f).await;
     let me = f.server_t.peer_id();
-    let (st, _) = call(&f.app, Method::DELETE, "/api/v1/hub/registration", None).await;
+    let (st, _) = call(&f.app, Method::DELETE, "/api/hub/registration", None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(f.hub.devices().iter().all(|d| d.endpoint_id != me), "removed on the hub with its own token");
     assert!(!f.server_hub.status().unwrap().registered);
@@ -375,7 +375,7 @@ async fn leaving_removes_the_server_on_the_hub() {
     // `?local=1` only forgets here.
     let f = fixture().await;
     register_server(&f).await;
-    let (st, _) = call(&f.app, Method::DELETE, "/api/v1/hub/registration?local=1", None).await;
+    let (st, _) = call(&f.app, Method::DELETE, "/api/hub/registration?local=1", None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(f.hub.devices().iter().any(|d| d.endpoint_id == f.server_t.peer_id()));
 }
@@ -383,7 +383,7 @@ async fn leaving_removes_the_server_on_the_hub() {
 #[tokio::test]
 async fn a_link_pending_at_restart_is_resumed() {
     let f = fixture().await;
-    let (st, pending) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home" }))).await;
+    let (st, pending) = call(&f.app, Method::POST, "/api/hub/link", Some(json!({ "name": "home" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED);
     let code = pending["user_code"].as_str().unwrap().to_string();
 
@@ -410,18 +410,18 @@ async fn a_removed_server_relinks_after_readmission() {
     register_server(&f).await;
     let me = f.server_t.peer_id();
     assert!(f.hub.remove(&me));
-    let (st, _) = call(&f.app, Method::POST, "/api/v1/hub/check", None).await;
+    let (st, _) = call(&f.app, Method::POST, "/api/hub/check", None).await;
     assert_eq!(st, StatusCode::OK);
     assert!(f.server_hub.status().unwrap().revoked);
 
     // Not re-admitted: 409 with the advice.
-    let (st, body) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home" }))).await;
+    let (st, body) = call(&f.app, Method::POST, "/api/hub/link", Some(json!({ "name": "home" }))).await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
     assert!(body["error"].as_str().unwrap().contains("re-admit"), "{body}");
 
     // The owner re-admits it, the server links again, the person approves in the browser.
     assert!(f.hub.readmit(&me));
-    let (st, pending) = call(&f.app, Method::POST, "/api/v1/hub/link", Some(json!({ "name": "home" }))).await;
+    let (st, pending) = call(&f.app, Method::POST, "/api/hub/link", Some(json!({ "name": "home" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{pending}");
     assert!(f.hub.approve(pending["user_code"].as_str().unwrap()));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -446,7 +446,7 @@ async fn hub_off_answers_503() {
         Some(st.dialer.clone()),
     );
     let app = ember_server::hub::api::router(None, computers);
-    let (st, body) = call(&app, Method::GET, "/api/v1/hub", None).await;
+    let (st, body) = call(&app, Method::GET, "/api/hub", None).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body["error"].as_str().unwrap().contains("EMBER_TRANSPORT"));
 }

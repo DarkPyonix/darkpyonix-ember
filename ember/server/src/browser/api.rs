@@ -1,6 +1,6 @@
 //! HTTP and WebSocket routes for the remote browser. Protocol: `docs/design/REMOTE-BROWSER.md`.
 //!
-//! | Route (under `/api/v1/browsers`) | |
+//! | Route (under `/api/browsers`) | |
 //! | --- | --- |
 //! | `GET /` | list browsers |
 //! | `GET /{project}` | one browser's info and state |
@@ -30,19 +30,19 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
 use super::agent::{self, BrowserMcp};
-use super::{BrowserInstance, BrowserManager, Egress, InputEvent, STREAM_VERSION};
+use super::{BrowserInstance, BrowserManager, Egress, InputEvent};
 
 pub fn router(browsers: Arc<BrowserManager>) -> Router {
     Router::new()
-        .route("/api/v1/browsers", get(list))
-        .route("/api/v1/browsers/{project}", get(info).post(open).delete(stop))
-        .route("/api/v1/browsers/{project}/egress", get(get_egress).put(egress))
-        .route("/api/v1/browsers/{project}/data", axum::routing::delete(clear))
-        .route("/api/v1/browsers/{project}/input", post(input))
-        .route("/api/v1/browsers/{project}/view", get(view))
-        .route("/api/v1/browsers/{project}/cdp", get(cdp))
-        .route("/api/v1/browsers/{project}/cdp/json/version", get(cdp_version))
-        .route("/api/v1/browsers/{project}/agent-config", get(agent_config))
+        .route("/api/browsers", get(list))
+        .route("/api/browsers/{project}", get(info).post(open).delete(stop))
+        .route("/api/browsers/{project}/egress", get(get_egress).put(egress))
+        .route("/api/browsers/{project}/data", axum::routing::delete(clear))
+        .route("/api/browsers/{project}/input", post(input))
+        .route("/api/browsers/{project}/view", get(view))
+        .route("/api/browsers/{project}/cdp", get(cdp))
+        .route("/api/browsers/{project}/cdp/json/version", get(cdp_version))
+        .route("/api/browsers/{project}/agent-config", get(agent_config))
         .with_state(browsers)
 }
 
@@ -72,7 +72,7 @@ async fn instance(m: &BrowserManager, project: &str) -> ApiResult<Arc<BrowserIns
 }
 
 async fn list(State(m): S) -> impl IntoResponse {
-    Json(json!({ "v": STREAM_VERSION, "chrome": m.config().chrome, "browsers": m.list().await }))
+    Json(json!({ "chrome": m.config().chrome, "browsers": m.list().await }))
 }
 
 async fn info(State(m): S, Path(project): Path<String>) -> ApiResult<impl IntoResponse> {
@@ -193,7 +193,7 @@ async fn view(
 
 fn state_msg(kind: &str, b: &BrowserInstance) -> Message {
     let st = b.state().borrow().clone();
-    let msg = json!({ "type": kind, "v": STREAM_VERSION, "project": b.project, "state": st });
+    let msg = json!({ "type": kind, "project": b.project, "state": st });
     Message::Text(msg.to_string().into())
 }
 
@@ -239,7 +239,7 @@ async fn view_loop(socket: WebSocket, b: Arc<BrowserInstance>) {
                     Err(e) => Err(anyhow::anyhow!("bad input message: {e}")),
                 };
                 if let Err(e) = res {
-                    let msg = json!({ "type": "error", "v": STREAM_VERSION, "message": format!("{e:#}") });
+                    let msg = json!({ "type": "error", "message": format!("{e:#}") });
                     if tx.send(Message::Text(msg.to_string().into())).await.is_err() { return; }
                 }
             }

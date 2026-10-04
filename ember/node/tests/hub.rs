@@ -66,7 +66,7 @@ async fn register_stores_a_private_registration_and_configures_the_transport() {
     let app = fake.devices().into_iter().find(|d| d.endpoint_id == key.peer_id()).unwrap().app.expect("app");
     assert_eq!((app.kind.as_str(), app.services.clone()), ("ember-node", vec!["ember-node".to_string()]));
 
-    // With the hub's /v1/config, its advertised relay is used (an IP-address hub derives none).
+    // With the hub's /config, its advertised relay is used (an IP-address hub derives none).
     fake.set_config_relays(vec!["https://relay.example.net".into()]);
     let cfg = hub::discovered_transport_config(dir.path(), key.clone()).await.unwrap();
     assert_eq!(cfg.hub.unwrap().pkarr_url, format!("{}/pkarr", fake.url()));

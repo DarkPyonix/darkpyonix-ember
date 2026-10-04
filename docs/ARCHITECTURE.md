@@ -129,9 +129,9 @@ allow-list for now. Peers find each other beyond address hints through the hub (
 `docs/design/HUB-INTEGRATION.md`): devices register under the user's GitHub account with the
 `ember-hub` crate, and `ember_transport::HubDirectory` (an `AddressDirectory`) publishes and
 resolves signed address records at the hub's `/pkarr`. Tested against `ember_hub::fake::FakeHub`
-in CI; not yet run against the real hub. The default hub address (`https://darkpyonix.dev`)
-and its `/v1` paths are to change (#62, draft PR #75), which waits for darkpyonix #41 and
-darkpyonix-core #42.
+in CI; not yet run against the real hub. The hub paths are unversioned like the real hub's
+(`/config`, `/devices`; checked against the vendored `hub.openapi.yaml`). The default hub address
+(`https://darkpyonix.dev`) is to change (#62, draft PR #75).
 
 ---
 

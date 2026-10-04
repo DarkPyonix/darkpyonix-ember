@@ -19,7 +19,7 @@ pub enum RelaySource {
     Derived,
     /// `EMBER_HUB_RELAY_URL` / [`HubConfig::with_relay`]: never replaced by discovery.
     Explicit,
-    /// The hub's `GET /v1/config` `relay_urls`.
+    /// The hub's `GET /config` `relay_urls`.
     Hub,
 }
 
@@ -32,12 +32,12 @@ pub struct HubConfig {
     /// base URL). `None` when it could not be derived (an IP-address hub, e.g. a test fake) and
     /// was not given: the transport then keeps its own relay setting.
     pub relay_url: Option<String>,
-    /// Further relays the hub advertised in `/v1/config` (after `relay_url`).
+    /// Further relays the hub advertised in `/config` (after `relay_url`).
     pub extra_relay_urls: Vec<String>,
     pub relay_source: RelaySource,
     /// The pkarr directory the hub advertised (`pkarr_url`); `None`: `<url>/pkarr`.
     pub pkarr_override: Option<String>,
-    /// What `GET /v1/config` said ([`HubConfig::discover`]); `None`: not asked, or the hub does
+    /// What `GET /config` said ([`HubConfig::discover`]); `None`: not asked, or the hub does
     /// not serve it (then everything is derived as before and the device list is polled).
     pub info: Option<HubInfo>,
 }
@@ -65,7 +65,7 @@ impl HubConfig {
         self
     }
 
-    /// Takes the relay and directory the hub advertised (`GET /v1/config`). An explicit relay
+    /// Takes the relay and directory the hub advertised (`GET /config`). An explicit relay
     /// (`EMBER_HUB_RELAY_URL`) is kept; an empty `relay_urls` or a missing `pkarr_url` keeps the
     /// derived value.
     pub fn apply_info(&mut self, info: HubInfo) {
@@ -92,7 +92,7 @@ impl HubConfig {
         self.info = Some(info);
     }
 
-    /// Asks the hub for its configuration (`GET /v1/config`) and applies it. Falls back to the
+    /// Asks the hub for its configuration (`GET /config`) and applies it. Falls back to the
     /// derived URLs (`https://relay.<host>`, `<hub>/pkarr`) when the hub does not serve the
     /// endpoint (`404`) or cannot be reached; never fails.
     pub async fn discover(mut self) -> Self {
@@ -101,8 +101,8 @@ impl HubConfig {
                 tracing::debug!(hub = %self.url, ?info, "hub configuration discovered");
                 self.apply_info(info);
             }
-            Ok(None) => tracing::debug!(hub = %self.url, "the hub has no /v1/config; relay and directory derived"),
-            Err(e) => tracing::info!(hub = %self.url, "could not read the hub's /v1/config ({e}); relay and directory derived"),
+            Ok(None) => tracing::debug!(hub = %self.url, "the hub has no /config; relay and directory derived"),
+            Err(e) => tracing::info!(hub = %self.url, "could not read the hub's /config ({e}); relay and directory derived"),
         }
         self
     }
@@ -147,7 +147,7 @@ impl HubConfig {
     /// The relay host of a hub: `https://<host>` → `https://relay.<host>` (the hub's two-host
     /// layout: the Worker cannot take the relay's UDP). An IP-address or `localhost` hub has no
     /// derivable relay. This is the fallback when the hub does not advertise its relay in
-    /// `GET /v1/config` ([`HubConfig::discover`]).
+    /// `GET /config` ([`HubConfig::discover`]).
     pub fn derive_relay_url(hub_url: &str) -> Option<String> {
         let url = Url::parse(hub_url).ok()?;
         let host = url.host_str()?;
@@ -217,7 +217,6 @@ mod tests {
         let info = HubInfo {
             relay_urls: vec!["https://relay-eu.example.net/".into(), "not a url".into(), "https://relay-us.example.net".into()],
             pkarr_url: Some("/dir/pkarr".into()),
-            api_version: Some(1),
             hub_version: Some("test".into()),
             link_url: Some("https://hub.example.net/link".into()),
         };
@@ -242,6 +241,9 @@ mod tests {
         assert_eq!(c.relay_url.as_deref(), Some("https://relay.hub.example.net"));
         assert_eq!(c.relay_source, RelaySource::Derived);
         assert_eq!(c.pkarr_url(), "https://hub.example.net/pkarr");
-        assert!(!c.supports_devices_wait());
+        // A hub that serves /config serves the documented `wait` on GET /devices.
+        assert!(c.supports_devices_wait());
+        // Without /config (never discovered), the watcher polls.
+        assert!(!HubConfig::new("https://hub.example.net").supports_devices_wait());
     }
 }

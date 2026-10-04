@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
             Some(h) if registered => h.ensure_resolve_token().await,
             _ => None,
         };
-        // The hub's relay and directory from its `/v1/config` (derived when it has none). Asked
+        // The hub's relay and directory from its `/config` (derived when it has none). Asked
         // only when the hub will be used now, so an unregistered server does not contact it.
         let hub_config = match &hub {
             Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => Some(h.discover().await),

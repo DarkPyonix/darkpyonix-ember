@@ -282,7 +282,7 @@ async fn revocation_is_noticed_by_any_hub_call_and_by_the_watcher() {
 async fn long_poll_watcher_sees_removal_at_once_and_syncs_devices() {
     let f = fixture().await;
     register_server(&f).await;
-    // Registration asked the hub's /v1/config: the fake offers the long-poll.
+    // Registration asked the hub's /config: the fake offers the long-poll.
     let (_, status) = call(&f.app, Method::GET, "/api/hub", None).await;
     assert_eq!(status["long_poll"], true, "{status}");
     assert_eq!(status["pkarr_url"], format!("{}/pkarr", f.hub.url()));

@@ -1,0 +1,67 @@
+{
+  "native_id": "0199aaaa-0000-7000-8000-000000000002",
+  "cwd": "/work/project",
+  "title": null,
+  "messages": [
+    {
+      "role": "user",
+      "text": "List the files, then fix the typo in main.py."
+    },
+    {
+      "role": "assistant",
+      "text": "{\"command\":[\"bash\",\"-lc\",\"ls\"],\"workdir\":\"/work/project\"}",
+      "tool_name": "shell",
+      "tool_call_id": "call_1"
+    },
+    {
+      "role": "tool",
+      "text": "config.toml\nmain.py\n",
+      "tool_name": "shell",
+      "tool_call_id": "call_1",
+      "is_error": false
+    },
+    {
+      "role": "assistant",
+      "text": "{\"command\":[\"bash\",\"-lc\",\"cat nope.txt\"]}",
+      "tool_name": "shell",
+      "tool_call_id": "call_2"
+    },
+    {
+      "role": "tool",
+      "text": "cat: nope.txt: No such file or directory\n",
+      "tool_name": "shell",
+      "tool_call_id": "call_2",
+      "is_error": true
+    },
+    {
+      "role": "assistant",
+      "text": "*** Begin Patch\n*** Update File: main.py\n-prnt('hi')\n+print('hi')\n*** End Patch",
+      "tool_name": "apply_patch",
+      "tool_call_id": "call_3"
+    },
+    {
+      "role": "tool",
+      "text": "Success. Updated the following files:\nM main.py",
+      "tool_name": "apply_patch",
+      "tool_call_id": "call_3",
+      "is_error": false
+    },
+    {
+      "role": "assistant",
+      "text": "not json at all",
+      "tool_name": "view_image",
+      "tool_call_id": "call_4"
+    },
+    {
+      "role": "tool",
+      "text": "plain text output",
+      "tool_name": "view_image",
+      "tool_call_id": "call_4",
+      "is_error": false
+    },
+    {
+      "role": "assistant",
+      "text": "Fixed the typo in main.py."
+    }
+  ]
+}

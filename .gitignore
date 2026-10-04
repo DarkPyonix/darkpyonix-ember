@@ -44,3 +44,17 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Isolated worktrees for parallel agents
+.claude/worktrees/
+
+# OSE build workdir and packages (build/ose/build.sh; builds run in CI)
+build/ose/.work/
+build/ose/dist/
+
+# Throwaway work, probes and downloads (AGENTS.md "Where files go")
+.scratch/
+
+# Editor extension build outputs
+*.vsix
+.vscode-test/

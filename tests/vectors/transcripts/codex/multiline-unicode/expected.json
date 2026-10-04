@@ -1,0 +1,23 @@
+{
+  "native_id": "0199aaaa-0000-7000-8000-000000000003",
+  "cwd": "/work/프로젝트",
+  "title": null,
+  "messages": [
+    {
+      "role": "user",
+      "text": "이 코드를 리뷰해 주세요.\n\n```rust\nfn main() {}\n```\n"
+    },
+    {
+      "role": "assistant",
+      "text": "좋아 보입니다 👍\n\n1. 첫째\n2. 둘째\t(탭)"
+    },
+    {
+      "role": "user",
+      "text": "Line separator, \"quotes\" and back\\slash"
+    },
+    {
+      "role": "assistant",
+      "text": "확인 — done."
+    }
+  ]
+}

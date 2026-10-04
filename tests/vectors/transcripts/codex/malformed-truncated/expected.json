@@ -1,0 +1,19 @@
+{
+  "native_id": "0199aaaa-0000-7000-8000-000000000005",
+  "cwd": "/work/project",
+  "title": null,
+  "messages": [
+    {
+      "role": "user",
+      "text": "First question."
+    },
+    {
+      "role": "assistant",
+      "text": "First answer."
+    },
+    {
+      "role": "user",
+      "text": "Second question."
+    }
+  ]
+}

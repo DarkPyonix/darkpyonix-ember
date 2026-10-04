@@ -1,0 +1,15 @@
+{
+  "native_id": "66666666-6666-4666-8666-666666666666",
+  "cwd": "/work/project",
+  "title": "Fix the login bug",
+  "messages": [
+    {
+      "role": "user",
+      "text": "The login button does nothing."
+    },
+    {
+      "role": "assistant",
+      "text": "The click handler was never attached; fixed."
+    }
+  ]
+}

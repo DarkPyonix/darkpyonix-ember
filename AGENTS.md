@@ -97,6 +97,16 @@ for word; user documents in 합니다체, internal documents in 한다체.
   `pip install`, because those are the toolchains the user supports (2026-10-03). Rust examples use
   cargo; Node examples stay as they are.
 
+## CI names
+
+Workflows follow the shared thisisthepy naming rule [user, 2026-10-04], so the same check has the
+same name in every repository and main's required checks stay readable:
+`test.yml` "Test" (basic checks), `test-<target>.yml` "<Target> ..." (special checks such as
+`test-ose.yml`), `publish-<target>.yml` "Publish to <target>" (tag releases), `release-sync.yml`
+"Release sync" (develop to main, script `.github/scripts/release/sync-release.sh`), `pages.yml`
+"Pages". Job names are short English sentence case saying what the job does; a matrix job is
+"<What> (<os>, <version>)".
+
 ## Who to ask
 
 Questions about project information or Ember's direction go to the darkpyonix leader session, not

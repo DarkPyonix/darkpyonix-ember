@@ -1,6 +1,6 @@
-# Publishes develop to main through the append-only `release` branch (.github/scripts/publish-release.sh).
+# Publishes develop to main through the append-only `release` branch (.github/scripts/release/sync-release.sh).
 # main is never written here; the user merges the release → main PR.
-name: release
+name: Release sync
 
 on:
   push:
@@ -16,7 +16,8 @@ permissions:
   pull-requests: write
 
 jobs:
-  publish:
+  sync:
+    name: Sync release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -32,5 +33,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         # Run a copy: the script checks out `release`, which would change the file under bash.
         run: |
-          cp .github/scripts/publish-release.sh "$RUNNER_TEMP/publish-release.sh"
-          bash "$RUNNER_TEMP/publish-release.sh"
+          cp .github/scripts/release/sync-release.sh "$RUNNER_TEMP/sync-release.sh"
+          bash "$RUNNER_TEMP/sync-release.sh"

@@ -5,7 +5,7 @@
 #   export EMBER_OSE_SERVER="$(crates/editor-conn/scripts/fetch-ose-artifact.sh)"
 #   cargo test --manifest-path crates/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture
 #
-# Picks the most recent *successful* run of .github/workflows/ose.yml that still has an
+# Picks the most recent *successful* run of .github/workflows/test-ose.yml that still has an
 # unexpired artifact named dpx-ose-<target> (pull-request runs and dispatches limited to other
 # targets have none and are skipped). The artifact holds dpx-ose-<tag>-<target>.tar.gz and its
 # .sha256; the checksum is verified before unpacking. Nothing is built or started.
@@ -47,14 +47,14 @@ repo="${OSE_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 # ---- pick the run -------------------------------------------------------------------------------
 run="${OSE_RUN_ID:-}"
 if [ -z "$run" ]; then
-  list_args=(run list -R "$repo" --workflow ose.yml --status success --limit 30 --json databaseId -q '.[].databaseId')
+  list_args=(run list -R "$repo" --workflow test-ose.yml --status success --limit 30 --json databaseId -q '.[].databaseId')
   [ -n "${OSE_BRANCH:-}" ] && list_args+=(--branch "$OSE_BRANCH")
   for id in $(gh "${list_args[@]}"); do
     has="$(gh api "repos/$repo/actions/runs/$id/artifacts?per_page=100" \
       -q ".artifacts[] | select(.name == \"$artifact\" and .expired == false) | .id" || true)"
     if [ -n "$has" ]; then run="$id"; break; fi
   done
-  [ -n "$run" ] || die "no successful ose run in $repo${OSE_BRANCH:+ on $OSE_BRANCH} has an unexpired $artifact artifact (artifacts are kept 14 days; run the workflow: gh workflow run ose.yml -R $repo)"
+  [ -n "$run" ] || die "no successful ose run in $repo${OSE_BRANCH:+ on $OSE_BRANCH} has an unexpired $artifact artifact (artifacts are kept 14 days; run the workflow: gh workflow run test-ose.yml -R $repo)"
 fi
 log "repo $repo, run $run, artifact $artifact"
 

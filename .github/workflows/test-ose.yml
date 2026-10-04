@@ -1,5 +1,5 @@
 # DarkPyonix OSE: Code-OSS (MIT) VS Code web server, renamed and pointed at Open VSX.
-# See build/ose/README.md. Builds run here, never on a developer machine.
+# See ember/ose/README.md. Builds run here, never on a developer machine.
 #
 #   pull_request     -> product job only (product.json overrides + checks; seconds)
 #   push / dispatch  -> product + 4-target build matrix + smoke test, artifacts uploaded
@@ -8,10 +8,10 @@ name: OSE build
 
 on:
   pull_request:
-    paths: ["build/ose/**", ".github/workflows/test-ose.yml"]
+    paths: ["ember/ose/**", ".github/workflows/test-ose.yml"]
   push:
     branches: [main, develop]
-    paths: ["build/ose/**", ".github/workflows/test-ose.yml"]
+    paths: ["ember/ose/**", ".github/workflows/test-ose.yml"]
     tags: ["ose-v*"]
   workflow_dispatch:
     inputs:
@@ -41,7 +41,7 @@ jobs:
       - id: version
         name: Resolve Code-OSS tag and its Node version
         run: |
-          tag="$(tr -d '[:space:]' < build/ose/VERSION)"
+          tag="$(tr -d '[:space:]' < ember/ose/VERSION)"
           node="$(curl -fsSL "https://raw.githubusercontent.com/microsoft/vscode/$tag/.nvmrc" | tr -d '[:space:]v')"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "node=$node" >> "$GITHUB_OUTPUT"
@@ -63,14 +63,14 @@ jobs:
             '{include: [.[] | select(. as $e | $t == "" or ($t | split(",") | map(gsub("\\s";"")) | index($e.target) != null))]}' <<< "$all")" \
             >> "$GITHUB_OUTPUT"
       - name: Apply overrides and check (Open VSX, telemetry off, no MS marketplace)
-        run: build/ose/build.sh --product-only
-      - name: Tag matches build/ose/VERSION
+        run: ember/ose/build.sh --product-only
+      - name: Tag matches ember/ose/VERSION
         if: startsWith(github.ref, 'refs/tags/ose-v')
         run: |
           want="${{ steps.version.outputs.tag }}"
           got="${GITHUB_REF_NAME#ose-v}"
           # ose-v1.139.1 or ose-v1.139.1-dpx.2 (a rebuild of the same upstream tag)
-          case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match build/ose/VERSION ($want)"; exit 1 ;; esac
+          case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match ember/ose/VERSION ($want)"; exit 1 ;; esac
 
   build:
     name: Build (${{ matrix.target }})
@@ -83,8 +83,8 @@ jobs:
     timeout-minutes: 240
     env:
       CI: "true"
-      OSE_WORK_DIR: ${{ github.workspace }}/build/ose/.work
-      OSE_OUT_DIR: ${{ github.workspace }}/build/ose/dist
+      OSE_WORK_DIR: ${{ github.workspace }}/ember/ose/.work
+      OSE_OUT_DIR: ${{ github.workspace }}/ember/ose/dist
     steps:
       - uses: actions/checkout@v5
 
@@ -123,8 +123,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            build/ose/.work/vscode/.build/node
-            build/ose/.work/vscode/.build/builtInExtensions
+            ember/ose/.work/vscode/.build/node
+            ember/ose/.work/vscode/.build/builtInExtensions
           key: ose-dl-${{ matrix.target }}-${{ needs.product.outputs.tag }}
 
       - name: Build, package and smoke-test
@@ -133,14 +133,14 @@ jobs:
           # Read-only token: upstream's build fetches built-in extensions and npm packages from
           # GitHub and is rate-limited without one (upstream passes GITHUB_TOKEN the same way).
           GITHUB_TOKEN: ${{ github.token }}
-        run: build/ose/build.sh --target ${{ matrix.target }} --smoke
+        run: ember/ose/build.sh --target ${{ matrix.target }} --smoke
 
       - uses: actions/upload-artifact@v4
         with:
           name: dpx-ose-${{ matrix.target }}
           path: |
-            build/ose/dist/*.tar.gz
-            build/ose/dist/*.sha256
+            ember/ose/dist/*.tar.gz
+            ember/ose/dist/*.sha256
           if-no-files-found: error
           retention-days: 14
 

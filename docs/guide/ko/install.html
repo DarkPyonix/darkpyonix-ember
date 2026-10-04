@@ -73,7 +73,7 @@
     <h2 id="checkout">코드 받기</h2>
     <p>
       작업은 <code>develop</code> 브랜치에 들어갑니다. <code>main</code> 에는 아직 코드가 없습니다.
-      <code>crates/</code> 아래의 각 크레이트는 자기 <code>Cargo.lock</code> 을 가진 독립된 cargo
+      <code>ember/</code> 아래의 각 크레이트는 자기 <code>Cargo.lock</code> 을 가진 독립된 cargo
       프로젝트이므로(워크스페이스가 없습니다), 크레이트 폴더 안에서 빌드합니다.
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
@@ -86,7 +86,7 @@ git checkout develop</code></pre>
     <h2 id="server">ember server, 메인 서버에</h2>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
-<pre><code><span class="k">cd</span> crates/server
+<pre><code><span class="k">cd</span> ember/server
 cargo build --release --locked
 ./target/release/ember-server</code></pre>
     </figure>
@@ -160,7 +160,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
     </div>
     <p>
       서버가 읽는 모든 변수의 목록은
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/crates/server/src/main.rs"><code>crates/server/src/main.rs</code></a>
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/ember/server/src/main.rs"><code>ember/server/src/main.rs</code></a>
       맨 위의 주석에 있습니다.
     </p>
 
@@ -186,7 +186,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
-<pre><code><span class="k">cd</span> crates/node
+<pre><code><span class="k">cd</span> ember/node
 cargo build --release --locked
 <span class="k">export</span> EMBER_NODE_TOKEN=<span class="s">"$(openssl rand -hex 32)"</span>   <span class="c"># 보관하세요: 서버에 필요합니다</span>
 ./target/release/ember-node</code></pre>
@@ -223,7 +223,7 @@ cargo build --release --locked
       상태 디렉터리에는 <code>local.json</code>(이 컴퓨터의 프로그램이 노드를 찾는 방법),
       <code>transport.key</code>(피어 신원), <code>allowed-peers</code>, 그리고 등록한 뒤에는
       <code>hub.json</code> 이 들어 있습니다. 변수 전체 목록은
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/crates/node/src/main.rs"><code>crates/node/src/main.rs</code></a>
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/ember/node/src/main.rs"><code>ember/node/src/main.rs</code></a>
       맨 위의 주석에 있습니다.
     </p>
 
@@ -236,7 +236,7 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
-<pre><code><span class="k">cd</span> crates/app
+<pre><code><span class="k">cd</span> ember/app
 EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run --release --locked</code></pre>
     </figure>
     <p>

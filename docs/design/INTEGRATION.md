@@ -1,6 +1,6 @@
 # darkPyonix VSCode Integration Design
 
-> 상태: **부분 구현.** OSE 런타임은 CI에서 빌드된다 (#24, #39). VSC 런타임 선택 화면(`FR-W4`)은 `web/proxy/`에 있고,
+> 상태: **부분 구현.** OSE 런타임은 CI에서 빌드된다 (#24, #39). VSC 런타임 선택 화면(`FR-W4`)은 `ember/proxy/`에 있고,
 > 출시 절차는 #72에서 다룬다.
 
 ## 개요

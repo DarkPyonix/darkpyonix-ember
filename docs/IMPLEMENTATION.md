@@ -9,8 +9,8 @@
 > summarised in the current `INTENT.md` D11.
 >
 > **Status (2026-10-04).** M8 has started (#32): the Code-OSS connection layer
-> (`crates/editor-conn`) and the editor session layer (`crates/editor`) exist and their tests run
-> in CI; the overlays of Category 2 are bridged in `crates/editor` but not yet shown in the
+> (`ember/editor-conn`) and the editor session layer (`ember/editor`) exist and their tests run
+> in CI; the overlays of Category 2 are bridged in `ember/editor` but not yet shown in the
 > client, and Categories 3 and 4 are not handled. Category 4 is still unsized (§6).
 
 ## How much of VS Code can Ember not reimplement, and what happens if it does anyway

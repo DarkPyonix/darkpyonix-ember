@@ -160,7 +160,7 @@
     <h2 id="vscode">VS Code Web <span class="pill partial">부분</span></h2>
     <p>
       VS Code 선택지는 컴퓨터 자체에서 서비스하는 VS Code Web을 Ember의 프록시
-      (<code>web/proxy/</code>)로 감싼 것입니다. 프록시는 수정하지 않은 VS Code 빌드 위에, 좁은
+      (<code>ember/proxy/</code>)로 감싼 것입니다. 프록시는 수정하지 않은 VS Code 빌드 위에, 좁은
       창을 위한 타이틀 바와 터치 레이아웃을 더합니다. 넓은 창에서는 순정 VS Code가 보입니다.
       런타임은 두 가지입니다.
     </p>
@@ -184,14 +184,14 @@
       지정합니다.
     </p>
     <p>
-      각 컴퓨터에서 <code>web/proxy</code> 로 가서 명령 하나로 런타임과 프록시를 띄웁니다.
+      각 컴퓨터에서 <code>ember/proxy</code> 로 가서 명령 하나로 런타임과 프록시를 띄웁니다.
       <code>--root</code> (또는 <code>DPX_FOLDER_ROOTS</code>) 가 적어도 하나 필요하고, 어느 루트에도 속하지 않는 폴더는 403으로
       거절합니다.
     </p>
 
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>셸, 컴퓨터에서</figcaption>
-<pre><code>cd web/proxy
+<pre><code>cd ember/proxy
 export DPX_USERNAME=<span class="s">&lt;user&gt;</span> DPX_PASSWORD=<span class="s">&lt;password&gt;</span>   <span class="c"># 처음 한 번만: 프록시 로그인 계정을 만듭니다</span>
 uv run --with-requirements requirements.txt python -m dpx.serve --runtime vsc --root ~/work
 <span class="c"># {"event": "ready", "url": "http://127.0.0.1:53817/", ...}</span></code></pre>

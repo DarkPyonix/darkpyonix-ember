@@ -1,6 +1,6 @@
 # EDITOR-SESSION.md: The editor session between editor-conn and the CodeEditor widget
 
-> Status: **partial.** `crates/editor/` (package `ember-editor`, #46) builds and its unit and flow
+> Status: **partial.** `ember/editor/` (package `ember-editor`, #46) builds and its unit and flow
 > tests run in CI. The live test (`tests/live_session.rs`, `#[ignore]`) runs by hand; the widget
 > side and "Open IDE → Ember" in the client are not built (#32).
 > Milestone: M8 (`PROJECT.md`), issue #32, SPEC §E (`FR-E1`–`FR-E4`). Written 2026-10-03.

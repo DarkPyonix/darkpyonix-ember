@@ -73,7 +73,7 @@
     <h2 id="checkout">Get the code</h2>
     <p>
       Work lands on the <code>develop</code> branch; <code>main</code> does not carry the code yet.
-      Each crate under <code>crates/</code> is its own cargo project with its own
+      Each crate under <code>ember/</code> is its own cargo project with its own
       <code>Cargo.lock</code> (there is no workspace), so you build inside the crate's folder.
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
@@ -86,7 +86,7 @@ git checkout develop</code></pre>
     <h2 id="server">ember server, on the main server</h2>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell</figcaption>
-<pre><code><span class="k">cd</span> crates/server
+<pre><code><span class="k">cd</span> ember/server
 cargo build --release --locked
 ./target/release/ember-server</code></pre>
     </figure>
@@ -161,7 +161,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
     </div>
     <p>
       The full list, with every variable the server reads, is the comment at the top of
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/crates/server/src/main.rs"><code>crates/server/src/main.rs</code></a>.
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/ember/server/src/main.rs"><code>ember/server/src/main.rs</code></a>.
     </p>
 
     <h3 id="server-data">What it stores</h3>
@@ -186,7 +186,7 @@ cargo build --release --locked --features mount-fuse</code></pre>
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell</figcaption>
-<pre><code><span class="k">cd</span> crates/node
+<pre><code><span class="k">cd</span> ember/node
 cargo build --release --locked
 <span class="k">export</span> EMBER_NODE_TOKEN=<span class="s">"$(openssl rand -hex 32)"</span>   <span class="c"># keep it: the server needs it</span>
 ./target/release/ember-node</code></pre>
@@ -223,7 +223,7 @@ cargo build --release --locked
       The state directory holds <code>local.json</code> (how programs on this computer find the
       node), <code>transport.key</code> (its peer identity), <code>allowed-peers</code> and, once
       registered, <code>hub.json</code>. The full list of variables is the comment at the top of
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/crates/node/src/main.rs"><code>crates/node/src/main.rs</code></a>.
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/ember/node/src/main.rs"><code>ember/node/src/main.rs</code></a>.
     </p>
 
     <h2 id="client">The client</h2>
@@ -235,7 +235,7 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell</figcaption>
-<pre><code><span class="k">cd</span> crates/app
+<pre><code><span class="k">cd</span> ember/app
 EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run --release --locked</code></pre>
     </figure>
     <p>

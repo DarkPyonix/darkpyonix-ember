@@ -9,7 +9,7 @@
 #   3. replace the tree with develop's tree and commit it;
 #   4. drop the internal planning documents, which exist only on develop;
 #   5. push without force;
-#   6. create the PR, or leave the existing one (it follows the branch).
+#   6. create the PR, or retitle the existing one (its content follows the branch).
 #
 # Usage: .github/scripts/release/sync-release.sh [--dry-run]
 # --dry-run builds the commit locally and prints what would be pushed, without pushing.
@@ -56,10 +56,14 @@ fi
 
 git push --quiet origin release
 
-if [[ -z "$(gh pr list --base main --head release --state open --json number --jq '.[].number')" ]]; then
+# The same title in every repository (compose-rust, dioxus-compose).
+title="Publish develop to main"
+pr="$(gh pr list --base main --head release --state open --json number --jq '.[].number')"
+if [[ -z "$pr" ]]; then
     gh pr create --base main --head release \
-        --title "Release: Publish develop to main" \
+        --title "$title" \
         --body "Automated by .github/workflows/release-sync.yml. release follows develop without the internal planning documents (${internal[*]}). The user merges this PR."
 else
-    echo "the release → main PR is open and now includes develop ${develop_sha}"
+    gh pr edit "$pr" --title "$title"
+    echo "the release → main PR #$pr is open and now includes develop ${develop_sha}"
 fi

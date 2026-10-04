@@ -12,12 +12,17 @@
 디자인으로 가야 해."
 
 Ember's A2A fits the way each agent already talks to other agents, and the agent chooses it before
-its own built-in means. A CLI or an MCP server is only the carrier. The test is behavioural: given a
+its own built-in means. Ember never blocks or intercepts those built-ins [user, 2026-10-04: "send
+message도 그냥 거르지 말고 모델이 알아서 쓰도록 하는게 맞는거 같아"]: its tools have to win by name,
+description and loading alone. A CLI or an MCP server is only the carrier. The test is behavioural: given a
 natural request such as "ask the reviewer" or "다른 에이전트에게 물어봐", does the agent call Ember
 first? Today's `ember-a2a` CLI plus instructions text does not pass that test against Claude Code,
 because Claude Code has its own peer tools that are always loaded.
 
 ## What each agent has today
+
+The "levers" below were surveyed; those that disable or intercept a built-in (deny rules, feature
+flags, redirect hooks) are recorded for reference only and are not part of the design.
 
 | Agent | Built-in means | How Ember can come first | Strongest lever | Risk |
 |---|---|---|---|---|
@@ -27,10 +32,34 @@ because Claude Code has its own peer tools that are always loaded.
 | Antigravity | `define_subagent`, `invoke_subagent`, `send_message`, `manage_inbox` [B] | MCP plus a `hooks.json` PreToolUse deny with a pointer reason (hooks tested locally, SPEC §A) | hooks | model-visible descriptions and MCP ranking [U] |
 | OMP | `task` subagents; peers write to `agent://<name>` [V] | expose Ember sessions as `agent://` names if an extension loads under ACP, otherwise MCP with the same wording [U] | the `agent://` scheme | extension loading [U] |
 
-AionUI (iOfficeAI/AionCore) solves the same contest with 13 `team_`-prefixed MCP tools and one
-injected line: "Your platform may provide similarly named built-in tools. Do NOT use those." A
-distinctive prefix avoids name collisions, MCP is primary and a CLI is the fallback. It publishes no
-measurement of how often it wins. [V]
+AionUI (iOfficeAI/AionCore at `4a707fc`, team logic in `crates/aionui-team`,
+`crates/aionui-team-prompts`, `crates/aionui-api-types/src/team_tools.rs`; read from source, its
+own docs are partly stale) [V]:
+
+- **Tools:** 13 `team_`-prefixed MCP tools; lead-only tools are hidden from teammates'
+  `tools/list`. The "comes first" device is one injected line: "You MUST use the `team_*` MCP tools
+  for ALL team coordination. Your platform may provide similarly named built-in tools. Do NOT use
+  those." It does not block built-ins and publishes no measurement.
+- **Delivery:** a message is stored in a SQLite mailbox, the receiver's event loop is woken, and
+  unread messages are batched into the receiver's next user turn ("## New Messages - From
+  <slot>"). A receiver mid-turn gets them after the turn. Messages are acknowledged only when that
+  turn succeeds, otherwise delivered again. Lanes: Foreground > Control > Directed > Background.
+- **Idle reports:** at turn end (Finish or Error) an `idle_notification` is written to the lead's
+  mailbox carrying only "idle". The lead is woken only when every teammate has settled and the lead
+  is idle; failures and give-ups wake at once. The actual result depends on the prompt telling the
+  teammate to call `team_send_message` (`event_loop.rs`, `scheduler`).
+- **Task assignment** notifies the owner automatically (`mcp/server.rs::maybe_notify_task_owner`).
+- **Gaps:** no loop or rate-limit protection in the path; the CLI path exports
+  `AIONUI_RUNTIME_TOKEN` to the agent environment and compares tokens in plain text; the role prompt
+  is prepended to the first user message (fragile on resume); starting a team kills and restarts
+  the agent process to load the tools; crash and 60 s inactivity handlers exist but no production
+  call site was found.
+
+Taken into Ember: acknowledge only after a successful turn, automatic notice to a task owner,
+cancel by interrupt rather than kill, lead-only tool visibility. Done differently: built-ins are not
+blocked and Ember-first is measured (≥ 95%); the server attaches the result to each report instead
+of relying on the model (FR-T8); done reports wake the lead per report, not after everyone
+settles; loop protection (FR-T3, FR-T5) and a token kept out of the shell (FR-T2a).
 
 ## Two directions for Claude Code
 
@@ -46,9 +75,10 @@ answered.
 **(B) Same-shaped Ember tools first.** An `ember` MCP server with `alwaysLoad`, tools
 `list_agents` and `send_message` using the native argument names (`to`, `message`), descriptions
 that open with the user's verbs ("ask, consult, tell, list the other agents and sessions, on any
-Ember computer and any model"), the built-ins denied, and a PreToolUse hook that answers a native
-call with "Use mcp__ember__send_message to reach other sessions in Ember". Supported surfaces only.
-This is the draft direction for every agent.
+Ember computer and any model"), and the server's instructions saying that these reach every Ember
+session while the built-ins reach only the agent's own. The built-ins stay enabled; nothing is
+denied and no hook redirects a call. Supported surfaces only. This is the direction for every
+agent.
 
 ## Keeping the runtime token out of the shell
 
@@ -76,17 +106,53 @@ ordered tool calls (Claude and Antigravity stream-json, `codex exec --json`, ACP
   opinion from another model", "tell payments the schema changed", "which agents are running",
   "다른 에이전트에게 물어봐"), plus negative controls ("spawn a helper to search the repo").
 - N: 30 per prompt per condition; 50 for a go or no-go decision; record model and CLI versions.
-- Conditions, cumulative: no Ember; CLI and instructions (today); MCP deferred; MCP always loaded;
-  plus appended prompt; plus built-ins denied; plus hook.
-- Metrics: first-choice Ember rate among A2A attempts, native leakage at any position, detours
+- Built-ins stay enabled in every condition. Conditions, cumulative: no Ember; CLI and
+  instructions (today); MCP deferred; MCP always loaded; plus appended prompt.
+- Metrics: first-choice Ember rate among A2A attempts, native calls at any position (counted as
+  failures, never blocked), detours
   (tool search, `--help`) before the first Ember call, delivery confirmed by the recorder, wrong
   targets, false positives on negatives.
 - Leakage detectors: native tool names per agent, shell access to `cc-socks`, and any send the
   model claims that the recorder did not see.
 - Re-run on every CLI version bump.
 
-Draft targets, for the user's decision: at least 95% Ember-first, zero leakage once the built-ins
-are denied, at most 2% false positives.
+Targets [user, 2026-10-04: "초안대로 확정하면 되긴 할거같은데"]: at least 95% Ember-first with
+the built-ins enabled, at most 2% false positives, re-measured whenever an agent CLI version
+changes.
+
+## Completion and idle reports (FR-T8)
+
+[user, 2026-10-04: "AionUI는 리더한테 각자 작업이 끝났고 한거가 전부 다 보고가 들어가더라고 idle로
+들어가면 리더가 바로 확인 없이 알게되는 방식인거 같던데 그런 인터렉션이 필요할거같아."]
+
+A session doing delegated work (an A2A request, a team task, a spawn) reports back on its own, so
+the delegator never polls. Claude Code does this with `SendMessage`'s `notify_when_idle` and with
+subagent hand-backs; AionUI's teammates report to the lead when they go idle.
+
+- **When:** the turn ends and the session is idle; an error ends the turn; an approval or a
+  question waits on a person; no progress for a configurable stall time.
+- **What:** built by the server from the turn, not left to the model: the outcome and stop reason
+  (done, failed, interrupted, needs input, stalled), a summary of the last response, files changed
+  and PRs or commits created in the turn, the error for a failure, and a link to the full
+  transcript.
+- **Wake policy:** each done report wakes an idle receiver at once, and reports arriving within
+  2 s share one turn; failures, interruptions, needs-input and undeliverable reports always wake
+  at once. AionUI's "wake the lead after every teammate has settled" is rejected, because the user
+  asked to know without checking.
+- **Delivery:** stored first, acknowledged only after the receiving turn succeeds, delivered again
+  otherwise.
+- **To whom:** the team leader for a team task, otherwise the sender of the message the session
+  was working on. A session with no delegator sends nothing.
+- **Waking:** an idle receiver is woken by a report and handles it at once, the way a Claude Code
+  cross-session message or a subagent hand-back wakes an idle session; that is what lets the
+  leader know without checking. A busy receiver gets reports at its next tool round, batched.
+- **No loops:** a report is marked as a report and never makes the receiver reply automatically
+  (a reply is an ordinary A2A message the receiver chooses to send). Reports do not beget reports:
+  when a turn woken by a report ends, its report goes only to that session's own delegator, never
+  back to the teammate that reported. Reports count toward loop protection.
+- **Noise:** one report per real turn end (deduplicated by session and turn, with a short settle
+  window for automatic follow-ups); at most one stall report per stall.
+- **How it arrives:** as one A2A message in the receiver's own idiom (FR-T2).
 
 ## Sources
 

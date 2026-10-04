@@ -61,7 +61,6 @@ async fn http_and_websockets_work_over_the_transport() {
     let f = start().await;
     let h = within(wait_up(&f.client)).await;
     assert!(h.ok);
-    assert_eq!(h.protocol, PROTOCOL_VERSION);
     assert!(f.client.peer().is_some());
     assert!(f.client.to_string().starts_with("peer:"));
 
@@ -157,7 +156,7 @@ async fn unknown_peers_are_refused_and_revocation_disconnects() {
     let f = start().await;
     within(wait_up(&f.client)).await;
 
-    // A peer that is not on the node's allow-list cannot even read /v1/health.
+    // A peer that is not on the node's allow-list cannot even read /health.
     let stranger = f.net.transport();
     let s = NodeClient::over_transport(Dialer::new(stranger), f.node_t.peer_id(), TOKEN);
     assert!(within(s.health()).await.is_err());

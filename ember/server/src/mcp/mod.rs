@@ -1,6 +1,6 @@
 //! Central MCP server registry (SPEC FR-A7).
 //!
-//! The user adds an MCP server once (`/api/v1/mcp`, [`api`]); every agent session that supports
+//! The user adds an MCP server once (`/api/mcp`, [`api`]); every agent session that supports
 //! MCP gets it at process start, through [`StartRequest::mcp_servers`], the same path as the
 //! project browser (FR-R3, `crate::browser::agent`), so Claude Code receives it in
 //! `--mcp-config`, Codex as `-c mcp_servers.<name>.…` overrides and Antigravity in its session
@@ -93,7 +93,7 @@ pub struct McpEntry {
     pub updated_at: i64,
 }
 
-/// `POST /api/v1/mcp`. No `Debug`: `env` holds secrets.
+/// `POST /api/mcp`. No `Debug`: `env` holds secrets.
 #[derive(Deserialize)]
 pub struct NewMcp {
     pub name: String,
@@ -116,7 +116,7 @@ fn all_scope() -> String {
     "all".into()
 }
 
-/// `PATCH /api/v1/mcp/{id}`: `None` leaves a field alone. `env` is merged: a string sets that
+/// `PATCH /api/mcp/{id}`: `None` leaves a field alone. `env` is merged: a string sets that
 /// variable, `null` removes it, unnamed variables stay. No `Debug`: `env` holds secrets.
 #[derive(Default, Deserialize)]
 pub struct McpPatch {

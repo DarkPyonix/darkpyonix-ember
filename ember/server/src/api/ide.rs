@@ -1,6 +1,6 @@
 //! "Open IDE" launch targets for a session (SPEC `FR-L7`, `FR-W1`).
 //!
-//! `GET /api/v1/sessions/{id}/ide[?computer=<name>]` returns, for the session's project and
+//! `GET /api/sessions/{id}/ide[?computer=<name>]` returns, for the session's project and
 //! current computer, how to open each IDE. The server only returns data; it never opens or
 //! renders anything (`NFR-L2`):
 //!
@@ -16,7 +16,7 @@
 //! The folder is the session's `cwd`, taken as a path on that computer.
 //!
 //! TODO(computers): sessions now have a current computer (`crate::computers`,
-//! `GET /api/v1/sessions/{id}/computer`) and computers are registered there. Default
+//! `GET /api/sessions/{id}/computer`) and computers are registered there. Default
 //! `?computer=` to the session's current computer and map registered computers to IDE targets
 //! instead of the separate `EMBER_IDE_COMPUTERS` list.
 //!
@@ -301,7 +301,7 @@ struct IdeState {
 
 pub fn router(sessions: Arc<Sessions>, config: Arc<IdeConfig>) -> Router {
     Router::new()
-        .route("/api/v1/sessions/{id}/ide", get(ide_targets))
+        .route("/api/sessions/{id}/ide", get(ide_targets))
         .with_state(IdeState { sessions, config })
 }
 

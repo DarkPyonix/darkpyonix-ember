@@ -80,7 +80,7 @@
     </div>
     <p>
       The server detects the installed agents and their versions at start and on demand
-      (<code>GET /api/v1/agents</code>); a missing agent is shown as not installed, not as an
+      (<code>GET /api/agents</code>); a missing agent is shown as not installed, not as an
       error. Each agent's binary can be set with <code>EMBER_CLAUDE_BIN</code>,
       <code>EMBER_CODEX_BIN</code>, <code>EMBER_AGY_BIN</code> and <code>EMBER_OMP_BIN</code>;
       otherwise the name is looked up on <code>PATH</code>.
@@ -88,9 +88,8 @@
     <p>
       An idle session releases its agent process after <code>EMBER_IDLE_SECS</code> (300 by
       default). The next message starts it again through the agent's own resume, so the
-      conversation continues where it was. REST paths on this page are shown as the code serves
-      them today; <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a> changes
-      <code>/api/v1/...</code> to <code>/api/...</code>.
+      conversation continues where it was. REST paths carry no version, so they
+      all begin with <code>/api/</code>.
     </p>
 
     <h2 id="claude">Claude Code <span class="pill works">Implemented</span></h2>
@@ -146,12 +145,12 @@
       <code>EMBER_HOSTED=1</code> and never offered through darkpyonix.dev.
     </p>
     <ol>
-      <li><code>POST /api/v1/chatgpt/signin</code> returns the authorization URL. Open it in a
+      <li><code>POST /api/chatgpt/signin</code> returns the authorization URL. Open it in a
           browser.</li>
       <li>OpenAI redirects to <code>http://127.0.0.1:&lt;port&gt;/auth/callback</code> on the server
           (<code>EMBER_CHATGPT_REDIRECT_PORT</code>, default the server's port).</li>
       <li>If your browser runs on another machine, that address does not reach the server: paste
-          the final URL into <code>POST /api/v1/chatgpt/signin/complete</code>.</li>
+          the final URL into <code>POST /api/chatgpt/signin/complete</code>.</li>
     </ol>
     <p>
       Tokens are stored encrypted and never returned by the API. The weekly cap is set by you
@@ -242,13 +241,13 @@
       CLI.
     </p>
     <ol>
-      <li>Create an account: <code>POST /api/v1/accounts</code> with
+      <li>Create an account: <code>POST /api/accounts</code> with
           <code>{"agent": "claude-code", "label": "work"}</code>.</li>
       <li>The answer includes the exact login command, for example
           <code>CLAUDE_CONFIG_DIR=&lt;dir&gt; claude auth login</code>. Run it on the server as the
           user ember runs as. Ember never automates login. For Codex on a headless server, add
           <code>--device-auth</code>.</li>
-      <li><code>POST /api/v1/accounts/{id}/check</code> runs the agent's read-only status
+      <li><code>POST /api/accounts/{id}/check</code> runs the agent's read-only status
           command.</li>
     </ol>
     <p>
@@ -256,8 +255,8 @@
       are neither rate-limited nor logged out, the one with the fewest tokens used today (UTC),
       then the default account, then the oldest. The choice and its reason are stored on the
       session and do not change silently. A rate-limited account is skipped until its reset time;
-      a completed turn on it clears the mark. <code>GET /api/v1/accounts/route?agent=…</code> shows
-      what the router would choose now, and <code>GET /api/v1/usage?days=7</code> shows tokens per
+      a completed turn on it clears the mark. <code>GET /api/accounts/route?agent=…</code> shows
+      what the router would choose now, and <code>GET /api/usage?days=7</code> shows tokens per
       account per day.
     </p>
     <div class="warn">
@@ -270,7 +269,7 @@
     </div>
     <p>
       API-key providers (any OpenAI-compatible or vendor API) are added with
-      <code>POST /api/v1/providers</code>. Keys are encrypted at rest and never returned.
+      <code>POST /api/providers</code>. Keys are encrypted at rest and never returned.
     </p>
 
     <h2 id="mcp">The central MCP registry <span class="pill works">Implemented</span></h2>
@@ -283,7 +282,7 @@
 
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>http</figcaption>
-<pre><code><span class="k">POST</span> /api/v1/mcp
+<pre><code><span class="k">POST</span> /api/mcp
 { <span class="at">"name"</span>: <span class="s">"github"</span>, <span class="at">"command"</span>: <span class="s">"github-mcp-server"</span>, <span class="at">"args"</span>: [<span class="s">"stdio"</span>],
   <span class="at">"env"</span>: { <span class="at">"GITHUB_TOKEN"</span>: <span class="s">"..."</span> }, <span class="at">"scope"</span>: <span class="s">"all"</span> }   <span class="c"># or "project:&lt;name&gt;"</span></code></pre>
     </figure>
@@ -307,7 +306,7 @@
           missed, with a notice. With <code>catch_up</code>, only the latest missed trigger runs.</li>
       <li>Cron times follow the time zone across daylight-saving changes; an hour that occurs
           twice fires once.</li>
-      <li>You manage schedules through <code>/api/v1/schedules</code> (create, pause, resume, run
+      <li>You manage schedules through <code>/api/schedules</code> (create, pause, resume, run
           now, list runs). An agent can create them from a conversation:</li>
     </ul>
 
@@ -343,8 +342,8 @@ ember-a2a show &lt;message-id&gt;</code></pre>
       <li>Loop protection: at most 20 messages per session and 10 per pair of sessions within 10
           minutes. Two agents told to reply to each other forever are stopped, with a notice.</li>
       <li>A2A can be switched off for the whole server (<code>EMBER_A2A=0</code>, or
-          <code>PUT /api/v1/a2a/settings</code>) or per session
-          (<code>/api/v1/sessions/{id}/a2a</code>). Sends to or from a switched-off session are
+          <code>PUT /api/a2a/settings</code>) or per session
+          (<code>/api/sessions/{id}/a2a</code>). Sends to or from a switched-off session are
           refused with a reason.</li>
     </ul>
 

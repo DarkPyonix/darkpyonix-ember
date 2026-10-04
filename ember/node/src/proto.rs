@@ -2,15 +2,12 @@
 //!
 //! Every request and response is JSON. Byte payloads (file contents, process output, stdin) are
 //! base64 strings so that one encoding carries over any transport. The node ↔ server transport
-//! is not decided yet (`INTENT.md` Q7). Bump [`PROTOCOL_VERSION`] on any incompatible change.
+//! is not decided yet (`INTENT.md` Q7).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-/// Incremented on incompatible wire changes; reported by `/v1/health`.
-pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Serde helper: `Vec<u8>` as a standard base64 string.
 pub mod b64 {
@@ -65,7 +62,6 @@ pub enum ErrorCode {
 pub struct Health {
     pub ok: bool,
     pub version: String,
-    pub protocol: u32,
 }
 
 /// Description of the computer, for the agent's replaceable environment block (FR-X3, FR-S7).
@@ -225,7 +221,7 @@ pub struct ListResponse {
     pub entries: Vec<DirEntry>,
 }
 
-/// `POST /v1/fs/readlink` response.
+/// `POST /fs/readlink` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadlinkResponse {
     pub path: PathBuf,
@@ -396,7 +392,7 @@ pub struct PtySize {
     pub cols: u16,
 }
 
-/// First message a client sends on `/v1/exec`.
+/// First message a client sends on `/exec`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecRequest {
     #[serde(flatten)]
@@ -406,7 +402,7 @@ pub struct ExecRequest {
     pub pty: Option<PtySize>,
 }
 
-/// Client → daemon messages on `/v1/exec` after the [`ExecRequest`].
+/// Client → daemon messages on `/exec` after the [`ExecRequest`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ExecInput {
@@ -425,7 +421,7 @@ pub enum ExecInput {
     },
 }
 
-/// Daemon → client messages on `/v1/exec`.
+/// Daemon → client messages on `/exec`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum ExecEvent {
@@ -494,7 +490,7 @@ pub struct KillRequest {
     pub signal: Option<i32>,
 }
 
-/// Node → server notifications on `/v1/events?after=<seq>`.
+/// Node → server notifications on `/events?after=<seq>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeEvent {
     /// Strictly increasing for the daemon's lifetime; resume with `after=<last seen>`.
@@ -561,7 +557,7 @@ impl std::str::FromStr for TermOrigin {
     }
 }
 
-/// `POST /v1/terms`.
+/// `POST /terms`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermCreateRequest {
     /// What to run. `None`: the login shell of the daemon's user (`$SHELL`, else `/bin/sh`;
@@ -674,7 +670,7 @@ pub struct TermInfo {
     pub has_screen: bool,
 }
 
-/// `GET /v1/terms` query.
+/// `GET /terms` query.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TermListQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -686,7 +682,7 @@ pub struct TermListQuery {
     pub running: Option<bool>,
 }
 
-/// `GET /v1/terms/{id}/snapshot`.
+/// `GET /terms/{id}/snapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermSnapshot {
     pub size: PtySize,
@@ -697,7 +693,7 @@ pub struct TermSnapshot {
     pub text: String,
 }
 
-/// `POST /v1/terms/{id}/control`.
+/// `POST /terms/{id}/control`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermControlRequest {
     /// The attached client that takes or releases control.
@@ -705,7 +701,7 @@ pub struct TermControlRequest {
     pub take: bool,
 }
 
-/// First message a client sends on `/v1/terms/{id}/attach`.
+/// First message a client sends on `/terms/{id}/attach`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TermHello {
     pub device: String,
@@ -728,7 +724,7 @@ pub struct TermHello {
     pub snapshot: bool,
 }
 
-/// Client → daemon messages on `/v1/terms/{id}/attach` after the [`TermHello`].
+/// Client → daemon messages on `/terms/{id}/attach` after the [`TermHello`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum TermInput {
@@ -761,7 +757,7 @@ pub enum TermRefusal {
     NotRunning,
 }
 
-/// Daemon → client messages on `/v1/terms/{id}/attach`.
+/// Daemon → client messages on `/terms/{id}/attach`.
 // A wire message: `Attached` is sent once per attach, so its size does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

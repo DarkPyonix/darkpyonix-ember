@@ -55,12 +55,12 @@ use ember_server::store::Store;
 ///   redirect (default: the `EMBER_LISTEN` port)
 /// - `EMBER_TRANSPORT=1`: bind the peer-to-peer transport (key in `<data dir>/transport.key`;
 ///   peer id and address printed at start). Computers can then be registered by peer, and the
-///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
-///   `/api/v1/devices`, managed on the TCP listener only)
+///   API is also served on transport service `ember-server` to allowed devices (FR-N3,
+///   `/api/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
-/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`; `off` disables).
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`; `off` disables).
 ///   With the transport on, the server can register to the user's GitHub account there
-///   (`POST /api/v1/hub/link`, local only), then publishes its address and resolves computers
+///   (`POST /api/hub/link`, local only), then publishes its address and resolves computers
 ///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides
 ///   the relay derived from the hub URL; `EMBER_HUB_SYNC_DEVICES=1` keeps the devices
 ///   allow-list in sync with the account's devices
@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
             Some(h) if registered => h.ensure_resolve_token().await,
             _ => None,
         };
-        // The hub's relay and directory from its `/v1/config` (derived when it has none). Asked
+        // The hub's relay and directory from its `/config` (derived when it has none). Asked
         // only when the hub will be used now, so an unregistered server does not contact it.
         let hub_config = match &hub {
             Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => Some(h.discover().await),
@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
             match (&st.device, st.revoked) {
                 (Some(d), false) => tracing::info!(hub = %st.hub_url, name = %d.name, "registered with the hub"),
                 (Some(_), true) => tracing::warn!(hub = %st.hub_url, "the hub removed this server; register again with a new key"),
-                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/v1/hub/link)"),
+                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/hub/link)"),
             }
         }
         t.wait_online(std::time::Duration::from_secs(5)).await;
@@ -278,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
     } else if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
         tracing::warn!(
             "ChatGPT sign-in redirects to {}, but the server listens on {addr}; paste the final \
-             URL into POST /api/v1/chatgpt/signin/complete",
+             URL into POST /api/chatgpt/signin/complete",
             chatgpt.config().redirect_uri()
         );
     }

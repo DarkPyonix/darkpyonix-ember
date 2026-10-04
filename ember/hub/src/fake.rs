@@ -3,12 +3,12 @@
 //! `feat/m4-hub-ember-gaps`), with the same status codes and bodies. One account; a "signed-in
 //! browser" is represented by [`FakeHub::session_token`] sent as a bearer token.
 //!
-//! Served: `GET /health`, `GET /v1/config`, `POST /v1/device-links`,
-//! `GET /v1/device-links/{link_id}`, `POST /v1/device-links/{link_id}/token`,
-//! `GET`/`POST /v1/link-codes/{user_code}`, `GET /v1/me`, `POST /v1/me/resolve-token`,
-//! `GET /v1/devices` (weak `ETag`, `If-None-Match`, `?wait=0..25` long-poll),
-//! `GET`/`PATCH`/`DELETE /v1/devices/{endpoint_id}`, `POST /v1/devices/{endpoint_id}/readmit`,
-//! `GET /v1/devices/{endpoint_id}/addresses`, `PUT`/`GET /pkarr/{key}` (the pkarr relay
+//! Served: `GET /health`, `GET /config`, `POST /device-links`,
+//! `GET /device-links/{link_id}`, `POST /device-links/{link_id}/token`,
+//! `GET`/`POST /link-codes/{user_code}`, `GET /me`, `POST /me/resolve-token`,
+//! `GET /devices` (weak `ETag`, `If-None-Match`, `?wait=0..25` long-poll),
+//! `GET`/`PATCH`/`DELETE /devices/{endpoint_id}`, `POST /devices/{endpoint_id}/readmit`,
+//! `GET /devices/{endpoint_id}/addresses`, `PUT`/`GET /pkarr/{key}` (the pkarr relay
 //! protocol, with signature check; resolving with a `dpr_` resolve token in `?token=`, never a
 //! device token). Every `401` carries `code` `device_removed` or `invalid_credentials`. Not
 //! served: GitHub sign-in, the relay, shares, names.
@@ -51,8 +51,6 @@ const MAX_DNS_PACKET: usize = 1000;
 const MAX_WAIT_SECS: u64 = 25;
 /// How long a re-admission stays open (FR-H11).
 const READMIT_SECS: i64 = 900;
-/// The `api_version` of `/v1/config` (the contract's `const: 1`).
-pub const FAKE_API_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkStatus {
@@ -271,12 +269,12 @@ impl FakeHub {
         self.state.lock().unwrap().link_ttl = secs;
     }
 
-    /// Whether `GET /v1/config` is served (`false`: `404`, like a hub before FR-H8).
+    /// Whether `GET /config` is served (`false`: `404`, like a hub before FR-H8).
     pub fn set_config_enabled(&self, on: bool) {
         self.state.lock().unwrap().config_enabled = on;
     }
 
-    /// The `relay_urls` `/v1/config` advertises (default none: the fake has no relay).
+    /// The `relay_urls` `/config` advertises (default none: the fake has no relay).
     pub fn set_config_relays(&self, relays: Vec<String>) {
         self.state.lock().unwrap().config_relays = relays;
     }
@@ -286,7 +284,7 @@ impl FakeHub {
         self.state.lock().unwrap().honour_wait = on;
     }
 
-    /// `GET /v1/devices` requests served so far.
+    /// `GET /devices` requests served so far.
     pub fn device_list_requests(&self) -> u64 {
         self.state.lock().unwrap().device_list_requests
     }
@@ -331,7 +329,7 @@ impl FakeHub {
         self.state.lock().unwrap().live_device(endpoint_id).map(|d| d.resolve_token.clone())
     }
 
-    /// Removes a device as the account owner would (`DELETE /v1/devices/{id}`).
+    /// Removes a device as the account owner would (`DELETE /devices/{id}`).
     pub fn remove(&self, endpoint_id: &PeerId) -> bool {
         self.state.lock().unwrap().remove(endpoint_id)
     }
@@ -388,18 +386,20 @@ impl std::fmt::Debug for FakeHub {
 fn router(state: Shared) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(json!({ "status": "ok", "version": "fake" })) }))
-        .route("/v1/config", get(hub_config))
-        .route("/v1/device-links", post(create_link))
-        .route("/v1/device-links/{link_id}", get(get_link))
-        .route("/v1/device-links/{link_id}/token", post(claim_link))
-        .route("/v1/link-codes/{code}", get(get_link_code).post(decide_link_code))
-        .route("/v1/me", get(me))
-        .route("/v1/me/resolve-token", post(rotate_resolve_token))
-        .route("/v1/devices", get(list_devices))
-        .route("/v1/devices/{id}", get(get_device).patch(update_device).delete(remove_device))
-        .route("/v1/devices/{id}/readmit", post(readmit_device))
-        .route("/v1/devices/{id}/addresses", get(device_addresses))
+        .route("/config", get(hub_config))
+        .route("/device-links", post(create_link))
+        .route("/device-links/{link_id}", get(get_link))
+        .route("/device-links/{link_id}/token", post(claim_link))
+        .route("/link-codes/{code}", get(get_link_code).post(decide_link_code))
+        .route("/me", get(me))
+        .route("/me/resolve-token", post(rotate_resolve_token))
+        .route("/devices", get(list_devices))
+        .route("/devices/{id}", get(get_device).patch(update_device).delete(remove_device))
+        .route("/devices/{id}/readmit", post(readmit_device))
+        .route("/devices/{id}/addresses", get(device_addresses))
         .route("/pkarr/{key}", put(pkarr_put).get(pkarr_get))
+        // Like the real hub (core NFR-V1): no versioned paths; `/v1/*` and anything else is 404.
+        .fallback(|| async { err(StatusCode::NOT_FOUND, "not found") })
         .with_state(state)
 }
 
@@ -533,7 +533,6 @@ async fn hub_config(State(st): State<Shared>) -> HResult {
     Ok((
         [("cache-control", "public, max-age=300")],
         Json(json!({
-            "api_version": FAKE_API_VERSION,
             "hub_version": "fake",
             "relay_urls": s.config_relays,
             "pkarr_url": format!("{}/pkarr", s.base_url),
@@ -729,7 +728,7 @@ fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
         .is_some_and(|v| v.split(',').any(|t| t.trim() == "*" || strip(t) == strip(etag)))
 }
 
-/// `GET /v1/devices` (FR-H9): weak `ETag` = the list's version; `If-None-Match` matching →
+/// `GET /devices` (FR-H9): weak `ETag` = the list's version; `If-None-Match` matching →
 /// `304`, or with `?wait=N` (0..=25) held until the version changes (`200`) or `N` s pass
 /// (`304`). The caller's credential is checked on every wake-up: a waiting device that was
 /// removed gets `401 device_removed`.

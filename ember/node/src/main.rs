@@ -16,19 +16,19 @@ use ember_transport::PeerGate;
 /// - `EMBER_NODE_STATE_DIR`: persistent terminal metadata and `local.json` (default
 ///   `$HOME/.ember/node`)
 /// - `EMBER_NODE_KEEP_PTY=0`: do not start PTY keepers (terminal sessions end with the daemon)
-/// - `EMBER_NODE_CODEX_BIN`: codex binary for `/v1/exec-server` (default `codex` on `PATH`)
+/// - `EMBER_NODE_CODEX_BIN`: codex binary for `/exec-server` (default `codex` on `PATH`)
 /// - `EMBER_NODE_TRANSPORT`: `1` also serves the API over the peer-to-peer transport (service
-///   `ember-node/1`, key in `<state dir>/transport.key`), `only` serves it there instead of TCP;
+///   `ember-node`, key in `<state dir>/transport.key`), `only` serves it there instead of TCP;
 ///   the peer id and address are printed at start
 /// - `EMBER_NODE_ALLOWED_PEERS` and `<state dir>/allowed-peers`: peer ids (ember servers) allowed
 ///   to connect over the transport (FR-N3); SIGHUP reloads the file and disconnects removed peers
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
-/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`, `off` disables);
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`, `off` disables);
 ///   `ember-node hub register` joins this computer to the user's GitHub account there (the
 ///   registration is kept in `<state dir>/hub.json`); a registered node publishes its address
 ///   through the hub and uses its relay (FR-N2). `EMBER_NODE_HUB_ALLOW_SERVERS=1` also admits
 ///   the account's main servers over the transport
-/// - `EMBER_NODE_EGRESS=off`: refuse `/v1/egress` (the remote browser's SOCKS5 exit, FR-R1)
+/// - `EMBER_NODE_EGRESS=off`: refuse `/egress` (the remote browser's SOCKS5 exit, FR-R1)
 /// - `EMBER_NODE_EGRESS_DENY`: denied egress destinations (`private`, `link-local`, `loopback`,
 ///   CIDRs; default none)
 /// - `EMBER_NODE_SOCKS_LISTEN`: also serve plain SOCKS5 on this address (loopback clients need no
@@ -37,7 +37,7 @@ use ember_transport::PeerGate;
 /// `ember-node __keep-pty …` is the internal PTY keeper (see `ember_node::term::pty`).
 /// `ember-node hub <register [--name N] | status | forget>` manages the hub registration.
 /// `ember-node exec-server` instead becomes `codex exec-server --listen stdio` on this process's
-/// stdio, the same command the daemon starts for each `/v1/exec-server` connection.
+/// stdio, the same command the daemon starts for each `/exec-server` connection.
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some(pty::KEEPER_SUBCOMMAND) {

@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::paths;
 use crate::types::{
     AddressRecord, ClaimOutcome, Device, DeviceApp, HubInfo, LinkCodeInfo, LinkInfo, LinkRequest, Me, PendingLink,
     Readmission,
@@ -20,7 +21,7 @@ pub const CODE_DEVICE_REMOVED: &str = "device_removed";
 /// The `code` of any other `401` (missing, unknown or expired credential).
 pub const CODE_INVALID_CREDENTIALS: &str = "invalid_credentials";
 
-/// How long `GET /v1/config` may take before discovery falls back to the derived URLs.
+/// How long `GET /config` may take before discovery falls back to the derived URLs.
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 /// Added to a long-poll's `wait` for the request timeout (the hub answers `304` at `wait`).
 const LONG_POLL_SLACK: Duration = Duration::from_secs(15);
@@ -107,7 +108,7 @@ struct ErrorBody {
     code: Option<String>,
 }
 
-/// Result of a conditional (and possibly long-polled) `GET /v1/devices`.
+/// Result of a conditional (and possibly long-polled) `GET /devices`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DevicesPoll {
     /// `304`: the list still matches the `ETag` sent (or nothing changed within `wait`).
@@ -135,7 +136,7 @@ struct ResolveToken {
 }
 
 impl HubClient {
-    /// A client for the hub at `base` (`https://darkpyonix.dev`), without a token.
+    /// A client for the hub at `base` (`https://api.darkpyonix.dev`), without a token.
     pub fn new(base: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
@@ -221,11 +222,11 @@ impl HubClient {
 
     // ------------------------------------------------------------------ hub configuration
 
-    /// `GET /v1/config` (public, FR-H8): the hub's relays, directory, link page and API
+    /// `GET /config` (public, FR-H8): the hub's relays, directory, link page and API
     /// version. `Ok(None)` when the hub does not serve it (`404`, `405`, `501`: a hub older
     /// than the endpoint).
     pub async fn config(&self) -> Result<Option<HubInfo>, HubError> {
-        let resp = Self::send(self.http.get(format!("{}/v1/config", self.base)).timeout(CONFIG_TIMEOUT)).await?;
+        let resp = Self::send(self.http.get(format!("{}{}", self.base, paths::CONFIG)).timeout(CONFIG_TIMEOUT)).await?;
         match resp.status() {
             StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED => Ok(None),
             _ => Self::json::<HubInfo>(resp).await.map(Some),
@@ -234,18 +235,18 @@ impl HubClient {
 
     // ------------------------------------------------------------------ device links (FR-H1)
 
-    /// `POST /v1/device-links`: ask to join an account. Unauthenticated.
+    /// `POST /device-links`: ask to join an account. Unauthenticated.
     pub async fn create_link(&self, req: &LinkRequest) -> Result<PendingLink, HubError> {
-        let resp = Self::send(self.http.post(format!("{}/v1/device-links", self.base)).json(req)).await?;
+        let resp = Self::send(self.http.post(format!("{}{}", self.base, paths::DEVICE_LINKS)).json(req)).await?;
         Self::json(resp).await
     }
 
-    /// `POST /v1/device-links/{link_id}/token` with the hex signature over
+    /// `POST /device-links/{link_id}/token` with the hex signature over
     /// [`crate::link_message`]. `403` (denied) and `404` (expired / claimed) are errors.
     pub async fn claim(&self, link_id: &str, signature_hex: &str) -> Result<ClaimOutcome, HubError> {
         let resp = Self::send(
             self.http
-                .post(format!("{}/v1/device-links/{link_id}/token", self.base))
+                .post(format!("{}{}", self.base, paths::device_link_token(link_id)))
                 .json(&json!({ "signature": signature_hex })),
         )
         .await?;
@@ -259,52 +260,52 @@ impl HubClient {
         }
     }
 
-    /// `GET /v1/device-links/{link_id}` (no credentials): the link's status, for a device that
+    /// `GET /device-links/{link_id}` (no credentials): the link's status, for a device that
     /// restarted while waiting. `404` once an expired link was deleted.
     pub async fn link_status(&self, link_id: &str) -> Result<LinkInfo, HubError> {
-        let resp = Self::send(self.http.get(format!("{}/v1/device-links/{}", self.base, encode(link_id)))).await?;
+        let resp = Self::send(self.http.get(format!("{}{}", self.base, paths::device_link(&encode(link_id))))).await?;
         Self::json(resp).await
     }
 
-    /// `GET /v1/link-codes/{user_code}`: what a pending code would let in (account rights: a
+    /// `GET /link-codes/{user_code}`: what a pending code would let in (account rights: a
     /// main server's token).
     pub async fn link_code(&self, user_code: &str) -> Result<LinkCodeInfo, HubError> {
-        let resp = Self::send(self.authed(Method::GET, &format!("/v1/link-codes/{}", encode(user_code)))?).await?;
+        let resp = Self::send(self.authed(Method::GET, &paths::link_code(&encode(user_code)))?).await?;
         Self::json(resp).await
     }
 
-    /// `POST /v1/link-codes/{user_code}` `{approve}` (account rights). A device token gets
+    /// `POST /link-codes/{user_code}` `{approve}` (account rights). A device token gets
     /// `403` approving a link that asks for `main_server`, or a re-admitted key's link (FR-H11):
     /// those need a signed-in browser session. Denying them is allowed.
     pub async fn decide_link_code(&self, user_code: &str, approve: bool) -> Result<(), HubError> {
         let req = self
-            .authed(Method::POST, &format!("/v1/link-codes/{}", encode(user_code)))?
+            .authed(Method::POST, &paths::link_code(&encode(user_code)))?
             .json(&json!({ "approve": approve }));
         Self::no_content(Self::send(req).await?).await
     }
 
     // ------------------------------------------------------------------ account and devices
 
-    /// `GET /v1/me`.
+    /// `GET /me`.
     pub async fn me(&self) -> Result<Me, HubError> {
-        Self::json(Self::send(self.authed(Method::GET, "/v1/me")?).await?).await
+        Self::json(Self::send(self.authed(Method::GET, paths::ME)?).await?).await
     }
 
-    /// `POST /v1/me/resolve-token` (device token in the header): a new read-only resolve token
+    /// `POST /me/resolve-token` (device token in the header): a new read-only resolve token
     /// (`dpr_...`) for `GET /pkarr/{key}?token=` (NFR-H2). The previous one stops working at
     /// once.
     pub async fn rotate_resolve_token(&self) -> Result<String, HubError> {
-        let t: ResolveToken = Self::json(Self::send(self.authed(Method::POST, "/v1/me/resolve-token")?).await?).await?;
+        let t: ResolveToken = Self::json(Self::send(self.authed(Method::POST, paths::ME_RESOLVE_TOKEN)?).await?).await?;
         Ok(t.resolve_token)
     }
 
-    /// `GET /v1/devices`: the account's devices, oldest first (removed ones not listed).
+    /// `GET /devices`: the account's devices, oldest first (removed ones not listed).
     pub async fn devices(&self) -> Result<Vec<Device>, HubError> {
-        let list: DeviceList = Self::json(Self::send(self.authed(Method::GET, "/v1/devices")?).await?).await?;
+        let list: DeviceList = Self::json(Self::send(self.authed(Method::GET, paths::DEVICES)?).await?).await?;
         Ok(list.devices)
     }
 
-    /// `GET /v1/devices` with `If-None-Match: <etag>` and, with `wait` (capped at 25 s),
+    /// `GET /devices` with `If-None-Match: <etag>` and, with `wait` (capped at 25 s),
     /// `?wait=<seconds>` (FR-H9): the hub holds the request until the list's version differs
     /// from `etag` (`200`) or `wait` passes (`304`). It notices changes about every 2 s, and a
     /// waiting device that is removed gets `401 device_removed`. A hub older than FR-H9 answers
@@ -312,9 +313,9 @@ impl HubClient {
     pub async fn devices_since(&self, etag: Option<&str>, wait: Option<Duration>) -> Result<DevicesPoll, HubError> {
         let mut req = match wait {
             Some(w) => self
-                .authed(Method::GET, &format!("/v1/devices?wait={}", w.min(MAX_WAIT).as_secs().max(1)))?
+                .authed(Method::GET, &format!("{}?wait={}", paths::DEVICES, w.min(MAX_WAIT).as_secs().max(1)))?
                 .timeout(w + LONG_POLL_SLACK),
-            None => self.authed(Method::GET, "/v1/devices")?,
+            None => self.authed(Method::GET, paths::DEVICES)?,
         };
         if let Some(e) = etag {
             req = req.header(reqwest::header::IF_NONE_MATCH, e);
@@ -332,40 +333,40 @@ impl HubClient {
         Ok(DevicesPoll::Changed { devices: list.devices, etag })
     }
 
-    /// `GET /v1/devices/{endpoint_id}`.
+    /// `GET /devices/{endpoint_id}`.
     pub async fn device(&self, id: &PeerId) -> Result<Device, HubError> {
-        Self::json(Self::send(self.authed(Method::GET, &format!("/v1/devices/{id}"))?).await?).await
+        Self::json(Self::send(self.authed(Method::GET, &paths::device(id))?).await?).await
     }
 
-    /// `PATCH /v1/devices/{endpoint_id}` `{name}`: rename (account rights, or the device's own
+    /// `PATCH /devices/{endpoint_id}` `{name}`: rename (account rights, or the device's own
     /// token).
     pub async fn rename_device(&self, id: &PeerId, name: &str) -> Result<Device, HubError> {
-        let req = self.authed(Method::PATCH, &format!("/v1/devices/{id}"))?.json(&json!({ "name": name }));
+        let req = self.authed(Method::PATCH, &paths::device(id))?.json(&json!({ "name": name }));
         Self::json(Self::send(req).await?).await
     }
 
-    /// `PATCH /v1/devices/{endpoint_id}` `{app}` (FR-H10): what the device runs; `None` clears
+    /// `PATCH /devices/{endpoint_id}` `{app}` (FR-H10): what the device runs; `None` clears
     /// it. Only the device's own token may set it (`403` otherwise).
     pub async fn set_app(&self, id: &PeerId, app: Option<&DeviceApp>) -> Result<Device, HubError> {
-        let req = self.authed(Method::PATCH, &format!("/v1/devices/{id}"))?.json(&json!({ "app": app }));
+        let req = self.authed(Method::PATCH, &paths::device(id))?.json(&json!({ "app": app }));
         Self::json(Self::send(req).await?).await
     }
 
-    /// `POST /v1/devices/{endpoint_id}/readmit` (a signed-in session only; device tokens get
+    /// `POST /devices/{endpoint_id}/readmit` (a signed-in session only; device tokens get
     /// `403`, FR-H11): for 15 minutes the removed key may link again, approved by a session.
     pub async fn readmit(&self, id: &PeerId) -> Result<Readmission, HubError> {
-        Self::json(Self::send(self.authed(Method::POST, &format!("/v1/devices/{id}/readmit"))?).await?).await
+        Self::json(Self::send(self.authed(Method::POST, &paths::device_readmit(id))?).await?).await
     }
 
-    /// `DELETE /v1/devices/{endpoint_id}`: account rights, or the device's own token (a device
+    /// `DELETE /devices/{endpoint_id}`: account rights, or the device's own token (a device
     /// leaving its account).
     pub async fn remove_device(&self, id: &PeerId) -> Result<(), HubError> {
-        Self::no_content(Self::send(self.authed(Method::DELETE, &format!("/v1/devices/{id}"))?).await?).await
+        Self::no_content(Self::send(self.authed(Method::DELETE, &paths::device(id))?).await?).await
     }
 
-    /// `GET /v1/devices/{endpoint_id}/addresses`: the decoded address record.
+    /// `GET /devices/{endpoint_id}/addresses`: the decoded address record.
     pub async fn addresses(&self, id: &PeerId) -> Result<AddressRecord, HubError> {
-        Self::json(Self::send(self.authed(Method::GET, &format!("/v1/devices/{id}/addresses"))?).await?).await
+        Self::json(Self::send(self.authed(Method::GET, &paths::device_addresses(id))?).await?).await
     }
 }
 
@@ -389,8 +390,8 @@ mod tests {
 
     #[test]
     fn token_is_not_in_debug_output() {
-        let c = HubClient::new("https://darkpyonix.dev/").with_token("dpd_secret");
-        assert_eq!(c.base_url(), "https://darkpyonix.dev");
+        let c = HubClient::new("https://api.darkpyonix.dev/").with_token("dpd_secret");
+        assert_eq!(c.base_url(), "https://api.darkpyonix.dev");
         assert!(!format!("{c:?}").contains("dpd_secret"));
         assert_eq!(encode(" bcdf-ghjk "), "bcdf-ghjk");
         assert_eq!(encode("a/b"), "a%2Fb");

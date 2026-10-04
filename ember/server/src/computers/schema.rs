@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS computers (
 CREATE TABLE IF NOT EXISTS session_computer (
     session_id  TEXT PRIMARY KEY,
     computer_id TEXT NOT NULL,
-    -- The computer's /v1/env at the time of the switch (JSON).
+    -- The computer's /env at the time of the switch (JSON).
     env_json    TEXT,
     -- FR-S7 v0 notice still to be delivered with the next message.
     notice      TEXT,

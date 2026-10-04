@@ -74,21 +74,21 @@ async fn fr_l4_assign_and_unassign_computers_is_persisted_and_pushed() {
     let studio = f.computers.registry().insert("studio", "http://studio:8741", "tok").unwrap();
     let mut rx = f.sessions.subscribe();
 
-    let (st, list) = call(&f.app, Method::GET, "/api/v1/projects", None).await;
+    let (st, list) = call(&f.app, Method::GET, "/api/projects", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(list, json!([{ "name": "alpha", "created_at": list[0]["created_at"], "computers": [] }]));
 
     // A project with no sessions yet; names are percent-encoded path segments.
-    let (st, p) = call(&f.app, Method::POST, "/api/v1/projects", Some(json!({ "name": "web/app" }))).await;
+    let (st, p) = call(&f.app, Method::POST, "/api/projects", Some(json!({ "name": "web/app" }))).await;
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(p["name"], "web/app");
-    let (st, _) = call(&f.app, Method::POST, "/api/v1/projects", Some(json!({ "name": "web/app" }))).await;
+    let (st, _) = call(&f.app, Method::POST, "/api/projects", Some(json!({ "name": "web/app" }))).await;
     assert_eq!(st, StatusCode::OK, "creating an existing project is not an error");
-    let (st, _) = call(&f.app, Method::POST, "/api/v1/projects", Some(json!({ "name": " " }))).await;
+    let (st, _) = call(&f.app, Method::POST, "/api/projects", Some(json!({ "name": " " }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     // Many-to-many: studio on both projects, local on alpha too.
-    let uri = |p: &str, c: &str| format!("/api/v1/projects/{p}/computers/{c}");
+    let uri = |p: &str, c: &str| format!("/api/projects/{p}/computers/{c}");
     let (st, p) = call(&f.app, Method::PUT, &uri("alpha", &studio.id), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(p["computers"], json!([studio.id]));
@@ -97,7 +97,7 @@ async fn fr_l4_assign_and_unassign_computers_is_persisted_and_pushed() {
     let mut want = vec![studio.id.clone(), LOCAL.to_string()];
     want.sort();
     assert_eq!(p["computers"], json!(want));
-    let (st, p) = call(&f.app, Method::GET, "/api/v1/projects/web%2Fapp", None).await;
+    let (st, p) = call(&f.app, Method::GET, "/api/projects/web%2Fapp", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(p["computers"], json!([studio.id]));
 
@@ -112,13 +112,12 @@ async fn fr_l4_assign_and_unassign_computers_is_persisted_and_pushed() {
     // Every change was pushed with the project's full assignment.
     let pushes: Vec<Value> = drain(&mut rx).into_iter().filter(|p| p["type"] == "project_updated").collect();
     assert_eq!(pushes.len(), 5, "{pushes:?}");
-    assert!(pushes.iter().all(|p| p["v"] == 1));
     assert_eq!(pushes.last().unwrap()["project"]["computers"], json!([studio.id]));
 
     // Removing the computer unassigns it everywhere and pushes the affected projects.
-    let (st, _) = call(&f.app, Method::DELETE, &format!("/api/v1/computers/{}", studio.id), None).await;
+    let (st, _) = call(&f.app, Method::DELETE, &format!("/api/computers/{}", studio.id), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (_, list) = call(&f.app, Method::GET, "/api/v1/projects", None).await;
+    let (_, list) = call(&f.app, Method::GET, "/api/projects", None).await;
     assert!(list.as_array().unwrap().iter().all(|p| p["computers"] == json!([])), "{list}");
     let names: Vec<Value> = drain(&mut rx).into_iter().map(|p| p["project"]["name"].clone()).collect();
     assert_eq!(names, vec![json!("alpha"), json!("web/app")]);
@@ -130,12 +129,12 @@ async fn fr_l9_patch_renames_pins_archives_and_pushes() {
     let id = new_session(&f.sessions, "alpha");
     let mut rx = f.sessions.subscribe();
 
-    let (st, rec) = call(&f.app, Method::GET, "/api/v1/sessions", None).await;
+    let (st, rec) = call(&f.app, Method::GET, "/api/sessions", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!((rec[0]["pinned"].clone(), rec[0]["archived"].clone()), (json!(false), json!(false)));
     assert!(rec[0].get("account_id").is_some(), "the record carries its account");
 
-    let path = format!("/api/v1/sessions/{id}");
+    let path = format!("/api/sessions/{id}");
     let (st, rec) = call(&f.app, Method::PATCH, &path, Some(json!({ "title": " Deploy fix ", "pinned": true }))).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!((rec["title"].clone(), rec["pinned"].clone(), rec["archived"].clone()), (json!("Deploy fix"), json!(true), json!(false)));
@@ -144,7 +143,7 @@ async fn fr_l9_patch_renames_pins_archives_and_pushes() {
 
     assert_eq!(call(&f.app, Method::PATCH, &path, Some(json!({ "title": "" }))).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(
-        call(&f.app, Method::PATCH, "/api/v1/sessions/nope", Some(json!({ "pinned": true }))).await.0,
+        call(&f.app, Method::PATCH, "/api/sessions/nope", Some(json!({ "pinned": true }))).await.0,
         StatusCode::NOT_FOUND
     );
 
@@ -170,7 +169,7 @@ async fn fr_s4_search_finds_messages_in_every_session_including_korean() {
     s.record_event(&b, &AgentEvent::UserMessage { text: "nginx 설정 파일을 고쳐 주세요".into() }).unwrap();
     s.record_event(&b, &AgentEvent::Error { message: "오류 in a non-message event".into() }).unwrap();
 
-    let get = |q: &str| format!("/api/v1/search?q={}", urlencode(q));
+    let get = |q: &str| format!("/api/search?q={}", urlencode(q));
 
     let (st, hits) = call(&f.app, Method::GET, &get("오류"), None).await;
     assert_eq!(st, StatusCode::OK);
@@ -201,14 +200,14 @@ async fn fr_s4_search_finds_messages_in_every_session_including_korean() {
     assert_eq!(hits[0]["session_id"], b.as_str());
 
     // Archived sessions are still found, and say so.
-    call(&f.app, Method::PATCH, &format!("/api/v1/sessions/{b}"), Some(json!({ "archived": true }))).await;
+    call(&f.app, Method::PATCH, &format!("/api/sessions/{b}"), Some(json!({ "archived": true }))).await;
     let (_, hits) = call(&f.app, Method::GET, &get("설정"), None).await;
     assert_eq!(hits[0]["archived"], true);
 
     // Query syntax is literal; empty and limit behave.
     assert_eq!(call(&f.app, Method::GET, &get("\"nginx"), None).await.0, StatusCode::OK);
     assert_eq!(call(&f.app, Method::GET, &get("NEAR( OR"), None).await.0, StatusCode::OK);
-    assert_eq!(call(&f.app, Method::GET, "/api/v1/search?q=", None).await.1, json!([]));
+    assert_eq!(call(&f.app, Method::GET, "/api/search?q=", None).await.1, json!([]));
     let (_, hits) = call(&f.app, Method::GET, &format!("{}&limit=1", get("nginx")), None).await;
     assert_eq!(hits.as_array().unwrap().len(), 1);
 }
@@ -220,7 +219,7 @@ async fn fr_l9_export_is_a_self_contained_transcript() {
     f.sessions.record_event(&id, &AgentEvent::UserMessage { text: "안녕".into() }).unwrap();
     f.sessions.record_event(&id, &AgentEvent::AssistantMessage { text: "hello".into() }).unwrap();
 
-    let req = Request::builder().uri(format!("/api/v1/sessions/{id}/export")).body(Body::empty()).unwrap();
+    let req = Request::builder().uri(format!("/api/sessions/{id}/export")).body(Body::empty()).unwrap();
     let resp = f.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let cd = resp.headers()["content-disposition"].to_str().unwrap().to_string();
@@ -237,17 +236,17 @@ async fn fr_l9_export_is_a_self_contained_transcript() {
     assert_eq!(events[0]["event"], json!({ "kind": "user_message", "text": "안녕" }));
     assert_eq!(events[1]["event"]["text"], "hello");
 
-    assert_eq!(call(&f.app, Method::GET, "/api/v1/sessions/nope/export", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&f.app, Method::GET, "/api/sessions/nope/export", None).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn fr_s5_fork_is_not_implemented_with_a_reason() {
     let f = fixture();
     let id = new_session(&f.sessions, "alpha");
-    let (st, body) = call(&f.app, Method::POST, &format!("/api/v1/sessions/{id}/fork"), Some(json!({}))).await;
+    let (st, body) = call(&f.app, Method::POST, &format!("/api/sessions/{id}/fork"), Some(json!({}))).await;
     assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
     assert!(body["reason"].as_str().unwrap().contains("not supported"), "{body}");
-    assert_eq!(call(&f.app, Method::POST, "/api/v1/sessions/nope/fork", Some(json!({}))).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&f.app, Method::POST, "/api/sessions/nope/fork", Some(json!({}))).await.0, StatusCode::NOT_FOUND);
 }
 
 /// Percent-encode a query value (no extra dev-dependency).

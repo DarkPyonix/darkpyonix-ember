@@ -159,7 +159,7 @@ async fn mcp_registry_reaches_agents_in_scope_and_never_leaks_secrets() {
     let (st, v, raw) = call(
         &app,
         "POST",
-        "/api/v1/mcp",
+        "/api/mcp",
         None,
         Some(json!({
             "name": "github",
@@ -174,23 +174,23 @@ async fn mcp_registry_reaches_agents_in_scope_and_never_leaks_secrets() {
     assert_eq!(v["env_keys"], json!(["GITHUB_TOKEN"]));
     assert!(!raw.contains("TOPSECRET"), "{raw}");
     let id = v["id"].as_str().unwrap().to_string();
-    let (st, _, raw) = call(&app, "POST", "/api/v1/mcp", None, Some(json!({ "name": "everywhere", "command": "x" }))).await;
+    let (st, _, raw) = call(&app, "POST", "/api/mcp", None, Some(json!({ "name": "everywhere", "command": "x" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{raw}");
-    let (st, _, _) = call(&app, "POST", "/api/v1/mcp", None, Some(json!({ "name": "github", "command": "x" }))).await;
+    let (st, _, _) = call(&app, "POST", "/api/mcp", None, Some(json!({ "name": "github", "command": "x" }))).await;
     assert_eq!(st, StatusCode::CONFLICT);
 
     // Rotating the secret answers with names only.
     let (st, _, raw) = call(
         &app,
         "PATCH",
-        &format!("/api/v1/mcp/{id}"),
+        &format!("/api/mcp/{id}"),
         None,
         Some(json!({ "env": { "GITHUB_TOKEN": "ghp_TOPSECRET_2" } })),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
     assert!(!raw.contains("TOPSECRET"), "{raw}");
-    let (_, list, raw) = call(&app, "GET", "/api/v1/mcp", None, None).await;
+    let (_, list, raw) = call(&app, "GET", "/api/mcp", None, None).await;
     assert_eq!(list.as_array().unwrap().len(), 2);
     assert!(!raw.contains("TOPSECRET"), "{raw}");
 
@@ -220,15 +220,15 @@ async fn mcp_registry_reaches_agents_in_scope_and_never_leaks_secrets() {
     assert!(!transcript.contains("TOPSECRET"));
 
     // Disabled servers are left out; deleted ones are gone.
-    let (st, _, _) = call(&app, "PATCH", &format!("/api/v1/mcp/{id}"), None, Some(json!({ "enabled": false }))).await;
+    let (st, _, _) = call(&app, "PATCH", &format!("/api/mcp/{id}"), None, Some(json!({ "enabled": false }))).await;
     assert_eq!(st, StatusCode::OK);
     let rec = sessions.store().session(&acme).unwrap().unwrap();
     let mut next = StartRequest::default();
     registry.configure_start(&rec, &mut next).unwrap();
     assert_eq!(next.mcp_servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["everywhere"]);
-    let (st, _, _) = call(&app, "DELETE", &format!("/api/v1/mcp/{id}"), None, None).await;
+    let (st, _, _) = call(&app, "DELETE", &format!("/api/mcp/{id}"), None, None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _, _) = call(&app, "DELETE", &format!("/api/v1/mcp/{id}"), None, None).await;
+    let (st, _, _) = call(&app, "DELETE", &format!("/api/mcp/{id}"), None, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
@@ -420,7 +420,7 @@ async fn http_api_and_agent_side_schedule_commands() {
     let (st, v, raw) = call(
         &app,
         "POST",
-        "/api/v1/schedules",
+        "/api/schedules",
         None,
         Some(json!({
             "project": "acme",
@@ -437,7 +437,7 @@ async fn http_api_and_agent_side_schedule_commands() {
     let (st, v, _) = call(
         &app,
         "POST",
-        "/api/v1/schedules",
+        "/api/schedules",
         None,
         Some(json!({
             "project": "acme", "prompt": "x",
@@ -447,25 +447,25 @@ async fn http_api_and_agent_side_schedule_commands() {
     )
     .await;
     assert_eq!((st, v["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_request")));
-    let (st, v, _) = call(&app, "POST", &format!("/api/v1/schedules/{id}/pause"), None, None).await;
+    let (st, v, _) = call(&app, "POST", &format!("/api/schedules/{id}/pause"), None, None).await;
     assert_eq!((st, v["paused"].as_bool(), v["next_run_at"].is_null()), (StatusCode::OK, Some(true), true));
-    let (st, v, _) = call(&app, "POST", &format!("/api/v1/schedules/{id}/resume"), None, None).await;
+    let (st, v, _) = call(&app, "POST", &format!("/api/schedules/{id}/resume"), None, None).await;
     assert_eq!((st, v["paused"].as_bool()), (StatusCode::OK, Some(false)));
-    let (st, v, _) = call(&app, "POST", &format!("/api/v1/schedules/{id}/run"), None, None).await;
+    let (st, v, _) = call(&app, "POST", &format!("/api/schedules/{id}/run"), None, None).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::ACCEPTED, Some("running")));
-    let (_, v, _) = call(&app, "GET", &format!("/api/v1/schedules/{id}/runs"), None, None).await;
+    let (_, v, _) = call(&app, "GET", &format!("/api/schedules/{id}/runs"), None, None).await;
     assert_eq!(v.as_array().unwrap().len(), 1);
     wait_status(&sessions, &a, SessionStatus::WaitingForApproval).await;
 
     // Agent routes: authenticated by the runtime token, confined to the caller's project.
     let token = agents.token("/w/a");
     assert!(agents.request("/w/a").instructions.unwrap().contains("ember-a2a schedule add"));
-    let (st, _, _) = call(&app, "GET", "/api/v1/a2a/schedules", None, None).await;
+    let (st, _, _) = call(&app, "GET", "/api/a2a/schedules", None, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
     let (st, v, raw) = call(
         &app,
         "POST",
-        "/api/v1/a2a/schedules",
+        "/api/a2a/schedules",
         Some(&token),
         Some(json!({ "prompt": "remind me", "kind": { "type": "interval", "seconds": 7200 } })),
     )
@@ -477,7 +477,7 @@ async fn http_api_and_agent_side_schedule_commands() {
     let (st, v, raw) = call(
         &app,
         "POST",
-        "/api/v1/a2a/schedules",
+        "/api/a2a/schedules",
         Some(&token),
         Some(json!({ "prompt": "nightly", "kind": { "type": "cron", "expr": "0 2 * * *" }, "target": { "type": "new" } })),
     )
@@ -488,13 +488,13 @@ async fn http_api_and_agent_side_schedule_commands() {
     // Another project's schedule is invisible to this agent.
     let b = new_session(&sessions, "other", "/w/b");
     let theirs = sched.create(interval_continue("other", &b, false), None).unwrap();
-    let (_, list, _) = call(&app, "GET", "/api/v1/a2a/schedules", Some(&token), None).await;
+    let (_, list, _) = call(&app, "GET", "/api/a2a/schedules", Some(&token), None).await;
     assert_eq!(list.as_array().unwrap().len(), 3);
     assert!(list.as_array().unwrap().iter().all(|s| s["project"] == "acme"));
-    let (st, _, _) = call(&app, "DELETE", &format!("/api/v1/a2a/schedules/{}", theirs.id), Some(&token), None).await;
+    let (st, _, _) = call(&app, "DELETE", &format!("/api/a2a/schedules/{}", theirs.id), Some(&token), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    let (st, _, _) = call(&app, "DELETE", &format!("/api/v1/a2a/schedules/{id}"), Some(&token), None).await;
+    let (st, _, _) = call(&app, "DELETE", &format!("/api/a2a/schedules/{id}"), Some(&token), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _, _) = call(&app, "GET", &format!("/api/v1/schedules/{id}"), None, None).await;
+    let (st, _, _) = call(&app, "GET", &format!("/api/schedules/{id}"), None, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }

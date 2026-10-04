@@ -2,7 +2,7 @@
 //!
 //! Agents run on the ember server, next to the browser. Each is given an off-the-shelf
 //! DevTools-protocol browser MCP server pointed at ember's CDP relay,
-//! `ws://<server>/api/v1/browsers/<project>/cdp`:
+//! `ws://<server>/api/browsers/<project>/cdp`:
 //!
 //! - **chrome-devtools-mcp** (default): `npx -y chrome-devtools-mcp@latest --wsEndpoint=<relay>`
 //! - **Playwright MCP**: `npx -y @playwright/mcp@latest --cdp-endpoint=<relay>`
@@ -143,7 +143,7 @@ pub fn cdp_ws_url(base: &str, project: &str) -> String {
     } else {
         base.to_string()
     };
-    format!("{}/api/v1/browsers/{project}/cdp", ws.trim_end_matches('/'))
+    format!("{}/api/browsers/{project}/cdp", ws.trim_end_matches('/'))
 }
 
 /// Ready-to-use configuration for each agent CLI.
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn configs() {
         let ws = cdp_ws_url("http://127.0.0.1:8740/", "acme");
-        assert_eq!(ws, "ws://127.0.0.1:8740/api/v1/browsers/acme/cdp");
+        assert_eq!(ws, "ws://127.0.0.1:8740/api/browsers/acme/cdp");
         let c = agent_config(&ws, BrowserMcp::ChromeDevtools);
         assert_eq!(
             c.claude_code_mcp_config["mcpServers"][MCP_NAME]["args"][2],
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn runners_and_servers() {
-        let ws = "ws://127.0.0.1:8740/api/v1/browsers/acme/cdp";
+        let ws = "ws://127.0.0.1:8740/api/browsers/acme/cdp";
         let (cmd, args) = BrowserMcp::Playwright.command_with(&Runner::Bunx("/b/bunx".into()), ws);
         assert_eq!(cmd, "/b/bunx");
         assert_eq!(args, ["@playwright/mcp@latest".to_string(), format!("--cdp-endpoint={ws}")]);

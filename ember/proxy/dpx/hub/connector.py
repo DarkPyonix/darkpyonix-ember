@@ -75,7 +75,6 @@ def machine_info() -> dict:
         "os": f"{platform.system()} {platform.release()}".strip(),
         "public_url": PUBLIC_URL,
         "agents": [{"id": a.id, "name": a.name} for a in agents.active_adapters()],
-        "version": 1,
     }
 
 

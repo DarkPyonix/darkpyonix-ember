@@ -2,37 +2,37 @@
 //!
 //! Agent routes authenticate with `Authorization: Bearer <EMBER_RUNTIME_TOKEN>`; the token
 //! identifies the calling session:
-//! - `GET  /api/v1/a2a/targets` → `[Target]`
-//! - `POST /api/v1/a2a/messages` `{to, text, reply_to?}` → `202 {id, to, status}` where status is
+//! - `GET  /api/a2a/targets` → `[Target]`
+//! - `POST /api/a2a/messages` `{to, text, reply_to?}` → `202 {id, to, status}` where status is
 //!   `delivered` or `queued`
-//! - `GET  /api/v1/a2a/messages/{id}` → the message, if the caller sent or received it
+//! - `GET  /api/a2a/messages/{id}` → the message, if the caller sent or received it
 //!
 //!
 //! Team routes for agents (FR-T7, token = the caller; see [`super::team`]):
-//! - `GET    /api/v1/a2a/team` → `TeamView` or `null`
-//! - `POST   /api/v1/a2a/team/members` `{name, prompt, agent?, account?, computer?, title?}` →
+//! - `GET    /api/a2a/team` → `TeamView` or `null`
+//! - `POST   /api/a2a/team/members` `{name, prompt, agent?, account?, computer?, title?}` →
 //!   `201 {team_id, member, message}` (leader only; the first spawn makes the caller leader)
-//! - `DELETE /api/v1/a2a/team/members/{name-or-session}` → `Member` (leader only)
-//! - `GET    /api/v1/a2a/team/tasks` → `[Task]`
-//! - `POST   /api/v1/a2a/team/tasks` `{title, detail?, assignee?}` → `201 Task`
-//! - `PATCH  /api/v1/a2a/team/tasks/{number}` `{title?, detail?, status?, assignee?}` → `Task`
+//! - `DELETE /api/a2a/team/members/{name-or-session}` → `Member` (leader only)
+//! - `GET    /api/a2a/team/tasks` → `[Task]`
+//! - `POST   /api/a2a/team/tasks` `{title, detail?, assignee?}` → `201 Task`
+//! - `PATCH  /api/a2a/team/tasks/{number}` `{title?, detail?, status?, assignee?}` → `Task`
 //!   (`assignee: ""` or `"none"` unassigns)
-//! - `GET    /api/v1/a2a/team/mail?after=&limit=` → `[Mail]`, oldest first
-//! - `POST   /api/v1/a2a/team/mail` `{to?, text}` → `202 {mail, deliveries}` (`to` omitted or
+//! - `GET    /api/a2a/team/mail?after=&limit=` → `[Mail]`, oldest first
+//! - `POST   /api/a2a/team/mail` `{to?, text}` → `202 {mail, deliveries}` (`to` omitted or
 //!   `all` = the whole team)
 //!
 //! User routes (switches and mentions, FR-T6; teams, FR-T7):
-//! - `GET|PUT /api/v1/a2a/settings` `{enabled}`
-//! - `GET|PUT /api/v1/sessions/{id}/a2a` `{enabled}`
-//! - `GET /api/v1/sessions/{id}/mentions?q=&limit=` → `[Target]`: sessions a message typed in
+//! - `GET|PUT /api/a2a/settings` `{enabled}`
+//! - `GET|PUT /api/sessions/{id}/a2a` `{enabled}`
+//! - `GET /api/sessions/{id}/mentions?q=&limit=` → `[Target]`: sessions a message typed in
 //!   `{id}` may mention. Mentions themselves are resolved when the message is posted to
-//!   `POST /api/v1/sessions/{id}/messages` (see [`super::mention`]).
-//! - `GET /api/v1/sessions/{id}/team` → the `TeamView` `{id}` leads or belongs to, or `null`
-//! - `GET /api/v1/teams/{team_id}` → `TeamView`
-//! - `GET /api/v1/teams/{team_id}/mail?after=&limit=` → `[Mail]` (all of the team's mail)
-//! - `POST /api/v1/teams/{team_id}/members/{session_id}/end` → `Member`
+//!   `POST /api/sessions/{id}/messages` (see [`super::mention`]).
+//! - `GET /api/sessions/{id}/team` → the `TeamView` `{id}` leads or belongs to, or `null`
+//! - `GET /api/teams/{team_id}` → `TeamView`
+//! - `GET /api/teams/{team_id}/mail?after=&limit=` → `[Mail]` (all of the team's mail)
+//! - `POST /api/teams/{team_id}/members/{session_id}/end` → `Member`
 //!
-//! Team changes are pushed as `{"type": "team_updated", "v": 1, "team": TeamView}`.
+//! Team changes are pushed as `{"type": "team_updated", "team": TeamView}`.
 //!
 //! Errors are `{error, code}` with `code` one of `unauthorized`, `disabled`, `rate_limited`,
 //! `not_found`, `bad_request`, `forbidden`, `internal`.
@@ -52,26 +52,26 @@ use super::{A2a, A2aError};
 
 pub fn router(a2a: Arc<A2a>) -> Router {
     Router::new()
-        .route("/api/v1/a2a/targets", get(targets))
-        .route("/api/v1/a2a/messages", post(send))
-        .route("/api/v1/a2a/messages/{id}", get(message))
-        .route("/api/v1/a2a/settings", get(get_settings).put(put_settings))
+        .route("/api/a2a/targets", get(targets))
+        .route("/api/a2a/messages", post(send))
+        .route("/api/a2a/messages/{id}", get(message))
+        .route("/api/a2a/settings", get(get_settings).put(put_settings))
         .route(
-            "/api/v1/sessions/{id}/a2a",
+            "/api/sessions/{id}/a2a",
             get(get_session_switch).put(put_session_switch),
         )
-        .route("/api/v1/a2a/team", get(my_team))
-        .route("/api/v1/a2a/team/members", post(spawn))
-        .route("/api/v1/a2a/team/members/{member}", delete(end_member))
-        .route("/api/v1/a2a/team/tasks", get(list_tasks).post(add_task))
-        .route("/api/v1/a2a/team/tasks/{number}", patch(update_task))
-        .route("/api/v1/a2a/team/mail", get(read_mail).post(send_mail))
-        .route("/api/v1/sessions/{id}/mentions", get(mentions))
-        .route("/api/v1/sessions/{id}/team", get(session_team))
-        .route("/api/v1/teams/{team_id}", get(team))
-        .route("/api/v1/teams/{team_id}/mail", get(team_mail))
+        .route("/api/a2a/team", get(my_team))
+        .route("/api/a2a/team/members", post(spawn))
+        .route("/api/a2a/team/members/{member}", delete(end_member))
+        .route("/api/a2a/team/tasks", get(list_tasks).post(add_task))
+        .route("/api/a2a/team/tasks/{number}", patch(update_task))
+        .route("/api/a2a/team/mail", get(read_mail).post(send_mail))
+        .route("/api/sessions/{id}/mentions", get(mentions))
+        .route("/api/sessions/{id}/team", get(session_team))
+        .route("/api/teams/{team_id}", get(team))
+        .route("/api/teams/{team_id}/mail", get(team_mail))
         .route(
-            "/api/v1/teams/{team_id}/members/{session_id}/end",
+            "/api/teams/{team_id}/members/{session_id}/end",
             post(user_end_member),
         )
         .with_state(a2a)

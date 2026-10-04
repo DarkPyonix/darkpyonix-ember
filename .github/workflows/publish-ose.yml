@@ -1,0 +1,71 @@
+# Publishes DarkPyonix OSE as a GitHub release after "OSE build" (test-ose.yml) succeeds for an
+# ose-v* tag. It never builds: it downloads the artifacts of that exact run (by run id), so the
+# release holds the files the build produced and checked, and it cannot run before the build
+# finishes successfully.
+name: Publish OSE
+
+on:
+  workflow_run:
+    workflows: ["OSE build"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-ose-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish the release
+    # For a tag push, workflow_run.head_branch is the tag name.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'ose-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check that the tag still points at the built commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tagged="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+          if [ "$tagged" != "$SHA" ]; then
+            echo "error: $TAG now points at $tagged, but the build ran on $SHA" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          sparse-checkout: build/ose/VERSION
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dpx-ose-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Verify checksums and write SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum -c ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code_oss="$(tr -d '[:space:]' < build/ose/VERSION)"
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "DarkPyonix OSE ${TAG#ose-v}" \
+            --notes "DarkPyonix OSE built from Code-OSS ${code_oss} (MIT, https://github.com/microsoft/vscode/tree/${code_oss}) by run ${{ github.event.workflow_run.html_url }}. Extensions gallery: Open VSX. Telemetry off. See build/ose/README.md for running it with web/proxy/dpx."

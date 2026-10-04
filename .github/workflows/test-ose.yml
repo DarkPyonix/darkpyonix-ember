@@ -3,7 +3,7 @@
 #
 #   pull_request     -> product job only (product.json overrides + checks; seconds)
 #   push / dispatch  -> product + 4-target build matrix + smoke test, artifacts uploaded
-#   tag ose-v*       -> all of the above + a GitHub release with tarballs and SHA256SUMS
+#   tag ose-v*       -> all of the above; publish-ose.yml then releases this run's artifacts
 name: OSE build
 
 on:
@@ -144,30 +144,3 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Release on tag
-    needs: [product, build]
-    if: startsWith(github.ref, 'refs/tags/ose-v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v5
-        with:
-          pattern: dpx-ose-*
-          path: dist
-          merge-multiple: true
-      - name: Verify checksums and write SHA256SUMS
-        working-directory: dist
-        run: |
-          sha256sum -c ./*.sha256
-          cat ./*.sha256 > SHA256SUMS
-          cat SHA256SUMS
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "DarkPyonix OSE ${GITHUB_REF_NAME#ose-v}" \
-            --notes "DarkPyonix OSE built from Code-OSS ${{ needs.product.outputs.tag }} (MIT, https://github.com/microsoft/vscode/tree/${{ needs.product.outputs.tag }}). Extensions gallery: Open VSX. Telemetry off. See build/ose/README.md for running it with web/proxy/dpx."

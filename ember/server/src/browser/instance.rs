@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use super::cdp::{Cdp, CdpEvent};
 use super::chrome::{self, LaunchOptions};
 use super::egress::{Egress, SharedEgressResolver};
-use super::{BrowserConfig, STREAM_VERSION};
+use super::BrowserConfig;
 
 /// An agent command within this long counts as "agent is active" (FR-R3 indicator).
 pub const AGENT_ACTIVE_WINDOW: Duration = Duration::from_secs(3);
@@ -565,7 +565,6 @@ impl BrowserInstance {
         let st = self.state.borrow();
         let header = json!({
             "type": "frame",
-            "v": STREAM_VERSION,
             "seq": self.frame_seq.fetch_add(1, Ordering::Relaxed),
             "format": "jpeg",
             "target_id": page.target_id,

@@ -14,7 +14,7 @@ NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember
 | A computer joins by signing in; no address or port entered (FR-N2) | Device link: `POST /v1/device-links` → user code + verification URL → person approves (browser, or Ember as the account's main server for `computer` / `client` links) → device polls `POST /v1/device-links/{id}/token` with an Ed25519 signature over `darkpyonix-hub/v2/link\n<link_id>\n<challenge>` → device token (`dpd_`, headers only) + resolve token (`dpr_`). A restarted device resumes with `GET /v1/device-links/{id}`. |
 | Address directory | The transport publishes its signed record to `PUT /pkarr/{z32 key}` and resolves peers with `GET /pkarr/{key}?token=<resolve token>` (a device token there is refused, NFR-H2). |
 | Relay | `GET /v1/config` `relay_urls`; fallback the hub's relay host (`https://relay.<hub host>`, iroh relay protocol at `/relay`). |
-| Add a computer without pasting a `PeerAddr` | `GET /v1/devices` → pick → `POST /api/v1/hub/devices/{endpoint_id}/computer {token}`; the computer row stores the bare peer id, resolved through the directory. |
+| Add a computer without pasting a `PeerAddr` | `GET /v1/devices` → pick → `POST /api/hub/devices/{endpoint_id}/computer {token}`; the computer row stores the bare peer id, resolved through the directory. |
 | FR-N3 allow-list from the account | Opt-in sync: `hub` rows of the server's `devices` table = account devices (minus the server). |
 | Revocation on the hub | `401 {code: device_removed}` (or a code-less `401` from a hub older than the codes) = removed; seen by a held `GET /v1/devices?wait=25` (FR-H9) within the hub's ~2 s check when `api_version` ≥ 1, else by `GET /v1/me` every 60 s. Recorded, surfaced, token no longer used. `401 {code: invalid_credentials}` is not a revocation. |
 | Leaving / rejoining | `forget` removes the device on the hub with its own token (`DELETE /v1/devices/{own id}`). A removed key rejoins after the owner re-admits it (`POST /v1/devices/{id}/readmit`, session, 15 min) and approves its new link in the browser (FR-H11). |
@@ -67,7 +67,7 @@ minutes; 5 s timeout):
 - When it is asked: ember server at start only when registered (or `EMBER_HUB_URL` is set), and
   when a registration completes, so an unregistered server does not contact the hub; ember node
   when it binds the transport (registered or `EMBER_HUB_URL`), on SIGHUP after a new
-  registration, and once per watch. `GET /api/v1/hub` shows `relay_urls`, `relay_source`
+  registration, and once per watch. `GET /api/hub` shows `relay_urls`, `relay_source`
   (`derived` / `explicit` / `hub`), `pkarr_url`, `api_version` and `long_poll`.
 
 **Device list: `ETag` and long-poll (FR-H9).** `HubClient::devices_since(etag, wait)` sends
@@ -91,7 +91,7 @@ when it changed.
 **Removed device vs bad token.** Every `401` has a `code`. `device_removed` →
 `HubError::DeviceRemoved` → revocation (recorded, token dropped). `invalid_credentials` →
 `HubError::InvalidCredentials` → `RegistrationState::Rejected`: logged and shown
-(`POST /api/v1/hub/check` → `rejected`, `ember-node hub status`), the token kept. A code-less
+(`POST /api/hub/check` → `rejected`, `ember-node hub status`), the token kept. A code-less
 `401` (only from a hub older than the codes) is still read as removal. The hub does not use
 `410`; Ember does not treat it specially.
 
@@ -104,10 +104,10 @@ only when missing). ember node keeps it in `hub.json`; ember server seals it lik
 
 **Approving codes (FR-H1).** The main server's token approves `computer` and `client` links; a
 link asking for `main_server`, or a re-admitted key's link, needs a signed-in browser session
-(the hub answers `403`, denying is allowed). `POST /api/v1/hub/link-codes/{code}` then answers
+(the hub answers `403`, denying is allowed). `POST /api/hub/link-codes/{code}` then answers
 `403` pointing to `<link_url>?code=<code>`.
 
-**Leaving and rejoining (FR-H1, FR-H11).** `DELETE /api/v1/hub/registration` and
+**Leaving and rejoining (FR-H1, FR-H11).** `DELETE /api/hub/registration` and
 `ember-node hub forget` remove the device on the hub with its own token, then forget it locally
 (`?local=1` / `--local`: local only). A device the hub removed may link again with the same key;
 until the owner re-admits it (`POST /v1/devices/{id}/readmit`, a session, valid 15 minutes) the
@@ -120,8 +120,8 @@ migration 11) and ember node `<state dir>/hub-link.json`; after a restart
 approved link (a denied, expired or claimed one is reported and forgotten).
 
 **App record (FR-H10).** `PATCH /v1/devices/{own id} {app}` after registering and at start:
-`{kind: "ember-server", version: <crate version>, services: ["ember-server-v1"]}` and
-`{kind: "ember-node", …, services: ["ember-node-v1"]}`. Service labels are the transport service
+`{kind: "ember-server", version: <crate version>, services: ["ember-server"]}` and
+`{kind: "ember-node", …, services: ["ember-node"]}`. Service labels are the transport service
 names in the hub's `^[a-z][a-z0-9-]{0,31}$` form (`/` → `-v`).
 
 **Client role (FR-H1, provisional).** `Role::Client` exists in the hub crate (connect, list,
@@ -142,11 +142,11 @@ with; nothing in Ember uses it yet.
 
 ### Server API
 
-Shared (TCP + transport): `GET /api/v1/hub`, `GET /api/v1/hub/devices`,
-`POST /api/v1/hub/devices/{endpoint_id}/computer {name?, token}`.
-Local only: `POST|DELETE /api/v1/hub/link`, `POST /api/v1/hub/check`,
-`DELETE /api/v1/hub/registration[?local=1]`, `DELETE /api/v1/hub/devices/{id}`,
-`GET|POST /api/v1/hub/link-codes/{code}`, `POST|PUT /api/v1/hub/sync-devices`.
+Shared (TCP + transport): `GET /api/hub`, `GET /api/hub/devices`,
+`POST /api/hub/devices/{endpoint_id}/computer {name?, token}`.
+Local only: `POST|DELETE /api/hub/link`, `POST /api/hub/check`,
+`DELETE /api/hub/registration[?local=1]`, `DELETE /api/hub/devices/{id}`,
+`GET|POST /api/hub/link-codes/{code}`, `POST|PUT /api/hub/sync-devices`.
 A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPORT`, or
 `EMBER_HUB_URL=off`) answers `503`.
 
@@ -211,7 +211,7 @@ Left open or worth confirming:
 - `api_version` stays `1` while FR-H9 is provisional: if the long-poll were withdrawn without a
   bump, Ember would still send `wait` (harmless: the hub would answer at once and Ember would
   fall back to polling after three immediate answers).
-- App `services` labels: Ember uses `ember-server-v1` / `ember-node-v1` (transport service names
+- App `services` labels: Ember uses `ember-server` / `ember-node` (transport service names
   do not fit the label pattern). The hub's example uses names like `kernel-manager`; say if there
   is a preferred vocabulary.
 - A device whose claim succeeded but which lost its tokens (crash between claim and save) can

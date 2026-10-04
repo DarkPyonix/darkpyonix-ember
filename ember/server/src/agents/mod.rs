@@ -217,7 +217,7 @@ pub struct RemoteExec {
     /// Stable id for the environment inside the agent (one per computer).
     pub environment_id: String,
     /// WebSocket URL of an exec-server speaking Codex's protocol (ember server's local relay to
-    /// the node's `/v1/exec-server`).
+    /// the node's `/exec-server`).
     pub exec_server_url: String,
 }
 

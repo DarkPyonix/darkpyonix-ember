@@ -7,7 +7,7 @@
 //! - `ember-node exec-server` (see `main.rs`) replaces itself with
 //!   `codex exec-server --listen stdio`. It is the one place that decides
 //!   which codex binary and flags run, so the daemon and a manual test use the same command.
-//! - `GET /v1/exec-server` (WebSocket, bearer-authenticated like every other route) starts one
+//! - `GET /exec-server` (WebSocket, bearer-authenticated like every other route) starts one
 //!   such codex child per connection and relays **raw bytes**: every Binary (or
 //!   Text) frame from the client is written to the child's stdin unchanged, and whatever the child
 //!   writes to stdout comes back as Binary frames, chunked arbitrarily. The relay does not parse
@@ -61,7 +61,7 @@ pub fn run_stdio() -> anyhow::Error {
     anyhow::anyhow!("could not run {} {}: {err}", bin.display(), codex_args().join(" "))
 }
 
-/// Route handler for `GET /v1/exec-server`.
+/// Route handler for `GET /exec-server`.
 pub async fn ws(State(node): State<Node>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| bridge(node, socket))
 }
@@ -137,13 +137,13 @@ async fn bridge(node: Node, ws: WebSocket) {
     }
 }
 
-/// Client side of `/v1/exec-server`: a raw byte stream to a fresh codex exec-server on the node.
+/// Client side of `/exec-server`: a raw byte stream to a fresh codex exec-server on the node.
 /// Over TCP or the transport alike ([`crate::client::NodeIo`]).
 pub type ExecServerStream = tokio_tungstenite::WebSocketStream<crate::client::NodeIo>;
 
 impl NodeClient {
-    /// Open `/v1/exec-server`. Send stdin bytes as Binary frames; stdout arrives as Binary frames.
+    /// Open `/exec-server`. Send stdin bytes as Binary frames; stdout arrives as Binary frames.
     pub async fn exec_server(&self) -> Result<ExecServerStream, ClientError> {
-        self.websocket("/v1/exec-server").await
+        self.websocket("/exec-server").await
     }
 }

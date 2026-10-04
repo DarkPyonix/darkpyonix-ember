@@ -9,7 +9,7 @@
 //!   again. A node the hub removed can rejoin with the same key after the account owner
 //!   re-admits it on the hub (FR-H11); the new link is approved in the browser.
 //! - **App record** (FR-H10): after registering and at start the node reports
-//!   `{kind: "ember-node", version, services: ["ember-node-v1"]}` with its own token.
+//!   `{kind: "ember-node", version, services: ["ember-node"]}` with its own token.
 //! - **Leaving** (`ember-node hub forget`): removes the node on the hub with its own token, then
 //!   deletes `hub.json` (`--local`: only the file).
 //! - **Transport**: a registered node publishes its address to the hub's directory and uses the

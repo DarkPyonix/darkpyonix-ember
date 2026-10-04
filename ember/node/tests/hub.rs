@@ -64,7 +64,7 @@ async fn register_stores_a_private_registration_and_configures_the_transport() {
     assert_ne!(h.token.as_deref(), Some(reg.device_token.as_str()));
     // The node reported its app with its own token (FR-H10).
     let app = fake.devices().into_iter().find(|d| d.endpoint_id == key.peer_id()).unwrap().app.expect("app");
-    assert_eq!((app.kind.as_str(), app.services.clone()), ("ember-node", vec!["ember-node-v1".to_string()]));
+    assert_eq!((app.kind.as_str(), app.services.clone()), ("ember-node", vec!["ember-node".to_string()]));
 
     // With the hub's /v1/config, its advertised relay is used (an IP-address hub derives none).
     fake.set_config_relays(vec!["https://relay.example.net".into()]);

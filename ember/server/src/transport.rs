@@ -4,7 +4,7 @@
 //! It is used two ways:
 //!
 //! - **Outgoing, to nodes**: computers registered by peer ([`crate::computers`]) are dialed
-//!   through one shared [`Dialer`] for service `ember-node/1`. The node admits the server only
+//!   through one shared [`Dialer`] for service `ember-node`. The node admits the server only
 //!   if the server's peer id is on its allow-list.
 //! - **Incoming, from clients**: the API is served on service [`SERVER_SERVICE`] to devices on
 //!   the [`crate::devices`] allow-list (a [`PeerGate`]); other peers are closed at accept. The
@@ -21,7 +21,7 @@ use ember_transport::http::HttpListener;
 use ember_transport::{Dialer, PeerGate, SecretKey, Transport, TransportConfig};
 
 /// Transport service name of the server API for clients.
-pub const SERVER_SERVICE: &str = "ember-server/1";
+pub const SERVER_SERVICE: &str = "ember-server";
 /// Transport service name of the node API (re-exported for convenience).
 pub use ember_node::client::NODE_SERVICE;
 

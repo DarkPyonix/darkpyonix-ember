@@ -63,7 +63,7 @@ pub fn server_app() -> DeviceApp {
 
 #[derive(Debug, thiserror::Error)]
 pub enum HubApiError {
-    #[error("this server is not registered with the hub; start with POST /api/v1/hub/link")]
+    #[error("this server is not registered with the hub; start with POST /api/hub/link")]
     NotRegistered,
     #[error("the hub removed this server (revoked at {0}); its key cannot rejoin: remove transport.key and the registration, restart, and register again")]
     Revoked(i64),
@@ -115,7 +115,7 @@ impl From<&PendingLink> for PendingView {
     }
 }
 
-/// `GET /api/v1/hub`.
+/// `GET /api/hub`.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubStatus {
     pub hub_url: String,
@@ -142,7 +142,7 @@ pub struct HubStatus {
     pub sync_devices: bool,
 }
 
-/// One of the account's devices, as `GET /api/v1/hub/devices` shows it.
+/// One of the account's devices, as `GET /api/hub/devices` shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubDeviceView {
     #[serde(flatten)]

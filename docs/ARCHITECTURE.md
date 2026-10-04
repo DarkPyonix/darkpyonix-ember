@@ -104,7 +104,7 @@ WebSockets and the client's push channel run unchanged. Nothing outside `ember/t
 backend; tests use the in-memory `MemNetwork`.
 
 ```
- client device ──ember-server/1──▶ ember server ──ember-node/1──▶ ember node
+ client device ──ember-server──▶ ember server ──ember-node──▶ ember node
    (Dialer)        gate: devices      (Dialer, one       gate: allowed server
                    table (FR-N3)       connection/node)   peer ids (FR-N3)
                                        │
@@ -187,7 +187,6 @@ API, not a generic transport:
 // webview → native, on tab detach (FR-B2)
 {
   "kind": "tab_detach",
-  "version": 1,
   "sourceWindowId": "...",
   "fileUri": "vscode-remote://...",
   "cursor": { "line": 42, "column": 7 },
@@ -198,21 +197,19 @@ API, not a generic transport:
 // native → webview, cross-window sync push (FR-B4)
 {
   "kind": "sibling_window_closed",
-  "version": 1,
   "windowId": "..."
 }
 ```
 
 Implemented as `ember/proxy/static/detach.js` (webview) and the `ember/bridge/` crate (native; message
-types, `WebviewBridge`, version handling). Concretely: positions are **0-based**; the payload
-crosses as a JSON string; `version` is per `kind` (`tab_detach`, `sibling_window_closed`,
-`open_window`, all 1); `tab_detach` also carries the additive fields `workspace.folder`,
+types, `WebviewBridge`). Concretely: positions are **0-based**; the payload
+crosses as a JSON string; there is no `version` (D15); `tab_detach` also carries the additive fields `workspace.folder`,
 `screen`, `label`, `editor` and `sentAtMs`; the WKWebView handler is named `emberBridge`, and
 native → webview pushes call `window.__emberBridge.receive(json)`.
 
-Schemas are versioned (`"version"`) from the start (per `FR-B2`'s acceptance criteria), because
-the launcher and any number of editor windows may be running builds that drifted by a release or
-two, and a silent schema mismatch is a worse failure mode than a logged, ignored, versioned one.
+Schemas carry no version (INTENT D15): the launcher and any number of editor windows may be
+running builds that drifted by a release or two, so messages only gain fields, a receiver ignores
+fields it does not know, and a message of an unknown `kind` is logged and kept, not dropped.
 
 **What deliberately does not cross the bridge:** editor content on every keystroke, rendering
 state, anything resembling the high-frequency traffic that would actually need JSI-grade

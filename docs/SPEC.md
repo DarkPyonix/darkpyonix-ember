@@ -50,7 +50,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-N2 | Implemented, CI against `FakeHub` (#50, #57); not run against the real hub. The default hub address and unversioned hub paths are designed, not merged: draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42. | #62 |
 | FR-N4 | Not verified on a real phone. | #10 |
 | NFR-N1 | Loopback bench only; the network matrix is not measured. | #10 |
-| PR-1 | Implemented with `PUSH_VERSION` 1. Dropping the `v` field (D15) is planned. | #63 |
+| PR-1 | Implemented without a version field (D15 implemented, #63). | #63 |
 | FR-W1–W3 | `ember/proxy/` (#1). FR-W3 not verified per platform. | #83 |
 | FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | #83 |
 | FR-W5, FR-W5a–h, NFR-W5a | Designed only (`docs/design/MOBILE-NO-NODE.md`), outside the 10-18 deadline. | #80 |
@@ -63,7 +63,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-K1, NFR-K1 | Rules for review, no code. | |
 | FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. Not wired into the client's "Open IDE → Ember"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
 
-Cross-cutting, designed and not landed: REST paths `/api/v1` → `/api` (D15, #63); releases and
+Cross-cutting, designed and not landed: releases and
 installers (#72); the documents in the house writing style (#68).
 
 ---
@@ -102,25 +102,23 @@ installers (#72); the documents in the house writing style (#68).
 
 - **Projects** are a table (`projects`, store migration 8), filled from existing sessions on
   migration and on every session creation. **Computer assignment** (FR-L4) is many-to-many
-  (`project_computers`): `GET/POST /api/v1/projects`, `PUT`/`DELETE
-  /api/v1/projects/{name}/computers/{computer_id}` (`local` = the main server). Removing a
+  (`project_computers`): `GET/POST /api/projects`, `PUT`/`DELETE
+  /api/projects/{name}/computers/{computer_id}` (`local` = the main server). Removing a
   computer removes its assignments.
 - **Session metadata** (FR-L9): `pinned` and `archived` columns (migration 9) and the existing
-  title, changed with `PATCH /api/v1/sessions/{id}` `{title?, pinned?, archived?}`. Not activity:
+  title, changed with `PATCH /api/sessions/{id}` `{title?, pinned?, archived?}`. Not activity:
   `updated_at` is unchanged.
-- **Push** gains `session_updated` and `project_updated` (additive; `PUSH_VERSION` stays 1;
-  clients skip unknown types), so a second client sees renames, pins, archives and assignments
+- **Push** gains `session_updated` and `project_updated` (additive; clients skip unknown types), so a second client sees renames, pins, archives and assignments
   without reloading.
 - **Search** (FR-S4): an FTS5 index (`messages_fts`, `unicode61` tokenizer) of user and
   assistant messages, kept current by a trigger on `events` and backfilled on migration.
-  `GET /api/v1/search?q=&limit=` answers `{session_id, seq, kind, snippet, title, project,
+  `GET /api/search?q=&limit=` answers `{session_id, seq, kind, snippet, title, project,
   archived}`, best match first; each word matches as a prefix (Korean `오류` finds `오류가`).
   The bundled SQLite (`libsqlite3-sys` with rusqlite's `bundled` feature) is compiled with
   `SQLITE_ENABLE_FTS5`.
-- **Export** (FR-L9): `GET /api/v1/sessions/{id}/export`, `format: "ember-transcript"`, the
+- **Export** (FR-L9): `GET /api/sessions/{id}/export`, `format: "ember-transcript"`, the
   record and every stored event.
-- **Paths**: the routes above carry `/api/v1`; D15 moves them to `/api` in one change (#63,
-  planned).
+- **Paths**: the routes above are `/api/...` with no version (D15, implemented in #63 and #85).
 - **Fork** (FR-S5): not implemented for any agent (#78). `GET /sessions/{id}` reports `can_fork:
   false` and `POST /sessions/{id}/fork` answers 501 with a reason. Codex's `thread/fork` is the
   likely first implementation.
@@ -263,11 +261,11 @@ run gated, any other version read-only.
   continue here, and an unresolved mention then loses nothing. Mentions follow the switches and
   the messaging rule but not the rate limits (a person sent them); they are stored, so they
   count toward the window for later agent sends. Each outcome is a notice in the origin session.
-- **APIs**: agent routes under `/api/v1/a2a/team` (members, tasks, mail; runtime token = the
-  caller); user routes `GET /api/v1/sessions/{id}/team`, `GET /api/v1/teams/{id}`,
-  `GET /api/v1/teams/{id}/mail`, `POST /api/v1/teams/{id}/members/{session}/end`,
-  `GET /api/v1/sessions/{id}/mentions?q=`. Every team change is pushed as `team_updated` with the
-  whole team (additive; `PUSH_VERSION` stays 1). Details: `ember/server/src/a2a/api.rs`.
+- **APIs**: agent routes under `/api/a2a/team` (members, tasks, mail; runtime token = the
+  caller); user routes `GET /api/sessions/{id}/team`, `GET /api/teams/{id}`,
+  `GET /api/teams/{id}/mail`, `POST /api/teams/{id}/members/{session}/end`,
+  `GET /api/sessions/{id}/mentions?q=`. Every team change is pushed as `team_updated` with the
+  whole team (additive). Details: `ember/server/src/a2a/api.rs`.
 - **Not yet verified**: a team of real Claude Code and Codex sessions on different computers and
   accounts (needs real agents and hardware); the composer suggestion list on screen.
 
@@ -311,7 +309,7 @@ run gated, any other version read-only.
 | **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium; see `ember/proxy/docs/CONSTRAINTS.md`). |
 | **FR-N5** | All Ember code reaches the network through one transport interface (connect to a peer by its key, accept, open bidirectional streams, report path state: direct or relayed). **No iroh type appears outside the transport crate.** | Replacing the transport touches only that crate: a CI check fails if `iroh` is imported anywhere else, and the ember server and ember node test suites run unchanged against an in-memory fake transport. |
 | **NFR-N1** | Transport quality bar. **If iroh misses any line after tuning, our own implementation is evaluated** (`FR-N1`). Initial targets, set before measurement; the first M5 measurement may adjust a target once, with the measured data and reason recorded here. | Measured on the real network matrix: home router ↔ school/office network, home ↔ LTE hotspot, and symmetric NAT on one side; 20 runs per pair. <br>• **Direct-path success:** ≥ 85% across the matrix excluding symmetric-NAT pairs; symmetric-NAT pairs must still connect via relay 100%. <br>• **Direct-path overhead:** RTT ≤ raw path + 5 ms (p50) and + 15 ms (p95); throughput ≥ 80% of a raw TCP transfer over the same path. <br>• **Connection setup:** first byte ≤ 1.5 s p95 (relay allowed); direct path established ≤ 5 s p95 when one exists. <br>• **Relay → direct upgrade:** ≤ 10 s p95 after a direct path becomes possible; direct → relay fallback with no stream reset. <br>• **Network change** (Wi-Fi ↔ LTE): open streams survive; stall ≤ 3 s p95. <br>• **Mobile:** an idle background connection adds ≤ 2%/hour battery drain (Android and iOS); reconnect on foreground ≤ 1 s p95. |
-| **PR-1** | Main server → client push channel for session status, transcript updates, computer reachability and assignments. | Versioned schema; a version mismatch is detected and reported, not silently dropped. |
+| **PR-1** | Main server → client push channel for session status, transcript updates, computer reachability and assignments. | Messages only gain fields; a receiver ignores unknown fields and skips unknown types (D15). |
 
 
 ### §N status: transport wiring (M5, issue #10)
@@ -322,9 +320,9 @@ run on real networks (#10) or against the real hub (#62).
 
 | ID | What is wired | Evidence / what remains |
 | -- | ------------- | ----------------------- |
-| **FR-N1** | ember node serves its API on transport service `ember-node/1` (`EMBER_NODE_TRANSPORT=1`, or `only`); ember server dials nodes registered by peer (`POST /api/v1/computers {name, peer, token}`) and serves its own API on `ember-server/1` (`EMBER_TRANSPORT=1`); the client crate reaches the server with `Api::over_transport`. One transport stream = one HTTP/1.1 connection, so every HTTP route and WebSocket (exec, events, exec-server, terminal attach, push) is unchanged. | `ember/node/tests/transport.rs`, `ember/server/tests/transport.rs`, `ember/client/tests/transport_flow.rs` (fake transport). The two-NAT acceptance run is still to do on real networks (`NFR-N1` matrix). |
-| **FR-N2** | Relay URL from `EMBER_RELAY_URL`; peers addressed by `PeerAddr` (id + hints) or bare id. **Hub** (`ember-hub` crate, `docs/design/HUB-INTEGRATION.md`, against `hub.openapi.yaml` v0.3.0): ember server (`POST /api/v1/hub/link`, token sealed with `secret.key`) and ember node (`ember-node hub register`, `<state dir>/hub.json` 0600) join the user's GitHub account through a device link (user code + verification URL, polled claim signed with the endpoint key). A registered endpoint publishes its signed address record to the hub's `/pkarr` and resolves peers there with its token (`ember_transport::HubDirectory`: iroh's own pkarr publisher/resolver inside the transport), and uses the hub's relay (`EMBER_HUB_URL`, default `https://darkpyonix.dev` → `https://relay.darkpyonix.dev`). Computers are added by picking a device from the account (`POST /api/v1/hub/devices/{id}/computer`); the devices allow-list can sync from the account (opt-in); removal on the hub is detected (`401` on `/v1/me`) and surfaced. | Tests run in CI: `ember/hub/tests/{link_flow,revocation,directory}.rs`, `ember/server/tests/hub.rs`, `ember/node/tests/hub.rs` against `ember_hub::fake::FakeHub`. Hub-side gaps (relay URL discovery, revocation reason, client role, self-removal…) are listed in `HUB-INTEGRATION.md` §Spec gaps. Until a node is registered, pasting its `PeerAddr` still works. Planned (#62, draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42): the default hub moves off the root domain and the hub paths lose `/v1`. |
-| **FR-N3** | Per-device allow-lists enforced at accept (`ember_transport::PeerGate`): the server admits peers in its `devices` table (store migration 6; `/api/v1/devices`, served on TCP only), the node admits server peer ids from `EMBER_NODE_ALLOWED_PEERS` / `<state dir>/allowed-peers`. Revoking (`DELETE /api/v1/devices/{peer}`; node: edit the file + SIGHUP) closes the peer's open connections immediately, which is within one heartbeat. Bearer tokens stay as a second factor for now. | `ember/transport/tests/gate.rs`; revocation cases in the three suites above. |
+| **FR-N1** | ember node serves its API on transport service `ember-node` (`EMBER_NODE_TRANSPORT=1`, or `only`); ember server dials nodes registered by peer (`POST /api/computers {name, peer, token}`) and serves its own API on `ember-server` (`EMBER_TRANSPORT=1`); the client crate reaches the server with `Api::over_transport`. One transport stream = one HTTP/1.1 connection, so every HTTP route and WebSocket (exec, events, exec-server, terminal attach, push) is unchanged. | `ember/node/tests/transport.rs`, `ember/server/tests/transport.rs`, `ember/client/tests/transport_flow.rs` (fake transport). The two-NAT acceptance run is still to do on real networks (`NFR-N1` matrix). |
+| **FR-N2** | Relay URL from `EMBER_RELAY_URL`; peers addressed by `PeerAddr` (id + hints) or bare id. **Hub** (`ember-hub` crate, `docs/design/HUB-INTEGRATION.md`, against `hub.openapi.yaml` v0.3.0): ember server (`POST /api/hub/link`, token sealed with `secret.key`) and ember node (`ember-node hub register`, `<state dir>/hub.json` 0600) join the user's GitHub account through a device link (user code + verification URL, polled claim signed with the endpoint key). A registered endpoint publishes its signed address record to the hub's `/pkarr` and resolves peers there with its token (`ember_transport::HubDirectory`: iroh's own pkarr publisher/resolver inside the transport), and uses the hub's relay (`EMBER_HUB_URL`, default `https://darkpyonix.dev` → `https://relay.darkpyonix.dev`). Computers are added by picking a device from the account (`POST /api/hub/devices/{id}/computer`); the devices allow-list can sync from the account (opt-in); removal on the hub is detected (`401` on `/v1/me`) and surfaced. | Tests run in CI: `ember/hub/tests/{link_flow,revocation,directory}.rs`, `ember/server/tests/hub.rs`, `ember/node/tests/hub.rs` against `ember_hub::fake::FakeHub`. Hub-side gaps (relay URL discovery, revocation reason, client role, self-removal…) are listed in `HUB-INTEGRATION.md` §Spec gaps. Until a node is registered, pasting its `PeerAddr` still works. Planned (#62, draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42): the default hub moves off the root domain and the hub paths lose `/v1`. |
+| **FR-N3** | Per-device allow-lists enforced at accept (`ember_transport::PeerGate`): the server admits peers in its `devices` table (store migration 6; `/api/devices`, served on TCP only), the node admits server peer ids from `EMBER_NODE_ALLOWED_PEERS` / `<state dir>/allowed-peers`. Revoking (`DELETE /api/devices/{peer}`; node: edit the file + SIGHUP) closes the peer's open connections immediately, which is within one heartbeat. Bearer tokens stay as a second factor for now. | `ember/transport/tests/gate.rs`; revocation cases in the three suites above. |
 | **FR-N5** | All of the above uses `ember-transport`'s API only. | `.github/scripts/checks/check-transport-isolation.sh` passes; server, node and client tests run against `MemNetwork`. |
 
 ---
@@ -431,15 +429,15 @@ Unchanged in substance from 09-22; see `ARCHITECTURE.md` §3 and `INTENT.md` D11
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-B1** | Injected script detects a tab drag-out gesture without interfering with VS Code's own tab reorder. | A short drag reorders; a long drag detaches; never both. |
-| **FR-B2** | On detach, the webview posts file URI, cursor, scroll, selection and source window to the native host through the platform's webview message API. | Versioned schema; mismatch is logged, not dropped. |
+| **FR-B2** | On detach, the webview posts file URI, cursor, scroll, selection and source window to the native host through the platform's webview message API. | No version field; an unknown kind is logged, not dropped. |
 | **FR-B3** | The native host opens a new IDE window at the same project and computer with that state. | The window appears within one frame of the gesture completing. |
-| **FR-B4** | The bridge is bidirectional (native → webview pushes). | Additive fields need no version bump. |
+| **FR-B4** | The bridge is bidirectional (native → webview pushes). | Additive fields are always compatible. |
 | **NFR-B1** | New IDE window open-to-usable ≤ a plain `serve-web` page load + 100 ms. | p99 on the reference machine. |
 | **NFR-B2** | One bridge message ≤ 5 ms p99 encode-to-receipt. | Regression guard. |
 
 **Implementation notes (10-03).** Webview side: `ember/proxy/static/detach.js` (VS Code Web target;
 the editor core reuses the schema later). Native side: the `ember/bridge/` crate (`ember-bridge`):
-message types, the `WebviewBridge` trait, version handling and the detach → open-window step.
+message types, the `WebviewBridge` trait and the detach → open-window step.
 No platform webview implementation yet (#30). Details and field reliability: `ember/proxy/README.md`
 "Tab detach".
 

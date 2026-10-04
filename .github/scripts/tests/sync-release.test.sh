@@ -7,7 +7,7 @@
 # second run is a no-op, and a main-side merge commit does not break the next sync.
 set -euo pipefail
 
-script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/.github/scripts/release/sync-release.sh"
+script="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/.github/scripts/release/sync-release.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -29,8 +29,8 @@ commit_as() { # name file
 commit_as alice README.md
 git push -q origin main
 git checkout -q -b develop
-mkdir -p docs/guide crates/x
-for f in PROJECT.md AGENTS.md CLAUDE.md docs/INTENT.md docs/SPEC.md docs/guide/index.html crates/x/lib.rs; do
+mkdir -p docs/guide ember/x
+for f in PROJECT.md AGENTS.md CLAUDE.md docs/INTENT.md docs/SPEC.md docs/guide/index.html ember/x/lib.rs; do
     commit_as bob "$f"
 done
 commit_as carol docs/ARCHITECTURE.md
@@ -53,7 +53,7 @@ check_release() {
     for f in PROJECT.md AGENTS.md CLAUDE.md docs/INTENT.md docs/SPEC.md; do
         ! git -C "$work/seed" cat-file -e "$rel:$f" 2>/dev/null || fail "$f is published"
     done
-    for f in docs/guide/index.html docs/ARCHITECTURE.md crates/x/lib.rs README.md; do
+    for f in docs/guide/index.html docs/ARCHITECTURE.md ember/x/lib.rs README.md; do
         git -C "$work/seed" cat-file -e "$rel:$f" 2>/dev/null || fail "$f is missing"
     done
     ok "internal documents absent, the rest present"
@@ -73,7 +73,7 @@ ok "second run is a no-op"
 # The user merges release into main with a merge commit; develop moves on.
 cd "$work/seed"
 git checkout -q main && git merge -q --no-ff --no-edit origin/release && git push -q origin main
-git checkout -q develop && commit_as dave crates/x/more.rs && git push -q origin develop
+git checkout -q develop && commit_as dave ember/x/more.rs && git push -q origin develop
 run_sync
 check_release
 git -C "$work/seed" merge-base --is-ancestor "$first" origin/release || fail "release was rewritten"

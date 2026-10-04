@@ -1,7 +1,7 @@
 //! Replies to extension-host requests that no bridge handles.
 //!
 //! [`ember_editor_conn::exthost::default_reply`] covers what the extension host needs to run at
-//! all. The live test against OSE (`crates/editor-conn/tests/live_ose.rs` `live_reply`) found two more
+//! all. The live test against OSE (`ember/editor-conn/tests/live_ose.rs` `live_reply`) found two more
 //! that real extensions need, which the session now owns:
 //!
 //! * `MainThreadLanguages.$getLanguages` → `string[]` (`languages.getLanguages()`; `undefined`

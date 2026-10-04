@@ -89,7 +89,7 @@ Ember 는 아직 릴리스가 없습니다. 아래 표는
 
 ## 🚀 빌드와 실행
 
-`crates/` 아래의 각 크레이트는 자체 `Cargo.lock` 을 가진 별도 cargo 프로젝트입니다. 그래서 크레이트
+`ember/` 아래의 각 크레이트는 자체 `Cargo.lock` 을 가진 별도 cargo 프로젝트입니다. 그래서 크레이트
 폴더 안에서 빌드합니다. 작업은 `develop` 에 들어갑니다.
 
 ```bash
@@ -98,12 +98,12 @@ cd darkpyonix-ember
 git checkout develop
 
 # 메인 서버
-cd crates/server
+cd ember/server
 cargo build --release --locked
 ./target/release/ember-server
 
 # 클라이언트, 다른 터미널에서
-cd crates/app
+cd ember/app
 EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run --release --locked
 ```
 
@@ -130,7 +130,7 @@ HTTP 리스너에는 로그인이 없습니다. 그래서 루프백(기본값)�
 
 | 구성 요소 | 설명 |
 | --------- | ---- |
-| **ember** | 이 저장소입니다. `ember-server`, `ember-node`, 클라이언트, IDE 창으로 이루어집니다. IDE 창은 `web/proxy/` 로 VS Code Web 을 감쌉니다. |
+| **ember** | 이 저장소입니다. `ember-server`, `ember-node`, 클라이언트, IDE 창으로 이루어집니다. IDE 창은 `ember/proxy/` 로 VS Code Web 을 감쌉니다. |
 | **vscode-darkpyonix** | DarkPyonix 노트북을 렌더링하는 VS Code 확장입니다. 가짜 매니저로 테스트했고, 실제 매니저로는 아직입니다. Ember 의 VS Code 런타임에 기본으로 설치됩니다. |
 | **vscode-darkpyonix-theme** | DarkPyonix(phoenix) 디자인 언어의 VS Code 테마입니다. 진행 중입니다. |
 | **intellij-darkpyonix** | 같은 노트북 기능을 제공하는 IntelliJ, PyCharm 플러그인입니다. 진행 중이며 CI 에서 빌드하고 테스트합니다. |
@@ -150,9 +150,7 @@ HTTP 리스너에는 로그인이 없습니다. 그래서 루프백(기본값)�
 
 ```
 darkpyonix-ember/
-├─ build/
-│  └─ ose/               OSE: DarkPyonix 가 빌드한 Code-OSS, IDE 창의 기본 런타임
-├─ crates/               크레이트마다 별도 cargo 프로젝트
+├─ ember/                크레이트마다 별도 cargo 프로젝트, 그리고 OSE, 프록시, 테스트 벡터
 │  ├─ server/            ember-server: 에이전트 CLI 를 감싸고, 세션을 저장하고, 업데이트를 푸시
 │  ├─ node/              ember-node: 각 컴퓨터에서 도구 동작을 수행
 │  ├─ app/               ember-app: dioxus-compose 위의 런처와 대화 UI
@@ -161,15 +159,13 @@ darkpyonix-ember/
 │  ├─ hub/               darkpyonix.dev 허브 클라이언트: 기기 등록과 디렉터리
 │  ├─ bridge/            IDE 창 브리지: 버전이 붙은 웹뷰와 네이티브 사이 메시지
 │  ├─ editor-conn/       Code-OSS 서버용 Rust 클라이언트
-│  └─ editor/            에디터 코어 세션 계층 (계획된 에디터, #32)
+│  ├─ editor/            에디터 코어 세션 계층 (계획된 에디터, #32)
+│  ├─ proxy/             VS Code Web 래핑 계층 (Python, FastAPI)
+│  ├─ ose/               OSE: DarkPyonix 가 빌드한 Code-OSS, IDE 창의 기본 런타임
+│  └─ vectors/           기록한 대화 기록과 브리지 테스트 벡터
 ├─ docs/
 │  └─ guide/             사용자 가이드, darkpyonix.dev/darkpyonix-ember 에서 제공
 ├─ extensions/           vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
-├─ scripts/              저장소 검사와 설정 도우미
-├─ tests/
-│  └─ vectors/           기록한 대화 기록과 브리지 테스트 벡터
-├─ web/
-│  └─ proxy/             VS Code Web 래핑 계층 (Python, FastAPI)
 └─ LICENSE
 ```
 

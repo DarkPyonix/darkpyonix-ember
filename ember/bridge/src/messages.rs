@@ -13,8 +13,8 @@
 //! - Positions are **0-based** `(line, column)`, like LSP; `detach.js` converts Monaco's
 //!   1-based values.
 //!
-//! Keep in sync with `web/proxy/static/detach.js` (`VERSIONS`, `buildDetachMessage`,
-//! `buildWorkspaceQuery`). `tests/vectors/bridge/detach_vectors.json` is checked by both.
+//! Keep in sync with `ember/proxy/static/detach.js` (`VERSIONS`, `buildDetachMessage`,
+//! `buildWorkspaceQuery`). `ember/vectors/bridge/detach_vectors.json` is checked by both.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -480,11 +480,11 @@ mod tests {
         expected_path: Option<String>,
     }
 
-    /// The same vectors web/proxy/tests/js/detach.test.js checks buildWorkspaceQuery against.
+    /// The same vectors ember/proxy/tests/js/detach.test.js checks buildWorkspaceQuery against.
     #[test]
     fn browser_url_matches_shared_vectors() {
         let vectors: Vectors =
-            serde_json::from_str(include_str!("../../../tests/vectors/bridge/detach_vectors.json")).unwrap();
+            serde_json::from_str(include_str!("../../vectors/bridge/detach_vectors.json")).unwrap();
         assert!(!vectors.cases.is_empty());
         for case in vectors.cases {
             let inbound = decode(&case.detach.to_string()).unwrap();

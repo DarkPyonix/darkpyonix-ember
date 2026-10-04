@@ -1,5 +1,5 @@
 //! `encodeURIComponent`, byte for byte, so URLs built here match the ones
-//! `web/proxy/static/detach.js` builds (checked by tests/vectors/bridge/detach_vectors.json).
+//! `ember/proxy/static/detach.js` builds (checked by ember/vectors/bridge/detach_vectors.json).
 
 /// Characters `encodeURIComponent` leaves alone: `A-Z a-z 0-9 - _ . ! ~ * ' ( )`.
 fn unreserved(b: u8) -> bool {

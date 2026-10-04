@@ -2,7 +2,7 @@
 //!
 //! Fails if any webview crate is in this app's dependency graph (every target platform), or
 //! if a webview API is named in the app's or the client core's sources. The same check runs
-//! without building in `scripts/check-no-webview.sh` (CI).
+//! without building in `.github/scripts/checks/check-no-webview.sh` (CI).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

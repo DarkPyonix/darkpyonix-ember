@@ -8,13 +8,13 @@
 # output captured from real CLIs and must stay as the tool printed it.
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../../.."
 
 # An en-dash (U+2013) in a numeric range is allowed.
 dash=$'—'
 hits="$(git grep -n --fixed-strings -- "$dash" -- \
     '*.md' '*.rs' '*.py' '*.js' '*.ts' '*.html' '*.css' '*.sh' '*.yml' '*.yaml' '*.toml' '*.txt' \
-    ':!scripts/check-no-em-dash.sh' ':!**/fixtures/**' || true)"
+    ':!.github/scripts/checks/check-no-em-dash.sh' ':!**/fixtures/**' || true)"
 
 if [[ -n "$hits" ]]; then
     echo "error: em-dashes found (AGENTS.md forbids them; use a comma, a colon or parentheses, or split the sentence)" >&2

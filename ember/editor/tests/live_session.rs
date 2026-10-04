@@ -1,12 +1,12 @@
 //! `EditorSession` against a real OSE server. Ignored by default and gated on `EMBER_OSE_SERVER`
-//! (the same server binary `crates/editor-conn/tests/live_ose.rs` uses):
+//! (the same server binary `ember/editor-conn/tests/live_ose.rs` uses):
 //!
 //! ```sh
-//! export EMBER_OSE_SERVER="$(crates/editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
-//! cargo test --manifest-path crates/editor/Cargo.toml --test live_session -- --ignored --nocapture
+//! export EMBER_OSE_SERVER="$(ember/editor-conn/scripts/fetch-ose-artifact.sh)"   # .../bin/dpx-ose-server
+//! cargo test --manifest-path ember/editor/Cargo.toml --test live_session -- --ignored --nocapture
 //! ```
 //!
-//! Flow: start the server on a free port (flags as `web/proxy/dpx`), `EditorSession::connect_tcp` on
+//! Flow: start the server on a free port (flags as `ember/proxy/dpx`), `EditorSession::connect_tcp` on
 //! a temp workspace, open a valid JSON file, send the widget event that makes it invalid
 //! (`CodeChanged` inserting `,,`), and wait for an Error **underline decoration** produced by the
 //! built-in JSON language server through `$changeMany` → the diagnostics bridge. Then save

@@ -8,7 +8,7 @@ Compose renderer, with **no webview** (E1, NFR-L2). All data comes from `ember-c
 ## Run
 
 ```sh
-cd crates/app
+cd ember/app
 EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run      # the main server (default shown)
 ```
 
@@ -36,7 +36,7 @@ cargo run --config 'patch."https://github.com/DarkPyonix/dioxus-compose".dioxus-
 `cargo test` runs the view-model, prefs, config, IDE, export and server-shape unit tests, and
 `tests/no_webview.rs` (NFR-L2): no webview crate in the resolved dependency graph on any
 target, no webview API named in the app's or `ember-client`'s sources.
-`../../scripts/check-no-webview.sh` does the same without compiling (CI job `no-webview`).
+`../../.github/scripts/checks/check-no-webview.sh` does the same without compiling (CI job `no-webview`).
 
 ## Structure
 

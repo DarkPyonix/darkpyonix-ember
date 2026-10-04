@@ -254,13 +254,13 @@ pub fn setup_hint(os: Os, at: &Path) -> String {
         Os::MacOs if first == "home" => format!(
             "On macOS /home is an automount point: once, comment out the `/home auto_home` line in \
              /etc/auto_master, run `sudo automount -vc`, then `sudo mkdir -p {p} && sudo chown $(id -un) {p}` \
-             (or run scripts/ember-mount-setup.sh {p})."
+             (or run ember/server/scripts/ember-mount-setup.sh {p})."
         ),
         Os::MacOs if !matches!(first.as_str(), "Users" | "Volumes" | "private" | "opt" | "usr" | "tmp" | "var") => format!(
             "On macOS a new top-level directory (/{first}) needs a line `{first}<TAB>System/Volumes/Data/{first}` in /etc/synthetic.conf and a \
-             reboot, then `sudo mkdir -p {p} && sudo chown $(id -un) {p}` (or run scripts/ember-mount-setup.sh {p})."
+             reboot, then `sudo mkdir -p {p} && sudo chown $(id -un) {p}` (or run ember/server/scripts/ember-mount-setup.sh {p})."
         ),
-        _ => format!("Once, as an administrator: `sudo mkdir -p {p} && sudo chown $(id -un) {p}` (or run scripts/ember-mount-setup.sh {p})."),
+        _ => format!("Once, as an administrator: `sudo mkdir -p {p} && sudo chown $(id -un) {p}` (or run ember/server/scripts/ember-mount-setup.sh {p})."),
     }
 }
 

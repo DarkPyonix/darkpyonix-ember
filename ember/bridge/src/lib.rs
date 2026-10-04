@@ -1,6 +1,6 @@
 //! The IDE window bridge (SPEC §B, ARCHITECTURE.md §3, INTENT.md D11).
 //!
-//! The webview side is `web/proxy/static/detach.js`, injected into VS Code Web. It posts
+//! The webview side is `ember/proxy/static/detach.js`, injected into VS Code Web. It posts
 //! versioned JSON messages through the platform's own webview message API
 //! (`WKScriptMessageHandler` named [`HANDLER_NAME`] on macOS/iOS, WebView2 `postMessage` on
 //! Windows); the native shell hands the received string to this crate.

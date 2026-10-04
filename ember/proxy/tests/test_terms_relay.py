@@ -1,7 +1,7 @@
 """The `/__terms` relay (dpx/terms/): endpoint discovery, what a browser may send, and HTTP
 forwarding to a fake ember node.
 
-    cd web/proxy && python3 -m unittest tests.test_terms_relay
+    cd ember/proxy && python3 -m unittest tests.test_terms_relay
 
 The pure helpers need nothing beyond the standard library. The router tests need the proxy's
 requirements (fastapi, httpx) and are skipped without them.

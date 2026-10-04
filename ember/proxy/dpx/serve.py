@@ -12,7 +12,7 @@ Runs next to ember node on each computer (SPEC `FR-W1`, `FR-W4`):
     5. prints one JSON line `{"event": "ready", "url": …}` on stdout (and to
        `--announce-file` if given), then supervises both until a signal or until either dies
 
-Run from the `web/proxy/` directory:
+Run from the `ember/proxy/` directory:
 
     python -m dpx.serve --root ~/work --root ~/src                 # OSE (DPX_OSE_SERVER)
     python -m dpx.serve --runtime vsc --root ~/work                # the user's `code serve-web`

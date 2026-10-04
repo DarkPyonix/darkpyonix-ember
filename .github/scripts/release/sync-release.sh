@@ -15,7 +15,7 @@
 # pushes without force and creates no commit when release already has develop's tree, main and
 # develop in its history.
 #
-# Environment: SYNC_RELEASE_NO_PR=1 skips the GitHub PR step (used by scripts/tests).
+# Environment: SYNC_RELEASE_NO_PR=1 skips the GitHub PR step (used by .github/scripts/tests).
 set -euo pipefail
 
 # Internal documents: planning and agent instructions, not part of the public tree.

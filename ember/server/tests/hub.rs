@@ -145,7 +145,7 @@ async fn register_then_add_a_computer_from_the_hub_device_list() {
     let (st, _) = call(&f.app, Method::POST, "/api/v1/hub/link", None).await;
     assert_eq!(st, StatusCode::CONFLICT);
 
-    // A node joins the account (registered on its own; see crates/node/tests/hub.rs for its link).
+    // A node joins the account (registered on its own; see ember/node/tests/hub.rs for its link).
     let (node_t, _node_dir) = start_node(&f.net, &f.server_t);
     f.hub.register(node_t.peer_id(), "gpu box", Role::Computer);
 

@@ -1,13 +1,13 @@
 #!/bin/sh
 # One-time privileged setup of project mount points for ember server
-# (crates/server/src/computers/mount.rs, docs/design/COMPUTERS.md § Project mount).
+# (ember/server/src/computers/mount.rs, docs/design/COMPUTERS.md § Project mount).
 #
 # A node's project directory is mounted on the server at the same absolute path. The mount itself
 # needs no root (macOS mount_nfs / Linux fusermount3 on a directory the server user owns), but
 # creating that directory may: e.g. /Users/<other user>/... or /home/<user>/... on macOS, or
 # /Users/<user>/... on a Raspberry Pi. Run this once per path, as the user ember server runs as:
 #
-#   scripts/ember-mount-setup.sh /home/pi/proj [/Users/me/other ...]
+#   ember/server/scripts/ember-mount-setup.sh /home/pi/proj [/Users/me/other ...]
 #
 # It prints every privileged command before running it with sudo. Use --dry-run to only print.
 set -eu

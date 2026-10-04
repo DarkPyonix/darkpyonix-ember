@@ -1,11 +1,11 @@
-"""Runs the dpx/agents transcript parsers over the shared vectors in tests/vectors/transcripts/.
+"""Runs the dpx/agents transcript parsers over the shared vectors in ember/vectors/transcripts/.
 
-The vectors' expected.json is the normalised form (tests/vectors/transcripts/SCHEMA.md). These
+The vectors' expected.json is the normalised form (ember/vectors/transcripts/SCHEMA.md). These
 adapters are display parsers that summarise tool calls instead of keeping them, so the
 comparison is a projection of it: the ordered (role, text) of plain user/assistant messages,
 the cwd, and the title where the file names one.
 
-    cd web/proxy && python3 -m unittest
+    cd ember/proxy && python3 -m unittest
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from dpx.agents.claude_code import ClaudeCodeAdapter
 from dpx.agents.codex import CodexAdapter
 
-VECTORS = Path(__file__).resolve().parents[3] / "tests" / "vectors" / "transcripts"
+VECTORS = Path(__file__).resolve().parents[2] / "vectors" / "transcripts"
 
 # agent dir -> (adapter class, where its files live relative to the adapter root)
 AGENTS = {

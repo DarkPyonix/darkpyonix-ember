@@ -166,7 +166,7 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
         <thead><tr><th scope="col">메시지</th><th scope="col">할 일</th></tr></thead>
         <tbody>
           <tr><td><code>cannot mount &hellip;: this ember server was built without a project mount (features mount-nfs on macOS, mount-fuse on Linux)</code></td><td>OS에 맞는 기능을 넣어 서버를 다시 빌드하거나, 프로젝트 경로를 메인 서버에도 둡니다.</td></tr>
-          <tr><td><code>&hellip; cannot be created by this user (&hellip;). &hellip;</code></td><td>마운트 지점에 한 번의 관리자 설정이 필요합니다. 서버 사용자로 <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> 를 실행합니다. <code>sudo</code> 를 쓰며 각 명령을 먼저 출력합니다.</td></tr>
+          <tr><td><code>&hellip; cannot be created by this user (&hellip;). &hellip;</code></td><td>마운트 지점에 한 번의 관리자 설정이 필요합니다. 서버 사용자로 <code>ember/server/scripts/ember-mount-setup.sh &lt;path&gt;</code> 를 실행합니다. <code>sudo</code> 를 쓰며 각 명령을 먼저 출력합니다.</td></tr>
           <tr><td><code>&hellip; exists on this server and is not empty; &hellip;</code></td><td>같은 경로에 로컬 폴더가 있습니다. 옮기거나, <code>EMBER_MOUNT_SHADOW=1</code> 로 그 위에 마운트합니다.</td></tr>
           <tr><td><code>project mount: &hellip; does not exist on computer "&hellip;"</code></td><td>그 컴퓨터에 폴더가 없습니다. 그곳에 만들거나 세션의 폴더를 고칩니다.</td></tr>
           <tr><td><code>project mount: &hellip; is outside the directories its ember node allows (its roots)</code></td><td>그 컴퓨터의 <code>EMBER_NODE_ROOTS</code> 를 넓힙니다.</td></tr>
@@ -222,7 +222,7 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
 
     <h2 id="macos">알려진 macOS 사항</h2>
     <ul>
-      <li><strong><code>/home</code> 아래의 마운트 지점.</strong> macOS에서 <code>/home</code> 은 자동 마운트이므로, Mac 메인 서버에서는 <code>/home/pi/proj</code> 같은 노드 경로를 그냥 만들 수 없습니다. <code>scripts/ember-mount-setup.sh</code> 가 이를 처리합니다(<code>/etc/auto_master</code> 를 고칩니다). <code>/srv</code> 같은 새 최상위 폴더는 <code>/etc/synthetic.conf</code> 와 재부팅이 필요합니다.</li>
+      <li><strong><code>/home</code> 아래의 마운트 지점.</strong> macOS에서 <code>/home</code> 은 자동 마운트이므로, Mac 메인 서버에서는 <code>/home/pi/proj</code> 같은 노드 경로를 그냥 만들 수 없습니다. <code>ember/server/scripts/ember-mount-setup.sh</code> 가 이를 처리합니다(<code>/etc/auto_master</code> 를 고칩니다). <code>/srv</code> 같은 새 최상위 폴더는 <code>/etc/synthetic.conf</code> 와 재부팅이 필요합니다.</li>
       <li><strong>root 없는 NFS.</strong> macOS 마운트는 사용자가 소유한 폴더에서 <code>sudo</code> 없이 <code>mount_nfs</code> 가 동작한다는 점에 기대고 있습니다. 상위 프로젝트 문서에는 그렇게 나와 있지만, Ember의 Mac mini에서는 아직 확인하지 않았습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).</li>
       <li><strong>Claude Code 계정과 키체인.</strong> Claude Code는 로그인을 macOS 로그인 키체인에 보관하므로, 계정을 지우기 전에 그 계정의 <code>auth logout</code> 명령으로 로그아웃하세요.</li>
       <li><strong>클라이언트의 모습.</strong> 클라이언트는 macOS에서 실제 서버에 붙어 실행된 적이 있지만, 실제 화면에서 레이아웃을 확인한 사람은 아직 없습니다(<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/9">#9</a>).</li>

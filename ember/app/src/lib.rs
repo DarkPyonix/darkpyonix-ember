@@ -2,7 +2,7 @@
 //!
 //! No webview anywhere (E1, NFR-L2): the UI is drawn by dioxus-compose's Compose renderer, and
 //! the only "browser" this app ever involves is the user's own, which it asks the OS to open
-//! for VS Code Web. `tests/no_webview.rs` and `scripts/check-no-webview.sh` enforce it.
+//! for VS Code Web. `tests/no_webview.rs` and `.github/scripts/checks/check-no-webview.sh` enforce it.
 //!
 //! - [`config`]: server URL and data paths.
 //! - [`services`]: tokio runtime, `ember_client::Client`, extra server API, outbox.

@@ -18,7 +18,7 @@ use crate::ui::use_ui;
 /// Agents offered when the server has not answered `GET /agents` yet.
 const FALLBACK_AGENTS: [&str; 2] = ["claude-code", "codex"];
 
-/// The local computer's id in the server's registry (`crates/server/src/computers`).
+/// The local computer's id in the server's registry (`ember/server/src/computers`).
 const LOCAL_COMPUTER: &str = "local";
 
 #[derive(Debug, Clone, PartialEq)]

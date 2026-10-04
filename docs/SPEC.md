@@ -22,16 +22,16 @@ Areas: **L** launcher and conversation UI · **S** sessions and transcripts · *
 
 What exists on `develop`, checked against the code, CI and the issues. **CI** means the crate is
 in `.github/workflows/test.yml`'s `cargo test` matrix (server, node, transport, hub, client,
-bridge, editor-conn, editor), which passes on `develop`. `crates/app` (`ember-app`, the native UI)
+bridge, editor-conn, editor), which passes on `develop`. `ember/app` (`ember-app`, the native UI)
 is not in that matrix, because it pulls `dioxus-compose` as a git dependency; the session builds it.
 Live agent tests (`EMBER_E2E_*`) and anything that needs a second computer, a real network, a
 screen or a real hub are run by hand and are listed as not verified until they are.
 
 | IDs | Status | Issue |
 | --- | ------ | ----- |
-| FR-L1–L9 | Implemented: client core (`crates/client`, CI) and screens (`crates/app`, not in CI). Server side of FR-L4 and FR-L9 in CI (#49). Not verified on a display. | #9 |
+| FR-L1–L9 | Implemented: client core (`ember/client`, CI) and screens (`ember/app`, not in CI). Server side of FR-L4 and FR-L9 in CI (#49). Not verified on a display. | #9 |
 | NFR-L1 | Not measured. | #9 |
-| NFR-L2 | `scripts/check-no-webview.sh` runs in CI. | |
+| NFR-L2 | `.github/scripts/checks/check-no-webview.sh` runs in CI. | |
 | FR-S1–S4, FR-S6 | Implemented, CI. | |
 | FR-S5 | Not implemented: `can_fork: false`, `POST …/fork` answers 501. | #78 |
 | FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: #79 |
@@ -51,17 +51,17 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-N4 | Not verified on a real phone. | #10 |
 | NFR-N1 | Loopback bench only; the network matrix is not measured. | #10 |
 | PR-1 | Implemented with `PUSH_VERSION` 1. Dropping the `v` field (D15) is planned. | #63 |
-| FR-W1–W3 | `web/proxy/` (#1). FR-W3 not verified per platform. | #83 |
+| FR-W1–W3 | `ember/proxy/` (#1). FR-W3 not verified per platform. | #83 |
 | FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | #83 |
 | FR-W5, FR-W5a–h, NFR-W5a | Designed only (`docs/design/MOBILE-NO-NODE.md`), outside the 10-18 deadline. | #80 |
 | FR-W6 | Extensions are in `extensions/` (#69); default install and the notebook criteria are open. | #15 |
 | NFR-W1 | No extension regression test yet. | #84 |
-| FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `web/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
+| FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `ember/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
 | NFR-P1 | Not measured. | #26 |
-| FR-B1–B4 | `detach.js` and `crates/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
+| FR-B1–B4 | `detach.js` and `ember/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
 | NFR-B1, NFR-B2 | Not measured. | #30 |
 | FR-K1, NFR-K1 | Rules for review, no code. | |
-| FR-E1–E5 | Connection layer (`crates/editor-conn`, #33, #35, #40) and session layer (`crates/editor`, #46), CI. Not wired into the client's "Open IDE → Ember"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
+| FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. Not wired into the client's "Open IDE → Ember"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
 
 Cross-cutting, designed and not landed: REST paths `/api/v1` → `/api` (D15, #63); releases and
 installers (#72); the documents in the house writing style (#68).
@@ -133,17 +133,17 @@ installers (#72); the documents in the house writing style (#68).
 | -- | ----------- | ------------------- |
 | **FR-A1** | Claude Code, Codex, Antigravity and OMP (oh-my-pi) run on the main server as their own unmodified CLIs. [user] | Each agent's version is the vendor's release; no agent binary or package is patched. |
 | **FR-A2** | Each agent is driven through its own non-interactive protocol, chosen per agent: Claude Code via `--print --input-format stream-json --output-format stream-json` with `--permission-prompt-tool stdio`; Codex via `codex app-server` JSON-RPC; Antigravity via its stream-json print mode, one process per turn; other agents (including OMP) via the Agent Client Protocol (ACP). *[provisional]* ACP is also a candidate for Claude Code, Codex and Gemini through their ACP adapters; the per-agent choice compares native-behaviour preservation (E2) between the vendor's own headless protocol and its ACP adapter (`INTENT.md` Q6). | An integration test per agent runs a turn that reads a file, edits it and runs a command, and verifies the normalised events (`FR-A3`). |
-| **FR-A3** | All agents' output is normalised into one event model (message, tool call, tool result, approval request, usage, turn end) driving one session state machine. | Adding an agent requires an adapter only; the UI, storage and A2A need no change. Matches `web/proxy/dpx/agents/`'s adapter rule. |
+| **FR-A3** | All agents' output is normalised into one event model (message, tool call, tool result, approval request, usage, turn end) driving one session state machine. | Adding an agent requires an adapter only; the UI, storage and A2A need no change. Matches `ember/proxy/dpx/agents/`'s adapter rule. |
 | **FR-A4** | The agent's own settings, models, modes, session IDs and resume keep working as they do natively. | A session started in Ember can be resumed with the agent's own CLI on the main server, and vice versa where the agent supports it. |
 | **FR-A5** | Tool approvals: allow once, always allow (for this session and tool kind), deny; a list of pending approvals; an opt-in mode that approves everything. | For agents with no headless approval channel (Antigravity), approval is obtained through the agent's own hook mechanism (a pre-tool-use hook calling back to the main server), not by patching the agent. |
 | **FR-A6** | Supported agents are detected automatically on the main server, with their installed versions. | Detection runs at startup and on demand; a missing agent is shown as not installed, not as an error. |
 | **FR-A7** | The main server manages MCP servers centrally and injects them into each agent session at creation. | An MCP server added once is visible to every agent that supports MCP. |
 | **FR-A8** | Scheduled tasks: cron expressions (with time zone), fixed intervals, and one-off runs; each run either continues an existing session or starts a new one. Agents may create schedules from within a conversation. | Missed triggers while the server was down are detected and reported, not silently dropped. |
 
-> The 09-22 transcript parsers in `web/proxy/dpx/agents/` (Claude Code, Codex) satisfy part of
+> The 09-22 transcript parsers in `ember/proxy/dpx/agents/` (Claude Code, Codex) satisfy part of
 > `FR-A3` for reading existing history and are kept (`INTENT.md` D13).
 
-> **ACP adapter (`FR-A2`, #53).** `crates/server/src/agents/acp.rs` is one generic ACP client (protocol
+> **ACP adapter (`FR-A2`, #53).** `ember/server/src/agents/acp.rs` is one generic ACP client (protocol
 > version 1, schema `schema-v1.24.1`): `initialize`, `session/new`, native resume through
 > `session/resume` (or `session/load` with the replay dropped), `session/prompt`, `session/cancel`;
 > `session/update` mapped to `FR-A3` events; `session/request_permission` mapped to `FR-A5`
@@ -152,7 +152,7 @@ installers (#72); the documents in the house writing style (#68).
 > session's computer through its node API (`FR-X1`). ACP agents are configured, not compiled in
 > (`EMBER_ACP_AGENTS`, preset `omp` = `omp acp`), and appear as agent kinds by their configured
 > name. *[provisional]* Covered by tests against an in-process fake ACP agent; the `FR-A2`
-> acceptance test against real OMP (`crates/server/tests/acp_omp.rs`, `EMBER_E2E_OMP=1`) has not been
+> acceptance test against real OMP (`ember/server/tests/acp_omp.rs`, `EMBER_E2E_OMP=1`) has not been
 > run (OMP is not installed on the main server). Gaps: no account isolation (`FR-U2`) or
 > transcript import for ACP agents; instructions reach agents without an instructions flag in
 > front of the first prompt of each process.
@@ -162,7 +162,7 @@ installers (#72); the documents in the house writing style (#68).
 Antigravity (`agy`) has no headless approval channel and no ACP. Ember runs it with
 `--dangerously-skip-permissions --sandbox` and makes its own `PreToolUse` hook (matcher `*`, in a
 per-session folder passed with `--add-dir`) the only gate. **[user, 2026-10-03]** the "reinforced
-hook" design, relayed by the darkpyonix leader. Implementation: `crates/server/src/agents/antigravity.rs`.
+hook" design, relayed by the darkpyonix leader. Implementation: `ember/server/src/agents/antigravity.rs`.
 
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
@@ -179,7 +179,7 @@ only). Every run: `agy -p "<prompt>" --output-format stream-json --add-dir <fold
 --new-project --model gemini-3.6-flash-low --dangerously-skip-permissions [extra]` from
 `<folder>/work`, `root/.agents/hooks.json` = one `PreToolUse` hook, matcher `*`. The prompt asked for
 `touch marker` unless noted; "marker" = whether the file appeared anywhere in the folder.
-Recordings: `crates/server/tests/fixtures/agy/*_1.2.16.*`.
+Recordings: `ember/server/tests/fixtures/agy/*_1.2.16.*`.
 
 | # | Test | Setup | Observed | Result |
 | - | ---- | ----- | -------- | ------ |
@@ -267,7 +267,7 @@ run gated, any other version read-only.
   caller); user routes `GET /api/v1/sessions/{id}/team`, `GET /api/v1/teams/{id}`,
   `GET /api/v1/teams/{id}/mail`, `POST /api/v1/teams/{id}/members/{session}/end`,
   `GET /api/v1/sessions/{id}/mentions?q=`. Every team change is pushed as `team_updated` with the
-  whole team (additive; `PUSH_VERSION` stays 1). Details: `crates/server/src/a2a/api.rs`.
+  whole team (additive; `PUSH_VERSION` stays 1). Details: `ember/server/src/a2a/api.rs`.
 - **Not yet verified**: a team of real Claude Code and Codex sessions on different computers and
   accounts (needs real agents and hardware); the composer suggestion list on screen.
 
@@ -308,7 +308,7 @@ run gated, any other version read-only.
 | **FR-N1** | Main server ↔ computer and client ↔ main server connections are HTTPS carried over a peer-to-peer tunnel. **Transport: iroh 1.0, decided, conditionally** [user, 2026-10-03: "P2P를 iroh로 가는건 일단 허용하는데 그게 품질이 별로면 아예 직접 구현하는거도 고민해봐"]. In-process Rust (one app on mobile), QUIC hole punching, self-hostable relay, MIT/Apache-2.0. If it misses `NFR-N1`, our own implementation is evaluated. Lives behind `FR-N5`. | Works across two different NATs with no port forwarding configured by the user. |
 | **FR-N2** | `darkpyonix.dev` provides hole-punching coordination and a relay fallback: `darkpyonix.dev` runs iroh-relay and an address directory (decided with the transport); devices register under the user's **GitHub account** on the hub [user, 2026-10-03: "허브는 깃허브 로그인으로 하자"], so connections need no user configuration. | A new computer joins by signing in; no address or port is entered by hand. |
 | **FR-N3** | All connections are encrypted and authenticated per device; a device can be revoked. | Revoking a device closes its connections within one heartbeat. |
-| **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium; see `web/proxy/docs/CONSTRAINTS.md`). |
+| **FR-N4** | Clients reach the IDE window over a secure context, so VS Code Web's service-worker-backed webviews work on phones and tablets. | Extension webviews render on a real phone (not only headless Chromium; see `ember/proxy/docs/CONSTRAINTS.md`). |
 | **FR-N5** | All Ember code reaches the network through one transport interface (connect to a peer by its key, accept, open bidirectional streams, report path state: direct or relayed). **No iroh type appears outside the transport crate.** | Replacing the transport touches only that crate: a CI check fails if `iroh` is imported anywhere else, and the ember server and ember node test suites run unchanged against an in-memory fake transport. |
 | **NFR-N1** | Transport quality bar. **If iroh misses any line after tuning, our own implementation is evaluated** (`FR-N1`). Initial targets, set before measurement; the first M5 measurement may adjust a target once, with the measured data and reason recorded here. | Measured on the real network matrix: home router ↔ school/office network, home ↔ LTE hotspot, and symmetric NAT on one side; 20 runs per pair. <br>• **Direct-path success:** ≥ 85% across the matrix excluding symmetric-NAT pairs; symmetric-NAT pairs must still connect via relay 100%. <br>• **Direct-path overhead:** RTT ≤ raw path + 5 ms (p50) and + 15 ms (p95); throughput ≥ 80% of a raw TCP transfer over the same path. <br>• **Connection setup:** first byte ≤ 1.5 s p95 (relay allowed); direct path established ≤ 5 s p95 when one exists. <br>• **Relay → direct upgrade:** ≤ 10 s p95 after a direct path becomes possible; direct → relay fallback with no stream reset. <br>• **Network change** (Wi-Fi ↔ LTE): open streams survive; stall ≤ 3 s p95. <br>• **Mobile:** an idle background connection adds ≤ 2%/hour battery drain (Android and iOS); reconnect on foreground ≤ 1 s p95. |
 | **PR-1** | Main server → client push channel for session status, transcript updates, computer reachability and assignments. | Versioned schema; a version mismatch is detected and reported, not silently dropped. |
@@ -322,10 +322,10 @@ run on real networks (#10) or against the real hub (#62).
 
 | ID | What is wired | Evidence / what remains |
 | -- | ------------- | ----------------------- |
-| **FR-N1** | ember node serves its API on transport service `ember-node/1` (`EMBER_NODE_TRANSPORT=1`, or `only`); ember server dials nodes registered by peer (`POST /api/v1/computers {name, peer, token}`) and serves its own API on `ember-server/1` (`EMBER_TRANSPORT=1`); the client crate reaches the server with `Api::over_transport`. One transport stream = one HTTP/1.1 connection, so every HTTP route and WebSocket (exec, events, exec-server, terminal attach, push) is unchanged. | `crates/node/tests/transport.rs`, `crates/server/tests/transport.rs`, `crates/client/tests/transport_flow.rs` (fake transport). The two-NAT acceptance run is still to do on real networks (`NFR-N1` matrix). |
-| **FR-N2** | Relay URL from `EMBER_RELAY_URL`; peers addressed by `PeerAddr` (id + hints) or bare id. **Hub** (`ember-hub` crate, `docs/design/HUB-INTEGRATION.md`, against `hub.openapi.yaml` v0.3.0): ember server (`POST /api/v1/hub/link`, token sealed with `secret.key`) and ember node (`ember-node hub register`, `<state dir>/hub.json` 0600) join the user's GitHub account through a device link (user code + verification URL, polled claim signed with the endpoint key). A registered endpoint publishes its signed address record to the hub's `/pkarr` and resolves peers there with its token (`ember_transport::HubDirectory`: iroh's own pkarr publisher/resolver inside the transport), and uses the hub's relay (`EMBER_HUB_URL`, default `https://darkpyonix.dev` → `https://relay.darkpyonix.dev`). Computers are added by picking a device from the account (`POST /api/v1/hub/devices/{id}/computer`); the devices allow-list can sync from the account (opt-in); removal on the hub is detected (`401` on `/v1/me`) and surfaced. | Tests run in CI: `crates/hub/tests/{link_flow,revocation,directory}.rs`, `crates/server/tests/hub.rs`, `crates/node/tests/hub.rs` against `ember_hub::fake::FakeHub`. Hub-side gaps (relay URL discovery, revocation reason, client role, self-removal…) are listed in `HUB-INTEGRATION.md` §Spec gaps. Until a node is registered, pasting its `PeerAddr` still works. Planned (#62, draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42): the default hub moves off the root domain and the hub paths lose `/v1`. |
-| **FR-N3** | Per-device allow-lists enforced at accept (`ember_transport::PeerGate`): the server admits peers in its `devices` table (store migration 6; `/api/v1/devices`, served on TCP only), the node admits server peer ids from `EMBER_NODE_ALLOWED_PEERS` / `<state dir>/allowed-peers`. Revoking (`DELETE /api/v1/devices/{peer}`; node: edit the file + SIGHUP) closes the peer's open connections immediately, which is within one heartbeat. Bearer tokens stay as a second factor for now. | `crates/transport/tests/gate.rs`; revocation cases in the three suites above. |
-| **FR-N5** | All of the above uses `ember-transport`'s API only. | `scripts/check-transport-isolation.sh` passes; server, node and client tests run against `MemNetwork`. |
+| **FR-N1** | ember node serves its API on transport service `ember-node/1` (`EMBER_NODE_TRANSPORT=1`, or `only`); ember server dials nodes registered by peer (`POST /api/v1/computers {name, peer, token}`) and serves its own API on `ember-server/1` (`EMBER_TRANSPORT=1`); the client crate reaches the server with `Api::over_transport`. One transport stream = one HTTP/1.1 connection, so every HTTP route and WebSocket (exec, events, exec-server, terminal attach, push) is unchanged. | `ember/node/tests/transport.rs`, `ember/server/tests/transport.rs`, `ember/client/tests/transport_flow.rs` (fake transport). The two-NAT acceptance run is still to do on real networks (`NFR-N1` matrix). |
+| **FR-N2** | Relay URL from `EMBER_RELAY_URL`; peers addressed by `PeerAddr` (id + hints) or bare id. **Hub** (`ember-hub` crate, `docs/design/HUB-INTEGRATION.md`, against `hub.openapi.yaml` v0.3.0): ember server (`POST /api/v1/hub/link`, token sealed with `secret.key`) and ember node (`ember-node hub register`, `<state dir>/hub.json` 0600) join the user's GitHub account through a device link (user code + verification URL, polled claim signed with the endpoint key). A registered endpoint publishes its signed address record to the hub's `/pkarr` and resolves peers there with its token (`ember_transport::HubDirectory`: iroh's own pkarr publisher/resolver inside the transport), and uses the hub's relay (`EMBER_HUB_URL`, default `https://darkpyonix.dev` → `https://relay.darkpyonix.dev`). Computers are added by picking a device from the account (`POST /api/v1/hub/devices/{id}/computer`); the devices allow-list can sync from the account (opt-in); removal on the hub is detected (`401` on `/v1/me`) and surfaced. | Tests run in CI: `ember/hub/tests/{link_flow,revocation,directory}.rs`, `ember/server/tests/hub.rs`, `ember/node/tests/hub.rs` against `ember_hub::fake::FakeHub`. Hub-side gaps (relay URL discovery, revocation reason, client role, self-removal…) are listed in `HUB-INTEGRATION.md` §Spec gaps. Until a node is registered, pasting its `PeerAddr` still works. Planned (#62, draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42): the default hub moves off the root domain and the hub paths lose `/v1`. |
+| **FR-N3** | Per-device allow-lists enforced at accept (`ember_transport::PeerGate`): the server admits peers in its `devices` table (store migration 6; `/api/v1/devices`, served on TCP only), the node admits server peer ids from `EMBER_NODE_ALLOWED_PEERS` / `<state dir>/allowed-peers`. Revoking (`DELETE /api/v1/devices/{peer}`; node: edit the file + SIGHUP) closes the peer's open connections immediately, which is within one heartbeat. Bearer tokens stay as a second factor for now. | `ember/transport/tests/gate.rs`; revocation cases in the three suites above. |
+| **FR-N5** | All of the above uses `ember-transport`'s API only. | `.github/scripts/checks/check-transport-isolation.sh` passes; server, node and client tests run against `MemNetwork`. |
 
 ---
 
@@ -334,7 +334,7 @@ run on real networks (#10) or against the real hub (#62).
 | ID | Requirement | Acceptance criteria |
 | -- | ----------- | ------------------- |
 | **FR-W1** | The IDE window serves VS Code Web for the session's project and current computer, so that only API and data traffic crosses the network on repeat loads. | Static workbench assets are cached; a cold open on a slow link renders the shell promptly and degrades gracefully. |
-| **FR-W2** | The wrapping layer applies CSS/DOM overrides for a native-feeling titlebar and a responsive layout for tablet and phone widths, on an unmodified VS Code Web build. | Implemented today by `web/proxy/` (the iframe wrapper, overlay, keyboard policy). A CI check diffs the served bundle against its pinned release. |
+| **FR-W2** | The wrapping layer applies CSS/DOM overrides for a native-feeling titlebar and a responsive layout for tablet and phone widths, on an unmodified VS Code Web build. | Implemented today by `ember/proxy/` (the iframe wrapper, overlay, keyboard policy). A CI check diffs the served bundle against its pinned release. |
 | **FR-W3** | Native window chrome is suppressed where the injected titlebar replaces it, without losing window controls. | Verified per platform. |
 | **FR-W4** | Two runtimes: OSE (DarkPyonix-built from MIT source, Open VSX) by default, and VSC (the user's installed Microsoft build, Microsoft Marketplace) as an option. *[provisional, from `docs/design/INTEGRATION.md`]* | Choosing VSC shows an install notice, a copyable install guide, and a command field to verify `code --version` before `code serve-web` is used. |
 | **FR-W5** | On Android and iOS the IDE window works without Node: through a `serve-web`-compatible Rust backend, or directly through web APIs with no backend. [user] | Opens and edits a project on a phone with no Node installed anywhere on the device. Only web-capable extensions run in this mode (`INTENT.md` D10). |
@@ -361,28 +361,28 @@ run on real networks (#10) or against the real hub (#62).
 
 ### FR-W4 acceptance: the OSE runtime
 
-OSE is built by `.github/workflows/test-ose.yml` from `build/ose/` (Code-OSS at the tag in `build/ose/VERSION`,
-`product.json` overrides only; see `build/ose/README.md`). A release (tag `ose-v*`) is accepted when,
+OSE is built by `.github/workflows/test-ose.yml` from `ember/ose/` (Code-OSS at the tag in `ember/ose/VERSION`,
+`product.json` overrides only; see `ember/ose/README.md`). A release (tag `ose-v*`) is accepted when,
 for every target (linux-x64, linux-arm64, darwin-arm64, darwin-x64):
 
-1. **No Microsoft marketplace or telemetry in `product.json`.** `build/ose/check-product.sh` passes on
+1. **No Microsoft marketplace or telemetry in `product.json`.** `ember/ose/check-product.sh` passes on
    the packaged `product.json`: `extensionsGallery` points at Open VSX
    (`serviceUrl` `https://open-vsx.org/vscode/gallery`, `itemUrl` `https://open-vsx.org/vscode/item`,
    resource/extension templates on `open-vsx.org`); `enableTelemetry` is not true and there is no
    `aiConfig`; no `marketplace.visualstudio.com`, `*.vsassets.io`, `vscode-unpkg.net`, update,
    experiments or voice endpoint appears anywhere. Remaining Microsoft hosts (the webview CDN,
-   Copilot doc links) are listed in the job log and in `build/ose/README.md`.
-2. **It launches.** `build/ose/smoke.sh` starts `bin/dpx-ose-server` with the flags `web/proxy/dpx` uses
+   Copilot doc links) are listed in the job log and in `ember/ose/README.md`.
+2. **It launches.** `ember/ose/smoke.sh` starts `bin/dpx-ose-server` with the flags `ember/proxy/dpx` uses
    (`DEFAULT_OSE_ARGS`: `--host --port --without-connection-token --accept-server-license-terms
    --server-data-dir`) and the workbench page is served.
-3. **Open VSX search and install work.** `build/ose/smoke.sh` queries `<serviceUrl>/extensionquery` and
+3. **Open VSX search and install work.** `ember/ose/smoke.sh` queries `<serviceUrl>/extensionquery` and
    gets results, and the server CLI installs an extension (`redhat.vscode-yaml` by default) from
    Open VSX.
 4. **Manually, once per release, on a Raspberry Pi (64-bit OS) and a Mac:** `python -m dpx.serve`
    with `DPX_OSE_SERVER` set opens the IDE window; the Extensions view searches Open VSX and
    installs an extension; Help → About shows "DarkPyonix OSE" and the Code-OSS version.
 
-Steps 1–3 run in CI on every build; step 1 alone runs on every pull request touching `build/ose/`.
+Steps 1–3 run in CI on every build; step 1 alone runs on every pull request touching `ember/ose/`.
 
 ---
 
@@ -437,10 +437,10 @@ Unchanged in substance from 09-22; see `ARCHITECTURE.md` §3 and `INTENT.md` D11
 | **NFR-B1** | New IDE window open-to-usable ≤ a plain `serve-web` page load + 100 ms. | p99 on the reference machine. |
 | **NFR-B2** | One bridge message ≤ 5 ms p99 encode-to-receipt. | Regression guard. |
 
-**Implementation notes (10-03).** Webview side: `web/proxy/static/detach.js` (VS Code Web target;
-the editor core reuses the schema later). Native side: the `crates/bridge/` crate (`ember-bridge`):
+**Implementation notes (10-03).** Webview side: `ember/proxy/static/detach.js` (VS Code Web target;
+the editor core reuses the schema later). Native side: the `ember/bridge/` crate (`ember-bridge`):
 message types, the `WebviewBridge` trait, version handling and the detach → open-window step.
-No platform webview implementation yet (#30). Details and field reliability: `web/proxy/README.md`
+No platform webview implementation yet (#30). Details and field reliability: `ember/proxy/README.md`
 "Tab detach".
 
 - **FR-B1** "never both" is enforced by deciding at `dragend` only when no VS Code drop target
@@ -476,7 +476,7 @@ The kernel, manager and hub contracts are defined in `darkpyonix-core`: `docs/PR
 
 ## §E: Editor core (long-term draft, gated)
 
-Formerly §M. Work has started (M8, #32): `crates/editor-conn` and `crates/editor` exist and their
+Formerly §M. Work has started (M8, #32): `ember/editor-conn` and `ember/editor` exist and their
 tests run in CI; the rows stay a draft until the editor opens a project on screen. See
 `IMPLEMENTATION.md`, `docs/design/EDITOR-CONNECTION.md` and `docs/design/EDITOR-SESSION.md`.
 

@@ -1,6 +1,6 @@
 # Sign in with ChatGPT on a self-hosted ember server (FR-U4)
 
-Status: **implemented**, `crates/server/src/chatgpt/` (#38), tests run in CI. Not yet run against OpenAI (#16). OpenAI's pages
+Status: **implemented**, `ember/server/src/chatgpt/` (#38), tests run in CI. Not yet run against OpenAI (#16). OpenAI's pages
 were read on 2026-10-03; the feature is in preview, so recheck them before release.
 
 ## What OpenAI documents

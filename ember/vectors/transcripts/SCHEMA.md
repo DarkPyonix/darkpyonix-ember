@@ -2,14 +2,14 @@
 
 Shared vectors for every parser that reads an agent's **native transcript file** (Claude Code's
 `~/.claude/projects/*/*.jsonl`, Codex's `~/.codex/sessions/**/rollout-*.jsonl`): the Python
-adapters in `web/proxy/dpx/agents/` and the Rust importers in `crates/server/src/history/`.
+adapters in `ember/proxy/dpx/agents/` and the Rust importers in `ember/server/src/history/`.
 
 ```
-tests/vectors/transcripts/<agent>/<case>/input.jsonl     native file, synthetic content
-tests/vectors/transcripts/<agent>/<case>/expected.json   the normalised form below
+ember/vectors/transcripts/<agent>/<case>/input.jsonl     native file, synthetic content
+ember/vectors/transcripts/<agent>/<case>/expected.json   the normalised form below
 ```
 
-Run both suites with `scripts/test-transcript-vectors.sh`.
+Run both suites with `.github/scripts/checks/test-transcript-vectors.sh`.
 
 ## Normalised form
 
@@ -75,9 +75,9 @@ Run both suites with `scripts/test-transcript-vectors.sh`.
 
 ## How each implementation is checked
 
-* **Rust** (`crates/server/src/history/`) must reproduce `expected.json` exactly.
-* **Python** (`web/proxy/dpx/agents/`) is a display parser that summarises tools instead of keeping
-  them, so `web/proxy/tests/test_transcript_vectors.py` compares a projection: the ordered
+* **Rust** (`ember/server/src/history/`) must reproduce `expected.json` exactly.
+* **Python** (`ember/proxy/dpx/agents/`) is a display parser that summarises tools instead of keeping
+  them, so `ember/proxy/tests/test_transcript_vectors.py` compares a projection: the ordered
   `(role, text)` of user/assistant messages without `tool_name`, against the adapter's
   `kind == "text"` messages; plus `cwd`, and `title` where it is not `null`. `native_id` is not
   compared (the Python adapter identifies a conversation by its file name).

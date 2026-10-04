@@ -8,7 +8,7 @@ FR-W4). It is the **VS Code web server ("REH web")** compiled by DarkPyonix from
 Microsoft's VS Code (`code serve-web`, Microsoft Marketplace).
 
 OSE is wrapped, never patched (E4): the only change to the upstream tree is `product.json`.
-Behaviour changes for the IDE window come from `web/proxy/`.
+Behaviour changes for the IDE window come from `ember/proxy/`.
 
 | File | What it is |
 | ---- | ---------- |
@@ -84,14 +84,14 @@ Microsoft-internal resources. The upstream tree stays unpatched in every case.
 - `GITHUB_TOKEN` (the workflow's read-only token) is passed to the build to avoid GitHub API rate
   limits when built-in extensions and packages are fetched.
 
-## Running it with `web/proxy/dpx`
+## Running it with `ember/proxy/dpx`
 
 ```sh
 tar -xzf dpx-ose-1.139.1-linux-arm64.tar.gz -C ~/.local/share
 export DPX_OSE_SERVER=~/.local/share/dpx-ose-1.139.1-linux-arm64/bin/dpx-ose-server
-# optional; this is the launcher's default (web/proxy/dpx/vscode/runtime.py DEFAULT_OSE_ARGS) plus telemetry off
+# optional; this is the launcher's default (ember/proxy/dpx/vscode/runtime.py DEFAULT_OSE_ARGS) plus telemetry off
 export DPX_OSE_ARGS='--host {host} --port {port} --without-connection-token --accept-server-license-terms --server-data-dir {data_dir} --telemetry-level off'
-cd web/proxy && python -m dpx.serve --root ~/work
+cd ember/proxy && python -m dpx.serve --root ~/work
 ```
 
 `dpx.serve` starts the OSE server on a free loopback port and fronts it with the proxy; the server
@@ -145,7 +145,7 @@ Server flags used here (from upstream `src/vs/server/node/serverEnvironmentServi
   only allows `'self'` and `*.vscode-cdn.net` as frame sources. This is not the marketplace and
   carries no telemetry, but it does mean webviews (Markdown preview, notebooks, extension webviews)
   need internet access to Microsoft's CDN. Self-hosting it needs a separate origin per webview plus
-  a CSP change in `web/proxy/`; tracked as an open item.
+  a CSP change in `ember/proxy/`; tracked as an open item.
 - `defaultChatAgent.*` links (aka.ms docs, `api.github.com/copilot_internal`): the MIT-licensed
   built-in Copilot Chat extension (`extensions/copilot`) and its setup UI. It contacts GitHub only
   when a user signs in to Copilot.

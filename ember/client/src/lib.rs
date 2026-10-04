@@ -1,7 +1,7 @@
 //! Ember native client core: everything below the UI (SPEC §L, PR-1, FR-S6).
 //!
 //! - [`wire`]: the main server's JSON types.
-//! - [`api`]: HTTP client for `/api/v1`.
+//! - [`api`]: HTTP client for `/api`.
 //! - [`push`]: push-message decoding (with version check) and reconnect backoff.
 //! - [`transcript`] and [`state`]: the pure reducer a UI binds to: projects, sessions with
 //!   launcher status (incl. finished-unread), transcripts, computers, connection state.

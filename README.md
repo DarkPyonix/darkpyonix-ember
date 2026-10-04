@@ -158,7 +158,7 @@ darkpyonix-ember/
 │  ├─ client/            client core: connection, sync and state below the UI
 │  ├─ transport/         peer-to-peer connections (iroh backend and an in-memory fake)
 │  ├─ hub/               darkpyonix.dev hub client: device registration and directory
-│  ├─ bridge/            IDE window bridge: versioned webview and native messages
+│  ├─ bridge/            IDE window bridge: webview and native messages
 │  ├─ editor-conn/       Rust client for a Code-OSS server
 │  ├─ editor/            editor core session layer (planned editor, #32)
 │  ├─ proxy/             the VS Code Web wrapping layer (Python, FastAPI)

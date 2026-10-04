@@ -2,13 +2,9 @@
 //!
 //! Mirrored rather than shared so the client never links the server. Decoding is tolerant where
 //! the server may grow: unknown event kinds and statuses decode to `Unknown` instead of failing,
-//! so an additive server change never breaks an older client. Incompatible changes bump
-//! [`PUSH_VERSION`] and are reported (see [`crate::push`]).
+//! so an additive server change never breaks an older client..
 
 use serde::{Deserialize, Serialize};
-
-/// The push envelope version this client understands.
-pub const PUSH_VERSION: u32 = 1;
 
 /// One thing that happened in a session (server `AgentEvent`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

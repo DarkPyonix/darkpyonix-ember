@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use super::{A2a, A2aError, Receipt, CLI_NAME};
 use crate::agents::AgentKind;
 use crate::events::{AgentEvent, SessionStatus};
-use crate::session::{NewSession, Push, SessionError, PUSH_VERSION};
+use crate::session::{NewSession, Push, SessionError};
 use crate::store::{now_ms, SessionPatch, SessionRecord, Store};
 
 /// Store migration: teams, members, tasks and mail (appended to `store::MIGRATIONS`).
@@ -708,7 +708,6 @@ impl A2a {
     pub(crate) fn publish_team(&self, team_id: &str) {
         match self.team_view(team_id) {
             Ok(Some(team)) => self.sessions.publish(Push::TeamUpdated {
-                v: PUSH_VERSION,
                 team,
             }),
             Ok(None) => {}

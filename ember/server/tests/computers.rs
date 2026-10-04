@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use ember_node::proto::{EnvInfo, Health, PROTOCOL_VERSION};
+use ember_node::proto::{EnvInfo, Health};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
 use ember_server::computers::{
@@ -50,7 +50,7 @@ struct FakeNode {
 impl NodeApi for FakeNode {
     async fn health(&self) -> anyhow::Result<Health> {
         anyhow::ensure!(self.up, "connection refused");
-        Ok(Health { ok: true, version: "test".into(), protocol: PROTOCOL_VERSION })
+        Ok(Health { ok: true, version: "test".into() })
     }
 
     async fn env(&self) -> anyhow::Result<EnvInfo> {
@@ -398,13 +398,13 @@ async fn http_register_list_and_switch() {
     let app = ember_server::api::router(f.sessions.clone())
         .merge(computers::api::router(f.computers.clone(), f.sessions.clone()));
 
-    let (st, pi) = call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "pi", "url": "http://pi:8741", "token": "tok" }))).await;
+    let (st, pi) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "pi", "url": "http://pi:8741", "token": "tok" }))).await;
     assert_eq!(st, StatusCode::CREATED);
     assert!(pi.get("token").is_none(), "token never returned: {pi}");
     let pi_id = pi["id"].as_str().unwrap().to_string();
-    call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "down", "url": "http://down:1", "token": "t" }))).await;
+    call(&app, Method::POST, "/api/computers", Some(json!({ "name": "down", "url": "http://down:1", "token": "t" }))).await;
 
-    let (st, list) = call(&app, Method::GET, "/api/v1/computers", None).await;
+    let (st, list) = call(&app, Method::GET, "/api/computers", None).await;
     assert_eq!(st, StatusCode::OK);
     let list = list.as_array().unwrap();
     assert_eq!(list[0]["id"], LOCAL);
@@ -412,29 +412,29 @@ async fn http_register_list_and_switch() {
     let by_name = |n: &str| list.iter().find(|c| c["name"] == n).unwrap().clone();
     assert_eq!(by_name("pi")["reachable"], true);
     assert_eq!(by_name("down")["reachable"], false);
-    let (_, unprobed) = call(&app, Method::GET, "/api/v1/computers?probe=false", None).await;
+    let (_, unprobed) = call(&app, Method::GET, "/api/computers?probe=false", None).await;
     assert!(unprobed.as_array().unwrap().iter().all(|c| c["reachable"].is_null()));
 
-    let (st, one) = call(&app, Method::GET, &format!("/api/v1/computers/{pi_id}"), None).await;
+    let (st, one) = call(&app, Method::GET, &format!("/api/computers/{pi_id}"), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(one["env"]["hostname"], "pi");
 
     let id = new_session(&f.sessions);
-    let (st, out) = call(&app, Method::PUT, &format!("/api/v1/sessions/{id}/computer"), Some(json!({ "computer_id": pi_id }))).await;
+    let (st, out) = call(&app, Method::PUT, &format!("/api/sessions/{id}/computer"), Some(json!({ "computer_id": pi_id }))).await;
     assert_eq!(st, StatusCode::OK, "{out}");
     assert_eq!(out["computer"]["name"], "pi");
     assert_eq!(out["changed"], true);
-    let (_, cur) = call(&app, Method::GET, &format!("/api/v1/sessions/{id}/computer"), None).await;
+    let (_, cur) = call(&app, Method::GET, &format!("/api/sessions/{id}/computer"), None).await;
     assert_eq!(cur["computer"]["id"], pi_id.as_str());
     assert_eq!(cur["implicit"], false);
 
     let down_id = by_name("down")["id"].as_str().unwrap().to_string();
-    let (st, _) = call(&app, Method::PUT, &format!("/api/v1/sessions/{id}/computer"), Some(json!({ "computer_id": down_id }))).await;
+    let (st, _) = call(&app, Method::PUT, &format!("/api/sessions/{id}/computer"), Some(json!({ "computer_id": down_id }))).await;
     assert_eq!(st, StatusCode::BAD_GATEWAY);
-    let (st, _) = call(&app, Method::DELETE, &format!("/api/v1/computers/{pi_id}"), None).await;
+    let (st, _) = call(&app, Method::DELETE, &format!("/api/computers/{pi_id}"), None).await;
     assert_eq!(st, StatusCode::CONFLICT);
-    let (st, _) = call(&app, Method::DELETE, &format!("/api/v1/computers/{down_id}"), None).await;
+    let (st, _) = call(&app, Method::DELETE, &format!("/api/computers/{down_id}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _) = call(&app, Method::GET, "/api/v1/sessions/nope/computer", None).await;
+    let (st, _) = call(&app, Method::GET, "/api/sessions/nope/computer", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }

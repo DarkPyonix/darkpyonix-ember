@@ -189,7 +189,7 @@ async fn leader(w: &World, title: &str) -> String {
 
 /// Spawn `name` for `lead`; returns the teammate's session id.
 async fn spawn(w: &World, lead: &str, name: &str, prompt: &str) -> String {
-    let (st, v) = agent(w, lead, "POST", "/api/v1/a2a/team/members", Some(json!({ "name": name, "prompt": prompt }))).await;
+    let (st, v) = agent(w, lead, "POST", "/api/a2a/team/members", Some(json!({ "name": name, "prompt": prompt }))).await;
     assert_eq!(st, StatusCode::CREATED, "{v}");
     v["member"]["session_id"].as_str().unwrap().to_string()
 }
@@ -204,7 +204,7 @@ async fn a_leader_spawns_a_teammate_that_keeps_its_own_approvals() {
         &w,
         &lead,
         "POST",
-        "/api/v1/a2a/team/members",
+        "/api/a2a/team/members",
         Some(json!({ "name": "alice", "prompt": "write the tests" })),
     )
     .await;
@@ -245,18 +245,18 @@ async fn a_leader_spawns_a_teammate_that_keeps_its_own_approvals() {
     finish_turn(&w.sessions, &alice, 1).await;
 
     // Visible through the agent and user APIs.
-    let (st, team) = agent(&w, &lead, "GET", "/api/v1/a2a/team", None).await;
+    let (st, team) = agent(&w, &lead, "GET", "/api/a2a/team", None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(team["id"], team_id.as_str());
     assert_eq!(team["leader"], lead.as_str());
     let names: Vec<&str> = team["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["lead", "alice"]);
-    let (_, by_session) = call(&w.app, "GET", &format!("/api/v1/sessions/{alice}/team"), None, None).await;
+    let (_, by_session) = call(&w.app, "GET", &format!("/api/sessions/{alice}/team"), None, None).await;
     assert_eq!(by_session["id"], team_id.as_str());
-    let (_, by_id) = call(&w.app, "GET", &format!("/api/v1/teams/{team_id}"), None, None).await;
+    let (_, by_id) = call(&w.app, "GET", &format!("/api/teams/{team_id}"), None, None).await;
     assert_eq!(by_id["members"].as_array().unwrap().len(), 2);
     let outsider = new_session(&w.sessions, "outsider");
-    let (st, none) = call(&w.app, "GET", &format!("/api/v1/sessions/{outsider}/team"), None, None).await;
+    let (st, none) = call(&w.app, "GET", &format!("/api/sessions/{outsider}/team"), None, None).await;
     assert_eq!((st, none), (StatusCode::OK, Value::Null));
 
     // And pushed.
@@ -279,12 +279,12 @@ async fn only_the_leader_spawns_and_ends_teammates() {
     let outsider = leader(&w, "outsider").await;
 
     // A teammate cannot spawn or end.
-    let (st, v) = agent(&w, &alice, "POST", "/api/v1/a2a/team/members", Some(json!({ "name": "bob", "prompt": "x" }))).await;
+    let (st, v) = agent(&w, &alice, "POST", "/api/a2a/team/members", Some(json!({ "name": "bob", "prompt": "x" }))).await;
     assert_eq!((st, v["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{v}");
-    let (st, v) = agent(&w, &alice, "DELETE", "/api/v1/a2a/team/members/alice", None).await;
+    let (st, v) = agent(&w, &alice, "DELETE", "/api/a2a/team/members/alice", None).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     // Someone outside the team cannot end its members.
-    let (st, v) = agent(&w, &outsider, "DELETE", "/api/v1/a2a/team/members/alice", None).await;
+    let (st, v) = agent(&w, &outsider, "DELETE", "/api/a2a/team/members/alice", None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
 
     // Bad names and agents.
@@ -295,14 +295,14 @@ async fn only_the_leader_spawns_and_ends_teammates() {
         (json!({ "name": "carol", "prompt": "  " }), "empty prompt"),
         (json!({ "name": "carol", "prompt": "x", "agent": "nope" }), "agent"),
     ] {
-        let (st, v) = agent(&w, &lead, "POST", "/api/v1/a2a/team/members", Some(body)).await;
+        let (st, v) = agent(&w, &lead, "POST", "/api/a2a/team/members", Some(body)).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{why}: {v}");
     }
     let (st, v) = agent(
         &w,
         &lead,
         "POST",
-        "/api/v1/a2a/team/members",
+        "/api/a2a/team/members",
         Some(json!({ "name": "carol", "prompt": "x", "computer": "studio" })),
     )
     .await;
@@ -311,15 +311,15 @@ async fn only_the_leader_spawns_and_ends_teammates() {
 
     // The leader ends alice: her agent stops, she leaves the team, the session stays.
     wait_status(&w.sessions, &alice, SessionStatus::WaitingForApproval).await;
-    let (st, v) = agent(&w, &lead, "DELETE", "/api/v1/a2a/team/members/alice", None).await;
+    let (st, v) = agent(&w, &lead, "DELETE", "/api/a2a/team/members/alice", None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["name"], "alice");
     assert!(!v["ended_at"].is_null());
     assert!(!w.sessions.is_live(&alice).await);
     assert!(notices(&w.sessions, &alice).iter().any(|n| n.contains("ended by the team leader")));
-    let (st, _) = agent(&w, &alice, "GET", "/api/v1/a2a/team/tasks", None).await;
+    let (st, _) = agent(&w, &alice, "GET", "/api/a2a/team/tasks", None).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    let (st, _) = agent(&w, &lead, "DELETE", "/api/v1/a2a/team/members/alice", None).await;
+    let (st, _) = agent(&w, &lead, "DELETE", "/api/a2a/team/members/alice", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
     // The name is free again.
@@ -328,9 +328,9 @@ async fn only_the_leader_spawns_and_ends_teammates() {
 
     // The user can end a teammate too.
     let team_id = w.a2a.team_of(&lead).unwrap().unwrap().id;
-    let (st, v) = call(&w.app, "POST", &format!("/api/v1/teams/{team_id}/members/{alice2}/end"), None, None).await;
+    let (st, v) = call(&w.app, "POST", &format!("/api/teams/{team_id}/members/{alice2}/end"), None, None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    let (st, _) = call(&w.app, "POST", &format!("/api/v1/teams/{team_id}/members/{lead}/end"), None, None).await;
+    let (st, _) = call(&w.app, "POST", &format!("/api/teams/{team_id}/members/{lead}/end"), None, None).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "the leader is not a teammate");
 }
 
@@ -342,46 +342,46 @@ async fn tasks_are_shared_and_members_update_their_own() {
     let bob = spawn(&w, &lead, "bob", "hi").await;
 
     // The leader assigns; the assignee is told.
-    let (st, t1) = agent(&w, &lead, "POST", "/api/v1/a2a/team/tasks", Some(json!({ "title": "write tests", "assignee": "alice" }))).await;
+    let (st, t1) = agent(&w, &lead, "POST", "/api/a2a/team/tasks", Some(json!({ "title": "write tests", "assignee": "alice" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{t1}");
     assert_eq!((t1["number"].as_i64(), t1["status"].as_str(), t1["assignee_name"].as_str()), (Some(1), Some("open"), Some("alice")));
     assert!(inbox(&w, &alice).contains("Task #1 was assigned to you by lead: write tests"));
 
     // A teammate adds tasks, but assigns only to itself.
-    let (st, v) = agent(&w, &alice, "POST", "/api/v1/a2a/team/tasks", Some(json!({ "title": "x", "assignee": "bob" }))).await;
+    let (st, v) = agent(&w, &alice, "POST", "/api/a2a/team/tasks", Some(json!({ "title": "x", "assignee": "bob" }))).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
-    let (st, t2) = agent(&w, &alice, "POST", "/api/v1/a2a/team/tasks", Some(json!({ "title": "refactor", "detail": "the parser" }))).await;
+    let (st, t2) = agent(&w, &alice, "POST", "/api/a2a/team/tasks", Some(json!({ "title": "refactor", "detail": "the parser" }))).await;
     assert_eq!((st, t2["number"].as_i64()), (StatusCode::CREATED, Some(2)));
-    let (st, v) = agent(&w, &alice, "PATCH", "/api/v1/a2a/team/tasks/2", Some(json!({ "assignee": "alice", "status": "in_progress" }))).await;
+    let (st, v) = agent(&w, &alice, "PATCH", "/api/a2a/team/tasks/2", Some(json!({ "assignee": "alice", "status": "in_progress" }))).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!((v["assignee"].as_str(), v["status"].as_str()), (Some(alice.as_str()), Some("in_progress")));
 
     // Alice finishes task 1: the leader hears about it.
-    let (st, v) = agent(&w, &alice, "PATCH", "/api/v1/a2a/team/tasks/1", Some(json!({ "status": "done" }))).await;
+    let (st, v) = agent(&w, &alice, "PATCH", "/api/a2a/team/tasks/1", Some(json!({ "status": "done" }))).await;
     assert_eq!((st, v["status"].as_str()), (StatusCode::OK, Some("done")), "{v}");
     assert!(inbox(&w, &lead).contains("Task #1 \"write tests\" is now done (updated by teammate alice)."), "{}", inbox(&w, &lead));
 
     // Bob cannot touch alice's tasks; the leader can.
-    let (st, _) = agent(&w, &bob, "PATCH", "/api/v1/a2a/team/tasks/1", Some(json!({ "status": "open" }))).await;
+    let (st, _) = agent(&w, &bob, "PATCH", "/api/a2a/team/tasks/1", Some(json!({ "status": "open" }))).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    let (st, _) = agent(&w, &bob, "PATCH", "/api/v1/a2a/team/tasks/2", Some(json!({ "assignee": "bob" }))).await;
+    let (st, _) = agent(&w, &bob, "PATCH", "/api/a2a/team/tasks/2", Some(json!({ "assignee": "bob" }))).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    let (st, v) = agent(&w, &lead, "PATCH", "/api/v1/a2a/team/tasks/2", Some(json!({ "assignee": "bob" }))).await;
+    let (st, v) = agent(&w, &lead, "PATCH", "/api/a2a/team/tasks/2", Some(json!({ "assignee": "bob" }))).await;
     assert_eq!((st, v["assignee_name"].as_str()), (StatusCode::OK, Some("bob")));
     assert!(inbox(&w, &bob).contains("Task #2 was assigned to you by lead: refactor\n\nthe parser"));
-    let (st, v) = agent(&w, &lead, "PATCH", "/api/v1/a2a/team/tasks/2", Some(json!({ "assignee": "none" }))).await;
+    let (st, v) = agent(&w, &lead, "PATCH", "/api/a2a/team/tasks/2", Some(json!({ "assignee": "none" }))).await;
     assert_eq!((st, v["assignee"].clone()), (StatusCode::OK, Value::Null));
 
     // Errors.
-    let (st, _) = agent(&w, &lead, "PATCH", "/api/v1/a2a/team/tasks/1", Some(json!({ "status": "finished" }))).await;
+    let (st, _) = agent(&w, &lead, "PATCH", "/api/a2a/team/tasks/1", Some(json!({ "status": "finished" }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _) = agent(&w, &lead, "PATCH", "/api/v1/a2a/team/tasks/9", Some(json!({ "status": "done" }))).await;
+    let (st, _) = agent(&w, &lead, "PATCH", "/api/a2a/team/tasks/9", Some(json!({ "status": "done" }))).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    let (st, _) = agent(&w, &lead, "POST", "/api/v1/a2a/team/tasks", Some(json!({ "title": " " }))).await;
+    let (st, _) = agent(&w, &lead, "POST", "/api/a2a/team/tasks", Some(json!({ "title": " " }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     // Everyone sees the same list, and so does the user.
-    let (_, tasks) = agent(&w, &bob, "GET", "/api/v1/a2a/team/tasks", None).await;
+    let (_, tasks) = agent(&w, &bob, "GET", "/api/a2a/team/tasks", None).await;
     let tasks = tasks.as_array().unwrap();
     assert_eq!(tasks.len(), 2);
     assert_eq!(tasks[0]["status"], "done");
@@ -389,7 +389,7 @@ async fn tasks_are_shared_and_members_update_their_own() {
     assert_eq!(view.tasks.len(), 2);
     // Outside the team there are no tasks.
     let outsider = leader(&w, "outsider").await;
-    let (st, _) = agent(&w, &outsider, "GET", "/api/v1/a2a/team/tasks", None).await;
+    let (st, _) = agent(&w, &outsider, "GET", "/api/a2a/team/tasks", None).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
 
@@ -403,7 +403,7 @@ async fn mail_reaches_members_and_the_mailbox() {
         finish_turn(&w.sessions, id, 1).await;
     }
 
-    let (st, r) = agent(&w, &lead, "POST", "/api/v1/a2a/team/mail", Some(json!({ "text": "standup in 5" }))).await;
+    let (st, r) = agent(&w, &lead, "POST", "/api/a2a/team/mail", Some(json!({ "text": "standup in 5" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{r}");
     let n = r["mail"]["id"].as_i64().unwrap();
     let deliveries = r["deliveries"].as_array().unwrap();
@@ -416,32 +416,32 @@ async fn mail_reaches_members_and_the_mailbox() {
         assert!(got.starts_with("[ember a2a]"), "a reply reference comes with it: {got}");
     }
 
-    let (st, r) = agent(&w, &alice, "POST", "/api/v1/a2a/team/mail", Some(json!({ "to": "lead", "text": "tests are green" }))).await;
+    let (st, r) = agent(&w, &alice, "POST", "/api/a2a/team/mail", Some(json!({ "to": "lead", "text": "tests are green" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{r}");
     wait_for("mail to the leader", || inbox(&w, &lead).contains("from alice to you:\n\ntests are green")).await;
-    let (st, _) = agent(&w, &bob, "POST", "/api/v1/a2a/team/mail", Some(json!({ "to": "alice", "text": "can you review?" }))).await;
+    let (st, _) = agent(&w, &bob, "POST", "/api/a2a/team/mail", Some(json!({ "to": "alice", "text": "can you review?" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED);
 
     // Mailboxes: the leader sees everything; teammates see team-wide mail and their own.
     let texts = |v: &Value| -> Vec<String> { v.as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap().to_string()).collect() };
-    let (_, all) = agent(&w, &lead, "GET", "/api/v1/a2a/team/mail", None).await;
+    let (_, all) = agent(&w, &lead, "GET", "/api/a2a/team/mail", None).await;
     assert_eq!(texts(&all), vec!["standup in 5", "tests are green", "can you review?"]);
     assert_eq!(all[1]["from_name"], "alice");
     assert_eq!(all[1]["to_name"], "lead");
-    let (_, a) = agent(&w, &alice, "GET", "/api/v1/a2a/team/mail", None).await;
+    let (_, a) = agent(&w, &alice, "GET", "/api/a2a/team/mail", None).await;
     assert_eq!(texts(&a).len(), 3);
-    let (_, b) = agent(&w, &bob, "GET", "/api/v1/a2a/team/mail", None).await;
+    let (_, b) = agent(&w, &bob, "GET", "/api/a2a/team/mail", None).await;
     assert_eq!(texts(&b), vec!["standup in 5", "can you review?"]);
-    let (_, after) = agent(&w, &lead, "GET", &format!("/api/v1/a2a/team/mail?after={n}&limit=1"), None).await;
+    let (_, after) = agent(&w, &lead, "GET", &format!("/api/a2a/team/mail?after={n}&limit=1"), None).await;
     assert_eq!(texts(&after), vec!["tests are green"]);
     let team_id = w.a2a.team_of(&lead).unwrap().unwrap().id;
-    let (_, user) = call(&w.app, "GET", &format!("/api/v1/teams/{team_id}/mail"), None, None).await;
+    let (_, user) = call(&w.app, "GET", &format!("/api/teams/{team_id}/mail"), None, None).await;
     assert_eq!(texts(&user).len(), 3);
 
     // Errors.
-    let (st, _) = agent(&w, &alice, "POST", "/api/v1/a2a/team/mail", Some(json!({ "to": "alice", "text": "me" }))).await;
+    let (st, _) = agent(&w, &alice, "POST", "/api/a2a/team/mail", Some(json!({ "to": "alice", "text": "me" }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
-    let (st, _) = agent(&w, &alice, "POST", "/api/v1/a2a/team/mail", Some(json!({ "to": "zed", "text": "?" }))).await;
+    let (st, _) = agent(&w, &alice, "POST", "/api/a2a/team/mail", Some(json!({ "to": "zed", "text": "?" }))).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
@@ -453,28 +453,28 @@ async fn teammates_are_reachable_only_from_their_team() {
     let other = leader(&w, "other").await;
     let ids = |v: &Value| -> Vec<String> { v.as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect() };
 
-    let (_, t) = agent(&w, &other, "GET", "/api/v1/a2a/targets", None).await;
+    let (_, t) = agent(&w, &other, "GET", "/api/a2a/targets", None).await;
     assert!(ids(&t).contains(&lead) && !ids(&t).contains(&alice), "{t}");
-    let (_, t) = agent(&w, &lead, "GET", "/api/v1/a2a/targets", None).await;
+    let (_, t) = agent(&w, &lead, "GET", "/api/a2a/targets", None).await;
     assert!(ids(&t).contains(&alice) && ids(&t).contains(&other));
-    let (_, t) = agent(&w, &alice, "GET", "/api/v1/a2a/targets", None).await;
+    let (_, t) = agent(&w, &alice, "GET", "/api/a2a/targets", None).await;
     assert_eq!(ids(&t), vec![lead.clone()]);
 
     let msg = |to: &str| json!({ "to": to, "text": "hi" });
-    let (st, v) = agent(&w, &other, "POST", "/api/v1/a2a/messages", Some(msg(&alice))).await;
+    let (st, v) = agent(&w, &other, "POST", "/api/a2a/messages", Some(msg(&alice))).await;
     assert_eq!((st, v["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")));
     assert!(v["error"].as_str().unwrap().contains("only its team can message it"), "{v}");
-    let (st, v) = agent(&w, &alice, "POST", "/api/v1/a2a/messages", Some(msg(&other))).await;
+    let (st, v) = agent(&w, &alice, "POST", "/api/a2a/messages", Some(msg(&other))).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     assert!(v["error"].as_str().unwrap().contains("you can message only your team"), "{v}");
-    let (st, _) = agent(&w, &lead, "POST", "/api/v1/a2a/messages", Some(msg(&alice))).await;
+    let (st, _) = agent(&w, &lead, "POST", "/api/a2a/messages", Some(msg(&alice))).await;
     assert_eq!(st, StatusCode::ACCEPTED);
-    let (st, _) = agent(&w, &alice, "POST", "/api/v1/a2a/messages", Some(msg(&lead))).await;
+    let (st, _) = agent(&w, &alice, "POST", "/api/a2a/messages", Some(msg(&lead))).await;
     assert_eq!(st, StatusCode::ACCEPTED);
 
     // Ended, alice is an ordinary session again.
-    agent(&w, &lead, "DELETE", "/api/v1/a2a/team/members/alice", None).await;
-    let (_, t) = agent(&w, &other, "GET", "/api/v1/a2a/targets", None).await;
+    agent(&w, &lead, "DELETE", "/api/a2a/team/members/alice", None).await;
+    let (_, t) = agent(&w, &other, "GET", "/api/a2a/targets", None).await;
     assert!(ids(&t).contains(&alice));
 }
 
@@ -485,24 +485,24 @@ async fn team_traffic_is_loop_protected() {
     let lead = leader(&w, "lead").await;
     let alice = spawn(&w, &lead, "alice", "hi").await; // lead has sent 1
     let _bob = spawn(&w, &lead, "bob", "hi").await; // 2
-    let (st, r) = agent(&w, &lead, "POST", "/api/v1/a2a/team/mail", Some(json!({ "text": "one" }))).await;
+    let (st, r) = agent(&w, &lead, "POST", "/api/a2a/team/mail", Some(json!({ "text": "one" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{r}"); // 4
-    let (st, r) = agent(&w, &lead, "POST", "/api/v1/a2a/team/mail", Some(json!({ "text": "two" }))).await;
+    let (st, r) = agent(&w, &lead, "POST", "/api/a2a/team/mail", Some(json!({ "text": "two" }))).await;
     assert_eq!((st, r["code"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")), "{r}");
     assert!(notices(&w.sessions, &lead).iter().any(|n| n.contains("loop protection")));
     // A refused broadcast stores nothing.
-    let (_, mail) = agent(&w, &lead, "GET", "/api/v1/a2a/team/mail", None).await;
+    let (_, mail) = agent(&w, &lead, "GET", "/api/a2a/team/mail", None).await;
     assert_eq!(mail.as_array().unwrap().len(), 1);
 
     // alice <-> lead: prompt (1) + mail one (2) + alice's reply (3), then the pair limit.
-    let (st, r) = agent(&w, &alice, "POST", "/api/v1/a2a/team/mail", Some(json!({ "to": "lead", "text": "ack" }))).await;
+    let (st, r) = agent(&w, &alice, "POST", "/api/a2a/team/mail", Some(json!({ "to": "lead", "text": "ack" }))).await;
     assert_eq!(st, StatusCode::ACCEPTED, "{r}");
-    let (st, r) = agent(&w, &alice, "POST", "/api/v1/a2a/team/mail", Some(json!({ "to": "lead", "text": "ack again" }))).await;
+    let (st, r) = agent(&w, &alice, "POST", "/api/a2a/team/mail", Some(json!({ "to": "lead", "text": "ack again" }))).await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{r}");
     assert!(r["error"].as_str().unwrap().contains("have exchanged 3"), "{r}");
 
     // Task notices under the limit are skipped, the task change itself is kept.
-    let (st, t) = agent(&w, &lead, "POST", "/api/v1/a2a/team/tasks", Some(json!({ "title": "t", "assignee": "alice" }))).await;
+    let (st, t) = agent(&w, &lead, "POST", "/api/a2a/team/tasks", Some(json!({ "title": "t", "assignee": "alice" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{t}");
     assert!(!inbox(&w, &alice).contains("Task #1 was assigned"));
 }
@@ -515,18 +515,18 @@ async fn a_mention_delivers_a_copy_with_the_users_text() {
     let b = new_session(&w.sessions, "Beta Tests");
     let c = new_session(&w.sessions, "gamma");
 
-    let (_, cands) = call(&w.app, "GET", &format!("/api/v1/sessions/{a}/mentions?q=bet"), None, None).await;
+    let (_, cands) = call(&w.app, "GET", &format!("/api/sessions/{a}/mentions?q=bet"), None, None).await;
     let cands = cands.as_array().unwrap();
     assert_eq!(cands.len(), 1);
     assert_eq!(cands[0]["id"], b.as_str());
-    let (_, all) = call(&w.app, "GET", &format!("/api/v1/sessions/{a}/mentions"), None, None).await;
+    let (_, all) = call(&w.app, "GET", &format!("/api/sessions/{a}/mentions"), None, None).await;
     assert_eq!(all.as_array().unwrap().len(), 2);
     let prefix = &c[..8];
-    let (_, by_id) = call(&w.app, "GET", &format!("/api/v1/sessions/{a}/mentions?q={prefix}"), None, None).await;
+    let (_, by_id) = call(&w.app, "GET", &format!("/api/sessions/{a}/mentions?q={prefix}"), None, None).await;
     assert_eq!(by_id[0]["id"], c.as_str());
 
     let text = "please look at this @@\"beta tests\", and @@nobody";
-    let (st, _) = call(&w.app, "POST", &format!("/api/v1/sessions/{a}/messages"), None, Some(json!({ "text": text }))).await;
+    let (st, _) = call(&w.app, "POST", &format!("/api/sessions/{a}/messages"), None, Some(json!({ "text": text }))).await;
     assert_eq!(st, StatusCode::ACCEPTED);
     // The API accepts the message and records it asynchronously.
     wait_for("the user's message, unchanged", || user_messages(&w.sessions, &a).last().is_some_and(|m| m == text)).await;
@@ -543,7 +543,7 @@ async fn a_mention_delivers_a_copy_with_the_users_text() {
     // A plain message mentions nobody.
     finish_turn(&w.sessions, &a, 2).await;
     let before = notices(&w.sessions, &a).len();
-    call(&w.app, "POST", &format!("/api/v1/sessions/{a}/messages"), None, Some(json!({ "text": "mail me@@x" }))).await;
+    call(&w.app, "POST", &format!("/api/sessions/{a}/messages"), None, Some(json!({ "text": "mail me@@x" }))).await;
     assert_eq!(notices(&w.sessions, &a).len(), before);
 }
 
@@ -556,10 +556,10 @@ async fn mentions_follow_switches_and_team_scope_but_not_rate_limits() {
 
     // Two mentions over the per-session limit of one: a person sent them, both go through.
     let text = format!("@@beta and @@{}", &c[..8]);
-    call(&w.app, "POST", &format!("/api/v1/sessions/{a}/messages"), None, Some(json!({ "text": text }))).await;
+    call(&w.app, "POST", &format!("/api/sessions/{a}/messages"), None, Some(json!({ "text": text }))).await;
     wait_for("both mentions", || user_messages(&w.sessions, &b).len() == 1 && user_messages(&w.sessions, &c).len() == 1).await;
     // They count toward the window: the agent's own send is now refused.
-    let (st, _) = agent(&w, &a, "POST", "/api/v1/a2a/messages", Some(json!({ "to": b, "text": "x" }))).await;
+    let (st, _) = agent(&w, &a, "POST", "/api/a2a/messages", Some(json!({ "to": b, "text": "x" }))).await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
 
     // A teammate of another team cannot be mentioned from outside it.
@@ -567,17 +567,17 @@ async fn mentions_follow_switches_and_team_scope_but_not_rate_limits() {
     let lead = leader(&w, "lead").await;
     spawn(&w, &lead, "alice", "hi").await;
     let x = leader(&w, "x").await;
-    let (_, cands) = call(&w.app, "GET", &format!("/api/v1/sessions/{x}/mentions?q=alice"), None, None).await;
+    let (_, cands) = call(&w.app, "GET", &format!("/api/sessions/{x}/mentions?q=alice"), None, None).await;
     assert_eq!(cands, json!([]));
-    call(&w.app, "POST", &format!("/api/v1/sessions/{x}/messages"), None, Some(json!({ "text": "@@\"alice \u{b7} lead\"" }))).await;
+    call(&w.app, "POST", &format!("/api/sessions/{x}/messages"), None, Some(json!({ "text": "@@\"alice \u{b7} lead\"" }))).await;
     assert!(notices(&w.sessions, &x).iter().any(|n| n.contains("no session you can message matches")));
 
     // A2A off for the session: its mentions are not delivered, with the reason.
     finish_turn(&w.sessions, &x, 2).await;
-    call(&w.app, "PUT", &format!("/api/v1/sessions/{x}/a2a"), None, Some(json!({ "enabled": false }))).await;
-    call(&w.app, "POST", &format!("/api/v1/sessions/{x}/messages"), None, Some(json!({ "text": "@@lead" }))).await;
+    call(&w.app, "PUT", &format!("/api/sessions/{x}/a2a"), None, Some(json!({ "enabled": false }))).await;
+    call(&w.app, "POST", &format!("/api/sessions/{x}/messages"), None, Some(json!({ "text": "@@lead" }))).await;
     assert!(notices(&w.sessions, &x).iter().any(|n| n.starts_with("Mentions were not delivered") && n.contains("turned off")));
-    let (st, _) = call(&w.app, "GET", &format!("/api/v1/sessions/{x}/mentions"), None, None).await;
+    let (st, _) = call(&w.app, "GET", &format!("/api/sessions/{x}/mentions"), None, None).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
 

@@ -1,5 +1,5 @@
 //! "Open IDE" (FR-L7): what each target does once the server has said how to reach it
-//! (`GET /api/v1/sessions/{id}/ide`).
+//! (`GET /api/sessions/{id}/ide`).
 //!
 //! - **VS Code**: the wrapped VS Code Web URL, opened in the **system browser**. This process
 //!   never hosts it (NFR-L2): the URL is handed to the OS URL handler.

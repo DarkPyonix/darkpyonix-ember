@@ -52,7 +52,7 @@
   // ---------------------------------------------------------------------------------------
   // Protocol constants: keep in sync with ember/bridge/src/messages.rs
   // ---------------------------------------------------------------------------------------
-  var VERSIONS = { tab_detach: 1, sibling_window_closed: 1, open_window: 1 };
+  var KINDS = { tab_detach: true, sibling_window_closed: true, open_window: true };
   var HANDLER_NAME = 'emberBridge';
   var EDITOR_KIND = 'vscode-web';
   // How far (CSS px) past the tab strip's rectangle the drop must land to count as a detach.
@@ -248,14 +248,13 @@
   function buildDetachMessage(o) {
     return {
       kind: 'tab_detach',
-      version: VERSIONS.tab_detach,
       sourceWindowId: o.sourceWindowId,
       workspace: o.folder ? { folder: o.folder } : null,
       fileUri: o.fileUri,
       cursor: o.cursor || null,
       scroll: o.scroll || null,
       selection: o.selection || null,
-      // Additive fields (FR-B4: no version bump). The host may ignore them.
+      // Additive fields (FR-B4). The host may ignore them.
       screen: o.screen || null,
       label: o.label || null,
       editor: EDITOR_KIND,
@@ -265,9 +264,9 @@
   }
 
   /**
-   * Checks an incoming message against the versions this script speaks. A mismatch is
-   * logged and the message is still delivered (FR-B2: "logged, not dropped").
-   * Returns { message, mismatch } or null for unparseable input.
+   * Parses an incoming message. There is no version: unknown fields are ignored, and an unknown
+   * kind is logged and still delivered (FR-B2: "logged, not dropped").
+   * Returns { message, unknownKind } or null for unparseable input.
    */
   function decodeIncoming(data, log) {
     var msg = typeof data === 'string' ? safeJson(data) : data;
@@ -275,17 +274,9 @@
       if (log) log('ember-bridge: unparseable message dropped', data);
       return null;
     }
-    var expected = VERSIONS[msg.kind];
-    var mismatch = null;
-    if (expected === undefined) {
-      mismatch = { kind: msg.kind, received: msg.version, expected: null };
-      if (log) log('ember-bridge: unknown message kind "' + msg.kind + '" (version ' + msg.version + ')');
-    } else if (msg.version !== expected) {
-      mismatch = { kind: msg.kind, received: msg.version, expected: expected };
-      if (log) log('ember-bridge: version mismatch for ' + msg.kind + ': received ' + msg.version +
-                   ', expected ' + expected + '; delivering anyway');
-    }
-    return { message: msg, mismatch: mismatch };
+    var unknownKind = KINDS[msg.kind] !== true;
+    if (unknownKind && log) log('ember-bridge: unknown message kind "' + msg.kind + '"');
+    return { message: msg, unknownKind: unknownKind };
   }
 
   // ---------------------------------------------------------------------------------------
@@ -579,7 +570,6 @@
       try { win.dispatchEvent(new CustomEvent('ember-bridge', { detail: res })); } catch (e) {}
     }
     win.__emberBridge = {
-      versions: VERSIONS,
       handler: HANDLER_NAME,
       receive: receive,   // WKWebView: evaluateJavaScript("__emberBridge.receive(...)")
       send: function (msg) { return send(win, msg, null); }
@@ -594,7 +584,7 @@
   }
 
   return {
-    VERSIONS: VERSIONS,
+    KINDS: KINDS,
     HANDLER_NAME: HANDLER_NAME,
     THRESHOLD_PX: THRESHOLD_PX,
     distanceToRect: distanceToRect,

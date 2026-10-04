@@ -25,18 +25,18 @@
 //!
 //! # How Ember does it
 //!
-//! 1. `POST /api/v1/chatgpt/signin` returns the authorization URL (fresh PKCE verifier, `state`,
+//! 1. `POST /api/chatgpt/signin` returns the authorization URL (fresh PKCE verifier, `state`,
 //!    `nonce`; kept in memory for [`PENDING_TTL_MS`]).
 //! 2. The browser comes back to `GET /auth/callback` on this server (the redirect port is the
 //!    server's listen port). When the browser runs on another machine, `127.0.0.1` does not reach
-//!    the server; the user pastes the final URL into `POST /api/v1/chatgpt/signin/complete`.
+//!    the server; the user pastes the final URL into `POST /api/chatgpt/signin/complete`.
 //! 3. The callback is checked (known `state`, no `error`, issued `client_id`), the code is
 //!    exchanged with the verifier, the ID token's issuer, audience, expiry and nonce are checked,
 //!    and the tokens are stored sealed with the accounts' [`SecretBox`](crate::accounts::secrets).
 //! 4. [`ChatGpt::access_token`] refreshes five minutes before expiry, one refresh at a time; a
 //!    dead refresh token (`invalid_grant`, …) clears the tokens and marks the account signed out.
 //! 5. [`ChatGpt::responses`] shapes the request ([`responses::shape_request`]), streams the reply
-//!    and records token usage per day, next to the agent accounts' usage (`GET /api/v1/usage`).
+//!    and records token usage per day, next to the agent accounts' usage (`GET /api/usage`).
 //!
 //! **ID token signature.** OpenAI's page says to verify the ID token against the published JWKS.
 //! Ember checks the claims only: the token arrives directly from the token endpoint over TLS,
@@ -213,7 +213,7 @@ fn net(e: reqwest::Error) -> ChatGptError {
 pub struct SignInStart {
     /// Open this in a browser.
     pub authorization_url: String,
-    /// Poll `GET /api/v1/chatgpt/signin/{state}` for the outcome.
+    /// Poll `GET /api/chatgpt/signin/{state}` for the outcome.
     pub state: String,
     pub redirect_uri: String,
     pub expires_at: i64,
@@ -358,7 +358,7 @@ impl ChatGpt {
             expires_at: now + PENDING_TTL_MS,
             note: "Open the URL in a browser on the machine running ember server. If the browser \
                    is elsewhere, the final 127.0.0.1 page will not load: copy its full URL into \
-                   POST /api/v1/chatgpt/signin/complete.",
+                   POST /api/chatgpt/signin/complete.",
         })
     }
 

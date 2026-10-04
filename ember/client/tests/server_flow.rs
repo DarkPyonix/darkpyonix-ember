@@ -235,31 +235,20 @@ async fn push_retries_with_backoff_until_server_comes_up() {
 }
 
 #[tokio::test]
-async fn version_mismatch_is_reported_not_dropped() {
+async fn unknown_push_types_and_fields_are_ignored() {
     use axum::extract::ws::{Message, WebSocketUpgrade};
     use axum::routing::get;
 
-    // Health says v2: refused before connecting.
+    // The server sends a type this client has never heard of, and an old `v` field: both skipped.
     let app = axum::Router::new()
-        .route("/api/v1/health", get(|| async { axum::Json(serde_json::json!({"ok": true, "push_version": 2})) }));
-    let url = serve(app).await;
-    let c = Client::new(ClientConfig::new(url)).await.unwrap();
-    c.start();
-    until("incompatible (health)", || {
-        c.read(|st| *st.connection() == ConnectionState::Incompatible { server: 2, client: 1 })
-    })
-    .await;
-    c.stop();
-
-    // Health says v1 but a push message says v3: detected on the message.
-    let app = axum::Router::new()
-        .route("/api/v1/health", get(|| async { axum::Json(serde_json::json!({"ok": true, "push_version": 1})) }))
-        .route("/api/v1/sessions", get(|| async { axum::Json(serde_json::json!([])) }))
+        .route("/api/health", get(|| async { axum::Json(serde_json::json!({"ok": true})) }))
+        .route("/api/sessions", get(|| async { axum::Json(serde_json::json!([])) }))
         .route(
-            "/api/v1/push",
+            "/api/push",
             get(|ws: WebSocketUpgrade| async move {
                 ws.on_upgrade(|mut socket| async move {
-                    let _ = socket.send(Message::Text(r#"{"type":"event","v":3}"#.into())).await;
+                    let _ = socket.send(Message::Text(r#"{"type":"future_thing","v":3}"#.into())).await;
+                    let _ = socket.send(Message::Text(r#"{"type":"lagged","v":3,"extra":1}"#.into())).await;
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 })
             }),
@@ -267,10 +256,9 @@ async fn version_mismatch_is_reported_not_dropped() {
     let url = serve(app).await;
     let c = Client::new(ClientConfig::new(url)).await.unwrap();
     c.start();
-    until("incompatible (push)", || {
-        c.read(|st| *st.connection() == ConnectionState::Incompatible { server: 3, client: 1 })
-    })
-    .await;
+    until("connected", || c.read(|st| *st.connection() == ConnectionState::Connected)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(c.read(|st| st.connection().clone()), ConnectionState::Connected);
     c.stop();
 }
 

@@ -47,7 +47,7 @@
 //!   computer through its node API when [`StartRequest::computer`] is set.
 //! - `terminal/create`, `terminal/output`, `terminal/wait_for_exit`, `terminal/kill`,
 //!   `terminal/release`: commands run directly (argv, no shell), on this server or through the
-//!   node's `/v1/exec`.
+//!   node's `/exec`.
 //! - Anything else (e.g. `elicitation/create`) gets JSON-RPC error `-32601`.
 //!
 //! # Configuration

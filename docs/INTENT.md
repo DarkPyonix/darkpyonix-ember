@@ -322,21 +322,24 @@ confirmed for Ember's own through the darkpyonix leader] Ember's REST API moves 
 root regrouping (#60). The API changes only by addition. The push WebSocket's `v` field goes too
 [user, 2026-10-03]: messages only ever gain fields, a receiver ignores fields it does not know,
 and there is no version negotiation. The remote browser's stream protocol drops its `v` by the
-same principle [user principle, applied 2026-10-04 through the darkpyonix leader]. The hub's
+same principle [user principle, applied 2026-10-04 through the darkpyonix leader]. The same holds
+for Ember's other own protocols: the node daemon's `/v1` prefix and `protocol` number, the
+transport service names (`ember-server/1` is now `ember-server`) and the IDE bridge's `version`
+field. A file format keeps its version (the transcript export's `format`/`version`). The hub's
 paths follow `darkpyonix-core`, whose `/v1` prefix is removed (core #42, merged).
 
 Rejected: keeping `/api/v1` alongside `/api` (two names for one API).
 
-**Status.** Decided, not implemented: the routes still carry `/api/v1` and push messages still
-carry `v` (`PUSH_VERSION` 1) (#63); the browser stream still carries `v` (#85). The hub side waits
-for the hub address decision (darkpyonix #41; #62, draft PR #75).
+**Status.** Implemented (#63, #85): routes, push messages, the browser stream, the node daemon
+and the IDE bridge carry no version, with no alias for the old paths. The hub side waits for the
+hub address decision (darkpyonix #41; #62, draft PR #75).
 
 ## Open questions
 
 | ID | Question | Status |
 | -- | -------- | ------ |
 | **Q1** | How do a project's computers relate: copies of the same workspace (the same repository checked out on a Mac and a Linux box), machines with different roles (iOS builds on the Mac, GPU work on Linux), or simply "whichever computer I am at"? | Open; decides how much of a session's observations survive a move |
-| **Q2** | Who moves a session: the agent (a `switch_computer` tool plus a routing policy, e.g. "needs CUDA → GPU box"), the user, or both? | Open; the concept suggests the agent, unconfirmed. Today the user switches (`PUT /api/v1/sessions/{id}/computer`, #34) |
+| **Q2** | Who moves a session: the agent (a `switch_computer` tool plus a routing policy, e.g. "needs CUDA → GPU box"), the user, or both? | Open; the concept suggests the agent, unconfirmed. Today the user switches (`PUT /api/sessions/{id}/computer`, #34) |
 | **Q3** | When a session moves, does an open IDE window follow it, or stay with its computer? | Open |
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal. v0 (a system notice on a switch) is implemented (#34, SPEC `FR-S7`); the hash comparison is not built (#79) |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional]; built as proposed in ember node (`FR-X4`, `ember/node/src/jobs.rs`) |

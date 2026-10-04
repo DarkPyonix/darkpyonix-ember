@@ -19,35 +19,31 @@ use crate::projects::Project;
 use crate::schedules::{Schedule, ScheduleRun};
 use crate::store::{SessionPatch, SessionRecord, Store, StoredEvent};
 
-/// Version of the push envelope (PR-1). Bump on any incompatible change.
-pub const PUSH_VERSION: u32 = 1;
-
 /// What the server pushes to every attached client (PR-1).
 ///
-/// Variants are only ever added; a client skips a `type` it does not know, so an addition does
-/// not bump [`PUSH_VERSION`].
+/// Variants are only ever added; a client skips a `type` it does not know.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Push {
-    SessionCreated { v: u32, session: SessionRecord },
-    Event { v: u32, status: SessionStatus, event: StoredEvent },
+    SessionCreated { session: SessionRecord },
+    Event { status: SessionStatus, event: StoredEvent },
     /// A session's metadata changed (title, pinned, archived: FR-L9). Carries the whole record;
     /// a client takes the metadata fields from it and keeps its own activity fields
     /// (`last_seq`, `status`, `updated_at`), which events update.
-    SessionUpdated { v: u32, session: SessionRecord },
+    SessionUpdated { session: SessionRecord },
     /// A project was created or its computer assignment changed (FR-L4).
-    ProjectUpdated { v: u32, project: Project },
+    ProjectUpdated { project: Project },
     /// A team's members or tasks changed (FR-T7). Carries the whole team.
-    TeamUpdated { v: u32, team: crate::a2a::team::TeamView },
+    TeamUpdated { team: crate::a2a::team::TeamView },
     /// A schedule was created (FR-A8), by a user or by an agent (`ember-a2a schedule add`).
-    ScheduleCreated { v: u32, schedule: Schedule },
+    ScheduleCreated { schedule: Schedule },
     /// A schedule changed: edited, paused, resumed. Carries the whole record.
-    ScheduleUpdated { v: u32, schedule: Schedule },
+    ScheduleUpdated { schedule: Schedule },
     /// A schedule was deleted.
-    ScheduleDeleted { v: u32, id: String, project: String },
+    ScheduleDeleted { id: String, project: String },
     /// A schedule run was recorded or changed status (`running`, `completed`, `failed`,
     /// `interrupted`, `skipped`, `missed`). A `missed` run's `error` is the notice text.
-    ScheduleRun { v: u32, run: ScheduleRun },
+    ScheduleRun { run: ScheduleRun },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -224,7 +220,7 @@ impl Sessions {
     /// Change a session's title, pin or archive mark and push the result (FR-L9).
     pub fn update_meta(&self, id: &str, patch: &SessionPatch) -> Result<SessionRecord, SessionError> {
         let rec = self.store.update_session_meta(id, patch)?.ok_or_else(|| SessionError::NotFound(id.into()))?;
-        self.publish(Push::SessionUpdated { v: PUSH_VERSION, session: rec.clone() });
+        self.publish(Push::SessionUpdated { session: rec.clone() });
         Ok(rec)
     }
 
@@ -269,10 +265,10 @@ impl Sessions {
             &new.title,
             choice.as_ref().map(|(id, why)| (id.as_str(), why.as_str())),
         )?;
-        let _ = self.push.send(Push::SessionCreated { v: PUSH_VERSION, session: rec.clone() });
+        let _ = self.push.send(Push::SessionCreated { session: rec.clone() });
         // The session may have created its project (FR-L1); clients listing projects learn it.
         if let Ok(Some(project)) = self.store.project(&rec.project) {
-            let _ = self.push.send(Push::ProjectUpdated { v: PUSH_VERSION, project });
+            let _ = self.push.send(Push::ProjectUpdated { project });
         }
         Ok(rec)
     }
@@ -290,7 +286,7 @@ impl Sessions {
         for hook in hooks {
             hook(&stored);
         }
-        let _ = self.push.send(Push::Event { v: PUSH_VERSION, status, event: stored });
+        let _ = self.push.send(Push::Event { status, event: stored });
         Ok(())
     }
 

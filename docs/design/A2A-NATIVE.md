@@ -112,9 +112,15 @@ subagent hand-backs; AionUI's teammates report to the lead when they go idle.
   transcript.
 - **To whom:** the team leader for a team task, otherwise the sender of the message the session
   was working on. A session with no delegator sends nothing.
+- **Waking:** an idle receiver is woken by a report and handles it at once, the way a Claude Code
+  cross-session message or a subagent hand-back wakes an idle session; that is what lets the
+  leader know without checking. A busy receiver gets reports at its next tool round, batched.
+- **No loops:** a report is marked as a report and never makes the receiver reply automatically
+  (a reply is an ordinary A2A message the receiver chooses to send). Reports do not beget reports:
+  when a turn woken by a report ends, its report goes only to that session's own delegator, never
+  back to the teammate that reported. Reports count toward loop protection.
 - **Noise:** one report per real turn end (deduplicated by session and turn, with a short settle
-  window for automatic follow-ups); at most one stall report per stall; reports count toward loop
-  protection and never start a reply turn on their own.
+  window for automatic follow-ups); at most one stall report per stall.
 - **How it arrives:** as one A2A message in the receiver's own idiom (FR-T2).
 
 ## Sources

@@ -18,7 +18,7 @@ Behaviour changes for the IDE window come from `web/proxy/`.
 | `check-product.sh` | Fails if a `product.json` is not on Open VSX, has telemetry on, or names a Microsoft marketplace/update/telemetry endpoint. |
 | `smoke.sh` | Starts a packaged build and checks: workbench served, Open VSX search, extension install. |
 
-Builds run in GitHub Actions (`.github/workflows/ose.yml`), never on a developer machine:
+Builds run in GitHub Actions (`.github/workflows/test-ose.yml`), never on a developer machine:
 `build.sh` refuses to run unless `CI=true` (or `OSE_ALLOW_LOCAL_BUILD=1`). `build.sh
 --product-only` is the exception: it only downloads `product.json`, applies the overrides and
 checks the result, so it is safe anywhere.

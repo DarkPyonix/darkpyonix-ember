@@ -6,7 +6,7 @@
 #                [--work <dir>] [--out <dir>] [--skip-install] [--smoke]
 #   build/ose/build.sh --product-only      # cheap: fetch only product.json, apply overrides, check
 #
-# Meant for CI (.github/workflows/ose.yml). A full build takes tens of minutes and ~8 GB of RAM,
+# Meant for CI (.github/workflows/test-ose.yml). A full build takes tens of minutes and ~8 GB of RAM,
 # so it refuses to run outside CI unless OSE_ALLOW_LOCAL_BUILD=1 is set.
 #
 # Steps (each mirrors a documented upstream step; see build/ose/README.md for sources):
@@ -70,7 +70,7 @@ if [ "$PRODUCT_ONLY" = 1 ]; then
 fi
 
 if [ "${CI:-}" != "true" ] && [ "${OSE_ALLOW_LOCAL_BUILD:-}" != "1" ]; then
-  die "OSE builds run in GitHub Actions (.github/workflows/ose.yml). Set OSE_ALLOW_LOCAL_BUILD=1 to build here anyway."
+  die "OSE builds run in GitHub Actions (.github/workflows/test-ose.yml). Set OSE_ALLOW_LOCAL_BUILD=1 to build here anyway."
 fi
 
 # --- target -------------------------------------------------------------------------------

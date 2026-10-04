@@ -11,7 +11,7 @@
 #   5. push without force;
 #   6. create the PR, or leave the existing one (it follows the branch).
 #
-# Usage: .github/scripts/publish-release.sh [--dry-run]
+# Usage: .github/scripts/release/sync-release.sh [--dry-run]
 # --dry-run builds the commit locally and prints what would be pushed, without pushing.
 set -euo pipefail
 
@@ -59,7 +59,7 @@ git push --quiet origin release
 if [[ -z "$(gh pr list --base main --head release --state open --json number --jq '.[].number')" ]]; then
     gh pr create --base main --head release \
         --title "Release: Publish develop to main" \
-        --body "Automated by .github/workflows/release.yml. release follows develop without the internal planning documents (${internal[*]}). The user merges this PR."
+        --body "Automated by .github/workflows/release-sync.yml. release follows develop without the internal planning documents (${internal[*]}). The user merges this PR."
 else
     echo "the release → main PR is open and now includes develop ${develop_sha}"
 fi

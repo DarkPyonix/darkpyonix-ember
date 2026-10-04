@@ -4,14 +4,14 @@
 #   pull_request     -> product job only (product.json overrides + checks; seconds)
 #   push / dispatch  -> product + 4-target build matrix + smoke test, artifacts uploaded
 #   tag ose-v*       -> all of the above + a GitHub release with tarballs and SHA256SUMS
-name: ose
+name: OSE build
 
 on:
   pull_request:
-    paths: ["build/ose/**", ".github/workflows/ose.yml"]
+    paths: ["build/ose/**", ".github/workflows/test-ose.yml"]
   push:
     branches: [main, develop]
-    paths: ["build/ose/**", ".github/workflows/ose.yml"]
+    paths: ["build/ose/**", ".github/workflows/test-ose.yml"]
     tags: ["ose-v*"]
   workflow_dispatch:
     inputs:
@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   product:
-    name: product.json check
+    name: Check product.json
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -73,7 +73,7 @@ jobs:
           case "$got" in "$want"|"$want"-*) ;; *) echo "tag $GITHUB_REF_NAME does not match build/ose/VERSION ($want)"; exit 1 ;; esac
 
   build:
-    name: build ${{ matrix.target }}
+    name: Build (${{ matrix.target }})
     needs: product
     if: github.event_name != 'pull_request'
     strategy:
@@ -145,7 +145,7 @@ jobs:
           retention-days: 14
 
   release:
-    name: release
+    name: Release on tag
     needs: [product, build]
     if: startsWith(github.ref, 'refs/tags/ose-v')
     runs-on: ubuntu-latest

@@ -40,7 +40,7 @@ The pin has one source of truth per side, and they are checked against each othe
 - `ember_editor_conn::PINNED_VERSION` / `PINNED_COMMIT` (`crates/editor-conn/src/lib.rs`) name the tag and
   commit the crate's tables and citations come from. The unit test `pin_matches_ose_version` fails
   if `PINNED_VERSION` differs from `build/ose/VERSION`; the CI job `editor-conn-pin`
-  (`.github/workflows/checks.yml`) clones the `build/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
+  (`.github/workflows/test.yml`) clones the `build/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
   fails if `rpc_ids.rs`, `PINNED_VERSION` or `PINNED_COMMIT` differ (§5).
 - At connect time, `handshake::verify_server` compares the server's `GET /version` with
   `PINNED_COMMIT` (§3.4).
@@ -453,7 +453,7 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
    - For VSC (the user's Microsoft build) the commit is arbitrary. A table can be generated for each
      public release tag: the tags are public, and the table is only the identifier order. Unknown
      commits fall back.
-4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/checks.yml`
+4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/test.yml`
    shallow-clones `microsoft/vscode` at the `build/ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
    if `crates/editor-conn/src/rpc_ids.rs` or `PINNED_VERSION` / `PINNED_COMMIT` differ. So bumping
    `build/ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches

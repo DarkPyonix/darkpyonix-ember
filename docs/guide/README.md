@@ -61,7 +61,7 @@ docs/guide/
   `<span class="pill partial">`(부분), `<span class="pill planned">`(계획).
 - 문체는 thisisthepy/pythonx-compose의 `docs/style/writing.md` 를 따릅니다. 현재 시제로 사실만
   쓰고, 한국어는 합니다체로 씁니다. em-dash(U+2014)는 쓰지 않습니다
-  (`scripts/check-no-em-dash.sh`). 설치와 실행 예시는 cargo, uv, ppp, tcl만 씁니다.
+  (`.github/scripts/checks/check-no-em-dash.sh`). 설치와 실행 예시는 cargo, uv, ppp, tcl만 씁니다.
 - 번역은 직역이 아니라 각 언어로 자연스럽게 씁니다. 내용과 순서는 같게 유지합니다.
 
 ## 페이지 추가하기

@@ -33,7 +33,7 @@
   ┌──────────────────────────┐             │          │ tool calls (wrapped shell, D4)          │        ┌──────────────────────────┐
   │ IDE window                  │             │          ▼                                          │◀─────▶│ Computer B (e.g. Linux GPU) │
   │  Ember IDE: webview +        │             │  ┌───────────────────────────────────────────┐  │  P2P   │  ember node (exec daemon)   │
-  │  VS Code Web via web/proxy/   │             │  │ Execution router: sends each tool action   │  │        └──────────────────────────┘
+  │  VS Code Web via ember/proxy/   │             │  │ Execution router: sends each tool action   │  │        └──────────────────────────┘
   │  - or VS Code / Gateway       │             │  │ to the session's CURRENT computer (FR-X3)  │  │
   │  (FR-L7, §W)                  │             │  └───────────────────────────────────────────┘  │
   └──────────────────────────┘             │  A2A broker (§T) · account/usage router (§U)       │
@@ -74,20 +74,20 @@ accounts or computer switching.
 
 | Path | What |
 | ---- | ---- |
-| `crates/server/` | ember server (Rust) |
-| `crates/node/` | ember node, the execution daemon (Rust) |
-| `crates/transport/` | the transport interface and its iroh backend (FR-N5); see §1.5 |
-| `crates/client/` | the client core below the dioxus-compose UI |
-| `web/proxy/` | the IDE window wrapping layer (Python) |
-| `crates/bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |
+| `ember/server/` | ember server (Rust) |
+| `ember/node/` | ember node, the execution daemon (Rust) |
+| `ember/transport/` | the transport interface and its iroh backend (FR-N5); see §1.5 |
+| `ember/client/` | the client core below the dioxus-compose UI |
+| `ember/proxy/` | the IDE window wrapping layer (Python) |
+| `ember/bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |
 | `extensions/` | editor extensions: `vscode-darkpyonix`, `vscode-darkpyonix-theme`, `intellij-darkpyonix` |
 
-### 1.4 Relationship to `web/proxy/` today
+### 1.4 Relationship to `ember/proxy/` today
 
-`web/proxy/` (merged in #1) is a FastAPI service in front of `code serve-web`. Its parts map onto this
+`ember/proxy/` (merged in #1) is a FastAPI service in front of `code serve-web`. Its parts map onto this
 topology as follows (`INTENT.md` D13, *[provisional]*):
 
-| `web/proxy/` part | Role in the target architecture |
+| `ember/proxy/` part | Role in the target architecture |
 | ------------- | ------------------------------- |
 | `dpx/vscode/`, `static/overlay.*`, `static/frame.html`, `static/webview-kb.js` | The IDE window's wrapping layer (`FR-W2`), kept |
 | `dpx/agents/` (Claude Code / Codex transcript parsers) | Kept and moved to the main server, where the transcripts now are |
@@ -100,7 +100,7 @@ topology as follows (`INTENT.md` D13, *[provisional]*):
 
 Every arrow marked P2P in the diagram is HTTP carried over `ember-transport` (`FR-N1`, `FR-N5`):
 **one transport stream = one HTTP/1.1 connection**, so the server and node routers, their
-WebSockets and the client's push channel run unchanged. Nothing outside `crates/transport/` names the
+WebSockets and the client's push channel run unchanged. Nothing outside `ember/transport/` names the
 backend; tests use the in-memory `MemNetwork`.
 
 ```
@@ -118,10 +118,10 @@ backend; tests use the in-memory `MemNetwork`.
 | `PeerGate` | `ember-transport` | Allow-list checked at accept (before any request); revoking closes the peer's open connections |
 | `Dialer` | `ember-transport` | One cached connection per (peer, service), a fresh stream per request/WebSocket, re-dial after close |
 | `HttpListener::with_gate` | `ember-transport` | `axum::serve` over a gated transport listener |
-| `NodeClient` | `crates/node/src/client.rs` | Same API over HTTP (`new`) or the transport (`over_transport`) |
-| Devices | `crates/server/src/devices/` | `devices` table → the server's gate; managed on the TCP listener only |
-| Computers by peer | `crates/server/src/computers/` | `peer_json` column (migration 5); probes, exec relay and the shim bridge dial through the server's `Dialer` |
-| `Api` | `crates/client/src/api.rs` | Same API and push socket over HTTP (`new`) or the transport (`over_transport`) |
+| `NodeClient` | `ember/node/src/client.rs` | Same API over HTTP (`new`) or the transport (`over_transport`) |
+| Devices | `ember/server/src/devices/` | `devices` table → the server's gate; managed on the TCP listener only |
+| Computers by peer | `ember/server/src/computers/` | `peer_json` column (migration 5); probes, exec relay and the shim bridge dial through the server's `Dialer` |
+| `Api` | `ember/client/src/api.rs` | Same API and push socket over HTTP (`new`) or the transport (`over_transport`) |
 
 Both daemons keep their TCP listener for local use (`ember-term`, the VS Code companion,
 loopback admin). Bearer tokens (node API) are kept as a second factor on top of the peer
@@ -203,7 +203,7 @@ API, not a generic transport:
 }
 ```
 
-Implemented as `web/proxy/static/detach.js` (webview) and the `crates/bridge/` crate (native; message
+Implemented as `ember/proxy/static/detach.js` (webview) and the `ember/bridge/` crate (native; message
 types, `WebviewBridge`, version handling). Concretely: positions are **0-based**; the payload
 crosses as a JSON string; `version` is per `kind` (`tab_detach`, `sibling_window_closed`,
 `open_window`, all 1); `tab_detach` also carries the additive fields `workspace.folder`,

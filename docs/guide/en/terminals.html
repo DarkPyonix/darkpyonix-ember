@@ -68,7 +68,7 @@
       <span class="label">Where this stands</span>
       <p>
         <span class="pill partial">Partial</span> The ember node side and the VS Code Web side are
-        implemented, with tests in <code>crates/node/tests/terms.rs</code> and the companion
+        implemented, with tests in <code>ember/node/tests/terms.rs</code> and the companion
         extension's own tests. The end-to-end checks (a real window closed, the terminal reopened
         on a second device) have not been run yet. The Ember editor's terminal panel and a
         terminal list in the Ember client are planned. Track it in
@@ -127,12 +127,12 @@
     <h2 id="vscode">In VS Code Web</h2>
     <p>
       VS Code Web reaches persistent terminals through a small web extension, the
-      <strong>Ember persistent terminals</strong> companion in <code>web/proxy/companion/</code>.
+      <strong>Ember persistent terminals</strong> companion in <code>ember/proxy/companion/</code>.
       It runs in the browser's extension host and talks to node through the proxy, so the node's
       token never reaches the browser. No VS Code source is patched.
     </p>
     <ol>
-      <li>Copy <code>web/proxy/companion/</code> into the VS Code server's extensions folder as
+      <li>Copy <code>ember/proxy/companion/</code> into the VS Code server's extensions folder as
           <code>darkpyonix.ember-terminals-0.1.0/</code>. For <code>dpx.serve</code> that is the
           <code>extensions</code> folder under <code>~/.ember/vscode-web/&lt;runtime&gt;</code>.</li>
       <li>Open a terminal with the profile <strong>Ember (persistent)</strong>.</li>

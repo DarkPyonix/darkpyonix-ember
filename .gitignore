@@ -48,9 +48,9 @@ dist-ssr
 # Isolated worktrees for parallel agents
 .claude/worktrees/
 
-# OSE build workdir and packages (build/ose/build.sh; builds run in CI)
-build/ose/.work/
-build/ose/dist/
+# OSE build workdir and packages (ember/ose/build.sh; builds run in CI)
+ember/ose/.work/
+ember/ose/dist/
 
 # Throwaway work, probes and downloads (AGENTS.md "Where files go")
 .scratch/

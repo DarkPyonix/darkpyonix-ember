@@ -1,7 +1,7 @@
 # Persistent terminals (SPEC §P)
 
 Status: **partial.** ember node's persistent sessions and the VS Code companion are implemented
-(#37, #42); `crates/node` tests run in CI (Linux; `tests/terms.rs` is known to fail on macOS). The
+(#37, #42); `ember/node` tests run in CI (Linux; `tests/terms.rs` is known to fail on macOS). The
 Ember editor's terminal panel is not built and the acceptance runs are not verified (#26). Requirements:
 `docs/SPEC.md` §P, FR-P1–FR-P6, NFR-P1.
 
@@ -22,9 +22,9 @@ editor), agents and people are clients that attach and detach.
 
 ## 1. ember node: sessions
 
-Code: `crates/node/src/term/` (`mod.rs` registry, `session.rs` one session, `screen.rs` VT model,
-`pty.rs` PTY + keeper, `store.rs` metadata), routes in `crates/node/src/api.rs`, wire types in
-`crates/node/src/proto.rs`, typed client in `crates/node/src/client.rs`.
+Code: `ember/node/src/term/` (`mod.rs` registry, `session.rs` one session, `screen.rs` VT model,
+`pty.rs` PTY + keeper, `store.rs` metadata), routes in `ember/node/src/api.rs`, wire types in
+`ember/node/src/proto.rs`, typed client in `ember/node/src/client.rs`.
 
 A persistent session is separate from `/v1/exec` (whose PTY lives as long as its WebSocket) and
 from jobs (pipes, no terminal). It is created by one request and runs until the program exits or
@@ -161,7 +161,7 @@ over the node link.
 
 Two pieces, both on the VS Code extension/settings surface:
 
-**a) Companion web extension: `web/proxy/companion/`** (integrated terminals). A `browser`-only
+**a) Companion web extension: `ember/proxy/companion/`** (integrated terminals). A `browser`-only
 extension, so it runs in VS Code Web's web worker extension host. It contributes the terminal
 profile **"Ember (persistent)"** (`contributes.terminal.profiles` +
 `window.registerTerminalProfileProvider`) whose `TerminalProfile` carries a
@@ -178,19 +178,19 @@ with `TerminalExitReason.User` kills the session (setting `ember.terminals.killO
 close or reload only detaches. Commands: *Ember: Attach to a Persistent Terminal…* (all sessions on
 the computer, any origin), *New Persistent Terminal*, *Take/Release Control*, *Kill*, *Use Persistent
 Terminals for New Terminals and Tasks* (writes the settings below). Unit tests:
-`cd web/proxy/companion && node --test`.
+`cd ember/proxy/companion && node --test`.
 
-The proxy side is `web/proxy/dpx/terms/` (`/__terms/*`, see its docstring): same-origin with the
+The proxy side is `ember/proxy/dpx/terms/` (`/__terms/*`, see its docstring): same-origin with the
 workbench, so the session cookie authenticates both `fetch` and the WebSocket (which also checks
 `Origin`); the node token comes from `~/.ember/node/local.json` and never reaches the browser; a
 browser may create only `ide-vscode` / `ide-ember` sessions. Unit tests:
-`cd web/proxy && python3 -m unittest tests.test_terms_relay`.
+`cd ember/proxy && python3 -m unittest tests.test_terms_relay`.
 
-Install: copy `web/proxy/companion/` into the VS Code server's extensions directory as
+Install: copy `ember/proxy/companion/` into the VS Code server's extensions directory as
 `darkpyonix.ember-terminals-0.1.0/` (for `code serve-web`, the `extensions` folder under its server
 data dir, or pass `--extensions-dir`), or package it with `vsce package` and install the `.vsix`.
 
-**b) `ember-term` binary: `crates/node/src/bin/ember-term.rs`** (tasks; also usable as a plain profile).
+**b) `ember-term` binary: `ember/node/src/bin/ember-term.rs`** (tasks; also usable as a plain profile).
 A small client that attaches the terminal it runs in to a node session: `ember-term` (new shell),
 `ember-term -c "<cmd>"` (new session running `$SHELL -c`, exits with its status), `ember-term
 attach <id> [--passive]`, `attach-or-create --key k [-- argv]`, `list`, `kill`. It forwards its
@@ -321,7 +321,7 @@ the adapter reasons above.
 
 ## 4. Tests
 
-- `crates/node/tests/terms.rs`: create / attach / detach / re-attach with snapshot; a session outliving
+- `ember/node/tests/terms.rs`: create / attach / detach / re-attach with snapshot; a session outliving
   every client (a socket dropped without detach); two clients typing alternately (both see both
   inputs in order); take control / refusal / release over HTTP / release on detach; size follows
   the controller, else the most recently active client (checked with `stty size`), passive
@@ -329,13 +329,13 @@ the adapter reasons above.
   its output then its exit status; remove; idempotent `key`; list filters; cwd outside the roots;
   re-adoption by a second node through the keeper with the snapshot of a graceful stop, and a
   `lost` record.
-- Unit tests in `crates/node/src/term/screen.rs` (round trips of plain text, colours, wide characters,
+- Unit tests in `ember/node/src/term/screen.rs` (round trips of plain text, colours, wide characters,
   alternate screen + modes, title, 10,000-line scrollback size, soft-wrap joining, shrink),
   `session.rs` (terminal-answer detection), `pty.rs` (fd passing), `config.rs` (endpoint file).
-- `web/proxy/tests/test_terms_relay.py`, `web/proxy/companion/test/extension.test.js`,
-  `web/proxy/companion/test/debug.test.js` (debug routing: which configurations are rewritten, the
+- `ember/proxy/tests/test_terms_relay.py`, `ember/proxy/companion/test/extension.test.js`,
+  `ember/proxy/companion/test/debug.test.js` (debug routing: which configurations are rewritten, the
   session body, endpoint parsing, attach / re-attach configurations, the launch-and-wait loop; the
-  debugpy bootstrap is compiled with `python3`). These two run: `cd web/proxy/companion && node --test`.
+  debugpy bootstrap is compiled with `python3`). These two run: `cd ember/proxy/companion && node --test`.
 
 ## 5. Open problems
 
@@ -351,7 +351,7 @@ the adapter reasons above.
   an orphaned one (both are "not attached here"); the user may get an offer for a debuggee
   another device is debugging (what a second simultaneous attach does is adapter-specific and untested).
 - The companion relies on the web worker extension host being same-origin with the proxy (true for
-  this proxy, `web/proxy/docs/CONSTRAINTS.md` §3); a `vscode-cdn.net`-hosted worker would need a
+  this proxy, `ember/proxy/docs/CONSTRAINTS.md` §3); a `vscode-cdn.net`-hosted worker would need a
   token handshake instead of the cookie. If needed, set `ember.terminals.proxyUrl`.
 - VS Code cannot render an extension terminal at a fixed size: a passive viewer whose viewport is
   smaller than the PTY sees wrapped lines instead of a scaled view (the Ember editor can scale).

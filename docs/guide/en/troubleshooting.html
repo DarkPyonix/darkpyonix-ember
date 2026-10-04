@@ -169,7 +169,7 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
         <thead><tr><th scope="col">Message</th><th scope="col">What to do</th></tr></thead>
         <tbody>
           <tr><td><code>cannot mount &hellip;: this ember server was built without a project mount (features mount-nfs on macOS, mount-fuse on Linux)</code></td><td>Rebuild the server with the feature for its OS, or keep the project path present on the main server.</td></tr>
-          <tr><td><code>&hellip; cannot be created by this user (&hellip;). &hellip;</code></td><td>The mount point needs a one-time privileged setup. Run <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> as the server's user; it uses <code>sudo</code> and prints each command first.</td></tr>
+          <tr><td><code>&hellip; cannot be created by this user (&hellip;). &hellip;</code></td><td>The mount point needs a one-time privileged setup. Run <code>ember/server/scripts/ember-mount-setup.sh &lt;path&gt;</code> as the server's user; it uses <code>sudo</code> and prints each command first.</td></tr>
           <tr><td><code>&hellip; exists on this server and is not empty; &hellip;</code></td><td>A local folder sits at the same path. Move it away, or set <code>EMBER_MOUNT_SHADOW=1</code> to mount over it.</td></tr>
           <tr><td><code>project mount: &hellip; does not exist on computer "&hellip;"</code></td><td>The folder is missing on that computer. Create it there or fix the session's folder.</td></tr>
           <tr><td><code>project mount: &hellip; is outside the directories its ember node allows (its roots)</code></td><td>Widen <code>EMBER_NODE_ROOTS</code> on that computer.</td></tr>
@@ -225,7 +225,7 @@ curl http://127.0.0.1:8740/api/v1/health   <span class="c"># {"ok":true,"push_ve
 
     <h2 id="macos">Known macOS notes</h2>
     <ul>
-      <li><strong>Mount points under <code>/home</code>.</strong> On macOS <code>/home</code> is an automount, so a node path such as <code>/home/pi/proj</code> cannot simply be created on a Mac main server. <code>scripts/ember-mount-setup.sh</code> handles it (it edits <code>/etc/auto_master</code>); a new top-level folder such as <code>/srv</code> needs <code>/etc/synthetic.conf</code> and a reboot.</li>
+      <li><strong>Mount points under <code>/home</code>.</strong> On macOS <code>/home</code> is an automount, so a node path such as <code>/home/pi/proj</code> cannot simply be created on a Mac main server. <code>ember/server/scripts/ember-mount-setup.sh</code> handles it (it edits <code>/etc/auto_master</code>); a new top-level folder such as <code>/srv</code> needs <code>/etc/synthetic.conf</code> and a reboot.</li>
       <li><strong>NFS without root.</strong> The macOS mount relies on <code>mount_nfs</code> working without <code>sudo</code> on a folder the user owns. That is documented upstream but not yet verified on Ember's Mac mini (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).</li>
       <li><strong>Claude Code accounts and the keychain.</strong> Claude Code keeps a login in the macOS login keychain, so log an account out with its own <code>auth logout</code> command before deleting it.</li>
       <li><strong>The client's look.</strong> The client has run against a live server on macOS, but nobody has yet checked its layout on a real display (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/9">#9</a>).</li>

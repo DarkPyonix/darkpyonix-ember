@@ -258,7 +258,7 @@ curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/comput
     </p>
     <ul>
       <li><strong>Build:</strong> <code>--features mount-nfs</code> on a macOS main server, <code>--features mount-fuse</code> on Linux (<a href="install.html#mount-build">Install</a>). <code>EMBER_MOUNT=off</code> turns it off.</li>
-      <li><strong>Mount point:</strong> the path must be creatable by the server's user. When it is not (another user's home, <code>/home</code> on macOS, a new top-level folder), run <code>scripts/ember-mount-setup.sh &lt;path&gt;</code> once; it prints each <code>sudo</code> command before running it, and <code>--dry-run</code> only prints them.</li>
+      <li><strong>Mount point:</strong> the path must be creatable by the server's user. When it is not (another user's home, <code>/home</code> on macOS, a new top-level folder), run <code>ember/server/scripts/ember-mount-setup.sh &lt;path&gt;</code> once; it prints each <code>sudo</code> command before running it, and <code>--dry-run</code> only prints them.</li>
       <li><strong>Existing folders:</strong> a non-empty local folder at the same path is not mounted over, unless <code>EMBER_MOUNT_SHADOW=1</code>.</li>
       <li><strong>Scope:</strong> only the session's folder is mounted. Nested project folders, and the same path served from two computers, are refused.</li>
       <li><strong>Freshness:</strong> writes go to the node at once; changes made on the node by other programs show within about a second (<code>EMBER_MOUNT_TTL_MS</code>, default 1000).</li>

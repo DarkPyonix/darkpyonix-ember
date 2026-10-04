@@ -1,4 +1,4 @@
-English | [한국어](https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/locale/README_ko.md)
+English | [한국어](https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/locales/README_ko.md)
 
 # darkpyonix-ember
 
@@ -90,7 +90,7 @@ Ember has no releases yet. The table matches the code on `develop` as of 2026-10
 
 ## 🚀 Build and run
 
-Each crate under `crates/` is its own cargo project with its own `Cargo.lock`, so you build inside
+Each crate under `ember/` is its own cargo project with its own `Cargo.lock`, so you build inside
 the crate's folder. Work lands on `develop`.
 
 ```bash
@@ -99,12 +99,12 @@ cd darkpyonix-ember
 git checkout develop
 
 # main server
-cd crates/server
+cd ember/server
 cargo build --release --locked
 ./target/release/ember-server
 
 # client, in another terminal
-cd crates/app
+cd ember/app
 EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run --release --locked
 ```
 
@@ -131,7 +131,7 @@ settings and what each program stores.
 
 | Component | What it is |
 | --------- | ---------- |
-| **ember** | This repository: `ember-server`, `ember-node`, the client, and the IDE window. The IDE window wraps VS Code Web through `web/proxy/`. |
+| **ember** | This repository: `ember-server`, `ember-node`, the client, and the IDE window. The IDE window wraps VS Code Web through `ember/proxy/`. |
 | **vscode-darkpyonix** | VS Code extension that renders DarkPyonix notebooks. Tested against a fake manager, not yet the real one. Installed by default in Ember's VS Code runtime. |
 | **vscode-darkpyonix-theme** | VS Code theme in the DarkPyonix (phoenix) design language. In progress. |
 | **intellij-darkpyonix** | IntelliJ and PyCharm plugin with the same notebook features. In progress, built and tested in CI. |
@@ -151,9 +151,7 @@ settings and what each program stores.
 
 ```
 darkpyonix-ember/
-├─ build/
-│  └─ ose/               OSE: DarkPyonix's build of Code-OSS, the default IDE-window runtime
-├─ crates/               one cargo project per crate
+├─ ember/                the product: one cargo project per crate, plus OSE, the proxy and test vectors
 │  ├─ server/            ember-server: wraps agent CLIs, stores sessions, pushes updates
 │  ├─ node/              ember-node: carries out tool actions on each computer
 │  ├─ app/               ember-app: launcher and conversation UI on dioxus-compose
@@ -162,15 +160,13 @@ darkpyonix-ember/
 │  ├─ hub/               darkpyonix.dev hub client: device registration and directory
 │  ├─ bridge/            IDE window bridge: versioned webview and native messages
 │  ├─ editor-conn/       Rust client for a Code-OSS server
-│  └─ editor/            editor core session layer (planned editor, #32)
+│  ├─ editor/            editor core session layer (planned editor, #32)
+│  ├─ proxy/             the VS Code Web wrapping layer (Python, FastAPI)
+│  ├─ ose/               OSE: DarkPyonix's build of Code-OSS, the default IDE-window runtime
+│  └─ vectors/           recorded transcript and bridge test vectors
 ├─ docs/
 │  └─ guide/             the user guide, served at darkpyonix.dev/darkpyonix-ember
 ├─ extensions/           vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
-├─ scripts/              repository checks and setup helpers
-├─ tests/
-│  └─ vectors/           recorded transcript and bridge test vectors
-├─ web/
-│  └─ proxy/             the VS Code Web wrapping layer (Python, FastAPI)
 └─ LICENSE
 ```
 

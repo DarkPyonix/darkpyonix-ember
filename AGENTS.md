@@ -20,7 +20,7 @@ VS Code questions. Kernel, manager and hub APIs belong to `darkpyonix-core`; Emb
 4. A wrapped agent is integrated against its actual current behaviour (CLI flags, protocol,
    session files), verified by an integration test, never by assumption.
 5. The client stays on `dioxus-compose`, with no webview in the launcher or conversation UI
-   (`scripts/check-no-webview.sh`). [user, 2026-10-03]
+   (`.github/scripts/checks/check-no-webview.sh`). [user, 2026-10-03]
 
 ## Sub-agents and builds
 
@@ -35,9 +35,9 @@ VS Code questions. Kernel, manager and hub APIs belong to `darkpyonix-core`; Emb
   시켜야지", "니가 작업 붙잡고 있으면 다른 일들도 진행이 안되잖아".)
 - Use sub-agents generously for parallel work, each in its own worktree under
   `.claude/worktrees/<name>/`.
-- `crates/client/` depends on `crates/server/`, and `crates/server/` on `crates/node/`, by path,
-  and CI runs `cargo test --locked` per crate. When a dependency changes in `crates/node/` or
-  `crates/server/`, rebuild the dependants so their `Cargo.lock` files update, and commit them in
+- `ember/client/` depends on `ember/server/`, and `ember/server/` on `ember/node/`, by path,
+  and CI runs `cargo test --locked` per crate. When a dependency changes in `ember/node/` or
+  `ember/server/`, rebuild the dependants so their `Cargo.lock` files update, and commit them in
   the same PR.
 
 ## Where files go
@@ -47,13 +47,14 @@ throwaway work, probes and downloads in `.scratch/<name>/` (both ignored). Not `
 directory beside this checkout, not the home directory. Large files in a worktree are linked, not
 copied. If a task seems to need a path outside the repository, ask first.
 
-**The repository root is fixed.** No new folder or file at the root without the user's approval:
-propose what to add and why, and wait. Approved root entries (2026-10-03, regrouped by #60):
-`.github/`, `.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`,
-`README.md`, `build/`, `crates/`, `docs/`, `extensions/`, `scripts/`, `tests/`, `web/`, plus the
-ignored `.claude/` and `.scratch/`. Rust crates live in `crates/<name>/`, the VS Code Web wrapper
-in `web/proxy/`, the OSE build pipeline in `build/ose/`, and shared test vectors in
-`tests/vectors/`.
+**The repository root is fixed.** The root holds one product folder, `ember/`, like core: `.github/`,
+`.gitignore`, `.vscode/`, `AGENTS.md`, `CLAUDE.md`, `LICENSE`, `PROJECT.md`, `README.md`, `docs/`,
+`ember/` and `extensions/`, plus the ignored `.claude/` and `.scratch/`. [user, 2026-10-04: the
+root holds one product folder like core; the previous root set was never approved.] A new root
+entry is added only after the user approves it, and the approval is recorded beside it with the
+date and the user's quote. Rust crates live in `ember/<name>/`, the VS Code Web wrapper in
+`ember/proxy/`, the OSE build pipeline in `ember/ose/`, shared test vectors in `ember/vectors/`,
+and CI scripts and repository checks in `.github/scripts/`.
 
 ## Git
 
@@ -91,7 +92,7 @@ for word; user documents in 합니다체, internal documents in 한다체.
 
 - **No em-dash (U+2014)** in documents or code (comments, doc strings, strings), because the user
   ruled it out (2026-10-03). Use a comma, a colon or parentheses, or split the sentence. An en-dash
-  in a numeric range is fine. `scripts/check-no-em-dash.sh` enforces it in CI; recorded data
+  in a numeric range is fine. `.github/scripts/checks/check-no-em-dash.sh` enforces it in CI; recorded data
   (`.json`, `.jsonl` and test fixtures captured from real CLIs) is exempt.
 - **Install and run examples use uv, ppp (pypackpack) and tcl (toolchain-lite) only**, never
   `pip install`, because those are the toolchains the user supports (2026-10-03). Rust examples use

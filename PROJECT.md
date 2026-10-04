@@ -15,7 +15,7 @@ four things work together:
    the main server can work on whichever computer the session is currently using, and move.
 3. **A native client** (launcher and conversation screens on `dioxus-compose`, no webview) that
    puts conversations first and opens an IDE only when needed.
-4. **An IDE window** (VS Code Web, wrapped by `web/proxy/`, or an external IDE: VS Code, JetBrains
+4. **An IDE window** (VS Code Web, wrapped by `ember/proxy/`, or an external IDE: VS Code, JetBrains
    Gateway) launched from a conversation.
 
 Kernel, manager and hub APIs are `darkpyonix-core`'s; Ember links to them.
@@ -82,10 +82,10 @@ by 10-16, remote-browser viewing is limited, and the reason is recorded.
 | **M4** | A2A (`FR-T1`–`FR-T6`) and accounts with usage routing (`FR-U1`–`FR-U3`, `FR-U5`) | Whether cross-vendor, cross-account messaging is useful without being a loop hazard |
 | **M5** | Networking: peer-to-peer with `darkpyonix.dev` hole punching and relay (`FR-N1`–`FR-N4`) | Which transport (Rust tunnel or an existing mesh, Q7); also resolves HTTPS for phones |
 | **M6** | Remote browser with server-held profile, and agent browser use (`FR-R1`–`FR-R5`) | How the browser reaches the client without breaking E1 |
-| **M7** | IDE window: `web/proxy/` integrated as the wrapping layer, OSE/VSC runtimes, bridge (`FR-W1`–`FR-W6`, `FR-B1`–`FR-B4`); mobile without Node (`FR-W5`) | Whether the wrapped IDE holds up from a conversation on desktop and phone |
+| **M7** | IDE window: `ember/proxy/` integrated as the wrapping layer, OSE/VSC runtimes, bridge (`FR-W1`–`FR-W6`, `FR-B1`–`FR-B4`); mobile without Node (`FR-W5`) | Whether the wrapped IDE holds up from a conversation on desktop and phone |
 | **M8** | Compose-native editor core (§E), back in scope [user, 2026-10-03], target 2026-10-18; planned (#32) | See `IMPLEMENTATION.md` |
 
-`web/proxy/` already delivers much of M7's wrapping layer and a transitional multi-machine home; it
+`ember/proxy/` already delivers much of M7's wrapping layer and a transitional multi-machine home; it
 keeps working throughout and is folded in rather than rewritten (`INTENT.md` D13).
 
 ## Open questions
@@ -102,14 +102,14 @@ The full list with status is in `docs/INTENT.md` → *Open questions*. Summary:
 | Q6 | Where exactly is each agent intercepted so its native behaviour is untouched? |
 | Q7 | ~~Which peer-to-peer transport?~~ **iroh 1.0, conditionally** [user]; own implementation if `NFR-N1` is missed |
 | Q8 | ~~Is the Tauri scaffold kept?~~ **Closed: deleted** [user, 2026-10-03] |
-| Q9 | `web/proxy/`'s carried-over items: login, pre-distribution security holes |
+| Q9 | `ember/proxy/`'s carried-over items: login, pre-distribution security holes |
 | Q10 | (from 09-22, still open) What is VS Code Web's renderer ↔ extension host wire protocol, and how stable is it? Only matters for M8. |
 | Q11 | ~~What is "OMP"?~~ oh-my-pi (`omp`), a distribution of the Pi coding agent that exposes ACP *[provisional, leader's research]* |
 
 ## Rejected alternatives (summary; see `INTENT.md`)
 
 - **Each computer runs its own agents and keeps its own transcripts**, with a hub aggregating
-  them. This is what `web/proxy/`'s hub does today, and it is the arrangement that makes moving a
+  them. This is what `ember/proxy/`'s hub does today, and it is the arrangement that makes moving a
   conversation between computers painful. Replaced by the main server (D3, D13).
 - **Patching or reimplementing the agents** to add Ember features. Violates E2; Ember adds around
   agents only.

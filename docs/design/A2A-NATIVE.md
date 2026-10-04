@@ -32,10 +32,34 @@ flags, redirect hooks) are recorded for reference only and are not part of the d
 | Antigravity | `define_subagent`, `invoke_subagent`, `send_message`, `manage_inbox` [B] | MCP plus a `hooks.json` PreToolUse deny with a pointer reason (hooks tested locally, SPEC §A) | hooks | model-visible descriptions and MCP ranking [U] |
 | OMP | `task` subagents; peers write to `agent://<name>` [V] | expose Ember sessions as `agent://` names if an extension loads under ACP, otherwise MCP with the same wording [U] | the `agent://` scheme | extension loading [U] |
 
-AionUI (iOfficeAI/AionCore) solves the same contest with 13 `team_`-prefixed MCP tools and one
-injected line: "Your platform may provide similarly named built-in tools. Do NOT use those." A
-distinctive prefix avoids name collisions, MCP is primary and a CLI is the fallback. It publishes no
-measurement of how often it wins. [V]
+AionUI (iOfficeAI/AionCore at `4a707fc`, team logic in `crates/aionui-team`,
+`crates/aionui-team-prompts`, `crates/aionui-api-types/src/team_tools.rs`; read from source, its
+own docs are partly stale) [V]:
+
+- **Tools:** 13 `team_`-prefixed MCP tools; lead-only tools are hidden from teammates'
+  `tools/list`. The "comes first" device is one injected line: "You MUST use the `team_*` MCP tools
+  for ALL team coordination. Your platform may provide similarly named built-in tools. Do NOT use
+  those." It does not block built-ins and publishes no measurement.
+- **Delivery:** a message is stored in a SQLite mailbox, the receiver's event loop is woken, and
+  unread messages are batched into the receiver's next user turn ("## New Messages - From
+  <slot>"). A receiver mid-turn gets them after the turn. Messages are acknowledged only when that
+  turn succeeds, otherwise delivered again. Lanes: Foreground > Control > Directed > Background.
+- **Idle reports:** at turn end (Finish or Error) an `idle_notification` is written to the lead's
+  mailbox carrying only "idle". The lead is woken only when every teammate has settled and the lead
+  is idle; failures and give-ups wake at once. The actual result depends on the prompt telling the
+  teammate to call `team_send_message` (`event_loop.rs`, `scheduler`).
+- **Task assignment** notifies the owner automatically (`mcp/server.rs::maybe_notify_task_owner`).
+- **Gaps:** no loop or rate-limit protection in the path; the CLI path exports
+  `AIONUI_RUNTIME_TOKEN` to the agent environment and compares tokens in plain text; the role prompt
+  is prepended to the first user message (fragile on resume); starting a team kills and restarts
+  the agent process to load the tools; crash and 60 s inactivity handlers exist but no production
+  call site was found.
+
+Taken into Ember: acknowledge only after a successful turn, automatic notice to a task owner,
+cancel by interrupt rather than kill, lead-only tool visibility. Done differently: built-ins are not
+blocked and Ember-first is measured (≥ 95%); the server attaches the result to each report instead
+of relying on the model (FR-T8); done reports wake the lead per report, not after everyone
+settles; loop protection (FR-T3, FR-T5) and a token kept out of the shell (FR-T2a).
 
 ## Two directions for Claude Code
 
@@ -107,9 +131,16 @@ subagent hand-backs; AionUI's teammates report to the lead when they go idle.
 
 - **When:** the turn ends and the session is idle; an error ends the turn; an approval or a
   question waits on a person; no progress for a configurable stall time.
-- **What:** the outcome (done, failed, needs input, stalled), a summary of the last response, files
-  changed and PRs or commits created in the turn, the error for a failure, and a link to the full
+- **What:** built by the server from the turn, not left to the model: the outcome and stop reason
+  (done, failed, interrupted, needs input, stalled), a summary of the last response, files changed
+  and PRs or commits created in the turn, the error for a failure, and a link to the full
   transcript.
+- **Wake policy:** each done report wakes an idle receiver at once, and reports arriving within
+  2 s share one turn; failures, interruptions, needs-input and undeliverable reports always wake
+  at once. AionUI's "wake the lead after every teammate has settled" is rejected, because the user
+  asked to know without checking.
+- **Delivery:** stored first, acknowledged only after the receiving turn succeeds, delivered again
+  otherwise.
 - **To whom:** the team leader for a team task, otherwise the sender of the message the session
   was working on. A session with no delegator sends nothing.
 - **Waking:** an idle receiver is woken by a report and handles it at once, the way a Claude Code

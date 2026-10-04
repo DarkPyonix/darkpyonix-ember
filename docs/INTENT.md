@@ -153,8 +153,17 @@ under different accounts. It is the only behaviour Ember adds to a wrapped agent
 **Why.** Motivation 2. Because every session already runs on the main server (D3), the channel is
 local to the server, regardless of which computers the sessions are working on.
 
+**How agents use it.** [user, 2026-10-04: "가장 중요한 것은 자연스럽게 소통하는 방식에 적응할 수
+있어야 한다는거야. 클로드 코드라면 list-agents를 먼저 쓰려고 할텐데 그거보다 더 우선적으로 쓴다는거잖아.
+그렇게 쓰게 하는 디자인으로 가야 해."] A2A fits the way each agent already talks to other agents,
+and the agent chooses it before its own built-in means (for Claude Code, `ListAgents`,
+`SendMessage` and `Agent`). Whether it arrives as a CLI or an MCP server is a detail; the test is
+whether the agent reaches for it first on a natural request. Research and the draft design:
+`docs/design/A2A-NATIVE.md` (#102).
+
 **Rejected alternative.** A shared file that agents read and write. It is what users do today, and
-it is the limitation this decision exists to remove.
+it is the limitation this decision exists to remove. Also rejected: one CLI with instructions text
+for every agent, because Claude Code's always-loaded peer tools win that contest.
 
 ### D6: A remote browser that egresses from the chosen computer, with its data on the main server
 

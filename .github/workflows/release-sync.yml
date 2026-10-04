@@ -1,0 +1,34 @@
+# Publishes develop to main through the append-only `release` branch (.github/scripts/release/sync-release.sh).
+# main is never written here; the user merges the release → main PR.
+name: Release sync
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Publish release and open the PR to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/release/sync-release.sh

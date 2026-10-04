@@ -1,6 +1,8 @@
 # COMPUTERS.md: computers, switching and tool interception (#6)
 
-> Status: **implemented, not yet run end to end** (2026-10-03). Covers SPEC `FR-X2`, `FR-X3` and
+> Status: **implemented** (#34, #47, #48), tests run in CI; verified end to end with a node on the
+> same Mac (Codex and Claude Code); a switch between two physical computers and the project mount
+> (features `mount-nfs`, `mount-fuse`, not built in CI) are not verified (#6). Covers SPEC `FR-X2`, `FR-X3` and
 > `FR-S7` v0 on ember server. The mechanism choice is in `INTERCEPTION.md`; this note records
 > what was built, what it relies on, and what is still open. **[V]** = verified locally (evidence
 > named), **[U]** = unverified.
@@ -9,30 +11,29 @@
 
 | Piece | Where | What it does |
 |-|-|-|
-| Registry | `server/src/computers/mod.rs` (`Registry`) | Tables `computers(id, name, url, token, created_at)` and `session_computer(session_id, computer_id, env_json, notice, switched_at)` in `ember.db`, created by store migration 3 (`computers/schema.rs`) and read through the main `Store` connection, like `accounts`. |
-| Service | `computers::Computers` | Register / list / probe (`/v1/health`, `/v1/env`) / remove; a session's current computer; `switch`. Installs three hooks on `Sessions`: an instructions hook (environment block), a start-config hook (Codex remote executor / Claude Code shell shim), and a message hook (the FR-S7 notice). |
-| HTTP API | `server/src/computers/api.rs` | `GET/POST /api/v1/computers`, `GET/DELETE /api/v1/computers/{id}`, `GET/PUT /api/v1/sessions/{id}/computer`. |
-| Codex relay | `server/src/computers/relay.rs` | Loopback WebSocket (`ws://127.0.0.1:<port>/<secret>`) that codex app-server connects to; re-frames to the node's raw `/v1/exec-server` stream. |
-| Node bridge | `node/src/exec_server.rs` | `GET /v1/exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
-| Browser egress | `server/src/computers/egress.rs`, `node/src/egress.rs` | Per computer, a loopback SOCKS5 listener (`socks5://127.0.0.1:<port>`) that a project's browser uses as `--proxy-server`; each connection becomes one node `/v1/egress` stream where the node runs SOCKS5 (FR-R1, see `REMOTE-BROWSER.md`). A computer that is some project's browser egress cannot be removed (409). |
-| Claude shim | `server/src/computers/shim.rs`, `server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/v1/exec` and carries the cwd back. |
-| Mount | `server/src/computers/mount.rs` (+ `mount/`) | Mounts a Claude Code session's cwd from its node at the same path: `remote_fs.rs` (node-backed filesystem with caches), `nfs.rs` (loopback NFSv3, feature `mount-nfs`), `fuse.rs` (Linux FUSE, feature `mount-fuse`), `cmd.rs` (mount commands, mount point checks). **Written, not compiled or run** — see § Project mount. |
+| Registry | `ember/server/src/computers/mod.rs` (`Registry`) | Tables `computers(id, name, url, token, created_at)` and `session_computer(session_id, computer_id, env_json, notice, switched_at)` in `ember.db`, created by store migration 3 (`computers/schema.rs`) and read through the main `Store` connection, like `accounts`. |
+| Service | `computers::Computers` | Register / list / probe (`/health`, `/env`) / remove; a session's current computer; `switch`. Installs three hooks on `Sessions`: an instructions hook (environment block), a start-config hook (Codex remote executor / Claude Code shell shim), and a message hook (the FR-S7 notice). |
+| HTTP API | `ember/server/src/computers/api.rs` | `GET/POST /api/computers`, `GET/DELETE /api/computers/{id}`, `GET/PUT /api/sessions/{id}/computer`. |
+| Codex relay | `ember/server/src/computers/relay.rs` | Loopback WebSocket (`ws://127.0.0.1:<port>/<secret>`) that codex app-server connects to; re-frames to the node's raw `/exec-server` stream. |
+| Node bridge | `ember/node/src/exec_server.rs` | `GET /exec-server` (bearer auth) runs `codex exec-server --listen stdio` per connection and relays bytes; `ember-node exec-server` runs the same command on its own stdio. |
+| Browser egress | `ember/server/src/computers/egress.rs`, `ember/node/src/egress.rs` | Per computer, a loopback SOCKS5 listener (`socks5://127.0.0.1:<port>`) that a project's browser uses as `--proxy-server`; each connection becomes one node `/egress` stream where the node runs SOCKS5 (FR-R1, see `REMOTE-BROWSER.md`). A computer that is some project's browser egress cannot be removed (409). |
+| Claude shim | `ember/server/src/computers/shim.rs`, `ember/server/src/bin/ember-exec.rs` | `CLAUDE_CODE_SHELL_PREFIX` target; runs Bash-tool commands on the node via `/exec` and carries the cwd back. |
+| Mount | `ember/server/src/computers/mount.rs` (+ `mount/`) | Mounts a Claude Code session's cwd from its node at the same path: `remote_fs.rs` (node-backed filesystem with caches), `nfs.rs` (loopback NFSv3, feature `mount-nfs`), `fuse.rs` (Linux FUSE, feature `mount-fuse`), `cmd.rs` (mount commands, mount point checks). **Written, not compiled or run**; see § Project mount. |
 
 The local server is the implicit computer `local`. A session with no `session_computer` row
 behaves exactly as before this change: no environment block, nothing redirected.
 
 ## Switching (FR-X3, FR-S7 v0)
 
-`PUT /api/v1/sessions/{id}/computer {computer_id}`:
+`PUT /api/sessions/{id}/computer {computer_id}`:
 
 1. Refused with 409 while the session is mid-turn (`running` or `waiting_for_approval`), 404 for
-   an unknown computer or session, 502 when the target fails `/v1/health` (or speaks another node
-   protocol version) or `/v1/env`.
-2. Records the computer and its `/v1/env` snapshot.
+   an unknown computer or session, 502 when the target fails `/health` or `/env`.
+2. Records the computer and its `/env` snapshot.
 3. If the session's agent has already run (it has a native id), queues a notice: the computer
    changed and earlier file contents, listings and command output must be re-read / re-run.
 4. Releases the agent process. The next message starts it again (native resume) with:
-   - the **environment block** built from `/v1/env` as system-level instructions — Claude Code
+   - the **environment block** built from `/env` as system-level instructions: Claude Code
      `--append-system-prompt=…`, Codex `developerInstructions` on `thread/start`/`thread/resume`.
      It is contributed by an instructions hook (`Sessions::add_instructions_hook`), joined with
      the other hooks' instructions (A2A, …). Because hooks run at every process start, a switch
@@ -47,7 +48,7 @@ Switching to the computer a session is already on is a no-op (`changed: false`).
 
 ## Per agent
 
-**Codex — tools run on the node (shell, unified exec, PTY, apply_patch file ops [U]).**
+**Codex: tools run on the node (shell, unified exec, PTY, apply_patch file ops [U]).**
 The start request carries `RemoteExec {environment_id: "ember-<computer id>", exec_server_url}`.
 The adapter then sends `initialize` with `capabilities: {experimentalApi: true,
 requestAttestation: false}`, `environment/add {environmentId, execServerUrl}`, `thread/start`
@@ -55,7 +56,7 @@ with `environments: [{environmentId, cwd}]`, and `environments` again on every `
 (`thread/resume` has no such field). The app-server process starts in the temp directory when
 the project path does not exist on the server.
 
-**Claude Code — Bash runs on the node; file tools go through the project mount.**
+**Claude Code: Bash runs on the node; file tools go through the project mount.**
 Environment: `CLAUDE_CODE_SHELL_PREFIX=<abs path of ember-exec>`, `EMBER_EXEC_NODE_URL`,
 `EMBER_EXEC_NODE_TOKEN`, `EMBER_EXEC_REMOTE_SHELL` (the node's `$SHELL`), and with the mount
 enabled `EMBER_MOUNT_CTL`. Read / Edit / Write / Glob / Grep operate on the server's disk, where
@@ -92,7 +93,7 @@ extension, not a daemon library).
 **Mount points (one-time privileged setup).** The mount point must exist and be owned by the
 server user. Missing directories are created when the nearest existing parent is writable (e.g.
 node and server share the user and `/Users/<u>/…`). Otherwise the start fails with a hint, and
-`scripts/ember-mount-setup.sh <path>` (run once with `sudo`) prepares it:
+`ember/server/scripts/ember-mount-setup.sh <path>` (run once with `sudo`) prepares it:
 - macOS `/Users/<other>/…`: `mkdir -p` + `chown`.
 - macOS `/home/<u>/…`: `/home` is an autofs mount (`auto_home`); comment out its line in
   `/etc/auto_master` and `automount -vc`, then `mkdir` + `chown`.
@@ -104,7 +105,7 @@ A non-empty local directory at the same path is not mounted over (it would hide 
 session might use it) unless `EMBER_MOUNT_SHADOW=1`. A stale mount from a crashed run is
 force-unmounted first.
 
-**Node API added for it** (all under the path policy and the write lock): `/v1/fs/lstat`,
+**Node API added for it** (all under the path policy and the write lock): `/fs/lstat`,
 `readlink`, `symlink`, `mkdir` (`parents`, `mode`), `remove` (`recursive`; never a root; links,
 not targets), `rename` (`overwrite`), `setattr` (chmod, truncate, utimes in one call), `pwrite`
 (in-place positional write). `Stat` and `DirEntry` gained `ino`, `nlink`, `atime_ms`,
@@ -119,7 +120,7 @@ the client carries the mount's 4 s per-request deadline (`NodeClient::with_deadl
 transport it covers stream open, including a dial when no connection is cached, the HTTP
 handshake, the request and the whole response body; over HTTP reqwest's own timeouts are set
 too). A missed deadline is `ClientError::Timeout` → `ETIMEDOUT`; a failed dial or stream is
-`ClientError::Transport` → `EIO`; both count as an outage. Tests: `server/tests/peer_mount.rs`
+`ClientError::Transport` → `EIO`; both count as an outage. Tests: `ember/server/tests/peer_mount.rs`
 (a real node and a stalled peer on `MemNetwork`).
 
 **Caching and freshness.** Inode numbers are the mount's own (path ↔ id, stable across renames).
@@ -155,17 +156,18 @@ whose node is unreachable fails with "computer … is unreachable".
 
 ## Open problems
 
-- **Not run end to end.** No real Codex turn through a remote environment and no real Claude
-  Bash call through `ember-exec` has been made yet; verify both on the Pi.
-- **Peer-addressed mount: not compiled or run.** `NodeClient::with_deadline`, `Computers::node_fs`
-  and `server/tests/peer_mount.rs` were written without building. Also open: a timed-out
+- **Run end to end on one Mac only** (#6, 2026-10-03): a Codex turn and a Claude Code Bash call
+  ran on a node registered as a separate computer. Still to verify on the Pi.
+- **Peer-addressed mount: not run against a real mount.** `NodeClient::with_deadline` and
+  `Computers::node_fs` build in CI; `ember/server/tests/peer_mount.rs` needs a mount feature,
+  which CI does not enable. Also open: a timed-out
   request over the transport drops its hyper `SendRequest`, but the background connection task
   of a peer that never answers may keep its stream open until the transport connection ends
   **[U]**; and the dialer keeps its cached connection after a timeout, so a silently dead path
   costs one deadline per request until the transport's own idle timeout closes it and the next
   request re-dials (forgetting the connection on timeout would also cut healthy concurrent
   requests). WebSockets (exec, terminal attach) still have no deadline on either reach.
-- **Project mount not compiled or run.** Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
+- **Project mount not built in CI or run** (features off by default). Written against `nfsserve` 0.11.0 and `fuser` 0.18.0
   read from their published sources. To verify on the Mac mini and the Pi: non-root
   `mount_nfs` on a user-owned directory, the exact `mount_nfs` option names (`deadtimeout`,
   `nonegnamecache`, `actimeo`, `retrycnt`), macOS NFS client behaviour with nfsserve
@@ -178,7 +180,7 @@ whose node is unreachable fails with "computer … is unreachable".
   `~/.gitconfig` on the node) are still the server's. Nested project directories of two sessions
   on one computer are refused; sessions of two computers on one path conflict.
 - **No change feed** on the node: external edits are seen after the TTL; a node fs watcher
-  pushing invalidations over `/v1/events` would make it exact.
+  pushing invalidations over `/events` would make it exact.
 - **Exclusive rename / hard links / xattrs / locks** are not supported through the mount
   (`RENAME_NOREPLACE` → `EINVAL`, locks local only).
 - **Claude cwd tracking**: the shim writes the node's `pwd -P` to the local cwd file; with the
@@ -187,7 +189,7 @@ whose node is unreachable fails with "computer … is unreachable".
   hooks' environment). A per-session scoped token is the fix.
 - **Codex needs a codex binary on the node** (outside FR-X5's "ember node only"), and the
   exec-server is not confined by the node's path policy.
-- **Node protocol**: `/v1/exec-server` and `/v1/egress` were added without bumping `PROTOCOL_VERSION` (additive).
+- **Node protocol**: `/exec-server` and `/egress` were added to the node API (additive; the node reports no protocol number).
 - Codex `additionalContext` (keyed context on `turn/start`) may be a cleaner carrier for the
   environment block than `developerInstructions`; not tried.
 - Switch is refused mid-turn; whether a user should be able to force it is open (`INTENT.md` Q2).

@@ -1,61 +1,129 @@
+English | [한국어](https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/locales/README_ko.md)
+
 # darkpyonix-ember
 
-**One AI, many computers.** Ember is a multi-provider, LLM-based development environment and
-remote IDE. Your coding agents — Claude Code, Codex, Antigravity, OMP — run on one main server
-that keeps every conversation, and do their work on whichever of your computers the task needs,
-moving between them as they go.
+**One AI, many computers.** Ember is a development environment and remote IDE for coding agents.
+Claude Code, Codex, Antigravity and OMP run on one main server that keeps every conversation.
+Their tools act on whichever of your computers the work needs. A conversation can move to another
+computer halfway through.
 
-*Ember is the client and the agent environment. DarkPyonix, underneath, is the Python kernel and
-notebook runtime (`darkpyonix-core`).*
+Ember is the client and the agent environment. DarkPyonix, underneath, is the Python kernel and
+notebook runtime ([darkpyonix-core](https://github.com/DarkPyonix/darkpyonix)).
 
----
-
-## 🎯 Why this exists
-
-Three frictions from day-to-day agentic development:
-
-- **Conversations are stuck on the computer that started them.** A CLI agent writes its transcript
-  to local disk; moving work to another computer means abandoning the conversation. Ember keeps
-  all conversations on **one main server** — a Raspberry Pi or Mac mini — so a conversation is no
-  longer tied to a computer.
-- **Agents from different vendors can't talk.** Claude and Codex can only coordinate through a
-  shared file, and even two Claude sessions can't talk across computers or accounts. Ember gives
-  agents **a direct channel to each other**, across models, computers and accounts.
-- **A remote computer's view of the network is hard to borrow.** Ember opens **a browser that
-  egresses from the chosen computer**, with its IP, while cookies and logins stay on the main
-  server — one browser identity, many vantage points. Agents can drive it too.
-
-A project is a company; its computers are branch offices. The agent works for the company, and
-goes to whichever office the work needs.
+**User guide** (English and Korean): <https://darkpyonix.dev/darkpyonix-ember/>
 
 ---
 
-## 🧭 The shape of the thing
+## 🎯 Why
 
-1. Open Ember. The main screen lists **projects**; each shows its **conversation sessions** and
-   whether they are running, waiting for approval, or finished. **Computers** are listed at the
-   bottom, with which projects they serve.
-2. Open a conversation. The agent is running on the main server; its tools act on the session's
-   current computer. Send messages, approve tool calls, switch the computer, or let it talk to
-   another agent.
-3. Need to look at code? **"Open IDE"** (top right) launches Ember's IDE window — VS Code Web,
-   wrapped — or VS Code, or JetBrains Gateway, on that project and computer.
-4. Close the client. The sessions keep running on the main server. Open it again on a phone or
-   another computer and pick up where you left off.
+Three problems come up every day in agentic development.
 
-The UX deliberately follows **JetBrains Gateway**: a light front door, heavier sessions opened on
-demand.
+- **A conversation is stuck on the computer that started it.** A CLI agent writes its transcript
+  to local disk. Moving the work to another computer means leaving the conversation behind. Ember
+  keeps every conversation on one main server, such as a Mac mini or a Raspberry Pi, so a
+  conversation no longer belongs to one computer.
+- **Agents from different vendors cannot talk.** Claude and Codex coordinate only through a shared
+  file. Two Claude sessions on different computers or accounts cannot talk at all. Ember gives
+  sessions a direct channel, across vendors, computers and accounts.
+- **A remote computer's view of the network is hard to borrow.** Ember opens a browser whose
+  traffic leaves from the chosen computer, with that computer's IP. Cookies and logins stay on the
+  main server, so you keep one browser identity across many vantage points.
 
 ---
 
-## 🏗 Architecture, one paragraph
+## 🧭 How it works
 
-A **main server** runs **ember server**: it runs the agent CLIs headless, stores transcripts, accounts and browser profiles,
-and brokers agent-to-agent messages. Each **computer** runs **ember node**, a thin execution daemon that performs
-tool actions (files, commands, browser egress) for whichever sessions are using it. The **client**
-— launcher and conversation screens on `dioxus-compose`, with no webview — talks to the main
-server; the **IDE window** is VS Code Web wrapped by `proxy/`. Everything connects peer to peer,
-with `darkpyonix.dev` coordinating hole punching. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+1. The main screen lists your **projects**. Each project shows its **sessions** with a status:
+   running, waiting for approval, finished or failed. Your **computers** are listed below, with
+   whether each is online.
+2. You open a conversation to steer an agent. The agent runs on the main server, and its tools act
+   on the session's current computer. You send messages, answer approvals, interrupt a turn, or
+   move the session to another computer.
+3. To read code, **Open IDE** opens VS Code or JetBrains Gateway on that project and computer.
+4. You close the client, and the sessions keep running on the main server. A client opened later,
+   on the same computer or another one, finds the conversation where you left it.
+
+The client follows JetBrains Gateway: a light front door, with heavier windows opened on demand.
+The reason is that agentic work is mostly watching and steering agents, not typing into an editor.
+
+---
+
+## 🏗 Architecture
+
+Ember is three programs.
+
+| Program | Runs on | Holds |
+| ------- | ------- | ----- |
+| `ember-server` | The main server | Every agent process, transcript, account, A2A queue, schedule and browser profile |
+| `ember-node` | Every other computer | Project files, and the processes that tools start: builds, tests, servers, terminals |
+| `ember-app` | Wherever you sit | A cache of what the main server last sent, so it starts instantly |
+
+The client talks to `ember-server` over HTTP. `ember-server` reaches each computer over HTTP or
+over a peer-to-peer transport built on [iroh](https://github.com/n0-computer/iroh) (QUIC, with hole
+punching and a relay). The darkpyonix.dev hub lets a computer join your GitHub account with a
+one-time code, so you do not type addresses or open ports.
+
+---
+
+## 🚦 Status
+
+Ember has no releases yet. The table matches the code on `develop` as of 2026-10-03, as the
+[guide's overview](https://darkpyonix.dev/darkpyonix-ember/en/index.html) records it.
+
+| Area | Status | Notes |
+| ---- | ------ | ----- |
+| Sessions, transcripts, push, search, export | implemented | Forking a session is not built for any agent yet. |
+| Claude Code and Codex | implemented | Driven through each CLI's own headless protocol. |
+| Antigravity | partial | Gated by Ember's approval hook on agy 1.2.16. Shell writes fail under `--sandbox` ([#65](https://github.com/DarkPyonix/darkpyonix-ember/issues/65)). |
+| OMP and other ACP agents | partial | Tested against a fake ACP agent; a real OMP run is pending ([#53](https://github.com/DarkPyonix/darkpyonix-ember/issues/53)). |
+| Computers and switching | partial | Verified with a second node on the same Mac, not yet between two separate computers ([#6](https://github.com/DarkPyonix/darkpyonix-ember/issues/6)). |
+| Project mount | partial | Written; not yet run on a real Mac mini or Raspberry Pi ([#6](https://github.com/DarkPyonix/darkpyonix-ember/issues/6)). |
+| Peer-to-peer transport | partial | Tested on an in-memory network; the real-network measurement is pending ([#10](https://github.com/DarkPyonix/darkpyonix-ember/issues/10)). |
+| darkpyonix.dev hub | partial | Tested against a fake hub. Its address is still being decided ([#62](https://github.com/DarkPyonix/darkpyonix-ember/issues/62)). |
+| Native client | partial | Runs against `ember-server` over HTTP. Layout is unchecked on a real display, and phone clients are not built ([#9](https://github.com/DarkPyonix/darkpyonix-ember/issues/9)). |
+| Open IDE | partial | VS Code and JetBrains Gateway open from a conversation. Ember's own editor is planned ([#32](https://github.com/DarkPyonix/darkpyonix-ember/issues/32)). |
+| Persistent terminals | partial | [#26](https://github.com/DarkPyonix/darkpyonix-ember/issues/26) |
+| Remote browser | partial | [#12](https://github.com/DarkPyonix/darkpyonix-ember/issues/12) |
+| Releases and installers | planned | Every program is built with cargo for now ([#72](https://github.com/DarkPyonix/darkpyonix-ember/issues/72)). |
+
+---
+
+## 🚀 Build and run
+
+Each crate under `ember/` is its own cargo project with its own `Cargo.lock`, so you build inside
+the crate's folder. Work lands on `develop`.
+
+```bash
+git clone https://github.com/DarkPyonix/darkpyonix-ember
+cd darkpyonix-ember
+git checkout develop
+
+# main server
+cd ember/server
+cargo build --release --locked
+./target/release/ember-server
+
+# client, in another terminal
+cd ember/app
+EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run --release --locked
+```
+
+The HTTP listener has no login, so keep it on loopback (the default) or a network you trust.
+[Install](https://darkpyonix.dev/darkpyonix-ember/en/install.html) covers `ember-node`, the
+settings and what each program stores.
+
+---
+
+## ⚖️ Non-negotiables
+
+| ID | Rule | Why |
+| -- | ---- | --- |
+| **E1** | The launcher and conversation screens never contain a webview. | The client is built natively on `dioxus-compose`; the IDE window is the one place a webview may exist. |
+| **E2** | A wrapped agent keeps its native behaviour. Ember adds around it and never patches it. | Your agent settings, models and session IDs keep working as they do natively. |
+| **E3** | Conversations, agent processes and account credentials live on the main server. | A computer is where tools run, so a conversation is never tied to one computer. |
+| **E4** | VS Code is wrapped, never modified, and its Extension Host is never reimplemented. | Extensions then behave exactly as they do in VS Code. |
+| **E5** | Inside the IDE window, a webview is scoped to the smallest region that needs it. | This applies once Ember's own editor lands; until then the IDE window as a whole is the exception. |
+| **E6** | A Compose-native editor core never diverges from VS Code's behaviour. | Where the two disagree, VS Code is correct by definition. |
 
 ---
 
@@ -63,51 +131,19 @@ with `darkpyonix.dev` coordinating hole punching. See [`docs/ARCHITECTURE.md`](d
 
 | Component | What it is |
 | --------- | ---------- |
-| **ember** | The multiplatform client and agent environment described above. Its IDE window uses VS Code's `serve-web`, or — on Android and iOS, without Node — a `serve-web`-compatible Rust backend or direct web-API access. |
-| **vscode-darkpyonix** | VS Code extension rendering DarkPyonix notebooks (`.py`, `.pynb`). Installed by default. |
-| **vscode-darkpyonix-theme** | VS Code theme in the DarkPyonix Ember (phoenix) design language. Installed by default. |
-| **intellij-darkpyonix** | IntelliJ / PyCharm plugin rendering DarkPyonix notebooks. Installed by default. |
-
----
-
-## 🚦 Status
-
-Design stage, with one working piece.
-
-| Layer | State |
-| ----- | ----- |
-| Main server (agent wrapping, sessions, accounts, A2A) | Specified (`docs/SPEC.md` §S, §A, §T, §U), not implemented |
-| ember node (execution daemon) and computer switching | Specified (§X), not implemented |
-| Native client (dioxus-compose) | Specified (§L); depends on `dioxus-compose` |
-| Networking (P2P, `darkpyonix.dev` relay) | Specified (§N); transport not chosen |
-| Remote and agent browser | Specified (§R), not implemented |
-| IDE window wrapping layer | **Working** in [`proxy/`](proxy/README.md) — VS Code Web on tablets and phones |
-| Compose-native editor core | Long-term, not committed (§E) |
-
----
-
-## ⚖️ Non-negotiables
-
-| ID | Constraint |
-| -- | ---------- |
-| **E1** | The launcher and conversation screens never contain a webview. |
-| **E2** | Wrapped agents keep their native behaviour; Ember adds around them, never patches them. |
-| **E3** | Conversations, agent processes and account credentials live on the main server. |
-| **E4** | VS Code is wrapped, never modified; the Extension Host is never reimplemented. |
-| **E5** | Inside the IDE window, a webview is scoped to the smallest region that needs it (long-term). |
-| **E6** | A Compose-native editor core, if built, never diverges from VS Code's behaviour. |
-
-Reasons, sources and the decisions behind them: [`docs/INTENT.md`](docs/INTENT.md).
+| **ember** | This repository: `ember-server`, `ember-node`, the client, and the IDE window. The IDE window wraps VS Code Web through `ember/proxy/`. |
+| **vscode-darkpyonix** | VS Code extension that renders DarkPyonix notebooks. Tested against a fake manager, not yet the real one. Installed by default in Ember's VS Code runtime. |
+| **vscode-darkpyonix-theme** | VS Code theme in the DarkPyonix (phoenix) design language. In progress. |
+| **intellij-darkpyonix** | IntelliJ and PyCharm plugin with the same notebook features. In progress, built and tested in CI. |
 
 ---
 
 ## 🔗 Related repositories
 
-- **[dioxus-compose](https://github.com/DarkPyonix/dioxus-compose)** — the native GUI stack the
-  client is built on. Its non-negotiables apply unchanged to Ember's client.
-- **[darkpyonix-core](https://github.com/DarkPyonix/darkpyonix)** (GitHub: `DarkPyonix/darkpyonix`) — the DarkPyonix kernel, manager and hub, with their API contracts
-  (`docs/PROTOCOL.md`, `docs/api/`, `docs/FORMAT.md`). Ember links to these rather than redefining
-  them.
+- **[dioxus-compose](https://github.com/DarkPyonix/dioxus-compose)**: the native GUI stack the
+  client is built on. Its rules apply unchanged to Ember's client.
+- **[darkpyonix-core](https://github.com/DarkPyonix/darkpyonix)**: the DarkPyonix kernel, manager
+  and hub, with their API contracts. Ember links to these rather than redefining them.
 
 ---
 
@@ -115,18 +151,22 @@ Reasons, sources and the decisions behind them: [`docs/INTENT.md`](docs/INTENT.m
 
 ```
 darkpyonix-ember/
-├─ README.md            this file
-├─ PROJECT.md           scope, method, milestones, open questions
+├─ ember/                the product: one cargo project per crate, plus OSE, the proxy and test vectors
+│  ├─ server/            ember-server: wraps agent CLIs, stores sessions, pushes updates
+│  ├─ node/              ember-node: carries out tool actions on each computer
+│  ├─ app/               ember-app: launcher and conversation UI on dioxus-compose
+│  ├─ client/            client core: connection, sync and state below the UI
+│  ├─ transport/         peer-to-peer connections (iroh backend and an in-memory fake)
+│  ├─ hub/               darkpyonix.dev hub client: device registration and directory
+│  ├─ bridge/            IDE window bridge: webview and native messages
+│  ├─ editor-conn/       Rust client for a Code-OSS server
+│  ├─ editor/            editor core session layer (planned editor, #32)
+│  ├─ proxy/             the VS Code Web wrapping layer (Python, FastAPI)
+│  ├─ ose/               OSE: DarkPyonix's build of Code-OSS, the default IDE-window runtime
+│  └─ vectors/           recorded transcript and bridge test vectors
 ├─ docs/
-│  ├─ INTENT.md          motivation, non-negotiables, decisions, open questions
-│  ├─ SPEC.md            FR-* / NFR-* / PR-* with acceptance criteria
-│  ├─ ARCHITECTURE.md    topology: main server, computers, client, IDE window
-│  ├─ IMPLEMENTATION.md  the IDE window's VS Code analysis (what can and cannot be replaced)
-│  ├─ BACKGROUND.md      how the 09-22 VS Code design was reached
-│  └─ design/            design material (INTEGRATION.md, decks)
-├─ server/              ember server (Rust) — main server: agents, sessions, push
-├─ proxy/               the IDE window wrapping layer (Python, FastAPI) — working
-├─ extensions/          editor extensions: vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
+│  └─ guide/             the user guide, served at darkpyonix.dev/darkpyonix-ember
+├─ extensions/           vscode-darkpyonix, vscode-darkpyonix-theme, intellij-darkpyonix
 └─ LICENSE
 ```
 
@@ -134,4 +174,4 @@ darkpyonix-ember/
 
 ## 📄 License
 
-Apache License 2.0.
+[Apache License 2.0](https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/LICENSE).

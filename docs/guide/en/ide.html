@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening an IDE · Ember guide</title>
+<meta name="description" content="The three Open IDE choices (Ember's own editor, VS Code Web, JetBrains Gateway), how each one finds its computer, and what works today.">
+<link rel="alternate" hreflang="en" href="ide.html">
+<link rel="alternate" hreflang="ko" href="../ko/ide.html">
+<link rel="alternate" hreflang="x-default" href="ide.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="ide.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/ide.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html" aria-current="page">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#choices">Three choices</a></li>
+        <li><a href="#button">What the button does</a></li>
+        <li><a href="#computer">Which computer opens</a></li>
+        <li><a href="#vscode">VS Code Web</a></li>
+        <li><a href="#gateway">JetBrains Gateway</a></li>
+        <li><a href="#ember">Ember's own editor</a></li>
+        <li><a href="#detach">Tab detach</a></li>
+        <li><a href="#phones">Phones and tablets</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Opening an IDE</p>
+    <h1>Opening an IDE</h1>
+    <p class="lede">
+      A conversation is where you work with an agent. When you want to read or edit the code
+      yourself, the <strong>Open IDE</strong> button at the top right of the conversation opens
+      the session's project in an IDE. There are three choices, and they are three different
+      programs, not three skins of one.
+    </p>
+
+    <div class="note">
+      <span class="label">Where this stands</span>
+      <p>
+        VS Code Web and JetBrains Gateway open today, from computers you describe in the server's
+        configuration. Ember's own editor is planned (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>):
+        choosing it shows a placeholder. The IDE does not yet follow the session's current
+        computer by itself, see <a href="#computer">Which computer opens</a>.
+      </p>
+    </div>
+
+    <h2 id="choices">Three choices</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Choice</th><th scope="col">What opens</th><th scope="col">Status</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Ember IDE</strong></td><td>Ember's own editor, drawn natively by dioxus-compose. No webview and no JavaScript engine.</td><td><span class="pill planned">Planned</span> <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a></td></tr>
+          <tr><td><strong>VS Code</strong></td><td>VS Code Web running on the computer, wrapped by Ember's proxy, opened in your default browser.</td><td><span class="pill partial">Partial</span></td></tr>
+          <tr><td><strong>JetBrains Gateway</strong></td><td>A <code>jetbrains-gateway://</code> link that starts the Gateway installed on your machine and connects to the computer over SSH.</td><td><span class="pill partial">Partial</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      VS Code and Gateway are marked partial for the same reason: they open, but the computer
+      they open on comes from a configuration list, not from the session. Gateway has also not
+      been run against a real Gateway installation yet; only the link it builds is tested.
+    </p>
+
+    <h2 id="button">What the button does</h2>
+    <p>
+      The client asks the main server how to open each IDE for this session. The server only
+      returns data and never opens a window itself, because the launcher process must never
+      create a webview.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>http: the request behind Open IDE</figcaption>
+<pre><code><span class="k">GET</span> /api/sessions/{id}/ide?computer=studio   <span class="c"># ?computer= is optional</span></code></pre>
+    </figure>
+
+    <p>
+      The answer lists three targets, always in the order <code>ember</code>, <code>vscode</code>,
+      <code>gateway</code>. Each has <code>available</code>, and a <code>reason</code> when it is not
+      available, for example "no ide_url configured for computer". The client shows that reason
+      instead of failing silently.
+    </p>
+    <ul>
+      <li>The client remembers the target you chose last and lists it first next time.</li>
+      <li>It hands a URL to your operating system only if the scheme fits the target:
+          <code>http</code> or <code>https</code> for VS Code, <code>jetbrains-gateway://</code> or
+          <code>jetbrains://</code> for Gateway. So a server answer cannot make the client open a
+          local file or program.</li>
+      <li>The folder that opens is the session's working directory, read as a path on that
+          computer.</li>
+    </ul>
+    <p>
+      REST paths carry no version, so they all begin with <code>/api/</code>.
+    </p>
+
+    <h2 id="computer">Which computer opens <span class="pill partial">Partial</span></h2>
+    <p>
+      Sessions already have a current computer, but the IDE targets do not read it yet. Until
+      they do, the server takes each computer's IDE details from <code>EMBER_IDE_COMPUTERS</code>,
+      and opens the default computer unless the request names another with
+      <code>?computer=</code>. The value is inline JSON or a path to a JSON file.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>json: EMBER_IDE_COMPUTERS</figcaption>
+<pre><code>{ <span class="at">"default_computer"</span>: <span class="s">"mini"</span>,
+  <span class="at">"server_url"</span>: <span class="s">"http://mini.local:8740"</span>,
+  <span class="at">"computers"</span>: {
+    <span class="at">"mini"</span>:   { <span class="at">"local"</span>: <span class="k">true</span>, <span class="at">"ide_url"</span>: <span class="s">"http://127.0.0.1:8890/"</span>, <span class="at">"os"</span>: <span class="s">"macos"</span> },
+    <span class="at">"studio"</span>: { <span class="at">"ide_url"</span>: <span class="s">"http://studio.local:8890/"</span>, <span class="at">"ssh_host"</span>: <span class="s">"studio.local"</span>,
+                <span class="at">"ssh_user"</span>: <span class="s">"me"</span>, <span class="at">"os"</span>: <span class="s">"linux"</span> } } }</code></pre>
+    </figure>
+
+    <dl>
+      <dt><code>ide_url</code></dt>
+      <dd>The wrapped VS Code Web on that computer, the URL its proxy announces (see below).</dd>
+      <dt><code>ssh_host</code>, <code>ssh_user</code>, <code>ssh_port</code></dt>
+      <dd>Where Gateway connects. Without <code>ssh_host</code> the Gateway target is unavailable. The port defaults to 22.</dd>
+      <dt><code>jetbrains_ide_path</code></dt>
+      <dd>An IDE backend already installed on the computer. Without it, Gateway asks which IDE to use.</dd>
+      <dt><code>os</code></dt>
+      <dd><code>macos</code>, <code>linux</code> or <code>windows</code>.</dd>
+    </dl>
+    <p>
+      With <code>EMBER_IDE_COMPUTERS</code> unset there is one computer, <code>local</code>, whose
+      <code>ide_url</code> is <code>EMBER_IDE_URL</code>. <code>server_url</code> defaults to
+      <code>EMBER_PUBLIC_URL</code>, else the host the request came to. Moving these targets onto the registered computers of
+      <a href="computers.html">Computers and the hub</a> is an open item in the server code.
+    </p>
+
+    <h2 id="vscode">VS Code Web <span class="pill partial">Partial</span></h2>
+    <p>
+      The VS Code choice is VS Code Web served on the computer itself and wrapped by Ember's
+      proxy (<code>ember/proxy/</code>). The proxy adds a title bar and a touch layout for narrow
+      windows on top of an unmodified VS Code build; on a wide window you see stock VS Code.
+      There are two runtimes:
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col"></th><th scope="col">OSE (default)</th><th scope="col">VSC</th></tr></thead>
+        <tbody>
+          <tr><td>Build</td><td>Code-OSS 1.139.1 compiled by DarkPyonix from the MIT source</td><td>Your own installation of Microsoft's VS Code (<code>code serve-web</code>)</td></tr>
+          <tr><td>Extensions</td><td>Open VSX</td><td>Microsoft Marketplace</td></tr>
+          <tr><td>Licence</td><td>MIT</td><td>Microsoft's licence, your responsibility</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      OSE is the default because Microsoft's server licence forbids hosting or redistributing
+      it. Ember therefore never downloads or bundles Microsoft's server; VSC only runs the copy
+      you installed yourself. OSE is built by the repository's CI for linux-x64, linux-arm64,
+      darwin-arm64 and darwin-x64. As of 2026-10-03 no OSE release has been published yet, so
+      today you either use <code>--runtime vsc</code> or point <code>DPX_OSE_SERVER</code> at an
+      OSE build you have.
+    </p>
+    <p>
+      On each computer, start the runtime and the proxy with one command from
+      <code>ember/proxy</code>. It needs at least one <code>--root</code> (or <code>DPX_FOLDER_ROOTS</code>): a folder outside every
+      root is refused with 403.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the computer</figcaption>
+<pre><code>cd ember/proxy
+export DPX_USERNAME=<span class="s">&lt;user&gt;</span> DPX_PASSWORD=<span class="s">&lt;password&gt;</span>   <span class="c"># first run only: creates the proxy's login</span>
+uv run --with-requirements requirements.txt python -m dpx.serve --runtime vsc --root ~/work
+<span class="c"># {"event": "ready", "url": "http://127.0.0.1:53817/", ...}</span></code></pre>
+    </figure>
+
+    <p>
+      The <code>url</code> in the ready line is the <code>ide_url</code> for that computer.
+      <code>--runtime vsc --check</code> prints whether <code>code</code> is installed and its
+      version, without starting anything. Settings and extensions live in
+      <code>~/.ember/vscode-web/&lt;runtime&gt;</code>, one folder per runtime, so the two
+      marketplaces never mix.
+    </p>
+
+    <div class="warn">
+      <span class="label">Roots are not a sandbox</span>
+      <p>
+        <code>--root</code> limits which folder a URL may open. The extension host and the
+        terminal still run as the operating-system user who started the proxy, and anyone who
+        can log in to the proxy sees that user's files.
+      </p>
+    </div>
+
+    <h2 id="gateway">JetBrains Gateway <span class="pill partial">Partial</span></h2>
+    <p>
+      For a JetBrains IDE, Ember builds a Gateway link for an SSH connection and hands it to your
+      operating system, which starts JetBrains Gateway on the machine you are using. Gateway
+      then connects to the computer and opens the session's folder.
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>the link Ember builds</figcaption>
+<pre><code>jetbrains-gateway://connect#type=ssh&amp;host=studio.local&amp;port=22&amp;user=me&amp;projectPath=%2Fhome%2Fme%2Fwork
+<span class="c"># with jetbrains_ide_path set, also: &amp;idePath=...&amp;deploy=false</span></code></pre>
+    </figure>
+
+    <p>
+      You need Gateway installed where the client runs, and SSH access to the computer. JetBrains
+      is moving Gateway into the Toolbox App with a <code>jetbrains://</code> scheme and only
+      limited compatibility for these links, which is why the client also accepts
+      <code>jetbrains://</code>.
+    </p>
+
+    <h2 id="ember">Ember's own editor <span class="pill planned">Planned</span></h2>
+    <p>
+      The Ember IDE is the reason the client is built on dioxus-compose. It rebuilds the Code-OSS
+      workbench natively in Rust, draws it with Code-OSS's own CSS, and replaces Monaco with a
+      native code editor widget. There is no webview and no JavaScript engine in that window.
+    </p>
+    <p>
+      Extensions keep running unmodified in the official Node extension host that the OSE server
+      on the computer starts. Ember never reimplements that host; instead it speaks Code-OSS's
+      own connection protocols to it. Those protocols are internal to VS Code, so Ember pins one
+      Code-OSS commit (the one OSE is built from, 1.139.1) and checks the server's version when it
+      connects. The first features are diagnostics, CodeLens and hover, then inline completions.
+    </p>
+    <p>
+      The connection layer (<code>ember-editor-conn</code>) and the session layer
+      (<code>ember-editor</code>) exist as first code. They build and pass their tests in CI; the end-to-end
+      test against a real OSE server is opt-in and not part of CI. Until the
+      editor works end to end, choosing Ember IDE shows a placeholder. Track it in
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>.
+    </p>
+
+    <h2 id="detach">Tab detach <span class="pill partial">Partial</span></h2>
+    <p>
+      In VS Code Web you can drag an editor tab out of its tab strip to open it in a new IDE
+      window on the same workspace, at the same cursor position.
+    </p>
+    <ul>
+      <li>Drop it more than 48&nbsp;px away from the tab strip, or outside the window, somewhere
+          VS Code does not accept the drop. A short drag still reorders tabs; a gesture never does
+          both.</li>
+      <li>Tabs with unsaved changes are not detached, because the new window reads the file from
+          disk. A message asks you to save first.</li>
+      <li>Alt-drag, multi-selected tabs and editors without a file (Settings, untitled) are left
+          to VS Code.</li>
+    </ul>
+    <p>
+      In a plain browser the new window is a browser window opened at the file and cursor; the
+      selection and scroll position do not carry over. If the browser blocks the popup, a toast
+      offers an Open button. A native IDE window that receives the full state (cursor, selection,
+      scroll) through the <code>ember-bridge</code> message is designed, but no native webview
+      window exists yet. Touch screens are not supported, because VS Code's tab drag uses HTML5
+      drag and drop, which phones do not produce. Set <code>DPX_TAB_DETACH=0</code> on the proxy to
+      turn the feature off. Track it in
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/30">#30</a>.
+    </p>
+
+    <h2 id="phones">Phones and tablets <span class="pill planned">Planned</span></h2>
+    <p>
+      The proxy's touch layout works in a phone or tablet browser today. Extension panels
+      (webviews) need a secure context, though: over plain HTTP to a LAN address they are blank.
+      <code>localhost</code> on the computer itself works. Secure connections from other devices
+      are expected to come with Ember's peer-to-peer transport
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/10">#10</a>).
+    </p>
+    <p>
+      Opening a project on Android or iOS with no Node on the device, through the computer's own
+      VS Code server or an offline working copy, is designed but not built.
+    </p>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="computers.html"><span>Previous</span>&larr; Computers and the hub</a>
+      <a class="next" href="terminals.html"><span>Next</span>Persistent terminals &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

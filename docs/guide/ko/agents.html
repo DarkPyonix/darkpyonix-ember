@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>에이전트 · Ember 가이드</title>
+<meta name="description" content="Ember가 Claude Code, Codex, Antigravity, OMP 같은 ACP 에이전트를 돌리는 방법과, 그 주변의 공용 기능: 계정, MCP 서버, 예약, A2A 메시지, 팀.">
+<link rel="alternate" hreflang="en" href="../en/agents.html">
+<link rel="alternate" hreflang="ko" href="agents.html">
+<link rel="alternate" hreflang="x-default" href="../en/agents.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">본문으로 건너뛰기</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>가이드</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">메뉴</button>
+  <nav class="langswitch" aria-label="언어">
+    <a href="../en/agents.html" hreflang="en">EN</a>
+    <a href="agents.html" aria-current="true" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="다크" data-light="라이트" aria-pressed="false">다크</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="가이드">
+      <h2>가이드</h2>
+      <ul>
+        <li><a href="index.html">개요</a></li>
+        <li><a href="install.html">설치</a></li>
+        <li><a href="first-conversation.html">첫 대화</a></li>
+        <li><a href="computers.html">컴퓨터와 허브</a></li>
+        <li><a href="ide.html">IDE 열기</a></li>
+        <li><a href="terminals.html">영구 터미널</a></li>
+        <li><a href="browser.html">원격 브라우저</a></li>
+        <li><a href="agents.html" aria-current="page">에이전트</a></li>
+        <li><a href="troubleshooting.html">문제 해결</a></li>
+      </ul>
+      <h2>이 페이지</h2>
+      <ul>
+        <li><a href="#overview">에이전트 한눈에 보기</a></li>
+        <li><a href="#claude">Claude Code</a></li>
+        <li><a href="#codex">Codex</a></li>
+        <li><a href="#antigravity">Antigravity</a></li>
+        <li><a href="#acp">OMP와 다른 ACP 에이전트</a></li>
+        <li><a href="#accounts">계정과 사용량 라우팅</a></li>
+        <li><a href="#mcp">중앙 MCP 레지스트리</a></li>
+        <li><a href="#schedules">예약 프롬프트</a></li>
+        <li><a href="#a2a">A2A 메시지</a></li>
+        <li><a href="#teams">팀과 @@멘션</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">에이전트</p>
+    <h1>에이전트</h1>
+    <p class="lede">
+      Ember는 각 에이전트의 수정하지 않은 CLI를 메인 서버에서, 그 에이전트 자체의 비대화형
+      프로토콜로 실행합니다. 에이전트 설정, 모델, 세션 ID는 원래대로 동작합니다. Ember는 노트북
+      한 대의 CLI 하나로는 할 수 없는 것을 더합니다. 여러 계정, 공유 MCP 서버, 예약, 그리고 서로
+      메시지를 주고받는 에이전트입니다.
+    </p>
+
+    <h2 id="overview">에이전트 한눈에 보기</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">에이전트</th><th scope="col">Ember가 다루는 방법</th><th scope="col">승인</th><th scope="col">계정</th><th scope="col">상태</th></tr></thead>
+        <tbody>
+          <tr><td>Claude Code</td><td><code>claude --print</code>, 입출력 모두 stream-json, 세션마다 프로세스 하나</td><td>Claude Code의 권한 요청</td><td>지원, <code>CLAUDE_CONFIG_DIR</code></td><td><span class="pill works">구현</span></td></tr>
+          <tr><td>Codex</td><td><code>codex app-server</code>, JSON-RPC</td><td>Codex의 승인 요청</td><td>지원, <code>CODEX_HOME</code></td><td><span class="pill works">구현</span></td></tr>
+          <tr><td>Antigravity</td><td><code>agy -p</code>, stream-json, 턴마다 프로세스 하나</td><td>Ember 자체 훅이 유일한 관문</td><td>아직 없음</td><td><span class="pill partial">부분</span> <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a></td></tr>
+          <tr><td>OMP와 다른 ACP 에이전트</td><td>stdio 위의 Agent Client Protocol</td><td>ACP 권한 요청</td><td>아직 없음</td><td><span class="pill partial">부분</span> <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/53">#53</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      서버는 시작할 때와 요청이 있을 때 설치된 에이전트와 그 버전을 찾습니다
+      (<code>GET /api/agents</code>). 없는 에이전트는 오류가 아니라 미설치로 표시합니다. 각
+      에이전트의 바이너리는 <code>EMBER_CLAUDE_BIN</code>, <code>EMBER_CODEX_BIN</code>,
+      <code>EMBER_AGY_BIN</code>, <code>EMBER_OMP_BIN</code> 으로 지정하고, 지정하지 않으면
+      <code>PATH</code> 에서 이름으로 찾습니다.
+    </p>
+    <p>
+      유휴 세션은 <code>EMBER_IDLE_SECS</code>(기본 300) 뒤에 에이전트 프로세스를 내려놓습니다. 다음
+      메시지가 오면 에이전트 자체의 재개 기능으로 다시 시작하므로, 대화는 하던 곳에서 이어집니다.
+      REST 경로에는 버전이 없어서 모두 <code>/api/</code> 로 시작합니다.
+    </p>
+
+    <h2 id="claude">Claude Code <span class="pill works">구현</span></h2>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸: Ember가 실행하는 명령, 세션마다 오래 사는 프로세스 하나</figcaption>
+<pre><code>claude --print --input-format stream-json --output-format stream-json --verbose \
+       --include-partial-messages --permission-prompt-tool stdio [--model M] [--resume ID]</code></pre>
+    </figure>
+    <ul>
+      <li><strong>승인.</strong> 권한 요청은 하나하나 승인 카드가 됩니다. 이번만 허용, 항상 허용,
+          거부 중에서 고릅니다. "항상 허용"은 그 프로세스가 사는 동안 그 도구에 적용됩니다. 이후
+          같은 도구 요청에는 곧바로 답하고, 도구 호출은 대화에 그대로 보입니다.</li>
+      <li><strong>중단과 재개.</strong> 중단하면 턴이 깔끔하게 끝납니다. 내려놓았거나 재시작한
+          세션은 <code>--resume</code> 으로 돌아옵니다.</li>
+      <li><strong>계정.</strong> 계정마다 자기 <code>CLAUDE_CONFIG_DIR</code> 을 씁니다.
+          <a href="#accounts">계정</a>을 보십시오.</li>
+      <li><strong>다른 컴퓨터.</strong> 셸 명령은 <code>ember-exec</code> 심을 거쳐 세션의 컴퓨터에서
+          돕니다. 파일 도구는 같은 경로에 마운트된 컴퓨터의 프로젝트를 봅니다
+          (<code>EMBER_MOUNT</code>: <code>auto</code>, <code>nfs</code>, <code>fuse</code>,
+          <code>off</code>. 서버를 <code>mount-nfs</code> 나 <code>mount-fuse</code> 기능으로 빌드해야
+          합니다).</li>
+    </ul>
+    <p>
+      어댑터는 Claude Code 2.1.288과 녹화한 실제 세션으로 확인했습니다.
+    </p>
+
+    <h2 id="codex">Codex <span class="pill works">구현</span></h2>
+    <p>
+      Ember는 <code>codex app-server</code> 를 실행하고 stdio 위의 JSON-RPC로 대화합니다. 스레드
+      ID가 곧 세션 ID라서 Codex 자체의 재개가 동작합니다.
+    </p>
+    <ul>
+      <li><strong>턴 도중의 메시지.</strong> Codex가 일하는 중에 보낸 메시지는 Codex 자체
+          클라이언트처럼 <code>turn/steer</code> 로 실행 중인 턴에 더합니다.</li>
+      <li><strong>승인.</strong> 명령, 파일 변경, 권한 요청이 승인 카드가 됩니다.</li>
+      <li><strong>설정.</strong> Codex 자체의 승인 정책, 샌드박스, 모델, <code>config.toml</code> 은
+          원래대로 적용됩니다.</li>
+      <li><strong>다른 컴퓨터.</strong> Ember는 Codex의 실험 기능인 <code>environment/add</code> 로
+          컴퓨터를 등록해, Codex가 거기서 도구를 돌리게 합니다. 실제 턴의 셸과 패치가 원격에서
+          실행되는지는 아직 확인하지 않았습니다.</li>
+    </ul>
+    <p>
+      프로토콜은 codex-cli 0.155.1에서 읽었고, 녹화한 실제 세션과 대조했습니다.
+    </p>
+
+    <h3 id="chatgpt">ChatGPT로 로그인 <span class="pill partial">부분</span></h3>
+    <p>
+      <strong>직접 호스팅하는</strong> ember server는 ChatGPT 계정으로 로그인할 수 있습니다. 그러면
+      Codex 토큰 사용량에 더해 ChatGPT Plus나 Pro 요금제도 쓸 수 있습니다. OpenAI는 이것을 오픈
+      소스이면서 로컬에서 호스팅하는 앱에만 허용합니다. 그래서 <code>EMBER_HOSTED=1</code> 이면
+      꺼지고, darkpyonix.dev를 통해서는 절대 제공하지 않습니다.
+    </p>
+    <ol>
+      <li><code>POST /api/chatgpt/signin</code> 이 인증 URL을 돌려줍니다. 브라우저에서 엽니다.</li>
+      <li>OpenAI는 서버의 <code>http://127.0.0.1:&lt;port&gt;/auth/callback</code> 으로 돌려보냅니다
+          (<code>EMBER_CHATGPT_REDIRECT_PORT</code>, 기본값은 서버 포트).</li>
+      <li>브라우저가 다른 기기에서 돌면 그 주소는 서버에 닿지 않습니다. 마지막 URL을
+          <code>POST /api/chatgpt/signin/complete</code> 에 붙여 넣습니다.</li>
+    </ol>
+    <p>
+      토큰은 암호화해 저장하고 API가 돌려주지 않습니다. 주간 한도는 사용자가 ChatGPT 설정에서
+      정하며, 그것을 알려 주는 API는 없습니다. 로그인과 토큰 처리는 구현되어 있고, 세션에서
+      요금제를 쓰는 일과 한도 표시는 아직 하지 않았습니다
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/16">#16</a>).
+    </p>
+
+    <h2 id="antigravity">Antigravity <span class="pill partial">부분</span></h2>
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸: Ember가 실행하는 명령, 턴마다 프로세스 하나</figcaption>
+<pre><code>agy -p &lt;message&gt; --output-format stream-json --add-dir &lt;session folder&gt; --sandbox \
+    --dangerously-skip-permissions [--conversation=&lt;id&gt;] [--model &lt;M&gt;]</code></pre>
+    </figure>
+    <p>
+      Antigravity의 print 모드는 권한을 물을 수 없고, 권한이 필요한 도구를 조용히 거절합니다. 그래서
+      Ember는 agy 자체의 확인 없이 실행하고 <strong>Ember 자체의 <code>PreToolUse</code> 훅을 유일한
+      관문</strong>으로 삼습니다. 훅은 세션마다 <code>&lt;data dir&gt;/agy/</code> 아래의 전용 폴더에
+      있습니다. <code>~/.gemini</code> 나 프로젝트에는 아무것도 쓰지 않으므로, 사용자 자신의 agy
+      세션은 영향을 받지 않습니다.
+    </p>
+    <ul>
+      <li>모든 도구 호출이 훅을 거칩니다. 워크스페이스 안의 읽기 전용 도구는 통과하고, 나머지는
+          승인 카드가 됩니다.</li>
+      <li>훅은 <code>allow</code> 나 <code>deny</code> 만 답합니다. 어떤 오류든(서버에 닿지 않음,
+          모르는 토큰, 이상한 응답) <code>deny</code> 가 됩니다.</li>
+      <li>답하지 않은 카드는 agy 자체의 훅 제한 시간보다 먼저, 58분 뒤에 거부되고 "Approval for
+          <em>tool</em> timed out; retry." 알림이 뜹니다.</li>
+      <li>턴을 시작할 때마다 Ember는 agy가 훅을 읽어 들였는지 확인합니다. 아니면 턴을
+          거절합니다.</li>
+      <li>실행마다 새 토큰을 쓰고, 끝나면 폐기합니다. 턴을 끝내거나 중단하면 대기 중인 카드를 모두
+          거부합니다.</li>
+    </ul>
+    <p>
+      <strong>버전 고정.</strong> 이 규칙은 agy <strong>1.2.16</strong> 에서 테스트했고, 이 버전에
+      고정합니다. 다른 버전은 알림과 함께 읽기 전용으로 돕니다. 워크스페이스 안의 읽기 전용 도구만
+      허용하고, 나머지는 묻지 않고 거부합니다. 고정 버전은 새 버전에서 테스트를 통과한 뒤에만
+      옮깁니다.
+    </p>
+    <p>
+      <strong>샌드박스.</strong> <code>--sandbox</code> 는 켜져 있습니다(<code>EMBER_AGY_SANDBOX=0</code>
+      으로 끔). 1.2.16에서 샌드박스가 켜져 있으면 셸 명령은 프로젝트 안에서도 쓰기를 못 하고, 파일
+      편집 도구는 씁니다. 원인은
+      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a> 에서 조사하고
+      있습니다.
+    </p>
+    <p>
+      아직 지원하지 않는 것: 계정(agy는 로그인을 <code>~/.gemini</code> 에 두고, 옮길 변수가
+      없습니다), 다른 컴퓨터에서의 세션, 실행 중인 턴에 메시지 더하기.
+    </p>
+
+    <h2 id="acp">OMP와 다른 ACP 에이전트 <span class="pill partial">부분</span></h2>
+    <p>
+      Agent Client Protocol(ACP, 버전 1)을 쓰는 에이전트는 범용 어댑터 하나로 돕니다. 컴파일해
+      넣는 것이 아니라 설정으로 추가하고, <code>EMBER_ACP_AGENTS</code>(JSON)나
+      <code>EMBER_ACP_AGENTS_FILE</code>(같은 JSON을 담은 파일)을 씁니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>json: EMBER_ACP_AGENTS</figcaption>
+<pre><code>[<span class="s">"omp"</span>, { <span class="at">"name"</span>: <span class="s">"gemini"</span>, <span class="at">"command"</span>: <span class="s">"gemini"</span>, <span class="at">"args"</span>: [<span class="s">"--experimental-acp"</span>] }]</code></pre>
+    </figure>
+
+    <p>
+      문자열은 프리셋입니다. 프리셋 <code>omp</code> 는 <code>omp acp</code> 를 실행합니다. 객체에는
+      <code>name</code> 과 <code>command</code> 가 필요하고, <code>args</code>,
+      <code>model_args</code>, <code>instructions_args</code>, <code>version_args</code>,
+      <code>env</code> 를 더할 수 있습니다. 각 에이전트는 설정한 이름으로 에이전트 종류에
+      나타납니다.
+    </p>
+    <ul>
+      <li>권한 요청은 승인 카드가 됩니다(이번만 허용, 항상 허용, 거부).</li>
+      <li>에이전트가 ACP로 보내는 파일 읽기, 쓰기와 터미널 명령은 세션의 컴퓨터에서 그 ember
+          node를 거쳐 돕니다.</li>
+      <li>ACP에는 턴 도중에 메시지를 더하는 기능이 없어서, 턴 도중에 보낸 메시지는 다음 턴으로
+          미룹니다.</li>
+      <li>계정 분리는 아직 없습니다. 서버에서 에이전트 자체 CLI로 로그인합니다.</li>
+    </ul>
+    <p>
+      어댑터는 가짜 ACP 에이전트로 테스트합니다. 테스트 서버에 OMP가 설치되어 있지 않아서 실제
+      OMP로는 아직 돌려 보지 않았습니다
+      (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/53">#53</a>).
+    </p>
+
+    <h2 id="accounts">계정과 사용량 라우팅 <span class="pill works">구현</span></h2>
+    <p>
+      메인 서버는 Claude Code와 Codex에 대해 에이전트마다 여러 계정을 둘 수 있습니다. 계정은
+      <code>&lt;data dir&gt;/accounts/&lt;id&gt;</code> 디렉터리이고, CLI 자체의 변수
+      <code>CLAUDE_CONFIG_DIR</code> 이나 <code>CODEX_HOME</code> 으로 그곳을 가리킵니다. 그러면 어느
+      CLI도 고치지 않고 인증 정보, 설정, 원래 세션 파일이 서로 분리됩니다.
+    </p>
+    <ol>
+      <li>계정을 만듭니다: <code>POST /api/accounts</code> 에
+          <code>{"agent": "claude-code", "label": "work"}</code>.</li>
+      <li>응답에 정확한 로그인 명령이 들어 있습니다. 예:
+          <code>CLAUDE_CONFIG_DIR=&lt;dir&gt; claude auth login</code>. ember가 실행되는 사용자로
+          서버에서 실행합니다. Ember는 로그인을 자동화하지 않습니다. 화면 없는 서버의 Codex라면
+          <code>--device-auth</code> 를 붙입니다.</li>
+      <li><code>POST /api/accounts/{id}/check</code> 는 에이전트의 읽기 전용 상태 명령을
+          실행합니다.</li>
+    </ol>
+    <p>
+      새 세션은 고른 계정을 씁니다. 고르지 않으면 라우터가 사용량 제한에 걸리지도, 로그아웃되지도
+      않은 계정 가운데 오늘(UTC) 토큰을 가장 적게 쓴 계정을 고르고, 같으면 기본 계정, 그다음
+      오래된 계정을 고릅니다. 고른 계정과 그 이유는 세션에 저장되고 조용히 바뀌지 않습니다. 사용량
+      제한에 걸린 계정은 초기화 시점까지 건너뛰고, 그 계정에서 턴이 끝까지 완료되면 표시가
+      풀립니다. <code>GET /api/accounts/route?agent=…</code> 는 지금 라우터가 무엇을 고를지,
+      <code>GET /api/usage?days=7</code> 은 계정별 일별 토큰을 보여 줍니다.
+    </p>
+    <div class="warn">
+      <span class="label">서버 환경 변수의 키</span>
+      <p>
+        서버 자신의 환경에 있는 <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>,
+        <code>CODEX_API_KEY</code> 는 모든 에이전트 프로세스에 전달되어 계정의 로그인을 덮어씁니다.
+        서버는 시작할 때 이것을 경고합니다.
+      </p>
+    </div>
+    <p>
+      API 키 제공자(OpenAI 호환이나 공급사 API)는 <code>POST /api/providers</code> 로 추가합니다.
+      키는 암호화해 저장하고 돌려주지 않습니다.
+    </p>
+
+    <h2 id="mcp">중앙 MCP 레지스트리 <span class="pill works">구현</span></h2>
+    <p>
+      MCP 서버를 한 번 추가하면, MCP를 지원하는 모든 에이전트 세션이 프로세스를 시작할 때 그것을
+      받습니다. Claude Code는 <code>--mcp-config</code> 로, Codex는
+      <code>-c mcp_servers.&lt;name&gt;</code> 덮어쓰기로, Antigravity는 세션 폴더로, ACP 에이전트는
+      <code>session/new</code> 로 받습니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>http</figcaption>
+<pre><code><span class="k">POST</span> /api/mcp
+{ <span class="at">"name"</span>: <span class="s">"github"</span>, <span class="at">"command"</span>: <span class="s">"github-mcp-server"</span>, <span class="at">"args"</span>: [<span class="s">"stdio"</span>],
+  <span class="at">"env"</span>: { <span class="at">"GITHUB_TOKEN"</span>: <span class="s">"..."</span> }, <span class="at">"scope"</span>: <span class="s">"all"</span> }   <span class="c"># 또는 "project:&lt;name&gt;"</span></code></pre>
+    </figure>
+
+    <ul>
+      <li>환경 변수 값은 비밀로 다룹니다. 암호화해 저장하고, 돌려주지 않으며(이름만 돌려줌),
+          명령줄에 넣지 않고, 로그에 남기지 않습니다.</li>
+      <li><code>"enabled": false</code> 로 <code>PATCH</code> 하면 지우지 않고 끕니다.</li>
+      <li>변경은 각 에이전트 프로세스가 다음에 시작할 때부터 적용됩니다.</li>
+    </ul>
+
+    <h2 id="schedules">예약 프롬프트 <span class="pill works">구현</span></h2>
+    <p>
+      예약은 시간대가 있는 cron 식, 고정 간격, 또는 한 번만 프롬프트를 보냅니다. 실행할 때마다
+      기존 세션을 이어 가거나 프로젝트에 새 세션을 시작합니다. 프롬프트는 사용자 메시지처럼
+      <code>[ember schedule]</code> 머리줄을 달고 들어갑니다.
+    </p>
+    <ul>
+      <li>서버가 꺼져 있던 동안 놓친 시점은 조용히 실행하지 않습니다. 놓침으로 기록하고 알림을
+          남깁니다. <code>catch_up</code> 을 켜면 놓친 것 중 마지막 하나만 실행합니다.</li>
+      <li>cron 시각은 일광 절약 시간 변경을 거쳐도 시간대를 따릅니다. 두 번 오는 시각에는 한 번만
+          실행합니다.</li>
+      <li>예약은 <code>/api/schedules</code> 로 관리합니다(만들기, 일시 정지, 재개, 지금 실행,
+          실행 기록). 에이전트도 대화 중에 만들 수 있습니다.</li>
+    </ul>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸, 에이전트 세션 안에서</figcaption>
+<pre><code>ember-a2a schedule add --cron <span class="s">'0 9 * * 1-5'</span> --tz Asia/Seoul <span class="s">"어제 커밋을 요약해 줘"</span>
+ember-a2a schedule add --every 2h --new --title <span class="s">"CI 감시"</span> <span class="s">"CI 상태를 확인해 줘"</span>
+ember-a2a schedule list
+ember-a2a schedule rm &lt;schedule-id&gt;</code></pre>
+    </figure>
+
+    <h2 id="a2a">A2A 메시지 <span class="pill works">구현</span></h2>
+    <p>
+      세션끼리는 공급사, 컴퓨터, 계정이 달라도 메시지를 주고받을 수 있습니다. 모든 에이전트
+      프로세스는 <code>EMBER_URL</code>, <code>EMBER_SESSION_ID</code>, 세션마다 다른
+      <code>EMBER_RUNTIME_TOKEN</code> 과 <code>ember-a2a</code> 명령 사용법을 받습니다. 에이전트를
+      고치지 않습니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸, 에이전트 세션 안에서</figcaption>
+<pre><code>ember-a2a list                               <span class="c"># 메시지를 보낼 수 있는 세션</span>
+ember-a2a send &lt;session-id&gt; <span class="s">"Mac에서 iOS 빌드를 돌려 줄 수 있어?"</span>
+ember-a2a send &lt;session-id&gt; --reply-to &lt;message-id&gt; <span class="s">"끝났어, 통과해."</span>
+ember-a2a show &lt;message-id&gt;</code></pre>
+    </figure>
+
+    <ul>
+      <li>메시지는 사용자 메시지처럼 대상에 들어가고, 보낸 쪽과 답장 참조를 적은
+          <code>[ember a2a]</code> 머리줄이 붙습니다.</li>
+      <li>바쁜 대상은 다음 턴 경계에서 받습니다. 잠든 대상은 깨웁니다. 전달하지 못한 메시지는 서버
+          재시작 뒤에도 남습니다.</li>
+      <li>루프 방지: 10분 안에 세션당 최대 20개, 세션 쌍당 최대 10개입니다. 서로 끝없이 답하라고
+          지시받은 두 에이전트는 알림과 함께 멈춥니다.</li>
+      <li>A2A는 서버 전체(<code>EMBER_A2A=0</code> 또는 <code>PUT /api/a2a/settings</code>)나 세션
+          단위(<code>/api/sessions/{id}/a2a</code>)로 끌 수 있습니다. 꺼진 세션과 주고받는 메시지는
+          이유와 함께 거절합니다.</li>
+    </ul>
+
+    <h2 id="teams">팀과 @@멘션 <span class="pill works">구현</span></h2>
+    <p>
+      세션은 팀을 이끌 수 있습니다. 처음 <code>team spawn</code> 을 부른 세션이 리더가 되고, 팀원은
+      같은 프로젝트의 새 세션으로 리더가 고른 에이전트, 계정, 컴퓨터를 씁니다. 팀원은 자기 승인을
+      자기 세션에서 답합니다.
+    </p>
+
+    <figure class="codeblock" data-copy="복사" data-copied="복사됨">
+      <figcaption>셸, 리더 세션 안에서</figcaption>
+<pre><code>ember-a2a team spawn reviewer --agent codex <span class="s">"이 브랜치의 변경을 리뷰해 줘"</span>
+ember-a2a task add <span class="s">"불안정한 로그인 테스트 고치기"</span> --assign reviewer
+ember-a2a mail send --all <span class="s">"18:00에 동결합니다"</span>
+ember-a2a team list
+ember-a2a team end reviewer</code></pre>
+    </figure>
+
+    <ul>
+      <li>활성 팀원은 최대 8명입니다. 한 세션은 한 팀에만 속하고, 팀 안에 팀을 두지 않습니다.</li>
+      <li>팀원을 만들고 끝내는 것은 리더만 합니다. 작업은 누구나 추가하고, 팀원은 자기 작업이나
+          배정되지 않은 작업만 고칩니다.</li>
+      <li>활성 팀원은 자기 팀에만 메시지를 보낼 수 있고, 자기 팀만 그 팀원에게 보낼 수 있습니다.</li>
+      <li>대화 화면에는 팀원, 실시간 상태, 작업 목록을 보여 주는 팀 패널이 있습니다.</li>
+    </ul>
+    <p>
+      입력창에서 <code>@@</code> 로 다른 세션을 멘션합니다. <code>@@&lt;id&gt;</code>,
+      <code>@@&lt;title&gt;</code>, <code>@@"&lt;title with spaces&gt;"</code> 형식입니다.
+      <code>@@</code> 를 치면 맞는 세션이 보입니다. 메시지 자체는 이 대화에 그대로 남고, 멘션된
+      세션마다 이 세션이 보낸 A2A 메시지로 사본이 갑니다. 그래서 멘션된 쪽은 호출 한 번으로 여기에
+      답할 수 있습니다. 찾지 못한 멘션이 있어도 잃는 것은 없습니다. 아직 확인하지 않은 것: 서로 다른
+      컴퓨터와 계정에서 도는 실제 Claude Code와 Codex 세션으로 이루어진 팀.
+    </p>
+
+    <nav class="pagenav" aria-label="페이지 이동">
+      <a class="prev" href="browser.html"><span>이전</span>&larr; 원격 브라우저</a>
+      <a class="next" href="troubleshooting.html"><span>다음</span>문제 해결 &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>이 가이드는 2026-10-03 기준 저장소 내용과 대조했습니다</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

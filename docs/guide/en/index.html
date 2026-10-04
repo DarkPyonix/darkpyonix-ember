@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ember: one AI, many computers</title>
+<meta name="description" content="Ember runs your coding agents on one main server that keeps every conversation, and does their work on whichever of your computers the task needs.">
+<link rel="alternate" hreflang="en" href="index.html">
+<link rel="alternate" hreflang="ko" href="../ko/index.html">
+<link rel="alternate" hreflang="x-default" href="index.html">
+<link rel="canonical" href="https://darkpyonix.dev/darkpyonix-ember/en/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Ember">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="ko_KR">
+<meta property="og:title" content="Ember: one AI, many computers">
+<meta property="og:description" content="Ember runs your coding agents on one main server that keeps every conversation, and does their work on whichever of your computers the task needs.">
+<meta property="og:url" content="https://darkpyonix.dev/darkpyonix-ember/en/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Ember: one AI, many computers">
+<meta name="twitter:description" content="Ember runs your coding agents on one main server that keeps every conversation, and does their work on whichever of your computers the task needs.">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="index.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/index.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html" aria-current="page">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#conversation-first">Conversation first</a></li>
+        <li><a href="#main-server">One main server</a></li>
+        <li><a href="#computers">Computers and switching</a></li>
+        <li><a href="#a2a">Agents talking to agents</a></li>
+        <li><a href="#network">How the pieces connect</a></li>
+        <li><a href="#status">Where it stands</a></li>
+        <li><a href="#start">Start here</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Overview</p>
+    <h1>One AI, many computers</h1>
+    <p class="lede">
+      Ember is a development environment for coding agents. Claude Code, Codex, Antigravity and
+      OMP run on one main server that keeps every conversation. Their tools act on whichever of
+      your computers the work needs, and a conversation can move to another computer halfway
+      through.
+    </p>
+    <div class="note">
+      <span class="label">An early project</span>
+      <p>
+        Ember has no releases yet, so you build it from source (see <a href="install.html">Install</a>).
+        This guide describes the code on the <code>develop</code> branch as of 2026-10-03. Each
+        feature that is not finished carries a status (<span class="pill works">Implemented</span>
+        <span class="pill partial">Partial</span> <span class="pill planned">Planned</span>) and
+        the issue that tracks it.
+      </p>
+    </div>
+
+    <h2 id="conversation-first">Conversation first</h2>
+    <p>
+      The main screen lists your projects. Each project shows its conversation sessions with a
+      status: running, waiting for approval, finished or failed. Your computers are listed below
+      the projects, with whether each one is online.
+    </p>
+    <p>
+      You open a conversation to steer an agent. You send messages, answer its approval requests,
+      interrupt a turn, or move the session to another computer. An IDE is something a
+      conversation opens when you need to read code, not the centre of the app. The reason is
+      simple: agentic work is mostly watching and steering agents, not typing into an editor.
+    </p>
+
+    <h2 id="main-server">One main server</h2>
+    <p>
+      The main server is a machine you leave running, such as a Mac mini or a Raspberry Pi. It runs
+      <code>ember-server</code>. Every agent CLI runs there, headless and unmodified, as its vendor
+      ships it. Every transcript and every account lives there too.
+    </p>
+    <p>
+      This is why a conversation is no longer tied to the computer that started it. Close the
+      client and the session keeps running on the main server. Open a client later, on the same
+      computer or another one, and the conversation is where you left it.
+    </p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Place</th><th scope="col">Holds</th><th scope="col">Never holds</th></tr></thead>
+        <tbody>
+          <tr><td>Main server (<code>ember-server</code>)</td><td>Every agent process, every transcript and the agents' own session files, accounts and credentials, projects, computers, A2A queues, schedules, browser profiles</td><td>Project source as the system of record</td></tr>
+          <tr><td>Computer (<code>ember-node</code>)</td><td>Project files, and the processes that tools start: builds, tests, servers, terminals</td><td>Agent CLIs, transcripts, agent credentials</td></tr>
+          <tr><td>Client (<code>ember-app</code>)</td><td>A cache of what the main server last sent, so it starts instantly</td><td>Anything authoritative</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="computers">Computers, and moving between them</h2>
+    <p>
+      A computer is any machine that holds project files and runs builds. Each one runs
+      <code>ember-node</code>, a small daemon that carries out tool actions for the sessions using
+      it: file reads and writes, searches, commands, terminals and browser traffic. It runs no agent
+      and stores no transcript. The main server is always available as a computer too; it is
+      called <code>local</code> in the API and "The main server" in the client.
+    </p>
+    <p>
+      A session belongs to a project, and its current computer is an attribute that can change.
+      After a switch, the next tool call runs on the new computer. With your next message the agent
+      is told that the computer changed and that earlier file contents and command output must be
+      read again, because they describe the old machine.
+    </p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>How a tool call travels</figcaption>
+<pre><code>  client (ember-app)
+        |  HTTP: sessions, messages, approvals, push
+        v
+  +---------------- main server ----------------+
+  | ember-server                                 |
+  |   agent CLIs: claude, codex, agy, omp        |
+  |   transcripts, accounts, A2A, schedules      |
+  +--------+-------------------------+-----------+
+           | HTTP or peer-to-peer    |
+           v                         v
+     computer A                computer B
+     ember-node                ember-node
+     files, commands,          files, commands,
+     terminals, egress         terminals, egress</code></pre>
+    </figure>
+    <ol>
+      <li>Your message reaches the session on the main server.</li>
+      <li>The agent CLI decides to read a file or run a command.</li>
+      <li>Ember sends that action to the session's current computer, where <code>ember-node</code> performs it and streams the result back. The agent sees it as if it had run locally.</li>
+      <li>The event is stored and pushed to every client that has the session open.</li>
+    </ol>
+
+    <h2 id="a2a">Agents talking to agents</h2>
+    <p>
+      Sessions can message each other directly, whatever the vendor, computer or account. Every
+      agent gets a small CLI, <code>ember-a2a</code>, with a token for its own session. A delivered
+      message enters the target session the way a user message does, with a header naming the
+      sender and a reference to reply to. Rate limits per session and per pair stop two agents from
+      answering each other forever.
+    </p>
+    <p>
+      You can bring another session into a conversation yourself: type <code>@@</code> and its title
+      or id in the composer. A leader session can also start teammate sessions that share a task
+      list and a mailbox. The <a href="agents.html">Agents</a> page covers both.
+    </p>
+
+    <h2 id="network">How the pieces connect</h2>
+    <p>
+      The client talks to <code>ember-server</code> over HTTP. <code>ember-server</code> reaches
+      each computer either over HTTP or over a peer-to-peer transport built on iroh (QUIC, with
+      hole punching and a relay fallback). The darkpyonix.dev hub lets a computer join your GitHub
+      account with a one-time code, so you do not type addresses or open ports.
+      <a href="computers.html">Computers and the hub</a> shows each way.
+    </p>
+
+    <h2 id="status">Where it stands</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th scope="col">Area</th><th scope="col">State</th><th scope="col">Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Sessions, transcripts, push, search, export</td><td><span class="pill works">Implemented</span></td><td>Forking a session is not built for any agent yet, so the client offers no fork action.</td></tr>
+          <tr><td>Claude Code and Codex</td><td><span class="pill works">Implemented</span></td><td>Driven through each CLI's own headless protocol.</td></tr>
+          <tr><td>Antigravity</td><td><span class="pill partial">Partial</span></td><td>Gated by Ember's approval hook on agy 1.2.16. Shell writes fail under <code>--sandbox</code> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/65">#65</a>). Runs on the main server only.</td></tr>
+          <tr><td>OMP and other ACP agents</td><td><span class="pill partial">Partial</span></td><td>Tested against a fake ACP agent; a run against real OMP is pending (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/53">#53</a>).</td></tr>
+          <tr><td>Computers and switching</td><td><span class="pill partial">Partial</span></td><td>Verified for Codex and Claude Code's Bash tool with a node registered as a second computer on the same Mac. A switch between two physically separate computers is not verified yet (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).</td></tr>
+          <tr><td>Project mount (Claude Code's file tools on another computer)</td><td><span class="pill partial">Partial</span></td><td>Written; not yet run on a real Mac mini or Raspberry Pi (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/6">#6</a>).</td></tr>
+          <tr><td>Peer-to-peer transport</td><td><span class="pill partial">Partial</span></td><td>Wired into server, node and client crate, and tested on an in-memory network. The measurement across real networks is pending (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/10">#10</a>).</td></tr>
+          <tr><td>darkpyonix.dev hub</td><td><span class="pill partial">Partial</span></td><td>Tested against a fake hub, not against the live one. The hub's address moves to its own subdomain, still being decided (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/62">#62</a>).</td></tr>
+          <tr><td>Native client</td><td><span class="pill partial">Partial</span></td><td>Runs against <code>ember-server</code> over HTTP. Its layout has not been checked on a real display yet, and phone clients are not built (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/9">#9</a>).</td></tr>
+          <tr><td>Open IDE</td><td><span class="pill partial">Partial</span></td><td>VS Code and JetBrains Gateway open from a conversation; Ember's own IDE window waits for the editor core (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/32">#32</a>). See <a href="ide.html">Opening an IDE</a>.</td></tr>
+          <tr><td>Persistent terminals</td><td><span class="pill partial">Partial</span></td><td>See <a href="terminals.html">Persistent terminals</a> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/26">#26</a>).</td></tr>
+          <tr><td>Remote browser</td><td><span class="pill partial">Partial</span></td><td>See <a href="browser.html">Remote browser</a> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/12">#12</a>).</td></tr>
+          <tr><td>Releases and installers</td><td><span class="pill planned">Planned</span></td><td>None yet; every program is built with cargo (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>).</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="start">Start here</h2>
+    <div class="cards">
+      <a class="card" href="install.html"><h3>Install</h3><p>Build ember server, ember node and the client from source, and start them.</p></a>
+      <a class="card" href="first-conversation.html"><h3>Your first conversation</h3><p>Create a project and a session, pick an agent and an account, send a message, answer approvals.</p></a>
+      <a class="card" href="computers.html"><h3>Computers and the hub</h3><p>Add a computer by address or through darkpyonix.dev, and move a session onto it.</p></a>
+      <a class="card" href="troubleshooting.html"><h3>Troubleshooting</h3><p>The error messages Ember actually prints, what they mean, and where the logs are.</p></a>
+    </div>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="next" href="install.html"><span>Next</span>Install &rarr;</a>
+    </nav>
+  </main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

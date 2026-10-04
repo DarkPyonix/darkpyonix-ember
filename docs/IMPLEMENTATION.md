@@ -1,4 +1,4 @@
-# IMPLEMENTATION.md — DarkPyonix Ember
+# IMPLEMENTATION.md: DarkPyonix Ember
 
 > **Scope note (2026-10-03).** Since the 10-03 revision of `INTENT.md`, Ember is conversation-first
 > and centred on a main server; VS Code is the optional IDE window. This analysis still holds for
@@ -7,11 +7,16 @@
 > M6 milestone named below is now **M8** in `PROJECT.md`, `FR-M*` is now `FR-E*` in `SPEC.md`, and
 > `INTENT.md` D-numbers cited below refer to the 09-22 version (in git history); their substance is
 > summarised in the current `INTENT.md` D11.
+>
+> **Status (2026-10-04).** M8 has started (#32): the Code-OSS connection layer
+> (`ember/editor-conn`) and the editor session layer (`ember/editor`) exist and their tests run
+> in CI; the overlays of Category 2 are bridged in `ember/editor` but not yet shown in the
+> client, and Categories 3 and 4 are not handled. Category 4 is still unsized (§6).
 
-## How much of VS Code can Ember not reimplement — and what happens if it does anyway
+## How much of VS Code can Ember not reimplement, and what happens if it does anyway
 
 This document is the detailed answer to the question that sits underneath most of Ember's design:
-**"we don't want a standing webview, but we do want the marketplace to keep working — exactly
+**"we don't want a standing webview, but we do want the marketplace to keep working; exactly
 where does that leave us?"** It is organized as a staged analysis, moving from "what is
 unconditionally off the table" to "what is a genuine, gated, long-term option," because the answer
 is different at each layer of VS Code's architecture.
@@ -31,7 +36,7 @@ extension host is a Node.js process and it exposes the VS Code API to extension 
 
 Marketplace extensions are, without exception, Node.js modules written against that exposed API
 (`vscode.window.*`, `vscode.languages.*`, `vscode.workspace.*`, and so on). That API is not a thin
-shim over something simpler underneath — it is a "massive, typed RPC protocol" (readoss.com's
+shim over something simpler underneath: it is a "massive, typed RPC protocol" (readoss.com's
 description of the Extension Host architecture) connecting the Extension Host process to the
 Renderer, marshaled through proxy objects on each side. It is also, notably, not fully public as a
 stable spec: it is documented incrementally and evolves with VS Code releases.
@@ -43,12 +48,12 @@ because there is no substitute that would not itself become a second, forever-di
 implementation of VS Code's most actively-developed internal surface.
 
 One structural nuance worth carrying forward, because it explains why §2 is even askable: VS
-Code's own `ExtensionHostKind` enum recognizes three environments an extension host can run in —
+Code's own `ExtensionHostKind` enum recognizes three environments an extension host can run in:
 `LocalProcess` (a Node.js child process, the desktop default, full Node API access),
 `LocalWebWorker` (browser-only APIs, the only option on plain vscode.dev), and `Remote` (a Node.js
-process on a separate machine, reached over the network — exactly the SSH/container/WSL remote
+process on a separate machine, reached over the network, exactly the SSH/container/WSL remote
 development pattern). Ember's topology (`ARCHITECTURE.md` §1) puts the editor window's Renderer on
-one machine and the project's Extension Host on another — the server — which is architecturally
+one machine and the project's Extension Host on another (the server), which is architecturally
 identical to VS Code's own `Remote` case, communicating over WebSocket. Ember is not inventing a
 new relationship between Renderer and Extension Host; it is reusing one VS Code already ships and
 supports, which is a meaningfully lower-risk position than it would be if Ember's topology had no
@@ -61,7 +66,7 @@ upstream precedent at all.
 `--serve-web` (and `code-server`, which follows the same shape) bundles two responsibilities that
 are conceptually separable even though they currently ship together:
 
-1. **Serving the Workbench's static payload** — the HTML/JS/CSS that becomes the Renderer once
+1. **Serving the Workbench's static payload**: the HTML/JS/CSS that becomes the Renderer once
    loaded in a browser or webview.
 2. **Running and managing the Extension Host**, plus the WebSocket endpoint the Renderer talks to
    it and to the workspace/filesystem through.
@@ -77,8 +82,8 @@ sub-questions that gate any real answer:
   reverse proxy could split, or are they interleaved closely enough (e.g., session/auth state
   shared across both) that splitting them risks subtle breakage?
 - Even if splittable, is the actual *win* worth the complexity? A Rust/Python static-file proxy in
-  front of (1) would reduce *some* load and allow local caching, but the Extension Host process —
-  the heavy, memory-relevant piece — is unaffected either way. This is explicitly **not** a path
+  front of (1) would reduce *some* load and allow local caching, but the Extension Host process
+  (the heavy, memory-relevant piece) is unaffected either way. This is explicitly **not** a path
   to "no Node.js at all"; at best it is "less Node.js doing less work," which is a real but modest
   win.
 
@@ -89,16 +94,16 @@ real and there is a concrete deployment to measure, not as a load-bearing part o
 
 ---
 
-## §3. What breaks, specifically, if Monaco is removed — the extension taxonomy
+## §3. What breaks, specifically, if Monaco is removed: the extension taxonomy
 
 This is the core analysis behind `INTENT.md` D6 and D7, and behind why `SPEC.md` §M is staged the
 way it is. Marketplace extensions interact with the rendered editor surface in three structurally
 different ways, and Monaco's removability is a different question for each.
 
-### Category 1 — Pure Extension Host logic, no editor-surface rendering at all
+### Category 1: Pure Extension Host logic, no editor-surface rendering at all
 
 Linters (in the sense of producing a report, not drawing squiggles), formatters, Git integration
-logic, debug adapter clients — these compute results inside the Extension Host and either apply a
+logic, debug adapter clients: these compute results inside the Extension Host and either apply a
 workspace edit directly or hand a result to the Renderer through an API that describes *what* to
 show, not *how* to draw it.
 
@@ -106,7 +111,7 @@ show, not *how* to draw it.
 correctly implements the relevant slice of the Extension API's reporting contract. This category
 is not actually a design risk for M6; it is listed for completeness.
 
-### Category 2 — Editor-surface overlays: diagnostics, CodeLens, Hover, inline completions
+### Category 2: Editor-surface overlays: diagnostics, CodeLens, Hover, inline completions
 
 This is the category `INTENT.md` D7 identifies as M6's correct starting point, and it is worth
 being precise about *why* it is both tractable and the highest-value target.
@@ -114,14 +119,14 @@ being precise about *why* it is both tractable and the highest-value target.
 An extension using `registerDiagnosticsProvider`, `registerCodeLensProvider`,
 `registerHoverProvider`, or `registerInlineCompletionItemProvider` reports **structured data**:
 line/column ranges, severities, markdown content, ghost-text strings, accept/reject commands. It
-does not ship pixels. The Renderer — currently Monaco — is responsible for taking that structured
+does not ship pixels. The Renderer (currently Monaco) is responsible for taking that structured
 data and drawing it at the correct position in the currently-rendered text, using the Renderer's
 own text-layout/glyph-position calculations to do so.
 
 **Monaco dependency: real, but contained to layout math, not extension cooperation.** A
 Compose-native Renderer that (a) implements the same reporting contract on the Extension-API side
 and (b) does its own correct text-layout-to-screen-position mapping would be a legitimate drop-in
-replacement from the extension author's point of view — no changes required on their end, which is
+replacement from the extension author's point of view, with no changes required on their end, which is
 exactly what `E3` demands. The work is real (rebuilding TextMate-grammar-driven tokenization for
 syntax highlighting, a correct multi-cursor/selection model, IME composition handling reusing
 `dioxus-compose`'s own IME work per `SPEC.md` `FR-M1`, virtual scrolling over large files, and the
@@ -134,23 +139,23 @@ accept/reject" pattern this category covers, and it is the single feature most d
 to Ember being an *agentic* IDE rather than a generic one. `INTENT.md` D7 names this the
 highest-priority item within category 2 for that reason.
 
-### Category 3 — Extensions that ship their own rendered content: webview panels
+### Category 3: Extensions that ship their own rendered content: webview panels
 
 `vscode.window.createWebviewPanel` hands an extension author a full HTML/CSS/JS surface to fill
 however they like. Markdown Preview Enhanced, Jupyter's notebook cell rendering, GitLens' commit
-graph views, REST Client's response viewer — these extensions are not reporting structured data
+graph views, REST Client's response viewer: these extensions are not reporting structured data
 for a Renderer to draw; **they are shipping a self-contained web app inside a panel**, by design,
 because that is what the API is for.
 
-**Monaco dependency: irrelevant — this is not about Monaco at all.** Removing Monaco changes
+**Monaco dependency: irrelevant: this is not about Monaco at all.** Removing Monaco changes
 nothing about category 3 extensions, because their content was never Monaco's to render in the
 first place; it was always the extension's own HTML running in its own webview context. The
 question these extensions actually pose is not "can Ember avoid Monaco" but "can Ember avoid a
 webview *anywhere*," and for this category the honest answer is **no, not without asking every
-such extension's author to rewrite their extension against a new, Ember-specific rendering API** —
+such extension's author to rewrite their extension against a new, Ember-specific rendering API**,
 which `E3` forecloses on its face (see `INTENT.md` D7's rejected alternative).
 
-### Category 4 — Extensions calling into Monaco's own API directly
+### Category 4: Extensions calling into Monaco's own API directly
 
 A smaller set of extensions, typically older or needing low-level editor control, call
 `monaco.editor.*` APIs directly from within a webview context rather than going through the
@@ -163,7 +168,7 @@ protocol.
 **Conclusion:** this category is the sharpest edge of "Monaco removal breaks things," and no
 amount of category-2-style protocol-matching fixes it. It is not currently sized (how many
 marketplace extensions actually fall here is an open empirical question, not yet answered by
-anything in this document) — flagged as a gap, see §6.
+anything in this document); it is flagged as a gap, see §6.
 
 ---
 
@@ -171,10 +176,10 @@ anything in this document) — flagged as a gap, see §6.
 
 | Category | Example extensions | Monaco-removal impact | M6 treatment |
 | -------- | ------------------- | ----------------------- | -------------- |
-| 1 — Extension Host logic only | Most linters, Git integration, debug adapters | None | Not a design target; works regardless |
-| 2 — Structured overlay data | Diagnostics, CodeLens, Hover, inline completions (Copilot-class) | Real but bounded — a correct protocol-compatible Renderer suffices | **First target**, per `INTENT.md` D7 and `SPEC.md` `FR-M2`–`FR-M4` |
-| 3 — Self-shipped webview content | Jupyter, Markdown Preview Enhanced, GitLens graphs | Not actually about Monaco; about webviews generally | **Permanently excepted** under `E4`, contained per-panel — `SPEC.md` `FR-M5` |
-| 4 — Direct `monaco.editor.*` API calls | A smaller, unsized set of low-level extensions | Total — no protocol-level fix exists | **Unresolved**, see §6 open gap |
+| 1: Extension Host logic only | Most linters, Git integration, debug adapters | None | Not a design target; works regardless |
+| 2: Structured overlay data | Diagnostics, CodeLens, Hover, inline completions (Copilot-class) | Real but bounded: a correct protocol-compatible Renderer suffices | **First target**, per `INTENT.md` D7 and `SPEC.md` `FR-M2`–`FR-M4` |
+| 3: Self-shipped webview content | Jupyter, Markdown Preview Enhanced, GitLens graphs | Not actually about Monaco; about webviews generally | **Permanently excepted** under `E4`, contained per-panel (`SPEC.md` `FR-M5`) |
+| 4: Direct `monaco.editor.*` API calls | A smaller, unsized set of low-level extensions | Total: no protocol-level fix exists | **Unresolved**, see §6 open gap |
 
 ---
 
@@ -186,12 +191,12 @@ that framing makes the actual trajectory clearer than the milestone IDs alone do
 | Stage | What's a webview | What isn't |
 | ----- | ------------------ | ------------ |
 | **M1** (launcher only) | Nothing yet built that has one | The entire launcher, always |
-| **M2–M5** (wrapped VS Code Web) | The entire editor window's content area — Workbench, Monaco, everything | The launcher (still, always, per `E1`) |
+| **M2–M5** (wrapped VS Code Web) | The entire editor window's content area: Workbench, Monaco, everything | The launcher (still, always, per `E1`) |
 | **M6, once started, categories 1–2 land** | Category-3 extension panels only | The launcher; the rest of the editor window's steady-state rendering (buffer, diagnostics, CodeLens, Hover, inline completions) |
 | **M6, category-3 handling matures** (`FR-M5`) | A single panel, exactly when and only when a category-3 extension is active and visible | Everything else, all the time |
 
 The end state this plan converges toward, if M6 is pursued to completion, is **not** "zero
-webviews ever" — `INTENT.md` correctly does not claim that as achievable, because category 3 makes
+webviews ever". `INTENT.md` correctly does not claim that as achievable, because category 3 makes
 it structurally impossible without violating `E3`. The end state is **"a webview never exists
 except while a specific extension that authored its own HTML is actively displaying it,"** which
 is the substance behind `E4`'s "smallest region that needs it" language. That is a materially

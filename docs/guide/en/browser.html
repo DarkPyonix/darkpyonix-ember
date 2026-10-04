@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote browser · Ember guide</title>
+<meta name="description" content="A browser whose traffic leaves from a chosen computer while its profile stays on the main server, how agents drive it through MCP, and how it is viewed.">
+<link rel="alternate" hreflang="en" href="browser.html">
+<link rel="alternate" hreflang="ko" href="../ko/browser.html">
+<link rel="alternate" hreflang="x-default" href="browser.html">
+<link rel="stylesheet" href="../assets/style.css">
+<script>(function(){try{var t=localStorage.getItem("dxc-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Ember <small>guide</small></a>
+  <span class="spacer"></span>
+  <button id="navtoggle" class="ghost" type="button" aria-expanded="false" aria-controls="sidebar">Menu</button>
+  <nav class="langswitch" aria-label="Language">
+    <a href="browser.html" aria-current="true" hreflang="en">EN</a>
+    <a href="../ko/browser.html" hreflang="ko">KO</a>
+  </nav>
+  <button id="themetoggle" class="ghost" type="button" data-dark="Dark" data-light="Light" aria-pressed="false">Dark</button>
+</header>
+
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <nav aria-label="Guide">
+      <h2>Guide</h2>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="install.html">Install</a></li>
+        <li><a href="first-conversation.html">Your first conversation</a></li>
+        <li><a href="computers.html">Computers and the hub</a></li>
+        <li><a href="ide.html">Opening an IDE</a></li>
+        <li><a href="terminals.html">Persistent terminals</a></li>
+        <li><a href="browser.html" aria-current="page">Remote browser</a></li>
+        <li><a href="agents.html">Agents</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+      <h2>On this page</h2>
+      <ul>
+        <li><a href="#model">One browser per project</a></li>
+        <li><a href="#egress">Where traffic leaves</a></li>
+        <li><a href="#profile">The profile</a></li>
+        <li><a href="#agents">Agents in the browser</a></li>
+        <li><a href="#viewing">Viewing and taking over</a></li>
+        <li><a href="#cautions">Things to know</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <p class="eyebrow">Remote browser</p>
+    <h1>Remote browser</h1>
+    <p class="lede">
+      Ember can run a browser whose traffic leaves from one of your computers, so pages see that
+      computer's IP address and its local network. The cookies, logins and history stay on the
+      main server, so switching computers keeps the same logged-in browser. Agents can drive the
+      same browser while you watch.
+    </p>
+
+    <div class="note">
+      <span class="label">Where this stands</span>
+      <p>
+        <span class="pill partial">Partial</span> The server side is implemented and tested piece
+        by piece: the browser, its profile, egress through a computer, the view stream and the
+        agent relay. Egress has not yet been run with a real Chrome through a real node, and the
+        Ember client has no browser view yet. Track it in
+        <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/12">#12</a>.
+      </p>
+    </div>
+
+    <h2 id="model">One browser per project</h2>
+    <p>
+      Each project gets one headless Chromium on the main server, with a 1280×800 viewport. It
+      starts the first time something opens or views it.
+    </p>
+    <ul>
+      <li>The browser binary is <code>EMBER_CHROME_BIN</code>. Unset, the server looks for Google
+          Chrome, Chromium or Chrome for Testing, then <code>google-chrome</code> or
+          <code>chromium</code> on <code>PATH</code>, then the newest Chromium in the Playwright
+          cache. With none found, the server starts without the remote browser and says so in
+          its log.</li>
+      <li><code>EMBER_BROWSER_HEADFUL=1</code> shows a real window, for debugging.</li>
+    </ul>
+    <p>
+      REST paths carry no version, so they all begin with <code>/api/</code>.
+    </p>
+
+    <h2 id="egress">Where traffic leaves</h2>
+    <p>
+      Egress is chosen per project, and there are three kinds:
+    </p>
+    <dl>
+      <dt>direct</dt>
+      <dd>The main server's own network.</dd>
+      <dt>proxy</dt>
+      <dd>A proxy URL: <code>socks5://</code>, <code>socks4://</code>, <code>http://</code> or <code>https://</code>, without credentials.</dd>
+      <dt>computer</dt>
+      <dd>A registered computer. Traffic leaves through that computer's ember node. <code>local</code> means direct.</dd>
+    </dl>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>http: send a project's browser traffic out through a computer</figcaption>
+<pre><code><span class="k">PUT</span> /api/browsers/{project}/egress
+{ <span class="at">"computer"</span>: <span class="s">"&lt;computer id&gt;"</span> }
+
+<span class="c"># or a proxy URL; null goes back to direct</span>
+{ <span class="at">"egress"</span>: <span class="s">"socks5://10.0.0.2:1080"</span> }</code></pre>
+    </figure>
+
+    <p>
+      Switching egress restarts Chrome on the <strong>same profile</strong>, after closing it
+      gracefully so cookies are written, so your logins survive the switch. The choice is stored
+      in the server database and applied again after a server restart.
+    </p>
+    <p>
+      For a computer, the path is a chain. Chrome uses a SOCKS5 proxy on the main server's
+      loopback; the main server copies those bytes, one WebSocket per connection, to the node's
+      <code>/egress</code>; the node opens the real connection.
+    </p>
+    <ul>
+      <li>Host names are resolved <strong>on the computer</strong>, so its local DNS names
+          work.</li>
+      <li>Loopback goes through the proxy too, so <code>localhost</code> in the browser is the
+          computer's <code>localhost</code>. A dev server running there is reachable.</li>
+      <li>If the computer cannot be reached, starting the browser fails. It never falls back to
+          direct, because that would quietly show the main server's IP instead.</li>
+      <li>A computer that some project's browser uses cannot be removed (409).</li>
+    </ul>
+    <p>
+      On the computer, ember node allows every destination by default, because its
+      <code>localhost</code> and LAN must be reachable. To narrow it, set
+      <code>EMBER_NODE_EGRESS_DENY</code>, for example <code>private,link-local,loopback</code> or
+      CIDR ranges. <code>EMBER_NODE_EGRESS=off</code> refuses egress entirely.
+    </p>
+
+    <h2 id="profile">The profile</h2>
+    <p>
+      The profile (cookies, storage, logins, history) lives on the main server at
+      <code>&lt;EMBER_DATA_DIR&gt;/browser/&lt;project&gt;/profile</code>. It is the same whichever
+      computer is the egress. To clear one project's browser data:
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>http</figcaption>
+<pre><code><span class="k">DELETE</span> /api/browsers/{project}/data   <span class="c"># a running browser restarts empty, same egress</span>
+<span class="k">DELETE</span> /api/browsers/{project}        <span class="c"># stop the browser, keep its data</span></code></pre>
+    </figure>
+
+    <h2 id="agents">Agents in the browser <span class="pill partial">Partial</span></h2>
+    <p>
+      Agents run on the main server next to the browser, so they reach it through a DevTools
+      relay at <code>/api/browsers/{project}/cdp</code>. Ember gives them an unmodified,
+      off-the-shelf DevTools MCP server pointed at that relay. This is off by default; turn it on
+      on the server:
+    </p>
+
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell, on the main server</figcaption>
+<pre><code>export EMBER_BROWSER_MCP=chrome-devtools   <span class="c"># or playwright; off is the default</span>
+export EMBER_BROWSER_MCP_RUNNER=npx         <span class="c"># optional: npx or bunx, found on PATH otherwise</span></code></pre>
+    </figure>
+
+    <p>
+      With it on, every agent session starts with an MCP server named
+      <code>ember-browser</code> for its project's browser:
+    </p>
+    <ul>
+      <li><code>chrome-devtools</code> runs <code>npx -y chrome-devtools-mcp@latest --wsEndpoint=&lt;relay&gt;</code>.</li>
+      <li><code>playwright</code> runs <code>npx -y @playwright/mcp@latest --cdp-endpoint=&lt;relay&gt;</code>.</li>
+      <li>Claude Code receives it through <code>--mcp-config</code>, Codex through
+          <code>-c mcp_servers.ember-browser.*</code> overrides, Antigravity through the
+          <code>mcp_config.json</code> in its session folder, and ACP agents in
+          <code>session/new</code>. Your own MCP servers stay.</li>
+      <li>Without <code>npx</code> or <code>bunx</code> on the server, the setting is ignored with
+          a warning.</li>
+    </ul>
+    <p>
+      The first run downloads the package, so Ember raises the MCP start-up timeout to 90 seconds.
+      <code>GET /api/browsers/{project}/agent-config</code> returns the same configuration if
+      you want to wire an agent by hand. An egress switch closes the relay connections; the MCP
+      server reconnects on its next tool call. Antigravity's own browser tools have not been
+      tested with Ember.
+    </p>
+
+    <h2 id="viewing">Viewing and taking over</h2>
+    <p>
+      The browser is shown to you as a picture, not as a web page inside the client, because the
+      launcher and conversation screens must never contain a webview. A viewer connects to
+      <code>GET /api/browsers/{project}/view</code>, a WebSocket that carries JPEG frames out
+      and mouse, keyboard and navigation input in. Frames are sent only while someone watches,
+      and all viewers share one stream.
+    </p>
+    <ul>
+      <li>While an agent sends commands, the state shows <code>agent_active</code> (for 3 seconds
+          after its last command), so a viewer can show that the agent is working.</li>
+      <li>You can <strong>take over</strong>, for example to type a password. While you hold it,
+          the agent's commands wait; when you release it, the agent continues where it was.</li>
+      <li>The Ember client has no browser view yet
+          (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/12">#12</a>). Phones can use
+          the same stream, but touch is mapped to mouse input for now and every viewer shares the
+          one 1280×800 viewport.</li>
+    </ul>
+
+    <h2 id="cautions">Things to know</h2>
+    <ul>
+      <li>The browser's raw DevTools port is open without authentication on the main server's
+          loopback. Agents should use the relay.</li>
+      <li>The SOCKS5 listener for a computer is also unauthenticated on loopback, so any local
+          process on the main server can use that computer's egress while the listener runs.</li>
+      <li>Ember's own API has no authentication yet. Keep the server on a trusted network.</li>
+      <li>For a Codex session working on another computer, whether Codex starts the MCP server
+          where the relay is reachable is not verified.</li>
+    </ul>
+
+    <nav class="pagenav" aria-label="Pagination">
+      <a class="prev" href="terminals.html"><span>Previous</span>&larr; Persistent terminals</a>
+      <a class="next" href="agents.html"><span>Next</span>Agents &rarr;</a>
+    </nav>
+</main>
+</div>
+
+<footer class="site">
+  <div class="inner">
+    <span>Ember &middot; Apache License 2.0</span>
+    <span><a class="footer-repo" href="https://github.com/DarkPyonix/darkpyonix-ember">GitHub</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/SPEC.md">SPEC.md</a> &middot; <a href="https://github.com/DarkPyonix/darkpyonix-ember/blob/develop/docs/INTENT.md">INTENT.md</a></span>
+    <span>Guide last reviewed against the repository on 2026-10-03</span>
+  </div>
+</footer>
+
+<script src="../assets/guide.js" defer></script>
+</body>
+</html>

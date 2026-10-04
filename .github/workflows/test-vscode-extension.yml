@@ -1,0 +1,59 @@
+name: VS Code extension
+
+# Type check, unit and integration tests (vitest, against the fake manager) and packaging of the
+# VS Code extensions. The in-VS Code e2e run (npm run test:e2e) needs an installed VS Code and is
+# not run here.
+
+on:
+  push:
+    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/test-vscode-extension.yml"]
+  pull_request:
+    paths: ["extensions/vscode-darkpyonix/**", "extensions/vscode-darkpyonix-theme/**", ".github/workflows/test-vscode-extension.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notebook:
+    name: Package notebook extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/vscode-darkpyonix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/vscode-darkpyonix/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Package
+        run: npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-darkpyonix
+          path: extensions/vscode-darkpyonix/*.vsix
+
+  theme:
+    name: Package theme
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/vscode-darkpyonix-theme
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Package
+        run: npx --yes @vscode/vsce@3 package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-darkpyonix-theme
+          path: extensions/vscode-darkpyonix-theme/*.vsix

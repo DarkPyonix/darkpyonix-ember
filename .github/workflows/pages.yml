@@ -1,0 +1,51 @@
+# Publishes the guide site (docs/guide) to GitHub Pages.
+#
+# The site is hand-written HTML with no build step, so this only uploads the directory.
+# Pages is configured for workflow deployment; the site is served at
+# https://darkpyonix.dev/darkpyonix-ember/ under the custom domain darkpyonix.dev.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/guide/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two deployments race; a later commit wins, but a running deploy finishes.
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy the guide
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the guide exists
+        run: |
+          if [[ ! -f docs/guide/index.html ]]; then
+            echo "error: docs/guide/index.html not found; nothing to publish" >&2
+            exit 1
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/guide
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,5 +1,8 @@
 # darkPyonix VSCode Integration Design
 
+> 상태: **부분 구현.** OSE 런타임은 CI에서 빌드된다 (#24, #39). VSC 런타임 선택 화면(`FR-W4`)은 `ember/proxy/`에 있고,
+> 출시 절차는 #72에서 다룬다.
+
 ## 개요
 
 darkPyonix manager(FastAPI 기반)가 VSCode Web 서버를 라우팅으로 연결하는 구조.
@@ -12,7 +15,7 @@ darkPyonix manager(FastAPI 기반)가 VSCode Web 서버를 라우팅으로 연�
 ## 런타임 구조
 
 ```
-Client (Tauri WebView — 폐기됨, 2026-10-03)
+Client (Tauri WebView, 폐기됨, 2026-10-03)
     ↕
 darkPyonix Manager (FastAPI)
     ↕ routing

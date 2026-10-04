@@ -1,6 +1,9 @@
-# EDITOR-CONNECTION.md — How Ember's editor core talks to a Code-OSS server
+# EDITOR-CONNECTION.md: How Ember's editor core talks to a Code-OSS server
 
-> Status: design + first code (`editor-conn/`, package `ember-editor-conn`), **not compiled yet**.
+> Status: **partial.** `ember/editor-conn/` (package `ember-editor-conn`, #33, #35) builds and its
+> tests run in CI, with the proxy table pinned to OSE's Code-OSS (`editor-conn-pin` check); the live
+> test against a real OSE server landed in #40 and runs by hand. Reconnect, the transport swap and
+> the client integration are open (#32).
 > Milestone: M8 (`PROJECT.md`), SPEC §E (`FR-E1`–`FR-E5`). Written 2026-10-03.
 
 ## 1. Why this exists
@@ -28,16 +31,16 @@ build OSE ourselves, we always know the exact server commit. That fact carries m
 ## 2. Pinned source
 
 All citations are to `microsoft/vscode` at tag **`1.139.1`**, commit
-**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`ose/VERSION`).
+**`04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`**: the release OSE is built from (`ember/ose/VERSION`).
 Paths are relative to `src/vs/`. Line numbers are at that commit.
 
 The pin has one source of truth per side, and they are checked against each other:
 
-- `ose/VERSION` names the tag OSE is built from (`ose/build.sh`).
-- `ember_editor_conn::PINNED_VERSION` / `PINNED_COMMIT` (`editor-conn/src/lib.rs`) name the tag and
+- `ember/ose/VERSION` names the tag OSE is built from (`ember/ose/build.sh`).
+- `ember_editor_conn::PINNED_VERSION` / `PINNED_COMMIT` (`ember/editor-conn/src/lib.rs`) name the tag and
   commit the crate's tables and citations come from. The unit test `pin_matches_ose_version` fails
-  if `PINNED_VERSION` differs from `ose/VERSION`; the CI job `editor-conn-pin`
-  (`.github/workflows/checks.yml`) clones the `ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
+  if `PINNED_VERSION` differs from `ember/ose/VERSION`; the CI job `editor-conn-pin`
+  (`.github/workflows/test.yml`) clones the `ember/ose/VERSION` tag, re-runs `gen_rpc_ids.sh`, and
   fails if `rpc_ids.rs`, `PINNED_VERSION` or `PINNED_COMMIT` differ (§5).
 - At connect time, `handshake::verify_server` compares the server's `GET /version` with
   `PINNED_COMMIT` (§3.4).
@@ -189,7 +192,7 @@ timeouts are retried (L698-728).
 A lost management connection is fatal to the window upstream. A lost extension-host connection
 is not (`reconnectionFailureIsFatal`, L754-787).
 
-### 3.6 IPC channel protocol (`ipc.ts`) — management connection
+### 3.6 IPC channel protocol (`ipc.ts`): management connection
 
 - **Values** (`serialize`/`deserialize`, L268-327) are a one-byte tag followed by the value:
   `0` undefined, `1` string, `2` Buffer, `3` VSBuffer, `4` array, `5` JSON object, `6` int32.
@@ -317,14 +320,14 @@ Every message starts with `type u8` and `req u32be`. The body depends on the typ
 | 2 | RequestJSONArgsWithCancellation | same as 1 |
 | 3 | RequestMixedArgs | `rpcId u8`, `method`, `u8 count`, then per arg: a type byte and its payload |
 | 4 | RequestMixedArgsWithCancellation | same as 3 |
-| 5 | Acknowledged | — |
-| 6 | Cancel | — |
-| 7 | ReplyOKEmpty (`undefined`) | — |
+| 5 | Acknowledged | (none) |
+| 6 | Cancel | (none) |
+| 7 | ReplyOKEmpty (`undefined`) | (none) |
 | 8 | ReplyOKVSBuffer | `u32 len` + bytes |
 | 9 | ReplyOKJSON | longString |
 | 10 | ReplyOKJSONWithBuffers | `u32 count`, longString JSON with `{"$$ref$$": i}` placeholders, then `count` buffers |
 | 11 | ReplyErrError | longString: JSON of `{$isError, name, message, stack}` |
-| 12 | ReplyErrEmpty | — |
+| 12 | ReplyErrEmpty | (none) |
 
 Mixed-mode argument types: `1` = JSON string, `2` = VSBuffer, `3` = object with buffers,
 `4` = `undefined`.
@@ -436,8 +439,8 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
 
 1. **Pin per OSE build.** We build OSE ourselves (`INTENT.md` D10), so each Ember release names
    one Code-OSS commit. `ember-editor-conn` carries the tag and commit its tables came from
-   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `ose/VERSION` by a unit test and by CI (§2).
-2. **Generate, don't hand-write.** `editor-conn/scripts/gen_rpc_ids.sh` regenerates the proxy
+   (`PINNED_VERSION`, `PINNED_COMMIT`), tied to `ember/ose/VERSION` by a unit test and by CI (§2).
+2. **Generate, don't hand-write.** `ember/editor-conn/scripts/gen_rpc_ids.sh` regenerates the proxy
    table from `extHost.protocol.ts`. It fails if `createProxyIdentifier` appears in another file,
    because then module load order would decide the numbering. The next step is to generate the
    subset's DTO types from the TypeScript too. That needs a small `ts-morph` script at OSE build
@@ -450,10 +453,10 @@ back to 1.139.1 (§2); 1.139.1 → 1.141.0 changed neither the proxy table nor t
    - For VSC (the user's Microsoft build) the commit is arbitrary. A table can be generated for each
      public release tag: the tags are public, and the table is only the identifier order. Unknown
      commits fall back.
-4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/checks.yml`
-   shallow-clones `microsoft/vscode` at the `ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
-   if `editor-conn/src/rpc_ids.rs` or `PINNED_VERSION` / `PINNED_COMMIT` differ. So bumping
-   `ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
+4. **CI.** Done for the pinned tag: the `editor-conn-pin` job in `.github/workflows/test.yml`
+   shallow-clones `microsoft/vscode` at the `ember/ose/VERSION` tag, runs `gen_rpc_ids.sh`, and fails
+   if `ember/editor-conn/src/rpc_ids.rs` or `PINNED_VERSION` / `PINNED_COMMIT` differ. So bumping
+   `ember/ose/VERSION` without regenerating the table fails the PR. Still to do: a canary that fetches
    each *new* upstream release tag, regenerates the table, diffs ids and subset signatures, and
    opens an issue on any change. That turns `PROJECT.md` Q2 into a tracked number, not a surprise.
 5. **Fail loud.** Any reply to an unknown method, a `ReplyErr` "Unknown actor", or a decode
@@ -465,32 +468,31 @@ runtime turns "protocol stability" from a research risk into a release-engineeri
 
 ## 6. Plan
 
-1. **Done in this change (not compiled):**
-   - `editor-conn/` crate: framing, the `PersistentProtocol` state machine and driver, upgrade and
+1. **Done (#33):**
+   - `ember/editor-conn/` crate: framing, the `PersistentProtocol` state machine and driver, upgrade and
      handshake, the reconnect loop, the IPC client, the `remoteFilesystem` client, the management
      calls, the RPC codec and peer, the pinned proxy table and its generator script, init data,
      the typed subset with default replies, and the document bridge.
    - Unit tests against hand-built frames, plus a fake-server handshake over `tokio::io::duplex`.
-2. **Compile, test, and run against a live OSE server.** The harness is written (not compiled or
-   run yet): `editor-conn/tests/live_ose.rs`, `#[ignore]` and gated on `EMBER_OSE_SERVER` (the
-   `bin/dpx-ose-server` of an unpacked OSE build; `editor-conn/scripts/fetch-ose-artifact.sh`
+2. **Compile, test, and run against a live OSE server.** Done in #40; the harness: `ember/editor-conn/tests/live_ose.rs`, `#[ignore]` and gated on `EMBER_OSE_SERVER` (the
+   `bin/dpx-ose-server` of an unpacked OSE build; `ember/editor-conn/scripts/fetch-ose-artifact.sh`
    downloads the newest `ose` workflow artifact for the current platform and prints that path).
    It starts the server on a free port with `--without-connection-token` and a temp
-   `--server-data-dir` (with `extensions.verifySignature: false`, as `ose/smoke.sh`), then over
+   `--server-data-dir` (with `extensions.verifySignature: false`, as `ember/ose/smoke.sh`), then over
    plain TCP: `verify_server`; management handshake, IPC, `getEnvironmentData`, the
    `remoteFilesystem` commands and a watch event; `scanExtensions` (the built-in
    `vscode.json-language-features` must be listed); the extension-host bootstrap, both
    `$initialize*` calls, `DocumentBridge::open_in_editor` on a JSON file, an edit that breaks it,
    and `MainThreadDiagnostics.$changeMany` from the JSON language server; then a clean shutdown.
    Each step prints its time. Run:
-   `cargo test --manifest-path editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture`
+   `cargo test --manifest-path ember/editor-conn/Cargo.toml --test live_ose -- --ignored --nocapture`
    (`EMBER_OSE_VERBOSE=1` lists every extension-host call). Still to do: capture real frames
-   into `testdata/editor-conn/` and replay them in unit tests.
+   into `ember/vectors/editor-conn/` and replay them in unit tests.
 3. **Session object.** Add an `EditorSession` that owns both connections, the reconnect policy,
    the `DocumentBridge`, the provider registries (handle → selector), and request routing:
    `provide_hover(uri, pos)` picks the providers whose selectors match and fans out.
    Selector matching needs `languages.score` semantics (language, scheme, glob pattern).
-   **Written (not compiled), with step 4's three bridges:** `editor/` (package `ember-editor`),
+   **Written (#46, CI), with step 4's three bridges:** `ember/editor/` (package `ember-editor`),
    designed in `EDITOR-SESSION.md`. Reconnect is still to do.
 4. **FR-E2 → FR-E3 → FR-E4** in that order, as `IMPLEMENTATION.md` §3 sets out. Each is a
    registry plus a request/response pair plus widget rendering.

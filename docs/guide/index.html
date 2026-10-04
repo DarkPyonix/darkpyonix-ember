@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ember guide</title>
+<link rel="canonical" href="en/">
+<link rel="alternate" hreflang="en" href="en/">
+<link rel="alternate" hreflang="ko" href="ko/">
+<link rel="alternate" hreflang="x-default" href="en/">
+<meta http-equiv="refresh" content="0; url=en/">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  /* English is the default. A reader who has already chosen Korean lands there. */
+  (function () {
+    try {
+      if (localStorage.getItem("dxc-lang") === "ko") { location.replace("ko/"); return; }
+    } catch (e) { /* ignore */ }
+    location.replace("en/");
+  })();
+</script>
+</head>
+<body>
+<main class="shell" style="display:block">
+  <h1>Ember guide</h1>
+  <p class="lede">Redirecting to the guide.</p>
+  <p><a href="en/">English</a> &middot; <a href="ko/">한국어</a></p>
+</main>
+</body>
+</html>

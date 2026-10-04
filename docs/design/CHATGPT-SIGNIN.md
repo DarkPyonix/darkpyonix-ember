@@ -1,6 +1,6 @@
 # Sign in with ChatGPT on a self-hosted ember server (FR-U4)
 
-Status: implemented in `server/src/chatgpt/` (issue #16). Not yet compiled or run. OpenAI's pages
+Status: **implemented**, `ember/server/src/chatgpt/` (#38), tests run in CI. Not yet run against OpenAI (#16). OpenAI's pages
 were read on 2026-10-03; the feature is in preview, so recheck them before release.
 
 ## What OpenAI documents
@@ -27,15 +27,15 @@ All pages are under `developers.openai.com/siwc/`.
 
 ## What Ember does
 
-- **Self-hosted only.** When `EMBER_HOSTED=1` is set, every `/api/v1/chatgpt/*` route and
+- **Self-hosted only.** When `EMBER_HOSTED=1` is set, every `/api/chatgpt/*` route and
   `/auth/callback` answer 403, and `ChatGpt` refuses every operation.
-- **Sign-in.** `POST /api/v1/chatgpt/signin` returns the authorization URL. The PKCE verifier,
+- **Sign-in.** `POST /api/chatgpt/signin` returns the authorization URL. The PKCE verifier,
   `state` and `nonce` stay in server memory for 10 minutes. The callback route is served by
   ember server itself at `http://127.0.0.1:<listen port>/auth/callback`, and
   `EMBER_CHATGPT_REDIRECT_PORT` can change the port.
 - **Browser on another machine.** If the browser does not run on the server's machine, the final
   127.0.0.1 page fails to load. The user copies its URL into
-  `POST /api/v1/chatgpt/signin/complete`. Ember does not use OpenAI's local-sign-in-then-SSH
+  `POST /api/chatgpt/signin/complete`. Ember does not use OpenAI's local-sign-in-then-SSH
   approach because Ember owns the token store.
 - **Callback checks.** The `state` must be known; an unknown state consumes nothing. An `error`
   parameter is reported to the user. A first sign-in must come back with an issued `client_id`,
@@ -55,8 +55,8 @@ All pages are under `developers.openai.com/siwc/`.
   events and records `response.completed` usage. On `usage_limit_exceeded` it marks the account
   limited, until `Retry-After` or for 1 h, and stops sending requests until then. Nothing in
   agents or sessions calls it yet.
-- **Usage.** Per-day tokens appear in `GET /api/v1/usage` next to the agent accounts.
-  `GET /api/v1/chatgpt/accounts` shows each account with `kind: "chatgpt"`, `limited`,
+- **Usage.** Per-day tokens appear in `GET /api/usage` next to the agent accounts.
+  `GET /api/chatgpt/accounts` shows each account with `kind: "chatgpt"`, `limited`,
   `tokens_today` and `weekly_cap: {known: false, manage_url}`.
 
 ## Open questions

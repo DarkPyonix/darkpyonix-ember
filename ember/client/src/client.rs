@@ -26,7 +26,7 @@ use crate::cache;
 use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
+    ApprovalDecision, DetectedAgent, ForkInfo, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
     SessionRecord, TeamMail, TeamMember, TeamView,
 };
 
@@ -261,6 +261,21 @@ impl Client {
         let enabled = self.inner.api.session(id).await?.approve_all;
         self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
         Ok(enabled)
+    }
+
+    /// Fork `id` after its completed turn `turn_seq` (the last when `None`, FR-S5). The new
+    /// session enters the state at once; the caller opens it.
+    pub async fn fork_session(&self, id: &str, turn_seq: Option<i64>) -> ApiResult<SessionRecord> {
+        let rec = self.inner.api.fork_session(id, turn_seq).await?;
+        self.inner.apply(Input::SessionLoaded(rec.clone()));
+        Ok(rec)
+    }
+
+    /// Ask the server for `id`'s fork facts (can_fork, turns, parent) and take the answer.
+    pub async fn load_fork_info(&self, id: &str) -> ApiResult<()> {
+        let detail = self.inner.api.session(id).await?;
+        self.inner.apply(Input::ForkInfoLoaded { session_id: id.to_string(), info: ForkInfo::from(&detail) });
+        Ok(())
     }
 
     pub async fn interrupt(&self, id: &str) -> ApiResult<()> {

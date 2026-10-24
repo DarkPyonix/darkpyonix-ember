@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::transcript::{Applied, Transcript};
-use crate::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView};
+use crate::wire::{AgentEvent, ForkInfo, Project, Push, SessionRecord, SessionStatus, StoredEvent, TeamView};
 
 /// Session status as the launcher shows it (FR-L2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +84,8 @@ pub enum Input {
     TeamLoaded { session_id: String, team: Option<TeamView> },
     /// `GET /sessions/{id}` or `PUT /sessions/{id}/approve-all` answered (FR-A5).
     ApproveAllLoaded { session_id: String, enabled: bool },
+    /// `GET /sessions/{id}` answered: the fork facts (FR-S5).
+    ForkInfoLoaded { session_id: String, info: ForkInfo },
 }
 
 /// What an input changed. A UI redraws the named parts; the sync layer acts on `resync*`.
@@ -180,6 +182,9 @@ pub struct State {
     /// Sessions in approve-everything mode (FR-A5). Not cached: asked when a conversation opens
     /// and kept by push.
     approve_all: BTreeSet<String>,
+    /// Fork facts per session (FR-S5). Not cached: asked when a conversation opens and after
+    /// each turn ends.
+    fork_info: HashMap<String, ForkInfo>,
     connection: ConnectionState,
     revision: u64,
 }
@@ -198,6 +203,7 @@ impl Default for State {
             teams: BTreeMap::new(),
             team_of: HashMap::new(),
             approve_all: BTreeSet::new(),
+            fork_info: HashMap::new(),
             connection: ConnectionState::Offline,
             revision: 0,
         }
@@ -306,6 +312,11 @@ impl State {
         self.approve_all.contains(id)
     }
 
+    /// Fork facts for `id` (FR-S5); the default (no fork offered) until loaded.
+    pub fn fork_info(&self, id: &str) -> ForkInfo {
+        self.fork_info.get(id).cloned().unwrap_or_default()
+    }
+
     pub fn is_open(&self, id: &str) -> bool {
         self.open.contains(id)
     }
@@ -393,6 +404,12 @@ impl State {
                     self.approve_all.remove(&session_id)
                 };
                 if changed {
+                    ch.sessions.insert(session_id);
+                }
+            }
+            Input::ForkInfoLoaded { session_id, info } => {
+                if self.fork_info.get(&session_id) != Some(&info) {
+                    self.fork_info.insert(session_id.clone(), info);
                     ch.sessions.insert(session_id);
                 }
             }
@@ -582,6 +599,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::ForkOrigin;
     use crate::wire::{ApprovalDecision, TurnOutcome};
     use serde_json::json;
 
@@ -933,5 +951,20 @@ mod tests {
         let ch = s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: false }));
         assert!(!s.approve_all("a"));
         assert!(ch.sessions.contains("a"));
+    }
+
+    #[test]
+    fn fr_s5_fork_info_loads_and_defaults_to_no_fork() {
+        let mut s = State::new();
+        assert!(!s.fork_info("a").can_fork);
+        let info = ForkInfo {
+            can_fork: true,
+            turns: vec![4, 9],
+            origin: Some(ForkOrigin { parent_id: "p".into(), turn_seq: 4, forked_at: 1 }),
+        };
+        let ch = s.apply(Input::ForkInfoLoaded { session_id: "a".into(), info: info.clone() });
+        assert!(ch.sessions.contains("a"));
+        assert_eq!(s.fork_info("a"), info);
+        assert!(s.apply(Input::ForkInfoLoaded { session_id: "a".into(), info }).is_empty());
     }
 }

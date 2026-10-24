@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use ember_client::state::{Computer, ConnectionState, Reachability, State};
 use ember_client::transcript::{Transcript, TranscriptItem};
-use ember_client::wire::{MentionCandidate, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
+use ember_client::wire::{ForkInfo, ForkOrigin, MentionCandidate, TurnOutcome, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
 use ember_client::LauncherStatus;
 
 use crate::server::{Account, ChatGptAccount, ComputerStatus};
@@ -54,6 +54,32 @@ pub fn approve_all_banner(on: bool) -> Option<&'static str> {
 /// Menu entry that flips the mode.
 pub fn approve_all_menu_label(on: bool) -> &'static str {
     if on { "Ask before tools again" } else { "Approve everything" }
+}
+
+/// Menu entry that forks from the last completed turn (FR-S5).
+pub const FORK_MENU_LABEL: &str = "Fork from last turn";
+
+/// Button under a completed turn.
+pub const FORK_TURN_LABEL: &str = "Fork from here";
+
+/// Whether the menu entry is enabled: the server reports a completed turn, or the transcript
+/// already shows one (the fork facts are fetched when the view opens, so a turn that ended
+/// since is only in the transcript). Disabled, not failing, otherwise (FR-S5).
+pub fn fork_menu_enabled(info: &ForkInfo, transcript_has_completed_turn: bool) -> bool {
+    info.can_fork || transcript_has_completed_turn
+}
+
+/// Whether the "Fork from here" button under the turn that ended at `seq` with `outcome` is
+/// enabled. Only completed turns can be forked from; when the server listed its turns, `seq`
+/// must be one of them.
+pub fn fork_turn_enabled(info: &ForkInfo, outcome: TurnOutcome, seq: i64) -> bool {
+    outcome == TurnOutcome::Completed && (info.turns.is_empty() || info.turns.contains(&seq))
+}
+
+/// "Forked from <parent>" line of a forked session; the parent's title when known, else its id.
+pub fn fork_origin_label(origin: &ForkOrigin, parent_title: Option<&str>) -> String {
+    let name = parent_title.filter(|t| !t.is_empty()).unwrap_or(&origin.parent_id);
+    format!("Forked from {name}")
 }
 
 /// Badge tone; the UI maps it to colour roles.
@@ -995,5 +1021,28 @@ mod tests {
         assert!(approve_all_banner(s.approve_all("a")).is_none());
         s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: true }));
         assert!(approve_all_banner(s.approve_all("a")).is_some());
+    }
+
+    #[test]
+    fn fr_s5_fork_actions_are_disabled_not_failing() {
+        let none = ForkInfo::default();
+        assert!(!fork_menu_enabled(&none, false));
+        assert!(fork_menu_enabled(&none, true));
+        let some = ForkInfo { can_fork: true, turns: vec![3, 8], origin: None };
+        assert!(fork_menu_enabled(&some, false));
+        assert!(fork_turn_enabled(&some, TurnOutcome::Completed, 8));
+        assert!(!fork_turn_enabled(&some, TurnOutcome::Completed, 5));
+        assert!(!fork_turn_enabled(&some, TurnOutcome::Interrupted, 3));
+        assert!(!fork_turn_enabled(&some, TurnOutcome::Failed, 3));
+        // Facts not loaded yet: a completed turn in the transcript may be forked.
+        assert!(fork_turn_enabled(&none, TurnOutcome::Completed, 3));
+    }
+
+    #[test]
+    fn fr_s5_forked_session_names_its_parent() {
+        let o = ForkOrigin { parent_id: "abc".into(), turn_seq: 4, forked_at: 1 };
+        assert_eq!(fork_origin_label(&o, Some("Fix login")), "Forked from Fix login");
+        assert_eq!(fork_origin_label(&o, Some("")), "Forked from abc");
+        assert_eq!(fork_origin_label(&o, None), "Forked from abc");
     }
 }

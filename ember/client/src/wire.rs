@@ -170,9 +170,39 @@ pub struct SessionDetail {
     /// Whether the fork action is offered (FR-S5); disabled, not failing, when `false`.
     #[serde(default)]
     pub can_fork: bool,
+    /// Sequence numbers of the completed turns a fork may start after (FR-S5), oldest first.
+    #[serde(default)]
+    pub fork_turns: Vec<i64>,
+    /// Where this session was forked from, if it is a fork (FR-S5).
+    #[serde(default)]
+    pub fork_of: Option<ForkOrigin>,
     /// Whether the session is in approve-everything mode (FR-A5).
     #[serde(default)]
     pub approve_all: bool,
+}
+
+/// Where a fork came from (server `ForkOrigin`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ForkOrigin {
+    pub parent_id: String,
+    /// Sequence number, in the parent, of the `turn_ended` event the fork starts after.
+    pub turn_seq: i64,
+    #[serde(default)]
+    pub forked_at: i64,
+}
+
+/// What the client keeps of `GET /sessions/{id}` for the fork action (FR-S5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForkInfo {
+    pub can_fork: bool,
+    pub turns: Vec<i64>,
+    pub origin: Option<ForkOrigin>,
+}
+
+impl From<&SessionDetail> for ForkInfo {
+    fn from(d: &SessionDetail) -> ForkInfo {
+        ForkInfo { can_fork: d.can_fork, turns: d.fork_turns.clone(), origin: d.fork_of.clone() }
+    }
 }
 
 /// `GET /agents` entry.

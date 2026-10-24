@@ -361,12 +361,105 @@ only (Antigravity has no fork, so the action would be missing for it).
 
 **Status.** Written, not yet compiled.
 
+### D17: Agents outlive the server: a shim per session holds the agent, the server reattaches
+
+**Decision.** [user, 2026-10-25: "일단 ember가 그러면 죽지 않도록 데몬이 될 필요가 있을거 같은데?
+에이전트들이 동작하다가 메모리 오버나는 일이 한둘이 아니라서 ember가 죽어버리면 다죽는 상황은 없어야
+할거같아. 그리고 그러면 ember를 업데이트 하기 위해서 모든 세션을 다 꺼야 하는데 그게 맞아? herdr은
+herdr 업데이트 해도 세션 이전이 가능하던데 그렇게 할 방법을 찾아봐."] Each session runs its agent under
+a small shim process (the containerd-shim pattern) that holds the agent's stdio. The ember server
+reattaches to the shims after a crash, a restart or an update. An update hands live sessions to the
+new server without stopping them (herdr's `herdr update --handoff` is the model). If a shim dies
+too, the session comes back through the agent's native resume. Each session has its own memory
+limit, so one agent running out of memory ends only its own session.
+
+**Why.** Agents run out of memory often. When the server owns them, one such failure ends every
+session, and every update needs every session stopped.
+
+Rejected: the current coupling, where the agent is a child of the server with `kill_on_drop`, so a
+server exit kills every agent; stopping all sessions to update the server.
+
+**Status.** Not built. The design is open: the shim protocol and how handoff is verified.
+
+### D18: A team member is a harness plus an account, or an account-switching pipeline
+
+**Decision.** [user, 2026-10-25: "팀원 하나를 만들 때, 지정해야 할 것이 하네스가 뭔지, 어떤 계정으로
+실행할건지 -- 혹은 계정 자동 전환 파이프라인으로 할건지 그 두가지를 지정해서 실행 가능하게 해야 해.
+그리고 opencodex와 같이 프록시도 지원해서 클로드 코드에서 API 모델이나 codex 모델도 지원을 할 수
+있어야겠지"] A team member is defined by two choices: the harness (Claude Code, Codex, ...) and either
+one fixed account or an automatic account-switching pipeline (D7's usage routing). Optionally a model
+proxy path sits on top, as opencodex does: for example Claude Code with `ANTHROPIC_BASE_URL` pointed
+at a proxy, so it runs an API model or a Codex model.
+
+**Why.** The harness and the model source vary independently. A member should be creatable with
+exactly those choices.
+
+Rejected: tying a harness to its vendor's models only; choosing the account only at session start
+by hand.
+
+**Status.** Not built.
+
+### D19: Agent API traffic exits through the current computer
+
+**Decision.** [user, confirmed 2026-10-25 through the leader session; the owner's words: "실제로
+네트워크 통신 마저도 각 컴퓨터로 보내는 것이기 때문에 클로드 서버에서는 각각의 컴퓨터에서 클로드
+코드가 동작하도록 IP가 잡혀야 한다는거야."] Not only tool execution (D4) but the agent CLI's own API
+traffic leaves through the session's current computer, so the model provider sees that computer's IP.
+Candidate: the CLI gets `HTTPS_PROXY` pointing at a proxy that forwards through ember node.
+The owner confirmed this reading (traffic, not only tools) on 2026-10-25.
+
+**Why.** To the provider, Claude Code should look like it runs on that computer. D6 already does
+this for the remote browser.
+
+Rejected: letting API traffic leave from the main server's IP.
+
+**Status.** Not built.
+
+### D20: A session knows its computer; a lost computer falls back to the main server
+
+**Decision.** [user, 2026-10-25: "모델이 본인이 실행되는 컴퓨터가 뭔지를 알고 기본적으로는 메인
+서버에서 실행되지만 available 한 컴퓨터 리스트가 있고, 그 중에서 유저가 일단 활동하라고 명시적으로
+지정한 컴퓨터가 있는거고, 유저가 컴퓨터를 잠시 종료하거나 해서 갑자기 그 컴퓨터에 접근이 안되는
+경우 자동으로 메인 서버에서 작업을 하다가 다시 그 컴퓨터가 감지되면 다시 복귀해서 작업할 수도 있어야
+해. 컴퓨터 연결 상태 자체가 모델에게 알림으로 가야 한다는거지. 무효라고 알려주기보다는 명시적으로
+컴퓨터를 자기가 이동해서 쓰고 있다고 인지시키는게 좋겠지?"] The default location is the main server.
+There is a list of available computers, and the user designates one to work on. When the designated
+computer becomes unreachable, the session falls back to the main server automatically, and returns
+when the computer is detected again. Every connection state change is told to the agent as "now
+working on X (moved)", never as "invalid".
+
+**Why.** The agent should know where it is, and a lost computer should not stop work. Telling it
+that it moved is clearer than telling it that its observations are invalid.
+
+Rejected: failing tool actions while the computer is away; wording the notice as invalidation.
+
+This closes Q2 (who moves a session): the user designates, and the server moves it on a connection
+change. An agent-triggered `switch_computer` is not part of this decision.
+
+**Status.** Not built; today only the user switches (#34).
+
+### D21: A low-level terminal view of other sessions, apart from team messages
+
+**Decision.** [user, 2026-10-25: "한 에이전트가 다른 에이전트의 터미널에서의 동작을 바로 보는게
+안되는거같긴 하거든? 그러면 가끔 대답을 안하는 에이전트가 발생하는 경우 소통이 잘 안되는 문제가
+있는거 같아. ... 니가 추가로 herdr로 지금 다른 세션이 뭐 하는지 볼 수가 있잖아. 그런 로우레벨 기능도
+있으면 좋을거같아."] Apart from team messages (D5), an agent with permission can read another
+session's live and past output and send it input or an interrupt, as A2A tools. The model is herdr's
+`pane read`, `pane send-text` and `pane send-keys`.
+
+**Why.** An agent that does not answer cannot be reached by messages. Reading its terminal shows
+what it is doing.
+
+Rejected: messages as the only channel between sessions.
+
+**Status.** Not built.
+
 ## Open questions
 
 | ID | Question | Status |
 | -- | -------- | ------ |
 | **Q1** | How do a project's computers relate: copies of the same workspace (the same repository checked out on a Mac and a Linux box), machines with different roles (iOS builds on the Mac, GPU work on Linux), or simply "whichever computer I am at"? | Open; decides how much of a session's observations survive a move |
-| **Q2** | Who moves a session: the agent (a `switch_computer` tool plus a routing policy, e.g. "needs CUDA → GPU box"), the user, or both? | Open; the concept suggests the agent, unconfirmed. Today the user switches (`PUT /api/sessions/{id}/computer`, #34) |
+| **Q2** | Who moves a session: the agent (a `switch_computer` tool plus a routing policy, e.g. "needs CUDA → GPU box"), the user, or both? | **Closed** [user, 2026-10-25]: the user designates the computer and the server falls back and returns on connection changes; see D20 |
 | **Q3** | When a session moves, does an open IDE window follow it, or stay with its computer? | Open |
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal. v0 (a system notice on a switch) is implemented (#34, SPEC `FR-S7`); the hash comparison is written from the tool-call log (SPEC `FR-S7`, #79); a separate recorded (path, hash, computer, time) table was not built, since the log already names the files |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional]; built as proposed in ember node (`FR-X4`, `ember/node/src/jobs.rs`) |

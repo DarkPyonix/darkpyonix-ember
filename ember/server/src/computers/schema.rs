@@ -33,3 +33,12 @@ CREATE TABLE IF NOT EXISTS session_computer (
 pub const PEER_MIGRATION: &str = "
 ALTER TABLE computers ADD COLUMN peer_json TEXT;
 ";
+
+/// Migration for FR-X3: the computer a user designated for a session. The session falls back to
+/// the main server when it is lost and returns when it is detected again.
+pub const DESIGNATED_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS session_designated (
+    session_id  TEXT PRIMARY KEY,
+    computer_id TEXT NOT NULL
+);
+";

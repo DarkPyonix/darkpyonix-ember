@@ -45,6 +45,17 @@ pub fn is_busy(s: LauncherStatus) -> bool {
     matches!(s, LauncherStatus::Running | LauncherStatus::WaitingForApproval)
 }
 
+/// Banner shown on a conversation while its approve-everything mode is on (FR-A5); `None` when
+/// off, so the indicator is visible exactly while the mode is active.
+pub fn approve_all_banner(on: bool) -> Option<&'static str> {
+    on.then_some("Approve everything is on: this session's tool requests are allowed without asking.")
+}
+
+/// Menu entry that flips the mode.
+pub fn approve_all_menu_label(on: bool) -> &'static str {
+    if on { "Ask before tools again" } else { "Approve everything" }
+}
+
 /// Badge tone; the UI maps it to colour roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -930,5 +941,22 @@ mod tests {
         assert_eq!((rows[1].open_tasks, rows[1].status), (1, "Running"));
         assert_eq!(task_line(&team.tasks[0]), "#1 [in progress] task 1 \u{b7} alice");
         assert_eq!(task_line(&team.tasks[2]), "#3 [open] task 3 \u{b7} unassigned");
+    }
+
+    #[test]
+    fn fr_a5_indicator_shows_only_while_approve_all_is_on() {
+        assert!(approve_all_banner(false).is_none());
+        assert!(approve_all_banner(true).unwrap().contains("Approve everything is on"));
+        assert_eq!(approve_all_menu_label(false), "Approve everything");
+        assert_eq!(approve_all_menu_label(true), "Ask before tools again");
+    }
+
+    #[test]
+    fn fr_a5_indicator_follows_the_client_state() {
+        let mut s = State::new();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "p", SessionStatus::Idle, 0)]));
+        assert!(approve_all_banner(s.approve_all("a")).is_none());
+        s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: true }));
+        assert!(approve_all_banner(s.approve_all("a")).is_some());
     }
 }

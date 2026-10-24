@@ -82,6 +82,8 @@ pub enum Input {
     /// `GET /sessions/{id}/team` answered (FR-T7): the team `session_id` leads or belongs to,
     /// or `None`.
     TeamLoaded { session_id: String, team: Option<TeamView> },
+    /// `GET /sessions/{id}` or `PUT /sessions/{id}/approve-all` answered (FR-A5).
+    ApproveAllLoaded { session_id: String, enabled: bool },
 }
 
 /// What an input changed. A UI redraws the named parts; the sync layer acts on `resync*`.
@@ -175,6 +177,9 @@ pub struct State {
     teams: BTreeMap<String, TeamView>,
     /// Which team each member session is in (leader and teammates, ended ones included).
     team_of: HashMap<String, String>,
+    /// Sessions in approve-everything mode (FR-A5). Not cached: asked when a conversation opens
+    /// and kept by push.
+    approve_all: BTreeSet<String>,
     connection: ConnectionState,
     revision: u64,
 }
@@ -192,6 +197,7 @@ impl Default for State {
             projects_known: false,
             teams: BTreeMap::new(),
             team_of: HashMap::new(),
+            approve_all: BTreeSet::new(),
             connection: ConnectionState::Offline,
             revision: 0,
         }
@@ -295,6 +301,11 @@ impl State {
         self.open.iter()
     }
 
+    /// Whether `id` is in approve-everything mode (FR-A5): the UI shows an indicator while it is.
+    pub fn approve_all(&self, id: &str) -> bool {
+        self.approve_all.contains(id)
+    }
+
     pub fn is_open(&self, id: &str) -> bool {
         self.open.contains(id)
     }
@@ -373,6 +384,17 @@ impl State {
                 }
                 ch.computers |= self.derive_computer_projects();
                 ch.persist |= ch.computers;
+            }
+            Input::Push(Push::ApproveAll { session_id, enabled })
+            | Input::ApproveAllLoaded { session_id, enabled } => {
+                let changed = if enabled {
+                    self.approve_all.insert(session_id.clone())
+                } else {
+                    self.approve_all.remove(&session_id)
+                };
+                if changed {
+                    ch.sessions.insert(session_id);
+                }
             }
             Input::Push(Push::TeamUpdated { team }) => self.put_team(team, &mut ch),
             Input::TeamLoaded { session_id, team: Some(team) } => {
@@ -896,5 +918,20 @@ mod tests {
         assert!(s.team_for_session("b").is_none());
         // Teams are not part of the cache.
         assert!(State::from_cache(s.to_cache()).team_for_session("lead").is_none());
+    }
+
+    #[test]
+    fn fr_a5_approve_all_follows_push_and_load() {
+        let mut s = State::new();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "p", SessionStatus::Idle, 0)]));
+        assert!(!s.approve_all("a"));
+        let ch = s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: true }));
+        assert!(s.approve_all("a"));
+        assert!(ch.sessions.contains("a"));
+        // Same value again changes nothing.
+        assert!(s.apply(Input::ApproveAllLoaded { session_id: "a".into(), enabled: true }).is_empty());
+        let ch = s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: false }));
+        assert!(!s.approve_all("a"));
+        assert!(ch.sessions.contains("a"));
     }
 }

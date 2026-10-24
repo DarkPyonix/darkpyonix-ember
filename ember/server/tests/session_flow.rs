@@ -224,3 +224,101 @@ async fn start_hooks_run_for_each_agent_start() {
     wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
     assert_eq!(*seen.lock().unwrap(), vec![id]);
 }
+
+fn resolved(s: &Sessions, id: &str) -> Vec<ApprovalDecision> {
+    s.store()
+        .events_after(id, 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            AgentEvent::ApprovalResolved { decision, .. } => Some(decision),
+            _ => None,
+        })
+        .collect()
+}
+
+/// FR-A5: with the mode on before the turn, later approvals are answered without a client.
+#[tokio::test]
+async fn approve_all_answers_later_approvals_on_every_turn() {
+    let s = sessions_with(Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    assert!(!s.approve_all(&id));
+    s.set_approve_all(&id, true).await.unwrap();
+    assert!(s.approve_all(&id));
+
+    s.send(&id, "one").await.unwrap();
+    wait_status(&s, &id, SessionStatus::Finished).await;
+    s.send(&id, "two").await.unwrap();
+    for _ in 0..200 {
+        if resolved(&s, &id).len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(resolved(&s, &id), vec![ApprovalDecision::AllowOnce; 2]);
+}
+
+/// FR-A5: switching the mode on answers the approval already pending in the running turn.
+#[tokio::test]
+async fn approve_all_answers_the_pending_approval_when_switched_on() {
+    let s = sessions_with(Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    let mut push = s.subscribe();
+    s.send(&id, "hello").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+
+    s.set_approve_all(&id, true).await.unwrap();
+    wait_status(&s, &id, SessionStatus::Finished).await;
+    assert_eq!(resolved(&s, &id), vec![ApprovalDecision::AllowOnce]);
+
+    let mut seen = Vec::new();
+    while let Ok(p) = push.try_recv() {
+        if let Push::ApproveAll { session_id, enabled } = p {
+            seen.push((session_id, enabled));
+        }
+    }
+    assert_eq!(seen, vec![(id.clone(), true)]);
+
+    // Off again: the next approval waits for a person.
+    s.set_approve_all(&id, false).await.unwrap();
+    s.send(&id, "again").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+}
+
+#[tokio::test]
+async fn approve_all_http_toggle_and_session_detail() {
+    let s = sessions_with(Arc::new(Store::open_in_memory().unwrap()));
+    let app = ember_server::api::router(s.clone());
+    let id = new_session(&s);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/sessions/{id}/approve-all"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = app
+        .clone()
+        .oneshot(Request::get(format!("/api/sessions/{id}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let detail: serde_json::Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(detail["approve_all"], true);
+
+    let res = app
+        .oneshot(
+            Request::put("/api/sessions/nope/approve-all")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

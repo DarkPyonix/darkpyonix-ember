@@ -131,7 +131,7 @@ installers (#72); the documents in the house writing style (#68).
   - **Native fork.** An adapter declares `native_fork()`: `Latest` (forks the whole native
     session), `AtTurn` (forks through a chosen turn) or `None`. When the parent has a native id
     and the adapter can fork from the chosen turn, `session_forks` records a pending native fork
-    (parent native id, turns to keep) and the copied-conversation notice is not sent. The fork
+    (migration 16: parent native id, turns to keep) and the copied-conversation notice is not sent. The fork
     starts lazily, at its first message: the adapter forks instead of resuming, and the new native
     id is stored through the usual `NativeSession` event. `Latest` is used only when the chosen turn
     is the parent's last (no user message after it); an earlier turn falls back to the copy.

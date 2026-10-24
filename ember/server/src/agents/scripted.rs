@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex, Notify};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 #[derive(Default)]
@@ -38,6 +38,43 @@ impl AgentAdapter for ScriptedAdapter {
             interrupt: Arc::new(Notify::new()),
             turn: 0,
         }))
+    }
+}
+
+/// The scripted agent with a native fork (FR-S5 tests): a fork starts with the native id
+/// `fork-of-<parent native id>[@<turns kept>]`; `fail_fork` makes the fork fail at start.
+pub struct ScriptedForkAdapter {
+    pub mode: NativeFork,
+    pub fail_fork: bool,
+}
+
+#[async_trait]
+impl AgentAdapter for ScriptedForkAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Scripted
+    }
+
+    fn native_fork(&self) -> NativeFork {
+        self.mode
+    }
+
+    async fn detect(&self) -> Detected {
+        Detected { kind: AgentKind::Scripted, installed: true, version: Some("test".into()) }
+    }
+
+    async fn start(
+        &self,
+        mut req: StartRequest,
+        events: mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<Box<dyn AgentRun>> {
+        if let Some(from) = req.fork_from.take() {
+            anyhow::ensure!(!self.fail_fork, "scripted fork failure");
+            req.resume_native_id = Some(match from.keep_turns {
+                Some(n) => format!("fork-of-{}@{n}", from.native_id),
+                None => format!("fork-of-{}", from.native_id),
+            });
+        }
+        ScriptedAdapter.start(req, events).await
     }
 }
 

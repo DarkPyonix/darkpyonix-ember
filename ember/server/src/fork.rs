@@ -26,6 +26,15 @@ CREATE TABLE session_forks (
 CREATE INDEX session_forks_by_parent ON session_forks(parent_id);
 ";
 
+/// Migration from `user_version` 15 to 16: a native fork waiting for the fork's first message.
+/// `native_pending` is 1 until the agent has forked (or failed to and the copy took over);
+/// `parent_native_id` and `keep_turns` (NULL = the whole session) say what to fork.
+pub const NATIVE_MIGRATION: &str = "
+ALTER TABLE session_forks ADD COLUMN native_pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE session_forks ADD COLUMN parent_native_id TEXT;
+ALTER TABLE session_forks ADD COLUMN keep_turns INTEGER;
+";
+
 /// Upper bound of the transcript put in front of the agent, in characters (the newest are kept).
 pub const SEED_MAX_CHARS: usize = 100_000;
 
@@ -47,6 +56,26 @@ pub enum ForkError {
     BadTurn(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// Whether and how a fork at the `ordinal`-th completed turn (1-based) of a parent with `total`
+/// completed turns can use the agent's own fork (FR-S5). `trailing` is true when the parent has a
+/// user message after that turn, which a whole-session fork would carry along.
+pub fn plan_native_fork(
+    mode: crate::agents::NativeFork,
+    parent_native_id: Option<&str>,
+    ordinal: usize,
+    total: usize,
+    trailing: bool,
+) -> Option<crate::agents::ForkFrom> {
+    use crate::agents::{ForkFrom, NativeFork};
+    let native_id = parent_native_id?.to_string();
+    match mode {
+        NativeFork::None => None,
+        NativeFork::AtTurn => Some(ForkFrom { native_id, keep_turns: Some(ordinal) }),
+        NativeFork::Latest if ordinal == total && !trailing => Some(ForkFrom { native_id, keep_turns: None }),
+        NativeFork::Latest => None,
+    }
 }
 
 /// Sequence numbers of the completed turns (`turn_ended`, outcome completed), oldest first.
@@ -127,6 +156,45 @@ impl Store {
             tx.commit().map_err(anyhow::Error::from)?;
         }
         Ok(self.session(&id)?.expect("just inserted"))
+    }
+
+    /// Mark `session` (a fork) as forking natively at its first message: the copied conversation
+    /// is not put in front of the agent.
+    pub fn set_native_fork(&self, session: &str, from: &crate::agents::ForkFrom) -> anyhow::Result<()> {
+        self.conn().execute(
+            "UPDATE session_forks SET native_pending = 1, seeded = 0, parent_native_id = ?2, keep_turns = ?3
+             WHERE session_id = ?1",
+            params![session, from.native_id, from.keep_turns.map(|n| n as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// The native fork `session` still has to make, if any.
+    pub fn pending_native_fork(&self, session: &str) -> anyhow::Result<Option<crate::agents::ForkFrom>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT parent_native_id, keep_turns FROM session_forks
+                 WHERE session_id = ?1 AND native_pending = 1 AND parent_native_id IS NOT NULL",
+                params![session],
+                |r| {
+                    Ok(crate::agents::ForkFrom {
+                        native_id: r.get(0)?,
+                        keep_turns: r.get::<_, Option<i64>>(1)?.map(|n| n as usize),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// The native fork is done (`ok`), or failed: then the copied conversation is put in front of
+    /// the agent after all.
+    pub fn settle_native_fork(&self, session: &str, ok: bool) -> anyhow::Result<()> {
+        self.conn().execute(
+            "UPDATE session_forks SET native_pending = 0, seeded = ?2 WHERE session_id = ?1",
+            params![session, if ok { 0 } else { 1 }],
+        )?;
+        Ok(())
     }
 
     /// The parent and turn `session` was forked from, if it is a fork.

@@ -552,7 +552,12 @@ impl ServerHub {
         let this = self.clone();
         let task = tokio::spawn(async move {
             let finished = match link.wait().await {
-                Ok(reg) => this.complete(reg).await.map_err(|e| e.to_string()),
+                Ok(reg) => {
+                    // Status must never show registered with a pending code,
+                    // so the pending link is cleared before registration is reported.
+                    this.link.lock().unwrap().pending = None;
+                    this.complete(reg).await.map_err(|e| e.to_string())
+                }
                 Err(e) => Err(e.to_string()),
             };
             if let Err(e) = this.clear_pending_link() {

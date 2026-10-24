@@ -201,6 +201,23 @@ removed). Not verified: browser tools; the read-only fallback against a real dif
 version; the end-to-end adapter test (`EMBER_E2E_AGY=1`) on 1.2.16. Open: shell writes under
 `--sandbox` (#65).
 
+**#65 findings (agy 1.4.6, 2026-10-25, macOS, project on `/Volumes`).** The failure reproduces on 1.4.6
+and is not caused by the external disk, `/Volumes` vs `/private` paths, or untrusted folders. agy
+writes a Seatbelt profile to `~/.gemini/sandbox/profiles/exebox-*.sb` per command (deleted after
+use; captured by polling). It allows writes to `/` and then explicitly denies writes to the
+working directory, its `.git` and the enclosing repository's `.git`, plus system paths. The allow
+list holds only temp dirs, agy's own brain/scratch folders and a few toolchain caches. Running
+the captured profile with `sandbox-exec -f` reproduces `Operation not permitted` for `touch` in
+the cwd and a subfolder, while the parent folder stays writable. The same happens when the cwd
+is exactly a `trustedWorkspaces` entry (`--mode accept-edits|auto`, `--project` change nothing),
+and a project `.agents/settings.json` with `write_file(<cwd>/)` did not change the profile. The agy docs say workspace
+writes in the sandbox come from `write_file` rules in `permissions` of
+`~/.gemini/antigravity-cli/settings.json`; headless runs apparently get no such grant. Cause: agy,
+not Ember's wrapper. Not verified: a project under the home directory; a global `write_file`
+rule (it would edit the user's global agy config, which FR-A5f forbids). Decision for the user:
+keep `--sandbox` and accept that shell commands cannot write (file edits via `write_to_file`
+still work), or add a global `write_file` allow rule, or set `EMBER_AGY_SANDBOX=0` (the hook stays the gate).
+
 **Outcome:** tests 1–7 pass on 1.2.16 (browser tools untestable); Antigravity sessions on 1.2.16
 run gated, any other version read-only.
 

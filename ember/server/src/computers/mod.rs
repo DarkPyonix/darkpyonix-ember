@@ -56,6 +56,7 @@ pub mod api;
 pub mod bridge;
 pub mod egress;
 pub mod mount;
+pub mod observations;
 pub mod relay;
 pub mod schema;
 pub mod shim;
@@ -370,6 +371,11 @@ fn row_to_computer(r: &rusqlite::Row<'_>) -> rusqlite::Result<Computer> {
 pub trait NodeApi: Send + Sync {
     async fn health(&self) -> anyhow::Result<Health>;
     async fn env(&self) -> anyhow::Result<EnvInfo>;
+    /// SHA-256 of the file at `path` on this computer, or [`observations::FileState::Missing`]
+    /// (FR-S7). Fakes without files keep the default, which makes the file count as changed.
+    async fn file_state(&self, _path: &str) -> anyhow::Result<observations::FileState> {
+        anyhow::bail!("file hashing is not supported")
+    }
 }
 
 #[async_trait]
@@ -380,6 +386,22 @@ impl NodeApi for NodeClient {
 
     async fn env(&self) -> anyhow::Result<EnvInfo> {
         Ok(NodeClient::env(self).await?)
+    }
+
+    async fn file_state(&self, path: &str) -> anyhow::Result<observations::FileState> {
+        use ember_node::client::ClientError;
+        use ember_node::proto::{ErrorCode, ReadRequest};
+        let req = ReadRequest { path: path.into(), offset: 0, len: Some(0), hash: true };
+        match NodeClient::read(self, &req).await {
+            Ok(r) => r
+                .sha256
+                .map(observations::FileState::Hash)
+                .ok_or_else(|| anyhow::anyhow!("node returned no hash")),
+            Err(ClientError::Api { body, .. }) if body.code == ErrorCode::NotFound => {
+                Ok(observations::FileState::Missing)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -396,6 +418,15 @@ impl NodeApi for LocalNode {
 
     async fn env(&self) -> anyhow::Result<EnvInfo> {
         Ok(ember_node::envinfo::describe(self.roots.clone()).await)
+    }
+
+    async fn file_state(&self, path: &str) -> anyhow::Result<observations::FileState> {
+        let p = PathBuf::from(path);
+        match tokio::task::spawn_blocking(move || ember_node::fs::sha256_file(&p)).await? {
+            Ok(h) => Ok(observations::FileState::Hash(h)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(observations::FileState::Missing),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -901,10 +932,38 @@ impl Computers {
             Some(pending) => notice_origin(pending),
             None => Some(previous_view.name.clone()),
         };
+        let pending = current.as_ref().and_then(|sc| sc.notice.as_deref()).is_some();
         let notice = (moved && rec.native_id.is_some())
             .then(|| observed.filter(|o| *o != target_view.name))
-            .flatten()
-            .map(|o| switch_notice(&o, &target_view.name));
+            .flatten();
+        // FR-S7: hash the files the agent saw on both computers so only changed ones are flagged.
+        // Without a comparison (a notice still undelivered, no files, a computer that cannot be
+        // hashed) the v0 notice applies.
+        let comparison = match (&notice, pending) {
+            (Some(_), false) => {
+                let events = sessions.store().events_after(session_id, 0)?;
+                let paths = observations::observed_paths(&events);
+                if paths.is_empty() {
+                    None
+                } else {
+                    let prev = self.resolve(&previous_view.id).ok().and_then(|c| (self.connector)(c.as_ref()).ok());
+                    let next = (self.connector)(target.as_ref()).ok();
+                    match (prev, next) {
+                        (Some(a), Some(b)) => {
+                            let before = observations::hash_all(a.as_ref(), &paths).await;
+                            let after = observations::hash_all(b.as_ref(), &paths).await;
+                            Some(observations::compare(&paths, &before, &after))
+                        }
+                        _ => None,
+                    }
+                }
+            }
+            _ => None,
+        };
+        let notice = notice.map(|o| match &comparison {
+            Some(c) => observations::switch_notice_with(&o, &target_view.name, c),
+            None => switch_notice(&o, &target_view.name),
+        });
         self.registry.set_session_computer(session_id, &target_view.id, Some(&env), notice.as_deref())?;
         // The next message starts the agent with the new computer (and natively resumes it).
         sessions.release(session_id).await.map_err(|e| ComputerError::Other(anyhow::anyhow!("{e:#}")))?;

@@ -69,6 +69,19 @@ fn notices(s: &Sessions, id: &str) -> Vec<String> {
         .collect()
 }
 
+/// The seed is sent to the agent's event channel and stored by the pump task, so it lands a moment
+/// after `send` returns: wait for it.
+async fn seed_notices(s: &Sessions, id: &str) -> Vec<String> {
+    for _ in 0..400 {
+        let n = notices(s, id);
+        if !n.is_empty() {
+            return n;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Vec::new()
+}
+
 #[tokio::test]
 async fn an_agent_with_native_fork_gets_its_native_id_forked_and_no_seed() {
     let s = sessions(Arc::new(ScriptedForkAdapter { mode: NativeFork::Latest, fail_fork: false }));
@@ -96,7 +109,7 @@ async fn a_latest_only_agent_copies_the_conversation_for_an_earlier_turn() {
     let (parent, turns) = two_turns(&s).await;
     let fork = s.fork(&parent, Some(turns[0]), None).unwrap();
     s.send(&fork.id, "and now?").await.unwrap();
-    let seed = notices(&s, &fork.id);
+    let seed = seed_notices(&s, &fork.id).await;
     assert_eq!(seed.len(), 1);
     assert!(seed[0].contains("first question") && !seed[0].contains("second question"), "{seed:?}");
 }
@@ -126,7 +139,7 @@ async fn an_agent_without_native_fork_gets_the_seed() {
     let fork = s.fork(&parent, Some(*turns.last().unwrap()), None).unwrap();
     assert_eq!(s.store().pending_native_fork(&fork.id).unwrap(), None);
     s.send(&fork.id, "and now?").await.unwrap();
-    let seed = notices(&s, &fork.id);
+    let seed = seed_notices(&s, &fork.id).await;
     assert_eq!(seed.len(), 1);
     assert!(seed[0].contains("first question") && seed[0].contains("second question"));
 }
@@ -137,7 +150,7 @@ async fn a_native_fork_that_fails_falls_back_to_the_seed_with_a_notice() {
     let (parent, turns) = two_turns(&s).await;
     let fork = s.fork(&parent, Some(*turns.last().unwrap()), None).unwrap();
     s.send(&fork.id, "and now?").await.unwrap();
-    let seed = notices(&s, &fork.id);
+    let seed = seed_notices(&s, &fork.id).await;
     assert_eq!(seed.len(), 1, "the copy takes over: {seed:?}");
     assert!(seed[0].contains("first question"));
     let notes: Vec<_> = s

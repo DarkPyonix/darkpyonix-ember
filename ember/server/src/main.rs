@@ -78,6 +78,21 @@ async fn main() -> anyhow::Result<()> {
     });
     std::fs::create_dir_all(&data_dir)?;
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
+    // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
+    // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
+    let shim_runtime = match ember_server::agents::proc::find_shim_bin() {
+        Some(bin) if ember_server::agents::proc::shim_enabled() => {
+            let dir = data_dir.join("shims");
+            std::fs::create_dir_all(&dir)?;
+            let rt = ember_server::agents::proc::ShimRuntime { bin, dir, store: store.clone() };
+            ember_server::agents::proc::install_runtime(rt.clone());
+            Some(rt)
+        }
+        _ => {
+            tracing::warn!("session shims off; agents stop with the server");
+            None
+        }
+    };
     let reset = store.reset_live_statuses()?;
     if reset > 0 {
         tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
@@ -363,6 +378,12 @@ async fn main() -> anyhow::Result<()> {
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
         .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
+    if let Some(rt) = &shim_runtime {
+        let rejoined = sessions.rejoin_shims(rt).await;
+        if !rejoined.is_empty() {
+            tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
+        }
+    }
     axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

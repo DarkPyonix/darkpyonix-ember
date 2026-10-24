@@ -101,6 +101,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
+use super::proc::{spawn_agent, AgentCommand, ProcHandle};
 use super::{AcpName, AgentAdapter, AgentKind, AgentRun, Detected, ForkFrom, McpServer, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
@@ -330,27 +331,29 @@ impl AgentAdapter for AcpAdapter {
     ) -> anyhow::Result<Box<dyn AgentRun>> {
         // On another computer the project path need not exist here (without a mount).
         let spawn_dir = if req.cwd.is_dir() { req.cwd.clone() } else { std::env::temp_dir() };
-        let mut child = Command::new(&self.config.command)
-            .args(self.config.process_args(&req))
-            .envs(self.config.env.iter().map(|(k, v)| (k, v)))
-            .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(&spawn_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("starting {} (ACP agent {})", self.config.command.display(), self.config.name))?;
-        let stdin = child.stdin.take().context("ACP agent stdin")?;
-        let stdout = child.stdout.take().context("ACP agent stdout")?;
-        let stderr = child.stderr.take().context("ACP agent stderr")?;
+        let mut env: Vec<(String, String)> = self.config.env.iter().cloned().collect();
+        env.extend(req.env.iter().cloned());
+        let proc = spawn_agent(AgentCommand {
+            program: self.config.command.clone(),
+            args: self.config.process_args(&req),
+            env,
+            cwd: spawn_dir,
+            // `initialize` and `session/*` have to run on a fresh agent, so a surviving one is
+            // restarted through the agent's native resume instead of rejoined.
+            reattachable: false,
+        })
+        .await
+        .with_context(|| format!("starting {} (ACP agent {})", self.config.command.display(), self.config.name))?;
+        let (stdin, stdout, stderr, child) = (proc.stdin, proc.stdout, proc.stderr, proc.handle);
         let name = self.config.name.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "acp", agent = %name, "{line}");
-            }
-        });
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "acp", agent = %name, "{line}");
+                }
+            });
+        }
         let prepend_instructions =
             if self.config.instructions_args.is_empty() { req.instructions.clone() } else { None };
         let setup = Setup {
@@ -389,7 +392,7 @@ pub(crate) struct Setup {
 pub(crate) async fn connect<R, W>(
     reader: R,
     writer: W,
-    child: Option<Child>,
+    child: Option<ProcHandle>,
     setup: Setup,
     events: mpsc::Sender<AgentEvent>,
 ) -> anyhow::Result<AcpRun>
@@ -1422,7 +1425,7 @@ async fn drive_node_terminal(term: Arc<Term>, session: ember_node::client::ExecS
 
 pub(crate) struct AcpRun {
     conn: Arc<Conn>,
-    child: Option<Child>,
+    child: Option<ProcHandle>,
     session_id: String,
     prompts: mpsc::UnboundedSender<String>,
     /// Instructions not passed on the command line, for the first prompt only.
@@ -1473,10 +1476,8 @@ impl AgentRun for AcpRun {
         if let Some(mut w) = self.conn.writer.lock().await.take() {
             let _ = w.shutdown().await;
         }
-        if let Some(mut child) = self.child.take() {
-            if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
-                let _ = child.kill().await;
-            }
+        if let Some(handle) = self.child.take() {
+            let _ = handle.shutdown(EXIT_GRACE).await;
         }
         Ok(())
     }

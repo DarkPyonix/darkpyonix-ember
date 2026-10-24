@@ -52,9 +52,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 
+use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
@@ -214,6 +215,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         NativeFork::Latest
     }
 
+    fn rejoins_shim(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -256,34 +261,36 @@ impl AgentAdapter for ClaudeCodeAdapter {
             (true, Some(config)) => Some(PrivateConfigFile::create(&std::env::temp_dir(), &config)?),
             _ => None,
         };
-        let mut child = Command::new(&self.bin)
-            .envs(mcp_timeout_env(&req))
-            .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .args(Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)))
-            .current_dir(&req.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to start {}: {e}", self.bin.display()))?;
-        let pid = child.id();
-        let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
+        let mut env: Vec<(String, String)> = mcp_timeout_env(&req).into_iter().collect();
+        env.extend(req.env.iter().cloned());
+        let proc = spawn_agent(AgentCommand {
+            program: self.bin.clone(),
+            args: Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)),
+            env,
+            cwd: req.cwd.clone(),
+            // stream-json has no handshake state, so a running agent can be rejoined (FR-S8).
+            reattachable: true,
+        })
+        .await?;
+        let pid = proc.pid;
+        let stdin: SharedStdin = Arc::new(Mutex::new(Some(proc.stdin)));
+        let stdout = proc.stdout;
+        let stderr = proc.stderr;
         let state = Arc::new(StdMutex::new(RunState::default()));
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(target: "ember::claude", pid, "stderr: {line}");
-            }
-        });
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(target: "ember::claude", pid, "stderr: {line}");
+                }
+            });
+        }
 
         tokio::spawn(read_stdout(stdout, stdin.clone(), state.clone(), events));
 
         Ok(Box::new(ClaudeRun {
-            child: Arc::new(Mutex::new(Some(child))),
+            child: Arc::new(Mutex::new(Some(proc.handle))),
             pid,
             stdin,
             state,
@@ -308,7 +315,7 @@ struct RunState {
     shutting_down: bool,
 }
 
-type SharedStdin = Arc<Mutex<Option<ChildStdin>>>;
+type SharedStdin = Arc<Mutex<Option<AgentStdin>>>;
 
 async fn write_line(stdin: &SharedStdin, msg: &Value) -> anyhow::Result<()> {
     let mut guard = stdin.lock().await;
@@ -351,7 +358,7 @@ fn error_response(request_id: &str, error: &str) -> Value {
 
 /// Read stdout until the process closes it, translating each line.
 async fn read_stdout(
-    stdout: tokio::process::ChildStdout,
+    stdout: AgentStdout,
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
     events: mpsc::Sender<AgentEvent>,
@@ -449,7 +456,7 @@ async fn read_stdout(
 }
 
 struct ClaudeRun {
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<ProcHandle>>>,
     pid: Option<u32>,
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
@@ -544,15 +551,10 @@ impl AgentRun for ClaudeRun {
         self.state.lock().unwrap().shutting_down = true;
         // Closing stdin ends the CLI's input stream; it exits after the current work.
         self.stdin.lock().await.take();
-        if let Some(mut child) = self.child.lock().await.take() {
-            match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
-                Ok(status) => {
-                    status?;
-                }
-                Err(_) => {
-                    tracing::warn!(target: "ember::claude", "claude did not exit; killing");
-                    child.kill().await?;
-                }
+        if let Some(handle) = self.child.lock().await.take() {
+            if let Err(e) = handle.shutdown(SHUTDOWN_GRACE).await {
+                tracing::warn!(target: "ember::claude", "claude shutdown: {e:#}");
+                return Err(e);
             }
         }
         Ok(())

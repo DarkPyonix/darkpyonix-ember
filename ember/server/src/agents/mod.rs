@@ -16,6 +16,7 @@ pub mod acp;
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod proc;
 pub mod scripted;
 
 /// Which agent CLI a session runs.
@@ -265,6 +266,12 @@ pub trait AgentAdapter: Send + Sync {
     /// conversation.
     fn native_fork(&self) -> NativeFork {
         NativeFork::None
+    }
+
+    /// Whether an agent that outlived the server under its shim can be rejoined as it runs
+    /// (FR-S8). Default: no, the session resumes natively on its next message.
+    fn rejoins_shim(&self) -> bool {
+        false
     }
 
     /// Start (or resume) the agent. Events are sent on `events` until the process exits.

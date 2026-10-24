@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
+    ember_server::members::install(&sessions);
     let shim = computers::find_shim();
     if shim.is_none() {
         tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");

@@ -80,7 +80,7 @@
 shasum -a 256 -c --ignore-missing SHA256SUMS
 tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
     </figure>
-    <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. 바이너리는 아직 서명이나 공증이 되어 있지 않습니다. macOS에서는 풀어낸 파일에 <code>xattr -d com.apple.quarantine</code>을 실행해 격리 표시를 지웁니다.</p>
+    <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. macOS 바이너리와 앱은 임시(ad hoc) 서명만 되어 있고 공증은 하지 않으므로(Apple 계정 없음) Gatekeeper가 첫 실행을 막습니다. 풀어낸 파일에는 <code>xattr -d com.apple.quarantine</code>을, <code>.app</code>에는 <code>xattr -dr com.apple.quarantine Ember.app</code>을 실행해 격리 표시를 지우거나, 우클릭 후 열기를 고릅니다. Windows <code>.msix</code>는 서명되어 있지 않으므로 개발자 모드를 켜거나 신뢰하는 인증서로 다시 서명합니다.</p>
     <p>클라이언트는 렌더러가 링크되지 않아 아직 릴리스에 없습니다. <a href="#client">클라이언트</a>에 나온 대로 소스에서 빌드하십시오.</p>
 
     <h2 id="checkout">코드 받기</h2>

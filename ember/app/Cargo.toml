@@ -24,6 +24,7 @@ path = "src/main.rs"
 # deeper than the main checkout). To build against a local checkout, see README.md ("Local
 # dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
+# TODO: 배포되면 버전 의존성으로 바꾼다 (dioxus-compose is not yet published).
 dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "b71b20e" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.

@@ -40,7 +40,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-A6–A8 | Implemented, CI (#14, #58). | |
 | FR-X1–X3 | Implemented, CI (#20, #34, #47, #48); verified end to end with a node on the same Mac. A switch between two physical computers is not verified; the project mount (`mount-nfs`, `mount-fuse` features) is not built in CI. | #6 |
 | FR-X4 | Implemented in ember node (`jobs.rs`), CI. | |
-| FR-X5, NFR-X1 | Not measured. | #81 |
+| FR-X5, NFR-X1 | Not measured on real hardware. RSS budget test and recorder written (`ember/node/tests/memory.rs`), not yet compiled or run. | #81 |
 | FR-T1–T7 | Implemented, CI (#18, #59). Teams of real agents on different computers not verified. | #82 |
 | FR-R1–R4 | Implemented on ember server and node, CI (#29, #44). Acceptance runs (egress IP, login across an egress switch, takeover) not verified. | #12 |
 | FR-R5 | Not implemented: no client renders the browser. | #12 |
@@ -238,7 +238,7 @@ run gated, any other version read-only.
 | **FR-X2** | The wrapping is transparent to the agent: paths, working directory and environment the agent sees are the target computer's. | The agent's own "print working directory" and environment queries report the target computer's values. |
 | **FR-X3** | A session's current computer can be switched. *[Who triggers it is open: `INTENT.md` Q2.]* | After a switch, the next tool action runs on the new computer; the environment description given to the agent is replaced, not appended (`FR-S7`). |
 | **FR-X4** | *[provisional, `INTENT.md` Q5]* A background job started on one computer keeps running after the session switches away, and its completion is reported into the session. | Start a long build on A, switch to B, finish the build on A: the session receives the result. |
-| **FR-X5** | ember node is the only Ember component required on a computer for agent work; it does not run agent CLIs or store transcripts. | Measured: daemon RSS stays bounded and independent of the number of sessions using that computer. |
+| **FR-X5** | ember node is the only Ember component required on a computer for agent work; it does not run agent CLIs or store transcripts. | Measured: daemon RSS stays bounded and independent of the number of sessions using that computer. *[provisional]* Budget: RSS grows by at most 64 MiB over 300 sessions after a 40-session warm-up. CI gate `ember/node/tests/memory.rs` (in-process, Linux `/proc` or macOS `ps`); the per-session memory and CPU recorder is its ignored test `record_per_session_cost`. |
 | **NFR-X1** | *[provisional]* Before and after moving agents to the main server, measure whether local slowdown came from agent runtimes and transcripts (memory) or from builds and tests (CPU). | If CPU dominates, add a concurrency limit per computer on the main server. |
 
 ---

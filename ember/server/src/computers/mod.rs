@@ -322,6 +322,41 @@ impl Registry {
         Ok(())
     }
 
+    /// The computer the user designated for the session (FR-X3), if any.
+    pub fn designated(&self, session_id: &str) -> Result<Option<String>, ComputerError> {
+        Ok(self
+            .store
+            .conn()
+            .query_row(
+                "SELECT computer_id FROM session_designated WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Designate a computer for the session, or clear the designation with `None`.
+    pub fn set_designated(&self, session_id: &str, computer_id: Option<&str>) -> Result<(), ComputerError> {
+        let conn = self.store.conn();
+        match computer_id {
+            Some(c) => conn.execute(
+                "INSERT INTO session_designated (session_id, computer_id) VALUES (?1, ?2)
+                 ON CONFLICT(session_id) DO UPDATE SET computer_id = ?2",
+                params![session_id, c],
+            )?,
+            None => conn.execute("DELETE FROM session_designated WHERE session_id = ?1", params![session_id])?,
+        };
+        Ok(())
+    }
+
+    /// Every (session, designated computer) pair, for the watcher.
+    pub fn all_designated(&self) -> Result<Vec<(String, String)>, ComputerError> {
+        let conn = self.store.conn();
+        let mut st = conn.prepare("SELECT session_id, computer_id FROM session_designated")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Take the pending notice, if any: it is returned once.
     pub fn take_notice(&self, session_id: &str) -> Result<Option<String>, ComputerError> {
         let mut conn = self.store.conn();
@@ -524,7 +559,7 @@ pub fn env_description(name: &str, env: &EnvInfo) -> String {
 /// The one-time notice after a switch (FR-S7 v0).
 pub fn switch_notice(from: &str, to: &str) -> String {
     format!(
-        "[Ember system notice] This session's computer changed from \"{from}\" to \"{to}\". \
+        "[Ember system notice] This session is now working on \"{to}\" (moved from \"{from}\"). \
          File contents, directory listings, processes and command output you observed earlier \
          came from \"{from}\" and may differ here: re-read any file before editing it, and re-run \
          commands whose results you rely on. Use the current computer description, not the \
@@ -537,8 +572,8 @@ pub fn switch_notice(from: &str, to: &str) -> String {
 
 /// The computer a [`switch_notice`] says observations came from.
 fn notice_origin(notice: &str) -> Option<String> {
-    let rest = notice.split("changed from \"").nth(1)?;
-    Some(rest.split("\" to \"").next()?.to_string())
+    let rest = notice.split("(moved from \"").nth(1)?;
+    Some(rest.split("\")").next()?.to_string())
 }
 
 /// Result of a switch.
@@ -582,7 +617,16 @@ pub struct Computers {
     bridges: Mutex<HashMap<String, bridge::NodeBridge>>,
     /// Browser egress listeners (loopback SOCKS5 → node `/egress`), by computer id.
     egress: Mutex<HashMap<String, egress::EgressListener>>,
+    /// Consecutive probes that must disagree with a session's computer before it moves (FR-X3).
+    debounce: std::sync::atomic::AtomicU32,
+    /// Per session: how many consecutive probes wanted a move (FR-X3 debounce).
+    flap: Mutex<HashMap<String, u32>>,
 }
+
+/// Probes in a row that must agree before a fallback or return happens (FR-X3).
+pub const DEFAULT_DEBOUNCE: u32 = 2;
+/// How often designated computers are probed.
+pub const WATCH_INTERVAL: Duration = Duration::from_secs(10);
 
 impl Computers {
     pub fn new(registry: Registry, connector: Connector) -> Arc<Computers> {
@@ -610,6 +654,8 @@ impl Computers {
             dialer,
             bridges: Mutex::new(HashMap::new()),
             egress: Mutex::new(HashMap::new()),
+            debounce: std::sync::atomic::AtomicU32::new(DEFAULT_DEBOUNCE),
+            flap: Mutex::new(HashMap::new()),
         })
     }
 
@@ -686,6 +732,23 @@ impl Computers {
         sessions.add_prepare_hook(self.prepare_hook());
         sessions.add_start_config_hook(self.start_hook());
         sessions.add_message_hook(self.message_hook());
+        {
+            // FR-X3: fall back to the main server when a designated computer is lost, and return.
+            let (this, sessions) = (Arc::downgrade(self), Arc::downgrade(sessions));
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(WATCH_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    let (Some(c), Some(s)) = (this.upgrade(), sessions.upgrade()) else { break };
+                    let Ok(pairs) = c.registry.all_designated() else { continue };
+                    for (sid, _) in pairs {
+                        if let Err(e) = c.reconcile(&s, &sid).await {
+                            tracing::warn!(session = %sid, "computer fallback failed: {e:#}");
+                        }
+                    }
+                }
+            });
+        }
         if let Some(mounts) = self.mounts() {
             // Unmount projects whose sessions' agents are gone (idle release, exit, deletion).
             let (mounts, sessions) = (Arc::downgrade(mounts), Arc::downgrade(sessions));
@@ -980,6 +1043,69 @@ impl Computers {
             notice,
             env_description: description,
         })
+    }
+
+    /// Set how many consecutive probes must agree before a fallback or return (FR-X3).
+    pub fn set_debounce(&self, probes: u32) {
+        self.debounce.store(probes.max(1), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Designate `computer_id` for the session, or clear it with `None` (FR-X3). The session
+    /// does not move until [`Computers::reconcile`] runs (the watcher, or the caller).
+    pub fn designate(&self, session_id: &str, computer_id: Option<&str>) -> Result<(), ComputerError> {
+        if let Some(id) = computer_id {
+            if id != LOCAL && self.registry.get(id)?.is_none() {
+                return Err(ComputerError::NotFound(id.to_string()));
+            }
+        }
+        self.flap.lock().unwrap().remove(session_id);
+        self.registry.set_designated(session_id, computer_id)
+    }
+
+    /// Move a session with a designated computer to where it belongs (FR-X3): onto the
+    /// designated computer while it answers, onto the main server while it does not. A move
+    /// needs [`Computers::set_debounce`] consecutive probes that agree, so a flapping
+    /// connection does not bounce the session. Returns the switch when one happened. A session
+    /// without a designation never moves; a mid-turn session waits for the next probe.
+    pub async fn reconcile(
+        &self,
+        sessions: &Arc<Sessions>,
+        session_id: &str,
+    ) -> Result<Option<SwitchOutcome>, ComputerError> {
+        let Some(designated) = self.registry.designated(session_id)? else {
+            return Ok(None);
+        };
+        let here = self
+            .registry
+            .session_computer(session_id)?
+            .map(|sc| sc.computer_id)
+            .unwrap_or_else(|| LOCAL.to_string());
+        let up = designated == LOCAL || {
+            let c = self.resolve(&designated)?;
+            self.probe(c.as_ref(), false).await.reachable == Some(true)
+        };
+        let want = if up { designated } else { LOCAL.to_string() };
+        if want == here {
+            self.flap.lock().unwrap().remove(session_id);
+            return Ok(None);
+        }
+        let seen = {
+            let mut f = self.flap.lock().unwrap();
+            let n = f.entry(session_id.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if seen < self.debounce.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(None);
+        }
+        match self.switch(sessions, session_id, &want).await {
+            Ok(out) => {
+                self.flap.lock().unwrap().remove(session_id);
+                Ok(Some(out))
+            }
+            Err(ComputerError::Busy(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Environment for a Claude Code process whose Bash tool runs on `c` through `ember-exec`.
@@ -1299,7 +1425,8 @@ mod tests {
     #[test]
     fn notice_names_both_computers_and_asks_to_reread() {
         let n = switch_notice("mac", "pi");
-        assert!(n.contains("from \"mac\" to \"pi\""));
+        assert!(n.contains("now working on \"pi\" (moved from \"mac\")"));
+        assert!(!n.contains("invalid"));
         assert!(n.contains("re-read any file before editing it"));
     }
 }

@@ -209,7 +209,7 @@ async fn switch_replaces_environment_and_injects_the_notice_once() {
     assert_eq!(out.previous.id, pi.id);
     assert_eq!(out.computer.id, mac.id);
     let notice = out.notice.clone().expect("notice for a session that already ran");
-    assert!(notice.contains("from \"pi\" to \"mac\""), "{notice}");
+    assert!(notice.contains("now working on \"mac\" (moved from \"pi\")"), "{notice}");
     assert!(!s.is_live(&id).await, "agent released so the next start uses the new computer");
     let cur = c.current(s, &id).unwrap();
     assert_eq!(cur.computer.id, mac.id);
@@ -248,7 +248,7 @@ async fn switch_replaces_environment_and_injects_the_notice_once() {
     // Back to this server: described too, with a notice.
     let out = c.switch(s, &id, LOCAL).await.unwrap();
     assert!(out.env_description.contains("\"this server\" (hostname server)"));
-    assert!(out.notice.unwrap().contains("from \"mac\" to \"this server\""));
+    assert!(out.notice.unwrap().contains("now working on \"this server\" (moved from \"mac\")"));
 }
 
 #[tokio::test]
@@ -266,7 +266,7 @@ async fn chained_switches_before_a_message_keep_the_computer_the_agent_observed(
     c.switch(s, &id, &b.id).await.unwrap();
     let out = c.switch(s, &id, &g.id).await.unwrap();
     let notice = out.notice.expect("notice kept");
-    assert!(notice.contains("from \"alpha\" to \"gamma\""), "{notice}");
+    assert!(notice.contains("now working on \"gamma\" (moved from \"alpha\")"), "{notice}");
     let ev = turn(s, &id, "go").await;
     assert_eq!(assistant_text(&ev), format!("echo: {notice}\n\ngo"));
     let starts = f.starts.lock().unwrap();
@@ -468,4 +468,122 @@ async fn http_register_list_and_switch() {
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (st, _) = call(&app, Method::GET, "/api/sessions/nope/computer", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fallback to the main server (FR-X3, FR-S7, INTENT D20)
+
+fn flaky_fixture() -> (Fixture, Arc<Mutex<Vec<String>>>) {
+    let down: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let d = down.clone();
+    let connector: Connector = Arc::new(move |c: Option<&Computer>| -> anyhow::Result<Arc<dyn NodeApi>> {
+        Ok(match c {
+            None => Arc::new(FakeNode { up: true, env: env_for("server") }),
+            Some(c) => Arc::new(FakeNode { up: !d.lock().unwrap().contains(&c.name), env: env_for(&c.name) }),
+        })
+    });
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(Capturing { starts: starts.clone() })];
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store.clone(), adapters);
+    let computers = Computers::with_shim(Registry::new(store), connector, None);
+    computers.install(&sessions);
+    computers.set_debounce(1);
+    (Fixture { sessions, computers, starts }, down)
+}
+
+#[tokio::test]
+async fn fr_x3_disconnect_moves_to_main_server_with_a_moved_notice() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    let out = c.reconcile(s, &id).await.unwrap().expect("moves onto the designated computer");
+    assert_eq!(out.computer.id, pi.id);
+    turn(s, &id, "hello").await;
+
+    down.lock().unwrap().push("pi".into());
+    let out = c.reconcile(s, &id).await.unwrap().expect("falls back");
+    assert_eq!(out.computer.id, LOCAL);
+    let notice = out.notice.expect("moved notice");
+    assert!(notice.contains("now working on \"this server\" (moved from \"pi\")"), "{notice}");
+    assert_eq!(c.current(s, &id).unwrap().computer.id, LOCAL);
+    // Stays put while the computer stays down.
+    assert!(c.reconcile(s, &id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fr_x3_reconnect_moves_back_with_a_notice() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    c.reconcile(s, &id).await.unwrap();
+    turn(s, &id, "hello").await;
+    down.lock().unwrap().push("pi".into());
+    c.reconcile(s, &id).await.unwrap().unwrap();
+    turn(s, &id, "on main").await;
+
+    down.lock().unwrap().clear();
+    let out = c.reconcile(s, &id).await.unwrap().expect("returns");
+    assert_eq!(out.computer.id, pi.id);
+    let notice = out.notice.expect("notice on return");
+    assert!(notice.contains("now working on \"pi\" (moved from \"this server\")"), "{notice}");
+    let ev = turn(s, &id, "back").await;
+    assert_eq!(assistant_text(&ev), format!("echo: {notice}\n\nback"));
+}
+
+#[tokio::test]
+async fn fr_s7_moved_notice_never_says_invalid() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    c.reconcile(s, &id).await.unwrap();
+    turn(s, &id, "hello").await;
+    down.lock().unwrap().push("pi".into());
+    let n1 = c.reconcile(s, &id).await.unwrap().unwrap().notice.unwrap();
+    down.lock().unwrap().clear();
+    turn(s, &id, "x").await;
+    let n2 = c.reconcile(s, &id).await.unwrap().unwrap().notice.unwrap();
+    for n in [n1, n2] {
+        assert!(!n.to_lowercase().contains("invalid"), "{n}");
+        assert!(n.contains("(moved"), "{n}");
+    }
+}
+
+#[tokio::test]
+async fn fr_x3_no_designated_computer_means_no_move() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    // Manually switched, never designated: losing the computer does not move the session.
+    c.switch(s, &id, &pi.id).await.unwrap();
+    down.lock().unwrap().push("pi".into());
+    assert!(c.reconcile(s, &id).await.unwrap().is_none());
+    assert_eq!(c.current(s, &id).unwrap().computer.id, pi.id);
+}
+
+#[tokio::test]
+async fn fr_x3_short_blips_do_not_flap_the_session() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    c.set_debounce(2);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    assert!(c.reconcile(s, &id).await.unwrap().is_none(), "first sighting waits");
+    assert!(c.reconcile(s, &id).await.unwrap().is_some());
+    down.lock().unwrap().push("pi".into());
+    assert!(c.reconcile(s, &id).await.unwrap().is_none(), "one failed probe is a blip");
+    down.lock().unwrap().clear();
+    assert!(c.reconcile(s, &id).await.unwrap().is_none());
+    assert_eq!(c.current(s, &id).unwrap().computer.id, pi.id);
+    down.lock().unwrap().push("pi".into());
+    c.reconcile(s, &id).await.unwrap();
+    assert!(c.reconcile(s, &id).await.unwrap().is_some(), "two in a row fall back");
 }

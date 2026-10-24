@@ -9,6 +9,7 @@
 //! | DELETE | `/api/computers/{id}` | → 204 (409 while a session is on it or a browser egresses through it); its project assignments are removed |
 //! | GET    | `/api/sessions/{id}/computer` | → `CurrentComputer` |
 //! | PUT    | `/api/sessions/{id}/computer` | `{computer_id}` → `SwitchOutcome` (409 mid-turn, 502 unreachable) |
+//! | PUT    | `/api/sessions/{id}/designated-computer` | `{computer_id}` (null clears) → 204; the session falls back to the main server when it is lost and returns (FR-X3) |
 //!
 //! `peer` registers a node reached over the transport (`FR-N1`): either its peer id (64 hex
 //! chars) or a full `PeerAddr` JSON object `{peer, relays, direct}` as the node prints at start.
@@ -38,6 +39,7 @@ pub fn router(computers: Arc<Computers>, sessions: Arc<Sessions>) -> Router {
         .route("/api/computers", get(list).post(register))
         .route("/api/computers/{id}", get(status).delete(remove))
         .route("/api/sessions/{id}/computer", get(current).put(switch))
+        .route("/api/sessions/{id}/designated-computer", axum::routing::put(designate))
         .with_state(AppState { computers, sessions })
 }
 
@@ -139,4 +141,18 @@ async fn switch(
     Json(b): Json<SwitchBody>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(s.computers.switch(&s.sessions, &id, &b.computer_id).await?))
+}
+
+#[derive(Deserialize)]
+struct DesignateBody {
+    computer_id: Option<String>,
+}
+
+async fn designate(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    Json(b): Json<DesignateBody>,
+) -> ApiResult<impl IntoResponse> {
+    s.computers.designate(&id, b.computer_id.as_deref())?;
+    Ok(StatusCode::NO_CONTENT)
 }

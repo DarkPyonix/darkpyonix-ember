@@ -33,7 +33,6 @@ fn spec(id: &str, cwd: &Path) -> ShimSpec {
 /// Collect output text until `needle` appears or the stream ends; returns (text, end offset).
 async fn read_until(c: &mut ShimClient, needle: &str) -> (String, u64) {
     let mut text = String::new();
-    let mut end = 0;
     loop {
         let ev = tokio::time::timeout(Duration::from_secs(15), c.events.recv())
             .await
@@ -42,9 +41,8 @@ async fn read_until(c: &mut ShimClient, needle: &str) -> (String, u64) {
         match ev {
             ShimEvent::Output { start, data } => {
                 text.push_str(&String::from_utf8_lossy(&data));
-                end = start + data.len() as u64;
                 if text.contains(needle) {
-                    return (text, end);
+                    return (text, start + data.len() as u64);
                 }
             }
             ShimEvent::Exited(r) => panic!("agent exited ({r}) before {needle:?}; got {text:?}"),

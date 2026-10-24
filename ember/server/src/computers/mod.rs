@@ -504,6 +504,12 @@ pub fn switch_notice(from: &str, to: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 // The service
 
+/// The computer a [`switch_notice`] says observations came from.
+fn notice_origin(notice: &str) -> Option<String> {
+    let rest = notice.split("changed from \"").nth(1)?;
+    Some(rest.split("\" to \"").next()?.to_string())
+}
+
 /// Result of a switch.
 #[derive(Debug, Clone, Serialize)]
 pub struct SwitchOutcome {
@@ -889,8 +895,16 @@ impl Computers {
         let description = env_description(&target_view.name, &env);
         let moved = previous_view.id != target_view.id;
         // Only an agent that has already worked somewhere has observations to invalidate.
+        // A notice still undelivered means the agent has not looked since an earlier switch: its
+        // observations come from the computer that notice names, not from the one just left.
+        let observed = match current.as_ref().and_then(|sc| sc.notice.as_deref()) {
+            Some(pending) => notice_origin(pending),
+            None => Some(previous_view.name.clone()),
+        };
         let notice = (moved && rec.native_id.is_some())
-            .then(|| switch_notice(&previous_view.name, &target_view.name));
+            .then(|| observed.filter(|o| *o != target_view.name))
+            .flatten()
+            .map(|o| switch_notice(&o, &target_view.name));
         self.registry.set_session_computer(session_id, &target_view.id, Some(&env), notice.as_deref())?;
         // The next message starts the agent with the new computer (and natively resumes it).
         sessions.release(session_id).await.map_err(|e| ComputerError::Other(anyhow::anyhow!("{e:#}")))?;

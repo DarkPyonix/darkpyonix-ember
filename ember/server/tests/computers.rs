@@ -252,6 +252,37 @@ async fn switch_replaces_environment_and_injects_the_notice_once() {
 }
 
 #[tokio::test]
+async fn chained_switches_before_a_message_keep_the_computer_the_agent_observed() {
+    let f = fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let a = c.register("alpha", "http://alpha:8741", "tok").unwrap();
+    let b = c.register("beta", "http://beta:8741", "tok").unwrap();
+    let g = c.register("gamma", "http://gamma:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.switch(s, &id, &a.id).await.unwrap();
+    turn(s, &id, "hello").await;
+
+    // A -> B -> C with no message between: the agent last observed A.
+    c.switch(s, &id, &b.id).await.unwrap();
+    let out = c.switch(s, &id, &g.id).await.unwrap();
+    let notice = out.notice.expect("notice kept");
+    assert!(notice.contains("from \"alpha\" to \"gamma\""), "{notice}");
+    let ev = turn(s, &id, "go").await;
+    assert_eq!(assistant_text(&ev), format!("echo: {notice}\n\ngo"));
+    let starts = f.starts.lock().unwrap();
+    let instr = starts.last().unwrap().instructions.clone().unwrap();
+    assert!(instr.contains("hostname gamma") && !instr.contains("hostname alpha"), "{instr}");
+    drop(starts);
+
+    // C -> A -> C with no message between: what it observed is valid again, no notice.
+    c.switch(s, &id, &a.id).await.unwrap();
+    assert!(c.current(s, &id).unwrap().notice_pending);
+    let out = c.switch(s, &id, &g.id).await.unwrap();
+    assert_eq!(out.notice, None);
+    assert!(!c.current(s, &id).unwrap().notice_pending);
+}
+
+#[tokio::test]
 async fn switch_is_refused_mid_turn_unreachable_or_unknown() {
     let f = fixture();
     let (s, c) = (&f.sessions, &f.computers);

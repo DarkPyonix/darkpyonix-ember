@@ -43,10 +43,12 @@ logger = logging.getLogger("proxy")
 RUNTIMES = ("ose", "vsc")
 DEFAULT_RUNTIME = "ose"
 
-# The theme extension FR-W6 asks for. It is not published yet, so the id is a placeholder:
-# override with DPX_DEFAULT_EXTENSIONS (os.pathsep-separated ids or .vsix paths, or empty to
-# install nothing). Installing a missing id fails with a warning; the server still starts.
-DEFAULT_EXTENSIONS = ("darkpyonix.vscode-darkpyonix-theme",)
+# The extensions FR-W6 asks for: the notebook renderer and the theme (extensions/). They are not
+# published yet, so a `<name>-*.vsix` in the bundled directory (DPX_BUNDLED_EXTENSIONS_DIR, else
+# extensions/dist/ in the repo) is installed in place of the id when it exists. Override the whole
+# list with DPX_DEFAULT_EXTENSIONS (os.pathsep-separated ids or .vsix paths, or empty to install
+# nothing). Installing a missing id fails with a warning; the server still starts.
+DEFAULT_EXTENSIONS = ("darkpyonix.vscode-darkpyonix", "darkpyonix.vscode-darkpyonix-theme")
 
 # The Code-OSS REH web server's own flags (the same server `code serve-web` downloads).
 DEFAULT_OSE_ARGS = ("--host {host} --port {port} --without-connection-token "
@@ -161,11 +163,19 @@ def server_cmd(rt: str, path: str, host: str, port: int, data_dir: Path,
 
 # --- Default extensions (FR-W6) ---------------------------------------------------------
 
+def _bundled_vsix(ext_id: str) -> str | None:
+    """A built .vsix for a default extension id, from the bundled directory, if present."""
+    root = os.environ.get("DPX_BUNDLED_EXTENSIONS_DIR") or str(
+        Path(__file__).resolve().parents[4] / "extensions" / "dist")
+    found = sorted(Path(root).glob(f"{ext_id.split('.', 1)[1]}-*.vsix"))
+    return str(found[-1]) if found else None
+
+
 def default_extensions() -> list[str]:
     """DPX_DEFAULT_EXTENSIONS if set (empty = none), else DEFAULT_EXTENSIONS."""
     raw = os.environ.get("DPX_DEFAULT_EXTENSIONS")
     if raw is None:
-        return list(DEFAULT_EXTENSIONS)
+        return [_bundled_vsix(e) or e for e in DEFAULT_EXTENSIONS]
     return [e.strip() for e in raw.split(os.pathsep) if e.strip()]
 
 

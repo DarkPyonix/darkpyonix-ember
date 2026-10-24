@@ -246,6 +246,13 @@ pub struct SpawnRequest {
     /// Account id; default: the account router's choice (FR-U2).
     #[serde(default)]
     pub account: Option<String>,
+    /// Use the account-switching pipeline (FR-U3). Exclusive with `account`; when neither is
+    /// given the pipeline is used (the pre-FR-A9 default).
+    #[serde(default)]
+    pub pipeline: bool,
+    /// Model proxy path (FR-U6); Claude Code only.
+    #[serde(default)]
+    pub proxy: Option<crate::members::ProxySpec>,
     /// Computer id; default: the main server (`local`).
     #[serde(default)]
     pub computer: Option<String>,
@@ -826,9 +833,16 @@ impl A2a {
             }
         }
         let agent = match req.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-            Some(a) => AgentKind::parse(a)
+            Some(a) => crate::members::parse_harness(a)
                 .ok_or_else(|| A2aError::BadRequest(format!("unknown agent {a}")))?,
             None => leader.agent,
+        };
+        let account = req.account.as_deref().map(str::trim).filter(|a| !a.is_empty());
+        let def = crate::members::MemberDef {
+            harness: agent.as_str().to_string(),
+            account: account.map(String::from),
+            pipeline: req.pipeline || account.is_none(),
+            proxy: req.proxy.clone(),
         };
         let title = req
             .title
@@ -839,19 +853,17 @@ impl A2a {
             .unwrap_or_else(|| format!("{name} \u{00b7} {}", leader.title));
         // Same project and directory; nothing else is inherited (model, account, computer and
         // approvals are the teammate's own).
-        let rec = self
-            .sessions
-            .create_with_account(
-                NewSession {
-                    project: leader.project.clone(),
-                    agent,
-                    cwd: leader.cwd.clone().into(),
-                    model: None,
-                    title,
-                },
-                req.account.as_deref().map(str::trim).filter(|a| !a.is_empty()),
-            )
-            .map_err(session_error)?;
+        let rec = crate::members::create_member_session(&self.sessions, &def, |agent| NewSession {
+            project: leader.project.clone(),
+            agent,
+            cwd: leader.cwd.clone().into(),
+            model: None,
+            title,
+        })
+        .map_err(|e| match e {
+            crate::members::CreateMemberError::Member(e) => A2aError::BadRequest(e.to_string()),
+            crate::members::CreateMemberError::Session(e) => session_error(e),
+        })?;
         let team_id = match existing {
             Some(id) => id,
             None => store.create_team(caller, &leader.project)?.id,

@@ -89,7 +89,7 @@ pub async fn hash_all(node: &dyn NodeApi, paths: &[String]) -> BTreeMap<String, 
 /// the v0 wording applies.
 pub fn switch_notice_with(from: &str, to: &str, cmp: &Comparison) -> String {
     let mut s = format!(
-        "[Ember system notice] This session's computer changed from \"{from}\" to \"{to}\". \
+        "[Ember system notice] This session is now working on \"{to}\" (moved from \"{from}\"). \
          Directory listings, processes and command output you observed earlier came from \
          \"{from}\" and may differ here: re-run commands whose results you rely on. Use the \
          current computer description, not the earlier one."
@@ -179,7 +179,8 @@ mod tests {
     fn notice_lists_changed_files_and_counts_identical() {
         let c = Comparison { same: vec!["/a".into()], changed: vec!["/b".into()] };
         let n = switch_notice_with("mac", "pi", &c);
-        assert!(n.contains("from \"mac\" to \"pi\""));
+        assert!(n.contains("now working on \"pi\" (moved from \"mac\")"));
+        assert!(!n.contains("invalid"));
         assert!(n.contains("/b"));
         assert!(!n.contains("/a"));
         assert!(n.contains("other 1 file(s)"));

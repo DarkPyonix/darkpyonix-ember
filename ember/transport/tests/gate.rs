@@ -1,6 +1,9 @@
 //! FR-N3 admission and revocation, and the dialer's connection cache, on the fake transport.
 #![cfg(feature = "http")]
 
+#[cfg(feature = "iroh")]
+mod common;
+
 use std::time::Duration;
 
 use axum::routing::get;
@@ -101,9 +104,6 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 #[cfg(feature = "iroh")]
 #[tokio::test]
 async fn revoked_device_is_dropped_within_a_heartbeat_over_iroh() {
-    mod common {
-        include!("common.rs");
-    }
     let (device, server, _dir) = common::iroh_pair().await;
     let gate = PeerGate::allow_list([device.peer_id()]);
     serve(&server, gate.clone());
@@ -135,9 +135,6 @@ async fn revoked_device_is_dropped_within_a_heartbeat_over_iroh() {
 #[cfg(feature = "iroh")]
 #[tokio::test]
 async fn stranger_is_refused_over_iroh() {
-    mod common {
-        include!("common.rs");
-    }
     let (stranger, server, _dir) = common::iroh_pair().await;
     let gate = PeerGate::allow_list([]);
     serve(&server, gate.clone());

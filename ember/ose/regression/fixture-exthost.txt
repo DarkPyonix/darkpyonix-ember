@@ -1,0 +1,5 @@
+2026-10-25 10:00:01.000 [info] ExtensionService#_doActivateExtension redhat.vscode-yaml, startup: false, activationEvent: 'onLanguage:yaml'
+2026-10-25 10:00:01.500 [info] ExtensionService#_doActivateExtension esbenp.prettier-vscode, startup: true, activationEvent: '*'
+2026-10-25 10:00:02.000 [info] ExtensionService#_doActivateExtension golang.go, startup: true, activationEvent: '*'
+2026-10-25 10:00:02.100 [error] Activating extension 'golang.go' failed: Cannot find module 'x'
+2026-10-25 10:00:03.000 [error] Activating extension vscodevim.vim failed due to an error:

@@ -16,6 +16,7 @@ Behaviour changes for the IDE window come from `ember/proxy/`.
 | `product.overrides.json` | Deep-merged into upstream `product.json`: DarkPyonix names, Open VSX gallery, telemetry off. |
 | `build.sh` | Fetch tag → apply overrides → `npm ci` → gulp `core-ci` + Copilot extension → gulp `vscode-reh-web-<target>-min-ci` → `tar.gz` + `.sha256`. CI only; see [Build notes](#build-notes). |
 | `check-product.sh` | Fails if a `product.json` is not on Open VSX, has telemetry on, or names a Microsoft marketplace/update/telemetry endpoint. |
+| `regress.sh` | Extension regression (NFR-W1, #84): installs `regression/extensions.json` from Open VSX, parses extension host logs, compares with `regression/expected.json`. Activation needs a client (`OSE_REGRESS_CLIENT`, not built); `--self-test` runs offline. The list is provisional until the owner confirms it. |
 | `smoke.sh` | Starts a packaged build and checks: workbench served, Open VSX search, extension install. |
 
 Builds run in GitHub Actions (`.github/workflows/test-ose.yml`), never on a developer machine:

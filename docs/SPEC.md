@@ -55,7 +55,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | #83 |
 | FR-W5, FR-W5a–h, NFR-W5a | Designed only (`docs/design/MOBILE-NO-NODE.md`), outside the 10-18 deadline. | #80 |
 | FR-W6 | Extensions are in `extensions/` (#69). Staging into OSE (`ember/ose/stage-extensions.sh`) and the proxy default list (`DEFAULT_EXTENSIONS`) are written (#117), unverified on a real build. `.vsix` packaging into `extensions/dist` is not yet produced. Notebook criteria are open. | #15 |
-| NFR-W1 | No extension regression test yet. | #84 |
+| NFR-W1 | Harness `ember/ose/regress.sh` (install, activation log parse, compare with `ember/ose/regression/expected.json`); self-test in CI. Extension list unconfirmed, no real run, no activation client. | #84 |
 | FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `ember/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
 | NFR-P1 | Not measured. | #26 |
 | FR-B1–B4 | `detach.js` and `ember/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
@@ -372,7 +372,7 @@ run on real networks (#10) or against the real hub (#62).
 | **FR-W5h** | *[provisional]* On iOS, `FR-W5f` (downloaded extension code) ships only behind a flag, enabled after the App Review decision (`MOBILE-NO-NODE.md` Q-M3). `FR-W5a`–`FR-W5e` ship without it. | An iOS build with the flag off downloads and executes no extension code locally. |
 | **NFR-W5a** | *[provisional: initial targets, to be adjusted once by the first measurement]* Mobile IDE responsiveness. | On a reference mid-range Android phone and a reference iPhone: `FR-W5a` warm open to editable ≤ 3 s p95 over a direct path; `FR-W5c` remote file open ≤ 1 s p95 for a 100 KB file; `FR-W5f` cold open ≤ 5 s p95; IDE-window RSS recorded per mode. |
 | **FR-W6** | vscode-darkpyonix (notebook renderer) and vscode-darkpyonix-theme are installed by default. [user] | Present on first launch for both runtimes. |
-| **NFR-W1** | Extensions are tested unmodified from the marketplace matching the runtime. | Regressions block release. |
+| **NFR-W1** | Extensions are tested unmodified from the marketplace matching the runtime. | Regressions block release. [provisional] A fixed list of popular extensions (`ember/ose/regression/extensions.json`) is installed from Open VSX into the OSE build; each must activate without error in the extension host log, as `expected.json` records. A failure not marked `known-fail` fails the run. |
 
 > **`FR-W5a`–`FR-W5h`, `NFR-W5a`** come from `docs/design/MOBILE-NO-NODE.md` (2026-10-03, design only;
 > outside the 10-18 deadline). The phone is mainly a client of a computer's own `serve-web` (`FR-W5a`)

@@ -471,9 +471,16 @@ Rejected: messages as the only channel between sessions.
 
 **Why.** Agentic work is mostly watching and steering. A project with several agents needs one place where their requests and reports arrive, and one place to talk to a person without waking an agent. The mention gate keeps people talking to people from costing tokens or steering an agent by accident.
 
-**Status.** Specified only (`FR-L10`–`FR-L12`, `FR-T10`–`FR-T15`). Not built.
+**Owner's answers, 2026-10-25.**
 
-**Open points** (owner to decide; nothing here is invented, see Q10–Q13): how an external account authenticates and what it may see; whether Home's general chat is a session without a project; whether a channel persists across machines; whether an invited person's message can be a request to the project's agents at all.
+- Tokens on Home: "토큰 사용량은 진짜로 token 사용량을 말하는거야. 해당 스펙이 usage가 아니라 진짜로 소모한 토큰 량이 맞으면 괜찮고 아니면 새로 스펙 추가해." `FR-U3` and `FR-U4` did not define consumed token counts, so `FR-U7` is new; Home shows both (`FR-L11`).
+- Mentions by invited people: "그래 좋아. 근데 사람별로 앞으로 몇시간 동안 자동 허용 이런 기능이 필요할거 같아." The default stays (an invited person's mention reaches no agent unless the owner allows it, `FR-T15`); a per-person time-boxed auto-allow is added (`FR-T17`).
+- Q10: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." (`FR-T14`)
+- Q11: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." (`FR-L13`)
+- Q12: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" (tentative wording; `FR-T16`)
+- Q13: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. 한 채널은 한 프로젝트에 속한거야. 때문에 채널 페이지에 들어가면 프로젝트별로 분류된 섹션의 하위에 채널들이 하나씩 놓여있는 형태인거지. 한 프로젝트는 기본적으로 하나의 채널을 가지고, 추가 채널을 생성할 수 있는 형태인거야." (`FR-L10`, `FR-L12`, `FR-T10`)
+
+**Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: how an invited person authenticates (Q10, remaining part) and the exact JSONL layout of `FR-T16`.
 
 ## Open questions
 
@@ -488,7 +495,7 @@ Rejected: messages as the only channel between sessions.
 | **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. Implemented in `ember/transport` (#23); `NFR-N1` not yet measured on real networks (#10). tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed: deleted** [user, 2026-10-03] |
 | **Q9** | `ember/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `ember/proxy/docs/BACKGROUND.md` §7-3. | Open; HTTPS over P2P is #10 |
-| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | Open; the owner decides. `FR-T14` is [provisional] until then |
-| **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | Open; the owner decides. `FR-L11` is [provisional] until then |
-| **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | Open; the owner decides. `FR-T10` stores on the main server [provisional] |
-| **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | Open; the owner decides |
+| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Open remainder:** the authentication mechanism of the invite |
+| **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | **Closed** [user, 2026-10-25]: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." Home chat sessions live in a built-in Unsorted project (`FR-L13`) |
+| **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | **Closed** [user, 2026-10-25]: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" Per-channel append-only JSONL on the main server (`FR-T16`); the exact layout is [provisional] |
+| **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | **Closed** [user, 2026-10-25]: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. ..." Full quote in D22. A channel belongs to one project; every project has a default channel (`FR-L12`, `FR-T10`) |

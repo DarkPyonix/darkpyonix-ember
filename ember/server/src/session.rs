@@ -321,6 +321,7 @@ impl Sessions {
             remote: None,
             mcp_servers: Vec::new(),
             computer: None,
+            fork_from: None,
         };
         let prepare_hooks: Vec<PrepareHook> = self.prepare_hooks.lock().unwrap().clone();
         for hook in &prepare_hooks {
@@ -331,7 +332,33 @@ impl Sessions {
             hook(&rec, &mut req)?;
         }
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
-        let run = adapter.start(req, tx.clone()).await?;
+        // A fork whose agent forks natively (FR-S5): fork instead of starting fresh. If the
+        // agent cannot after all, start fresh and put the copied conversation in front of it.
+        let native_fork = if rec.native_id.is_none() { self.store.pending_native_fork(id)? } else { None };
+        let run = match native_fork {
+            Some(from) => {
+                let mut forked = req.clone();
+                forked.fork_from = Some(from);
+                match adapter.start(forked, tx.clone()).await {
+                    Ok(run) => {
+                        self.store.settle_native_fork(id, true)?;
+                        run
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %id, "native fork failed, copying the conversation: {e:#}");
+                        self.store.settle_native_fork(id, false)?;
+                        let _ = self.record(
+                            id,
+                            &AgentEvent::Notice {
+                                message: format!("The agent could not fork its session ({e:#}); the conversation was copied instead."),
+                            },
+                        );
+                        adapter.start(req, tx.clone()).await?
+                    }
+                }
+            }
+            None => adapter.start(req, tx.clone()).await?,
+        };
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let run = LiveRun { run: Arc::new(Mutex::new(run)), events: tx, generation };
         live.insert(id.to_string(), run.clone());
@@ -422,7 +449,28 @@ impl Sessions {
         turn_seq: Option<i64>,
         title: Option<&str>,
     ) -> Result<SessionRecord, crate::fork::ForkError> {
+        let parent = self.store.session(id)?;
         let rec = self.store.fork_session(id, turn_seq, title)?;
+        // The agent's own fork first, the conversation copy as the fallback (FR-S5, #78).
+        if let (Some(parent), Some(origin)) = (parent, self.store.fork_origin(&rec.id)?) {
+            let mode = self.adapters.get(&parent.agent).map(|a| a.native_fork());
+            let events = self.store.events_after(id, 0)?;
+            let turns = crate::fork::completed_turns(&events);
+            if let (Some(mode), Some(ordinal)) = (mode, turns.iter().position(|s| *s == origin.turn_seq)) {
+                let trailing = events
+                    .iter()
+                    .any(|e| e.seq > origin.turn_seq && matches!(e.event, AgentEvent::UserMessage { .. }));
+                if let Some(from) = crate::fork::plan_native_fork(
+                    mode,
+                    parent.native_id.as_deref(),
+                    ordinal + 1,
+                    turns.len(),
+                    trailing,
+                ) {
+                    self.store.set_native_fork(&rec.id, &from)?;
+                }
+            }
+        }
         let _ = self.push.send(Push::SessionCreated { session: rec.clone() });
         Ok(rec)
     }

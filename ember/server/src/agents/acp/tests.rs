@@ -13,6 +13,7 @@ fn setup(cwd: &Path) -> Setup {
     Setup {
         cwd: cwd.to_path_buf(),
         resume_native_id: None,
+        fork_from: None,
         mcp_servers: Vec::new(),
         computer: None,
         prepend_instructions: None,
@@ -327,6 +328,27 @@ async fn resume_is_preferred_over_load() {
     let events = turn(&mut run, &mut rx, "setup?", ApprovalDecision::AllowOnce).await;
     assert_eq!(last_message(&events), "setup=resume");
     run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fork_uses_session_fork_and_announces_the_new_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = setup(dir.path());
+    s.fork_from = Some(ForkFrom { native_id: "parent-1".into(), keep_turns: None });
+    let (mut run, mut rx) = start(FakeOptions { fork: true, ..Default::default() }, s).await.unwrap();
+    assert_eq!(next(&mut rx).await, AgentEvent::NativeSession { native_id: "parent-1-fork".into() });
+    let events = turn(&mut run, &mut rx, "setup?", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "setup=fork");
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fork_without_the_capability_fails_so_the_copy_can_take_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = setup(dir.path());
+    s.fork_from = Some(ForkFrom { native_id: "parent-1".into(), keep_turns: None });
+    let err = start(FakeOptions::default(), s).await.err().expect("must fail");
+    assert!(format!("{err:#}").contains("session/fork"), "{err:#}");
 }
 
 #[tokio::test]

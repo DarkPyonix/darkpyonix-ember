@@ -55,7 +55,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, Mutex};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a `result` after the interrupt control request before sending SIGINT.
@@ -111,6 +111,11 @@ impl ClaudeCodeAdapter {
         if let Some(id) = &req.resume_native_id {
             // Equals form, as the SDK does, so an id can never be read as a flag.
             args.push(format!("--resume={id}"));
+        } else if let Some(fork) = &req.fork_from {
+            // FR-S5: `--fork-session` makes the resume a copy under a new session id, which the
+            // init event announces like any other.
+            args.push(format!("--resume={}", fork.native_id));
+            args.push("--fork-session".into());
         }
         // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
         // variadic: the equals form keeps it to exactly this one value. Without
@@ -202,6 +207,11 @@ pub fn mcp_config(servers: &[super::McpServer]) -> Option<String> {
 impl AgentAdapter for ClaudeCodeAdapter {
     fn kind(&self) -> AgentKind {
         AgentKind::ClaudeCode
+    }
+
+    /// `--resume <id> --fork-session` forks the whole session (FR-S5).
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::Latest
     }
 
     async fn detect(&self) -> Detected {
@@ -932,6 +942,7 @@ mod tests {
             remote: None,
             mcp_servers: Vec::new(),
             computer: None,
+            fork_from: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
@@ -939,6 +950,20 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
         assert!(args.contains(&"--resume=abc".to_string()));
+    }
+
+    #[test]
+    fn fork_resumes_the_parent_as_a_new_session() {
+        let req = StartRequest {
+            cwd: ".".into(),
+            fork_from: Some(crate::agents::ForkFrom { native_id: "parent".into(), keep_turns: None }),
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        assert!(args.contains(&"--resume=parent".to_string()));
+        assert!(args.contains(&"--fork-session".to_string()));
+        let plain = ClaudeCodeAdapter::args(&StartRequest { cwd: ".".into(), ..Default::default() });
+        assert!(!plain.contains(&"--fork-session".to_string()));
     }
 
     #[test]

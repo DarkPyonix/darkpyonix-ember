@@ -18,5 +18,6 @@ pub mod projects;
 pub mod schedules;
 pub mod hub;
 pub mod session;
+pub mod session_shim;
 pub mod store;
 pub mod transport;

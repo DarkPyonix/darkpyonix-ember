@@ -441,7 +441,7 @@ that it moved is clearer than telling it that its observations are invalid.
 
 Rejected: failing tool actions while the computer is away; wording the notice as invalidation.
 
-**Owner decisions (E5, E6, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** E5 (expose the designated and the current computer to clients as read-only fields) is on hold until the real implementation (the owner's K5). E6: the loss detection default stays 2 probes x 10 s (about 10-20 s) and is configurable; it is revisited after the two-machine disconnect test.
+**Owner decisions (E5, E6, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** E5: the session response exposes the designated computer and the current computer to clients as read-only fields (approved as recommended; the code is in another PR). E6: the loss detection default stays 2 probes x 10 s (about 10-20 s) and is configurable; it is revisited after the two-machine disconnect test.
 
 This closes Q2 (who moves a session): the user designates, and the server moves it on a connection
 change. An agent-triggered `switch_computer` is not part of this decision.

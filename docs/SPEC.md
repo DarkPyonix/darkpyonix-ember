@@ -36,7 +36,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-S5 | Server implemented (Ember-level fork, transcript-seeded); client action not built. Not yet compiled. | #78 |
 | FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: #79 |
 | FR-A1–A4 | Claude Code and Codex (#14), Antigravity (#64), ACP agents (#61) implemented, CI against recordings and fakes. Real OMP run not verified. agy shell writes fail under `--sandbox`. | #53, #65 |
-| FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is not implemented, in the server or the client. | #73 |
+| FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is implemented per session: server `Sessions::set_approve_all` (any agent kind, answers pending and later approvals), `PUT /api/sessions/{id}/approve-all`, client toggle in the conversation menu and a banner while on; in-memory on the server, so a restart returns sessions to asking. Tests written, not yet run in CI. | #73 |
 | FR-A6–A8 | Implemented, CI (#14, #58). | |
 | FR-X1–X3 | Implemented, CI (#20, #34, #47, #48); verified end to end with a node on the same Mac. A switch between two physical computers is not verified; the project mount (`mount-nfs`, `mount-fuse` features) is not built in CI. | #6 |
 | FR-X4 | Implemented in ember node (`jobs.rs`), CI. | |
@@ -207,6 +207,23 @@ file per run in `~/.gemini/config/projects/` (not used by the adapter; the test 
 removed). Not verified: browser tools; the read-only fallback against a real different agy
 version; the end-to-end adapter test (`EMBER_E2E_AGY=1`) on 1.2.16. Open: shell writes under
 `--sandbox` (#65).
+
+**#65 findings (agy 1.4.6, 2026-10-25, macOS, project on `/Volumes`).** The failure reproduces on 1.4.6
+and is not caused by the external disk, `/Volumes` vs `/private` paths, or untrusted folders. agy
+writes a Seatbelt profile to `~/.gemini/sandbox/profiles/exebox-*.sb` per command (deleted after
+use; captured by polling). It allows writes to `/` and then explicitly denies writes to the
+working directory, its `.git` and the enclosing repository's `.git`, plus system paths. The allow
+list holds only temp dirs, agy's own brain/scratch folders and a few toolchain caches. Running
+the captured profile with `sandbox-exec -f` reproduces `Operation not permitted` for `touch` in
+the cwd and a subfolder, while the parent folder stays writable. The same happens when the cwd
+is exactly a `trustedWorkspaces` entry (`--mode accept-edits|auto`, `--project` change nothing),
+and a project `.agents/settings.json` with `write_file(<cwd>/)` did not change the profile. The agy docs say workspace
+writes in the sandbox come from `write_file` rules in `permissions` of
+`~/.gemini/antigravity-cli/settings.json`; headless runs apparently get no such grant. Cause: agy,
+not Ember's wrapper. Not verified: a project under the home directory; a global `write_file`
+rule (it would edit the user's global agy config, which FR-A5f forbids). Decision for the user:
+keep `--sandbox` and accept that shell commands cannot write (file edits via `write_to_file`
+still work), or add a global `write_file` allow rule, or set `EMBER_AGY_SANDBOX=0` (the hook stays the gate).
 
 **Outcome:** tests 1–7 pass on 1.2.16 (browser tools untestable); Antigravity sessions on 1.2.16
 run gated, any other version read-only.

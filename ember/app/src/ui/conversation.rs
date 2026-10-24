@@ -99,6 +99,15 @@ pub fn ConversationView(id: String) -> Element {
                     }
                 },
             );
+            let ap = id.clone();
+            run(
+                async move { services().client.load_approve_all(&ap).await.map(|_| ()).map_err(|e| e.to_string()) },
+                |r| {
+                    if let Err(e) = r {
+                        tracing::debug!("approve-all: {e}");
+                    }
+                },
+            );
             let a = id.clone();
             run(
                 async move { services().server.session_computer(&a).await.map_err(|e| e.to_string()) },
@@ -193,6 +202,11 @@ pub fn ConversationView(id: String) -> Element {
     let computers = {
         let _ = *ui.live.launcher.read();
         s.client.read(|st| st.computers().to_vec())
+    };
+
+    let approve_all = {
+        let _ = *ui.live.launcher.read();
+        s.client.read(|st| st.approve_all(&id))
     };
 
     // ---- transcript ----------------------------------------------------------------------------
@@ -326,6 +340,22 @@ pub fn ConversationView(id: String) -> Element {
             );
         }
     };
+    let toggle_approve_all = {
+        let id = id.clone();
+        move |_: ()| {
+            more_menu.set(false);
+            let sid = id.clone();
+            let enable = !approve_all;
+            run(
+                async move { services().client.set_approve_all(&sid, enable).await.map_err(|e| e.to_string()) },
+                |r| {
+                    if let Err(e) = r {
+                        show_message(format!("Could not switch approve everything: {e}"));
+                    }
+                },
+            );
+        }
+    };
     let clear_queue = {
         let id = id.clone();
         move |_: ()| {
@@ -424,7 +454,16 @@ pub fn ConversationView(id: String) -> Element {
                     },
                     Button { text: if pinned { "Unpin" } else { "Pin" }, variant: ButtonVariant::Text, fill_max_width: true, on_click: pin_this }
                     Button { text: "Export", variant: ButtonVariant::Text, fill_max_width: true, on_click: export_this }
+                    Button {
+                        text: model::approve_all_menu_label(approve_all),
+                        variant: ButtonVariant::Text,
+                        fill_max_width: true,
+                        on_click: toggle_approve_all,
+                    }
                 }
+            }
+            if let Some(text) = model::approve_all_banner(approve_all) {
+                Banner { text, tone: Tone::Warning }
             }
             // Computer and IDE, a row of their own (they do not fit beside the title on a phone).
             Row {

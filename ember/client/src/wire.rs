@@ -170,6 +170,9 @@ pub struct SessionDetail {
     /// Whether the fork action is offered (FR-S5); disabled, not failing, when `false`.
     #[serde(default)]
     pub can_fork: bool,
+    /// Whether the session is in approve-everything mode (FR-A5).
+    #[serde(default)]
+    pub approve_all: bool,
 }
 
 /// `GET /agents` entry.
@@ -207,6 +210,8 @@ pub enum Push {
     ProjectUpdated { project: Project },
     /// A team's members or tasks changed (FR-T7): the whole team.
     TeamUpdated { team: TeamView },
+    /// A session's approve-everything mode was switched (FR-A5).
+    ApproveAll { session_id: String, enabled: bool },
 }
 
 // ---- teams and mentions (FR-T6, FR-T7; server `a2a::team`, `a2a::mention`) -------------------

@@ -5,7 +5,7 @@
 //! idle, and every event it emits is stored before it is pushed, so clients can come and go
 //! without affecting the turn.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +44,8 @@ pub enum Push {
     /// A schedule run was recorded or changed status (`running`, `completed`, `failed`,
     /// `interrupted`, `skipped`, `missed`). A `missed` run's `error` is the notice text.
     ScheduleRun { run: ScheduleRun },
+    /// A session's approve-everything mode was switched (FR-A5).
+    ApproveAll { session_id: String, enabled: bool },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -141,6 +143,9 @@ pub struct Sessions {
     last_active: std::sync::Mutex<HashMap<String, Instant>>,
     /// Sessions a client is looking at, and until when (FR-S6). Renewed by the client.
     leases: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Sessions in approve-everything mode (FR-A5). Opt-in per session, kept in memory: a server
+    /// restart returns every session to asking.
+    approve_all: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Sessions {
@@ -161,6 +166,7 @@ impl Sessions {
             push,
             last_active: std::sync::Mutex::new(HashMap::new()),
             leases: std::sync::Mutex::new(HashMap::new()),
+            approve_all: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -346,6 +352,18 @@ impl Sessions {
                 if let Err(e) = this.record(&sid, &event) {
                     tracing::error!(session = %sid, "failed to store event: {e:#}");
                 }
+                // Approve-everything mode answers a new request itself (FR-A5). Spawned: the
+                // answer goes back through this very channel.
+                if let AgentEvent::ApprovalRequested { approval_id, .. } = &event {
+                    if this.approve_all(&sid) {
+                        let (this, sid, approval_id) = (this.clone(), sid.clone(), approval_id.clone());
+                        tokio::spawn(async move {
+                            if let Err(e) = this.answer(&sid, &approval_id, ApprovalDecision::AllowOnce).await {
+                                tracing::warn!(session = %sid, "auto-approve failed: {e}");
+                            }
+                        });
+                    }
+                }
             }
             let mut live = this.live.lock().await;
             if live.get(&sid).is_some_and(|l| l.generation == generation) {
@@ -461,6 +479,49 @@ impl Sessions {
             .await
             .map_err(|_| anyhow::anyhow!("agent for session {id} has exited"))?;
         live.run.lock().await.answer(approval_id, decision).await?;
+        Ok(())
+    }
+
+    /// Whether `id` is in approve-everything mode (FR-A5).
+    pub fn approve_all(&self, id: &str) -> bool {
+        self.approve_all.lock().unwrap().contains(id)
+    }
+
+    /// Switch approve-everything mode for `id` (FR-A5). Switching it on also allows every approval
+    /// the running turn is waiting on; later requests are allowed as they arrive (see the event
+    /// pump). It works for every agent kind because it only answers through [`Sessions::answer`].
+    pub async fn set_approve_all(self: &Arc<Self>, id: &str, enabled: bool) -> Result<(), SessionError> {
+        self.store.session(id)?.ok_or_else(|| SessionError::NotFound(id.into()))?;
+        let changed = {
+            let mut set = self.approve_all.lock().unwrap();
+            if enabled { set.insert(id.to_string()) } else { set.remove(id) }
+        };
+        if !changed {
+            return Ok(());
+        }
+        let _ = self.push.send(Push::ApproveAll { session_id: id.to_string(), enabled });
+        let message = if enabled {
+            "Approve everything is on: tool requests in this session are allowed without asking."
+        } else {
+            "Approve everything is off: tool requests ask again."
+        };
+        self.record(id, &AgentEvent::Notice { message: message.into() })?;
+        if enabled {
+            let mut pending: Vec<String> = Vec::new();
+            for e in self.store.events_after(id, 0)? {
+                match e.event {
+                    AgentEvent::ApprovalRequested { approval_id, .. } => pending.push(approval_id),
+                    AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|p| *p != approval_id),
+                    AgentEvent::TurnEnded { .. } => pending.clear(),
+                    _ => {}
+                }
+            }
+            for approval_id in pending {
+                if let Err(e) = self.answer(id, &approval_id, ApprovalDecision::AllowOnce).await {
+                    tracing::warn!(session = %id, "approve-all of pending {approval_id} failed: {e}");
+                }
+            }
+        }
         Ok(())
     }
 

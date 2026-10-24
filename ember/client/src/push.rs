@@ -48,6 +48,12 @@ struct TeamBody {
 }
 
 #[derive(Deserialize)]
+struct ApproveAllBody {
+    session_id: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
 struct LaggedBody {
     #[serde(default)]
     missed: u64,
@@ -83,6 +89,10 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
         "team_updated" => {
             let b: TeamBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::TeamUpdated { team: b.team })
+        }
+        "approve_all" => {
+            let b: ApproveAllBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ApproveAll { session_id: b.session_id, enabled: b.enabled })
         }
         "lagged" => {
             let b: LaggedBody = serde_json::from_value(value).map_err(malformed)?;
@@ -216,6 +226,15 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(p, Push::Event { event: StoredEvent { event: AgentEvent::Notice { .. }, .. }, .. }));
+    }
+
+    #[test]
+    fn fr_a5_decodes_approve_all() {
+        assert_eq!(
+            decode(r#"{"type":"approve_all","session_id":"a","enabled":true}"#),
+            Ok(Push::ApproveAll { session_id: "a".into(), enabled: true })
+        );
+        assert!(matches!(decode(r#"{"type":"approve_all"}"#), Err(DecodeError::Malformed(_))));
     }
 
     #[test]

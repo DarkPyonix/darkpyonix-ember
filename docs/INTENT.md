@@ -401,7 +401,7 @@ by hand.
 
 ### D19: Agent API traffic exits through the current computer
 
-**Decision.** [user, confirmed 2026-10-25 ("3번 해석 맞아"); the owner's words: "실제로
+**Decision.** [user, confirmed 2026-10-25 through the leader session; the owner's words: "실제로
 네트워크 통신 마저도 각 컴퓨터로 보내는 것이기 때문에 클로드 서버에서는 각각의 컴퓨터에서 클로드
 코드가 동작하도록 IP가 잡혀야 한다는거야."] Not only tool execution (D4) but the agent CLI's own API
 traffic leaves through the session's current computer, so the model provider sees that computer's IP.

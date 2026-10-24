@@ -346,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
-        .merge(ember_server::api::ide::router(sessions, ide))
+        .merge(ember_server::api::ide::router(sessions.clone(), ide))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))

@@ -304,7 +304,7 @@ makes its own `PreToolUse` hook (matcher `*`) the only gate:
    recreated and revoked when it ends. Ending or cancelling a turn denies every pending approval.
 4. Before every run `agy -p /hooks --output-format json` must list Ember's hook, else the run is
    refused (hooks.json has been silently dropped in the past).
-5. `--sandbox` is used as well, and the agy version is pinned. Another version is warned about and
+5. `--sandbox` is used as well (reversed 2026-10-25, see #65 below), and the agy version is pinned. Another version is warned about and
    runs read-only until the tests below pass on it.
 6. A global hook, if used, passes through when Ember's environment is absent, so the user's own agy
    sessions are unaffected.
@@ -328,6 +328,8 @@ the project's `.agents/` (writes into the user's repository).
 
 **Status.** Implemented (#64, `ember/server/src/agents/antigravity.rs`). Open: shell writes fail
 under `--sandbox` even inside the project (#65).
+
+**Owner decision (E11, #65, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** This reverses the 2026-10-03 decision to keep `--sandbox`. The default becomes `EMBER_AGY_SANDBOX=0` (no `--sandbox`) and Ember's hook is the gate, because the sandbox denies shell writes in the working directory. `EMBER_AGY_SANDBOX=1` turns it back on. The code change is tracked in #65.
 ### D15: REST paths carry no version
 
 **Decision.** [user, 2026-10-03: "REST API의 버저닝은 죄악이야"; a principle for every REST API,
@@ -379,7 +381,9 @@ session, and every update needs every session stopped.
 Rejected: the current coupling, where the agent is a child of the server with `kill_on_drop`, so a
 server exit kills every agent; stopping all sessions to update the server.
 
-**Status.** Not built. The design is open: the shim protocol and how handoff is verified.
+**Owner decision (E9, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** The memory limit is a 1 s RSS poll by the shim, not `RLIMIT_AS` (V8 reserves a large address space and would die at the limit); the interval is configurable. After the agent exits the shim waits up to 1 hour for the final ack (E10 in the owner's list), configurable.
+
+**Status.** Built in part (#128); see FR-S8.
 
 ### D18: A team member is a harness plus an account, or an account-switching pipeline
 
@@ -397,7 +401,9 @@ exactly those choices.
 Rejected: tying a harness to its vendor's models only; choosing the account only at session start
 by hand.
 
-**Status.** Member definition and the Claude Code proxy env are built (#129, awaiting CI). The proxy server is not part of Ember.
+**Owner decisions (E1, E2, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** `team spawn` with neither an account nor a pipeline keeps defaulting to the pipeline (the account router); the strict exactly-one check stays in the member API. The proxy env is added to Codex and agy one harness at a time, each only after an integration test verifies the CLI's real proxy or base-URL setting; until then only Claude Code gets it.
+
+**Status.** Member definition and the Claude Code proxy env are built (#129, awaiting CI). The proxy server is not part of Ember. Verification issues for Codex and agy are filed.
 
 ### D19: Agent API traffic exits through the current computer
 
@@ -407,6 +413,8 @@ by hand.
 traffic leaves through the session's current computer, so the model provider sees that computer's IP.
 Candidate: the CLI gets `HTTPS_PROXY` pointing at a proxy that forwards through ember node.
 The owner confirmed this reading (traffic, not only tools) on 2026-10-25.
+
+**Owner decisions (E3, E4, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** CONNECT only: no plain `http://` proxying (`HTTP_PROXY` is not served). A tunnel already open stays on its computer after a switch and the proxy stops only when the session ends (an idle release is not an end); a long stream can therefore keep leaving from the old IP until it closes.
 
 **Why.** To the provider, Claude Code should look like it runs on that computer. D6 already does
 this for the remote browser.
@@ -433,6 +441,8 @@ that it moved is clearer than telling it that its observations are invalid.
 
 Rejected: failing tool actions while the computer is away; wording the notice as invalidation.
 
+**Owner decisions (E5, E6, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** E5 (expose the designated and the current computer to clients as read-only fields) is on hold until the real implementation (the owner's K5). E6: the loss detection default stays 2 probes x 10 s (about 10-20 s) and is configurable; it is revisited after the two-machine disconnect test.
+
 This closes Q2 (who moves a session): the user designates, and the server moves it on a connection
 change. An agent-triggered `switch_computer` is not part of this decision.
 
@@ -451,6 +461,8 @@ session's live and past output and send it input or an interrupt, as A2A tools. 
 what it is doing.
 
 Rejected: messages as the only channel between sessions.
+
+**Owner decisions (E7, E8, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** The implicit grant runs only from a team leader to its own teammates; a teammate acts on the leader's terminal only with an explicit user grant. The `ember-a2a` CLI subcommands and the agent instruction text are a separate follow-up issue, so #132 closes at the tools.
 
 **Status.** Server tools built (#132, FR-T9); the CLI subcommands are not.
 

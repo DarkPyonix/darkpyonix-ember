@@ -397,7 +397,7 @@ exactly those choices.
 Rejected: tying a harness to its vendor's models only; choosing the account only at session start
 by hand.
 
-**Status.** Not built.
+**Status.** Member definition and the Claude Code proxy env are built (#129, awaiting CI). The proxy server is not part of Ember.
 
 ### D19: Agent API traffic exits through the current computer
 

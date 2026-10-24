@@ -14,6 +14,7 @@ pub mod events;
 pub mod fork;
 pub mod history;
 pub mod mcp;
+pub mod members;
 pub mod projects;
 pub mod schedules;
 pub mod hub;

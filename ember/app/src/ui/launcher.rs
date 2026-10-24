@@ -68,6 +68,7 @@ pub fn Launcher() -> Element {
             }
             Divider {}
             ComputerList { project: selected.clone() }
+            ChatGptUsage {}
         }
     }
 }
@@ -531,6 +532,38 @@ fn ComputerList(project: Option<String>) -> Element {
                                 },
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// ChatGPT plan usage (FR-U4): per account, tokens today and the weekly per-app cap. Hidden
+/// when no ChatGPT account exists (sign-in off or never used).
+#[component]
+fn ChatGptUsage() -> Element {
+    let ui = use_ui();
+    let accounts = ui.live.chatgpt.read().clone();
+    if accounts.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        Column {
+            fill_max_width: true,
+            space_role: SpaceRole::Xs,
+            Text { text: "ChatGPT plan usage", type_role: TypeRole::Subtitle }
+            for a in accounts {
+                Row {
+                    key: "{a.id}",
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Text { text: a.label.clone(), type_role: TypeRole::BodyStrong }
+                    Text {
+                        text: model::chatgpt_usage_line(&a),
+                        type_role: TypeRole::Caption,
+                        color: Paint::Role(ColorRole::OnSurfaceVariant),
                     }
                 }
             }

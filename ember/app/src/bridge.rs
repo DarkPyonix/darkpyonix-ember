@@ -30,7 +30,7 @@ use ember_client::wire::DetectedAgent;
 use ember_client::{Changes, LauncherStatus};
 
 use crate::model::merge_computers;
-use crate::server::Account;
+use crate::server::{Account, ChatGptAccount};
 use crate::services::{services, Services};
 
 /// How often accounts, agents and computer reachability are refreshed.
@@ -49,6 +49,8 @@ pub struct Live {
     /// Any team (members, tasks: FR-T7).
     pub teams: SyncSignal<u64>,
     pub accounts: SyncSignal<Vec<Account>>,
+    /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
+    pub chatgpt: SyncSignal<Vec<ChatGptAccount>>,
     pub agents: SyncSignal<Vec<DetectedAgent>>,
 }
 
@@ -61,6 +63,7 @@ impl Live {
             outbox: use_signal_sync(|| 0),
             teams: use_signal_sync(|| 0),
             accounts: use_signal_sync(Vec::new),
+            chatgpt: use_signal_sync(Vec::new),
             agents: use_signal_sync(Vec::new),
         }
     }
@@ -229,6 +232,10 @@ async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
             }
         }
         Err(e) => tracing::debug!("accounts refresh failed: {e}"),
+    }
+    let g = s.server.chatgpt_accounts().await.unwrap_or_default();
+    if *live.chatgpt.peek() != g {
+        live.chatgpt.set(g);
     }
     match s.client.agents().await {
         Ok(a) => {

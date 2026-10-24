@@ -188,9 +188,10 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("EMBER_AGENT_EGRESS").map(|v| v != "off").unwrap_or(true) {
         let (c, d) = (computers.clone(), dialer.clone());
         let route: ember_server::egress_proxy::Route = Arc::new(move |sid| {
-            match c.session_computer(sid)? {
+            match c.registry().session_computer(sid)? {
                 Some(sc) if sc.computer_id != computers::LOCAL => {
                     let comp = c
+                        .registry()
                         .get(&sc.computer_id)?
                         .ok_or_else(|| anyhow::anyhow!("computer {} is gone", sc.computer_id))?;
                     Ok(Some(computers::node_client(&comp, d.as_ref())?))

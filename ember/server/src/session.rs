@@ -415,11 +415,25 @@ impl Sessions {
         released
     }
 
+    /// FR-S5: fork `id` after its completed turn `turn_seq` (the last one when `None`).
+    pub fn fork(
+        &self,
+        id: &str,
+        turn_seq: Option<i64>,
+        title: Option<&str>,
+    ) -> Result<SessionRecord, crate::fork::ForkError> {
+        let rec = self.store.fork_session(id, turn_seq, title)?;
+        let _ = self.push.send(Push::SessionCreated { session: rec.clone() });
+        Ok(rec)
+    }
+
     pub async fn send(self: &Arc<Self>, id: &str, text: &str) -> Result<(), SessionError> {
         self.touch(id);
         let live = self.ensure_live(id).await?;
         let hooks: Vec<MessageHook> = self.message_hooks.lock().unwrap().clone();
-        let notes: Vec<String> = hooks.iter().filter_map(|h| h(id)).collect();
+        // A fork's copied conversation goes first, once (FR-S5).
+        let mut notes: Vec<String> = self.store.take_fork_seed(id)?.into_iter().collect();
+        notes.extend(hooks.iter().filter_map(|h| h(id)));
         for note in &notes {
             live.events
                 .send(AgentEvent::SystemNotice { text: note.clone() })

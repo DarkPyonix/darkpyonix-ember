@@ -314,5 +314,7 @@ async fn metadata_and_assignment_reach_a_second_client_by_push() {
     assert_eq!(export["session"]["title"], "Deploy");
     let detail = two.api().session(&id).await.unwrap();
     assert!(!detail.can_fork);
-    assert_eq!(two.api().fork_session(&id, None).await.unwrap_err().status(), Some(501));
+    // FR-S5: forking needs a completed turn; this session has none, so the server answers 409
+    // (it answered 501 before the fork was implemented).
+    assert_eq!(two.api().fork_session(&id, None).await.unwrap_err().status(), Some(409));
 }

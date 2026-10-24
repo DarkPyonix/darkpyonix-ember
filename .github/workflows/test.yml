@@ -123,7 +123,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [server, node, transport, hub, client, bridge, editor-conn, editor]
+        crate: [server, node, transport, hub, client, bridge, editor-conn, editor, app]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
@@ -145,4 +145,7 @@ jobs:
         if: steps.present.outputs.yes == 'true'
         working-directory: ember/${{ matrix.crate }}
         run: |
-          if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi
+          if [ "${{ matrix.crate }}" = app ]; then
+            # TODO: run the tests once dioxus-compose publishes a renderer matching the pinned rev (undefined symbol dioxus_compose_host_release_batch)
+            cargo test --locked --no-run
+          elif [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi

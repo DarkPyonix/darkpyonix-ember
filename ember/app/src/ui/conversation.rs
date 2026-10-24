@@ -47,6 +47,18 @@ fn item_key(item: &TranscriptItem) -> String {
     seq.to_string()
 }
 
+/// Fork `id` after its completed turn `seq` (the last one when `None`) and open the new
+/// session (FR-S5).
+fn fork_from(ui: crate::ui::Ui, id: String, seq: Option<i64>) {
+    run(
+        async move { services().client.fork_session(&id, seq).await.map_err(|e| e.to_string()) },
+        move |r| match r {
+            Ok(rec) => ui.open_conversation(&rec.id),
+            Err(e) => show_message(format!("Could not fork: {e}")),
+        },
+    );
+}
+
 #[component]
 pub fn ConversationView(id: String) -> Element {
     let ui = use_ui();
@@ -96,6 +108,15 @@ pub fn ConversationView(id: String) -> Element {
                 |r| {
                     if let Err(e) = r {
                         tracing::debug!("team: {e}");
+                    }
+                },
+            );
+            let fk = id.clone();
+            run(
+                async move { services().client.load_fork_info(&fk).await.map_err(|e| e.to_string()) },
+                |r| {
+                    if let Err(e) = r {
+                        tracing::debug!("fork info: {e}");
                     }
                 },
             );
@@ -210,13 +231,43 @@ pub fn ConversationView(id: String) -> Element {
     };
 
     // ---- transcript ----------------------------------------------------------------------------
-    let (count, keys, pending) = {
+    let (count, keys, pending, has_completed_turn) = {
         let _ = *ui.live.transcripts.read();
         s.client.read(|st| match st.transcript(&id) {
-            Some(t) => (t.items.len(), t.items.iter().map(item_key).collect::<Vec<_>>(), t.pending_approvals().count()),
-            None => (0, Vec::new(), 0),
+            Some(t) => (
+                t.items.len(),
+                t.items.iter().map(item_key).collect::<Vec<_>>(),
+                t.pending_approvals().count(),
+                t.items.iter().any(|i| matches!(i, TranscriptItem::TurnEnded { outcome: TurnOutcome::Completed, .. })),
+            ),
+            None => (0, Vec::new(), 0, false),
         })
     };
+
+    // ---- fork (FR-S5) --------------------------------------------------------------------------
+    let (fork_info, fork_parent) = {
+        let _ = *ui.live.launcher.read();
+        s.client.read(|st| {
+            let info = st.fork_info(&id);
+            let parent = info
+                .origin
+                .as_ref()
+                .map(|o| (o.clone(), st.session(&o.parent_id).map(|v| v.record.title.clone())));
+            (info, parent)
+        })
+    };
+    let fork_enabled = model::fork_menu_enabled(&fork_info, has_completed_turn);
+    let fork_last = {
+        let id = id.clone();
+        move |_: ()| {
+            more_menu.set(false);
+            fork_from(ui, id.clone(), None);
+        }
+    };
+    let fork_label = fork_parent
+        .as_ref()
+        .map(|(o, title)| model::fork_origin_label(o, title.as_deref()));
+    let fork_parent_id = fork_parent.as_ref().map(|(o, _)| o.parent_id.clone()).unwrap_or_default();
 
     // ---- outbox --------------------------------------------------------------------------------
     let (queued, queue_error) = {
@@ -455,6 +506,13 @@ pub fn ConversationView(id: String) -> Element {
                     Button { text: if pinned { "Unpin" } else { "Pin" }, variant: ButtonVariant::Text, fill_max_width: true, on_click: pin_this }
                     Button { text: "Export", variant: ButtonVariant::Text, fill_max_width: true, on_click: export_this }
                     Button {
+                        text: model::FORK_MENU_LABEL,
+                        variant: ButtonVariant::Text,
+                        fill_max_width: true,
+                        enabled: fork_enabled,
+                        on_click: fork_last,
+                    }
+                    Button {
                         text: model::approve_all_menu_label(approve_all),
                         variant: ButtonVariant::Text,
                         fill_max_width: true,
@@ -464,6 +522,19 @@ pub fn ConversationView(id: String) -> Element {
             }
             if let Some(text) = model::approve_all_banner(approve_all) {
                 Banner { text, tone: Tone::Warning }
+            }
+            if let Some(text) = fork_label.clone() {
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Text { text, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Button {
+                        text: "Open",
+                        variant: ButtonVariant::Text,
+                        on_click: { let p = fork_parent_id.clone(); move |_| ui.open_conversation(&p) },
+                    }
+                }
             }
             // Computer and IDE, a row of their own (they do not fit beside the title on a phone).
             Row {
@@ -898,7 +969,16 @@ fn TranscriptRow(
                 }
             }
         }
-        TranscriptItem::TurnEnded { outcome, .. } => {
+        TranscriptItem::TurnEnded { seq, outcome } => {
+            let ui = use_ui();
+            let can = {
+                let _ = *ui.live.launcher.read();
+                services().client.read(|st| model::fork_turn_enabled(&st.fork_info(&session), outcome, seq))
+            };
+            let fork_here = {
+                let session = session.clone();
+                move |_: ()| fork_from(ui, session.clone(), Some(seq))
+            };
             let (text, ink) = match outcome {
                 TurnOutcome::Completed => ("Turn completed", ColorRole::OnSurfaceVariant),
                 TurnOutcome::Interrupted => ("Interrupted", ColorRole::OnSurfaceVariant),
@@ -912,6 +992,9 @@ fn TranscriptRow(
                     padding_role: SpaceRole::Xs,
                     dioxus_compose::Box { weight: 1.0, Divider {} }
                     Text { text, type_role: TypeRole::Caption, color: Paint::Role(ink) }
+                    if outcome == TurnOutcome::Completed {
+                        Button { text: model::FORK_TURN_LABEL, variant: ButtonVariant::Text, enabled: can, on_click: fork_here }
+                    }
                     dioxus_compose::Box { weight: 1.0, Divider {} }
                 }
             }

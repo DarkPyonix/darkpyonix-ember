@@ -20,6 +20,7 @@
 //! | [`languages`] | file → language id from `contributes.languages` |
 //! | [`ids`] | stable, non-zero, session-unique decoration ids |
 //! | [`coords`] | widget (0-based) ↔ extension host (1-based) positions, UTF-16 helpers, ranges through edits |
+//! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
@@ -28,6 +29,7 @@
 pub mod codelens;
 pub mod coords;
 pub mod engine;
+pub mod fallback;
 pub mod diagnostics;
 pub mod document;
 pub mod hover;
@@ -40,6 +42,7 @@ pub mod selector;
 pub mod session;
 pub mod widget;
 
+pub use crate::fallback::{fallback_for, Fallback};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::session::{EditorSession, SessionConfig};

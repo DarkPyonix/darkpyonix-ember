@@ -1,0 +1,96 @@
+# Builds ember server and ember node for each target on a v* tag and attaches the archives and
+# SHA256SUMS to a GitHub release (SPEC NFR-R1, #72). Unsigned: signing and notarization are an
+# open owner decision.
+# TODO: add ember-app once dioxus-compose publishes a renderer matching the pinned rev (the same
+# gap as the TODO in test.yml); until then the app cannot link, so it is not packaged.
+name: Publish to GitHub release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-14, target: macos-arm64 }
+          - { os: ubuntu-24.04, target: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64 }
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ember/server
+            ember/node
+      - name: Build server and node
+        run: |
+          (cd ember/server && cargo build --release --locked)
+          (cd ember/node && cargo build --release --locked)
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          pack() { # crate, program...
+            crate="$1"; shift
+            name="ember-${crate}-${TAG}-${TARGET}"
+            mkdir -p "stage/$name"
+            for p in "$@"; do cp "ember/$crate/target/release/$p" "stage/$name/"; done
+            tar -C stage -czf "dist/$name.tar.gz" "$name"
+            (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256")
+          }
+          pack server ember-server ember-exec ember-a2a
+          pack node ember-node ember-term
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpx-ember-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dpx-ember-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and write SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum -c ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Ember ${TAG#v}" \
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, built by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Unsigned. The client app is not included yet (see docs/guide install page)."

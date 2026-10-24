@@ -63,7 +63,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-K1, NFR-K1 | Rules for review, no code. | |
 | FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. Not wired into the client's "Open IDE → Ember"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
 
-Cross-cutting, designed and not landed: releases and
+Cross-cutting: releases (`NFR-R1`, workflow written, no tag run yet) and
 installers (#72); the documents in the house writing style (#68).
 
 ---
@@ -511,3 +511,9 @@ tests run in CI; the rows stay a draft until the editor opens a project on scree
 | **FR-E3** | CodeLens and hover overlays from unmodified extensions render correctly positioned. |
 | **FR-E4** | Inline completion (ghost text) providers work; this is the highest priority within §E. |
 | **FR-E5** | Extension webview panels still work, contained to their panel. |
+
+## Releases
+
+| ID | Requirement | Acceptance |
+|---|---|---|
+| **NFR-R1** | *[provisional]* A tag `v*` publishes a GitHub release with `ember-server` (with `ember-exec`, `ember-a2a`) and `ember-node` (with `ember-term`) for macOS arm64, Linux x86_64 and Linux aarch64, plus `SHA256SUMS`. The client app joins once dioxus-compose publishes a renderer matching the pinned rev (see the TODO in `test.yml`). Binaries are unsigned until the owner decides on signing and notarization (#72). | `.github/scripts/checks/check-release-workflow.sh` passes in CI; a real tag run attaches the archives and `sha256sum -c SHA256SUMS` passes. |

@@ -80,6 +80,42 @@ session while the built-ins reach only the agent's own. The built-ins stay enabl
 denied and no hook redirects a call. Supported surfaces only. This is the direction for every
 agent.
 
+## Extension points per agent (official docs, 2026-10-24)
+
+Checked against the vendors' published pages; what a page did not state is marked [U]. All
+decisions in this section are [provisional].
+
+| Agent | MCP | Instructions and skills | Hooks | Subagent tools | Notes for Ember |
+|---|---|---|---|---|---|
+| Claude Code | Servers in `.mcp.json` or settings; tool search is the default, so an MCP tool is deferred unless the server sets `alwaysLoad` (the docs name the field on remote types; the exact semantics are in the "scale with MCP tool search" section) [V][U] | `CLAUDE.md`, appended system prompt, skills | PreToolUse and others, documented but not used to redirect (D5) | `Agent`, `ListAgents`, `SendMessage` built in | Ember ships `ember` MCP with `alwaysLoad` and relies on names and descriptions only |
+| Codex | `[mcp_servers.<name>]` in `config.toml`: `command`, `args`, `env`, `env_vars`, `enabled_tools`, `startup_timeout_sec`, `required` [V]; no tool search or deferred loading key on the MCP page [U] | `AGENTS.md`, skills | hooks schema in openai/codex | `multi_agent` tools (`spawn_agent`, `send_input`, `list_agents`, `wait_agent`) | `required = true` makes startup fail loudly if the Ember server is missing; `env` on the server keeps the token out of the agent shell (FR-T2a) |
+| Antigravity | `agy mcp add/remove/list/enable/disable`; the config format page redirects to `/docs/mcp?tab=cli` and was not readable [U] | skills in `.agents/skills/` and `~/.gemini/antigravity-cli/skills/` (secondary source) [U] | `hooks.json`, tested locally (SPEC §A) | `define_subagent`, `invoke_subagent`, `send_message`, `manage_inbox` [B] | Needs a live check of whether MCP tools are loaded upfront |
+| OMP | not covered by `agent-hub.md` [U] | `prompts/` in the repository | not covered [U] | `task`; peers are `agent://<id>`, `write agent://<id>` messages a peer, `agent://all` broadcasts [V] | The `agent://` scheme is the native idiom; whether an extension can register ids is [U] |
+
+Per-agent adapter shape (first draft, [provisional]):
+
+- **Claude Code:** `ember` MCP server, tools `list_agents` and `send_message` with the native
+  argument names, `alwaysLoad`, server instructions saying it reaches every Ember session.
+- **Codex:** `[mcp_servers.ember]` with `required = true`, tools in the `multi_agent` v2 shapes,
+  one AGENTS.md paragraph.
+- **Antigravity:** `agy mcp` entry with the same tools; a skill describing when to use them.
+- **OMP:** `agent://` names for Ember sessions if an extension can register them under ACP,
+  otherwise the MCP server with the same wording.
+
+## Leakage handling
+
+Leakage means the agent picked a built-in peer tool, or an Ember send that the recorder did not
+see. Built-ins are never blocked (D5), so leakage is measured and then fixed in wording:
+
+1. Each trial records the first A2A call. A built-in first is a failure, logged with the prompt,
+   agent, CLI version and the model's visible reason if any.
+2. A prompt whose built-in-first rate exceeds 5% is reported with its transcripts. The fix is to
+   the Ember tool's name, description or server instructions, never a deny rule or hook.
+3. A send the model claims but the recorder lacks is a delivery failure, counted separately.
+4. A CLI version bump re-runs the whole suite before the new version is listed as supported.
+5. Leakage at runtime (a built-in used in real sessions) is only observable for agents whose
+   stream shows tool names; the share is shown in the A2A admin view [provisional].
+
 ## Keeping the runtime token out of the shell
 
 Today the token is exported to the agent process as `EMBER_RUNTIME_TOKEN`
@@ -156,7 +192,12 @@ subagent hand-backs; AionUI's teammates report to the lead when they go idle.
 
 ## Sources
 
-code.claude.com docs (cross-session messaging, tools reference, hooks, MCP, subagents, agent
+Read 2026-10-24: code.claude.com/docs/en/mcp; learn.chatgpt.com/docs/extend/mcp (Codex MCP,
+formerly developers.openai.com/codex/mcp); antigravity.google/docs/mcp (redirect only, body not
+read) and a secondary Medium/Google Cloud article on Antigravity MCP and skills;
+github.com/can1357/oh-my-pi `docs/agent-hub.md`.
+
+Earlier: code.claude.com docs (cross-session messaging, tools reference, hooks, MCP, subagents, agent
 teams, settings, environment variables); the claude 2.1.288 binary; openai/codex
 `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` and the hooks schema; iOfficeAI/AionCore
 `crates/aionui-api-types/src/team_tools.rs` and `crates/aionui-team-prompts`; can1357/oh-my-pi

@@ -70,7 +70,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, RemoteExec, StartRequest};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, RemoteExec, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a response to one of our requests.
@@ -131,6 +131,11 @@ impl CodexAdapter {
 impl AgentAdapter for CodexAdapter {
     fn kind(&self) -> AgentKind {
         AgentKind::Codex
+    }
+
+    /// `thread/fork` takes `lastTurnId`, so a fork can start after any completed turn (FR-S5).
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::AtTurn
     }
 
     async fn detect(&self) -> Detected {
@@ -211,15 +216,36 @@ impl AgentAdapter for CodexAdapter {
         if let (Some(envs), None) = (&environments, &req.resume_native_id) {
             params.insert("environments".into(), envs.clone());
         }
-        let resp = match &req.resume_native_id {
-            Some(id) => {
+        let resp = match (&req.resume_native_id, &req.fork_from) {
+            (None, Some(from)) => {
+                // FR-S5: `thread/fork {threadId, lastTurnId}` copies the thread through that turn.
+                // Its params have no `environments`, so a fork on another computer is left to the
+                // conversation copy.
+                anyhow::ensure!(req.remote.is_none(), "thread/fork cannot target a remote exec-server");
+                params.insert("threadId".into(), json!(from.native_id));
+                if let Some(keep) = from.keep_turns {
+                    let list = conn
+                        .request(
+                            "thread/turns/list",
+                            json!({ "threadId": from.native_id, "sortDirection": "asc", "limit": 10_000 }),
+                        )
+                        .await
+                        .context("thread/turns/list")?;
+                    let turn = fork_turn_id(&list, keep)
+                        .with_context(|| format!("the thread has no completed turn number {keep}"))?;
+                    params.insert("lastTurnId".into(), json!(turn));
+                }
+                params.insert("excludeTurns".into(), json!(true));
+                conn.request("thread/fork", Value::Object(params)).await.context("thread/fork")?
+            }
+            (Some(id), _) => {
                 params.insert("threadId".into(), json!(id));
                 params.insert("excludeTurns".into(), json!(true));
                 conn.request("thread/resume", Value::Object(params))
                     .await
                     .context("thread/resume")?
             }
-            None => {
+            (None, None) => {
                 conn.request("thread/start", Value::Object(params)).await.context("thread/start")?
             }
         };
@@ -314,6 +340,19 @@ fn environment_add_params(remote: &RemoteExec) -> Value {
 /// `environments: Array<TurnEnvironmentParams>` selecting `remote` with the session's cwd.
 fn environments_param(remote: &RemoteExec, cwd: &std::path::Path) -> Value {
     json!([{ "environmentId": remote.environment_id, "cwd": cwd.to_string_lossy() }])
+}
+
+/// The id of the `keep`-th completed turn (1-based, oldest first) in a `thread/turns/list`
+/// response, the `lastTurnId` of a fork through that turn (FR-S5).
+fn fork_turn_id(list: &Value, keep: usize) -> Option<String> {
+    let turns = list.get("data")?.as_array()?;
+    turns
+        .iter()
+        .filter(|t| t.get("status").and_then(Value::as_str) == Some("completed"))
+        .nth(keep.checked_sub(1)?)?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// `result.thread.id` of a `thread/start` / `thread/resume` response.
@@ -956,6 +995,19 @@ fn strip_nulls(v: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fork_turn_id_picks_the_nth_completed_turn() {
+        let list = json!({ "data": [
+            { "id": "t1", "status": "completed" },
+            { "id": "t2", "status": "interrupted" },
+            { "id": "t3", "status": "completed" },
+        ] });
+        assert_eq!(fork_turn_id(&list, 1).as_deref(), Some("t1"));
+        assert_eq!(fork_turn_id(&list, 2).as_deref(), Some("t3"));
+        assert_eq!(fork_turn_id(&list, 3), None);
+        assert_eq!(fork_turn_id(&list, 0), None);
+    }
+
     use super::*;
 
     /// One fixture line: `{"dir": "in" | "out" | "note", "msg": …}`.

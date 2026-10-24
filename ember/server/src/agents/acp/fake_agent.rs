@@ -27,13 +27,15 @@ pub struct FakeOptions {
     pub load: bool,
     /// Advertise `sessionCapabilities.resume`.
     pub resume: bool,
+    /// Advertise `sessionCapabilities.fork`.
+    pub fork: bool,
     /// The protocol version to answer `initialize` with.
     pub version: u64,
 }
 
 impl Default for FakeOptions {
     fn default() -> FakeOptions {
-        FakeOptions { load: false, resume: false, version: 1 }
+        FakeOptions { load: false, resume: false, fork: false, version: 1 }
     }
 }
 
@@ -124,7 +126,10 @@ impl Fake {
                     assert_eq!(params["clientCapabilities"]["fs"]["readTextFile"], true);
                     assert_eq!(params["clientCapabilities"]["fs"]["writeTextFile"], true);
                     assert_eq!(params["clientCapabilities"]["terminal"], true);
-                    let session_caps = if self.opts.resume { json!({ "resume": {} }) } else { json!({}) };
+                    let mut session_caps = if self.opts.resume { json!({ "resume": {} }) } else { json!({}) };
+                    if self.opts.fork {
+                        session_caps["fork"] = json!({});
+                    }
                     let result = json!({
                         "protocolVersion": self.opts.version,
                         "agentCapabilities": { "loadSession": self.opts.load, "sessionCapabilities": session_caps },
@@ -158,6 +163,13 @@ impl Fake {
                                         "title": "old tool", "status": "completed" }))
                         .await;
                     self.reply(id, json!({})).await;
+                }
+                Some("session/fork") => {
+                    assert!(self.opts.fork, "session/fork without the capability");
+                    let parent = params["sessionId"].as_str().unwrap();
+                    self.session = format!("{parent}-fork");
+                    self.setup = "fork";
+                    self.reply(id, json!({ "sessionId": self.session })).await;
                 }
                 Some("session/resume") => {
                     assert!(self.opts.resume, "session/resume without the capability");

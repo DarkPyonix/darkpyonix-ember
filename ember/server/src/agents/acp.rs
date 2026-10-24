@@ -101,7 +101,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 
-use super::{AcpName, AgentAdapter, AgentKind, AgentRun, Detected, McpServer, StartRequest};
+use super::{AcpName, AgentAdapter, AgentKind, AgentRun, Detected, ForkFrom, McpServer, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// The ACP major version this client speaks.
@@ -295,6 +295,13 @@ impl AgentAdapter for AcpAdapter {
         self.kind
     }
 
+    /// Whether the agent has `session/fork` is only known after `initialize`; a start that finds
+    /// it missing fails and the session layer falls back to the conversation copy (FR-S5). The
+    /// request carries no turn, so only the last one can be forked.
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::Latest
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -349,6 +356,7 @@ impl AgentAdapter for AcpAdapter {
         let setup = Setup {
             cwd: req.cwd.clone(),
             resume_native_id: req.resume_native_id.clone(),
+            fork_from: req.fork_from.clone(),
             mcp_servers: req.mcp_servers.clone(),
             computer: req.computer.clone(),
             prepend_instructions,
@@ -367,6 +375,8 @@ fn parse_version(stdout: &str) -> Option<String> {
 pub(crate) struct Setup {
     pub cwd: PathBuf,
     pub resume_native_id: Option<String>,
+    /// Fork this native session with `session/fork` (FR-S5).
+    pub fork_from: Option<ForkFrom>,
     pub mcp_servers: Vec<McpServer>,
     pub computer: Option<NodeClient>,
     /// Put in front of the first prompt (agents without an instructions argument).
@@ -419,7 +429,27 @@ where
     let mcp = mcp_servers_param(&setup.mcp_servers);
     let cwd_str = cwd.to_string_lossy().into_owned();
 
+    let can_fork = caps.pointer("/sessionCapabilities/fork").is_some_and(|v| !v.is_null());
     let session_id = match setup.resume_native_id {
+        None if setup.fork_from.is_some() => {
+            // ACP's `session/fork` is unstable and takes no turn: the whole session is forked.
+            let from = setup.fork_from.as_ref().expect("checked");
+            if !can_fork {
+                bail!("the agent does not advertise session/fork");
+            }
+            let resp = conn
+                .request(
+                    "session/fork",
+                    json!({ "sessionId": from.native_id, "cwd": cwd_str, "mcpServers": mcp }),
+                    Some(REQUEST_TIMEOUT),
+                )
+                .await
+                .context("ACP session/fork")?;
+            resp.get("sessionId")
+                .and_then(Value::as_str)
+                .context("session/fork response without sessionId")?
+                .to_string()
+        }
         Some(id) if can_resume => {
             conn.request(
                 "session/resume",

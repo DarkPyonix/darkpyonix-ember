@@ -348,6 +348,19 @@ Rejected: keeping `/api/v1` alongside `/api` (two names for one API).
 and the IDE bridge carry no version, with no alias for the old paths. The hub side waits for the
 hub address decision (darkpyonix #41; #62, draft PR #75).
 
+### D16: A fork uses the agent's own fork, and copies the conversation only as the fallback
+
+**Decision.** [user, 2026-10-25: "에이전트의 자체 포크를 사용하고 fallback으로 대화 복사를 해"]
+Forking a session (FR-S5, #78) asks the wrapped agent to fork its own native session when it can
+(Codex at a chosen turn; Claude Code and ACP agents from the last turn). When it cannot, Ember
+copies the stored conversation into a fresh agent session. The earlier Ember-level fork (#114,
+#123) stays as that fallback. Evidence per agent: `docs/design/NATIVE-FORK.md`.
+
+Rejected: copy only (loses the agent's own context: tool results, reasoning, caches); native
+only (Antigravity has no fork, so the action would be missing for it).
+
+**Status.** Written, not yet compiled.
+
 ## Open questions
 
 | ID | Question | Status |

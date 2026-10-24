@@ -33,7 +33,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | NFR-L1 | Not measured. | #9 |
 | NFR-L2 | `.github/scripts/checks/check-no-webview.sh` runs in CI. | |
 | FR-S1–S4, FR-S6 | Implemented, CI. | |
-| FR-S5 | Server implemented (Ember-level fork, transcript-seeded); client action not built. Not yet compiled. | #78 |
+| FR-S5 | Server implemented (Ember-level fork, transcript-seeded); client action written ("Fork from here" under each completed turn, "Fork from last turn" in the conversation menu, disabled without a completed turn, "Forked from <parent>" line). Not yet compiled; native fork open. | #78 |
 | FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison written (#79), not yet compiled or run. | #6 (v0); #79 |
 | FR-A1–A4 | Claude Code and Codex (#14), Antigravity (#64), ACP agents (#61) implemented, CI against recordings and fakes. Real OMP run not verified. agy shell writes fail under `--sandbox`. | #53, #65 |
 | FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is implemented per session: server `Sessions::set_approve_all` (any agent kind, answers pending and later approvals), `PUT /api/sessions/{id}/approve-all`, client toggle in the conversation menu and a banner while on; in-memory on the server, so a restart returns sessions to asking. Tests written, not yet run in CI. | #73 |
@@ -128,7 +128,7 @@ installers (#72); the documents in the house writing style (#68).
   session without a completed turn answers 409 and `can_fork` is false. *[provisional]* This is
   not a native fork: #78 asks for a copy of the agent's native session, which no agent exposes
   from a chosen turn headlessly (Codex `thread/fork` forks a whole thread). Native fork stays open. The client action
-  (fork from a turn's menu) is not built.
+  (fork from a turn, or from the last turn in the menu) is written, not yet compiled.
 
 ---
 

@@ -48,6 +48,14 @@ pub enum ApiError {
     BadUrl(String),
 }
 
+/// `POST /sessions/{id}/fork` body: `{turn_seq?}` (server `ForkBody`).
+pub(crate) fn fork_body(turn_seq: Option<i64>) -> serde_json::Value {
+    match turn_seq {
+        Some(seq) => json!({ "turn_seq": seq }),
+        None => json!({}),
+    }
+}
+
 impl ApiError {
     pub fn status(&self) -> Option<u16> {
         match self {
@@ -333,13 +341,10 @@ impl Api {
         self.get(&format!("/sessions/{}/export", seg(id))).await
     }
 
-    /// Fork a session (FR-S5). Every server so far answers 501 (`ApiError::Status`); check
-    /// [`SessionDetail::can_fork`] first.
-    pub async fn fork_session(&self, id: &str, after_seq: Option<i64>) -> ApiResult<SessionRecord> {
-        let body = match after_seq {
-            Some(seq) => json!({ "after_seq": seq }),
-            None => json!({}),
-        };
+    /// Fork a session after its completed turn `turn_seq` (the last one when `None`, FR-S5).
+    /// The server answers 409 without a completed turn; check [`SessionDetail::can_fork`] first.
+    pub async fn fork_session(&self, id: &str, turn_seq: Option<i64>) -> ApiResult<SessionRecord> {
+        let body = fork_body(turn_seq);
         Self::decode(self.post(&format!("/sessions/{}/fork", seg(id)), body).await?)
     }
 
@@ -416,6 +421,35 @@ fn seg(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_s5_fork_body_names_turn_seq() {
+        assert_eq!(fork_body(None), json!({}));
+        assert_eq!(fork_body(Some(7)), json!({ "turn_seq": 7 }));
+    }
+
+    #[test]
+    fn fr_s5_session_detail_decodes_fork_fields() {
+        let d: SessionDetail = serde_json::from_value(json!({
+            "session": {"id":"s","project":"p","agent":"codex","cwd":"/","status":"idle","title":"t",
+                        "created_at":1,"updated_at":1,"last_seq":3},
+            "live": false, "can_fork": true, "fork_turns": [2, 5],
+            "fork_of": {"parent_id": "q", "turn_seq": 2, "forked_at": 9}
+        }))
+        .unwrap();
+        let info = crate::wire::ForkInfo::from(&d);
+        assert!(info.can_fork);
+        assert_eq!(info.turns, vec![2, 5]);
+        assert_eq!(info.origin.unwrap().parent_id, "q");
+        // Older servers omit the fields.
+        let d: SessionDetail = serde_json::from_value(json!({
+            "session": {"id":"s","project":"p","agent":"codex","cwd":"/","status":"idle","title":"t",
+                        "created_at":1,"updated_at":1,"last_seq":3},
+            "live": false
+        }))
+        .unwrap();
+        assert!(!crate::wire::ForkInfo::from(&d).can_fork);
+    }
 
     #[test]
     fn urls() {

@@ -970,6 +970,7 @@ impl A2a {
         if let Err(e) = self.sessions.release(&target.session_id).await {
             tracing::warn!(session = %target.session_id, "release on team end: {e:#}");
         }
+        self.sessions.session_ended(&target.session_id);
         let notice = AgentEvent::Notice {
             message: format!(
                 "Teammate {} was ended by {by}; it has left team {team_id}.",

@@ -148,6 +148,20 @@ class ExtensionsTest(unittest.TestCase):
         out = runtime.ensure_extensions([str(bad)], self.dir, "/bin/code")
         self.assertEqual(len(out["failed"]), 1)
 
+    def test_default_extensions_name_both_and_prefer_bundled_vsix(self):
+        self.assertIn("darkpyonix.vscode-darkpyonix", runtime.DEFAULT_EXTENSIONS)
+        self.assertIn("darkpyonix.vscode-darkpyonix-theme", runtime.DEFAULT_EXTENSIONS)
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "vscode-darkpyonix-0.1.0.vsix").write_bytes(b"")
+            env = {"DPX_BUNDLED_EXTENSIONS_DIR": d}
+            with mock.patch.dict(os.environ, env):
+                os.environ.pop("DPX_DEFAULT_EXTENSIONS", None)
+                got = runtime.default_extensions()
+            self.assertEqual(got[0], str(Path(d) / "vscode-darkpyonix-0.1.0.vsix"))
+            self.assertEqual(got[1], "darkpyonix.vscode-darkpyonix-theme")
+
     def test_default_extensions_env(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(runtime.default_extensions(), list(runtime.DEFAULT_EXTENSIONS))

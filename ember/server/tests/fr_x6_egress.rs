@@ -171,7 +171,7 @@ async fn fr_x6_ending_a_session_refuses_its_proxy_port() {
     end("s1");
     // The proxy task is aborted on the runtime, so its listener closes a little later.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while TcpStream::connect(addr).await.is_ok() {
+        while TcpStream::connect(addr.as_str()).await.is_ok() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

@@ -29,7 +29,6 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::{A2a, A2aError, Receipt, CLI_NAME};
-use crate::agents::AgentKind;
 use crate::events::{AgentEvent, SessionStatus};
 use crate::session::{NewSession, Push, SessionError};
 use crate::store::{now_ms, SessionPatch, SessionRecord, Store};

@@ -413,7 +413,7 @@ this for the remote browser.
 
 Rejected: letting API traffic leave from the main server's IP.
 
-**Status.** Not built.
+**Status.** Built, unverified against real CLIs and computers (#130): a per-session loopback CONNECT proxy tunnels over the node's existing `/egress`. A tunnel already open keeps its computer after a switch; new connections follow the new one.
 
 ### D20: A session knows its computer; a lost computer falls back to the main server
 

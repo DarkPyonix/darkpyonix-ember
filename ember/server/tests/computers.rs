@@ -587,3 +587,21 @@ async fn fr_x3_short_blips_do_not_flap_the_session() {
     c.reconcile(s, &id).await.unwrap();
     assert!(c.reconcile(s, &id).await.unwrap().is_some(), "two in a row fall back");
 }
+
+#[tokio::test]
+async fn fr_x3_current_computer_exposes_the_designated_computer() {
+    let (f, _down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    assert_eq!(c.current(s, &id).unwrap().designated_computer_id, None);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    assert_eq!(c.current(s, &id).unwrap().designated_computer_id.as_deref(), Some(pi.id.as_str()));
+}
+
+#[test]
+fn fr_x3_fallback_probes_and_interval_are_configurable() {
+    assert_eq!(computers::parse_fallback(None, None), (2, 10));
+    assert_eq!(computers::parse_fallback(Some("5"), Some("3")), (5, 3));
+    assert_eq!(computers::parse_fallback(Some("0"), Some("x")), (2, 10), "invalid values keep the defaults");
+}

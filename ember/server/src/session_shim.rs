@@ -56,6 +56,11 @@ pub struct ShimSpec {
     pub linger_secs: Option<u64>,
 }
 
+/// Post-exit linger: the spec's value, else `EMBER_SHIM_LINGER_SECS`, else 3600 s (FR-S8).
+pub fn linger_secs(spec: Option<u64>, env: Option<&str>) -> u64 {
+    spec.or_else(|| env.and_then(|v| v.trim().parse().ok())).unwrap_or(3600)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShimMeta {
     pub session: String,
@@ -171,7 +176,7 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     }
 
     // waiter: records the exit, honours KILL
-    let linger = Duration::from_secs(spec.linger_secs.unwrap_or(3600));
+    let linger = Duration::from_secs(linger_secs(spec.linger_secs, std::env::var("EMBER_SHIM_LINGER_SECS").ok().as_deref()));
     {
         let shared = shared.clone();
         let dir = dir.to_path_buf();

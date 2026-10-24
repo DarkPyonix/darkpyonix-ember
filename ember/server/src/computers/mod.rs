@@ -600,6 +600,8 @@ pub struct CurrentComputer {
     pub switched_at: Option<i64>,
     pub env_description: Option<String>,
     pub notice_pending: bool,
+    /// The computer the user designated for the session (FR-X3), read-only for clients.
+    pub designated_computer_id: Option<String>,
 }
 
 pub struct Computers {
@@ -619,6 +621,8 @@ pub struct Computers {
     egress: Mutex<HashMap<String, egress::EgressListener>>,
     /// Consecutive probes that must disagree with a session's computer before it moves (FR-X3).
     debounce: std::sync::atomic::AtomicU32,
+    /// Seconds between probes of designated computers (FR-X3).
+    watch_secs: std::sync::atomic::AtomicU64,
     /// Per session: how many consecutive probes wanted a move (FR-X3 debounce).
     flap: Mutex<HashMap<String, u32>>,
 }
@@ -627,6 +631,24 @@ pub struct Computers {
 pub const DEFAULT_DEBOUNCE: u32 = 2;
 /// How often designated computers are probed.
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Fallback probe count and interval in seconds from `EMBER_FALLBACK_PROBES` and
+/// `EMBER_FALLBACK_INTERVAL_SECS` values; unset or invalid (or zero) values keep the defaults (FR-X3).
+fn fallback_env() -> (u32, u64) {
+    parse_fallback(
+        std::env::var("EMBER_FALLBACK_PROBES").ok().as_deref(),
+        std::env::var("EMBER_FALLBACK_INTERVAL_SECS").ok().as_deref(),
+    )
+}
+
+pub fn parse_fallback(probes: Option<&str>, interval_secs: Option<&str>) -> (u32, u64) {
+    let p = probes.and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| *v > 0).unwrap_or(DEFAULT_DEBOUNCE);
+    let i = interval_secs
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(WATCH_INTERVAL.as_secs());
+    (p, i)
+}
 
 impl Computers {
     pub fn new(registry: Registry, connector: Connector) -> Arc<Computers> {
@@ -654,7 +676,8 @@ impl Computers {
             dialer,
             bridges: Mutex::new(HashMap::new()),
             egress: Mutex::new(HashMap::new()),
-            debounce: std::sync::atomic::AtomicU32::new(DEFAULT_DEBOUNCE),
+            debounce: std::sync::atomic::AtomicU32::new(fallback_env().0),
+            watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
             flap: Mutex::new(HashMap::new()),
         })
     }
@@ -736,7 +759,9 @@ impl Computers {
             // FR-X3: fall back to the main server when a designated computer is lost, and return.
             let (this, sessions) = (Arc::downgrade(self), Arc::downgrade(sessions));
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(WATCH_INTERVAL);
+                let mut tick = tokio::time::interval(Duration::from_secs(
+                    this.upgrade().map(|c| c.fallback_settings().1).unwrap_or(WATCH_INTERVAL.as_secs()),
+                ));
                 loop {
                     tick.tick().await;
                     let (Some(c), Some(s)) = (this.upgrade(), sessions.upgrade()) else { break };
@@ -910,6 +935,7 @@ impl Computers {
             .store()
             .session(session_id)?
             .ok_or_else(|| ComputerError::SessionNotFound(session_id.to_string()))?;
+        let designated_computer_id = self.registry.designated(&rec.id)?;
         Ok(match self.registry.session_computer(&rec.id)? {
             None => CurrentComputer {
                 session_id: rec.id,
@@ -918,6 +944,7 @@ impl Computers {
                 switched_at: None,
                 env_description: None,
                 notice_pending: false,
+                designated_computer_id,
             },
             Some(sc) => {
                 let view = self.view(&sc.computer_id);
@@ -928,6 +955,7 @@ impl Computers {
                     implicit: false,
                     switched_at: Some(sc.switched_at),
                     notice_pending: sc.notice.is_some(),
+                    designated_computer_id,
                 }
             }
         })
@@ -1043,6 +1071,19 @@ impl Computers {
             notice,
             env_description: description,
         })
+    }
+
+    /// Set the seconds between probes of designated computers (FR-X3); takes effect at the next start.
+    pub fn set_watch_interval_secs(&self, secs: u64) {
+        self.watch_secs.store(secs.max(1), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Probes that must agree, and seconds between probes (FR-X3).
+    pub fn fallback_settings(&self) -> (u32, u64) {
+        (
+            self.debounce.load(std::sync::atomic::Ordering::SeqCst),
+            self.watch_secs.load(std::sync::atomic::Ordering::SeqCst),
+        )
     }
 
     /// Set how many consecutive probes must agree before a fallback or return (FR-X3).

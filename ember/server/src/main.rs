@@ -29,7 +29,7 @@ use ember_server::store::Store;
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
 ///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
-///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=0` drops agy's `--sandbox`
+///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",

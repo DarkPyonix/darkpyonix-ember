@@ -10,6 +10,7 @@ pub mod browser;
 pub mod chatgpt;
 pub mod computers;
 pub mod devices;
+pub mod egress_proxy;
 pub mod events;
 pub mod fork;
 pub mod history;

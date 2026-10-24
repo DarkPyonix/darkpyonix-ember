@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         computer_registry,
         computers::connector(dialer.clone()),
         shim,
-        dialer,
+        dialer.clone(),
     );
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     // Opened like every other node client, so computers registered by peer mount too.
@@ -184,6 +184,24 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("project mount off; Claude Code file tools stay on this server");
     }
     computers.install(&sessions);
+    // The agent CLI's own API traffic leaves through the session's current computer (FR-X6).
+    // EMBER_AGENT_EGRESS=off keeps it on this server.
+    if std::env::var("EMBER_AGENT_EGRESS").map(|v| v != "off").unwrap_or(true) {
+        let (c, d) = (computers.clone(), dialer.clone());
+        let route: ember_server::egress_proxy::Route = Arc::new(move |sid| {
+            match c.registry().session_computer(sid)? {
+                Some(sc) if sc.computer_id != computers::LOCAL => {
+                    let comp = c
+                        .registry()
+                        .get(&sc.computer_id)?
+                        .ok_or_else(|| anyhow::anyhow!("computer {} is gone", sc.computer_id))?;
+                    Ok(Some(computers::node_client(&comp, d.as_ref())?))
+                }
+                _ => Ok(None),
+            }
+        });
+        sessions.add_start_hook(ember_server::egress_proxy::SessionEgress::new(route).start_hook());
+    }
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())

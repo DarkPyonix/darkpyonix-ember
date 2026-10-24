@@ -91,3 +91,59 @@ async fn open_gate_admits_everyone_until_revoked() {
     assert!(!gate.is_allowed(&a.peer_id()));
     assert!(ping(&da, &server).await.is_err());
 }
+
+/// One heartbeat, the bound FR-N3 gives for closing a revoked device's connections.
+#[cfg(feature = "iroh")]
+const HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// FR-N3 on the real iroh backend: a revoked device's open connection is closed, as seen by the
+/// device itself, within one heartbeat, and its re-dial is refused.
+#[cfg(feature = "iroh")]
+#[tokio::test]
+async fn revoked_device_is_dropped_within_a_heartbeat_over_iroh() {
+    mod common {
+        include!("common.rs");
+    }
+    let (device, server, _dir) = common::iroh_pair().await;
+    let gate = PeerGate::allow_list([device.peer_id()]);
+    serve(&server, gate.clone());
+
+    let d = Dialer::new(device.clone());
+    assert_eq!(ping(&d, &server).await.unwrap(), "pong");
+    let conn = d.connection(&PeerAddr::new(server.peer_id()), SERVICE).await.unwrap();
+    assert_eq!(gate.live_connections(&device.peer_id()), 1);
+
+    let start = std::time::Instant::now();
+    assert_eq!(gate.revoke(&device.peer_id()), 1);
+    let reason = tokio::time::timeout(HEARTBEAT, conn.closed())
+        .await
+        .expect("revoked connection still open after one heartbeat");
+    assert!(start.elapsed() < HEARTBEAT);
+    assert!(
+        matches!(reason, CloseReason::Remote { code: ember_transport::gate::CLOSE_REVOKED, .. }),
+        "{reason:?}"
+    );
+    assert!(ping(&d, &server).await.is_err());
+
+    gate.allow(device.peer_id());
+    assert_eq!(ping(&d, &server).await.unwrap(), "pong");
+    device.close().await;
+    server.close().await;
+}
+
+/// FR-N3 on iroh: a peer outside the allow-list is refused at accept.
+#[cfg(feature = "iroh")]
+#[tokio::test]
+async fn stranger_is_refused_over_iroh() {
+    mod common {
+        include!("common.rs");
+    }
+    let (stranger, server, _dir) = common::iroh_pair().await;
+    let gate = PeerGate::allow_list([]);
+    serve(&server, gate.clone());
+    let s = Dialer::new(stranger.clone());
+    assert!(ping(&s, &server).await.is_err());
+    assert_eq!(gate.live_connections(&stranger.peer_id()), 0);
+    stranger.close().await;
+    server.close().await;
+}

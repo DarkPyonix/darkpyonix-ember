@@ -27,7 +27,7 @@ use ember_node::egress::{self, reply, Target};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::session::StartHook;
+use crate::session::{EndHook, StartHook};
 
 /// Where a session's traffic leaves now: `Ok(None)` is this server (direct), `Ok(Some(node))`
 /// is the node of the session's current computer. Called once per CONNECT.
@@ -112,6 +112,11 @@ impl SessionEgress {
     /// Stop the session's proxy (open tunnels finish on their own).
     pub fn stop(&self, session_id: &str) {
         self.proxies.lock().unwrap().remove(session_id);
+    }
+
+    /// An end hook stopping the session's proxy when the session ends.
+    pub fn end_hook(self: Arc<Self>) -> EndHook {
+        Arc::new(move |id| self.stop(id))
     }
 
     /// A start hook adding the proxy environment to every agent process (FR-X6).

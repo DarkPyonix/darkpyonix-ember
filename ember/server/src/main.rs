@@ -215,7 +215,9 @@ async fn main() -> anyhow::Result<()> {
                 _ => Ok(None),
             }
         });
-        sessions.add_start_hook(ember_server::egress_proxy::SessionEgress::new(route).start_hook());
+        let egress = ember_server::egress_proxy::SessionEgress::new(route);
+        sessions.add_start_hook(egress.clone().start_hook());
+        sessions.add_end_hook(egress.end_hook());
     }
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")

@@ -46,7 +46,7 @@ def compare(expected, results):
 
 def self_test():
     here = os.path.dirname(os.path.abspath(__file__))
-    with open(os.path.join(here, "fixture-exthost.log")) as f:
+    with open(os.path.join(here, "fixture-exthost.txt")) as f:
         got = parse_log(f.read())
     assert got == {"redhat.vscode-yaml": "activated", "esbenp.prettier-vscode": "activated",
                    "golang.go": "failed", "vscodevim.vim": "failed"}, got

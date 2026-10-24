@@ -79,7 +79,7 @@
 shasum -a 256 -c --ignore-missing SHA256SUMS
 tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
     </figure>
-    <p>Each archive holds the programs described below (<code>ember-server</code>, <code>ember-exec</code> and <code>ember-a2a</code>; <code>ember-node</code> and <code>ember-term</code>); keep each set in one directory. The binaries are not signed or notarized yet. On macOS, clear the quarantine flag with <code>xattr -d com.apple.quarantine</code> on the extracted files.</p>
+    <p>Each archive holds the programs described below (<code>ember-server</code>, <code>ember-exec</code> and <code>ember-a2a</code>; <code>ember-node</code> and <code>ember-term</code>); keep each set in one directory. macOS binaries and apps are ad hoc signed only (no Apple account, no notarization), so Gatekeeper blocks the first launch. Clear the quarantine flag with <code>xattr -d com.apple.quarantine</code> on the extracted files. For the <code>.app</code>, run <code>xattr -dr com.apple.quarantine Ember.app</code>, or right-click and choose Open. The Windows <code>.msix</code> is unsigned: enable developer mode or re-sign it with a certificate you trust.</p>
     <p>The client is not in the release yet, because its renderer does not link; build it from source as shown in <a href="#client">The client</a>.</p>
 
     <h2 id="checkout">Get the code</h2>

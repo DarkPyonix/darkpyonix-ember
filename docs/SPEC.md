@@ -36,7 +36,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-S5 | Not implemented: `can_fork: false`, `POST …/fork` answers 501. | #78 |
 | FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: #79 |
 | FR-A1–A4 | Claude Code and Codex (#14), Antigravity (#64), ACP agents (#61) implemented, CI against recordings and fakes. Real OMP run not verified. agy shell writes fail under `--sandbox`. | #53, #65 |
-| FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is not implemented, in the server or the client. | #73 |
+| FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is implemented per session: server `Sessions::set_approve_all` (any agent kind, answers pending and later approvals), `PUT /api/sessions/{id}/approve-all`, client toggle in the conversation menu and a banner while on; in-memory on the server, so a restart returns sessions to asking. Tests written, not yet run in CI. | #73 |
 | FR-A6–A8 | Implemented, CI (#14, #58). | |
 | FR-X1–X3 | Implemented, CI (#20, #34, #47, #48); verified end to end with a node on the same Mac. A switch between two physical computers is not verified; the project mount (`mount-nfs`, `mount-fuse` features) is not built in CI. | #6 |
 | FR-X4 | Implemented in ember node (`jobs.rs`), CI. | |

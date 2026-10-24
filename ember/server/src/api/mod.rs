@@ -19,6 +19,7 @@
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
 //! | GET    | `/api/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
 //! | GET    | `/api/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
+//! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
 //! | POST   | `/api/sessions/{id}/fork` | → 501 `{error, reason}`: no agent supports forking yet |
 //!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
@@ -61,6 +62,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/messages", post(send_message))
         .route("/api/sessions/{id}/approvals/{approval_id}", post(answer))
+        .route("/api/sessions/{id}/approve-all", put(set_approve_all))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/sessions/{id}/lease", post(lease))
         .route("/api/push", get(push))
@@ -158,7 +160,7 @@ async fn get_session(
 ) -> ApiResult<impl IntoResponse> {
     let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
     // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing).
-    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await, "can_fork": false })))
+    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await, "can_fork": false, "approve_all": s.approve_all(&id) })))
 }
 
 /// FR-L9: rename, pin, archive.
@@ -317,6 +319,21 @@ async fn answer(
 ) -> ApiResult<impl IntoResponse> {
     s.answer(&id, &approval_id, b.decision).await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Deserialize)]
+struct ApproveAllBody {
+    enabled: bool,
+}
+
+/// FR-A5: switch a session's approve-everything mode.
+async fn set_approve_all(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+    Json(b): Json<ApproveAllBody>,
+) -> ApiResult<impl IntoResponse> {
+    s.set_approve_all(&id, b.enabled).await?;
+    Ok(Json(json!({ "approve_all": b.enabled })))
 }
 
 async fn interrupt(

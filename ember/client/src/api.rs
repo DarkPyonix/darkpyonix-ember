@@ -268,6 +268,14 @@ impl Api {
         Ok(())
     }
 
+    /// Switch a session's approve-everything mode (FR-A5). The server answers the approvals
+    /// already pending, and pushes the change to every client.
+    pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {
+        let path = format!("/sessions/{}/approve-all", seg(id));
+        Self::check(self.send(Method::PUT, &path, Some(json!({ "enabled": enabled }))).await?)?;
+        Ok(())
+    }
+
     pub async fn interrupt(&self, id: &str) -> ApiResult<()> {
         self.post(&format!("/sessions/{}/interrupt", seg(id)), json!({})).await?;
         Ok(())

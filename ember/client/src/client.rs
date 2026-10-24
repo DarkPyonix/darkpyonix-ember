@@ -248,6 +248,21 @@ impl Client {
         self.inner.api.answer(id, approval_id, decision).await
     }
 
+    /// Switch a session's approve-everything mode (FR-A5). The state follows at once; the
+    /// server's push tells every other client.
+    pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {
+        self.inner.api.set_approve_all(id, enabled).await?;
+        self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+        Ok(())
+    }
+
+    /// Ask the server whether `id` is in approve-everything mode and take the answer.
+    pub async fn load_approve_all(&self, id: &str) -> ApiResult<bool> {
+        let enabled = self.inner.api.session(id).await?.approve_all;
+        self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+        Ok(enabled)
+    }
+
     pub async fn interrupt(&self, id: &str) -> ApiResult<()> {
         self.inner.api.interrupt(id).await
     }

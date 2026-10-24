@@ -54,7 +54,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-W1–W3 | `ember/proxy/` (#1). FR-W3 not verified per platform. | #83 |
 | FR-W4 | OSE builds in CI (#24, #39); the manual Pi and Mac step is not recorded. | #83 |
 | FR-W5, FR-W5a–h, NFR-W5a | Designed only (`docs/design/MOBILE-NO-NODE.md`), outside the 10-18 deadline. | #80 |
-| FR-W6 | Extensions are in `extensions/` (#69); default install and the notebook criteria are open. | #15 |
+| FR-W6 | Extensions are in `extensions/` (#69). Staging into OSE (`ember/ose/stage-extensions.sh`) and the proxy default list (`DEFAULT_EXTENSIONS`) are written (#117), unverified on a real build. `.vsix` packaging into `extensions/dist` is not yet produced. Notebook criteria are open. | #15 |
 | NFR-W1 | No extension regression test yet. | #84 |
 | FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `ember/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
 | NFR-P1 | Not measured. | #26 |

@@ -39,6 +39,40 @@ pub struct Account {
     pub limited: bool,
 }
 
+/// The weekly per-app cap of a ChatGPT account (FR-U4). OpenAI reports no figure, so `known`
+/// is false and the view points at where the user sets it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct WeeklyCap {
+    #[serde(default)]
+    pub known: bool,
+    #[serde(default)]
+    pub manage_url: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// `GET /api/chatgpt/accounts` entry (FR-U4); token material never reaches clients.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ChatGptAccount {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    /// `signed_in` | `signed_out` | `not_eligible`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub limited: bool,
+    #[serde(default)]
+    pub limited_until: Option<i64>,
+    #[serde(default)]
+    pub limit_reason: Option<String>,
+    #[serde(default)]
+    pub tokens_today: u64,
+    #[serde(default)]
+    pub weekly_cap: Option<WeeklyCap>,
+}
+
 /// `GET /api/computers` entry (`ComputerStatus`, flattened `ComputerView`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ComputerStatus {
@@ -173,6 +207,11 @@ impl ServerApi {
         Ok(Self::check(self.http.get(self.url("/accounts")).send().await?).await?.json().await?)
     }
 
+    /// ChatGPT plan accounts; an error (404 when sign-in is off, e.g. hosted) means none.
+    pub async fn chatgpt_accounts(&self) -> ServerResult<Vec<ChatGptAccount>> {
+        Ok(Self::check(self.http.get(self.url("/chatgpt/accounts")).send().await?).await?.json().await?)
+    }
+
     /// `probe = false` answers at once with `reachable: None`; `true` asks every node.
     pub async fn computers(&self, probe: bool) -> ServerResult<Vec<ComputerStatus>> {
         let req = self.http.get(self.url("/computers")).query(&[("probe", probe)]);
@@ -253,6 +292,22 @@ mod tests {
         }]))
         .unwrap();
         assert_eq!(a[0].label, "work");
+    }
+
+    #[test]
+    fn fr_u4_decodes_chatgpt_accounts_with_the_weekly_cap() {
+        let a: Vec<ChatGptAccount> = serde_json::from_value(json!([{
+            "id": "g1", "kind": "chatgpt", "label": "me", "email": "me@x.dev", "client_id": "c",
+            "scopes": [], "plan_usage": true, "status": "signed_in", "access_expires_at": 5,
+            "limited_until": null, "limit_reason": null, "created_at": 1, "updated_at": 2,
+            "limited": false, "tokens_today": 15,
+            "weekly_cap": { "known": false, "manage_url": "https://chatgpt.com/x", "note": "n" }
+        }]))
+        .unwrap();
+        assert_eq!(a[0].tokens_today, 15);
+        let cap = a[0].weekly_cap.as_ref().unwrap();
+        assert!(!cap.known);
+        assert_eq!(cap.manage_url, "https://chatgpt.com/x");
     }
 
     #[test]

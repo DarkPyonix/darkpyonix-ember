@@ -10,7 +10,7 @@ use ember_client::transcript::{Transcript, TranscriptItem};
 use ember_client::wire::{MentionCandidate, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
 use ember_client::LauncherStatus;
 
-use crate::server::{Account, ComputerStatus};
+use crate::server::{Account, ChatGptAccount, ComputerStatus};
 
 // ---- status ------------------------------------------------------------------------------------
 
@@ -213,6 +213,22 @@ pub struct SessionRow {
 /// Labels for account ids (`label (agent)`), from `GET /accounts`.
 pub fn account_labels(accounts: &[Account]) -> HashMap<String, String> {
     accounts.iter().map(|a| (a.id.clone(), a.label.clone())).collect()
+}
+
+/// One line of the usage view for a ChatGPT plan account (FR-U4): tokens today, the weekly
+/// cap (which OpenAI does not report, so the line says where it is set) and a limit notice.
+pub fn chatgpt_usage_line(a: &ChatGptAccount) -> String {
+    let mut parts = vec![format!("{} tokens today", a.tokens_today)];
+    match &a.weekly_cap {
+        Some(c) if c.known => parts.push("weekly cap known".to_string()),
+        Some(_) => parts.push("weekly cap set in ChatGPT settings, not reported to apps".to_string()),
+        None => {}
+    }
+    if a.limited {
+        let reason = a.limit_reason.as_deref().unwrap_or("limit reached");
+        parts.push(format!("limited: {reason}"));
+    }
+    parts.join(" | ")
 }
 
 /// What a session row needs from the outside world besides [`State`].
@@ -691,6 +707,27 @@ mod tests {
         assert_eq!(badges[1], ("2 running".to_string(), Tone::Accent));
         assert_eq!(badges[2], ("1 unread".to_string(), Tone::Success));
         assert!(status_rank(LauncherStatus::WaitingForApproval) > status_rank(LauncherStatus::Running));
+    }
+
+    #[test]
+    fn fr_u4_usage_line_shows_the_weekly_cap() {
+        use crate::server::WeeklyCap;
+        let mut a = ChatGptAccount {
+            id: "g".into(),
+            label: "me".into(),
+            email: None,
+            status: "signed_in".into(),
+            limited: false,
+            limited_until: None,
+            limit_reason: None,
+            tokens_today: 15,
+            weekly_cap: Some(WeeklyCap { known: false, manage_url: String::new(), note: String::new() }),
+        };
+        let line = chatgpt_usage_line(&a);
+        assert!(line.contains("15 tokens today") && line.contains("weekly cap"), "{line}");
+        a.limited = true;
+        a.limit_reason = Some("subscription_sharing_usage_limit_exceeded".into());
+        assert!(chatgpt_usage_line(&a).contains("limited: subscription_sharing_usage_limit_exceeded"));
     }
 
     #[test]

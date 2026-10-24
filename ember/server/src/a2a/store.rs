@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS a2a_messages (
 );
 CREATE INDEX IF NOT EXISTS a2a_messages_pending ON a2a_messages (to_session, delivered_at);
 CREATE INDEX IF NOT EXISTS a2a_messages_from ON a2a_messages (from_session, created_at);
+CREATE TABLE IF NOT EXISTS a2a_terminal_grants (
+    reader      TEXT NOT NULL,
+    target      TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (reader, target)
+);
 CREATE TABLE IF NOT EXISTS a2a_switches (
     scope    TEXT PRIMARY KEY,
     enabled  INTEGER NOT NULL
@@ -259,6 +265,46 @@ impl A2aStore {
 
     pub fn set_session_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
         self.set_switch(&session_scope(id), enabled)
+    }
+
+    /// Whether the user granted `reader` terminal access to `target` (FR-T9).
+    pub fn terminal_granted(&self, reader: &str, target: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT 1 FROM a2a_terminal_grants WHERE reader = ?1 AND target = ?2",
+                params![reader, target],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Grant or revoke (FR-T9).
+    pub fn set_terminal_grant(&self, reader: &str, target: &str, allowed: bool) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        if allowed {
+            conn.execute(
+                "INSERT OR IGNORE INTO a2a_terminal_grants (reader, target, created_at) VALUES (?1, ?2, ?3)",
+                params![reader, target, now_ms()],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM a2a_terminal_grants WHERE reader = ?1 AND target = ?2",
+                params![reader, target],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Targets `reader` was granted, sorted.
+    pub fn terminal_grants(&self, reader: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT target FROM a2a_terminal_grants WHERE reader = ?1 ORDER BY target")?;
+        let rows = stmt.query_map(params![reader], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 

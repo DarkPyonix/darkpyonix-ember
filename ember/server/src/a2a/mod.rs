@@ -17,6 +17,7 @@ pub mod client;
 pub mod mention;
 pub mod store;
 pub mod team;
+pub mod terminal;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

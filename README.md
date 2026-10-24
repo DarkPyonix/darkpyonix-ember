@@ -35,7 +35,7 @@ Three problems come up every day in agentic development.
 
 1. The main screen lists your **projects**. Each project shows its **sessions** with a status:
    running, waiting for approval, finished or failed. Your **computers** are listed below, with
-   whether each is online.
+   whether each is online. Top tabs switch between **Home** (general chat, usage, harnesses), **Project** (this screen, the default) and **Channels** (per-project feed and chat with agents and people; planned, `INTENT.md` D22).
 2. You open a conversation to steer an agent. The agent runs on the main server, and its tools act
    on the session's current computer. You send messages, answer approvals, interrupt a turn, or
    move the session to another computer.

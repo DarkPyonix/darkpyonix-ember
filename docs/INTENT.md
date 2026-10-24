@@ -454,6 +454,27 @@ Rejected: messages as the only channel between sessions.
 
 **Status.** Server tools built (#132, FR-T9); the CLI subcommands are not.
 
+### D22: The client has navigation tabs: Home, Project, Channels
+
+**Decision.** [user, 2026-10-25: "Ember IDE의 네비게이션 탭 구성을 홈(일반적인 채팅창+토큰 소모량+구독 사용량 남은거+하네스 목록), 프로젝트(기본 화면), 채널(프로젝트 내 에이전트들이 사용자에게 요청하거나 보고하는 내용의 종합+@로 에이전트 태깅해서 슬랙처럼 메시지 바로 보내기 가능+몇몇의 에이전트만 뽑아서 새로운 채널 생성 가능+외부 계정을 채널에 초대 가능, 에이전트 태깅 없이는 사람들사이 대화로 취급) 등으로 하려는데 이에 따라 스펙 추가해줄래?"] The client's top navigation is a set of tabs. "등으로" means the list may grow, so the tab set is open-ended.
+
+- **Home**: a general chat window, token consumption, the remaining subscription usage, and the list of harnesses (agents).
+- **Project**: the default screen, which is today's project and session view (`FR-L1`–`FR-L9`).
+- **Channels**: per project. An aggregate feed of what the project's agents request from or report to the user. The user can mention an agent with `@` and message it directly, like Slack. A new channel can be created with a chosen subset of the project's agents. External accounts (other people) can be invited into a channel. A message without an agent mention is human-to-human conversation and is not delivered to any agent.
+
+**How it relates to earlier decisions.**
+
+- D9: the tabs are native `dioxus-compose` screens, with no webview (`NFR-L2`).
+- D7: Home shows usage already recorded for accounts (`FR-U3`, `FR-U4`); it adds a view, not a new meter.
+- D5: a channel mention reaches an agent through the same A2A delivery as a composer mention (`FR-T6`, `FR-T3`). The agents' requests and reports in the feed reuse the idle and completion reports (`FR-T8`). The new rule is the mention gate: no mention, no delivery to agents.
+- Teams (`FR-T7`, D18): a channel's agent subset is a selection of sessions; it does not create a team, and the team messaging rule still applies to team members.
+
+**Why.** Agentic work is mostly watching and steering. A project with several agents needs one place where their requests and reports arrive, and one place to talk to a person without waking an agent. The mention gate keeps people talking to people from costing tokens or steering an agent by accident.
+
+**Status.** Specified only (`FR-L10`–`FR-L12`, `FR-T10`–`FR-T15`). Not built.
+
+**Open points** (owner to decide; nothing here is invented, see Q10–Q13): how an external account authenticates and what it may see; whether Home's general chat is a session without a project; whether a channel persists across machines; whether an invited person's message can be a request to the project's agents at all.
+
 ## Open questions
 
 | ID | Question | Status |
@@ -467,3 +488,7 @@ Rejected: messages as the only channel between sessions.
 | **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. Implemented in `ember/transport` (#23); `NFR-N1` not yet measured on real networks (#10). tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed: deleted** [user, 2026-10-03] |
 | **Q9** | `ember/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `ember/proxy/docs/BACKGROUND.md` §7-3. | Open; HTTPS over P2P is #10 |
+| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | Open; the owner decides. `FR-T14` is [provisional] until then |
+| **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | Open; the owner decides. `FR-L11` is [provisional] until then |
+| **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | Open; the owner decides. `FR-T10` stores on the main server [provisional] |
+| **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | Open; the owner decides |

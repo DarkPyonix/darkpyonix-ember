@@ -14,6 +14,9 @@ need 'linux-x86_64' 'Linux x86_64 target missing'
 need 'SHA256SUMS' 'SHA256SUMS missing'
 need '--verify-tag' 'release must verify the tag'
 need 'codesign --force --deep -s -' 'ad hoc signing step missing'
+need 'ember/app' 'client job must build ember/app'
+need 'ember-app' 'client binary ember-app missing'
+[ -f ember/app/Dioxus.toml ] || { echo 'error: ember/app/Dioxus.toml missing' >&2; fail=1; }
 need '^  client:' 'client app job missing'
 need 'EMBER_CLIENT_RELEASE' 'client job must be gated by EMBER_CLIENT_RELEASE'
 for fmt in 'app dmg' 'zip msix' 'AppImage'; do need "formats: \"$fmt\"" "client format list '$fmt' missing"; done

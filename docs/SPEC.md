@@ -33,7 +33,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | NFR-L1 | Not measured. | #9 |
 | NFR-L2 | `.github/scripts/checks/check-no-webview.sh` runs in CI. | |
 | FR-S1–S4, FR-S6 | Implemented, CI. | |
-| FR-S5 | Not implemented: `can_fork: false`, `POST …/fork` answers 501. | #78 |
+| FR-S5 | Server implemented (Ember-level fork, transcript-seeded); client action not built. Not yet compiled. | #78 |
 | FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: #79 |
 | FR-A1–A4 | Claude Code and Codex (#14), Antigravity (#64), ACP agents (#61) implemented, CI against recordings and fakes. Real OMP run not verified. agy shell writes fail under `--sandbox`. | #53, #65 |
 | FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is not implemented, in the server or the client. | #73 |
@@ -119,9 +119,14 @@ installers (#72); the documents in the house writing style (#68).
 - **Export** (FR-L9): `GET /api/sessions/{id}/export`, `format: "ember-transcript"`, the
   record and every stored event.
 - **Paths**: the routes above are `/api/...` with no version (D15, implemented in #63 and #85).
-- **Fork** (FR-S5): not implemented for any agent (#78). `GET /sessions/{id}` reports `can_fork:
-  false` and `POST /sessions/{id}/fork` answers 501 with a reason. Codex's `thread/fork` is the
-  likely first implementation.
+- **Fork** (FR-S5): `POST /sessions/{id}/fork {turn_seq?, title?}` creates a new session after a
+  completed turn (default: the last). The parent's events up to that `turn_ended` are copied
+  (native ids are not), and `session_forks` (migration 15) records the parent and turn;
+  `GET /sessions/{id}` reports `fork_of`, `fork_turns` and `can_fork` (true when a completed turn
+  exists). No wrapped agent forks from an arbitrary turn headlessly, so the fork starts a fresh
+  agent session and its first message carries the copied conversation as a system notice. A
+  session without a completed turn answers 409 and `can_fork` is false. The client action
+  (fork from a turn's menu) is not built.
 
 ---
 

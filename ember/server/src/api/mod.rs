@@ -19,7 +19,7 @@
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
 //! | GET    | `/api/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
 //! | GET    | `/api/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
-//! | POST   | `/api/sessions/{id}/fork` | → 501 `{error, reason}`: no agent supports forking yet |
+//! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
 //!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
 //! changes are pushed (`project_updated`, `session_updated`).
@@ -157,8 +157,16 @@ async fn get_session(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing).
-    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await, "can_fork": false })))
+    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing). It needs a
+    // completed turn; `fork_turns` lists the sequence numbers a fork may start after.
+    let turns = crate::fork::completed_turns(&s.store().events_after(&id, 0)?);
+    Ok(Json(json!({
+        "session": rec,
+        "live": s.is_live(&id).await,
+        "can_fork": !turns.is_empty(),
+        "fork_turns": turns,
+        "fork_of": s.store().fork_origin(&id)?,
+    })))
 }
 
 /// FR-L9: rename, pin, archive.
@@ -201,17 +209,29 @@ fn file_safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
-/// FR-S5. No wrapped agent forks yet: Claude Code has no fork-from-turn in its headless mode
-/// and Codex's `thread/fork` is not wired into the adapter (it forks a whole thread, not from a
-/// chosen turn, and needs a second app-server thread per session). Clients read `can_fork`
-/// from `GET /sessions/{id}` and disable the action; this answers 501 for anyone who calls it.
+#[derive(Deserialize, Default)]
+struct ForkBody {
+    /// Sequence number of a completed turn's `turn_ended`; the last completed turn when absent.
+    #[serde(default)]
+    turn_seq: Option<i64>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// FR-S5: a new session that starts after a completed turn of this one. 409 when the session has
+/// no such turn (the client reads `can_fork` and does not offer the action).
 async fn fork_session(
     State(s): State<Arc<Sessions>>,
     Path(id): Path<String>,
+    body: Option<Json<ForkBody>>,
 ) -> ApiResult<Response> {
-    let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    let reason = format!("forking is not supported for {} sessions yet", rec.agent.as_str());
-    Ok((StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": reason, "reason": reason }))).into_response())
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    match s.fork(&id, b.turn_seq, b.title.as_deref()) {
+        Ok(rec) => Ok((StatusCode::CREATED, Json(rec)).into_response()),
+        Err(crate::fork::ForkError::NotFound(_)) => Err(SessionError::NotFound(id).into()),
+        Err(crate::fork::ForkError::BadTurn(m)) => Err(ApiError(StatusCode::CONFLICT, m)),
+        Err(crate::fork::ForkError::Other(e)) => Err(e.into()),
+    }
 }
 
 #[derive(Deserialize)]

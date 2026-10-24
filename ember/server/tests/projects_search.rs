@@ -1,5 +1,5 @@
 //! Projects and computer assignment (FR-L4), session metadata (FR-L9), full-text search
-//! (FR-S4), export (FR-L9) and the fork stub (FR-S5), over HTTP.
+//! (FR-S4), export (FR-L9) and fork (FR-S5), over HTTP.
 
 use std::sync::Arc;
 
@@ -239,14 +239,84 @@ async fn fr_l9_export_is_a_self_contained_transcript() {
     assert_eq!(call(&f.app, Method::GET, "/api/sessions/nope/export", None).await.0, StatusCode::NOT_FOUND);
 }
 
+fn two_turns(f: &Fixture) -> String {
+    use ember_server::events::TurnOutcome;
+    let id = new_session(&f.sessions, "alpha");
+    let rec = |e: AgentEvent| {
+        f.sessions.record_event(&id, &e).unwrap();
+    };
+    rec(AgentEvent::NativeSession { native_id: "native-1".into() });
+    rec(AgentEvent::UserMessage { text: "first question".into() });
+    rec(AgentEvent::AssistantMessage { text: "first answer".into() });
+    rec(AgentEvent::TurnEnded { outcome: TurnOutcome::Completed });
+    rec(AgentEvent::UserMessage { text: "second question".into() });
+    rec(AgentEvent::AssistantMessage { text: "second answer".into() });
+    rec(AgentEvent::TurnEnded { outcome: TurnOutcome::Completed });
+    id
+}
+
 #[tokio::test]
-async fn fr_s5_fork_is_not_implemented_with_a_reason() {
+async fn fr_s5_fork_without_a_completed_turn_is_disabled_not_failing() {
     let f = fixture();
     let id = new_session(&f.sessions, "alpha");
-    let (st, body) = call(&f.app, Method::POST, &format!("/api/sessions/{id}/fork"), Some(json!({}))).await;
-    assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
-    assert!(body["reason"].as_str().unwrap().contains("not supported"), "{body}");
+    let (_, detail) = call(&f.app, Method::GET, &format!("/api/sessions/{id}"), None).await;
+    assert_eq!(detail["can_fork"], false);
+    let (st, _) = call(&f.app, Method::POST, &format!("/api/sessions/{id}/fork"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(call(&f.app, Method::POST, "/api/sessions/nope/fork", Some(json!({}))).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fr_s5_fork_copies_up_to_the_turn_and_records_the_parent() {
+    let f = fixture();
+    let id = two_turns(&f);
+    let (_, detail) = call(&f.app, Method::GET, &format!("/api/sessions/{id}"), None).await;
+    assert_eq!(detail["can_fork"], true);
+    let turns = detail["fork_turns"].as_array().unwrap().clone();
+    assert_eq!(turns.len(), 2);
+
+    // Fork after the first turn.
+    let (st, fork) = call(&f.app, Method::POST, &format!("/api/sessions/{id}/fork"), Some(json!({ "turn_seq": turns[0] }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{fork}");
+    let fid = fork["id"].as_str().unwrap().to_string();
+    assert_ne!(fid, id);
+    assert_eq!(fork["project"], "alpha");
+    assert!(fork["native_id"].is_null(), "a fork never resumes the parent's native session");
+    assert!(fork["title"].as_str().unwrap().starts_with("Fork of"));
+
+    let events = f.sessions.store().events_after(&fid, 0).unwrap();
+    let texts: Vec<_> = events.iter().filter_map(|e| match &e.event {
+        AgentEvent::UserMessage { text } | AgentEvent::AssistantMessage { text } => Some(text.as_str()),
+        _ => None,
+    }).collect();
+    assert_eq!(texts, ["first question", "first answer"]);
+    assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2, 3]);
+
+    let (_, d) = call(&f.app, Method::GET, &format!("/api/sessions/{fid}"), None).await;
+    assert_eq!(d["fork_of"]["parent_id"], id.as_str());
+    assert_eq!(d["fork_of"]["turn_seq"], turns[0]);
+
+    // The parent is unchanged.
+    assert_eq!(f.sessions.store().events_after(&id, 0).unwrap().len(), 7);
+
+    // Default: the last completed turn; a seq that is not a turn end is refused.
+    let (st, last) = call(&f.app, Method::POST, &format!("/api/sessions/{id}/fork"), Some(json!({ "title": "Try B" }))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    assert_eq!(last["title"], "Try B");
+    assert_eq!(f.sessions.store().events_after(last["id"].as_str().unwrap(), 0).unwrap().len(), 6);
+    let (st, _) = call(&f.app, Method::POST, &format!("/api/sessions/{id}/fork"), Some(json!({ "turn_seq": 2 }))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn fr_s5_fork_seeds_the_agent_once_with_the_copied_conversation() {
+    let f = fixture();
+    let id = two_turns(&f);
+    let fork = f.sessions.fork(&id, None, None).unwrap();
+    let seed = f.sessions.store().take_fork_seed(&fork.id).unwrap().expect("first call seeds");
+    assert!(seed.contains("User: first question") && seed.contains("Assistant: second answer"), "{seed}");
+    assert!(f.sessions.store().take_fork_seed(&fork.id).unwrap().is_none(), "only once");
+    assert!(f.sessions.store().take_fork_seed(&id).unwrap().is_none(), "a plain session has no seed");
 }
 
 /// Percent-encode a query value (no extra dev-dependency).

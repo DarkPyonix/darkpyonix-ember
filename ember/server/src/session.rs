@@ -312,6 +312,9 @@ impl Sessions {
             self.start_hooks.lock().unwrap().iter().flat_map(|h| h(&rec)).collect();
         let instructions: Vec<String> =
             self.instructions_hooks.lock().unwrap().iter().filter_map(|h| h(&rec)).collect();
+        let mut env = env;
+        // Lets the shared spawn helper run the agent under its per-session shim (FR-S8).
+        env.push((crate::agents::proc::SESSION_ENV.to_string(), id.to_string()));
         let mut req = StartRequest {
             cwd: PathBuf::from(&rec.cwd),
             resume_native_id: rec.native_id.clone(),
@@ -586,6 +589,38 @@ impl Sessions {
             live.run.lock().await.shutdown().await?;
         }
         Ok(())
+    }
+
+    /// Server startup (FR-S8): rejoin the sessions whose agent outlived the previous server.
+    /// Agents that can be rejoined as they run are attached from their stored output offset, so
+    /// the rest of an interrupted turn arrives; for the others the old agent is stopped and the
+    /// session resumes natively on its next message. Returns the rejoined session ids.
+    pub async fn rejoin_shims(self: &Arc<Self>, rt: &crate::agents::proc::ShimRuntime) -> Vec<String> {
+        let ids = match crate::agents::proc::live_shim_sessions(rt).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("could not scan session shims: {e:#}");
+                return Vec::new();
+            }
+        };
+        let mut rejoined = Vec::new();
+        for id in ids {
+            let rejoin = self
+                .store
+                .session(&id)
+                .ok()
+                .flatten()
+                .and_then(|rec| self.adapters.get(&rec.agent).map(|a| a.rejoins_shim()))
+                .unwrap_or(false);
+            if !rejoin {
+                continue;
+            }
+            match self.ensure_live(&id).await {
+                Ok(_) => rejoined.push(id),
+                Err(e) => tracing::warn!(session = %id, "could not rejoin its agent: {e}"),
+            }
+        }
+        rejoined
     }
 
     pub async fn is_live(&self, id: &str) -> bool {

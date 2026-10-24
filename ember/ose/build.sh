@@ -13,6 +13,7 @@
 #   1. fetch    shallow-clone microsoft/vscode at the tag in ember/ose/VERSION
 #   2. product  merge ember/ose/product.overrides.json into product.json, drop Microsoft-only keys,
 #               then ember/ose/check-product.sh
+#      stage-extensions.sh copies the notebook and theme into extensions/ (built in, FR-W6)
 #   3. install  (Linux) build/npm/preinstall.ts first, then npm ci (npm + package-lock.json, not yarn)
 #   4. build    gulp core-ci -> compile-copilot-extension-build -> stage the Copilot SDK into
 #               .build/extensions/copilot -> gulp vscode-reh-web-<platform>-<arch>-min-ci
@@ -179,6 +180,8 @@ stage_copilot_sdk() {
   echo "staged $(du -sh "$to" | cut -f1) of @github/copilot into .build/extensions/copilot"
 }
 
+log "stage DarkPyonix extensions as built-in (FR-W6)"
+"$here/stage-extensions.sh" "$SRC"
 rm -rf "$SRC/.build/extensions"   # what upstream's clean-extensions-build does
 log "gulp core-ci"
 (cd "$SRC" && npm run gulp core-ci)

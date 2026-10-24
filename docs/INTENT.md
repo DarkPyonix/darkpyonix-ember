@@ -452,7 +452,7 @@ what it is doing.
 
 Rejected: messages as the only channel between sessions.
 
-**Status.** Not built.
+**Status.** Server tools built (#132, FR-T9); the CLI subcommands are not.
 
 ## Open questions
 

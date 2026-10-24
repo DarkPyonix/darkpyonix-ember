@@ -32,6 +32,12 @@
 //! - `GET /api/teams/{team_id}/mail?after=&limit=` → `[Mail]` (all of the team's mail)
 //! - `POST /api/teams/{team_id}/members/{session_id}/end` → `Member`
 //!
+//! Terminal tools (FR-T9, see [`super::terminal`]; the caller needs a grant, else `403 forbidden`):
+//! - `GET  /api/a2a/terminal/{target}?lines=&since=&wait_ms=` → `{lines:[{seq,text}], last_seq}`
+//! - `POST /api/a2a/terminal/{target}/text` `{text}` → `202`
+//! - `POST /api/a2a/terminal/{target}/interrupt` → `202`
+//! - `GET|PUT /api/sessions/{id}/terminal-grants` (user) `{target, allowed}`
+//!
 //! Team changes are pushed as `{"type": "team_updated", "team": TeamView}`.
 //!
 //! Errors are `{error, code}` with `code` one of `unauthorized`, `disabled`, `rate_limited`,
@@ -66,6 +72,13 @@ pub fn router(a2a: Arc<A2a>) -> Router {
         .route("/api/a2a/team/tasks", get(list_tasks).post(add_task))
         .route("/api/a2a/team/tasks/{number}", patch(update_task))
         .route("/api/a2a/team/mail", get(read_mail).post(send_mail))
+        .route("/api/a2a/terminal/{target}", get(terminal_read))
+        .route("/api/a2a/terminal/{target}/text", post(terminal_text))
+        .route("/api/a2a/terminal/{target}/interrupt", post(terminal_interrupt))
+        .route(
+            "/api/sessions/{id}/terminal-grants",
+            get(list_terminal_grants).put(put_terminal_grant),
+        )
         .route("/api/sessions/{id}/mentions", get(mentions))
         .route("/api/sessions/{id}/team", get(session_team))
         .route("/api/teams/{team_id}", get(team))
@@ -311,4 +324,71 @@ async fn mentions(
     Query(q): Query<MentionQuery>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(a.mention_candidates(&id, &q.q, q.limit)?))
+}
+
+// ---- terminal tools (FR-T9) ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ReadQuery {
+    lines: Option<usize>,
+    since: Option<i64>,
+    wait_ms: Option<u64>,
+}
+
+async fn terminal_read(
+    State(a): State<Arc<A2a>>,
+    headers: HeaderMap,
+    Path(target): Path<String>,
+    Query(q): Query<ReadQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let me = caller(&a, &headers)?;
+    Ok(Json(a.terminal_read(&me, &target, q.lines, q.since, q.wait_ms).await?))
+}
+
+#[derive(Deserialize)]
+struct TextBody {
+    text: String,
+}
+
+async fn terminal_text(
+    State(a): State<Arc<A2a>>,
+    headers: HeaderMap,
+    Path(target): Path<String>,
+    Json(b): Json<TextBody>,
+) -> ApiResult<impl IntoResponse> {
+    let me = caller(&a, &headers)?;
+    a.terminal_send_text(&me, &target, &b.text).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "to": target, "status": "sent" }))))
+}
+
+async fn terminal_interrupt(
+    State(a): State<Arc<A2a>>,
+    headers: HeaderMap,
+    Path(target): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let me = caller(&a, &headers)?;
+    a.terminal_interrupt(&me, &target).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "to": target, "status": "interrupted" }))))
+}
+
+async fn list_terminal_grants(
+    State(a): State<Arc<A2a>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(json!({ "targets": a.store().terminal_grants(&id)? })))
+}
+
+#[derive(Deserialize)]
+struct GrantBody {
+    target: String,
+    allowed: bool,
+}
+
+async fn put_terminal_grant(
+    State(a): State<Arc<A2a>>,
+    Path(id): Path<String>,
+    Json(b): Json<GrantBody>,
+) -> ApiResult<impl IntoResponse> {
+    a.set_terminal_grant(&id, &b.target, b.allowed)?;
+    Ok(Json(json!({ "reader": id, "target": b.target, "allowed": b.allowed })))
 }

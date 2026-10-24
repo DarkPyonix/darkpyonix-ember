@@ -401,17 +401,17 @@ by hand.
 
 ### D19: Agent API traffic exits through the current computer
 
-**Decision.** [provisional, waits for owner confirmation; the owner's words, 2026-10-25: "실제로
+**Decision.** [user, confirmed 2026-10-25 ("3번 해석 맞아"); the owner's words: "실제로
 네트워크 통신 마저도 각 컴퓨터로 보내는 것이기 때문에 클로드 서버에서는 각각의 컴퓨터에서 클로드
 코드가 동작하도록 IP가 잡혀야 한다는거야."] Not only tool execution (D4) but the agent CLI's own API
 traffic leaves through the session's current computer, so the model provider sees that computer's IP.
 Candidate: the CLI gets `HTTPS_PROXY` pointing at a proxy that forwards through ember node.
-The reading (traffic, not only tools) is the leader's and is not yet confirmed by the owner.
+The owner confirmed this reading (traffic, not only tools) on 2026-10-25.
 
 **Why.** To the provider, Claude Code should look like it runs on that computer. D6 already does
 this for the remote browser.
 
-Rejected (for now): letting API traffic leave from the main server's IP.
+Rejected: letting API traffic leave from the main server's IP.
 
 **Status.** Not built.
 

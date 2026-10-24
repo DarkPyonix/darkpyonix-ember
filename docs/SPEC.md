@@ -34,7 +34,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | NFR-L2 | `.github/scripts/checks/check-no-webview.sh` runs in CI. | |
 | FR-S1–S4, FR-S6 | Implemented, CI. | |
 | FR-S5 | Not implemented: `can_fork: false`, `POST …/fork` answers 501. | #78 |
-| FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison planned. | #6 (v0); target: #79 |
+| FR-S7 | v0 (system notice) implemented, CI (#34). Per-file hash comparison written (#79), not yet compiled or run. | #6 (v0); #79 |
 | FR-A1–A4 | Claude Code and Codex (#14), Antigravity (#64), ACP agents (#61) implemented, CI against recordings and fakes. Real OMP run not verified. agy shell writes fail under `--sandbox`. | #53, #65 |
 | FR-A5 | Allow once, always, deny and the pending list implemented; Antigravity hook FR-A5a–f implemented (#64). The approve-everything mode is implemented per session: server `Sessions::set_approve_all` (any agent kind, answers pending and later approvals), `PUT /api/sessions/{id}/approve-all`, client toggle in the conversation menu and a banner while on; in-memory on the server, so a restart returns sessions to asking. Tests written, not yet run in CI. | #73 |
 | FR-A6–A8 | Implemented, CI (#14, #58). | |
@@ -96,7 +96,7 @@ installers (#72); the documents in the house writing style (#68).
 | **FR-S4** | Full-text search across all sessions' messages. | Indexed search (not a linear scan); results link to the matching message. |
 | **FR-S5** | A session can be forked from any completed turn where the agent supports it. | The fork records its parent and turn; agents that cannot fork have the action disabled, not failing. |
 | **FR-S6** | Idle sessions release their agent process and reconnect transparently on the next message; a session being viewed is kept alive. | Measured: an idle session's agent process exits after the idle timeout; sending a message restores it via native resume. A session open in a client is not reclaimed. |
-| **FR-S7** | *[provisional, `INTENT.md` Q4]* When a session's current computer changes, observations of the previous computer are invalidated. | v0: a system notice tells the agent the computer changed and prior file observations must be re-read before editing. Target: per-file content-hash comparison so only changed files are flagged. |
+| **FR-S7** | *[provisional, `INTENT.md` Q4]* When a session's current computer changes, observations of the previous computer are invalidated. | v0: a system notice tells the agent the computer changed and prior file observations must be re-read before editing. Per-file comparison *[provisional]*: at a switch the server takes the files in the session's Read, Edit, Write, MultiEdit and NotebookEdit tool calls (absolute paths, the latest 100), hashes each (SHA-256 of the whole file) on the computer left and on the one entered, and the notice names only files whose hash differs, is missing on one side, or could not be read; identical files need no re-read. Without file calls, or with an undelivered earlier notice, the v0 wording applies. The "observation" is the file as it is on the old computer at switch time, not at the moment it was read. |
 
 ### §S status: server APIs behind the launcher (FR-L4, FR-L9, FR-S4, FR-S5)
 

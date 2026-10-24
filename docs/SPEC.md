@@ -125,7 +125,9 @@ installers (#72); the documents in the house writing style (#68).
   `GET /sessions/{id}` reports `fork_of`, `fork_turns` and `can_fork` (true when a completed turn
   exists). No wrapped agent forks from an arbitrary turn headlessly, so the fork starts a fresh
   agent session and its first message carries the copied conversation as a system notice. A
-  session without a completed turn answers 409 and `can_fork` is false. The client action
+  session without a completed turn answers 409 and `can_fork` is false. *[provisional]* This is
+  not a native fork: #78 asks for a copy of the agent's native session, which no agent exposes
+  from a chosen turn headlessly (Codex `thread/fork` forks a whole thread). Native fork stays open. The client action
   (fork from a turn's menu) is not built.
 
 ---

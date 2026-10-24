@@ -11,6 +11,7 @@ pub mod chatgpt;
 pub mod computers;
 pub mod devices;
 pub mod events;
+pub mod fork;
 pub mod history;
 pub mod mcp;
 pub mod projects;

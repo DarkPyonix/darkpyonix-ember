@@ -47,7 +47,7 @@ use crate::ui::project::{
     status_pill,
 };
 use crate::ui::theme::*;
-use crate::ui::use_ui;
+use crate::ui::{use_ui, Ui};
 
 /// Shown wherever something is not built yet.
 pub use crate::ui::project::SOON;
@@ -832,7 +832,7 @@ pub fn ComposerChips(session: String) -> Element {
 
 /// Hand an IDE choice to the OS, as the conversation view does.
 /// TODO(conversation.rs): the conversation view keeps its own copy of this; unify.
-fn launch_ide(kind: IdeKind, launch: Option<Result<IdeLaunch, String>>) {
+fn launch_ide(ui: Ui, kind: IdeKind, launch: Option<Result<IdeLaunch, String>>) {
     let target = match &launch {
         None => {
             show_message("IDE 목록을 받아오는 중입니다");
@@ -859,8 +859,9 @@ fn launch_ide(kind: IdeKind, launch: Option<Result<IdeLaunch, String>>) {
             },
         ),
         IdeAction::EmberPlaceholder => {
-            // TODO(M8, editor core): open the Ember IDE window here.
-            show_message("Ember 에디터는 준비 중입니다. VS Code나 JetBrains Gateway를 사용하세요");
+            // FR-L31: the editor screen; its code area waits for the editor core (M8).
+            let (project, folder) = IdeLaunch::editor_target(launch.as_ref());
+            ui.open_editor(project, folder);
         }
         IdeAction::Unavailable(why) => show_message(format!("{label}: 사용할 수 없습니다: {why}")),
     }
@@ -915,7 +916,7 @@ fn IdeMenu(session: String) -> Element {
                     on_click: move |_: ()| {
                         open.set(false);
                         ui.update_prefs(|p| p.ide_target = Some(c.kind.key().to_string()));
-                        launch_ide(c.kind, ide.read().clone());
+                        launch_ide(ui, c.kind, ide.read().clone());
                     },
                 }
             }

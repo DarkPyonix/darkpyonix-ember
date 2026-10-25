@@ -224,3 +224,13 @@ fn every_tool_window_has_a_name_and_every_action_a_label() {
         assert!(!a.label().is_empty());
     }
 }
+
+// FR-L31 (#186): the session view IDE menu opens the editor on the launch project and folder.
+#[test]
+fn fr_l31_editor_target_is_empty_until_the_launch_arrives() {
+    use ember_app::server::IdeLaunch;
+    let none = (String::new(), String::new());
+    assert_eq!(IdeLaunch::editor_target(None), none);
+    let err = Err("down".to_string());
+    assert_eq!(IdeLaunch::editor_target(Some(&err)), none);
+}

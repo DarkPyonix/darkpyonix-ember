@@ -44,6 +44,12 @@ pub struct Prefs {
     /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
     #[serde(default)]
     pub theme: crate::ui::theme::ThemePref,
+    /// The session screen's view: `multi`, `single` or `status` (FR-L18).
+    #[serde(default)]
+    pub session_view: Option<String>,
+    /// Pane tabs per project (FR-L18).
+    #[serde(default)]
+    pub panes: BTreeMap<String, crate::ui::session::ProjectPanes>,
 }
 
 fn format_default() -> u32 {
@@ -58,6 +64,8 @@ impl Default for Prefs {
             last_project: None,
             ide_target: None,
             theme: crate::ui::theme::ThemePref::default(),
+            session_view: None,
+            panes: BTreeMap::new(),
         }
     }
 }

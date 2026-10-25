@@ -979,7 +979,7 @@ fn RepoBar(
     let branch_text = match (&snap, &project.branch) {
         (Some(s), _) => s.branch.clone(),
         (None, Some(b)) => b.clone(),
-        _ => soon_line("브랜치"),
+        _ => "브랜치".to_string(),
     };
     let upstream = snap
         .as_ref()
@@ -1093,9 +1093,6 @@ fn RepoBar(
                         enabled: has,
                         on_click: move |()| notice(&soon_line("원격 동작")),
                     }
-                    AppButton { text: "Fetch", small: true, enabled: has }
-                    AppButton { text: "Pull", small: true, enabled: has }
-                    AppButton { text: "Push", small: true, enabled: has }
                 }
                 SmallNote { text: remote_line.clone() }
             }

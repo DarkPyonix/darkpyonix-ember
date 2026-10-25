@@ -1689,9 +1689,15 @@ mod tests {
         assert_eq!(Harness::ClaudeCode.kind(), "claude-code");
         assert_eq!(Harness::Codex.kind(), "codex");
         // Disabled even when the server lists it as installed, and before the server answers.
-        assert_eq!(harness_block(Harness::Gemini, &[], &[]), Some("준비 중입니다"));
+        assert_eq!(
+            harness_block(Harness::Gemini, &[], &[]),
+            Some("준비 중입니다")
+        );
         let agents = vec![("gemini".to_string(), true)];
-        assert_eq!(harness_block(Harness::Gemini, &agents, &[]), Some("준비 중입니다"));
+        assert_eq!(
+            harness_block(Harness::Gemini, &agents, &[]),
+            Some("준비 중입니다")
+        );
     }
 
     #[test]

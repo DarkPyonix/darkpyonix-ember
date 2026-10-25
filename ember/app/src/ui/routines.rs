@@ -26,60 +26,252 @@ pub const LOCAL_OFFSET_MIN: i64 = 0;
 // ---------------------------------------------------------------------------------------------
 
 /// Days since 1970-01-01 of a civil date.
-pub fn days_from_civil(_y: i64, _m: u32, _d: u32) -> i64 {
-    todo!()
+pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// `(year, month, day)` of a day count since 1970-01-01.
-pub fn civil_from_days(_days: i64) -> (i64, u32, u32) {
-    todo!()
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// 0 = Sunday .. 6 = Saturday.
-pub fn weekday(_days: i64) -> u32 {
-    todo!()
+pub fn weekday(days: i64) -> u32 {
+    (days + 4).rem_euclid(7) as u32
 }
 
 /// Minutes since the epoch of a civil date and time.
-pub fn minutes_at(_y: i64, _mo: u32, _d: u32, _h: u32, _mi: u32) -> Minutes {
-    todo!()
+pub fn minutes_at(y: i64, mo: u32, d: u32, h: u32, mi: u32) -> Minutes {
+    days_from_civil(y, mo, d) * 1440 + h as i64 * 60 + mi as i64
 }
+
+const WEEKDAY_SHORT: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
 
 // ---------------------------------------------------------------------------------------------
 // Cron
 // ---------------------------------------------------------------------------------------------
 
+/// The five fields as bit sets over their values.
+struct Cron {
+    minute: u64,
+    hour: u64,
+    dom: u64,
+    month: u64,
+    dow: u64,
+    dom_any: bool,
+    dow_any: bool,
+}
+
+/// One field: comma list of `*`, `a`, `a-b`, each with an optional `/step`.
+fn parse_field(field: &str, lo: u32, hi: u32) -> Option<u64> {
+    let mut mask = 0u64;
+    for part in field.split(',') {
+        let (base, step) = match part.split_once('/') {
+            Some((b, s)) => (b, s.parse::<u32>().ok().filter(|n| *n > 0)?),
+            None => (part, 1),
+        };
+        let (from, to): (u32, u32) = if base == "*" {
+            (lo, hi)
+        } else if let Some((a, b)) = base.split_once('-') {
+            (a.parse().ok()?, b.parse().ok()?)
+        } else {
+            let a: u32 = base.parse().ok()?;
+            if part.contains('/') { (a, hi) } else { (a, a) }
+        };
+        if from < lo || to > hi || from > to {
+            return None;
+        }
+        let mut v = from;
+        while v <= to {
+            mask |= 1u64 << v;
+            v += step;
+        }
+    }
+    Some(mask)
+}
+
+fn parse_cron(expr: &str) -> Option<Cron> {
+    let f: Vec<&str> = expr.split_whitespace().collect();
+    if f.len() != 5 {
+        return None;
+    }
+    let mut dow = parse_field(f[4], 0, 7)?;
+    if dow & (1u64 << 7) != 0 {
+        dow = (dow & !(1u64 << 7)) | 1;
+    }
+    Some(Cron {
+        minute: parse_field(f[0], 0, 59)?,
+        hour: parse_field(f[1], 0, 23)?,
+        dom: parse_field(f[2], 1, 31)?,
+        month: parse_field(f[3], 1, 12)?,
+        dow,
+        dom_any: f[2].starts_with('*'),
+        dow_any: f[4].starts_with('*'),
+    })
+}
+
 /// Whether `expr` is a five-field cron expression this screen understands: `*`, `*/n`, `a`,
 /// `a-b`, `a-b/n` and comma lists, per field (minute hour day-of-month month day-of-week).
-pub fn cron_valid(_expr: &str) -> bool {
-    todo!()
+pub fn cron_valid(expr: &str) -> bool {
+    parse_cron(expr).is_some()
+}
+
+const INVALID_CRON: &str = "올바르지 않은 cron입니다";
+
+/// "오전 9시", "오후 2시 30분", "자정", "정오".
+fn time_phrase(h: u32, m: u32) -> String {
+    if h == 0 && m == 0 {
+        return "자정".into();
+    }
+    if h == 12 && m == 0 {
+        return "정오".into();
+    }
+    let period = if h < 12 { "오전" } else { "오후" };
+    let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+    if m == 0 {
+        format!("{period} {h12}시")
+    } else {
+        format!("{period} {h12}시 {m}분")
+    }
 }
 
 /// The schedule as a Korean phrase: "매일 오전 9시", "평일 오전 9시", "15분마다". An expression
 /// outside the small subset reads "사용자 지정 일정"; an invalid one "올바르지 않은 cron입니다".
-pub fn describe_cron(_expr: &str) -> String {
-    todo!()
+pub fn describe_cron(expr: &str) -> String {
+    if !cron_valid(expr) {
+        return INVALID_CRON.into();
+    }
+    let f: Vec<&str> = expr.split_whitespace().collect();
+    let num = |s: &str| s.parse::<u32>().ok();
+    let step = |s: &str| s.strip_prefix("*/").and_then(|n| n.parse::<u32>().ok());
+    let rest_any = f[2] == "*" && f[3] == "*" && f[4] == "*";
+    let custom = || "사용자 지정 일정".to_string();
+
+    if f.iter().all(|x| *x == "*") {
+        return "매분".into();
+    }
+    if f[1] == "*" && rest_any {
+        if f[0] == "0" {
+            return "매시 정각".into();
+        }
+        return match step(f[0]) {
+            Some(n) => format!("{n}분마다"),
+            None => custom(),
+        };
+    }
+    if f[0] == "0" && rest_any {
+        if let Some(n) = step(f[1]) {
+            return format!("{n}시간마다");
+        }
+    }
+    let (Some(m), Some(h)) = (num(f[0]), num(f[1])) else {
+        return custom();
+    };
+    let t = time_phrase(h, m);
+    match (f[2], f[3], f[4]) {
+        ("*", "*", "*") => format!("매일 {t}"),
+        ("*", "*", "1-5") => format!("평일 {t}"),
+        ("*", "*", d) => match num(d) {
+            Some(n) if n <= 7 => format!("매주 {}요일 {t}", WEEKDAY_SHORT[(n % 7) as usize]),
+            _ => custom(),
+        },
+        (d, "*", "*") => match num(d) {
+            Some(n) => format!("매월 {n}일 {t}"),
+            None => custom(),
+        },
+        _ => custom(),
+    }
 }
 
 /// The time shown large: "09:00" for a fixed minute and hour, else the phrase of [`describe_cron`].
-pub fn big_time(_expr: &str) -> String {
-    todo!()
+pub fn big_time(expr: &str) -> String {
+    if cron_valid(expr) {
+        let f: Vec<&str> = expr.split_whitespace().collect();
+        if let (Ok(m), Ok(h)) = (f[0].parse::<u32>(), f[1].parse::<u32>()) {
+            return format!("{h:02}:{m:02}");
+        }
+    }
+    describe_cron(expr)
+}
+
+fn day_matches(c: &Cron, day: i64) -> bool {
+    let (_, month, dom) = civil_from_days(day);
+    if c.month & (1u64 << month) == 0 {
+        return false;
+    }
+    let dom_ok = c.dom & (1u64 << dom) != 0;
+    let dow_ok = c.dow & (1u64 << weekday(day)) != 0;
+    match (c.dom_any, c.dow_any) {
+        (true, true) => true,
+        (true, false) => dow_ok,
+        (false, true) => dom_ok,
+        (false, false) => dom_ok || dow_ok,
+    }
 }
 
 /// The first trigger strictly after `after` (local minutes), looking up to four years ahead.
 /// `None` for an invalid expression or one that never matches (30 February).
-pub fn next_run(_expr: &str, _after: Minutes) -> Option<Minutes> {
-    todo!()
+pub fn next_run(expr: &str, after: Minutes) -> Option<Minutes> {
+    let c = parse_cron(expr)?;
+    let first = after.div_euclid(1440);
+    for day in first..first + 366 * 4 {
+        if !day_matches(&c, day) {
+            continue;
+        }
+        for h in (0..24).filter(|h| c.hour & (1u64 << *h) != 0) {
+            for m in (0..60).filter(|m| c.minute & (1u64 << *m) != 0) {
+                let t = day * 1440 + h * 60 + m;
+                if t > after {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// "오늘 09:00", "내일 09:00" or "10월 28일 09:00", both times in local minutes.
-pub fn format_next(_next: Minutes, _now: Minutes) -> String {
-    todo!()
+pub fn format_next(next: Minutes, now: Minutes) -> String {
+    let rem = next.rem_euclid(1440);
+    let clock = format!("{:02}:{:02}", rem / 60, rem % 60);
+    let next_day = next.div_euclid(1440);
+    match next_day - now.div_euclid(1440) {
+        0 => format!("오늘 {clock}"),
+        1 => format!("내일 {clock}"),
+        _ => {
+            let (_, m, d) = civil_from_days(next_day);
+            format!("{m}월 {d}일 {clock}")
+        }
+    }
 }
 
 /// "방금 전", "5분 전", "3시간 전" or "2일 전".
-pub fn ago(_now: Minutes, _at: Minutes) -> String {
-    todo!()
+pub fn ago(now: Minutes, at: Minutes) -> String {
+    let d = now - at;
+    if d < 1 {
+        "방금 전".into()
+    } else if d < 60 {
+        format!("{d}분 전")
+    } else if d < 1440 {
+        format!("{}시간 전", d / 60)
+    } else {
+        format!("{}일 전", d / 1440)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -127,6 +319,16 @@ pub enum RunStatus {
     Running,
 }
 
+impl RunStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            RunStatus::Done => "성공",
+            RunStatus::Failed => "실패",
+            RunStatus::Running => "실행 중",
+        }
+    }
+}
+
 /// One run of a routine; each run is a session reachable from the history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
@@ -142,14 +344,20 @@ pub struct Entry {
     pub runs: Vec<Run>,
 }
 
-/// "시간" or "이벤트" with the schedule sentence: "매일 오전 9시", or the event text.
-pub fn schedule_line(_r: &Routine) -> String {
-    todo!()
+/// The schedule sentence: "매일 오전 9시", or the event text.
+pub fn schedule_line(r: &Routine) -> String {
+    match r.trigger {
+        Trigger::Time => describe_cron(&r.cron),
+        Trigger::Event => r.cron.clone(),
+    }
 }
 
-/// "실행 기록 없음", or "성공 · 3시간 전".
-pub fn last_run_text(_runs: &[Run], _now: Minutes) -> String {
-    todo!()
+/// "실행 기록 없음", or "성공 · 3시간 전" from the newest run.
+pub fn last_run_text(runs: &[Run], now: Minutes) -> String {
+    match runs.first() {
+        None => "실행 기록 없음".into(),
+        Some(r) => format!("{} · {}", r.status.label(), ago(now, r.at)),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -165,20 +373,47 @@ pub struct Group {
 impl Group {
     /// "ember (2)".
     pub fn title(&self) -> String {
-        todo!()
+        format!("{} ({})", self.project, self.routines.len())
     }
+}
+
+fn matches_query(r: &Routine, q: &str) -> bool {
+    q.is_empty()
+        || format!("{} {} {}", r.name, schedule_line(r), r.prompt)
+            .to_lowercase()
+            .contains(q)
 }
 
 /// One group per project, projects by name with 기본 프로젝트 last, routines in the given
 /// order. `project` limits to one project; `query` matches name, schedule and prompt without
 /// regard to case. A project with no match has no group.
-pub fn group_by_project(_all: &[Routine], _project: Option<&str>, _query: &str) -> Vec<Group> {
-    todo!()
+pub fn group_by_project(all: &[Routine], project: Option<&str>, query: &str) -> Vec<Group> {
+    let q = query.trim().to_lowercase();
+    let mut groups: Vec<Group> = Vec::new();
+    for r in all {
+        if project.is_some_and(|p| p != r.sel.project) || !matches_query(r, &q) {
+            continue;
+        }
+        match groups.iter_mut().find(|g| g.project == r.sel.project) {
+            Some(g) => g.routines.push(r.clone()),
+            None => groups.push(Group {
+                project: r.sel.project.clone(),
+                routines: vec![r.clone()],
+            }),
+        }
+    }
+    groups.sort_by(|a, b| {
+        (a.project == DEFAULT_PROJECT, &a.project).cmp(&(b.project == DEFAULT_PROJECT, &b.project))
+    });
+    groups
 }
 
 /// The projects that have a routine, for the filter pills, in the order of the groups.
-pub fn filter_projects(_all: &[Routine]) -> Vec<String> {
-    todo!()
+pub fn filter_projects(all: &[Routine]) -> Vec<String> {
+    group_by_project(all, None, "")
+        .into_iter()
+        .map(|g| g.project)
+        .collect()
 }
 
 /// What the screen shows at a window size.
@@ -191,13 +426,19 @@ pub enum PaneMode {
 
 /// Wide: list and detail side by side. Compact: one of them, the detail once a routine is open
 /// (with the back button), else the list.
-pub fn pane_mode(_compact: bool, _detail_open: bool) -> PaneMode {
-    todo!()
+pub fn pane_mode(compact: bool, detail_open: bool) -> PaneMode {
+    match (compact, detail_open) {
+        (false, _) => PaneMode::Both,
+        (true, true) => PaneMode::DetailOnly,
+        (true, false) => PaneMode::ListOnly,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
 // Form
 // ---------------------------------------------------------------------------------------------
+
+const DEFAULT_CRON: &str = "0 9 * * *";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormDraft {
@@ -218,33 +459,83 @@ pub enum FormError {
 
 impl FormError {
     pub fn message(self) -> &'static str {
-        todo!()
+        match self {
+            FormError::NameEmpty => "이름을 입력하셔야 합니다",
+            FormError::ScheduleInvalid => "일정이 올바른 cron 형식이 아닙니다",
+            FormError::EventEmpty => "이벤트 설명을 입력하셔야 합니다",
+            FormError::PromptEmpty => "프롬프트를 입력하셔야 합니다",
+        }
     }
 }
 
 impl FormDraft {
     /// A new routine: every day at 09:00, Claude Code's default, ask mode, the main server.
-    pub fn new(_project: &str) -> FormDraft {
-        todo!()
+    pub fn new(project: &str) -> FormDraft {
+        FormDraft {
+            name: String::new(),
+            trigger: Trigger::Time,
+            cron: DEFAULT_CRON.into(),
+            prompt: String::new(),
+            sel: Selection {
+                project: project.into(),
+                ..Selection::initial()
+            },
+        }
     }
 
-    pub fn from_routine(_r: &Routine) -> FormDraft {
-        todo!()
+    pub fn from_routine(r: &Routine) -> FormDraft {
+        FormDraft {
+            name: r.name.clone(),
+            trigger: r.trigger,
+            cron: r.cron.clone(),
+            prompt: r.prompt.clone(),
+            sel: r.sel.clone(),
+        }
     }
 
     /// Switching trigger replaces the text with that trigger's starting value.
-    pub fn with_trigger(&self, _t: Trigger) -> FormDraft {
-        todo!()
+    pub fn with_trigger(&self, t: Trigger) -> FormDraft {
+        if t == self.trigger {
+            return self.clone();
+        }
+        FormDraft {
+            trigger: t,
+            cron: match t {
+                Trigger::Time => DEFAULT_CRON.into(),
+                Trigger::Event => String::new(),
+            },
+            ..self.clone()
+        }
     }
 
     /// The problems that block saving, in field order. Empty: the draft can be saved.
     pub fn errors(&self) -> Vec<FormError> {
-        todo!()
+        let mut out = Vec::new();
+        if self.name.trim().is_empty() {
+            out.push(FormError::NameEmpty);
+        }
+        match self.trigger {
+            Trigger::Time if !cron_valid(self.cron.trim()) => out.push(FormError::ScheduleInvalid),
+            Trigger::Event if self.cron.trim().is_empty() => out.push(FormError::EventEmpty),
+            _ => {}
+        }
+        if self.prompt.trim().is_empty() {
+            out.push(FormError::PromptEmpty);
+        }
+        out
     }
 
-    /// The routine to store, switched on. Text is trimmed.
-    pub fn into_routine(&self, _id: &str, _enabled: bool) -> Routine {
-        todo!()
+    /// The routine to store. Text is trimmed.
+    pub fn into_routine(&self, id: &str, enabled: bool) -> Routine {
+        Routine {
+            id: id.into(),
+            name: self.name.trim().into(),
+            trigger: self.trigger,
+            cron: self.cron.trim().into(),
+            prompt: self.prompt.trim().into(),
+            enabled,
+            sel: self.sel.clone(),
+        }
     }
 }
 
@@ -260,19 +551,69 @@ pub struct RoutineKpi {
 }
 
 /// Success rate of the runs that ended: done over done and failed. `None` while none ended.
-pub fn success_percent(_runs: &[Run]) -> Option<u32> {
-    todo!()
+pub fn success_percent(runs: &[Run]) -> Option<u32> {
+    let done = runs.iter().filter(|r| r.status == RunStatus::Done).count();
+    let failed = runs
+        .iter()
+        .filter(|r| r.status == RunStatus::Failed)
+        .count();
+    let ended = done + failed;
+    (ended > 0).then(|| ((done as f64 / ended as f64) * 100.0).round() as u32)
 }
 
 /// The rate over every run of every routine.
-pub fn overall_success(_entries: &[Entry]) -> Option<u32> {
-    todo!()
+pub fn overall_success(entries: &[Entry]) -> Option<u32> {
+    let all: Vec<Run> = entries.iter().flat_map(|e| e.runs.clone()).collect();
+    success_percent(&all)
 }
 
 /// 켜진 루틴, 지금 실행 중, 이번 주 실행 (the last seven days) and 다음 실행. `now` is local
 /// minutes; run times are shifted by `offset` to local before they are compared.
-pub fn kpis(_entries: &[Entry], _now: Minutes, _offset: i64) -> [RoutineKpi; 4] {
-    todo!()
+pub fn kpis(entries: &[Entry], now: Minutes, offset: i64) -> [RoutineKpi; 4] {
+    let on = entries.iter().filter(|e| e.routine.enabled).count();
+    let runs = || entries.iter().flat_map(|e| e.runs.iter());
+    let running = runs().filter(|r| r.status == RunStatus::Running).count();
+    let week: Vec<&Run> = runs()
+        .filter(|r| r.at + offset > now - 7 * 1440 && r.at + offset <= now)
+        .collect();
+    let failed = week
+        .iter()
+        .filter(|r| r.status == RunStatus::Failed)
+        .count();
+    let next = entries
+        .iter()
+        .filter(|e| e.routine.enabled && e.routine.trigger == Trigger::Time)
+        .filter_map(|e| next_run(&e.routine.cron, now).map(|t| (t, &e.routine.name)))
+        .min_by_key(|(t, _)| *t);
+    [
+        RoutineKpi {
+            label: "켜진 루틴",
+            value: on.to_string(),
+            note: Some(format!("전체 {}", entries.len())),
+        },
+        RoutineKpi {
+            label: "지금 실행 중",
+            value: running.to_string(),
+            note: (running > 0).then(|| "진행 중".to_string()),
+        },
+        RoutineKpi {
+            label: "이번 주 실행",
+            value: week.len().to_string(),
+            note: Some(format!("실패 {failed}")),
+        },
+        match next {
+            Some((t, name)) => RoutineKpi {
+                label: "다음 실행",
+                value: format_next(t, now),
+                note: Some(name.clone()),
+            },
+            None => RoutineKpi {
+                label: "다음 실행",
+                value: "없음".into(),
+                note: None,
+            },
+        },
+    ]
 }
 
 /// One weekday of the bar chart.
@@ -285,8 +626,24 @@ pub struct DayBar {
 }
 
 /// The seven days ending today, oldest first, with the runs that ended on each.
-pub fn weekday_bars(_entries: &[Entry], _now: Minutes, _offset: i64) -> [DayBar; 7] {
-    todo!()
+pub fn weekday_bars(entries: &[Entry], now: Minutes, offset: i64) -> [DayBar; 7] {
+    let today = now.div_euclid(1440);
+    std::array::from_fn(|i| {
+        let day = today - 6 + i as i64;
+        let on_day = |status: RunStatus| {
+            entries
+                .iter()
+                .flat_map(|e| e.runs.iter())
+                .filter(|r| r.status == status && (r.at + offset).div_euclid(1440) == day)
+                .count()
+        };
+        DayBar {
+            label: WEEKDAY_SHORT[weekday(day) as usize],
+            ok: on_day(RunStatus::Done),
+            fail: on_day(RunStatus::Failed),
+            today: day == today,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -321,22 +678,49 @@ pub struct LocalStore {
 
 impl RoutineStore for LocalStore {
     fn entries(&self) -> Vec<Entry> {
-        todo!()
+        self.routines
+            .iter()
+            .map(|r| Entry {
+                routine: r.clone(),
+                runs: Vec::new(),
+            })
+            .collect()
     }
-    fn save(&mut self, _routine: Routine) {
-        todo!()
+
+    fn save(&mut self, routine: Routine) {
+        match self.routines.iter_mut().find(|r| r.id == routine.id) {
+            Some(slot) => *slot = routine,
+            None => self.routines.push(routine),
+        }
     }
-    fn set_enabled(&mut self, _id: &str, _enabled: bool) -> Result<(), StoreError> {
-        todo!()
+
+    fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), StoreError> {
+        let r = self
+            .routines
+            .iter_mut()
+            .find(|r| r.id == id)
+            .ok_or(StoreError::NotFound)?;
+        r.enabled = enabled;
+        Ok(())
     }
-    fn run_now(&mut self, _id: &str) -> Result<(), StoreError> {
-        todo!()
+
+    fn run_now(&mut self, id: &str) -> Result<(), StoreError> {
+        if self.routines.iter().any(|r| r.id == id) {
+            Err(StoreError::Unavailable)
+        } else {
+            Err(StoreError::NotFound)
+        }
     }
+
     fn next_id(&self) -> String {
-        todo!()
+        (1..)
+            .map(|n| format!("r{n}"))
+            .find(|id| self.routines.iter().all(|r| &r.id != id))
+            .expect("an unused id exists")
     }
+
     fn is_local(&self) -> bool {
-        todo!()
+        true
     }
 }
 

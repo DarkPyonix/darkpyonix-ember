@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{conversation, home, launcher, new_session, search, use_ui, Route};
+use crate::ui::{conversation, home, new_session, project, search, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -460,7 +460,7 @@ pub fn Shell() -> Element {
                 fill_max_width: true,
                 match screen {
                     Screen::Home => rsx! { home::Home {} },
-                    Screen::Launcher => rsx! { launcher::Launcher {} },
+                    Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
                     Screen::Conversation(id) => rsx! { conversation::ConversationView { key: "{id}", id: id.clone() } },
                     Screen::Placeholder(menu) => rsx! { Placeholder { menu } },

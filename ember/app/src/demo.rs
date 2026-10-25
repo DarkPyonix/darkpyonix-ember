@@ -38,6 +38,15 @@ pub const DEMO_NOTICE: &str = "데모 모드입니다";
 const DAY_MS: i64 = 86_400_000;
 const APPROVAL_ID: &str = "demo-approval-1";
 
+/// The toast for actions that need a server.
+pub const UNAVAILABLE: &str = "데모에서는 쓸 수 없습니다";
+
+/// The message to show instead of calling the server: `Some` in the demo, `None` otherwise.
+/// Pure, for tests.
+pub fn unavailable(demo_active: bool) -> Option<&'static str> {
+    demo_active.then_some(UNAVAILABLE)
+}
+
 /// Whether the demo source is used: the switch is `1` and no server URL is given (an empty one
 /// counts as not given, like `AppConfig`). Pure, for tests.
 pub fn active(demo_switch: Option<&str>, server_url: Option<&str>) -> bool {
@@ -351,6 +360,12 @@ impl DemoSource {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn server_only_actions_are_blocked_only_in_the_demo() {
+        assert_eq!(super::unavailable(true), Some("데모에서는 쓸 수 없습니다"));
+        assert_eq!(super::unavailable(false), None);
+    }
+
     use super::*;
     use ember_client::state::State;
 

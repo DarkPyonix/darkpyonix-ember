@@ -159,6 +159,18 @@ impl Services {
         self.client.set_approve_all(id, enabled).await.map_err(|e| e.to_string())
     }
 
+    /// In the demo, say the action is not available and return true; the caller then returns
+    /// without calling the server (#202).
+    pub fn demo_blocked(&self) -> bool {
+        match crate::demo::unavailable(self.demo.is_some()) {
+            Some(m) => {
+                show_message(m);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Tell the UI the outbox changed (queued-message indicator).
     pub fn bump_outbox(&self) {
         if let Some(live) = self.live.get() {

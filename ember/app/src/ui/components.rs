@@ -157,13 +157,19 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
-/// The toolkit's Button pads its 20 dp label by about 10 dp above and below and clips to its
-/// height, so anything under 40 dp cuts the bottom of Hangul final consonants (검색 reads 거새).
-/// Until the toolkit exposes the padding, the small button is drawn at 40 dp.
-pub const BUTTON_MIN_RENDER_HEIGHT: f32 = 40.0;
-
-pub fn button_render_height(height: f32) -> f32 {
-    height.max(BUTTON_MIN_RENDER_HEIGHT)
+/// Workaround for compose-rust #328 (Button and Chip labels are measured too narrow, so a
+/// short Korean label such as "보내기" wraps to two lines). The toolkit's Button has no
+/// `max_lines`, so the button gets a width that fits its label: an estimate of the label's
+/// advance (a wide glyph is one em, a narrow one about 0.55 em), the 16 dp side padding on both
+/// sides, and room for the icon. Remove this once #328 is fixed upstream.
+pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
+    let advance: f32 = text
+        .chars()
+        .map(|c| if c.is_ascii() { 0.55 } else { 1.0 })
+        .sum::<f32>()
+        * font_px;
+    let icon = if has_icon { 20.0 + 8.0 } else { 0.0 };
+    advance + icon + 2.0 * 16.0
 }
 
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
@@ -179,13 +185,20 @@ pub fn AppButton(
 ) -> Element {
     let theme = use_ember_theme();
     let s = button_style(kind, small, theme.palette);
+    let width = if fill_max_width || text.is_empty() {
+        None
+    } else {
+        Some(label_min_width(&text, s.fs.size(), icon.is_some()))
+    };
     rsx! {
         Button {
             text,
             icon,
             enabled,
             fill_max_width,
-            height: button_render_height(s.height),
+            // Workaround for compose-rust #328: no soft wrap, see `label_min_width`.
+            width,
+            height: s.height,
             variant: ButtonVariant::Text,
             background: paint(s.fill),
             color: paint(s.text),
@@ -231,11 +244,6 @@ pub fn pickchip_style(selected: bool, p: &Palette) -> (f32, Color) {
     (H_CTL, if selected { p.sel } else { p.surface_2 })
 }
 
-/// A chip is drawn at the button minimum so Hangul final consonants are not clipped.
-pub fn pickchip_render_height(height: f32) -> f32 {
-    button_render_height(height)
-}
-
 /// The composer's choice chip (`.pickchip`): project, harness/model, computer, mode.
 /// With `icon_only` (390 px and below) it drops its text and keeps the glyph.
 #[component]
@@ -248,17 +256,22 @@ pub fn PickChip(
 ) -> Element {
     let theme = use_ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
-    // The toolkit clips a label below 40 dp (dioxus-compose #133): draw the chip tall enough.
-    let height = pickchip_render_height(height);
     let text = if icon_only && icon.is_some() {
         String::new()
     } else {
         text
     };
+    // Workaround for compose-rust #328: no soft wrap, see `label_min_width`.
+    let width = if text.is_empty() {
+        None
+    } else {
+        Some(label_min_width(&text, Fs::Sm.size(), icon.is_some()))
+    };
     rsx! {
         Button {
             text,
             icon,
+            width,
             height,
             variant: ButtonVariant::Text,
             background: paint(fill),
@@ -401,9 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn buttons_are_drawn_tall_enough_not_to_clip_hangul() {
-        assert_eq!(button_render_height(32.0), 40.0);
-        assert_eq!(button_render_height(40.0), 40.0);
+    fn label_min_width_grows_with_the_label_and_the_icon() {
+        // Three Hangul glyphs at 14 px, no icon: 42 + 32 padding.
+        assert_eq!(label_min_width("보내기", 14.0, false), 74.0);
+        assert_eq!(label_min_width("보내기", 14.0, true), 102.0);
+        assert!(label_min_width("명령마다 확인", 13.0, false) > label_min_width("확인", 13.0, false));
+        // Latin letters are narrower than Hangul.
+        assert!(label_min_width("abc", 14.0, false) < label_min_width("가나다", 14.0, false));
     }
 
     #[test]
@@ -423,11 +440,6 @@ mod tests {
     fn pickchip_has_no_border_and_a_selected_fill() {
         assert_eq!(pickchip_style(false, &LIGHT), (32.0, LIGHT.surface_2));
         assert_eq!(pickchip_style(true, &DARK), (32.0, DARK.sel));
-    }
-
-    #[test]
-    fn chips_are_drawn_at_40_dp_or_more() {
-        assert_eq!(pickchip_render_height(pickchip_style(false, &LIGHT).0), 40.0);
     }
 
     #[test]

@@ -38,6 +38,9 @@ pub fn SearchScreen() -> Element {
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
         let current = generation.clone();
         let q = v.trim().to_string();
+        if !q.is_empty() && services().demo_blocked() {
+            return;
+        }
         if q.is_empty() {
             hits.set(Vec::new());
             hits_for.set(String::new());

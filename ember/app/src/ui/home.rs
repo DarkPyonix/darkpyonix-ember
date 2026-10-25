@@ -851,7 +851,7 @@ pub fn MenuItem(
             enabled,
             variant: ButtonVariant::Text,
             fill_max_width: true,
-            height: BUTTON_MIN_RENDER_HEIGHT,
+            height: H_CTL,
             color,
             on_click: move |()| on_click.call(()),
         }

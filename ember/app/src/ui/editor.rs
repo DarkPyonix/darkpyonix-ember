@@ -429,7 +429,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
         let h = w.action().map(|a| keymap.hint(a, os)).unwrap_or_default();
         tooltip_text(w.label(), &h)
     };
-    let run_action = move |a: Action| {
+    let mut run_action = move |a: Action| {
         let handled = {
             let mut t = tabs.write();
             let mut s = stripes.write();

@@ -539,13 +539,19 @@ Glass; every other platform draws the same bar opaque. Tokens, the Apple-style s
 radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), motion and every screen layout are in
 `DESIGN.md`.
 
+[user, 2026-10-25: "JetBrains 느낌도 반영"] The design is based on the current mockup, with a
+JetBrains-like feel added to tool-window density and the IDE screens (editor, terminal). The
+reason: the owner asked for that feel on the work surfaces, and the rest keeps the reference look.
+Which areas exactly, and how, stays [provisional] until the owner approves a mockup draft (pending).
+
 **Why.** One product that a user moves between machines should look the same on all of them, and a
 per-OS widget set multiplies the work of every screen.
 
-**Rejected.** Per-OS designs. The JetBrains New UI look that issue #151 first asked for ("Jetbrains
-제품 같은 느낌"): the owner's later rounds steered by the reference images instead, so the cool grey
-IDE look is not used [provisional: this reading is the leader's; no single owner sentence
-withdraws the JetBrains wording]. Liquid Glass on every platform (asked for iOS only).
+**Rejected.** Per-OS designs. A full JetBrains New UI look with the cool grey IDE palette on every
+screen, which issue #151 first asked for ("Jetbrains 제품 같은 느낌"). The owner's later rounds
+steered the base by the reference images, so the base stays the warm mockup palette. The JetBrains
+feel is added only where the 2026-10-25 answer places it (see the Decision). Liquid Glass on every
+platform (asked for iOS only).
 
 **Status.** Design approved in the mockup (`.scratch/design-mockup/`), not built (#154). Gaps in
 dioxus-compose and compose-rust are listed in `DESIGN.md` §10.

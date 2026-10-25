@@ -33,8 +33,11 @@ team's reading or detail that the owner has not confirmed.
   that floats over content on a phone.
 - **Calm, warm and dense like the references.** [user for the references, provisional for the
   wording] Warm grey backgrounds, white cards with a hairline border and an almost invisible
-  shadow, regular-weight large numbers, pills for status, outline icons. Not the cool grey of a
-  JetBrains IDE: the owner's later rounds pointed at the reference images instead (D25).
+  shadow, regular-weight large numbers, pills for status, outline icons. The base is not the cool
+  grey of a JetBrains IDE: the owner's later rounds pointed at the reference images (D25). [user,
+  D25, 2026-10-25] Tool windows and the IDE screens (editor, terminal) add a JetBrains-like feel,
+  because the owner asked for it on those work surfaces. Which areas and how is [provisional]
+  until the owner approves a mockup draft (pending).
 - **Visual elements over block lists.** [user, FEEDBACK v6: "자꾸 쉽게 쉽게 가려고 블록 리스트
   형식으로 가는데 그건 너무 별로야."] Dashboards use rings, stacked bars, avatar groups and large
   numbers in tiles of different sizes. A stack of same-sized rows reads as a block list.
@@ -570,7 +573,7 @@ Rules for all six:
 
 ## 8. Logo
 
-**Pending the owner's final sign-off.** Direction [user, QUEUED-logo: "엠버의 로고 디자인은
+**Temporary, rework pending (rounder silhouette).** Phoenix-fold B is the temporary logo in use in the app and the mockup; the rework (`SPEC.md` FR-L29) is a Draft and not scheduled. Direction [user, QUEUED-logo: "엠버의 로고 디자인은
 DarkPyonix의 임시 로고를 참고하도록 해. ... 데스크탑의 작업 표시줄 아이콘은 vscode 처럼 배경 없이
 구현하고, 모바일과 앱 내 아이콘은 배경 넣어서 구현해줘."]; candidate B was chosen [user: "그래 뭐
 주 후보인게 젤 좋긴 한거같다."] with three refinements (rounder tail, VS Code-like size, more colour

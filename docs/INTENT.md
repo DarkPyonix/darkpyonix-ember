@@ -539,10 +539,13 @@ Glass; every other platform draws the same bar opaque. Tokens, the Apple-style s
 radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), motion and every screen layout are in
 `DESIGN.md`.
 
-[user, 2026-10-25: "JetBrains 느낌도 반영"] The design is based on the current mockup, with a
-JetBrains-like feel added to tool-window density and the IDE screens (editor, terminal). The
-reason: the owner asked for that feel on the work surfaces, and the rest keeps the reference look.
-Which areas exactly, and how, stays [provisional] until the owner approves a mockup draft (pending).
+[user, 2026-10-25: "JetBrains 느낌도 반영"; corrected by the user, 2026-10-25: "아니 다른건 건들지
+말고 에디터와 터미널 화면만 건드리도록 해"] The design is based on the current mockup. The
+JetBrains-like feel applies only to the editor and terminal screens. Every other screen keeps the
+approved mockup design unchanged, including tool windows, the session panels, the status view and
+version control. The reason: the owner asked for that feel on the editor and terminal, and the rest
+keeps the reference look. The editor and terminal draft stays [provisional] until the owner approves
+a mockup draft (pending).
 
 **Why.** One product that a user moves between machines should look the same on all of them, and a
 per-OS widget set multiplies the work of every screen.
@@ -550,7 +553,8 @@ per-OS widget set multiplies the work of every screen.
 **Rejected.** Per-OS designs. A full JetBrains New UI look with the cool grey IDE palette on every
 screen, which issue #151 first asked for ("Jetbrains 제품 같은 느낌"). The owner's later rounds
 steered the base by the reference images, so the base stays the warm mockup palette. The JetBrains
-feel is added only where the 2026-10-25 answer places it (see the Decision). Liquid Glass on every
+feel is added only on the editor and terminal screens, as the 2026-10-25 correction places it (see
+the Decision). Liquid Glass on every
 platform (asked for iOS only).
 
 **Status.** Design approved in the mockup (`.scratch/design-mockup/`), not built (#154). Gaps in

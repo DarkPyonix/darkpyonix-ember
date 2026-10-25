@@ -27,8 +27,6 @@ pub mod theme;
 pub mod vcs;
 pub mod workbench;
 
-use std::collections::HashMap;
-
 use dioxus_compose::prelude::*;
 
 use crate::bridge::{use_bridge, Live};

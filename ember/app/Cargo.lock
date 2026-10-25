@@ -338,8 +338,8 @@ dependencies = [
 
 [[package]]
 name = "compose-rust"
-version = "0.0.2"
-source = "git+https://github.com/DarkPyonix/compose-rust?rev=d8205850bc032b40c418b7283787afd99ab84e4c#d8205850bc032b40c418b7283787afd99ab84e4c"
+version = "0.0.3"
+source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.3#4e194ce5677ea0fab57eba9c418aa8abcb656157"
 dependencies = [
  "compose-rust-macros",
  "jni",
@@ -347,8 +347,8 @@ dependencies = [
 
 [[package]]
 name = "compose-rust-macros"
-version = "0.0.2"
-source = "git+https://github.com/DarkPyonix/compose-rust?rev=d8205850bc032b40c418b7283787afd99ab84e4c#d8205850bc032b40c418b7283787afd99ab84e4c"
+version = "0.0.3"
+source = "git+https://github.com/DarkPyonix/compose-rust?tag=v0.0.3#4e194ce5677ea0fab57eba9c418aa8abcb656157"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -652,7 +652,7 @@ dependencies = [
 [[package]]
 name = "dioxus-compose"
 version = "0.0.1"
-source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=d37fb3cd#d37fb3cdbce9afa8ebdcaeafd6d0f0c02554f789"
+source = "git+https://github.com/DarkPyonix/dioxus-compose?rev=4259fd08#4259fd08854e2c205cd70c844aa1bdfa05a99d5e"
 dependencies = [
  "blitz-dom",
  "blitz-html",

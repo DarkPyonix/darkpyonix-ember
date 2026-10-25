@@ -32,6 +32,7 @@ use crate::ui::components::{
 use crate::ui::launcher::ConnectionBanner;
 use crate::ui::monitor::MonitorSheet;
 use crate::ui::theme::*;
+use crate::ui::theme::Palette;
 use crate::ui::use_ui;
 
 // ---------------------------------------------------------------------------------------------

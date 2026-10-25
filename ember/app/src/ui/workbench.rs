@@ -145,7 +145,7 @@ pub mod view {
     #[component]
     pub fn WorkbenchChrome() -> Element {
         rsx! {
-            HtmlView { app: super::chrome, config: super::config, fill_max_height: true }
+            HtmlView { app: super::chrome, config: Some(super::config as fn() -> dioxus_compose::html::HtmlConfig), fill_max_height: true }
         }
     }
 }

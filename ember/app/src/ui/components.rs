@@ -12,6 +12,7 @@
 use dioxus_compose::prelude::*;
 
 use super::theme::*;
+use super::theme::Palette;
 
 // ---------------------------------------------------------------------------------------------
 // Text

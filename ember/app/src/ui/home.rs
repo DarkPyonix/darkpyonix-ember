@@ -16,6 +16,7 @@ use ember_client::state::{Input, LauncherStatus, Reachability, State};
 
 use super::components::*;
 use super::theme::*;
+use super::components::ButtonKind;
 use crate::model;
 use crate::prefs::LastUsed;
 use crate::server::CreateSession;

@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{channels, conversation, home, new_session, project, search, vcs, use_ui, Route};
+use crate::ui::{channels, conversation, home, new_session, project, routines, search, vcs, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -86,6 +86,8 @@ pub enum Screen {
     Launcher,
     Search,
     Conversation(String),
+    /// 루틴 (FR-L25).
+    Routines,
     /// 버전 관리 (FR-L19).
     VersionControl,
     /// 채널 (FR-L12).
@@ -99,6 +101,7 @@ pub enum Screen {
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
         (NavMenu::Home, _) => Screen::Home,
+        (NavMenu::Routines, _) => Screen::Routines,
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
@@ -468,6 +471,7 @@ pub fn Shell() -> Element {
                     Screen::Home => rsx! { home::Home {} },
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
+                    Screen::Routines => rsx! { routines::Routines {} },
                     Screen::Conversation(id) => rsx! { conversation::ConversationView { key: "{id}", id: id.clone() } },
                     Screen::VersionControl => rsx! { vcs::VcsScreen {} },
                     Screen::Channels => rsx! { channels::ChannelsScreen {} },
@@ -616,9 +620,12 @@ mod tests {
         );
         assert_eq!(screen_for(&Route::Projects, NavMenu::Home), Screen::Home);
         assert_eq!(screen_for(&c, NavMenu::Home), Screen::Home);
+        assert_eq!(
+            screen_for(&Route::Projects, NavMenu::Routines),
+            Screen::Routines
+        );
         assert_eq!(screen_for(&Route::Projects, NavMenu::Channels), Screen::Channels);
         for m in [
-            NavMenu::Routines,
             NavMenu::Agents,
             NavMenu::Files,
         ] {

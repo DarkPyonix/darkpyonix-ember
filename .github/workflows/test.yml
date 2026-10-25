@@ -166,6 +166,12 @@ jobs:
         if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
         # The compose-rust renderer links X11, GL, fontconfig and freetype on Linux.
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
+      - name: Fetch every platform's crates
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
+        # tests/no_webview.rs reads the whole dependency graph with `cargo metadata
+        # --offline`, which needs the crates of every platform on disk, not only Linux's.
+        working-directory: ember/app
+        run: cargo fetch --locked
       - name: cargo test
         if: steps.present.outputs.yes == 'true'
         working-directory: ember/${{ matrix.crate }}

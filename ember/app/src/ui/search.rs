@@ -32,13 +32,19 @@ pub fn SearchScreen() -> Element {
     let mut hits_for = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let generation = use_hook(|| Arc::new(AtomicU64::new(0)));
+    // The demo says once that search is unavailable, not on every keystroke (#202).
+    let mut told = use_signal(|| false);
 
     let on_change = move |v: String| {
         query.set(v.clone());
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
         let current = generation.clone();
         let q = v.trim().to_string();
-        if !q.is_empty() && services().demo_blocked() {
+        if !q.is_empty() && services().demo.is_some() {
+            if !*told.peek() {
+                told.set(true);
+                services().demo_blocked();
+            }
             return;
         }
         if q.is_empty() {

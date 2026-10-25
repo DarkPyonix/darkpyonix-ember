@@ -26,7 +26,7 @@ use dioxus_compose::prelude::*;
 use tokio::sync::{broadcast::error::RecvError, Notify};
 
 use ember_client::state::Input;
-use ember_client::wire::DetectedAgent;
+use ember_client::wire::{DailyUsage, DetectedAgent};
 use ember_client::{Changes, LauncherStatus};
 
 use crate::model::merge_computers;
@@ -52,6 +52,8 @@ pub struct Live {
     /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
     pub chatgpt: SyncSignal<Vec<ChatGptAccount>>,
     pub agents: SyncSignal<Vec<DetectedAgent>>,
+    /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
+    pub usage: SyncSignal<Vec<DailyUsage>>,
 }
 
 impl Live {
@@ -65,6 +67,7 @@ impl Live {
             accounts: use_signal_sync(Vec::new),
             chatgpt: use_signal_sync(Vec::new),
             agents: use_signal_sync(Vec::new),
+            usage: use_signal_sync(Vec::new),
         }
     }
 
@@ -236,6 +239,14 @@ async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
     let g = s.server.chatgpt_accounts().await.unwrap_or_default();
     if *live.chatgpt.peek() != g {
         live.chatgpt.set(g);
+    }
+    match s.client.api().usage(Some(14)).await {
+        Ok(u) => {
+            if *live.usage.peek() != u {
+                live.usage.set(u);
+            }
+        }
+        Err(e) => tracing::debug!("usage refresh failed: {e}"),
     }
     match s.client.agents().await {
         Ok(a) => {

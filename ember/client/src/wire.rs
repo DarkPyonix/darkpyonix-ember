@@ -123,6 +123,29 @@ pub struct SessionPatch {
     pub archived: Option<bool>,
 }
 
+/// `GET /usage` row (FR-U7): tokens one account reported on one UTC day. The server lists the
+/// ChatGPT plan accounts (FR-U4) next to the agent accounts, keyed by account id.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DailyUsage {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Number of `usage` events (about one per turn).
+    #[serde(default)]
+    pub reports: u64,
+}
+
+impl DailyUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
 /// Start of a matched term in [`SearchHit::snippet`].
 pub const SNIPPET_OPEN: char = '\u{ab}';
 /// End of a matched term in [`SearchHit::snippet`].

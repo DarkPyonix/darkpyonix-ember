@@ -30,6 +30,9 @@ pub struct Services {
     pub rt: Runtime,
     pub client: Client,
     pub server: ServerApi,
+    /// Demo only (#199): `Some` when the app serves itself (no server). The one place the
+    /// app decides between the demo source and the server.
+    pub demo: Option<crate::demo::DemoSource>,
     pub outbox: Arc<Mutex<Outbox>>,
     /// Prefs as read from disk at start-up; the UI owns them from then on.
     pub initial_prefs: crate::prefs::Prefs,
@@ -69,10 +72,18 @@ impl Services {
 
     /// Open a conversation in the client (load transcript, mark seen, renew lease).
     pub fn open_session(&self, id: &str) {
+        if let Some(d) = &self.demo {
+            d.open(&self.client, id);
+            return;
+        }
         self.enter(|| self.client.open_session(id));
     }
 
     pub fn close_session(&self, id: &str) {
+        if self.demo.is_some() {
+            self.client.apply(ember_client::Input::Closed(id.to_string()));
+            return;
+        }
         self.enter(|| self.client.close_session(id));
     }
 
@@ -91,6 +102,10 @@ impl Services {
             let sid = id.to_string();
             self.spawn(async move {
                 let s = services();
+                if let Some(d) = &s.demo {
+                    d.send_message(&s.client, &sid, &text);
+                    return;
+                }
                 if let Err(e) = s.client.send_message(&sid, &text).await {
                     tracing::warn!(session = %sid, "send failed: {e}");
                     s.outbox.lock().unwrap().failed(&sid, text, e.to_string());
@@ -102,6 +117,48 @@ impl Services {
 }
 
 impl Services {
+    /// Answer an approval: on the server, or in the demo state (#199).
+    pub async fn answer(
+        &self,
+        sid: &str,
+        approval_id: &str,
+        decision: ember_client::wire::ApprovalDecision,
+    ) -> Result<(), String> {
+        if let Some(d) = &self.demo {
+            d.answer(&self.client, sid, approval_id, decision);
+            return Ok(());
+        }
+        self.client.answer(sid, approval_id, decision).await.map_err(|e| e.to_string())
+    }
+
+    /// Create a session: on the server, or in the demo state (#199).
+    pub async fn create_session(&self, body: &crate::server::CreateSession) -> Result<ember_client::wire::SessionRecord, String> {
+        if let Some(d) = &self.demo {
+            return Ok(d.create_session(&self.client, body));
+        }
+        let rec = self.server.create_session(body).await.map_err(|e| e.to_string())?;
+        self.client.apply(ember_client::Input::SessionLoaded(rec.clone()));
+        Ok(rec)
+    }
+
+    /// Rename, pin or archive: on the server, or in the demo state (#199).
+    pub async fn patch_session(&self, id: &str, patch: &ember_client::wire::SessionPatch) -> Result<(), String> {
+        if let Some(d) = &self.demo {
+            d.patch_session(&self.client, id, patch);
+            return Ok(());
+        }
+        self.client.patch_session(id, patch).await.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Switch approve-everything: on the server, or in the demo state (#199).
+    pub async fn set_approve_all(&self, id: &str, enabled: bool) -> Result<(), String> {
+        if self.demo.is_some() {
+            self.client.apply(ember_client::Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+            return Ok(());
+        }
+        self.client.set_approve_all(id, enabled).await.map_err(|e| e.to_string())
+    }
+
     /// Tell the UI the outbox changed (queued-message indicator).
     pub fn bump_outbox(&self) {
         if let Some(live) = self.live.get() {

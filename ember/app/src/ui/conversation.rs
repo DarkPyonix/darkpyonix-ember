@@ -397,7 +397,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
             let sid = id.clone();
             let enable = !approve_all;
             run(
-                async move { services().client.set_approve_all(&sid, enable).await.map_err(|e| e.to_string()) },
+                async move { services().set_approve_all(&sid, enable).await },
                 |r| {
                     if let Err(e) = r {
                         show_message(format!("Could not switch approve everything: {e}"));
@@ -900,7 +900,7 @@ pub(crate) fn TranscriptRow(
                     let (sid, aid) = (session.clone(), approval_id.clone());
                     let done = approval_id.clone();
                     run(
-                        async move { services().client.answer(&sid, &aid, decision).await.map_err(|e| e.to_string()) },
+                        async move { services().answer(&sid, &aid, decision).await },
                         move |r: Result<(), String>| {
                             let mut a = answering;
                             a.write().remove(&done);

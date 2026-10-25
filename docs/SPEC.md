@@ -55,6 +55,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-N2 | Implemented, CI against `FakeHub` (#50, #57); not run against the real hub. The default hub address and unversioned hub paths are designed, not merged: draft PR #75, waiting for darkpyonix #41 and darkpyonix-core #42. | #62 |
 | FR-N4 | Not verified on a real phone. | #10 |
 | NFR-N1 | Loopback bench only; the network matrix is not measured. | #10 |
+| FR-L27, FR-L27.1 to L27.6 (Files screen) | In progress (#174): `ember/app/src/ui/files.rs` wired as 파일 against a `TransferService` trait with no implementation; shows the real computers and "준비 중입니다" for the rest. Unit tests written, not compiled, not verified on a display. | #174 |
 | FR-F1 to FR-F9 | Draft, specified only (`INTENT.md` D24). Not built. | #152 |
 | PR-1 | Implemented without a version field (D15 implemented, #63). | #63 |
 | FR-W1–W3 | `ember/proxy/` (#1). FR-W3 not verified per platform. | #83 |

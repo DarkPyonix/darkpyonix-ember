@@ -20,6 +20,7 @@ use dioxus_compose::prelude::*;
 
 use crate::services::services;
 use crate::ui::components::{AppButton, ButtonKind, EmberCard, Label, PickChip, Pill, PillTone};
+use crate::ui::home::MenuItem;
 use crate::ui::project::{display_name, is_default_project, project_boxes, ProjectBox};
 use crate::ui::shell::NavMenu;
 use crate::ui::theme::*;

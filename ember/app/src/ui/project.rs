@@ -904,8 +904,12 @@ fn ProjectBoxView(
     let total = project.members.len();
     let shown = visible_tiles(total, expanded());
     let deck = deck_count(total, expanded());
-    let (id_open, id_set, id_sessions) =
-        (project.id.clone(), project.id.clone(), project.id.clone());
+    let (id_open, id_set, id_sessions, id_vcs) = (
+        project.id.clone(),
+        project.id.clone(),
+        project.id.clone(),
+        project.id.clone(),
+    );
     let first = project.members.first().map(|m| m.session_id.clone());
     rsx! {
         EmberCard {
@@ -950,13 +954,10 @@ fn ProjectBoxView(
                             None => ui.open_new_session(Some(id_sessions.clone())),
                         },
                     }
-                    // TODO(version control screen): 버전 관리 is not built; the notice stands in.
                     AppButton {
                         text: "버전 관리",
                         icon: IconRole::List,
-                        on_click: move |()| {
-                            Message::new(format!("버전 관리는 {SOON}")).with_duration(MessageDuration::Short).show();
-                        },
+                        on_click: move |()| crate::ui::vcs::open_for_project(ui, &id_vcs),
                     }
                     AppButton {
                         text: "설정",

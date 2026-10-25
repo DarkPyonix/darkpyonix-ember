@@ -16,6 +16,7 @@ pub mod project;
 pub mod search;
 pub mod shell;
 pub mod theme;
+pub mod vcs;
 
 use dioxus_compose::prelude::*;
 

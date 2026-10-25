@@ -322,7 +322,7 @@ fn Sidebar(
             // Tools: theme, collapse, settings.
             Button {
                 text: if rail { String::new() } else { format!("테마: {}", pref.label()) },
-                icon: IconRole::Settings,
+                icon: IconRole::Image,
                 variant: ButtonVariant::Text,
                 fill_max_width: !rail,
                 height: H_NAV_ITEM,

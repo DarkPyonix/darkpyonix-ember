@@ -13,7 +13,7 @@
 //! - no clickable Row/Column/Card: a text Button is the hit target of a header or a tile;
 //! - no Heroicons set: the nearest `IconRole` glyph;
 //! - no continuous-curve corners, one shadow: from `components.rs`;
-//! - no animated characters: a harness-coloured circle (TODO FR-L22, `docs/DESIGN.md` section 7);
+//! - no animated characters: static poses per state (`ui/characters.rs`, `docs/DESIGN.md` section 7);
 //! - the status donut would need `Canvas` arcs, which are unverified here: a disc with the member
 //!   count, tinted by the most urgent status.
 
@@ -25,6 +25,7 @@ use ember_client::{LauncherStatus, State};
 
 use crate::model::status_rank;
 use crate::services::{run, services};
+use crate::ui::characters::{CharState, Character, StylePicker};
 use crate::ui::components::{
     AppButton, ButtonKind, EmberCard, EmberSheet, InsetPanel, Label, PickChip, Pill, PillTone,
 };
@@ -161,8 +162,7 @@ pub fn status_pill(s: LauncherStatus) -> (&'static str, PillTone) {
     }
 }
 
-/// The placeholder character's colour family by harness, until FR-L22 draws real characters.
-/// TODO(FR-L22): replace with the team character renderer (shape and shade seeded from the name).
+/// The pill colour family by harness.
 pub fn harness_tone(agent: &str) -> PillTone {
     let a = agent.to_lowercase();
     if a.contains("claude") {
@@ -795,47 +795,8 @@ fn StatusDisc(total: usize, top: Option<LauncherStatus>, size: f32) -> Element {
     }
 }
 
-/// The placeholder character: a circle in the harness colour, with the crown for a leader.
-/// TODO(FR-L22): the six animated team character styles replace this.
 #[component]
-fn Character(agent: String, leader: bool, size: f32, name: String) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
-    let (fg, bg) = tone_fill(harness_tone(&agent), p);
-    let initial: String = agent
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().collect())
-        .unwrap_or_default();
-    rsx! {
-        Row {
-            alignment: Alignment::TopCenter,
-            if leader {
-                // The leader badge (FR-L24): a small ink circle with a gold crown. The crown
-                // is drawn as a glyph until the shared character renderer owns it.
-                dioxus_compose::Box {
-                    width: 18.0,
-                    height: 18.0,
-                    shape_role: ShapeRole::Full,
-                    background: paint(p.ink),
-                    alignment: Alignment::Center,
-                    Label { text: "\u{265b}", fs: Fs::Xs2, color: Paint::Literal(Color::rgb(0xE8B931)) }
-                }
-            }
-            dioxus_compose::Box {
-                width: size,
-                height: size,
-                shape_role: ShapeRole::Full,
-                background: paint(bg),
-                alignment: Alignment::Center,
-                Label { text: initial, fs: Fs::Sm, weight: Weight::Semibold, color: paint(fg) }
-            }
-        }
-    }
-}
-
-#[component]
-fn MemberTile(member: Member, on_open: EventHandler<String>) -> Element {
+fn MemberTile(member: Member, project_id: String, on_open: EventHandler<String>) -> Element {
     let theme = use_ember_theme();
     let p = theme.palette;
     let (label, tone) = status_pill(member.status);
@@ -845,7 +806,14 @@ fn MemberTile(member: Member, on_open: EventHandler<String>) -> Element {
             fill_max_width: true,
             alignment: Alignment::CenterStart,
             space_role: SpaceRole::Sm,
-            Character { agent: member.agent.clone(), leader: member.leader, size: 32.0, name: member.name.clone() }
+            Character {
+                agent: member.agent.clone(),
+                leader: member.leader,
+                size: 32.0,
+                name: member.name.clone(),
+                project: project_id.clone(),
+                state: CharState::from_status(member.status),
+            }
             Column {
                 weight: 1.0,
                 // TODO(GAPS: 클릭 가능한 컨테이너): the name button opens the member's session.
@@ -954,7 +922,7 @@ fn ProjectBoxView(
                             Label { text: "아직 팀원이 없습니다", fs: Fs::Sm, color: paint(p.text_2) }
                         }
                         for m in project.members.iter().take(shown).cloned() {
-                            MemberTile { key: "{m.session_id}", member: m, on_open: move |s: String| ui.open_conversation(&s) }
+                            MemberTile { key: "{m.session_id}", member: m, project_id: project.id.clone(), on_open: move |s: String| ui.open_conversation(&s) }
                         }
                         if deck > 0 {
                             AppButton {
@@ -1061,7 +1029,7 @@ fn FullProject(
                     Label { text: "일치하는 멤버가 없습니다", color: paint(p.text_2) }
                 }
                 for m in list {
-                    MemberTile { key: "{m.session_id}", member: m, on_open: move |s: String| ui.open_conversation(&s) }
+                    MemberTile { key: "{m.session_id}", member: m, project_id: project.id.clone(), on_open: move |s: String| ui.open_conversation(&s) }
                 }
             }
         }
@@ -1188,9 +1156,9 @@ fn SettingsSheet(
                     SettingsSection { title: "새 팀원 기본값", hint: "하네스, 모델, 권한 모드는 새 팀원에게만 적용됩니다. 준비 중입니다",
                         AppButton { text: "기본값 고르기", enabled: part_supported(SettingsPart::MemberDefaults) }
                     }
-                    SettingsSection { title: "팀 캐릭터", hint: "팀 캐릭터 고르기는 준비 중입니다",
-                        // TODO(FR-L22): the six styles (몽글, 말랑, 크루, 포켓, 크림, 키링).
-                        AppButton { text: "몽글", enabled: part_supported(SettingsPart::CharacterStyle) }
+                    SettingsSection { title: "팀 캐릭터", hint: "팀원이 모두 고른 모양으로 보입니다. 이 기기에만 저장됩니다",
+                        // TODO(server): the style is kept in this device's prefs until the server stores it.
+                        StylePicker { project_id: project.id.clone(), seed_name: project.name.clone() }
                     }
                     if leader_choice_visible(&project.id) {
                         SettingsSection { title: "리더", hint: "리더 지정은 준비 중입니다",

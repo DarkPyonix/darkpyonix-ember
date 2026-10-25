@@ -5,6 +5,7 @@
 //! their content changes shape (two panes side by side vs. stacked). Tokens are in [`theme`],
 //! shared components in [`components`].
 
+pub mod characters;
 pub mod compat;
 pub mod components;
 pub mod conversation;

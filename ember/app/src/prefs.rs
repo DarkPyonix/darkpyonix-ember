@@ -44,6 +44,10 @@ pub struct Prefs {
     /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
     #[serde(default)]
     pub theme: crate::ui::theme::ThemePref,
+    /// Team character style per project id (FR-L22). Absent means the default, 몽글.
+    /// TODO(server): the project stores its own style once the server has the field.
+    #[serde(default)]
+    pub character_styles: BTreeMap<String, crate::ui::characters::CharStyle>,
 }
 
 fn format_default() -> u32 {
@@ -58,7 +62,22 @@ impl Default for Prefs {
             last_project: None,
             ide_target: None,
             theme: crate::ui::theme::ThemePref::default(),
+            character_styles: BTreeMap::new(),
         }
+    }
+}
+
+impl Prefs {
+    /// The project's team character style; 몽글 when none was chosen.
+    pub fn character_style(&self, project: &str) -> crate::ui::characters::CharStyle {
+        self.character_styles
+            .get(project)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
+        self.character_styles.insert(project.to_string(), style);
     }
 }
 

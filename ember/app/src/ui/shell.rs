@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{channels, conversation, home, new_session, project, search, use_ui, Route};
+use crate::ui::{channels, conversation, home, new_session, project, search, vcs, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -86,6 +86,8 @@ pub enum Screen {
     Launcher,
     Search,
     Conversation(String),
+    /// 버전 관리 (FR-L19).
+    VersionControl,
     /// 채널 (FR-L12).
     Channels,
     /// A menu whose screen is not built yet ("준비 중입니다").
@@ -100,6 +102,7 @@ pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
+        (NavMenu::VersionControl, _) => Screen::VersionControl,
         (NavMenu::Channels, _) => Screen::Channels,
         (other, _) => Screen::Placeholder(other),
     }
@@ -466,6 +469,7 @@ pub fn Shell() -> Element {
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
                     Screen::Conversation(id) => rsx! { conversation::ConversationView { key: "{id}", id: id.clone() } },
+                    Screen::VersionControl => rsx! { vcs::VcsScreen {} },
                     Screen::Channels => rsx! { channels::ChannelsScreen {} },
                     Screen::Placeholder(menu) => rsx! { Placeholder { menu } },
                 }
@@ -615,12 +619,15 @@ mod tests {
         assert_eq!(screen_for(&Route::Projects, NavMenu::Channels), Screen::Channels);
         for m in [
             NavMenu::Routines,
-            NavMenu::VersionControl,
             NavMenu::Agents,
             NavMenu::Files,
         ] {
             assert_eq!(screen_for(&Route::Projects, m), Screen::Placeholder(m));
         }
+        assert_eq!(
+            screen_for(&Route::Projects, NavMenu::VersionControl),
+            Screen::VersionControl
+        );
         // 세션 with no open conversation has nothing to show yet.
         assert_eq!(
             screen_for(&Route::Projects, NavMenu::Sessions),

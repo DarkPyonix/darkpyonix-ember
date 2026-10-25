@@ -745,7 +745,7 @@ pub fn Home() -> Element {
 
 /// One entry of a chip's menu.
 #[component]
-fn MenuItem(
+pub fn MenuItem(
     #[props(into)] text: String,
     #[props(default)] selected: bool,
     #[props(default)] danger: bool,

@@ -193,13 +193,29 @@ pub fn side_list_mode(class: WindowSizeClass) -> SideListMode {
     }
 }
 
-/// Below this width the session toolbar keeps only the project, the view chips and IDE 열기;
-/// 새 팀원, 버전 관리 and 웹 페이지 fold into ⋯. The navigation column and the side list take
-/// about 500 dp, so a window under 1100 dp cannot show every button (FR-L layout, #191).
-pub const TOOLBAR_FOLD_WIDTH: f32 = 1100.0;
+/// The width the session toolbar really has: the window minus the navigation column (the full
+/// sidebar from 1280 dp, the rail below), minus the side list when it is a column, and minus
+/// the 목록 button when the list is a drawer. Folding on the window width instead made IDE 열기
+/// run off the right edge at 1200 dp (#195).
+pub fn toolbar_width(window_dp: f32, list_is_column: bool) -> f32 {
+    let nav = if window_dp >= 1280.0 { SIDE_W } else { RAIL_W };
+    let list = if list_is_column { SIDE_LIST_W } else { 90.0 };
+    window_dp - nav - list
+}
 
-pub fn fold_toolbar_actions(width_dp: f32) -> bool {
-    width_dp < TOOLBAR_FOLD_WIDTH
+/// How many of 웹 페이지, 버전 관리 and 새 팀원 (in that order) fold into ⋯ at a toolbar width:
+/// 0 shows all three, 1 folds 웹 페이지, 2 also 버전 관리, 3 also 새 팀원. The widths are the
+/// space the project, the view chips, the buttons and IDE 열기 need (about 945 dp for all).
+pub fn toolbar_fold_level(toolbar_dp: f32) -> usize {
+    if toolbar_dp >= 980.0 {
+        0
+    } else if toolbar_dp >= 900.0 {
+        1
+    } else if toolbar_dp >= 790.0 {
+        2
+    } else {
+        3
+    }
 }
 
 /// 264 dp at 1440 in the design.
@@ -984,18 +1000,23 @@ fn SideList(
                                 background: if active.as_deref() == Some(m.session_id.as_str()) { paint(p.sel) } else { paint(Color::argb(0)) },
                                 shape_role: ShapeRole::Full,
                                 Character { agent: m.agent.clone(), leader: m.leader, size: 24.0, name: m.name.clone(), project: s.project.clone(), state: CharState::from_status(m.status) }
-                                Button {
+                                // The name gets the whole flexible width; the status pill sits
+                                // under it instead of crowding it (#195).
+                                Column {
                                     weight: 1.0,
-                                    text: m.accessible_name(),
-                                    height: H_BTN,
-                                    variant: ButtonVariant::Text,
-                                    color: paint(p.text),
-                                    on_click: {
-                                        let (proj, id) = (s.project.clone(), m.session_id.clone());
-                                        move |()| on_open.call((proj.clone(), id.clone()))
-                                    },
+                                    Button {
+                                        text: m.accessible_name(),
+                                        height: H_BTN,
+                                        fill_max_width: true,
+                                        variant: ButtonVariant::Text,
+                                        color: paint(p.text),
+                                        on_click: {
+                                            let (proj, id) = (s.project.clone(), m.session_id.clone());
+                                            move |()| on_open.call((proj.clone(), id.clone()))
+                                        },
+                                    }
+                                    Pill { text: status_pill(m.status).0, tone: status_pill(m.status).1, small: true }
                                 }
-                                Pill { text: status_pill(m.status).0, tone: status_pill(m.status).1, small: true }
                             }
                         }
                         Spacer { height: SP[1] }
@@ -1215,9 +1236,14 @@ fn Pane(
                 Column {
                     weight: 1.0,
                     Label { text: member.accessible_name(), weight: Weight::Semibold, max_lines: 1 }
-                    Label { text: member.task.clone(), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
+                    Row {
+                        fill_max_width: true,
+                        alignment: Alignment::CenterStart,
+                        space_role: SpaceRole::Xs,
+                        Pill { text: label, tone, small: true }
+                        Label { text: member.task.clone(), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
+                    }
                 }
-                Pill { text: label, tone, small: true }
                 IconButton { icon: IconRole::Forward, on_click: { let id = id.clone(); move |()| on_enlarge.call(id.clone()) } }
                 Menu {
                     expanded: menu(),
@@ -1678,7 +1704,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
     let target = single_target(&members, focus.as_deref());
     let sections = side_sections(&boxes, &current, &query.read());
     let mode = side_list_mode(window.class);
-    let fold = fold_toolbar_actions(window.width_dp);
+    let fold_level = toolbar_fold_level(toolbar_width(window.width_dp, mode == SideListMode::Column));
 
     let set_view = use_callback(move |v: SessionView| {
         view.set(v);
@@ -1784,36 +1810,45 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                         PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
                     }
                     Spacer { width: SP[2] }
-                    if !fold {
+                    if fold_level < 3 {
                         AppButton { text: "새 팀원", icon: IconRole::Add, on_click: { let c = current.clone(); move |()| ui.open_new_session(Some(c.clone())) } }
                         Spacer { width: SP[1] }
+                    }
+                    if fold_level < 2 {
                         AppButton { text: "버전 관리", on_click: { let c = current.clone(); move |()| crate::ui::vcs::open_for_project(ui, &c) } }
                         Spacer { width: SP[1] }
+                    }
+                    if fold_level < 1 {
                         // TODO(server): the ports detected on the member's computer (FR-L18).
                         AppButton { text: "웹 페이지", on_click: move |()| show_message(WEB_SOON) }
                         Spacer { width: SP[1] }
-                    } else {
-                        // Medium and compact: the less used actions fold into a ⋯ menu so
-                        // IDE 열기 stays on screen at 800 px.
+                    }
+                    if fold_level > 0 {
+                        // The less used actions fold into a ⋯ menu, in stages, so IDE 열기
+                        // stays on screen at every width.
                         Menu {
                             expanded: more_menu(),
                             on_dismiss: move |_| more_menu.set(false),
                             anchor: rsx! {
                                 AppButton { text: "⋯", on_click: move |()| more_menu.set(true) }
                             },
-                            Button {
-                                text: "새 팀원",
-                                variant: ButtonVariant::Text,
-                                height: H_BTN,
-                                fill_max_width: true,
-                                on_click: { let c = current.clone(); move |_: ()| { more_menu.set(false); ui.open_new_session(Some(c.clone())) } },
+                            if fold_level >= 3 {
+                                Button {
+                                    text: "새 팀원",
+                                    variant: ButtonVariant::Text,
+                                    height: H_BTN,
+                                    fill_max_width: true,
+                                    on_click: { let c = current.clone(); move |_: ()| { more_menu.set(false); ui.open_new_session(Some(c.clone())) } },
+                                }
                             }
-                            Button {
-                                text: "버전 관리",
-                                variant: ButtonVariant::Text,
-                                height: H_BTN,
-                                fill_max_width: true,
-                                on_click: { let c = current.clone(); move |_: ()| { more_menu.set(false); crate::ui::vcs::open_for_project(ui, &c) } },
+                            if fold_level >= 2 {
+                                Button {
+                                    text: "버전 관리",
+                                    variant: ButtonVariant::Text,
+                                    height: H_BTN,
+                                    fill_max_width: true,
+                                    on_click: { let c = current.clone(); move |_: ()| { more_menu.set(false); crate::ui::vcs::open_for_project(ui, &c) } },
+                                }
                             }
                             Button {
                                 text: "웹 페이지",
@@ -2002,10 +2037,13 @@ mod tests {
     }
 
     #[test]
-    fn fr_l_toolbar_folds_at_800_so_ide_open_stays_visible() {
-        assert!(fold_toolbar_actions(800.0));
-        assert!(fold_toolbar_actions(900.0));
-        assert!(!fold_toolbar_actions(1440.0));
+    fn fr_l_toolbar_folds_in_stages_so_ide_open_stays_visible() {
+        let level = |w: f32| toolbar_fold_level(toolbar_width(w, w >= 840.0));
+        assert_eq!(level(800.0), 3);
+        assert_eq!(level(1000.0), 3);
+        assert_eq!(level(1200.0), 2);
+        assert_eq!(level(1500.0), 0);
+        assert_eq!(toolbar_width(1200.0, true), 864.0);
     }
 
     #[test]

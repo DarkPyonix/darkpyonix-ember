@@ -328,7 +328,7 @@ pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes
 // ---------------------------------------------------------------------------------------------
 
 const STRIPE_W: f32 = 40.0;
-/// The button fills the 40 dp stripe, so its glyph is about 20 px (JetBrains stripe icons).
+/// The button fills the 40 dp stripe (owner decision), so its glyph is about 20 px.
 const STRIPE_BTN: f32 = 40.0;
 /// A 40 dp button plus 12 dp above and below; a shorter row squeezes the buttons below the
 /// 40 dp the toolkit needs for Hangul (#157, dioxus-compose #133).
@@ -576,9 +576,9 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                     Island { width: LEFT_W, fill_max_height: true,
                         match w {
                             ToolWindow::Project => rsx! {
-                                Column { fill_max_width: true, weight: 1.0, padding: SP[3], spacing: SP[0],
+                                Column { fill_max_width: true, weight: 1.0, padding: SP[3], spacing: SP[0], alignment: Alignment::TopStart,
                                     Label { text: "프로젝트", fs: Fs::Md, weight: Weight::Semibold }
-                                    Label { text: folder_line.clone(), fs: Fs::Sm }
+                                    Label { text: folder_line.clone(), fs: Fs::Sm, color: paint(p.text_2), max_lines: 1 }
                                     if files.is_empty() {
                                         Label { text: format!("파일 목록은 {SOON}"), fs: Fs::Xs, color: paint(p.muted) }
                                     }
@@ -588,6 +588,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                             key: "{path}",
                                             text: path,
                                             variant: ButtonVariant::Text,
+                                            color: paint(p.text),
                                             fill_max_width: true,
                                             on_click: move |_| tabs.write().open(path),
                                         }

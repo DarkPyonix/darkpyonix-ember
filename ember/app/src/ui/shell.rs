@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{Route, new_session, project, search, session, use_ui};
+use crate::ui::{Route, home, new_session, project, search, session, use_ui};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -81,6 +81,8 @@ pub fn active_menu(route: &Route, chosen: NavMenu) -> NavMenu {
 /// What the content area shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
+    /// 홈: the chat-first top and the dashboard (FR-L11, FR-L23).
+    Home,
     Launcher,
     Search,
     Conversation(String),
@@ -88,10 +90,11 @@ pub enum Screen {
     Placeholder(NavMenu),
 }
 
-/// The screen for the active menu. The launcher stands in for 프로젝트 and the conversation for
-/// 세션; every other menu is a placeholder until its screen lands.
+/// The screen for the active menu. Home is 홈, `Launcher` renders ProjectScreen for 프로젝트 and the
+/// conversation stands in for 세션; every other menu is a placeholder until its screen lands.
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
+        (NavMenu::Home, _) => Screen::Home,
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
@@ -456,6 +459,7 @@ pub fn Shell() -> Element {
                 weight: 1.0,
                 fill_max_width: true,
                 match screen {
+                    Screen::Home => rsx! { home::Home {} },
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
                     // 세션 is the inside of a project (FR-L18); the open conversation is its focus.
@@ -603,8 +607,9 @@ mod tests {
             screen_for(&c, NavMenu::Sessions),
             Screen::Conversation("s1".into())
         );
+        assert_eq!(screen_for(&Route::Projects, NavMenu::Home), Screen::Home);
+        assert_eq!(screen_for(&c, NavMenu::Home), Screen::Home);
         for m in [
-            NavMenu::Home,
             NavMenu::Channels,
             NavMenu::Routines,
             NavMenu::VersionControl,

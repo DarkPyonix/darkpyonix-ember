@@ -40,6 +40,7 @@ use crate::ui::components::{
     AppButton, ButtonKind, EmberCard, EmberSheet, IconButton, Label, Pill, PillTone,
 };
 use crate::ui::conversation::{ConversationView, TranscriptRow, item_key};
+use crate::ui::home::{Harness, PermMode, default_option, model_catalog, modes_for};
 use crate::ui::project::{
     Character, Member, MemberFilter, ProjectBox, display_name, filter_members, project_boxes,
     status_pill,
@@ -583,30 +584,57 @@ fn use_leases(wanted: &[String], focus: Option<&str>) {
 // Composer chips, pane header, right panel
 // ---------------------------------------------------------------------------------------------
 
-/// "harness · model".
-/// TODO(FR-L15): replace with the shared model picker of Home when it lands (#158), which also
-/// changes the model of a new session; an existing session's model cannot be changed.
+/// The chip text of a running session, with the labels of Home's picker (FR-L15): the harness
+/// label and the model's display name from the shared catalog. An existing session's model
+/// cannot be changed, so the chip is read-only.
 pub fn model_chip_label(agent: &str, model: Option<&str>) -> String {
-    match model.filter(|m| !m.is_empty()) {
-        Some(m) => format!("{agent} \u{00b7} {m}"),
-        None => format!("{agent} \u{00b7} 기본 모델"),
+    let harness = Harness::from_kind(agent);
+    let name = model.filter(|m| !m.is_empty()).map(|m| {
+        model_catalog()
+            .into_iter()
+            .find(|o| o.model == m)
+            .map(|o| o.name.to_string())
+            .unwrap_or_else(|| m.to_string())
+    });
+    match (harness, name) {
+        (Some(h), Some(n)) => format!("{} \u{00b7} {}", h.label(), n),
+        (Some(h), None) => format!("{} \u{00b7} {}", h.label(), default_option(h).name),
+        (None, Some(n)) => format!("{agent} \u{00b7} {n}"),
+        (None, None) => format!("{agent} \u{00b7} 기본 모델"),
     }
 }
 
-/// The permission mode of a running session: ask for each request, or approve everything
-/// (FR-A5). The other modes of FR-L16 need the harness flags (not integrated yet).
-/// TODO(FR-L16): unify with the shared mode picker of Home when it lands (#158).
-pub fn mode_chip_label(approve_all: bool) -> &'static str {
+/// The mode a running session is in. The client only knows approve-everything (FR-A5), which
+/// is bypass; every other session asks for each command.
+pub fn current_mode(approve_all: bool) -> PermMode {
     if approve_all {
-        "모두 승인"
+        PermMode::Bypass
     } else {
-        "승인 요청"
+        PermMode::Ask
     }
 }
 
-/// Bypass is drawn in the warning colour (FR-L16).
+pub fn mode_chip_label(approve_all: bool) -> &'static str {
+    current_mode(approve_all).label()
+}
+
+/// Bypass is drawn selected, as Home does (FR-L16).
 pub fn mode_chip_warns(approve_all: bool) -> bool {
-    approve_all
+    current_mode(approve_all).is_bypass()
+}
+
+/// The modes the harness supports (Home's list), each with whether a running session can be
+/// switched to it now. Only ask and bypass can: edits-only and plan need CLI flags that are
+/// set when a session starts. An unknown harness offers ask and bypass.
+pub fn mode_rows(agent: &str) -> Vec<(PermMode, bool)> {
+    let modes: &[PermMode] = match Harness::from_kind(agent) {
+        Some(h) => modes_for(h),
+        None => &[PermMode::Ask, PermMode::Bypass],
+    };
+    modes
+        .iter()
+        .map(|m| (*m, matches!(m, PermMode::Ask | PermMode::Bypass)))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -717,40 +745,6 @@ fn panes_of(ui: crate::ui::Ui, project: &str) -> ProjectPanes {
         .normalized()
 }
 
-/// A 40 dp choice chip (dioxus-compose #133: nothing under 40 dp).
-/// TODO(components.rs): `PickChip` is 32 dp; unify once it draws at 40 dp too.
-#[component]
-fn SChip(
-    #[props(into)] text: String,
-    #[props(default)] icon: Option<IconRole>,
-    #[props(default)] selected: bool,
-    #[props(default)] warn: bool,
-    #[props(default = true)] enabled: bool,
-    #[props(default)] on_click: EventHandler<()>,
-) -> Element {
-    let p = use_ember_theme().palette;
-    let (fill, ink) = if warn {
-        (p.orange.soft, p.orange.strong)
-    } else if selected {
-        (p.sel, p.text)
-    } else {
-        (p.surface_2, p.text)
-    };
-    rsx! {
-        Button {
-            text,
-            icon,
-            enabled,
-            height: H_BTN,
-            variant: ButtonVariant::Text,
-            background: paint(fill),
-            color: paint(ink),
-            shape_role: ShapeRole::Full,
-            on_click: move |()| on_click.call(()),
-        }
-    }
-}
-
 /// The model and mode chips of a composer (FR-L15, FR-L16).
 #[component]
 pub fn ComposerChips(session: String) -> Element {
@@ -801,7 +795,7 @@ pub fn ComposerChips(session: String) -> Element {
                 expanded: model_menu(),
                 on_dismiss: move |_| model_menu.set(false),
                 anchor: rsx! {
-                    SChip { text: model_chip_label(&agent, model.as_deref()), icon: IconRole::Settings, on_click: move |()| model_menu.set(true) }
+                    PickChip { text: model_chip_label(&agent, model.as_deref()), icon: IconRole::Settings, on_click: move |()| model_menu.set(true) }
                 },
                 Column {
                     padding_role: SpaceRole::Sm,
@@ -814,25 +808,23 @@ pub fn ComposerChips(session: String) -> Element {
                 expanded: mode_menu(),
                 on_dismiss: move |_| mode_menu.set(false),
                 anchor: rsx! {
-                    SChip {
+                    PickChip {
                         text: mode_chip_label(approve_all),
-                        warn: mode_chip_warns(approve_all),
+                        selected: mode_chip_warns(approve_all),
                         on_click: move |()| mode_menu.set(true),
                     }
                 },
-                Button {
-                    text: mode_chip_label(false),
-                    variant: ButtonVariant::Text,
-                    height: H_BTN,
-                    fill_max_width: true,
-                    on_click: move |_: ()| set_mode.call(false),
-                }
-                Button {
-                    text: mode_chip_label(true),
-                    variant: ButtonVariant::Text,
-                    height: H_BTN,
-                    fill_max_width: true,
-                    on_click: move |_: ()| set_mode.call(true),
+                for (m, settable) in mode_rows(&agent) {
+                    Button {
+                        key: "{m.label()}",
+                        text: if settable { m.label().to_string() } else { format!("{} ({})", m.label(), SOON) },
+                        enabled: settable,
+                        variant: ButtonVariant::Text,
+                        height: H_BTN,
+                        fill_max_width: true,
+                        color: if m.is_bypass() { paint(p.orange.strong) } else { paint(p.text) },
+                        on_click: move |_: ()| set_mode.call(m.is_bypass()),
+                    }
                 }
             }
         }
@@ -1248,7 +1240,7 @@ fn Pane(
                 fill_max_width: true,
                 space_role: SpaceRole::Xs,
                 for t in PaneToggle::ALL {
-                    SChip { key: "{t.label()}", text: t.label(), selected: toggle() == t, on_click: move |()| toggle.set(t) }
+                    PickChip { key: "{t.label()}", text: t.label(), selected: toggle() == t, on_click: move |()| toggle.set(t) }
                 }
             }
             if toggle() == PaneToggle::Conversation {
@@ -1317,7 +1309,7 @@ fn MultiView(
             ScrollRow {
                 fill_max_width: true,
                 for (i, t) in panes.tabs.iter().enumerate() {
-                    SChip {
+                    PickChip {
                         key: "{t.name}",
                         text: t.name.clone(),
                         selected: i == panes.active,
@@ -1330,7 +1322,7 @@ fn MultiView(
                         },
                     }
                 }
-                SChip {
+                PickChip {
                     text: "새 탭",
                     icon: IconRole::Add,
                     on_click: {
@@ -1343,7 +1335,7 @@ fn MultiView(
                     },
                 }
                 if panes.tabs.len() > 1 {
-                    SChip {
+                    PickChip {
                         text: "탭 닫기",
                         icon: IconRole::Close,
                         on_click: {
@@ -1360,7 +1352,7 @@ fn MultiView(
                     Menu {
                         expanded: add_menu(),
                         on_dismiss: move |_| add_menu.set(false),
-                        anchor: rsx! { SChip { text: "팀원 추가", icon: IconRole::Add, on_click: move |()| add_menu.set(true) } },
+                        anchor: rsx! { PickChip { text: "팀원 추가", icon: IconRole::Add, on_click: move |()| add_menu.set(true) } },
                         for m in hidden.clone() {
                             Button {
                                 key: "{m.session_id}",
@@ -1778,7 +1770,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                     }
                     Spacer { width: SP[1] }
                     for v in SessionView::ALL {
-                        SChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view(v) }
+                        PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
                     }
                     Spacer { width: SP[2] }
                     AppButton { text: "새 팀원", icon: IconRole::Add, on_click: { let c = current.clone(); move |()| ui.open_new_session(Some(c.clone())) } }
@@ -2284,20 +2276,35 @@ mod tests {
     fn fr_l15_model_chip_reads_harness_and_model() {
         assert_eq!(
             model_chip_label("claude-code", Some("opus")),
-            "claude-code · opus"
+            "Claude Code · Opus 5.5"
         );
-        assert_eq!(model_chip_label("codex", None), "codex · 기본 모델");
-        assert_eq!(model_chip_label("codex", Some("")), "codex · 기본 모델");
+        assert_eq!(model_chip_label("codex", None), "Codex · GPT-5");
+        assert_eq!(model_chip_label("codex", Some("")), "Codex · GPT-5");
+        assert_eq!(model_chip_label("codex", Some("custom")), "Codex · custom");
+        assert_eq!(model_chip_label("omp", None), "omp · 기본 모델");
     }
 
     #[test]
     fn fr_l16_mode_chip_follows_approve_everything() {
-        assert_eq!(mode_chip_label(false), "승인 요청");
-        assert_eq!(mode_chip_label(true), "모두 승인");
+        assert_eq!(mode_chip_label(false), PermMode::Ask.label());
+        assert_eq!(mode_chip_label(true), PermMode::Bypass.label());
         assert!(
             mode_chip_warns(true) && !mode_chip_warns(false),
             "bypass is drawn in the warning colour"
         );
+    }
+
+    #[test]
+    fn fr_l16_mode_rows_follow_the_harness_and_only_ask_and_bypass_can_be_set() {
+        let claude = mode_rows("claude-code");
+        assert_eq!(claude.len(), 4);
+        let codex = mode_rows("codex");
+        assert_eq!(codex.len(), 3);
+        assert!(!codex.iter().any(|(m, _)| *m == PermMode::Plan));
+        for (m, settable) in claude {
+            assert_eq!(settable, matches!(m, PermMode::Ask | PermMode::Bypass));
+        }
+        assert_eq!(mode_rows("omp").len(), 2);
     }
 
     #[test]
@@ -2329,7 +2336,7 @@ mod tests {
         assert_eq!(get("컴퓨터").as_deref(), Some("mac-mini"));
         assert_eq!(get("하네스").as_deref(), Some("codex"));
         assert_eq!(get("모델").as_deref(), Some("o3"));
-        assert_eq!(get("권한 모드").as_deref(), Some("모두 승인"));
+        assert_eq!(get("권한 모드").as_deref(), Some(PermMode::Bypass.label()));
         assert_eq!(get("작업 폴더").as_deref(), Some("/w/ember"));
         assert_eq!(get("저장소").as_deref(), Some("준비 중입니다"));
         let none = environment_rows(&rec, None, false);

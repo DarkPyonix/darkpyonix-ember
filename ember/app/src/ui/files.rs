@@ -25,6 +25,7 @@ use ember_client::state::{Computer, Reachability};
 use super::components::*;
 use super::home::{CrewMember, crew};
 use super::theme::*;
+use super::components::ButtonKind;
 use crate::services::services;
 use crate::ui::use_ui;
 

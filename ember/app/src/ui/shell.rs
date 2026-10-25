@@ -204,16 +204,36 @@ fn transparent() -> Paint {
     Paint::Literal(Color::argb(0))
 }
 
-/// The logo slot. The mark is the current wordmark; the new logo is pending the owner's
-/// sign-off (`docs/DESIGN.md` "Logo"), and only this component changes when it lands.
+/// The temporary Ember logo (logo B, phoenix fold; D35, rework pending).
+pub const MARK_SVG: &str = include_str!("../../assets/brand/mark.svg");
+pub const MARK_SM_SVG: &str = include_str!("../../assets/brand/mark-sm.svg");
+pub const APP_ICON_SVG: &str = include_str!("../../assets/brand/app-icon.svg");
+pub const FAVICON_SVG: &str = include_str!("../../assets/brand/favicon.svg");
+
+/// Up to this size (dp) the small mark is used, above it the full one.
+pub const MARK_SM_MAX: f32 = 32.0;
+
+/// Which SVG a mark of `size` dp uses.
+pub fn mark_svg_for(size: f32) -> &'static str {
+    if size <= MARK_SM_MAX { MARK_SM_SVG } else { MARK_SVG }
+}
+
+/// The logo slot: the temporary mark, with the wordmark beside it when there is room.
+/// Only this component changes when the final logo lands.
 #[component]
 fn LogoSlot(#[props(default)] compact: bool) -> Element {
+    let size = 28.0;
+    let id = asset(AssetKind::Svg, mark_svg_for(size).as_bytes());
     rsx! {
         Row {
             height: SHEET_HEADER_H,
             alignment: Alignment::CenterStart,
+            space_role: SpaceRole::Sm,
             Spacer { width: SP[3] }
-            Label { text: if compact { "E" } else { "Ember" }, fs: Fs::Xl, weight: Weight::Semibold }
+            Image { asset_id: id, width: size, height: size }
+            if !compact {
+                Label { text: "Ember", fs: Fs::Xl, weight: Weight::Semibold }
+            }
         }
     }
 }
@@ -589,6 +609,26 @@ mod tests {
         assert_eq!(shell_mode(WindowSizeClass::Expanded, false), ShellMode::Sidebar);
         // The collapse control turns the sidebar into the rail.
         assert_eq!(shell_mode(WindowSizeClass::Expanded, true), ShellMode::Rail);
+    }
+
+    #[test]
+    fn logo_assets_exist_and_are_svg() {
+        for (name, svg) in [
+            ("mark", MARK_SVG),
+            ("mark-sm", MARK_SM_SVG),
+            ("app-icon", APP_ICON_SVG),
+            ("favicon", FAVICON_SVG),
+        ] {
+            assert!(svg.trim_start().starts_with("<svg"), "{name} is not an SVG");
+            assert!(svg.contains("</svg>"), "{name} is not closed");
+        }
+    }
+
+    #[test]
+    fn logo_uses_the_small_mark_at_32_or_less() {
+        assert_eq!(mark_svg_for(28.0), MARK_SM_SVG);
+        assert_eq!(mark_svg_for(32.0), MARK_SM_SVG);
+        assert_eq!(mark_svg_for(48.0), MARK_SVG);
     }
 
     #[test]

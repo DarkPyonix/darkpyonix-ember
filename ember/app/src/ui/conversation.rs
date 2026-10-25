@@ -309,10 +309,13 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                     );
                 }
                 IdeAction::EmberPlaceholder => {
-                    // TODO(M8, editor core): open the Ember IDE window here.
-                    Message::new("The Ember IDE arrives with the editor core (M8). Use VS Code or Gateway for now.")
-                        .with_duration(MessageDuration::Long)
-                        .show();
+                    // FR-L31: the editor screen; its code area waits for the editor core (M8).
+                    let (project, folder) = launch
+                        .as_ref()
+                        .and_then(|r| r.as_ref().ok())
+                        .map(|l| (l.project.clone(), l.folder.clone()))
+                        .unwrap_or_default();
+                    ui.open_editor(project, folder);
                 }
                 IdeAction::Unavailable(why) => {
                     Message::new(format!("{} is not available: {why}", kind.label()))

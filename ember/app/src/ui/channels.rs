@@ -615,7 +615,7 @@ fn RoomView(room: Room, show_back: bool, on_back: EventHandler<()>) -> Element {
                                     Label { text: d, fs: Fs::Xs, color: paint(p.muted) }
                                 }
                             },
-                            FeedItem::Bubble(b) => rsx! { BubbleRow { key: "{b.id}", bubble: b, harness: room.member(&b.from).map(|m| m.harness.clone()).unwrap_or_default() } },
+                            FeedItem::Bubble(b) => rsx! { BubbleRow { key: "{b.id}", harness: room.member(&b.from).map(|m| m.harness.clone()).unwrap_or_default(), bubble: b } },
                         }
                     }
                 }

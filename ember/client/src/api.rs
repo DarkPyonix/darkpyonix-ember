@@ -21,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
+    ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
@@ -381,6 +381,12 @@ impl Api {
         self.get(&format!("/search?{q}")).await
     }
 
+    /// Tokens per account per UTC day for the last `days` days (FR-U7), oldest first. The server
+    /// clamps `days` to 1..=366 and defaults to 7.
+    pub async fn usage(&self, days: Option<u32>) -> ApiResult<Vec<DailyUsage>> {
+        self.get(&usage_path(days)).await
+    }
+
     /// The session as the server's self-contained export file (`format: "ember-transcript"`).
     pub async fn export_session(&self, id: &str) -> ApiResult<serde_json::Value> {
         self.get(&format!("/sessions/{}/export", seg(id))).await
@@ -463,9 +469,35 @@ fn seg(s: &str) -> String {
     out
 }
 
+/// Path of `GET /usage`, with `?days=` when given.
+fn usage_path(days: Option<u32>) -> String {
+    match days {
+        Some(n) => format!("/usage?days={n}"),
+        None => "/usage".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_u7_usage_path_carries_days() {
+        assert_eq!(usage_path(None), "/usage");
+        assert_eq!(usage_path(Some(14)), "/usage?days=14");
+    }
+
+    #[test]
+    fn fr_u7_daily_usage_decodes_server_rows() {
+        let rows: Vec<DailyUsage> = serde_json::from_value(json!([
+            {"account_id": "gpt-1", "day": "2026-10-25", "input_tokens": 1200, "output_tokens": 34, "reports": 3},
+            {"account_id": null, "day": "2026-10-26", "input_tokens": 5, "output_tokens": 6, "reports": 1}
+        ]))
+        .unwrap();
+        assert_eq!(rows[0].account_id.as_deref(), Some("gpt-1"));
+        assert_eq!(rows[0].total_tokens(), 1234);
+        assert_eq!((rows[1].account_id.clone(), rows[1].day.as_str()), (None, "2026-10-26"));
+    }
 
     #[test]
     fn fr_s5_fork_body_names_turn_seq() {

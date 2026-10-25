@@ -310,11 +310,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                 }
                 IdeAction::EmberPlaceholder => {
                     // FR-L31: the editor screen; its code area waits for the editor core (M8).
-                    let (project, folder) = launch
-                        .as_ref()
-                        .and_then(|r| r.as_ref().ok())
-                        .map(|l| (l.project.clone(), l.folder.clone()))
-                        .unwrap_or_default();
+                    let (project, folder) = IdeLaunch::editor_target(launch.as_ref());
                     ui.open_editor(project, folder);
                 }
                 IdeAction::Unavailable(why) => {

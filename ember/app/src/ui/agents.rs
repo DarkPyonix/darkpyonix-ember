@@ -1485,16 +1485,22 @@ fn UsageSection(live: AgentsLive) -> Element {
         .client
         .read(|s| home::harness_usage(s));
     let tokens = chatgpt_tokens_today(&live.chatgpt);
+    let ids: Vec<String> = live.chatgpt.iter().map(|a| a.id.clone()).collect();
+    let week: u64 = home::chatgpt_token_days(&ui.live.usage.read(), &ids, &home::today_utc(), 7)
+        .iter()
+        .map(|(_, t)| *t)
+        .sum();
     rsx! {
         Block { title: "오늘 토큰", pills: rsx! {},
             match tokens {
                 Some(n) => rsx! {
                     Label { text: format_tokens(n), fs: Fs::Xl3, weight: Weight::Medium }
+                    Label { text: format!("최근 7일 {}", format_tokens(week)), fs: Fs::Sm }
                     Label { text: "ChatGPT 플랜 계정이 보고한 토큰만 합친 값입니다. 다른 하네스는 준비 중입니다.", fs: Fs::Xs }
                 },
                 None => rsx! { Pending { text: "토큰 사용량은" } },
             }
-            // TODO(server): FR-U7 has no endpoint; 7/14-day bars and token kinds wait for it.
+            // TODO(server): other harnesses and token kinds (cache) are not reported by /api/usage yet.
         }
         Block { title: "하네스별", pills: rsx! {},
             for b in bars {

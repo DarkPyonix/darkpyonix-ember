@@ -160,6 +160,14 @@ impl IdeLaunch {
     pub fn target(&self, kind: &str) -> Option<&IdeTarget> {
         self.targets.iter().find(|t| t.kind == kind)
     }
+
+    /// The `(project, folder)` the Ember editor opens (FR-L31); empty until the launch data arrives.
+    pub fn editor_target(launch: Option<&Result<IdeLaunch, String>>) -> (String, String) {
+        launch
+            .and_then(|r| r.as_ref().ok())
+            .map(|l| (l.project.clone(), l.folder.clone()))
+            .unwrap_or_default()
+    }
 }
 
 /// `POST /api/sessions` body, including the account (FR-U2) that

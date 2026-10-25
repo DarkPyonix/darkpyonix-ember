@@ -163,3 +163,12 @@ async fn fr_s8_exit_status_is_reported_to_a_reattached_server() {
     };
     assert_eq!(wait_exit(&mut c2).await, "exit:0");
 }
+
+#[test]
+fn fr_s8_linger_is_configurable_and_defaults_to_one_hour() {
+    use ember_server::session_shim::linger_secs;
+    assert_eq!(linger_secs(None, None), 3600);
+    assert_eq!(linger_secs(None, Some("90")), 90);
+    assert_eq!(linger_secs(Some(5), Some("90")), 5, "the spec wins over the environment");
+    assert_eq!(linger_secs(None, Some("nope")), 3600);
+}

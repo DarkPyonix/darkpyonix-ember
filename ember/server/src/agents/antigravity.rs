@@ -98,7 +98,7 @@
 //! headless gate soft-denies anything that needs a permission) **and** with the hook in
 //! [`Policy::ReadOnly`]. The pin moves only after the SPEC §A tests pass on the new version.
 //!
-//! `--sandbox` (agy's terminal sandbox) is on unless `EMBER_AGY_SANDBOX=0`. Recorded on 1.2.16:
+//! `--sandbox` (agy's terminal sandbox) is off unless `EMBER_AGY_SANDBOX=1`; the hook is the gate. Recorded on 1.2.16:
 //! with it, shell commands could not write even in the project (`Operation not permitted`) while
 //! the file-edit tools could.
 //!
@@ -198,25 +198,25 @@ pub struct AntigravityAdapter {
 
 impl AntigravityAdapter {
     pub fn new(bin: impl Into<PathBuf>, home: impl Into<PathBuf>, hooks: Arc<HookBroker>) -> Self {
-        AntigravityAdapter { bin: bin.into(), home: home.into(), hooks, sandbox: true }
+        AntigravityAdapter { bin: bin.into(), home: home.into(), hooks, sandbox: false }
     }
 
-    /// Turn agy's terminal sandbox off (`--sandbox` is passed by default).
-    pub fn without_sandbox(mut self) -> Self {
-        self.sandbox = false;
+    /// Turn agy's terminal sandbox on (`--sandbox`; off by default, the hook is the gate).
+    pub fn with_sandbox(mut self) -> Self {
+        self.sandbox = true;
         self
     }
 
     /// The binary from `EMBER_AGY_BIN`, else `agy` on `PATH`; session roots under
-    /// `<data_dir>/agy`; `EMBER_AGY_SANDBOX=0` drops `--sandbox`.
+    /// `<data_dir>/agy`; `EMBER_AGY_SANDBOX=1` adds `--sandbox`.
     pub fn from_env(data_dir: &Path, hooks: Arc<HookBroker>) -> Self {
         let adapter = Self::new(
             std::env::var_os("EMBER_AGY_BIN").unwrap_or_else(|| "agy".into()),
             data_dir.join("agy"),
             hooks,
         );
-        if std::env::var("EMBER_AGY_SANDBOX").as_deref() == Ok("0") {
-            adapter.without_sandbox()
+        if std::env::var("EMBER_AGY_SANDBOX").as_deref() == Ok("1") {
+            adapter.with_sandbox()
         } else {
             adapter
         }
@@ -1615,6 +1615,13 @@ mod tests {
         e.push(r#"AGY_ERROR: {"short_error":"bad"}"#);
         assert_eq!(e.message().as_deref(), Some("bad"));
         assert!(e.rate_limit().is_none());
+    }
+
+    #[test]
+    fn sandbox_is_off_by_default_and_on_when_asked() {
+        let a = AntigravityAdapter::new("agy", "/h", HookBroker::new());
+        assert!(!a.sandbox, "the hook is the gate; EMBER_AGY_SANDBOX unset means no --sandbox");
+        assert!(a.with_sandbox().sandbox);
     }
 
     #[test]

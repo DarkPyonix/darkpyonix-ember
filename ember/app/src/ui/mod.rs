@@ -8,6 +8,7 @@
 pub mod compat;
 pub mod components;
 pub mod conversation;
+pub mod home;
 pub mod launcher;
 pub mod new_session;
 pub mod search;

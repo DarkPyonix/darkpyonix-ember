@@ -11,8 +11,10 @@ pub mod agents;
 pub mod channels;
 pub mod components;
 pub mod conversation;
+pub mod editor;
 pub mod files;
 pub mod home;
+pub mod keymap;
 pub mod launcher;
 pub mod monitor;
 pub mod new_session;
@@ -57,6 +59,8 @@ pub struct Ui {
     pub show_archived: Signal<bool>,
     /// The menu chosen in the shell (FR-L10). A cold start lands on Projects.
     pub menu: Signal<NavMenu>,
+    /// `Some` while the Ember 에디터 screen is open (FR-L31); it replaces the shell.
+    pub editor: Signal<Option<editor::EditorTarget>>,
 }
 
 impl Ui {
@@ -105,6 +109,17 @@ impl Ui {
         save_prefs(snapshot);
     }
 
+    /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
+    pub fn open_editor(&self, project: String, folder: String) {
+        let mut e = self.editor;
+        e.set(Some(editor::EditorTarget { project, folder }));
+    }
+
+    pub fn close_editor(&self) {
+        let mut e = self.editor;
+        e.set(None);
+    }
+
     pub fn open_new_session(&self, project: Option<String>) {
         let mut d = self.new_session;
         d.set(Some(project.unwrap_or_default()));
@@ -150,6 +165,7 @@ pub fn app() -> Element {
     let new_session = use_signal(|| None::<String>);
     let show_archived = use_signal(|| false);
     let menu = use_signal(initial_menu);
+    let editor = use_signal(|| None::<editor::EditorTarget>);
     let theme_pref = use_signal(|| services().initial_prefs.theme);
     use_context_provider(|| ThemeCtx { pref: theme_pref });
     use_context_provider(|| Ui {
@@ -160,9 +176,14 @@ pub fn app() -> Element {
         new_session,
         show_archived,
         menu,
+        editor,
     });
 
-    rsx! { shell::Shell {} }
+    let open = editor.read().clone();
+    match open {
+        Some(target) => rsx! { editor::EditorScreen { target } },
+        None => rsx! { shell::Shell {} },
+    }
 }
 
 #[cfg(test)]

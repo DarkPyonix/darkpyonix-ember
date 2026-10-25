@@ -91,6 +91,7 @@ pub fn launch() {
 fn launch_builder() -> LaunchBuilder {
     // Follows the host platform's design system (Material 3 where there is no native one).
     LaunchBuilder::new()
-        .with_theme(Theme::adaptive(DesignSystem::Material3))
+        // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
+        .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(services().initial_prefs.theme.color_scheme()))
         .with_window(Window::new().with_title("Ember"))
 }

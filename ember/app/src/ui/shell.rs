@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{agents, channels, conversation, home, new_session, project, routines, search, vcs, use_ui, Route};
+use crate::ui::{agents, channels, conversation, files, home, new_session, project, routines, search, vcs, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -83,6 +83,8 @@ pub fn active_menu(route: &Route, chosen: NavMenu) -> NavMenu {
 pub enum Screen {
     /// 홈: the chat-first top and the dashboard (FR-L11, FR-L23).
     Home,
+    /// 파일: device file transfer (FR-L27).
+    Files,
     Launcher,
     Search,
     Conversation(String),
@@ -103,6 +105,7 @@ pub enum Screen {
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
         (NavMenu::Home, _) => Screen::Home,
+        (NavMenu::Files, _) => Screen::Files,
         (NavMenu::Routines, _) => Screen::Routines,
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
@@ -472,6 +475,7 @@ pub fn Shell() -> Element {
                 fill_max_width: true,
                 match screen {
                     Screen::Home => rsx! { home::Home {} },
+                    Screen::Files => rsx! { files::Files {} },
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
                     Screen::Agents => rsx! { agents::Agents {} },
@@ -629,11 +633,7 @@ mod tests {
             Screen::Routines
         );
         assert_eq!(screen_for(&Route::Projects, NavMenu::Channels), Screen::Channels);
-        for m in [
-            NavMenu::Files,
-        ] {
-            assert_eq!(screen_for(&Route::Projects, m), Screen::Placeholder(m));
-        }
+        assert_eq!(screen_for(&Route::Projects, NavMenu::Files), Screen::Files);
         assert_eq!(screen_for(&Route::Projects, NavMenu::Agents), Screen::Agents);
         assert_eq!(
             screen_for(&Route::Projects, NavMenu::VersionControl),

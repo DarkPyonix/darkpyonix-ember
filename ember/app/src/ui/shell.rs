@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{conversation, home, new_session, project, search, use_ui, Route};
+use crate::ui::{conversation, home, new_session, project, routines, search, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -86,6 +86,8 @@ pub enum Screen {
     Launcher,
     Search,
     Conversation(String),
+    /// 루틴 (FR-L25).
+    Routines,
     /// A menu whose screen is not built yet ("준비 중입니다").
     Placeholder(NavMenu),
 }
@@ -95,6 +97,7 @@ pub enum Screen {
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
         (NavMenu::Home, _) => Screen::Home,
+        (NavMenu::Routines, _) => Screen::Routines,
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
@@ -462,6 +465,7 @@ pub fn Shell() -> Element {
                     Screen::Home => rsx! { home::Home {} },
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
+                    Screen::Routines => rsx! { routines::Routines {} },
                     Screen::Conversation(id) => rsx! { conversation::ConversationView { key: "{id}", id: id.clone() } },
                     Screen::Placeholder(menu) => rsx! { Placeholder { menu } },
                 }
@@ -608,9 +612,12 @@ mod tests {
         );
         assert_eq!(screen_for(&Route::Projects, NavMenu::Home), Screen::Home);
         assert_eq!(screen_for(&c, NavMenu::Home), Screen::Home);
+        assert_eq!(
+            screen_for(&Route::Projects, NavMenu::Routines),
+            Screen::Routines
+        );
         for m in [
             NavMenu::Channels,
-            NavMenu::Routines,
             NavMenu::VersionControl,
             NavMenu::Agents,
             NavMenu::Files,

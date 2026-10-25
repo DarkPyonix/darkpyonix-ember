@@ -10,7 +10,20 @@
 //! memory for this app run and starts empty: nothing here is sample data. Run history and
 //! "지금 실행" need the server, so they say [`UNAVAILABLE`].
 
-use super::home::{DEFAULT_PROJECT, Harness, PermMode, Selection, default_mode, default_option};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use dioxus_compose::prelude::*;
+
+use super::components::*;
+use super::home::{
+    DEFAULT_PROJECT, Harness, Selection, bar_rects, computer_chip_text, filter_models,
+    harness_block, model_catalog, modes_for, project_options,
+};
+use super::theme::*;
+use crate::model;
+use crate::services::services;
+use crate::ui::use_ui;
 
 /// What a part shows or says while the server does not provide it.
 pub const UNAVAILABLE: &str = "준비 중입니다";
@@ -724,9 +737,1001 @@ impl RoutineStore for LocalStore {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------------------------------
+
+/// Shown while routines live only in this app run.
+pub const LOCAL_NOTE: &str =
+    "루틴은 이 앱을 실행하는 동안만 이 기기에 보관됩니다. 서버와의 연결은 준비 중입니다";
+const RUN_NOTICE: &str = "지금 실행은 서버에 연결되어야 합니다. 준비 중입니다";
+const HISTORY_NOTE: &str = "실행 기록은 서버에 연결되면 표시됩니다. 준비 중입니다";
+
+fn store() -> &'static Mutex<LocalStore> {
+    static STORE: OnceLock<Mutex<LocalStore>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(LocalStore::default()))
+}
+
+/// Runs `f` on the store. TODO(server): swap [`LocalStore`] for a store over `/api/schedules`
+/// once `ember-client` wraps it.
+fn with_store<R>(f: impl FnOnce(&mut LocalStore) -> R) -> R {
+    let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+/// Local minutes now.
+fn now_local() -> Minutes {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    secs / 60 + LOCAL_OFFSET_MIN
+}
+
+/// `(id, name)` of the registered computers, and the existing project names.
+fn live_choices() -> (Vec<(String, String)>, Vec<String>) {
+    let ui = use_ui();
+    let _ = *ui.live.launcher.read();
+    services().client.read(|s| {
+        let computers = s
+            .computers()
+            .iter()
+            .filter(|c| c.id != "local")
+            .map(|c| (c.id.clone(), c.name.clone()))
+            .collect();
+        let projects = model::project_cards(s)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        (computers, projects)
+    })
+}
+
+fn status_tone(s: RunStatus) -> PillTone {
+    match s {
+        RunStatus::Done => PillTone::Green,
+        RunStatus::Failed => PillTone::Red,
+        RunStatus::Running => PillTone::Blue,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum Panel {
+    #[default]
+    View,
+    /// The form for the routine with this id.
+    Edit(String),
+    New,
+}
+
+/// 루틴: the dashboard, the list grouped by project and the detail (FR-L25).
+#[component]
+pub fn Routines() -> Element {
+    let window = use_window_size();
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let compact = window.is_compact();
+    let mut tick = use_signal(|| 0_u32);
+    let mut selected = use_signal(|| None::<String>);
+    let mut panel = use_signal(Panel::default);
+    let mut filter = use_signal(|| None::<String>);
+    let mut query = use_signal(String::new);
+    let mut notice = use_signal(|| None::<String>);
+
+    let _ = tick();
+    let entries = with_store(|s| s.entries());
+    let local = with_store(|s| s.is_local());
+    let now = now_local();
+    let (computers, existing_projects) = live_choices();
+
+    let routines: Vec<Routine> = entries.iter().map(|e| e.routine.clone()).collect();
+    let groups = group_by_project(&routines, filter().as_deref(), &query());
+    let pills = filter_projects(&routines);
+    // A stale filter (its last routine was moved away) falls back to all.
+    let current = selected().filter(|id| entries.iter().any(|e| e.routine.id == *id));
+    let shown = if compact {
+        current.clone()
+    } else {
+        current.clone().or_else(|| {
+            groups
+                .first()
+                .and_then(|g| g.routines.first())
+                .map(|r| r.id.clone())
+        })
+    };
+    let detail = shown
+        .as_ref()
+        .and_then(|id| entries.iter().find(|e| e.routine.id == *id))
+        .cloned();
+    let mode = pane_mode(compact, current.is_some());
+    let pad = if compact { SP[3] } else { SP[6] };
+
+    let toggle = use_callback(move |(id, on): (String, bool)| {
+        let _ = with_store(|s| s.set_enabled(&id, on));
+        tick += 1;
+    });
+    let run_now = use_callback(move |id: String| match with_store(|s| s.run_now(&id)) {
+        Err(StoreError::Unavailable) => notice.set(Some(RUN_NOTICE.to_string())),
+        Err(StoreError::NotFound) => notice.set(Some("루틴을 찾을 수 없습니다".to_string())),
+        Ok(()) => notice.set(None),
+    });
+    let save = use_callback(move |(draft, editing): (FormDraft, Option<String>)| {
+        let id = editing
+            .clone()
+            .unwrap_or_else(|| with_store(|s| s.next_id()));
+        let enabled = with_store(|s| {
+            s.entries()
+                .iter()
+                .find(|e| e.routine.id == id)
+                .map(|e| e.routine.enabled)
+        })
+        .unwrap_or(true);
+        with_store(|s| s.save(draft.into_routine(&id, enabled)));
+        selected.set(Some(id));
+        panel.set(Panel::View);
+        tick += 1;
+    });
+
+    let form = panel();
+    let form_initial = match &form {
+        Panel::View => None,
+        Panel::New => Some((
+            FormDraft::new(filter().as_deref().unwrap_or(DEFAULT_PROJECT)),
+            None,
+        )),
+        Panel::Edit(id) => entries
+            .iter()
+            .find(|e| e.routine.id == *id)
+            .map(|e| (FormDraft::from_routine(&e.routine), Some(id.clone()))),
+    };
+
+    rsx! {
+        ScrollColumn {
+            fill_max_width: true,
+            fill_max_height: true,
+            Column {
+                fill_max_width: true,
+                padding: pad,
+                spacing: SP[4],
+                if mode != PaneMode::DetailOnly {
+                    Row {
+                        fill_max_width: true,
+                        alignment: Alignment::CenterStart,
+                        Column {
+                            weight: 1.0,
+                            Label { text: "루틴", fs: Fs::Xl2, weight: Weight::Semibold }
+                            Label { text: "팀원이 일정이나 이벤트에 맞춰 스스로 하는 일입니다", fs: Fs::Sm, color: paint(p.muted) }
+                        }
+                        AppButton {
+                            text: "새 루틴",
+                            icon: IconRole::Add,
+                            kind: ButtonKind::Primary,
+                            on_click: move |()| panel.set(Panel::New),
+                        }
+                    }
+                }
+                if local {
+                    Label { text: LOCAL_NOTE, fs: Fs::Xs, color: paint(p.muted), max_lines: 3 }
+                }
+                if let Some(text) = notice() {
+                    Row {
+                        fill_max_width: true,
+                        alignment: Alignment::CenterStart,
+                        spacing: SP[2],
+                        Pill { text, tone: PillTone::Orange }
+                        PickChip { text: "닫기", on_click: move |()| notice.set(None) }
+                    }
+                }
+                if mode != PaneMode::DetailOnly {
+                    Dashboard { entries: entries.clone(), now, compact }
+                }
+                match mode {
+                    PaneMode::Both => rsx! {
+                        Row {
+                            fill_max_width: true,
+                            spacing: SP[3],
+                            Column {
+                                weight: 1.0,
+                                ListPane {
+                                    entries: entries.clone(),
+                                    groups: groups.clone(),
+                                    pills: pills.clone(),
+                                    filter: filter(),
+                                    shown: shown.clone(),
+                                    now,
+                                    computers: computers.clone(),
+                                    on_filter: move |f: Option<String>| filter.set(f),
+                                    on_query: move |q: String| query.set(q),
+                                    on_open: move |id: String| selected.set(Some(id)),
+                                    on_toggle: move |a: (String, bool)| toggle.call(a),
+                                }
+                            }
+                            Column {
+                                weight: 1.6,
+                                DetailPane {
+                                    entry: detail.clone(),
+                                    now,
+                                    compact: false,
+                                    computers: computers.clone(),
+                                    empty: entries.is_empty(),
+                                    on_back: move |()| selected.set(None),
+                                    on_edit: move |id: String| panel.set(Panel::Edit(id)),
+                                    on_run: move |id: String| run_now.call(id),
+                                    on_toggle: move |a: (String, bool)| toggle.call(a),
+                                }
+                            }
+                        }
+                    },
+                    PaneMode::ListOnly => rsx! {
+                        ListPane {
+                            entries: entries.clone(),
+                            groups: groups.clone(),
+                            pills: pills.clone(),
+                            filter: filter(),
+                            shown: None,
+                            now,
+                            computers: computers.clone(),
+                            on_filter: move |f: Option<String>| filter.set(f),
+                            on_query: move |q: String| query.set(q),
+                            on_open: move |id: String| selected.set(Some(id)),
+                            on_toggle: move |a: (String, bool)| toggle.call(a),
+                        }
+                    },
+                    PaneMode::DetailOnly => rsx! {
+                        DetailPane {
+                            entry: detail.clone(),
+                            now,
+                            compact: true,
+                            computers: computers.clone(),
+                            empty: entries.is_empty(),
+                            on_back: move |()| selected.set(None),
+                            on_edit: move |id: String| panel.set(Panel::Edit(id)),
+                            on_run: move |id: String| run_now.call(id),
+                            on_toggle: move |a: (String, bool)| toggle.call(a),
+                        }
+                    },
+                }
+            }
+        }
+        if let Some((initial, editing)) = form_initial {
+            RoutineForm {
+                key: "{editing:?}",
+                initial,
+                editing: editing.clone(),
+                computers: computers.clone(),
+                projects: existing_projects.clone(),
+                on_save: move |d: FormDraft| save.call((d, editing.clone())),
+                on_close: move |()| panel.set(Panel::View),
+            }
+        }
+    }
+}
+
+// ---- dashboard ------------------------------------------------------------------------------
+
+#[component]
+fn Dashboard(entries: Vec<Entry>, now: Minutes, compact: bool) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let k = kpis(&entries, now, LOCAL_OFFSET_MIN);
+    let rate = overall_success(&entries);
+    let bars = weekday_bars(&entries, now, LOCAL_OFFSET_MIN);
+
+    // Success ring: the track, then the blue arc of the rate.
+    let mut ring = DrawList::builder().circle(paint(p.track), 40.0, 40.0, 32.0, 9.0);
+    if let Some(r) = rate.filter(|r| *r > 0) {
+        ring = ring.arc(
+            paint(if r < 60 {
+                p.orange.strong
+            } else {
+                p.blue.strong
+            }),
+            40.0,
+            40.0,
+            32.0,
+            -90.0,
+            (359.9_f32).min(360.0 * r as f32 / 100.0),
+            9.0,
+        );
+    }
+    let ring = ring.build();
+
+    // Weekday bars: ok (blue) stacked under fail (orange), heights relative to the busiest day.
+    const W: f32 = 280.0;
+    const H: f32 = 80.0;
+    let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
+    let mut chart = DrawList::builder().rect(paint(p.line), 0.0, H, W, 1.0, 0.0);
+    for (b, (x, y, w, h)) in bars.iter().zip(bar_rects(&totals, W, H, 8.0)) {
+        if h <= 0.0 {
+            continue;
+        }
+        let total = (b.ok + b.fail) as f32;
+        let fail_h = h * b.fail as f32 / total;
+        chart = chart.round_rect(paint(p.blue.strong), x, y + fail_h, w, h - fail_h, 4.0, 0.0);
+        if fail_h > 0.0 {
+            chart = chart.round_rect(paint(p.orange.strong), x, y, w, fail_h, 4.0, 0.0);
+        }
+    }
+    let chart = chart.build();
+    let busy = totals.iter().any(|t| *t > 0);
+
+    rsx! {
+        Column {
+            fill_max_width: true,
+            spacing: SP[3],
+            if compact {
+                Row { fill_max_width: true, spacing: SP[3],
+                    RoutineKpiView { kpi: k[0].clone() }
+                    RoutineKpiView { kpi: k[1].clone() }
+                }
+                Row { fill_max_width: true, spacing: SP[3],
+                    RoutineKpiView { kpi: k[2].clone() }
+                    RoutineKpiView { kpi: k[3].clone() }
+                }
+            } else {
+                Row { fill_max_width: true, spacing: SP[3],
+                    for kpi in k.iter().cloned() {
+                        RoutineKpiView { key: "{kpi.label}", kpi }
+                    }
+                }
+            }
+            EmberCard { fill_max_width: true,
+                Column {
+                    fill_max_width: true,
+                    padding: PAD_CARD_H,
+                    spacing: SP[3],
+                    Label { text: "성공률", fs: Fs::Lg, weight: Weight::Semibold }
+                    Row {
+                        fill_max_width: true,
+                        alignment: Alignment::CenterStart,
+                        spacing: SP[3],
+                        Canvas { width: 80.0, height: 80.0, commands: ring }
+                        Column {
+                            spacing: SP[0],
+                            match rate {
+                                Some(r) => rsx! {
+                                    Label { text: format!("{r}%"), fs: Fs::Xl2, weight: Weight::Semibold }
+                                    Label { text: "끝난 실행 기준입니다", fs: Fs::Xs, color: paint(p.muted) }
+                                },
+                                None => rsx! {
+                                    Label { text: "집계 전", fs: Fs::Lg, color: paint(p.muted) }
+                                    Label { text: "끝난 실행이 없습니다", fs: Fs::Xs, color: paint(p.muted) }
+                                },
+                            }
+                        }
+                    }
+                    Label { text: "요일별 실행", fs: Fs::Sm, color: paint(p.muted) }
+                    Canvas { width: W, height: H + 1.0, commands: chart }
+                    Row {
+                        width: W,
+                        for b in bars.iter().copied() {
+                            Column {
+                                key: "{b.label}",
+                                weight: 1.0,
+                                Label {
+                                    text: b.label,
+                                    fs: Fs::Xs,
+                                    weight: if b.today { Weight::Semibold } else { Weight::Regular },
+                                    color: paint(if b.today { p.text } else { p.muted }),
+                                }
+                            }
+                        }
+                    }
+                    if !busy {
+                        Label { text: "최근 7일 동안 끝난 실행이 없습니다", fs: Fs::Xs, color: paint(p.muted) }
+                    }
+                    Row {
+                        spacing: SP[3],
+                        Label { text: "성공", fs: Fs::Xs, color: paint(p.blue.strong) }
+                        Label { text: "실패", fs: Fs::Xs, color: paint(p.orange.strong) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RoutineKpiView(kpi: RoutineKpi) -> Element {
+    let theme = use_ember_theme();
+    let muted = paint(theme.palette.muted);
+    rsx! {
+        Column {
+            weight: 1.0,
+            spacing: SP[0],
+            Label { text: kpi.label, fs: Fs::Sm, color: muted }
+            Label { text: kpi.value.clone(), fs: Fs::Xl, weight: Weight::Semibold, max_lines: 1 }
+            if let Some(note) = kpi.note.clone() {
+                Label { text: note, fs: Fs::Xs, color: muted, max_lines: 1 }
+            }
+        }
+    }
+}
+
+// ---- list -----------------------------------------------------------------------------------
+
+#[component]
+fn ListPane(
+    entries: Vec<Entry>,
+    groups: Vec<Group>,
+    pills: Vec<String>,
+    filter: Option<String>,
+    shown: Option<String>,
+    now: Minutes,
+    computers: Vec<(String, String)>,
+    on_filter: EventHandler<Option<String>>,
+    on_query: EventHandler<String>,
+    on_open: EventHandler<String>,
+    on_toggle: EventHandler<(String, bool)>,
+) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    rsx! {
+        Column {
+            fill_max_width: true,
+            spacing: SP[2],
+            ScrollRow {
+                fill_max_width: true,
+                height: 48.0,
+                PickChip { text: "전체", selected: filter.is_none(), on_click: move |()| on_filter.call(None) }
+                Spacer { width: SP[0] }
+                for name in pills.iter().cloned() {
+                    PickChip {
+                        key: "{name}",
+                        text: name.clone(),
+                        selected: filter.as_deref() == Some(name.as_str()),
+                        on_click: {
+                            let name = name.clone();
+                            move |()| on_filter.call(Some(name.clone()))
+                        },
+                    }
+                    Spacer { width: SP[0] }
+                }
+            }
+            // TODO(dioxus-compose): TextField is uncontrolled and has no initial value.
+            TextField {
+                fill_max_width: true,
+                placeholder: "루틴 검색",
+                on_value_change: move |v: String| on_query.call(v),
+            }
+            if groups.is_empty() {
+                Label {
+                    text: if entries.is_empty() { "아직 루틴이 없습니다. 새 루틴을 만들어 주세요" } else { "맞는 루틴이 없습니다" },
+                    color: paint(p.muted),
+                    max_lines: 2,
+                }
+            }
+            for g in groups.iter().cloned() {
+                Column {
+                    key: "{g.project}",
+                    fill_max_width: true,
+                    spacing: SP[1],
+                    Label { text: g.title(), fs: Fs::Sm, weight: Weight::Medium, color: paint(p.text_2) }
+                    for r in g.routines.iter().cloned() {
+                        RoutineRow {
+                            key: "{r.id}",
+                            runs: entries.iter().find(|e| e.routine.id == r.id).map(|e| e.runs.clone()).unwrap_or_default(),
+                            selected: shown.as_deref() == Some(r.id.as_str()),
+                            now,
+                            computers: computers.clone(),
+                            routine: r,
+                            on_open: move |id: String| on_open.call(id),
+                            on_toggle: move |a: (String, bool)| on_toggle.call(a),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RoutineRow(
+    routine: Routine,
+    runs: Vec<Run>,
+    selected: bool,
+    now: Minutes,
+    computers: Vec<(String, String)>,
+    on_open: EventHandler<String>,
+    on_toggle: EventHandler<(String, bool)>,
+) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let (open_id, toggle_id) = (routine.id.clone(), routine.id.clone());
+    let tone = match routine.trigger {
+        Trigger::Time => PillTone::Blue,
+        Trigger::Event => PillTone::Sky,
+    };
+    let computer = computer_chip_text(routine.sel.computer.as_deref(), &computers);
+    rsx! {
+        EmberCard { fill_max_width: true, selected,
+            Column {
+                fill_max_width: true,
+                padding: SP[3],
+                spacing: SP[0],
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    // TODO(GAPS: clickable containers): the name button is the row's hit target.
+                    Button {
+                        text: routine.name.clone(),
+                        height: 40.0,
+                        weight: 1.0,
+                        variant: ButtonVariant::Text,
+                        color: paint(p.text),
+                        on_click: move |()| on_open.call(open_id.clone()),
+                    }
+                    Switch {
+                        checked: routine.enabled,
+                        on_change: move |v: bool| on_toggle.call((toggle_id.clone(), v)),
+                    }
+                }
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    spacing: SP[2],
+                    Pill { text: routine.trigger.label(), tone, small: true }
+                    Label { text: schedule_line(&routine), fs: Fs::Sm, color: paint(p.text_2), max_lines: 1 }
+                }
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    spacing: SP[2],
+                    Label {
+                        text: format!("{} · {}", routine.sel.option.harness.label(), computer),
+                        fs: Fs::Xs,
+                        color: paint(p.muted),
+                        max_lines: 1,
+                    }
+                    Spacer { weight: 1.0 }
+                    Label { text: last_run_text(&runs, now), fs: Fs::Xs, color: paint(p.muted), max_lines: 1 }
+                }
+            }
+        }
+    }
+}
+
+// ---- detail ---------------------------------------------------------------------------------
+
+#[component]
+fn DetailPane(
+    entry: Option<Entry>,
+    now: Minutes,
+    compact: bool,
+    computers: Vec<(String, String)>,
+    empty: bool,
+    on_back: EventHandler<()>,
+    on_edit: EventHandler<String>,
+    on_run: EventHandler<String>,
+    on_toggle: EventHandler<(String, bool)>,
+) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let Some(entry) = entry else {
+        return rsx! {
+            EmberCard { fill_max_width: true,
+                Column { fill_max_width: true, padding: PAD_CARD_H,
+                    Label {
+                        text: if empty { "루틴을 만들면 여기에 자세한 내용이 표시됩니다" } else { "루틴을 골라 주세요" },
+                        color: paint(p.muted),
+                        max_lines: 2,
+                    }
+                }
+            }
+        };
+    };
+    let r = entry.routine.clone();
+    let (edit_id, run_id, toggle_id) = (r.id.clone(), r.id.clone(), r.id.clone());
+    let rate = success_percent(&entry.runs);
+    let when_big = match r.trigger {
+        Trigger::Time => big_time(&r.cron),
+        Trigger::Event => r.cron.clone(),
+    };
+    let next = match r.trigger {
+        _ if !r.enabled => "꺼져 있습니다".to_string(),
+        Trigger::Event => "이벤트가 있을 때 실행됩니다".to_string(),
+        Trigger::Time => match next_run(&r.cron, now) {
+            Some(t) => format!("다음 실행 {}", format_next(t, now)),
+            None => "다음 실행 없음".to_string(),
+        },
+    };
+    let computer = computer_chip_text(r.sel.computer.as_deref(), &computers);
+    let ring = {
+        let mut l = DrawList::builder().circle(paint(p.track), 32.0, 32.0, 25.0, 7.0);
+        if let Some(v) = rate.filter(|v| *v > 0) {
+            l = l.arc(
+                paint(p.blue.strong),
+                32.0,
+                32.0,
+                25.0,
+                -90.0,
+                (359.9_f32).min(360.0 * v as f32 / 100.0),
+                7.0,
+            );
+        }
+        l.build()
+    };
+    rsx! {
+        EmberCard { fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: PAD_CARD_H,
+                spacing: SP[3],
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    spacing: SP[2],
+                    if compact {
+                        AppButton { text: "목록", icon: IconRole::Back, small: true, on_click: move |()| on_back.call(()) }
+                    }
+                    Label { text: r.name.clone(), fs: Fs::Xl, weight: Weight::Semibold, max_lines: 1 }
+                    Pill { text: r.trigger.label(), tone: if r.trigger == Trigger::Time { PillTone::Blue } else { PillTone::Sky }, small: true }
+                    Spacer { weight: 1.0 }
+                    Switch {
+                        checked: r.enabled,
+                        on_change: move |v: bool| on_toggle.call((toggle_id.clone(), v)),
+                    }
+                }
+                Row {
+                    fill_max_width: true,
+                    spacing: SP[2],
+                    AppButton { text: "편집", small: true, on_click: move |()| on_edit.call(edit_id.clone()) }
+                    AppButton {
+                        text: "지금 실행",
+                        small: true,
+                        kind: ButtonKind::Primary,
+                        on_click: move |()| on_run.call(run_id.clone()),
+                    }
+                }
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    spacing: SP[3],
+                    Column {
+                        weight: 1.0,
+                        spacing: SP[0],
+                        Label { text: when_big, fs: Fs::Xl3, weight: Weight::Semibold, max_lines: 1 }
+                        Label { text: schedule_line(&r), fs: Fs::Lg, weight: Weight::Medium, max_lines: 1 }
+                        if r.trigger == Trigger::Time {
+                            Label { text: r.cron.clone(), fs: Fs::Xs, color: paint(p.muted), max_lines: 1 }
+                        }
+                        Label { text: next, fs: Fs::Sm, color: paint(p.text_2), max_lines: 1 }
+                    }
+                    Column {
+                        spacing: SP[0],
+                        Canvas { width: 64.0, height: 64.0, commands: ring }
+                        Label {
+                            text: rate.map(|v| format!("{v}%")).unwrap_or_else(|| "집계 전".to_string()),
+                            fs: Fs::Xs,
+                            color: paint(p.muted),
+                        }
+                    }
+                }
+                KeyValue { title: "프로젝트", value: r.sel.project.clone(), sub: String::new() }
+                KeyValue {
+                    title: "에이전트",
+                    value: r.sel.option.harness.label().to_string(),
+                    sub: r.sel.option.row_title(),
+                }
+                KeyValue {
+                    title: "컴퓨터와 프로필",
+                    value: computer,
+                    sub: "프로필은 하네스를 따릅니다".to_string(),
+                }
+                KeyValue { title: "권한 모드", value: r.sel.mode.label().to_string(), sub: String::new() }
+                InsetPanel { fill_max_width: true,
+                    Column {
+                        fill_max_width: true,
+                        spacing: SP[1],
+                        Label { text: "프롬프트", fs: Fs::Xs, color: paint(p.muted) }
+                        Label { text: r.prompt.clone() }
+                    }
+                }
+                Label { text: "실행 기록", fs: Fs::Lg, weight: Weight::Semibold }
+                if entry.runs.is_empty() {
+                    Label { text: "아직 실행하지 않았습니다", color: paint(p.muted) }
+                    Label { text: HISTORY_NOTE, fs: Fs::Xs, color: paint(p.muted), max_lines: 2 }
+                }
+                for run in entry.runs.iter().cloned() {
+                    RunTile { key: "{run.at}", run, now }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn KeyValue(#[props(into)] title: String, value: String, sub: String) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    rsx! {
+        InsetPanel { fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                spacing: SP[0],
+                Label { text: title, fs: Fs::Xs, color: paint(p.muted) }
+                Label { text: value, weight: Weight::Medium }
+                if !sub.is_empty() {
+                    Label { text: sub, fs: Fs::Xs, color: paint(p.muted), max_lines: 2 }
+                }
+            }
+        }
+    }
+}
+
+/// One run of the history; it opens its session when there is one.
+#[component]
+fn RunTile(run: Run, now: Minutes) -> Element {
+    let ui = use_ui();
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let session = run.session.clone();
+    rsx! {
+        Row {
+            fill_max_width: true,
+            alignment: Alignment::CenterStart,
+            spacing: SP[2],
+            Pill { text: run.status.label(), tone: status_tone(run.status), small: true }
+            Label { text: ago(now, run.at), fs: Fs::Sm, color: paint(p.text_2) }
+            Spacer { weight: 1.0 }
+            if let Some(id) = session {
+                // TODO(GAPS: clickable containers): a text button opens the run's session.
+                AppButton { text: "세션 열기", small: true, on_click: move |()| ui.open_conversation(&id) }
+            }
+        }
+    }
+}
+
+// ---- form -----------------------------------------------------------------------------------
+
+/// The routine form: name, project, trigger, schedule, model and mode (the Home pickers' logic),
+/// computer and prompt. No account select: the profile follows the harness (FR-L17).
+/// TODO(dioxus-compose): `TextField` is uncontrolled, so an edited routine's current text is
+/// the placeholder, and a field left alone keeps the routine's value.
+#[component]
+fn RoutineForm(
+    initial: FormDraft,
+    editing: Option<String>,
+    computers: Vec<(String, String)>,
+    projects: Vec<String>,
+    on_save: EventHandler<FormDraft>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let ui = use_ui();
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let mut draft = use_signal(|| initial.clone());
+    let mut tried = use_signal(|| false);
+
+    let agents: Vec<(String, bool)> = ui
+        .live
+        .agents
+        .read()
+        .iter()
+        .map(|a| (a.kind.clone(), a.installed))
+        .collect();
+    let d = draft();
+    let errors = d.errors();
+    let mut project_choices = project_options(&projects);
+    if !project_choices.contains(&d.sel.project) {
+        project_choices.push(d.sel.project.clone());
+    }
+    let models = filter_models(&model_catalog(), Some(d.sel.option.harness), "");
+    let title = if editing.is_some() {
+        "루틴 편집"
+    } else {
+        "새 루틴"
+    };
+    let schedule_hint = match d.trigger {
+        Trigger::Time => {
+            let now = now_local();
+            match next_run(d.cron.trim(), now) {
+                Some(t) => format!(
+                    "{} · 다음 실행 {}",
+                    describe_cron(d.cron.trim()),
+                    format_next(t, now)
+                ),
+                None => describe_cron(d.cron.trim()),
+            }
+        }
+        Trigger::Event => "이벤트가 일어날 때 실행됩니다".to_string(),
+    };
+
+    rsx! {
+        EmberSheet {
+            title,
+            open: true,
+            on_dismiss: move |()| on_close.call(()),
+            ScrollColumn {
+                fill_max_width: true,
+                height: 560.0,
+                Column {
+                    fill_max_width: true,
+                    padding: SP[4],
+                    spacing: SP[3],
+                    if editing.is_some() {
+                        Label { text: "입력하지 않은 항목은 지금 값을 유지합니다", fs: Fs::Xs, color: paint(p.muted) }
+                    }
+                    FormLabel { text: "이름" }
+                    TextField {
+                        fill_max_width: true,
+                        placeholder: if initial.name.is_empty() { "예: develop CI 실패 요약".to_string() } else { initial.name.clone() },
+                        on_value_change: move |v: String| draft.write().name = v,
+                    }
+                    FormLabel { text: "프로젝트" }
+                    ScrollRow {
+                        fill_max_width: true,
+                        height: 48.0,
+                        for name in project_choices.iter().cloned() {
+                            PickChip {
+                                key: "{name}",
+                                text: name.clone(),
+                                selected: d.sel.project == name,
+                                on_click: {
+                                    let name = name.clone();
+                                    move |()| draft.write().sel.project = name.clone()
+                                },
+                            }
+                            Spacer { width: SP[0] }
+                        }
+                    }
+                    FormLabel { text: "트리거" }
+                    Row {
+                        spacing: SP[1],
+                        for t in Trigger::ALL {
+                            PickChip {
+                                key: "{t.label()}",
+                                text: t.label(),
+                                selected: d.trigger == t,
+                                on_click: move |()| {
+                                    let next = draft.peek().with_trigger(t);
+                                    draft.set(next);
+                                },
+                            }
+                        }
+                    }
+                    FormLabel { text: if d.trigger == Trigger::Time { "일정 (cron)" } else { "이벤트" } }
+                    for t in [d.trigger] {
+                        TextField {
+                            key: "schedule-{t.label()}",
+                            fill_max_width: true,
+                            placeholder: if initial.trigger == t && !initial.cron.is_empty() {
+                                initial.cron.clone()
+                            } else if t == Trigger::Time {
+                                "0 9 * * *".to_string()
+                            } else {
+                                "예: PR이 열릴 때".to_string()
+                            },
+                            on_value_change: move |v: String| draft.write().cron = v,
+                        }
+                    }
+                    Label { text: schedule_hint, fs: Fs::Xs, color: paint(p.text_2), max_lines: 2 }
+                    FormLabel { text: "하네스" }
+                    ScrollRow {
+                        fill_max_width: true,
+                        height: 48.0,
+                        for h in Harness::ALL {
+                            if harness_block(h, &agents, &[]).is_none() {
+                                PickChip {
+                                    key: "{h.label()}",
+                                    text: h.label(),
+                                    selected: d.sel.option.harness == h,
+                                    on_click: move |()| {
+                                        let s = draft.peek().sel.with_harness(h);
+                                        draft.write().sel = s;
+                                    },
+                                }
+                                Spacer { width: SP[0] }
+                            }
+                        }
+                    }
+                    FormLabel { text: "모델과 추론 강도" }
+                    ScrollRow {
+                        fill_max_width: true,
+                        height: 48.0,
+                        for (i, o) in models.iter().copied().enumerate() {
+                            PickChip {
+                                key: "{i}-{o.model}",
+                                text: o.row_title(),
+                                selected: d.sel.option == o,
+                                on_click: move |()| {
+                                    let s = draft.peek().sel.with_option(o);
+                                    draft.write().sel = s;
+                                },
+                            }
+                            Spacer { width: SP[0] }
+                        }
+                    }
+                    Label { text: "프로필은 하네스를 따릅니다. 계정을 따로 고르지 않습니다", fs: Fs::Xs, color: paint(p.muted), max_lines: 2 }
+                    FormLabel { text: "권한 모드" }
+                    ScrollRow {
+                        fill_max_width: true,
+                        height: 48.0,
+                        for m in modes_for(d.sel.option.harness).iter().copied() {
+                            PickChip {
+                                key: "{m.label()}",
+                                text: m.label(),
+                                selected: d.sel.mode == m,
+                                on_click: move |()| {
+                                    let s = draft.peek().sel.with_mode(m);
+                                    draft.write().sel = s;
+                                },
+                            }
+                            Spacer { width: SP[0] }
+                        }
+                    }
+                    FormLabel { text: "컴퓨터" }
+                    ScrollRow {
+                        fill_max_width: true,
+                        height: 48.0,
+                        PickChip {
+                            text: "이 서버",
+                            selected: d.sel.computer.is_none(),
+                            on_click: move |()| draft.write().sel.computer = None,
+                        }
+                        Spacer { width: SP[0] }
+                        for (id, name) in computers.iter().cloned() {
+                            PickChip {
+                                key: "{id}",
+                                text: name.clone(),
+                                selected: d.sel.computer.as_deref() == Some(id.as_str()),
+                                on_click: {
+                                    let id = id.clone();
+                                    move |()| draft.write().sel.computer = Some(id.clone())
+                                },
+                            }
+                            Spacer { width: SP[0] }
+                        }
+                    }
+                    FormLabel { text: "프롬프트" }
+                    TextField {
+                        fill_max_width: true,
+                        height: 120.0,
+                        multiline: true,
+                        placeholder: if initial.prompt.is_empty() { "에이전트에게 매번 줄 지시를 적어 주세요".to_string() } else { initial.prompt.clone() },
+                        on_value_change: move |v: String| draft.write().prompt = v,
+                    }
+                    if tried() {
+                        for e in errors.iter() {
+                            Label { key: "{e.message()}", text: e.message(), fs: Fs::Xs, color: paint(p.red.strong) }
+                        }
+                    }
+                    Row {
+                        fill_max_width: true,
+                        spacing: SP[2],
+                        Spacer { weight: 1.0 }
+                        AppButton { text: "취소", on_click: move |()| on_close.call(()) }
+                        AppButton {
+                            text: "저장",
+                            kind: ButtonKind::Primary,
+                            on_click: move |()| {
+                                let d = draft.peek().clone();
+                                if d.errors().is_empty() {
+                                    on_save.call(d);
+                                } else {
+                                    tried.set(true);
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FormLabel(#[props(into)] text: String) -> Element {
+    let theme = use_ember_theme();
+    rsx! {
+        Label { text, fs: Fs::Sm, weight: Weight::Medium, color: paint(theme.palette.text_2) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::home::{PermMode, default_mode, default_option};
 
     fn at(y: i64, mo: u32, d: u32, h: u32, mi: u32) -> Minutes {
         minutes_at(y, mo, d, h, mi)

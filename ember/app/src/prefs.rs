@@ -134,6 +134,23 @@ mod tests {
         assert_eq!(load(&path).theme, ThemePref::Dark);
     }
 
+    // FR-L22: the project character style is kept per device, default 몽글.
+    #[test]
+    fn fr_l22_character_style_round_trips_per_project() {
+        use crate::ui::characters::CharStyle;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).character_style("ember"), CharStyle::Mongle);
+        let mut p = Prefs::default();
+        p.set_character_style("ember", CharStyle::Crew);
+        save(&path, &p).unwrap();
+        let back = load(&path);
+        assert_eq!(back.character_style("ember"), CharStyle::Crew);
+        assert_eq!(back.character_style("other"), CharStyle::Mongle);
+        back.clone().set_character_style("ember", CharStyle::Mongle);
+    }
+
     #[test]
     fn older_prefs_with_local_pins_still_load() {
         let dir = tempfile::tempdir().unwrap();

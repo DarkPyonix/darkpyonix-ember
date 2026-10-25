@@ -13,6 +13,7 @@ pub mod conversation;
 pub mod files;
 pub mod home;
 pub mod launcher;
+pub mod monitor;
 pub mod new_session;
 pub mod project;
 pub mod routines;

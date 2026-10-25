@@ -44,6 +44,10 @@ pub struct Prefs {
     /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
     #[serde(default)]
     pub theme: crate::ui::theme::ThemePref,
+    /// Team character style per project id (FR-L22). Absent means the default, 몽글.
+    /// TODO(server): the project stores its own style once the server has the field.
+    #[serde(default)]
+    pub character_styles: BTreeMap<String, crate::ui::characters::CharStyle>,
 }
 
 fn format_default() -> u32 {
@@ -58,7 +62,22 @@ impl Default for Prefs {
             last_project: None,
             ide_target: None,
             theme: crate::ui::theme::ThemePref::default(),
+            character_styles: BTreeMap::new(),
         }
+    }
+}
+
+impl Prefs {
+    /// The project's team character style; 몽글 when none was chosen.
+    pub fn character_style(&self, project: &str) -> crate::ui::characters::CharStyle {
+        self.character_styles
+            .get(project)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
+        self.character_styles.insert(project.to_string(), style);
     }
 }
 
@@ -132,6 +151,23 @@ mod tests {
         };
         save(&path, &p).unwrap();
         assert_eq!(load(&path).theme, ThemePref::Dark);
+    }
+
+    // FR-L22: the project character style is kept per device, default 몽글.
+    #[test]
+    fn fr_l22_character_style_round_trips_per_project() {
+        use crate::ui::characters::CharStyle;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).character_style("ember"), CharStyle::Mongle);
+        let mut p = Prefs::default();
+        p.set_character_style("ember", CharStyle::Crew);
+        save(&path, &p).unwrap();
+        let back = load(&path);
+        assert_eq!(back.character_style("ember"), CharStyle::Crew);
+        assert_eq!(back.character_style("other"), CharStyle::Mongle);
+        back.clone().set_character_style("ember", CharStyle::Mongle);
     }
 
     #[test]

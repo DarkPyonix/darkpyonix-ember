@@ -34,11 +34,7 @@ team's reading or detail that the owner has not confirmed.
 - **Calm, warm and dense like the references.** [user for the references, provisional for the
   wording] Warm grey backgrounds, white cards with a hairline border and an almost invisible
   shadow, regular-weight large numbers, pills for status, outline icons. The base is not the cool
-  grey of a JetBrains IDE: the owner's later rounds pointed at the reference images (D25). [user,
-  D25, 2026-10-25] Only the editor and terminal screens add a JetBrains-like feel, because the
-  owner asked for it on those work surfaces. Every other screen, including tool windows, keeps the
-  mockup design. The editor and terminal draft is [provisional] until the owner approves a mockup
-  draft (pending).
+  grey of a JetBrains IDE: the owner's later rounds pointed at the reference images (D25). [user, D25, 2026-10-25] The editor and terminal use the island style and the tool-window stripes in §6.3; every other screen keeps the mockup design.
 - **Visual elements over block lists.** [user, FEEDBACK v6: "자꾸 쉽게 쉽게 가려고 블록 리스트
   형식으로 가는데 그건 너무 별로야."] Dashboards use rings, stacked bars, avatar groups and large
   numbers in tiles of different sizes. A stack of same-sized rows reads as a block list.
@@ -418,6 +414,7 @@ header switches project.
   window), **VS Code** (the computer's `code serve-web` wrapped in Ember's IDE window, runtime OSE
   by default or the official build), **JetBrains Gateway** (a command to the Gateway installed on
   that computer). The choice is remembered.
+- **Editor look** [user, D25, 2026-10-25] The Ember 에디터 window uses the app's own style: rounded island panels for the code area, tabs and tool windows, matching the JetBrains Islands concept. The left and right tool-window stripes are 40 px, icon only, with no white background or shadow on the selected button, only a faint selection tint. Breadcrumbs sit under the tabs [provisional, a leader decision]. The visual source is `.scratch/design-mockup/editor.html`. The keymap (VS Code or JetBrains, `INTENT.md` D32, `FR-L30`) changes the shortcut hints and keys, not the layout.
 - **Multi view**: user-defined **tabs**, each holding its own pane layout, saved per project.
   No pane-count picker [user, FEEDBACK v7: "에이전트 수를 고를 수 있도록 하는 기능은 필요 없을거
   같고 탭을 추가해서 여러 pane을 사용자가 배치할 수 있도록 해줘."]. Panes are dragged by their

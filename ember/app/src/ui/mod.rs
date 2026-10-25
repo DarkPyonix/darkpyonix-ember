@@ -10,6 +10,7 @@ pub mod agents;
 pub mod channels;
 pub mod components;
 pub mod conversation;
+pub mod files;
 pub mod home;
 pub mod launcher;
 pub mod new_session;

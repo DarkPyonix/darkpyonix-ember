@@ -162,11 +162,12 @@ jobs:
         if: steps.present.outputs.yes == 'true'
         with:
           workspaces: ember/${{ matrix.crate }}
+      - name: Renderer system libraries
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
+        # The compose-rust renderer links X11, GL, fontconfig and freetype on Linux.
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
       - name: cargo test
         if: steps.present.outputs.yes == 'true'
         working-directory: ember/${{ matrix.crate }}
         run: |
-          if [ "${{ matrix.crate }}" = app ]; then
-            # TODO: run the tests once dioxus-compose publishes a renderer matching the pinned rev (undefined symbol dioxus_compose_host_release_batch)
-            cargo test --locked --no-run
-          elif [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi
+          if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi

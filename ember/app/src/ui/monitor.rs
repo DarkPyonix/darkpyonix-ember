@@ -5,9 +5,15 @@
 //! metric cards say "준비 중입니다". The pure functions below (rolling series, the process table
 //! sort) are what the live update will use once a [`ComputerMetrics`] source exists.
 
+use dioxus_compose::prelude::*;
 use ember_client::state::Reachability;
 
-use crate::ui::project::{Member, ProjectBox};
+use crate::ui::components::{EmberCard, EmberSheet, InsetPanel, Label, Pill};
+use crate::ui::project::{
+    display_name, reach_pill, Character, ComputerChip, Member, ProjectBox, SOON,
+};
+use crate::ui::theme::*;
+use crate::ui::{use_ui, Route};
 
 /// The metric cards of the monitor, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +77,16 @@ pub const SERIES_CAP: usize = 60;
 
 /// Fold new samples into a rolling series: append, drop non-finite values, keep the newest `cap`.
 pub fn fold_samples(prev: &[f32], incoming: &[f32], cap: usize) -> Vec<f32> {
-    let _ = (prev, incoming, cap);
-    todo!("FR-L21")
+    let mut out: Vec<f32> = prev
+        .iter()
+        .chain(incoming.iter())
+        .copied()
+        .filter(|v| v.is_finite())
+        .collect();
+    if out.len() > cap {
+        out.drain(..out.len() - cap);
+    }
+    out
 }
 
 /// One row of the process table.
@@ -117,41 +131,316 @@ impl Default for SortState {
 /// A click on a header: the same key flips the direction; a new key starts descending for CPU
 /// and memory and ascending for name and PID.
 pub fn toggle_sort(state: SortState, key: SortKey) -> SortState {
-    let _ = (state, key);
-    todo!("FR-L21")
+    if state.key == key {
+        SortState {
+            key,
+            descending: !state.descending,
+        }
+    } else {
+        SortState {
+            key,
+            descending: matches!(key, SortKey::Cpu | SortKey::Memory),
+        }
+    }
 }
 
 /// Sort rows by the state. Rows without the value go last in either direction; ties break by
 /// name, then PID, so rows do not jump between updates.
 pub fn sort_rows(rows: &mut [ProcessRow], state: SortState) {
-    let _ = (rows, state);
-    todo!("FR-L21")
+    use std::cmp::Ordering;
+    // `None` goes last in both directions, so the direction applies to known values only.
+    fn known<T: PartialOrd>(a: &Option<T>, b: &Option<T>, desc: bool) -> Ordering {
+        match (a, b) {
+            (Some(x), Some(y)) => {
+                let o = x.partial_cmp(y).unwrap_or(Ordering::Equal);
+                if desc {
+                    o.reverse()
+                } else {
+                    o
+                }
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+    let desc = state.descending;
+    rows.sort_by(|a, b| {
+        let primary = match state.key {
+            SortKey::Name => {
+                let o = a.name.cmp(&b.name);
+                if desc {
+                    o.reverse()
+                } else {
+                    o
+                }
+            }
+            SortKey::Pid => known(&a.pid, &b.pid, desc),
+            SortKey::Cpu => known(&a.cpu, &b.cpu, desc),
+            SortKey::Memory => known(&a.mem, &b.mem, desc),
+        };
+        primary
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
 }
 
 /// Members of the projects assigned to a computer, once each. TODO(FR-X7): the client does not
 /// know which computer a session runs on, so this is every member of the assigned projects.
 pub fn computer_members(projects: &[String], boxes: &[ProjectBox]) -> Vec<Member> {
-    let _ = (projects, boxes);
-    todo!("FR-L21")
+    let mut out: Vec<Member> = Vec::new();
+    for b in boxes.iter().filter(|b| projects.contains(&b.id)) {
+        for m in &b.members {
+            if !out.iter().any(|o| o.session_id == m.session_id) {
+                out.push(m.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Agent process rows for members; CPU, memory and PID are unknown until FR-X7.
 pub fn agent_rows(members: &[Member]) -> Vec<ProcessRow> {
-    let _ = members;
-    todo!("FR-L21")
+    members
+        .iter()
+        .map(|m| ProcessRow {
+            pid: None,
+            name: m.name.clone(),
+            cpu: None,
+            mem: None,
+            session: Some(m.session_id.clone()),
+            agent: m.agent.clone(),
+            leader: m.leader,
+        })
+        .collect()
 }
 
 /// The line under the title: the online state, and for a computer that is not online the notice
 /// and what is not known (the client keeps no last connection time yet).
 pub fn offline_notice(r: Reachability) -> Option<&'static str> {
-    let _ = r;
-    todo!("FR-L21")
+    match r {
+        Reachability::Online => None,
+        Reachability::Offline => Some("연결이 끊겼습니다"),
+        Reachability::Unknown => Some("연결 상태를 알 수 없습니다"),
+    }
 }
 
 /// Cards per row: 2 wide or medium, 1 on a phone. TODO(GAPS: 창 폭 레이아웃): 4 at 1280 and up.
 pub fn card_columns(compact: bool) -> usize {
-    let _ = compact;
-    todo!("FR-L21")
+    if compact {
+        1
+    } else {
+        2
+    }
+}
+
+/// CPU percent text for a reported value; a missing one is a dash.
+pub fn cpu_text(v: Option<f32>) -> String {
+    v.map_or_else(|| "-".to_string(), |v| format!("{v:.1}%"))
+}
+
+/// Memory text in MB or GB for a reported value; a missing one is a dash.
+pub fn mem_text(v: Option<u64>) -> String {
+    match v {
+        None => "-".to_string(),
+        Some(b) if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+        Some(b) => format!("{} MB", b >> 20),
+    }
+}
+
+fn header_label(key: SortKey) -> &'static str {
+    match key {
+        SortKey::Name => "이름",
+        SortKey::Pid => "PID",
+        SortKey::Cpu => "CPU",
+        SortKey::Memory => "메모리",
+    }
+}
+
+/// The monitor sheet of one computer. `metrics` is [`NoMetrics`] until ember node reports
+/// (FR-X7), so the cards say they are not ready and the table lists the members' sessions.
+#[component]
+pub fn MonitorSheet(
+    chip: Option<ComputerChip>,
+    boxes: Vec<ProjectBox>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let ui = use_ui();
+    let window = use_window_size();
+    let mut sort = use_signal(SortState::default);
+    let metrics = NoMetrics;
+    let title = chip
+        .as_ref()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "컴퓨터".to_string());
+    let columns = card_columns(window.class == WindowSizeClass::Compact);
+
+    rsx! {
+        EmberSheet {
+            title,
+            open: true,
+            on_dismiss: move |()| on_close.call(()),
+            ScrollColumn {
+                fill_max_width: true,
+                Column {
+                    fill_max_width: true,
+                    padding: SP[4],
+                    space_role: SpaceRole::Md,
+                    if let Some(c) = chip {
+                        {
+                            let (state_text, tone) = reach_pill(c.reachability);
+                            let members = computer_members(&c.projects, &boxes);
+                            let mut rows = metrics.processes().unwrap_or_else(|| agent_rows(&members));
+                            sort_rows(&mut rows, *sort.read());
+                            let cur = *sort.read();
+                            rsx! {
+                                Row {
+                                    fill_max_width: true,
+                                    alignment: Alignment::CenterStart,
+                                    space_role: SpaceRole::Sm,
+                                    Pill { text: state_text, tone }
+                                    Label { text: format!("실행 중 {}", c.running), fs: Fs::Sm, color: paint(p.text_2) }
+                                }
+                                if let Some(n) = offline_notice(c.reachability) {
+                                    InsetPanel { fill_max_width: true,
+                                        Label { text: n, fs: Fs::Sm, weight: Weight::Medium }
+                                        Label { text: "마지막 연결 시각은 아직 알 수 없습니다", fs: Fs::Xs, color: paint(p.text_2) }
+                                    }
+                                }
+                                Label { text: "할당된 프로젝트", fs: Fs::Sm, weight: Weight::Medium, color: paint(p.text_2) }
+                                if c.projects.is_empty() {
+                                    Label { text: "할당된 프로젝트가 없습니다", color: paint(p.text_2) }
+                                }
+                                for pr in c.projects.iter() {
+                                    Label { key: "{pr}", text: display_name(pr) }
+                                }
+                                for chunk in Metric::ALL.chunks(columns) {
+                                    Row {
+                                        key: "{chunk[0].title()}",
+                                        fill_max_width: true,
+                                        space_role: SpaceRole::Sm,
+                                        for m in chunk.iter().copied() {
+                                            Column { key: "{m.title()}", weight: 1.0,
+                                                MetricCard { metric: m, series: metrics.series(m) }
+                                            }
+                                        }
+                                        if chunk.len() < columns {
+                                            Spacer { weight: 1.0 }
+                                        }
+                                    }
+                                }
+                                Label { text: "프로세스", fs: Fs::Lg, weight: Weight::Semibold }
+                                Row {
+                                    fill_max_width: true,
+                                    alignment: Alignment::CenterStart,
+                                    for key in [SortKey::Name, SortKey::Pid, SortKey::Cpu, SortKey::Memory] {
+                                        {
+                                            let mark = if cur.key == key { if cur.descending { " \u{25BE}" } else { " \u{25B4}" } } else { "" };
+                                            rsx! {
+                                                Column { key: "{header_label(key)}", weight: 1.0,
+                                                    Button {
+                                                        text: format!("{}{mark}", header_label(key)),
+                                                        height: 40.0,
+                                                        variant: ButtonVariant::Text,
+                                                        color: paint(p.text_2),
+                                                        fill_max_width: true,
+                                                        on_click: move |()| {
+                                                            let next = toggle_sort(*sort.peek(), key);
+                                                            sort.set(next);
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if rows.is_empty() {
+                                    Label { text: "이 컴퓨터에서 실행 중인 팀원이 없습니다", color: paint(p.text_2) }
+                                }
+                                for (i, r) in rows.into_iter().enumerate() {
+                                    ProcessRowView {
+                                        key: "{i}-{r.name}",
+                                        row: r,
+                                        on_open: move |id: String| {
+                                            on_close.call(());
+                                            ui.go(Route::Conversation(id));
+                                        },
+                                    }
+                                }
+                                Label { text: format!("프로세스 목록은 팀원의 세션만 표시합니다. 전체 프로세스는 {SOON}"), fs: Fs::Xs, color: paint(p.text_2) }
+                            }
+                        }
+                    } else {
+                        Label { text: "컴퓨터를 찾을 수 없습니다" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One metric card: the title and, with no data, "준비 중입니다".
+#[component]
+fn MetricCard(metric: Metric, series: Option<Vec<f32>>) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    rsx! {
+        EmberCard { fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[3],
+                spacing: SP[1],
+                Label { text: metric.title(), fs: Fs::Md, weight: Weight::Semibold }
+                match series.as_ref().and_then(|s| s.last()) {
+                    // TODO(FR-X7): the graph from `fold_samples` series.
+                    Some(v) => rsx! { Label { text: format!("{v:.1}"), fs: Fs::Xl, weight: Weight::Semibold } },
+                    None => rsx! { Label { text: SOON, fs: Fs::Sm, color: paint(p.muted) } },
+                }
+            }
+        }
+    }
+}
+
+/// A process row; a member's agent row has the character, the leader badge and opens its session.
+#[component]
+fn ProcessRowView(row: ProcessRow, on_open: EventHandler<String>) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let session = row.session.clone();
+    let agent_row = session.is_some();
+    rsx! {
+        Row {
+            fill_max_width: true,
+            alignment: Alignment::CenterStart,
+            space_role: SpaceRole::Sm,
+            background: paint(if agent_row { p.blue.soft } else { p.surface }),
+            corner_radius: CORNER_MD,
+            if agent_row {
+                Character { agent: row.agent.clone(), leader: row.leader, size: 24.0, name: row.name.clone() }
+            }
+            // TODO(GAPS: 클릭 가능한 컨테이너): the name button opens the member's session.
+            Column { weight: 1.0,
+                Button {
+                    text: if row.leader { format!("{} (리더)", row.name) } else { row.name.clone() },
+                    height: 40.0,
+                    variant: ButtonVariant::Text,
+                    color: paint(p.text),
+                    fill_max_width: true,
+                    enabled: agent_row,
+                    on_click: move |()| {
+                        if let Some(id) = session.clone() {
+                            on_open.call(id);
+                        }
+                    },
+                }
+            }
+            Label { text: row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()), fs: Fs::Xs, color: paint(p.text_2) }
+            Label { text: cpu_text(row.cpu), fs: Fs::Xs, color: paint(p.text_2) }
+            Label { text: mem_text(row.mem), fs: Fs::Xs, color: paint(p.text_2) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +622,15 @@ mod tests {
             offline_notice(Reachability::Unknown),
             Some("연결 상태를 알 수 없습니다")
         );
+    }
+
+    #[test]
+    fn value_text_uses_a_dash_for_unknown() {
+        assert_eq!(cpu_text(None), "-");
+        assert_eq!(cpu_text(Some(12.34)), "12.3%");
+        assert_eq!(mem_text(None), "-");
+        assert_eq!(mem_text(Some(512 << 20)), "512 MB");
+        assert_eq!(mem_text(Some(3 << 30)), "3.0 GB");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Top to bottom: the computer strip, then the project boxes in 3, 2 or 1 columns. A box is two
 //! levels: a header (status disc, name, repository, counts, buttons) over an inset of up to five
 //! member tiles and a "+N" deck. Tapping the header opens the full project view; the gear opens
-//! the settings sheet. A computer chip opens a detail sheet.
+//! the settings sheet. A computer chip opens the monitor sheet (`monitor.rs`).
 //!
 //! The decisions (columns per size class, member order, the deck count, who wears the leader
 //! badge, settings validation, which settings the server can save) are plain functions at the top
@@ -26,9 +26,10 @@ use ember_client::{LauncherStatus, State};
 use crate::model::status_rank;
 use crate::services::{run, services};
 use crate::ui::components::{
-    AppButton, ButtonKind, EmberCard, EmberSheet, InsetPanel, Label, PickChip, Pill, PillTone,
+    AppButton, ButtonKind, EmberCard, EmberSheet, Label, PickChip, Pill, PillTone,
 };
 use crate::ui::launcher::ConnectionBanner;
+use crate::ui::monitor::MonitorSheet;
 use crate::ui::theme::*;
 use crate::ui::use_ui;
 
@@ -604,8 +605,9 @@ pub fn ProjectScreen() -> Element {
             }
         }
         if let Some(c) = cur.computer.clone() {
-            ComputerSheet {
+            MonitorSheet {
                 chip: chips.iter().find(|x| x.id == c).cloned(),
+                boxes: boxes.clone(),
                 on_close: move |()| overlay.write().computer = None,
             }
         }
@@ -677,59 +679,6 @@ fn ComputerChipView(chip: ComputerChip, on_open: EventHandler<String>) -> Elemen
     }
 }
 
-/// The computer detail sheet. TODO(FR-L21, FR-X7): the full monitor (CPU per core, GPU, memory,
-/// disk, network, process table) replaces this once ember node reports it. Until then the sheet
-/// shows what the client has: reachability, assigned projects and running count.
-#[component]
-fn ComputerSheet(chip: Option<ComputerChip>, on_close: EventHandler<()>) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
-    let title = chip
-        .as_ref()
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| "컴퓨터".to_string());
-    rsx! {
-        EmberSheet {
-            title,
-            open: true,
-            on_dismiss: move |()| on_close.call(()),
-            Column {
-                fill_max_width: true,
-                padding: SP[4],
-                space_role: SpaceRole::Md,
-                if let Some(c) = chip {
-                    Row {
-                        fill_max_width: true,
-                        alignment: Alignment::CenterStart,
-                        space_role: SpaceRole::Sm,
-                        Pill { text: reach_pill(c.reachability).0, tone: reach_pill(c.reachability).1 }
-                        Label { text: format!("실행 중 {}", c.running), fs: Fs::Sm, color: paint(p.text_2) }
-                    }
-                    Label { text: "할당된 프로젝트", fs: Fs::Sm, weight: Weight::Medium, color: paint(p.text_2) }
-                    if c.projects.is_empty() {
-                        Label { text: "할당된 프로젝트가 없습니다", color: paint(p.text_2) }
-                    }
-                    for pr in c.projects.iter() {
-                        Label { key: "{pr}", text: display_name(pr) }
-                    }
-                    InsetPanel {
-                        fill_max_width: true,
-                        Label { text: format!("CPU, GPU, 메모리, 디스크 사용량 모니터는 {SOON}"), fs: Fs::Sm, color: paint(p.text_2) }
-                    }
-                    // TODO(FR-L21): monitor sheet fed by FR-X7 (about 1 s while visible).
-                } else {
-                    Label { text: "컴퓨터를 찾을 수 없습니다" }
-                }
-                Row {
-                    fill_max_width: true,
-                    arrangement: Arrangement::End,
-                    AppButton { text: "닫기", on_click: move |()| on_close.call(()) }
-                }
-            }
-        }
-    }
-}
-
 // --- project grid ----------------------------------------------------------------------------
 
 #[component]
@@ -798,7 +747,7 @@ fn StatusDisc(total: usize, top: Option<LauncherStatus>, size: f32) -> Element {
 /// The placeholder character: a circle in the harness colour, with the crown for a leader.
 /// TODO(FR-L22): the six animated team character styles replace this.
 #[component]
-fn Character(agent: String, leader: bool, size: f32, name: String) -> Element {
+pub(crate) fn Character(agent: String, leader: bool, size: f32, name: String) -> Element {
     let theme = use_ember_theme();
     let p = theme.palette;
     let (fg, bg) = tone_fill(harness_tone(&agent), p);

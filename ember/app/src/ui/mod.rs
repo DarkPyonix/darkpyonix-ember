@@ -5,14 +5,19 @@
 //! their content changes shape (two panes side by side vs. stacked). Tokens are in [`theme`],
 //! shared components in [`components`].
 
+pub mod characters;
 pub mod compat;
+pub mod agents;
 pub mod channels;
 pub mod components;
 pub mod conversation;
+pub mod files;
 pub mod home;
 pub mod launcher;
+pub mod monitor;
 pub mod new_session;
 pub mod project;
+pub mod routines;
 pub mod search;
 pub mod session;
 pub mod shell;

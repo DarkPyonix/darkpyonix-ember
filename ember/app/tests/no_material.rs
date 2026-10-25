@@ -1,3 +1,4 @@
+//! Workaround for compose-rust #321 (material: flips window decoration); remove once Ember is on v0.0.3 and #321 is settled. Tracked in #166.
 //! The renderer flips the live window to undecorated when any `material:` modifier appears in the
 //! tree, and AWT then throws IllegalComponentStateException (#166). The app must not use one.
 

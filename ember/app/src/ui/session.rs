@@ -39,10 +39,11 @@ use crate::services::{run, services};
 use crate::ui::components::{
     AppButton, ButtonKind, EmberCard, EmberSheet, IconButton, Label, PickChip, Pill, PillTone,
 };
+use crate::ui::characters::{CharState, Character};
 use crate::ui::conversation::{ConversationView, TranscriptRow, item_key};
 use crate::ui::home::{Harness, PermMode, default_option, model_catalog, modes_for};
 use crate::ui::project::{
-    Character, Member, MemberFilter, ProjectBox, display_name, filter_members, project_boxes,
+    Member, MemberFilter, ProjectBox, display_name, filter_members, project_boxes,
     status_pill,
 };
 use crate::ui::theme::*;
@@ -61,7 +62,6 @@ const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
 const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
-const VCS_SOON: &str = "버전 관리는 준비 중입니다";
 const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const COMPUTER_LOADING: &str = "확인하는 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
@@ -77,7 +77,6 @@ pub const UI_STRINGS: &[&str] = &[
     NO_CONVERSATION,
     TERMINAL_SOON,
     MODEL_LOCKED,
-    VCS_SOON,
     WEB_SOON,
     COMPUTER_LOADING,
     NO_SESSION,
@@ -974,7 +973,7 @@ fn SideList(
                                 space_role: SpaceRole::Xs,
                                 background: if active.as_deref() == Some(m.session_id.as_str()) { paint(p.sel) } else { paint(Color::argb(0)) },
                                 shape_role: ShapeRole::Full,
-                                Character { agent: m.agent.clone(), leader: m.leader, size: 24.0, name: m.name.clone() }
+                                Character { agent: m.agent.clone(), leader: m.leader, size: 24.0, name: m.name.clone(), project: s.project.clone(), state: CharState::from_status(m.status) }
                                 Button {
                                     weight: 1.0,
                                     text: m.accessible_name(),
@@ -1202,7 +1201,7 @@ fn Pane(
                 fill_max_width: true,
                 alignment: Alignment::CenterStart,
                 space_role: SpaceRole::Xs,
-                Character { agent: member.agent.clone(), leader: member.leader, size: 28.0, name: member.name.clone() }
+                Character { agent: member.agent.clone(), leader: member.leader, size: 28.0, name: member.name.clone(), project: project.clone(), state: CharState::from_status(member.status) }
                 Column {
                     weight: 1.0,
                     Label { text: member.accessible_name(), weight: Weight::Semibold, max_lines: 1 }
@@ -1534,7 +1533,7 @@ fn SingleView(session: String, focus: Option<String>) -> Element {
 
 /// The kanban of member status, with the PR list and timeline not built yet.
 #[component]
-fn StatusView(members: Vec<Member>, on_open: EventHandler<String>) -> Element {
+fn StatusView(project: String, members: Vec<Member>, on_open: EventHandler<String>) -> Element {
     let p = use_ember_theme().palette;
     let columns = kanban(&members);
     let count = |s: LauncherStatus| members.iter().filter(|m| m.status == s).count();
@@ -1578,7 +1577,7 @@ fn StatusView(members: Vec<Member>, on_open: EventHandler<String>) -> Element {
                                         padding_role: SpaceRole::Xs,
                                         alignment: Alignment::CenterStart,
                                         space_role: SpaceRole::Xs,
-                                        Character { agent: m.agent.clone(), leader: m.leader, size: 28.0, name: m.name.clone() }
+                                        Character { agent: m.agent.clone(), leader: m.leader, size: 28.0, name: m.name.clone(), project: project.clone(), state: CharState::from_status(m.status) }
                                         Column {
                                             weight: 1.0,
                                             Button {
@@ -1777,8 +1776,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                     if mode == SideListMode::Column {
                         AppButton { text: "새 팀원", icon: IconRole::Add, on_click: { let c = current.clone(); move |()| ui.open_new_session(Some(c.clone())) } }
                         Spacer { width: SP[1] }
-                        // TODO(version control screen): a large sheet for this project (FR-L18).
-                        AppButton { text: "버전 관리", on_click: move |()| show_message(VCS_SOON) }
+                        AppButton { text: "버전 관리", on_click: { let c = current.clone(); move |()| crate::ui::vcs::open_for_project(ui, &c) } }
                         Spacer { width: SP[1] }
                         // TODO(server): the ports detected on the member's computer (FR-L18).
                         AppButton { text: "웹 페이지", on_click: move |()| show_message(WEB_SOON) }
@@ -1804,7 +1802,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                                 variant: ButtonVariant::Text,
                                 height: H_BTN,
                                 fill_max_width: true,
-                                on_click: move |_: ()| { more_menu.set(false); show_message(VCS_SOON) },
+                                on_click: { let c = current.clone(); move |_: ()| { more_menu.set(false); crate::ui::vcs::open_for_project(ui, &c) } },
                             }
                             Button {
                                 text: "웹 페이지",
@@ -1843,7 +1841,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                             },
                         },
                         SessionView::Status => rsx! {
-                            StatusView { members: members.clone(), on_open: move |id: String| to_single.call(id) }
+                            StatusView { project: current.clone(), members: members.clone(), on_open: move |id: String| to_single.call(id) }
                         },
                     }
                 }

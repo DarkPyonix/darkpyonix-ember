@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{channels, home, new_session, project, search, session, vcs, use_ui, Route};
+use crate::ui::{agents, channels, files, home, new_session, project, routines, search, session, vcs, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -83,9 +83,15 @@ pub fn active_menu(route: &Route, chosen: NavMenu) -> NavMenu {
 pub enum Screen {
     /// 홈: the chat-first top and the dashboard (FR-L11, FR-L23).
     Home,
+    /// 파일: device file transfer (FR-L27).
+    Files,
     Launcher,
     Search,
     Conversation(String),
+    /// 에이전트: harnesses, models, profiles, network, usage (FR-L20).
+    Agents,
+    /// 루틴 (FR-L25).
+    Routines,
     /// 버전 관리 (FR-L19).
     VersionControl,
     /// 채널 (FR-L12).
@@ -99,9 +105,12 @@ pub enum Screen {
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
         (NavMenu::Home, _) => Screen::Home,
+        (NavMenu::Files, _) => Screen::Files,
+        (NavMenu::Routines, _) => Screen::Routines,
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
+        (NavMenu::Agents, _) => Screen::Agents,
         (NavMenu::VersionControl, _) => Screen::VersionControl,
         (NavMenu::Channels, _) => Screen::Channels,
         (other, _) => Screen::Placeholder(other),
@@ -466,8 +475,11 @@ pub fn Shell() -> Element {
                 fill_max_width: true,
                 match screen {
                     Screen::Home => rsx! { home::Home {} },
+                    Screen::Files => rsx! { files::Files {} },
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
+                    Screen::Agents => rsx! { agents::Agents {} },
+                    Screen::Routines => rsx! { routines::Routines {} },
                     // 세션 is the inside of a project (FR-L18); the open conversation is its focus.
                     Screen::Conversation(id) => rsx! { session::SessionScreen { focus: Some(id.clone()) } },
                     Screen::VersionControl => rsx! { vcs::VcsScreen {} },
@@ -617,14 +629,13 @@ mod tests {
         );
         assert_eq!(screen_for(&Route::Projects, NavMenu::Home), Screen::Home);
         assert_eq!(screen_for(&c, NavMenu::Home), Screen::Home);
+        assert_eq!(
+            screen_for(&Route::Projects, NavMenu::Routines),
+            Screen::Routines
+        );
         assert_eq!(screen_for(&Route::Projects, NavMenu::Channels), Screen::Channels);
-        for m in [
-            NavMenu::Routines,
-            NavMenu::Agents,
-            NavMenu::Files,
-        ] {
-            assert_eq!(screen_for(&Route::Projects, m), Screen::Placeholder(m));
-        }
+        assert_eq!(screen_for(&Route::Projects, NavMenu::Files), Screen::Files);
+        assert_eq!(screen_for(&Route::Projects, NavMenu::Agents), Screen::Agents);
         assert_eq!(
             screen_for(&Route::Projects, NavMenu::VersionControl),
             Screen::VersionControl

@@ -731,8 +731,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
-                // No `material` here: any Material modifier makes the renderer flip the live
-                // window to undecorated and AWT throws IllegalComponentStateException (#166).
+                // Workaround for compose-rust #321 (material: flips window decoration); remove once Ember is on v0.0.3 and #321 is settled. Tracked in #166.
                 background: Paint::Role(ColorRole::SurfaceContainer),
                 shape_role: ShapeRole::Large,
                 padding_role: SpaceRole::Xs,

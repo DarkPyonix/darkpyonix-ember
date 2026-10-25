@@ -87,7 +87,7 @@ impl Section {
 
 /// The section a key opens; an unknown key opens 변경 사항.
 pub fn route_section(key: &str) -> Section {
-    todo!()
+    Section::from_key(key).unwrap_or(Section::Changes)
 }
 
 /// How the section list is drawn.
@@ -100,7 +100,10 @@ pub enum SectionNav {
 }
 
 pub fn section_nav(class: WindowSizeClass) -> SectionNav {
-    todo!()
+    match class {
+        WindowSizeClass::Expanded => SectionNav::List,
+        _ => SectionNav::Pills,
+    }
 }
 
 /// How a section's panes are arranged.
@@ -115,7 +118,11 @@ pub enum PaneLayout {
 }
 
 pub fn pane_layout(class: WindowSizeClass) -> PaneLayout {
-    todo!()
+    match class {
+        WindowSizeClass::Expanded => PaneLayout::Two,
+        WindowSizeClass::Medium => PaneLayout::Stacked,
+        WindowSizeClass::Compact => PaneLayout::Tabs,
+    }
 }
 
 /// An in-screen tab of the compact layout.
@@ -144,18 +151,32 @@ impl PaneTab {
 
 /// The tabs a section has at compact width; empty when it has one pane.
 pub fn pane_tabs(section: Section) -> &'static [PaneTab] {
-    todo!()
+    match section {
+        Section::Changes => &[PaneTab::Files, PaneTab::Diff, PaneTab::Commit],
+        Section::History => &[PaneTab::Graph, PaneTab::Detail],
+        Section::PullRequests => &[PaneTab::List, PaneTab::Detail],
+        _ => &[],
+    }
 }
 
 /// The tab to show after the user picks a file, a commit or a pull request.
 pub fn tab_after_select(tab: PaneTab) -> PaneTab {
-    todo!()
+    match tab {
+        PaneTab::Files => PaneTab::Diff,
+        PaneTab::Graph | PaneTab::List => PaneTab::Detail,
+        other => other,
+    }
 }
 
 /// The tab to show in a section: the chosen one if the section has it, else its first; `None`
 /// for a section with one pane.
 pub fn effective_tab(section: Section, chosen: PaneTab) -> Option<PaneTab> {
-    todo!()
+    let tabs = pane_tabs(section);
+    if tabs.contains(&chosen) {
+        Some(chosen)
+    } else {
+        tabs.first().copied()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -172,38 +193,72 @@ pub enum RemoteAction {
 }
 
 pub fn remote_action(ahead: u32, behind: u32) -> RemoteAction {
-    todo!()
+    if behind > 0 {
+        RemoteAction::Pull(behind)
+    } else if ahead > 0 {
+        RemoteAction::Push(ahead)
+    } else {
+        RemoteAction::Fetch
+    }
 }
 
 impl RemoteAction {
     pub fn label(self) -> String {
-        todo!()
+        match self {
+            RemoteAction::Pull(n) => format!("Pull {n}"),
+            RemoteAction::Push(n) => format!("Push {n}"),
+            RemoteAction::Fetch => "Fetch".to_string(),
+        }
     }
 }
 
 /// "앞섬 2 · 뒤처짐 1", or a note that the branch equals its remote.
 pub fn ahead_behind_text(ahead: u32, behind: u32) -> String {
-    todo!()
+    match (ahead, behind) {
+        (0, 0) => "원격과 같습니다".to_string(),
+        (a, 0) => format!("앞섬 {a}"),
+        (0, b) => format!("뒤처짐 {b}"),
+        (a, b) => format!("앞섬 {a} \u{00b7} 뒤처짐 {b}"),
+    }
 }
 
 /// The last fetch, from its age in seconds. `None`: never fetched.
 pub fn fetched_text(age_secs: Option<u64>) -> String {
-    todo!()
+    match age_secs {
+        None => "아직 fetch하지 않았습니다".to_string(),
+        Some(s) if s < 60 => "방금 fetch했습니다".to_string(),
+        Some(s) if s < 3_600 => format!("{}분 전에 fetch했습니다", s / 60),
+        Some(s) if s < 86_400 => format!("{}시간 전에 fetch했습니다", s / 3_600),
+        Some(s) => format!("{}일 전에 fetch했습니다", s / 86_400),
+    }
 }
 
 /// The widths of a branch's behind | ahead bar as fractions of the bar, `(behind, ahead)`.
 pub fn bar_fractions(ahead: u32, behind: u32) -> (f32, f32) {
-    todo!()
+    let total = ahead + behind;
+    if total == 0 {
+        (0.0, 0.0)
+    } else {
+        (behind as f32 / total as f32, ahead as f32 / total as f32)
+    }
 }
 
 /// The line under the branch name.
 pub fn upstream_text(upstream: Option<&str>) -> String {
-    todo!()
+    match upstream {
+        Some(u) if !u.is_empty() => format!("{u} 추적"),
+        _ => "추적하는 원격 브랜치가 없습니다".to_string(),
+    }
 }
 
 /// "<what>은 준비 중입니다", with the topic particle that fits the last syllable of `what`.
 pub fn soon_line(what: &str) -> String {
-    todo!()
+    let has_final = what
+        .chars()
+        .last()
+        .map(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c) && (c as u32 - 0xac00) % 28 != 0)
+        .unwrap_or(false);
+    format!("{what}{} {SOON}", if has_final { "은" } else { "는" })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -229,7 +284,17 @@ pub enum ReviewState {
 /// Merge is enabled only with CI passing and an approval; otherwise the reason is shown under
 /// the button (FR-L19).
 pub fn merge_gate(ci: CiState, review: ReviewState) -> Result<(), &'static str> {
-    todo!()
+    match ci {
+        CiState::Failed => return Err("CI가 실패했습니다"),
+        CiState::Running => return Err("CI가 실행 중입니다"),
+        CiState::Waiting => return Err("CI를 기다리는 중입니다"),
+        CiState::Passed => {}
+    }
+    match review {
+        ReviewState::Approved => Ok(()),
+        ReviewState::ChangesRequested => Err("변경 요청이 있습니다"),
+        ReviewState::Pending | ReviewState::NoReviewer => Err("승인이 필요합니다"),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -331,7 +396,18 @@ impl FileDiff {
 /// Parse `@@ -a[,b] +c[,d] @@ ...` into `(old_start, old_len, new_start, new_len)`. A missing
 /// length is 1.
 pub fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32, u32)> {
-    todo!()
+    let rest = line.strip_prefix("@@ -")?;
+    let (ranges, _) = rest.split_once(" @@")?;
+    let (old, new) = ranges.split_once(" +")?;
+    let range = |s: &str| -> Option<(u32, u32)> {
+        match s.split_once(',') {
+            Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+            None => Some((s.parse().ok()?, 1)),
+        }
+    };
+    let (os, ol) = range(old)?;
+    let (ns, nl) = range(new)?;
+    Some((os, ol, ns, nl))
 }
 
 fn strip_side(path: &str) -> &str {
@@ -345,7 +421,143 @@ fn strip_side(path: &str) -> &str {
 /// A hunk's lengths decide where its content ends, so a deleted line that reads `-- x` (shown
 /// as `--- x`) is not mistaken for a file header.
 pub fn parse_unified(text: &str) -> Vec<FileDiff> {
-    todo!()
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut cur: Option<FileDiff> = None;
+    let mut open: Option<Hunk> = None;
+    let (mut left_old, mut left_new) = (0u32, 0u32);
+    let (mut no_old, mut no_new) = (0u32, 0u32);
+
+    fn blank(path: &str) -> FileDiff {
+        FileDiff {
+            path: path.to_string(),
+            old_path: None,
+            status: FileStatus::Modified,
+            binary: false,
+            hunks: Vec::new(),
+        }
+    }
+    fn close(cur: &mut Option<FileDiff>, open: &mut Option<Hunk>) {
+        if let (Some(f), Some(h)) = (cur.as_mut(), open.take()) {
+            f.hunks.push(h);
+        }
+    }
+
+    for line in text.lines() {
+        if left_old > 0 || left_new > 0 {
+            let (kind, body) = match line.chars().next() {
+                Some('+') => (LineKind::Add, &line[1..]),
+                Some('-') => (LineKind::Del, &line[1..]),
+                Some(' ') => (LineKind::Context, &line[1..]),
+                None => (LineKind::Context, ""),
+                Some('\\') => continue,
+                Some(_) => (LineKind::Context, line),
+            };
+            let (old_no, new_no) = match kind {
+                LineKind::Add => {
+                    left_new = left_new.saturating_sub(1);
+                    no_new += 1;
+                    (None, Some(no_new - 1))
+                }
+                LineKind::Del => {
+                    left_old = left_old.saturating_sub(1);
+                    no_old += 1;
+                    (Some(no_old - 1), None)
+                }
+                LineKind::Context => {
+                    left_old = left_old.saturating_sub(1);
+                    left_new = left_new.saturating_sub(1);
+                    no_old += 1;
+                    no_new += 1;
+                    (Some(no_old - 1), Some(no_new - 1))
+                }
+            };
+            if let Some(h) = open.as_mut() {
+                h.lines.push(DiffLine {
+                    kind,
+                    text: body.to_string(),
+                    old_no,
+                    new_no,
+                });
+            }
+            continue;
+        }
+        if line.starts_with('\\') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            close(&mut cur, &mut open);
+            files.extend(cur.take());
+            let path = rest
+                .rsplit_once(" b/")
+                .map(|(_, b)| b)
+                .unwrap_or_else(|| strip_side(rest));
+            cur = Some(blank(path));
+        } else if let Some((os, ol, ns, nl)) = parse_hunk_header(line) {
+            close(&mut cur, &mut open);
+            if cur.is_none() {
+                cur = Some(blank(""));
+            }
+            left_old = ol;
+            left_new = nl;
+            no_old = os;
+            no_new = ns;
+            open = Some(Hunk {
+                header: line.to_string(),
+                old_start: os,
+                old_len: ol,
+                new_start: ns,
+                new_len: nl,
+                lines: Vec::new(),
+            });
+        } else if let Some(p) = line.strip_prefix("--- ") {
+            // A header only when no hunk is open (checked above), so a new file starts when the
+            // current one already has hunks.
+            if open.is_some() || cur.as_ref().map_or(true, |f| !f.hunks.is_empty()) {
+                close(&mut cur, &mut open);
+                files.extend(cur.take());
+                cur = Some(blank(""));
+            }
+            if let Some(f) = cur.as_mut() {
+                if p != "/dev/null" {
+                    f.old_path = Some(strip_side(p).to_string());
+                    if f.path.is_empty() {
+                        f.path = strip_side(p).to_string();
+                    }
+                }
+            }
+        } else if let Some(p) = line.strip_prefix("+++ ") {
+            if let Some(f) = cur.as_mut() {
+                if p != "/dev/null" {
+                    f.path = strip_side(p).to_string();
+                }
+            }
+        } else if let Some(f) = cur.as_mut() {
+            if line.starts_with("new file mode") {
+                f.status = FileStatus::Added;
+            } else if line.starts_with("deleted file mode") {
+                f.status = FileStatus::Deleted;
+            } else if let Some(from) = line.strip_prefix("rename from ") {
+                f.status = FileStatus::Renamed;
+                f.old_path = Some(from.to_string());
+            } else if let Some(to) = line.strip_prefix("rename to ") {
+                f.path = to.to_string();
+            } else if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
+                f.binary = true;
+            }
+        }
+    }
+    close(&mut cur, &mut open);
+    files.extend(cur);
+    // A deleted file's `+++ /dev/null` leaves the path from the `---` side; a rename keeps `old_path`.
+    for f in &mut files {
+        if f.status == FileStatus::Modified
+            && f.old_path.is_none()
+            && f.hunks.first().is_some_and(|h| h.old_len == 0)
+        {
+            f.status = FileStatus::Added;
+        }
+    }
+    files
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -361,17 +573,33 @@ pub enum Check {
 }
 
 pub fn check_of(staged: usize, total: usize) -> Check {
-    todo!()
+    if total == 0 || staged == 0 {
+        Check::Off
+    } else if staged >= total {
+        Check::On
+    } else {
+        Check::Partial
+    }
 }
 
 /// The glyph of a check box.
 pub fn check_glyph(check: Check) -> &'static str {
-    todo!()
+    match check {
+        Check::On => "\u{25cf}",
+        Check::Partial => "\u{25d0}",
+        Check::Off => "\u{25cb}",
+    }
 }
 
 /// The check of a folder from its children.
 pub fn folder_check(children: &[Check]) -> Check {
-    todo!()
+    if children.is_empty() || children.iter().all(|c| *c == Check::Off) {
+        Check::Off
+    } else if children.iter().all(|c| *c == Check::On) {
+        Check::On
+    } else {
+        Check::Partial
+    }
 }
 
 /// The staged lines of one file, as `(hunk, line)` indexes into its [`FileDiff`]. Only added and
@@ -397,34 +625,81 @@ impl FileStaging {
     }
 
     fn change_lines(diff: &FileDiff, hunk: usize) -> Vec<(usize, usize)> {
-        todo!()
+        diff.hunks
+            .get(hunk)
+            .map(|h| {
+                h.lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.is_change())
+                    .map(|(i, _)| (hunk, i))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Toggle one line. A context line or an unknown index changes nothing.
     pub fn toggle_line(&mut self, diff: &FileDiff, hunk: usize, line: usize) {
-        todo!()
+        let is_change = diff
+            .hunks
+            .get(hunk)
+            .and_then(|h| h.lines.get(line))
+            .is_some_and(DiffLine::is_change);
+        if !is_change {
+            return;
+        }
+        if !self.staged.remove(&(hunk, line)) {
+            self.staged.insert((hunk, line));
+        }
     }
 
     /// Toggle a hunk: stage all its changed lines, or unstage them when all are staged.
     pub fn toggle_hunk(&mut self, diff: &FileDiff, hunk: usize) {
-        todo!()
+        let lines = Self::change_lines(diff, hunk);
+        let all = !lines.is_empty() && lines.iter().all(|k| self.staged.contains(k));
+        for k in lines {
+            if all {
+                self.staged.remove(&k);
+            } else {
+                self.staged.insert(k);
+            }
+        }
     }
 
     pub fn set_all(&mut self, diff: &FileDiff, on: bool) {
-        todo!()
+        self.staged.clear();
+        if on {
+            for h in 0..diff.hunks.len() {
+                self.staged.extend(Self::change_lines(diff, h));
+            }
+        }
     }
 
     /// `(staged, total)` changed lines of the file.
     pub fn counts(&self, diff: &FileDiff) -> (usize, usize) {
-        todo!()
+        let total = diff.added() + diff.removed();
+        let staged = self
+            .staged
+            .iter()
+            .filter(|(h, l)| {
+                diff.hunks
+                    .get(*h)
+                    .and_then(|h| h.lines.get(*l))
+                    .is_some_and(DiffLine::is_change)
+            })
+            .count();
+        (staged, total)
     }
 
     pub fn check(&self, diff: &FileDiff) -> Check {
-        todo!()
+        let (s, t) = self.counts(diff);
+        check_of(s, t)
     }
 
     pub fn hunk_check(&self, diff: &FileDiff, hunk: usize) -> Check {
-        todo!()
+        let lines = Self::change_lines(diff, hunk);
+        let staged = lines.iter().filter(|k| self.staged.contains(k)).count();
+        check_of(staged, lines.len())
     }
 }
 
@@ -459,34 +734,48 @@ impl Staging {
     }
 
     pub fn check(&self, diff: &FileDiff) -> Check {
-        todo!()
+        self.file(&diff.path).map_or(Check::Off, |s| s.check(diff))
     }
 
     /// Click the file's check: stage everything unless everything is staged already.
     pub fn toggle_file(&mut self, diff: &FileDiff) {
-        todo!()
+        let on = self.check(diff) != Check::On;
+        self.file_mut(&diff.path).set_all(diff, on);
     }
 
     /// Click the "all" check.
     pub fn toggle_all(&mut self, diffs: &[FileDiff]) {
-        todo!()
+        let has_lines = |d: &FileDiff| d.added() + d.removed() > 0;
+        let on = diffs
+            .iter()
+            .any(|d| has_lines(d) && self.check(d) != Check::On);
+        for d in diffs {
+            self.file_mut(&d.path).set_all(d, on);
+        }
     }
 
     /// Files with at least one staged line.
     pub fn staged_files(&self, diffs: &[FileDiff]) -> usize {
-        todo!()
+        diffs.iter().filter(|d| self.check(d) != Check::Off).count()
     }
 }
 
 /// The commit button is enabled with a summary and at least one staged file. Amending keeps the
 /// previous message and may change nothing else, so it is always enabled.
 pub fn commit_enabled(summary: &str, staged_files: usize, amend: bool) -> bool {
-    todo!()
+    if amend {
+        return true;
+    }
+    !summary.trim().is_empty() && staged_files > 0
 }
 
 /// "main에 커밋 (2개 파일)".
 pub fn commit_label(branch: &str, staged_files: usize) -> String {
-    todo!()
+    if staged_files == 0 {
+        format!("{branch}에 커밋")
+    } else {
+        format!("{branch}에 커밋 ({staged_files}개 파일)")
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -525,13 +814,55 @@ fn walk(
     prefix: &str,
     out: &mut Vec<TreeRow>,
 ) {
-    todo!()
+    for (name, child) in &node.dirs {
+        let mut label = name.clone();
+        let mut path = format!("{prefix}{name}/");
+        let mut ch = child;
+        while ch.files.is_empty() && ch.dirs.len() == 1 {
+            let (n2, c2) = ch.dirs.iter().next().expect("one dir");
+            label.push('/');
+            label.push_str(n2);
+            path.push_str(n2);
+            path.push('/');
+            ch = c2;
+        }
+        let open = !folded.contains(&path);
+        out.push(TreeRow::Dir {
+            label,
+            path: path.clone(),
+            depth,
+            open,
+        });
+        if open {
+            walk(ch, paths, folded, depth + 1, &path, out);
+        }
+    }
+    for &i in &node.files {
+        let name = paths[i].rsplit('/').next().unwrap_or(&paths[i]).to_string();
+        out.push(TreeRow::File {
+            index: i,
+            name,
+            depth,
+        });
+    }
 }
 
 /// The rows of the changed-files tree: folders first, then files in the given order. Folders
 /// whose path is in `folded` hide their children.
 pub fn build_tree(paths: &[String], folded: &BTreeSet<String>) -> Vec<TreeRow> {
-    todo!()
+    let mut root = Node::default();
+    for (i, p) in paths.iter().enumerate() {
+        let mut parts: Vec<&str> = p.split('/').collect();
+        let _ = parts.pop();
+        let mut n = &mut root;
+        for part in parts {
+            n = n.dirs.entry(part.to_string()).or_default();
+        }
+        n.files.push(i);
+    }
+    let mut out = Vec::new();
+    walk(&root, paths, folded, 0, "", &mut out);
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -560,18 +891,30 @@ pub fn snapshot(_project: &str) -> Option<RepoSnapshot> {
 
 /// The count beside a section's name; `None` while the data is unavailable.
 pub fn section_count(section: Section, snap: Option<&RepoSnapshot>) -> Option<usize> {
-    todo!()
+    let s = snap?;
+    match section {
+        Section::Changes => Some(s.changes.len()),
+        Section::Branches => Some(s.branches.len()),
+        _ => None,
+    }
 }
 
 /// Projects that can have a repository: every project except 기본 프로젝트.
 pub fn repo_projects(boxes: &[ProjectBox]) -> Vec<&ProjectBox> {
-    todo!()
+    boxes
+        .iter()
+        .filter(|b| !is_default_project(&b.id))
+        .collect()
 }
 
 /// Which project the screen shows: the selected one if it can have a repository, else the first
 /// that can.
 pub fn pick_project(selected: Option<&str>, boxes: &[ProjectBox]) -> Option<String> {
-    todo!()
+    let list = repo_projects(boxes);
+    selected
+        .and_then(|s| list.iter().find(|b| b.id == s))
+        .or_else(|| list.first())
+        .map(|b| b.id.clone())
 }
 
 /// Open 버전 관리 on a project (from the project screen and the session top bar).
@@ -582,6 +925,587 @@ pub fn open_for_project(ui: Ui, project: &str) {
     ui.go(Route::Projects);
     let mut menu = ui.menu;
     menu.set(NavMenu::VersionControl);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------------------------------
+
+fn notice(text: &str) {
+    Message::new(text.to_string())
+        .with_duration(MessageDuration::Short)
+        .show();
+}
+
+#[component]
+fn SmallNote(#[props(into)] text: String) -> Element {
+    let p = use_ember_theme().palette;
+    rsx! { Label { text, fs: Fs::Xs, color: paint(p.text_2) } }
+}
+
+#[component]
+fn Unavailable(section: Section) -> Element {
+    let p = use_ember_theme().palette;
+    rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[4],
+                space_role: SpaceRole::Sm,
+                Label { text: section.label(), fs: Fs::Lg, weight: Weight::Semibold }
+                // TODO(server, #168): this section needs the repository endpoints listed there.
+                Label { text: SOON, color: paint(p.text_2) }
+            }
+        }
+    }
+}
+
+/// The bar of three: repository, current branch, remote origin.
+#[component]
+fn RepoBar(
+    projects: Vec<(String, String)>,
+    project: ProjectBox,
+    snap: Option<RepoSnapshot>,
+    compact: bool,
+    on_pick: EventHandler<String>,
+) -> Element {
+    let mut project_menu = use_signal(|| false);
+    let mut branch_menu = use_signal(|| false);
+    let has = snap.is_some();
+    let (ahead, behind) = snap.as_ref().map_or((0, 0), |s| (s.ahead, s.behind));
+    let action = remote_action(ahead, behind);
+    let branch_text = match (&snap, &project.branch) {
+        (Some(s), _) => s.branch.clone(),
+        (None, Some(b)) => b.clone(),
+        _ => soon_line("브랜치"),
+    };
+    let upstream = snap
+        .as_ref()
+        .map(|s| upstream_text(s.upstream.as_deref()))
+        .unwrap_or_else(|| SOON.to_string());
+    let remote_line = match &snap {
+        Some(s) => format!(
+            "{} \u{00b7} {}",
+            ahead_behind_text(s.ahead, s.behind),
+            fetched_text(s.fetched_age_secs)
+        ),
+        None => SOON.to_string(),
+    };
+    let branches = snap
+        .as_ref()
+        .map(|s| s.branches.clone())
+        .unwrap_or_default();
+    let current_branch = snap.as_ref().map(|s| s.branch.clone());
+
+    let repo_cell = rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[2],
+                space_role: SpaceRole::Xs,
+                SmallNote { text: "저장소" }
+                Menu {
+                    expanded: project_menu(),
+                    on_dismiss: move |_| project_menu.set(false),
+                    anchor: rsx! {
+                        PickChip {
+                            text: display_name(&project.id),
+                            icon: IconRole::Library,
+                            on_click: move |()| project_menu.set(true),
+                        }
+                    },
+                    for (id, name) in projects.iter().cloned() {
+                        MenuItem {
+                            key: "{id}",
+                            text: name.clone(),
+                            selected: id == project.id,
+                            on_click: move |()| {
+                                on_pick.call(id.clone());
+                                project_menu.set(false);
+                            },
+                        }
+                    }
+                }
+                SmallNote { text: project.repo_line() }
+            }
+        }
+    };
+    let branch_cell = rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[2],
+                space_role: SpaceRole::Xs,
+                SmallNote { text: "현재 브랜치" }
+                Menu {
+                    expanded: branch_menu(),
+                    on_dismiss: move |_| branch_menu.set(false),
+                    anchor: rsx! {
+                        PickChip {
+                            text: branch_text.clone(),
+                            icon: IconRole::List,
+                            on_click: move |()| branch_menu.set(true),
+                        }
+                    },
+                    if branches.is_empty() {
+                        Label { text: soon_line("브랜치 목록"), fs: Fs::Sm }
+                    }
+                    for b in branches.iter().cloned() {
+                        MenuItem {
+                            key: "{b}",
+                            text: b.clone(),
+                            selected: Some(&b) == current_branch.as_ref(),
+                            // TODO(server, #168): checkout.
+                            on_click: move |()| {
+                                notice(&soon_line("브랜치 전환"));
+                                branch_menu.set(false);
+                            },
+                        }
+                    }
+                    // TODO(server, #168): create a branch.
+                    AppButton { text: "새 브랜치", icon: IconRole::Add, small: true, enabled: false }
+                }
+                SmallNote { text: upstream.clone() }
+            }
+        }
+    };
+    let remote_cell = rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[2],
+                space_role: SpaceRole::Xs,
+                SmallNote { text: "원격 origin" }
+                Row {
+                    fill_max_width: true,
+                    space_role: SpaceRole::Sm,
+                    alignment: Alignment::CenterStart,
+                    // TODO(server, #168): pull, push and fetch run on the project's computer.
+                    AppButton {
+                        text: action.label(),
+                        kind: ButtonKind::Primary,
+                        small: true,
+                        enabled: has,
+                        on_click: move |()| notice(&soon_line("원격 동작")),
+                    }
+                    AppButton { text: "Fetch", small: true, enabled: has }
+                    AppButton { text: "Pull", small: true, enabled: has }
+                    AppButton { text: "Push", small: true, enabled: has }
+                }
+                SmallNote { text: remote_line.clone() }
+            }
+        }
+    };
+
+    rsx! {
+        if compact {
+            Column { fill_max_width: true, space_role: SpaceRole::Sm, {repo_cell} {branch_cell} {remote_cell} }
+        } else {
+            Row {
+                fill_max_width: true,
+                space_role: SpaceRole::Sm,
+                Column { weight: 1.0, {repo_cell} }
+                Column { weight: 1.0, {branch_cell} }
+                Column { weight: 1.5, {remote_cell} }
+            }
+        }
+    }
+}
+
+/// The section list on the left (wide windows) with counts.
+#[component]
+fn SectionList(
+    active: Section,
+    snap: Option<RepoSnapshot>,
+    on_pick: EventHandler<Section>,
+) -> Element {
+    let p = use_ember_theme().palette;
+    rsx! {
+        Column {
+            width: 200.0,
+            space_role: SpaceRole::Xs,
+            for sec in Section::ALL {
+                Button {
+                    key: "{sec.key()}",
+                    text: match section_count(sec, snap.as_ref()) {
+                        Some(n) => format!("{}  {n}", sec.label()),
+                        None => sec.label().to_string(),
+                    },
+                    variant: ButtonVariant::Text,
+                    fill_max_width: true,
+                    height: H_NAV_ITEM,
+                    shape_role: ShapeRole::Full,
+                    background: if sec == active { paint(p.sel) } else { paint(p.bg) },
+                    color: paint(if sec == active { p.text } else { p.muted }),
+                    on_click: move |()| on_pick.call(sec),
+                }
+            }
+        }
+    }
+}
+
+/// The section pills above the panes (medium and compact windows).
+#[component]
+fn SectionPills(active: Section, on_pick: EventHandler<Section>) -> Element {
+    rsx! {
+        ScrollRow {
+            fill_max_width: true,
+            Row {
+                spacing: SP[1],
+                for sec in Section::ALL {
+                    PickChip {
+                        key: "{sec.key()}",
+                        text: sec.label(),
+                        selected: sec == active,
+                        on_click: move |()| on_pick.call(sec),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PaneTabs(section: Section, active: Option<PaneTab>, on_pick: EventHandler<PaneTab>) -> Element {
+    rsx! {
+        Row {
+            fill_max_width: true,
+            spacing: SP[1],
+            for t in pane_tabs(section).iter().copied() {
+                PickChip {
+                    key: "{t.label()}",
+                    text: t.label(),
+                    selected: Some(t) == active,
+                    on_click: move |()| on_pick.call(t),
+                }
+            }
+        }
+    }
+}
+
+/// The changes section: tree, diff and commit box.
+#[component]
+fn ChangesPane(
+    snap: RepoSnapshot,
+    layout: PaneLayout,
+    tab: Option<PaneTab>,
+    on_tab: EventHandler<PaneTab>,
+) -> Element {
+    let p = use_ember_theme().palette;
+    let diffs = snap.changes.clone();
+    let mut staging = use_signal(|| Staging::new(&diffs, false));
+    let mut folded = use_signal(BTreeSet::<String>::new);
+    let mut selected = use_signal(|| 0usize);
+    let mut summary = use_signal(String::new);
+    let mut amend = use_signal(|| false);
+
+    let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
+    let rows = build_tree(&paths, &folded.read());
+    let sel = (*selected.read()).min(diffs.len().saturating_sub(1));
+    let staged_files = staging.read().staged_files(&diffs);
+    let can_commit = commit_enabled(&summary.read(), staged_files, *amend.read());
+
+    let files_pane = rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[2],
+                space_role: SpaceRole::Xs,
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    Button {
+                        text: format!("{}  변경 파일 {}", check_glyph(folder_check(&diffs.iter().map(|d| staging.read().check(d)).collect::<Vec<_>>())), diffs.len()),
+                        variant: ButtonVariant::Text,
+                        on_click: { let d = diffs.clone(); move |()| staging.write().toggle_all(&d) },
+                    }
+                }
+                for row in rows.iter().cloned() {
+                    match row {
+                        TreeRow::Dir { label, path, depth, open } => rsx! {
+                            Row {
+                                key: "{path}",
+                                fill_max_width: true,
+                                Spacer { width: depth as f32 * SP[3] },
+                                Button {
+                                    text: format!("{} {label}", if open { "\u{25be}" } else { "\u{25b8}" }),
+                                    variant: ButtonVariant::Text,
+                                    on_click: move |()| {
+                                        let mut f = folded.write();
+                                        if !f.remove(&path) { f.insert(path.clone()); }
+                                    },
+                                }
+                            }
+                        },
+                        TreeRow::File { index, name, depth } => rsx! {
+                            Row {
+                                key: "{index}",
+                                fill_max_width: true,
+                                Spacer { width: depth as f32 * SP[3] },
+                                Button {
+                                    text: check_glyph(staging.read().check(&diffs[index])),
+                                    variant: ButtonVariant::Text,
+                                    on_click: { let d = diffs[index].clone(); move |()| staging.write().toggle_file(&d) },
+                                }
+                                Button {
+                                    text: format!("{name}  {}", diffs[index].status.letter()),
+                                    variant: ButtonVariant::Text,
+                                    background: if index == sel { paint(p.sel) } else { paint(p.surface) },
+                                    on_click: move |()| {
+                                        selected.set(index);
+                                        on_tab.call(tab_after_select(PaneTab::Files));
+                                    },
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    };
+
+    let diff_pane = rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[2],
+                space_role: SpaceRole::Xs,
+                if let Some(file) = diffs.get(sel).cloned() {
+                    DiffView { file: file.clone(), staging }
+                } else {
+                    Label { text: "변경 사항이 없습니다. 작업 트리가 깨끗합니다", color: paint(p.text_2) }
+                }
+            }
+        }
+    };
+
+    let commit_pane = rsx! {
+        EmberCard {
+            fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: SP[2],
+                space_role: SpaceRole::Sm,
+                TextField {
+                    fill_max_width: true,
+                    placeholder: "요약 (필수)",
+                    on_value_change: move |v: String| summary.set(v),
+                }
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Switch { checked: amend(), on_change: move |v: bool| amend.set(v) }
+                    Label { text: "마지막 커밋 수정 (amend)", fs: Fs::Sm }
+                }
+                // TODO(server, #168): commit only the staged lines (apply a patch built from the staging).
+                AppButton {
+                    text: commit_label(&snap.branch, staged_files),
+                    kind: ButtonKind::Primary,
+                    enabled: false,
+                    on_click: move |()| notice(&soon_line("커밋")),
+                }
+                SmallNote { text: if can_commit { SOON.to_string() } else { "요약과 스테이징한 파일이 필요합니다".to_string() } }
+            }
+        }
+    };
+
+    rsx! {
+        match layout {
+            PaneLayout::Two => rsx! {
+                Row { fill_max_width: true, space_role: SpaceRole::Sm,
+                    Column { width: 320.0, {files_pane} }
+                    Column { weight: 1.0, space_role: SpaceRole::Sm, {diff_pane} {commit_pane} }
+                }
+            },
+            PaneLayout::Stacked => rsx! {
+                Column { fill_max_width: true, space_role: SpaceRole::Sm, {files_pane} {diff_pane} {commit_pane} }
+            },
+            PaneLayout::Tabs => rsx! {
+                Column { fill_max_width: true, space_role: SpaceRole::Sm,
+                    PaneTabs { section: Section::Changes, active: tab, on_pick: move |t| on_tab.call(t) }
+                    match tab.unwrap_or(PaneTab::Files) {
+                        PaneTab::Diff => diff_pane,
+                        PaneTab::Commit => commit_pane,
+                        _ => files_pane,
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// One file's diff with a check per changed line and per hunk.
+#[component]
+fn DiffView(file: FileDiff, staging: Signal<Staging>) -> Element {
+    let p = use_ember_theme().palette;
+    let (on, total) = staging
+        .read()
+        .file(&file.path)
+        .map_or((0, file.added() + file.removed()), |s| s.counts(&file));
+    rsx! {
+        Row {
+            fill_max_width: true,
+            space_role: SpaceRole::Sm,
+            alignment: Alignment::CenterStart,
+            Label { text: file.path.clone(), weight: Weight::Medium, max_lines: 1 }
+            Spacer { weight: 1.0 }
+            Pill { text: format!("+{}", file.added()), tone: PillTone::Green, small: true }
+            Pill { text: format!("-{}", file.removed()), tone: PillTone::Red, small: true }
+            Pill { text: format!("{on}/{total}줄 스테이징"), tone: PillTone::Grey, small: true }
+        }
+        if file.binary {
+            Label { text: "이진 파일은 차이를 보여 주지 않습니다", color: paint(p.text_2) }
+        }
+        for (hi, h) in file.hunks.iter().enumerate() {
+            Row {
+                key: "h{hi}",
+                fill_max_width: true,
+                alignment: Alignment::CenterStart,
+                Label { text: h.header.clone(), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
+                Spacer { weight: 1.0 }
+                AppButton {
+                    text: "이 덩어리 전체",
+                    small: true,
+                    on_click: { let f = file.clone(); move |()| staging.write().file_mut(&f.path).toggle_hunk(&f, hi) },
+                }
+            }
+            for (li, l) in h.lines.iter().enumerate() {
+                Surface {
+                    key: "{hi}:{li}",
+                    fill_max_width: true,
+                    background: match l.kind {
+                        LineKind::Add => paint(p.green.soft),
+                        LineKind::Del => paint(p.red.soft),
+                        LineKind::Context => paint(p.surface),
+                    },
+                    Row {
+                        fill_max_width: true,
+                        alignment: Alignment::CenterStart,
+                        if l.is_change() {
+                            Button {
+                                text: check_glyph(if staging.read().file(&file.path).is_some_and(|s| s.is_staged(hi, li)) { Check::On } else { Check::Off }),
+                                variant: ButtonVariant::Text,
+                                on_click: { let f = file.clone(); move |()| staging.write().file_mut(&f.path).toggle_line(&f, hi, li) },
+                            }
+                        } else {
+                            Spacer { width: H_BTN }
+                        }
+                        Text {
+                            text: format!(
+                                "{:>4} {:>4} {}{}",
+                                l.old_no.map(|n| n.to_string()).unwrap_or_default(),
+                                l.new_no.map(|n| n.to_string()).unwrap_or_default(),
+                                match l.kind { LineKind::Add => "+", LineKind::Del => "-", LineKind::Context => " " },
+                                l.text
+                            ),
+                            type_role: TypeRole::Mono,
+                            max_lines: 1,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The screen wired as 버전 관리.
+#[component]
+pub fn VcsScreen() -> Element {
+    let ui = use_ui();
+    let window = use_window_size();
+    let p = use_ember_theme().palette;
+    let class = window.class;
+    let mut section = use_signal(|| Section::Changes);
+    let mut tab = use_signal(|| PaneTab::Files);
+
+    let boxes = {
+        let _ = *ui.live.launcher.read();
+        services().client.read(project_boxes)
+    };
+    let selected = ui.selected_project.read().clone();
+    let current = pick_project(selected.as_deref(), &boxes);
+    let project = current
+        .as_ref()
+        .and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
+    let snap = current.as_deref().and_then(snapshot);
+    let projects: Vec<(String, String)> = repo_projects(&boxes)
+        .into_iter()
+        .map(|b| (b.id.clone(), b.name.clone()))
+        .collect();
+
+    let sec = *section.read();
+    let active_tab = effective_tab(sec, *tab.read());
+    let layout = pane_layout(class);
+    let wide = section_nav(class) == SectionNav::List;
+
+    let panes = match (&snap, sec) {
+        (Some(s), Section::Changes) => rsx! {
+            ChangesPane {
+                key: "{s.branch}",
+                snap: s.clone(),
+                layout,
+                tab: active_tab,
+                on_tab: move |t| tab.set(t),
+            }
+        },
+        _ => rsx! { Unavailable { section: sec } },
+    };
+
+    rsx! {
+        ScrollColumn {
+            fill_max_width: true,
+            weight: 1.0,
+            Column {
+                fill_max_width: true,
+                padding: SP[3],
+                space_role: SpaceRole::Md,
+                Label { text: "버전 관리", fs: Fs::Xl2, weight: Weight::Semibold }
+                if let Some(project) = project {
+                    RepoBar {
+                        key: "{project.id}",
+                        projects,
+                        project: project.clone(),
+                        snap: snap.clone(),
+                        compact: class == WindowSizeClass::Compact,
+                        on_pick: move |id: String| {
+                            let mut s = ui.selected_project;
+                            s.set(Some(id));
+                        },
+                    }
+                    if snap.is_none() {
+                        Label { text: soon_line("저장소 정보"), fs: Fs::Sm, color: paint(p.text_2) }
+                    }
+                    if wide {
+                        Row {
+                            fill_max_width: true,
+                            space_role: SpaceRole::Md,
+                            SectionList { active: sec, snap: snap.clone(), on_pick: move |s| section.set(s) }
+                            Column { weight: 1.0, space_role: SpaceRole::Sm, {panes} }
+                        }
+                    } else {
+                        Column {
+                            fill_max_width: true,
+                            space_role: SpaceRole::Sm,
+                            SectionPills { active: sec, on_pick: move |s| section.set(s) }
+                            if layout == PaneLayout::Tabs && snap.is_none() && !pane_tabs(sec).is_empty() {
+                                PaneTabs { section: sec, active: active_tab, on_pick: move |t| tab.set(t) }
+                            }
+                            {panes}
+                        }
+                    }
+                } else {
+                    Label { text: "저장소를 둘 수 있는 프로젝트가 없습니다" }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

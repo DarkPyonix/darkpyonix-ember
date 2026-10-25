@@ -71,7 +71,11 @@ pub fn pill_colors(tone: PillTone, p: &Palette) -> (Color, Color) {
 
 /// `(height, font step, weight)`: 24 px with 12/500, or 20 px with 11/500 when small.
 pub fn pill_metrics(small: bool) -> (f32, Fs, Weight) {
-    if small { (H_PILL_SM, Fs::Xs2, Weight::Medium) } else { (H_PILL, Fs::Xs, Weight::Medium) }
+    if small {
+        (H_PILL_SM, Fs::Xs2, Weight::Medium)
+    } else {
+        (H_PILL, Fs::Xs, Weight::Medium)
+    }
 }
 
 /// A status or count pill. Pills carry status and counts, never actions.
@@ -112,7 +116,7 @@ pub enum ButtonKind {
 }
 
 /// What a button looks like, resolved from the tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ButtonStyle {
     pub height: f32,
     pub fill: Color,
@@ -122,11 +126,33 @@ pub struct ButtonStyle {
 }
 
 pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
-    let (height, fs) = if small { (H_CTL, Fs::Sm) } else { (H_BTN, Fs::Md) };
+    let (height, fs) = if small {
+        (H_CTL, Fs::Sm)
+    } else {
+        (H_BTN, Fs::Md)
+    };
     match kind {
-        ButtonKind::Default => ButtonStyle { height, fill: p.surface, text: p.text, border: p.line, fs },
-        ButtonKind::Primary => ButtonStyle { height, fill: p.ink, text: p.ink_text, border: p.ink, fs },
-        ButtonKind::Destructive => ButtonStyle { height, fill: p.surface, text: p.red.strong, border: p.red.soft, fs },
+        ButtonKind::Default => ButtonStyle {
+            height,
+            fill: p.surface,
+            text: p.text,
+            border: p.line,
+            fs,
+        },
+        ButtonKind::Primary => ButtonStyle {
+            height,
+            fill: p.ink,
+            text: p.ink_text,
+            border: p.ink,
+            fs,
+        },
+        ButtonKind::Destructive => ButtonStyle {
+            height,
+            fill: p.surface,
+            text: p.red.strong,
+            border: p.red.soft,
+            fs,
+        },
     }
 }
 
@@ -207,7 +233,11 @@ pub fn PickChip(
 ) -> Element {
     let theme = use_ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
-    let text = if icon_only && icon.is_some() { String::new() } else { text };
+    let text = if icon_only && icon.is_some() {
+        String::new()
+    } else {
+        text
+    };
     rsx! {
         Button {
             text,
@@ -229,7 +259,11 @@ pub fn PickChip(
 /// `(fill, border)`: `surface` on a `line` border; a selected card takes `sel` and a 1 px
 /// `ink` border, never a 2 px one.
 pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
-    if selected { (p.sel, p.ink) } else { (p.surface, p.line) }
+    if selected {
+        (p.sel, p.ink)
+    } else {
+        (p.surface, p.line)
+    }
 }
 
 /// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.

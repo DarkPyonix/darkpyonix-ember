@@ -42,11 +42,16 @@ impl AppConfig {
         let data_dir = data_dir_override
             .filter(|p| !p.as_os_str().is_empty())
             .or_else(|| os_data_dir.map(|d| d.join("ember")));
-        AppConfig { server_url, data_dir }
+        AppConfig {
+            server_url,
+            data_dir,
+        }
     }
 
     pub fn cache_path(&self) -> Option<PathBuf> {
-        self.data_dir.as_deref().map(|d| d.join("client-cache.json"))
+        self.data_dir
+            .as_deref()
+            .map(|d| d.join("client-cache.json"))
     }
 
     pub fn prefs_path(&self) -> Option<PathBuf> {
@@ -73,14 +78,24 @@ impl AppConfig {
 pub fn safe_file_stem(s: &str) -> String {
     let mut out: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     while out.contains("--") {
         out = out.replace("--", "-");
     }
     let out = out.trim_matches('-');
     let out: String = out.chars().take(48).collect();
-    if out.is_empty() { "session".into() } else { out }
+    if out.is_empty() {
+        "session".into()
+    } else {
+        out
+    }
 }
 
 pub fn ensure_dir(p: &Path) -> std::io::Result<()> {
@@ -106,11 +121,24 @@ mod tests {
     #[test]
     fn data_dir_is_under_os_data_dir_unless_overridden() {
         let c = AppConfig::from_values(None, None, Some(PathBuf::from("/data")));
-        assert_eq!(c.cache_path(), Some(PathBuf::from("/data/ember/client-cache.json")));
-        assert_eq!(c.prefs_path(), Some(PathBuf::from("/data/ember/prefs.json")));
-        let c = AppConfig::from_values(None, Some(PathBuf::from("/x")), Some(PathBuf::from("/data")));
+        assert_eq!(
+            c.cache_path(),
+            Some(PathBuf::from("/data/ember/client-cache.json"))
+        );
+        assert_eq!(
+            c.prefs_path(),
+            Some(PathBuf::from("/data/ember/prefs.json"))
+        );
+        let c = AppConfig::from_values(
+            None,
+            Some(PathBuf::from("/x")),
+            Some(PathBuf::from("/data")),
+        );
         assert_eq!(c.cache_path(), Some(PathBuf::from("/x/client-cache.json")));
-        assert_eq!(c.client_config().cache_path, Some(PathBuf::from("/x/client-cache.json")));
+        assert_eq!(
+            c.client_config().cache_path,
+            Some(PathBuf::from("/x/client-cache.json"))
+        );
     }
 
     #[test]

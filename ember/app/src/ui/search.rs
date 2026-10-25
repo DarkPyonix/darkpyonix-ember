@@ -50,7 +50,10 @@ pub fn SearchScreen() -> Element {
                 if current.load(Ordering::SeqCst) != my_gen {
                     return None; // superseded while waiting
                 }
-                Some((q.clone(), services().client.search(&q, Some(HIT_LIMIT)).await))
+                Some((
+                    q.clone(),
+                    services().client.search(&q, Some(HIT_LIMIT)).await,
+                ))
             },
             move |r| {
                 let Some((q, r)) = r else { return };

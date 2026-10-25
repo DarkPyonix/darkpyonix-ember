@@ -63,7 +63,9 @@ impl Ui {
         }
         if let Route::Conversation(id) = &to {
             services().open_session(id);
-            let project = services().client.read(|s| s.session(id).map(|v| v.record.project.clone()));
+            let project = services()
+                .client
+                .read(|s| s.session(id).map(|v| v.record.project.clone()));
             if let Some(p) = project {
                 let mut sel = self.selected_project;
                 sel.set(Some(p));
@@ -107,10 +109,15 @@ impl Ui {
 
     /// Like [`Ui::with_rows`], without redrawing on transcript changes (a streaming reply
     /// would otherwise redraw the caller on every delta). Previews may be stale.
-    pub fn with_rows_no_previews<R>(&self, f: impl FnOnce(&ember_client::State, &RowContext<'_>) -> R) -> R {
+    pub fn with_rows_no_previews<R>(
+        &self,
+        f: impl FnOnce(&ember_client::State, &RowContext<'_>) -> R,
+    ) -> R {
         let _ = *self.live.launcher.read();
         let labels = model::account_labels(&self.live.accounts.read());
-        let cx = RowContext { account_labels: &labels };
+        let cx = RowContext {
+            account_labels: &labels,
+        };
         services().client.read(|s| f(s, &cx))
     }
 }
@@ -130,7 +137,15 @@ pub fn app() -> Element {
     let menu = use_signal(|| NavMenu::Projects);
     let theme_pref = use_signal(|| services().initial_prefs.theme);
     use_context_provider(|| ThemeCtx { pref: theme_pref });
-    use_context_provider(|| Ui { live, route, prefs, selected_project, new_session, show_archived, menu });
+    use_context_provider(|| Ui {
+        live,
+        route,
+        prefs,
+        selected_project,
+        new_session,
+        show_archived,
+        menu,
+    });
 
     rsx! { shell::Shell {} }
 }

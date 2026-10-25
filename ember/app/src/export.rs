@@ -16,20 +16,35 @@ use crate::config::{ensure_dir, safe_file_stem};
 
 /// Add the reduced transcript to the server's export file and serialise it.
 pub fn build(mut export: serde_json::Value) -> Result<Vec<u8>, String> {
-    let events: Vec<StoredEvent> = serde_json::from_value(export.get("events").cloned().unwrap_or_default())
-        .map_err(|e| format!("export has no readable events: {e}"))?;
+    let events: Vec<StoredEvent> =
+        serde_json::from_value(export.get("events").cloned().unwrap_or_default())
+            .map_err(|e| format!("export has no readable events: {e}"))?;
     let mut t = Transcript::new();
     for e in &events {
         t.apply(e);
     }
-    let obj = export.as_object_mut().ok_or("export is not a JSON object")?;
-    obj.insert("transcript".into(), serde_json::to_value(&t).map_err(|e| e.to_string())?);
+    let obj = export
+        .as_object_mut()
+        .ok_or("export is not a JSON object")?;
+    obj.insert(
+        "transcript".into(),
+        serde_json::to_value(&t).map_err(|e| e.to_string())?,
+    );
     serde_json::to_vec_pretty(&export).map_err(|e| e.to_string())
 }
 
 /// Fetch, complete and write `<dir>/<title>-<id>.json`. Returns the file's path.
-pub async fn export_session(client: &Client, dir: PathBuf, id: &str, title: &str) -> Result<PathBuf, String> {
-    let export = client.api().export_session(id).await.map_err(|e| e.to_string())?;
+pub async fn export_session(
+    client: &Client,
+    dir: PathBuf,
+    id: &str,
+    title: &str,
+) -> Result<PathBuf, String> {
+    let export = client
+        .api()
+        .export_session(id)
+        .await
+        .map_err(|e| e.to_string())?;
     let bytes = build(export)?;
     let short: String = id.chars().take(8).collect();
     let path = dir.join(format!("{}-{short}.json", safe_file_stem(title)));

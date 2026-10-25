@@ -15,7 +15,10 @@ fn tone_roles(tone: Tone) -> (ColorRole, ColorRole) {
         Tone::Accent => (ColorRole::PrimaryContainer, ColorRole::OnPrimaryContainer),
         Tone::Warning => (ColorRole::TertiaryContainer, ColorRole::OnTertiaryContainer),
         Tone::Error => (ColorRole::Error, ColorRole::OnError),
-        Tone::Success => (ColorRole::SecondaryContainer, ColorRole::OnSecondaryContainer),
+        Tone::Success => (
+            ColorRole::SecondaryContainer,
+            ColorRole::OnSecondaryContainer,
+        ),
     }
 }
 
@@ -46,7 +49,11 @@ pub fn Badge(#[props(into)] text: String, tone: Tone) -> Element {
 #[component]
 pub fn Dot(tone: Tone) -> Element {
     let (fill, _) = tone_roles(tone);
-    let fill = if tone == Tone::Accent { ColorRole::Primary } else { fill };
+    let fill = if tone == Tone::Accent {
+        ColorRole::Primary
+    } else {
+        fill
+    };
     rsx! {
         dioxus_compose::Box {
             width: 8.0,
@@ -104,7 +111,10 @@ pub fn StatusIndicator(status: LauncherStatus) -> Element {
 /// TODO(dioxus-compose M9, ~10-08): wrap in the text selection container so text can be
 /// selected and copied.
 #[component]
-pub fn MessageText(#[props(into)] text: String, #[props(default)] ink: Option<ColorRole>) -> Element {
+pub fn MessageText(
+    #[props(into)] text: String,
+    #[props(default)] ink: Option<ColorRole>,
+) -> Element {
     rsx! {
         Text {
             text,
@@ -120,7 +130,11 @@ pub fn MessageText(#[props(into)] text: String, #[props(default)] ink: Option<Co
 /// ~10-08): horizontal scroll for long lines and text selection; long lines wrap until then.
 /// TODO(code editor widget, FR-38): read-only editor view for large outputs.
 #[component]
-pub fn CodeText(#[props(into)] text: String, #[props(default)] max_lines: Option<u32>, #[props(default)] error: bool) -> Element {
+pub fn CodeText(
+    #[props(into)] text: String,
+    #[props(default)] max_lines: Option<u32>,
+    #[props(default)] error: bool,
+) -> Element {
     rsx! {
         dioxus_compose::Box {
             fill_max_width: true,
@@ -142,7 +156,11 @@ pub fn CodeText(#[props(into)] text: String, #[props(default)] max_lines: Option
 ///
 /// TODO(dioxus-compose, ~10-14): replace with the split pane widget (draggable divider).
 #[component]
-pub fn SplitPane(start: Element, end: Element, #[props(default = 0.45)] start_weight: f32) -> Element {
+pub fn SplitPane(
+    start: Element,
+    end: Element,
+    #[props(default = 0.45)] start_weight: f32,
+) -> Element {
     rsx! {
         Row {
             fill_max_width: true,

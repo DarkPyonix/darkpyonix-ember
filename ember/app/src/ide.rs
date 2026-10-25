@@ -67,7 +67,11 @@ pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
         return IdeAction::Unavailable(format!("the server offers no {} target", kind.label()));
     };
     if !t.available {
-        return IdeAction::Unavailable(t.reason.clone().unwrap_or_else(|| format!("{} is not available", kind.label())));
+        return IdeAction::Unavailable(
+            t.reason
+                .clone()
+                .unwrap_or_else(|| format!("{} is not available", kind.label())),
+        );
     }
     match t.url.as_deref() {
         Some(url) if allowed_url(kind, url) => IdeAction::OpenUrl(url.to_string()),
@@ -80,7 +84,9 @@ fn allowed_url(kind: IdeKind, url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     match kind {
         IdeKind::VsCode => lower.starts_with("http://") || lower.starts_with("https://"),
-        IdeKind::Gateway => lower.starts_with("jetbrains-gateway://") || lower.starts_with("jetbrains://"),
+        IdeKind::Gateway => {
+            lower.starts_with("jetbrains-gateway://") || lower.starts_with("jetbrains://")
+        }
         IdeKind::Ember => false,
     }
 }
@@ -122,11 +128,21 @@ mod tests {
     #[test]
     fn fr_l7_targets() {
         assert_eq!(
-            plan(IdeKind::VsCode, Some(&target("vscode", true, Some("http://h:8890/?folder=%2Fw")))),
+            plan(
+                IdeKind::VsCode,
+                Some(&target("vscode", true, Some("http://h:8890/?folder=%2Fw")))
+            ),
             IdeAction::OpenUrl("http://h:8890/?folder=%2Fw".into())
         );
         assert_eq!(
-            plan(IdeKind::Gateway, Some(&target("gateway", true, Some("jetbrains-gateway://connect#type=ssh")))),
+            plan(
+                IdeKind::Gateway,
+                Some(&target(
+                    "gateway",
+                    true,
+                    Some("jetbrains-gateway://connect#type=ssh")
+                ))
+            ),
             IdeAction::OpenUrl("jetbrains-gateway://connect#type=ssh".into())
         );
         assert_eq!(plan(IdeKind::Ember, None), IdeAction::EmberPlaceholder);
@@ -136,11 +152,17 @@ mod tests {
         );
         // A server cannot make the client open a local file or program.
         assert!(matches!(
-            plan(IdeKind::VsCode, Some(&target("vscode", true, Some("file:///etc/passwd")))),
+            plan(
+                IdeKind::VsCode,
+                Some(&target("vscode", true, Some("file:///etc/passwd")))
+            ),
             IdeAction::Unavailable(_)
         ));
         assert!(matches!(
-            plan(IdeKind::Gateway, Some(&target("gateway", true, Some("http://x")))),
+            plan(
+                IdeKind::Gateway,
+                Some(&target("gateway", true, Some("http://x")))
+            ),
             IdeAction::Unavailable(_)
         ));
         assert_eq!(IdeKind::from_key("gateway"), Some(IdeKind::Gateway));

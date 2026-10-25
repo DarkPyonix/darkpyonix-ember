@@ -108,7 +108,10 @@ pub struct Palette {
 }
 
 const fn accent(strong: u32, soft: u32) -> Accent {
-    Accent { strong: Color::rgb(strong), soft: Color::rgb(soft) }
+    Accent {
+        strong: Color::rgb(strong),
+        soft: Color::rgb(soft),
+    }
 }
 
 pub const LIGHT: Palette = Palette {
@@ -206,7 +209,17 @@ pub enum Fs {
 }
 
 impl Fs {
-    pub const ALL: [Fs; 9] = [Fs::Xs2, Fs::Xs, Fs::Sm, Fs::Md, Fs::Lg, Fs::Xl, Fs::Xl2, Fs::Xl3, Fs::Xl4];
+    pub const ALL: [Fs; 9] = [
+        Fs::Xs2,
+        Fs::Xs,
+        Fs::Sm,
+        Fs::Md,
+        Fs::Lg,
+        Fs::Xl,
+        Fs::Xl2,
+        Fs::Xl3,
+        Fs::Xl4,
+    ];
 
     /// Font size in dp.
     pub const fn size(self) -> f32 {
@@ -357,7 +370,13 @@ mod tests {
         let rows: [(&str, Color, Color, u32, u32); 12] = [
             ("bg", LIGHT.bg, DARK.bg, 0xf3f2ee, 0x151514),
             ("surface", LIGHT.surface, DARK.surface, 0xffffff, 0x1f1f1d),
-            ("surface-2", LIGHT.surface_2, DARK.surface_2, 0xf7f6f2, 0x252523),
+            (
+                "surface-2",
+                LIGHT.surface_2,
+                DARK.surface_2,
+                0xf7f6f2,
+                0x252523,
+            ),
             ("line", LIGHT.line, DARK.line, 0xebe9e4, 0x2f2e2b),
             ("text", LIGHT.text, DARK.text, 0x1c1b19, 0xf0eee9),
             ("text-2", LIGHT.text_2, DARK.text_2, 0x56534d, 0xc3bfb7),
@@ -365,7 +384,13 @@ mod tests {
             ("hover", LIGHT.hover, DARK.hover, 0xf0eee9, 0x2a2927),
             ("sel", LIGHT.sel, DARK.sel, 0xecebe6, 0x2f2e2b),
             ("ink", LIGHT.ink, DARK.ink, 0x1c1b19, 0xf0eee9),
-            ("ink-text", LIGHT.ink_text, DARK.ink_text, 0xffffff, 0x151514),
+            (
+                "ink-text",
+                LIGHT.ink_text,
+                DARK.ink_text,
+                0xffffff,
+                0x151514,
+            ),
             ("track", LIGHT.track, DARK.track, 0xecebe6, 0x2f2e2b),
         ];
         for (name, l, d, el, ed) in rows {
@@ -379,12 +404,36 @@ mod tests {
     fn data_palette_matches_design_md() {
         // (name, light strong, dark strong, light soft, dark soft)
         let rows = [
-            ("blue", LIGHT.blue, DARK.blue, 0x3f74d4, 0x6b95e0, 0xe6eefb, 0x1e2a3f),
-            ("orange", LIGHT.orange, DARK.orange, 0xe49b55, 0xe6a76a, 0xfbeedf, 0x3a2c1d),
-            ("sky", LIGHT.sky, DARK.sky, 0x9dbde9, 0x8fb1df, 0xedf3fc, 0x1f2834),
-            ("grey", LIGHT.grey, DARK.grey, 0xb4b2ac, 0x8d8b86, 0xefeee9, 0x2a2927),
-            ("red", LIGHT.red, DARK.red, 0xd65a4a, 0xe07264, 0xfbe6e2, 0x3b221e),
-            ("green", LIGHT.green, DARK.green, 0x4f9a6c, 0x6fb287, 0xe3f1e8, 0x1d3125),
+            (
+                "blue", LIGHT.blue, DARK.blue, 0x3f74d4, 0x6b95e0, 0xe6eefb, 0x1e2a3f,
+            ),
+            (
+                "orange",
+                LIGHT.orange,
+                DARK.orange,
+                0xe49b55,
+                0xe6a76a,
+                0xfbeedf,
+                0x3a2c1d,
+            ),
+            (
+                "sky", LIGHT.sky, DARK.sky, 0x9dbde9, 0x8fb1df, 0xedf3fc, 0x1f2834,
+            ),
+            (
+                "grey", LIGHT.grey, DARK.grey, 0xb4b2ac, 0x8d8b86, 0xefeee9, 0x2a2927,
+            ),
+            (
+                "red", LIGHT.red, DARK.red, 0xd65a4a, 0xe07264, 0xfbe6e2, 0x3b221e,
+            ),
+            (
+                "green",
+                LIGHT.green,
+                DARK.green,
+                0x4f9a6c,
+                0x6fb287,
+                0xe3f1e8,
+                0x1d3125,
+            ),
         ];
         for (name, l, d, ls, ds, lsoft, dsoft) in rows {
             assert_eq!(hex(l.strong), ls, "light {name}");
@@ -436,7 +485,16 @@ mod tests {
         assert_eq!((SIDE_W, RAIL_W, TABBAR_H), (234.0, 72.0, 64.0));
         assert_eq!((H_NAV_ITEM, SHEET_HEADER_H), (38.0, 60.0));
         assert_eq!(
-            [CORNER_2XS, CORNER_XS, CORNER_SM, CORNER_MD, CORNER_LG, CORNER_XL, CORNER_BUBBLE, CORNER_TAIL],
+            [
+                CORNER_2XS,
+                CORNER_XS,
+                CORNER_SM,
+                CORNER_MD,
+                CORNER_LG,
+                CORNER_XL,
+                CORNER_BUBBLE,
+                CORNER_TAIL
+            ],
             [5.0, 6.0, 8.0, 12.0, 14.0, 24.0, 18.0, 6.0]
         );
         assert_eq!(SQUIRCLE_SMOOTHING, 0.6);
@@ -444,22 +502,48 @@ mod tests {
 
     #[test]
     fn press_values_and_tint() {
-        assert_eq!((PRESS_SCALE, PRESS_IN_MS, PRESS_HOLD_MS, PRESS_OUT_MS), (0.975, 180, 120, 200));
+        assert_eq!(
+            (PRESS_SCALE, PRESS_IN_MS, PRESS_HOLD_MS, PRESS_OUT_MS),
+            (0.975, 180, 120, 200)
+        );
         // 7 % and 10 % of 255, rounded.
-        assert_eq!(EmberTheme::new(Scheme::Light).press_tint().to_argb(), 0x12_000000);
-        assert_eq!(EmberTheme::new(Scheme::Dark).press_tint().to_argb(), 0x1a_000000);
+        assert_eq!(
+            EmberTheme::new(Scheme::Light).press_tint().to_argb(),
+            0x12_000000
+        );
+        assert_eq!(
+            EmberTheme::new(Scheme::Dark).press_tint().to_argb(),
+            0x1a_000000
+        );
     }
 
     #[test]
     fn preference_selects_the_palette() {
         assert_eq!(ThemePref::default(), ThemePref::System);
         // System follows the OS in both directions.
-        assert_eq!(EmberTheme::select(ThemePref::System, Scheme::Light).scheme, Scheme::Light);
-        assert_eq!(EmberTheme::select(ThemePref::System, Scheme::Dark).scheme, Scheme::Dark);
+        assert_eq!(
+            EmberTheme::select(ThemePref::System, Scheme::Light).scheme,
+            Scheme::Light
+        );
+        assert_eq!(
+            EmberTheme::select(ThemePref::System, Scheme::Dark).scheme,
+            Scheme::Dark
+        );
         // An explicit choice ignores the OS.
-        assert_eq!(EmberTheme::select(ThemePref::Light, Scheme::Dark).scheme, Scheme::Light);
-        assert_eq!(EmberTheme::select(ThemePref::Dark, Scheme::Light).scheme, Scheme::Dark);
-        assert_eq!(EmberTheme::select(ThemePref::Dark, Scheme::Light).palette.bg, DARK.bg);
+        assert_eq!(
+            EmberTheme::select(ThemePref::Light, Scheme::Dark).scheme,
+            Scheme::Light
+        );
+        assert_eq!(
+            EmberTheme::select(ThemePref::Dark, Scheme::Light).scheme,
+            Scheme::Dark
+        );
+        assert_eq!(
+            EmberTheme::select(ThemePref::Dark, Scheme::Light)
+                .palette
+                .bg,
+            DARK.bg
+        );
     }
 
     #[test]
@@ -474,6 +558,9 @@ mod tests {
     #[test]
     fn preference_serializes_as_lowercase() {
         assert_eq!(serde_json::to_string(&ThemePref::Dark).unwrap(), "\"dark\"");
-        assert_eq!(serde_json::from_str::<ThemePref>("\"system\"").unwrap(), ThemePref::System);
+        assert_eq!(
+            serde_json::from_str::<ThemePref>("\"system\"").unwrap(),
+            ThemePref::System
+        );
     }
 }

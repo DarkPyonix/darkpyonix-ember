@@ -121,7 +121,12 @@ pub const BOTTOM_TABS: [BottomTab; 5] = [
 ];
 
 /// What 더보기 opens: the four menus the bar has no room for.
-pub const MORE_MENUS: [NavMenu; 4] = [NavMenu::Routines, NavMenu::VersionControl, NavMenu::Agents, NavMenu::Files];
+pub const MORE_MENUS: [NavMenu; 4] = [
+    NavMenu::Routines,
+    NavMenu::VersionControl,
+    NavMenu::Agents,
+    NavMenu::Files,
+];
 
 impl BottomTab {
     pub fn label(self) -> &'static str {
@@ -141,7 +146,11 @@ impl BottomTab {
 
 /// The tab that is marked for a menu: the menu's own tab, or 더보기 for the other four.
 pub fn tab_for_menu(menu: NavMenu) -> BottomTab {
-    if MORE_MENUS.contains(&menu) { BottomTab::More } else { BottomTab::NavMenu(menu) }
+    if MORE_MENUS.contains(&menu) {
+        BottomTab::More
+    } else {
+        BottomTab::NavMenu(menu)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -215,7 +224,11 @@ pub const MARK_SM_MAX: f32 = 32.0;
 
 /// Which SVG a mark of `size` dp uses.
 pub fn mark_svg_for(size: f32) -> &'static str {
-    if size <= MARK_SM_MAX { MARK_SM_SVG } else { MARK_SVG }
+    if size <= MARK_SM_MAX {
+        MARK_SM_SVG
+    } else {
+        MARK_SVG
+    }
 }
 
 /// The logo slot: the temporary mark, with the wordmark beside it when there is room.
@@ -538,7 +551,16 @@ mod tests {
     fn fr_l10_menu_order_and_labels_follow_d26() {
         assert_eq!(
             labels(&NavMenu::ALL),
-            ["홈", "프로젝트", "세션", "채널", "루틴", "버전 관리", "에이전트", "파일"]
+            [
+                "홈",
+                "프로젝트",
+                "세션",
+                "채널",
+                "루틴",
+                "버전 관리",
+                "에이전트",
+                "파일"
+            ]
         );
     }
 
@@ -553,23 +575,48 @@ mod tests {
     #[test]
     fn fr_l10_active_item_follows_the_choice_and_an_open_conversation() {
         let c = Route::Conversation("s1".into());
-        assert_eq!(active_menu(&Route::Projects, NavMenu::Projects), NavMenu::Projects);
+        assert_eq!(
+            active_menu(&Route::Projects, NavMenu::Projects),
+            NavMenu::Projects
+        );
         assert_eq!(active_menu(&Route::Projects, NavMenu::Home), NavMenu::Home);
-        assert_eq!(active_menu(&Route::Search, NavMenu::Projects), NavMenu::Projects);
+        assert_eq!(
+            active_menu(&Route::Search, NavMenu::Projects),
+            NavMenu::Projects
+        );
         assert_eq!(active_menu(&c, NavMenu::Projects), NavMenu::Sessions);
     }
 
     #[test]
     fn fr_l10_existing_screens_are_wired_and_the_rest_are_placeholders() {
         let c = Route::Conversation("s1".into());
-        assert_eq!(screen_for(&Route::Projects, NavMenu::Projects), Screen::Launcher);
-        assert_eq!(screen_for(&Route::Search, NavMenu::Projects), Screen::Search);
-        assert_eq!(screen_for(&c, NavMenu::Sessions), Screen::Conversation("s1".into()));
-        for m in [NavMenu::Home, NavMenu::Channels, NavMenu::Routines, NavMenu::VersionControl, NavMenu::Agents, NavMenu::Files] {
+        assert_eq!(
+            screen_for(&Route::Projects, NavMenu::Projects),
+            Screen::Launcher
+        );
+        assert_eq!(
+            screen_for(&Route::Search, NavMenu::Projects),
+            Screen::Search
+        );
+        assert_eq!(
+            screen_for(&c, NavMenu::Sessions),
+            Screen::Conversation("s1".into())
+        );
+        for m in [
+            NavMenu::Home,
+            NavMenu::Channels,
+            NavMenu::Routines,
+            NavMenu::VersionControl,
+            NavMenu::Agents,
+            NavMenu::Files,
+        ] {
             assert_eq!(screen_for(&Route::Projects, m), Screen::Placeholder(m));
         }
         // 세션 with no open conversation has nothing to show yet.
-        assert_eq!(screen_for(&Route::Projects, NavMenu::Sessions), Screen::Placeholder(NavMenu::Sessions));
+        assert_eq!(
+            screen_for(&Route::Projects, NavMenu::Sessions),
+            Screen::Placeholder(NavMenu::Sessions)
+        );
         assert_eq!(PLACEHOLDER_TEXT, "준비 중입니다");
     }
 
@@ -582,11 +629,20 @@ mod tests {
 
     #[test]
     fn fr_l28_more_holds_the_other_four_in_menu_order() {
-        assert_eq!(labels(&MORE_MENUS), ["루틴", "버전 관리", "에이전트", "파일"]);
+        assert_eq!(
+            labels(&MORE_MENUS),
+            ["루틴", "버전 관리", "에이전트", "파일"]
+        );
         // Together with the four tabs that are menus, every menu is reachable exactly once.
         let mut all: Vec<NavMenu> = BOTTOM_TABS
             .iter()
-            .filter_map(|t| if let BottomTab::NavMenu(m) = t { Some(*m) } else { None })
+            .filter_map(|t| {
+                if let BottomTab::NavMenu(m) = t {
+                    Some(*m)
+                } else {
+                    None
+                }
+            })
             .collect();
         all.extend(MORE_MENUS);
         assert_eq!(all, NavMenu::ALL.to_vec());
@@ -594,8 +650,14 @@ mod tests {
 
     #[test]
     fn fr_l28_menu_to_tab_mapping() {
-        assert_eq!(tab_for_menu(NavMenu::Home), BottomTab::NavMenu(NavMenu::Home));
-        assert_eq!(tab_for_menu(NavMenu::Channels), BottomTab::NavMenu(NavMenu::Channels));
+        assert_eq!(
+            tab_for_menu(NavMenu::Home),
+            BottomTab::NavMenu(NavMenu::Home)
+        );
+        assert_eq!(
+            tab_for_menu(NavMenu::Channels),
+            BottomTab::NavMenu(NavMenu::Channels)
+        );
         for m in MORE_MENUS {
             assert_eq!(tab_for_menu(m), BottomTab::More, "{}", m.label());
         }
@@ -603,10 +665,19 @@ mod tests {
 
     #[test]
     fn fr_l10_layout_per_size_class() {
-        assert_eq!(shell_mode(WindowSizeClass::Compact, false), ShellMode::BottomTabs);
-        assert_eq!(shell_mode(WindowSizeClass::Compact, true), ShellMode::BottomTabs);
+        assert_eq!(
+            shell_mode(WindowSizeClass::Compact, false),
+            ShellMode::BottomTabs
+        );
+        assert_eq!(
+            shell_mode(WindowSizeClass::Compact, true),
+            ShellMode::BottomTabs
+        );
         assert_eq!(shell_mode(WindowSizeClass::Medium, false), ShellMode::Rail);
-        assert_eq!(shell_mode(WindowSizeClass::Expanded, false), ShellMode::Sidebar);
+        assert_eq!(
+            shell_mode(WindowSizeClass::Expanded, false),
+            ShellMode::Sidebar
+        );
         // The collapse control turns the sidebar into the rail.
         assert_eq!(shell_mode(WindowSizeClass::Expanded, true), ShellMode::Rail);
     }
@@ -638,7 +709,10 @@ mod tests {
         strings.extend(BOTTOM_TABS.iter().map(|t| t.label()));
         strings.push(PLACEHOLDER_TEXT);
         for s in strings {
-            assert!(!s.ends_with('다') || s.ends_with("입니다") || s.ends_with("합니다"), "{s}");
+            assert!(
+                !s.ends_with('다') || s.ends_with("입니다") || s.ends_with("합니다"),
+                "{s}"
+            );
         }
     }
 }

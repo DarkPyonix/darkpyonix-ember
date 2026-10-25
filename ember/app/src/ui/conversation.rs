@@ -51,7 +51,13 @@ fn item_key(item: &TranscriptItem) -> String {
 /// session (FR-S5).
 fn fork_from(ui: crate::ui::Ui, id: String, seq: Option<i64>) {
     run(
-        async move { services().client.fork_session(&id, seq).await.map_err(|e| e.to_string()) },
+        async move {
+            services()
+                .client
+                .fork_session(&id, seq)
+                .await
+                .map_err(|e| e.to_string())
+        },
         move |r| match r {
             Ok(rec) => ui.open_conversation(&rec.id),
             Err(e) => show_message(format!("Could not fork: {e}")),
@@ -68,7 +74,8 @@ pub fn ConversationView(id: String) -> Element {
     // ---- header data -------------------------------------------------------------------------
     let header = {
         let _ = *ui.live.launcher.read();
-        s.client.read(|st| st.session(&id).map(|v| (v.record.clone(), v.status)))
+        s.client
+            .read(|st| st.session(&id).map(|v| (v.record.clone(), v.status)))
     };
 
     // Fetched when the view opens (and after a computer switch).
@@ -81,7 +88,13 @@ pub fn ConversationView(id: String) -> Element {
         move || {
             let sid = id.clone();
             run(
-                async move { services().client.mention_candidates(&sid, "", Some(200)).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .client
+                        .mention_candidates(&sid, "", Some(200))
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 move |r| {
                     let mut candidates = candidates;
                     match r {
@@ -104,7 +117,14 @@ pub fn ConversationView(id: String) -> Element {
             // The team this session is in (FR-T7); push keeps it current afterwards.
             let t = id.clone();
             run(
-                async move { services().client.load_team(&t).await.map(|_| ()).map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .client
+                        .load_team(&t)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                },
                 |r| {
                     if let Err(e) = r {
                         tracing::debug!("team: {e}");
@@ -113,7 +133,13 @@ pub fn ConversationView(id: String) -> Element {
             );
             let fk = id.clone();
             run(
-                async move { services().client.load_fork_info(&fk).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .client
+                        .load_fork_info(&fk)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 |r| {
                     if let Err(e) = r {
                         tracing::debug!("fork info: {e}");
@@ -122,7 +148,14 @@ pub fn ConversationView(id: String) -> Element {
             );
             let ap = id.clone();
             run(
-                async move { services().client.load_approve_all(&ap).await.map(|_| ()).map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .client
+                        .load_approve_all(&ap)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                },
                 |r| {
                     if let Err(e) = r {
                         tracing::debug!("approve-all: {e}");
@@ -131,7 +164,13 @@ pub fn ConversationView(id: String) -> Element {
             );
             let a = id.clone();
             run(
-                async move { services().server.session_computer(&a).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .server
+                        .session_computer(&a)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 move |r| {
                     let mut computer = computer;
                     match r {
@@ -142,7 +181,13 @@ pub fn ConversationView(id: String) -> Element {
             );
             let b = id.clone();
             run(
-                async move { services().server.ide_targets(&b, None).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .server
+                        .ide_targets(&b, None)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 move |r| {
                     let mut ide = ide;
                     ide.set(Some(r));
@@ -207,7 +252,10 @@ pub fn ConversationView(id: String) -> Element {
     };
 
     let title = record.title.clone();
-    let account = model::account_label(record.account_id.as_deref(), &model::account_labels(&ui.live.accounts.read()));
+    let account = model::account_label(
+        record.account_id.as_deref(),
+        &model::account_labels(&ui.live.accounts.read()),
+    );
     let busy = model::is_busy(status);
     let mut meta = vec![record.project.clone(), record.agent.clone()];
     meta.push(account.unwrap_or_else(|| "server login".into()));
@@ -238,7 +286,15 @@ pub fn ConversationView(id: String) -> Element {
                 t.items.len(),
                 t.items.iter().map(item_key).collect::<Vec<_>>(),
                 t.pending_approvals().count(),
-                t.items.iter().any(|i| matches!(i, TranscriptItem::TurnEnded { outcome: TurnOutcome::Completed, .. })),
+                t.items.iter().any(|i| {
+                    matches!(
+                        i,
+                        TranscriptItem::TurnEnded {
+                            outcome: TurnOutcome::Completed,
+                            ..
+                        }
+                    )
+                }),
             ),
             None => (0, Vec::new(), 0, false),
         })
@@ -249,10 +305,12 @@ pub fn ConversationView(id: String) -> Element {
         let _ = *ui.live.launcher.read();
         s.client.read(|st| {
             let info = st.fork_info(&id);
-            let parent = info
-                .origin
-                .as_ref()
-                .map(|o| (o.clone(), st.session(&o.parent_id).map(|v| v.record.title.clone())));
+            let parent = info.origin.as_ref().map(|o| {
+                (
+                    o.clone(),
+                    st.session(&o.parent_id).map(|v| v.record.title.clone()),
+                )
+            });
             (info, parent)
         })
     };
@@ -267,13 +325,19 @@ pub fn ConversationView(id: String) -> Element {
     let fork_label = fork_parent
         .as_ref()
         .map(|(o, title)| model::fork_origin_label(o, title.as_deref()));
-    let fork_parent_id = fork_parent.as_ref().map(|(o, _)| o.parent_id.clone()).unwrap_or_default();
+    let fork_parent_id = fork_parent
+        .as_ref()
+        .map(|(o, _)| o.parent_id.clone())
+        .unwrap_or_default();
 
     // ---- outbox --------------------------------------------------------------------------------
     let (queued, queue_error) = {
         let _ = *ui.live.outbox.read();
         let o = s.outbox.lock().unwrap();
-        (o.queued_texts(&id), o.error(&id).map(String::from).unwrap_or_default())
+        (
+            o.queued_texts(&id),
+            o.error(&id).map(String::from).unwrap_or_default(),
+        )
     };
 
     // ---- actions -------------------------------------------------------------------------------
@@ -323,7 +387,12 @@ pub fn ConversationView(id: String) -> Element {
         }
     };
     // The remembered target first (FR-L7: the choice is remembered per user).
-    let remembered = ui.prefs.read().ide_target.as_deref().and_then(IdeKind::from_key);
+    let remembered = ui
+        .prefs
+        .read()
+        .ide_target
+        .as_deref()
+        .and_then(IdeKind::from_key);
     let mut ide_order: Vec<IdeKind> = IdeKind::ALL.to_vec();
     if let Some(k) = remembered {
         ide_order.retain(|x| *x != k);
@@ -360,18 +429,29 @@ pub fn ConversationView(id: String) -> Element {
             let sid = id.clone();
             let reload = load.clone();
             run(
-                async move { services().server.switch_computer(&sid, &computer_id).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .server
+                        .switch_computer(&sid, &computer_id)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 move |r| match r {
                     Ok(out) => {
                         // The current computer and its IDE targets changed.
                         reload();
                         show_message(match (&out.notice, out.changed) {
                             (_, false) => format!("Already on {}", out.computer.name),
-                            (Some(_), true) => format!("Switched to {}. The agent is told with your next message.", out.computer.name),
+                            (Some(_), true) => format!(
+                                "Switched to {}. The agent is told with your next message.",
+                                out.computer.name
+                            ),
                             (None, true) => format!("Switched to {}", out.computer.name),
                         });
                     }
-                    Err(e) => Message::new(format!("Could not switch computer: {e}")).with_duration(MessageDuration::Long).show(),
+                    Err(e) => Message::new(format!("Could not switch computer: {e}"))
+                        .with_duration(MessageDuration::Long)
+                        .show(),
                 },
             );
         }
@@ -382,7 +462,13 @@ pub fn ConversationView(id: String) -> Element {
         move |_: ()| {
             let sid = id.clone();
             run(
-                async move { services().client.interrupt(&sid).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .client
+                        .interrupt(&sid)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 |r| {
                     if let Err(e) = r {
                         show_message(format!("Could not interrupt: {e}"));
@@ -398,7 +484,13 @@ pub fn ConversationView(id: String) -> Element {
             let sid = id.clone();
             let enable = !approve_all;
             run(
-                async move { services().client.set_approve_all(&sid, enable).await.map_err(|e| e.to_string()) },
+                async move {
+                    services()
+                        .client
+                        .set_approve_all(&sid, enable)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
                 |r| {
                     if let Err(e) = r {
                         show_message(format!("Could not switch approve everything: {e}"));
@@ -430,7 +522,13 @@ pub fn ConversationView(id: String) -> Element {
         let id = id.clone();
         move |_: ()| {
             more_menu.set(false);
-            patch_session(id.clone(), SessionPatch { pinned: Some(!pinned), ..Default::default() });
+            patch_session(
+                id.clone(),
+                SessionPatch {
+                    pinned: Some(!pinned),
+                    ..Default::default()
+                },
+            );
         }
     };
     // ---- mentions (FR-T6) ----------------------------------------------------------------------
@@ -446,7 +544,11 @@ pub fn ConversationView(id: String) -> Element {
         _ => Vec::new(),
     };
     let typed_raw = typed.map(|t| t.raw).unwrap_or_default();
-    let picked: Vec<String> = picks.read().iter().map(|(_, token)| token.clone()).collect();
+    let picked: Vec<String> = picks
+        .read()
+        .iter()
+        .map(|(_, token)| token.clone())
+        .collect();
     let on_draft = {
         let load_candidates = load_candidates.clone();
         move |v: String| {
@@ -790,7 +892,9 @@ fn TranscriptRow(
                 }
             }
         },
-        TranscriptItem::Assistant { text, streaming, .. } => rsx! {
+        TranscriptItem::Assistant {
+            text, streaming, ..
+        } => rsx! {
             dioxus_compose::Box {
                 fill_max_width: true,
                 padding_role: SpaceRole::Xs,
@@ -815,7 +919,13 @@ fn TranscriptRow(
                 }
             }
         },
-        TranscriptItem::ToolCall { call_id, name, input, result, .. } => {
+        TranscriptItem::ToolCall {
+            call_id,
+            name,
+            input,
+            result,
+            ..
+        } => {
             let open = expanded.read().contains(&call_id);
             let summary = model::json_summary(&input, 100);
             let toggle = {
@@ -833,9 +943,16 @@ fn TranscriptRow(
                 Some(r) if r.is_error => ("error", Tone::Error),
                 Some(_) => ("done", Tone::Success),
             };
-            let name = if name.is_empty() { "Tool".to_string() } else { name };
+            let name = if name.is_empty() {
+                "Tool".to_string()
+            } else {
+                name
+            };
             let has_result = result.is_some();
-            let (out_text, out_err) = result.as_ref().map(|r| (r.output.clone(), r.is_error)).unwrap_or_default();
+            let (out_text, out_err) = result
+                .as_ref()
+                .map(|r| (r.output.clone(), r.is_error))
+                .unwrap_or_default();
             let show_tail = has_result && !out_text.trim().is_empty();
             rsx! {
                 Card {
@@ -882,7 +999,13 @@ fn TranscriptRow(
                 }
             }
         }
-        TranscriptItem::Approval { approval_id, tool, input, state, .. } => {
+        TranscriptItem::Approval {
+            approval_id,
+            tool,
+            input,
+            state,
+            ..
+        } => {
             let in_flight = answering.read().contains(&approval_id);
             let answer = {
                 let session = session.clone();
@@ -893,7 +1016,13 @@ fn TranscriptRow(
                     let (sid, aid) = (session.clone(), approval_id.clone());
                     let done = approval_id.clone();
                     run(
-                        async move { services().client.answer(&sid, &aid, decision).await.map_err(|e| e.to_string()) },
+                        async move {
+                            services()
+                                .client
+                                .answer(&sid, &aid, decision)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
                         move |r: Result<(), String>| {
                             let mut a = answering;
                             a.write().remove(&done);
@@ -973,7 +1102,9 @@ fn TranscriptRow(
             let ui = use_ui();
             let can = {
                 let _ = *ui.live.launcher.read();
-                services().client.read(|st| model::fork_turn_enabled(&st.fork_info(&session), outcome, seq))
+                services()
+                    .client
+                    .read(|st| model::fork_turn_enabled(&st.fork_info(&session), outcome, seq))
             };
             let fork_here = {
                 let session = session.clone();
@@ -1028,7 +1159,13 @@ fn TeamPanel(session: String) -> Element {
         let _ = *ui.live.teams.read();
         let _ = *ui.live.launcher.read();
         services().client.read(|st| {
-            st.team_for_session(&session).map(|t| (t.id.clone(), t.tasks.clone(), model::team_member_rows(st, t, &session)))
+            st.team_for_session(&session).map(|t| {
+                (
+                    t.id.clone(),
+                    t.tasks.clone(),
+                    model::team_member_rows(st, t, &session),
+                )
+            })
         })
     };
     let Some((team_id, tasks, rows)) = data else {
@@ -1037,11 +1174,22 @@ fn TeamPanel(session: String) -> Element {
     let active = rows.iter().filter(|r| !r.leader && !r.ended).count();
     let open = tasks
         .iter()
-        .filter(|t| !matches!(t.status, ember_client::wire::TaskStatus::Done | ember_client::wire::TaskStatus::Cancelled))
+        .filter(|t| {
+            !matches!(
+                t.status,
+                ember_client::wire::TaskStatus::Done | ember_client::wire::TaskStatus::Cancelled
+            )
+        })
         .count();
     let end = move |team_id: String, sid: String, name: String| {
         run(
-            async move { services().client.end_teammate(&team_id, &sid).await.map_err(|e| e.to_string()) },
+            async move {
+                services()
+                    .client
+                    .end_teammate(&team_id, &sid)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
             move |r| match r {
                 Ok(_) => show_message(format!("Ended teammate {name}")),
                 Err(e) => show_message(format!("Could not end {name}: {e}")),

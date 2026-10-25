@@ -151,7 +151,14 @@ impl Fingerprints {
             for id in ids {
                 let print = st.session(id).map(|v| {
                     let r = v.record;
-                    (v.status, r.title.clone(), r.project.clone(), r.pinned, r.archived, r.updated_at / LAUNCHER_TIME_STEP_MS)
+                    (
+                        v.status,
+                        r.title.clone(),
+                        r.project.clone(),
+                        r.pinned,
+                        r.archived,
+                        r.updated_at / LAUNCHER_TIME_STEP_MS,
+                    )
                 });
                 match print {
                     Some(p) => {

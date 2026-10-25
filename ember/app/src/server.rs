@@ -186,7 +186,10 @@ pub struct ServerApi {
 
 impl ServerApi {
     pub fn new(base_url: &str) -> ServerApi {
-        ServerApi { http: reqwest::Client::new(), base: base_url.trim_end_matches('/').to_string() }
+        ServerApi {
+            http: reqwest::Client::new(),
+            base: base_url.trim_end_matches('/').to_string(),
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -203,30 +206,52 @@ impl ServerApi {
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
             .unwrap_or(body);
-        Err(ServerError::Status { status: status.as_u16(), message })
+        Err(ServerError::Status {
+            status: status.as_u16(),
+            message,
+        })
     }
 
     pub async fn accounts(&self) -> ServerResult<Vec<Account>> {
-        Ok(Self::check(self.http.get(self.url("/accounts")).send().await?).await?.json().await?)
+        Ok(
+            Self::check(self.http.get(self.url("/accounts")).send().await?)
+                .await?
+                .json()
+                .await?,
+        )
     }
 
     /// ChatGPT plan accounts; an error (404 when sign-in is off, e.g. hosted) means none.
     pub async fn chatgpt_accounts(&self) -> ServerResult<Vec<ChatGptAccount>> {
-        Ok(Self::check(self.http.get(self.url("/chatgpt/accounts")).send().await?).await?.json().await?)
+        Ok(
+            Self::check(self.http.get(self.url("/chatgpt/accounts")).send().await?)
+                .await?
+                .json()
+                .await?,
+        )
     }
 
     /// `probe = false` answers at once with `reachable: None`; `true` asks every node.
     pub async fn computers(&self, probe: bool) -> ServerResult<Vec<ComputerStatus>> {
-        let req = self.http.get(self.url("/computers")).query(&[("probe", probe)]);
+        let req = self
+            .http
+            .get(self.url("/computers"))
+            .query(&[("probe", probe)]);
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
     pub async fn session_computer(&self, id: &str) -> ServerResult<CurrentComputer> {
-        let req = self.http.get(self.url(&format!("/sessions/{}/computer", seg(id))));
+        let req = self
+            .http
+            .get(self.url(&format!("/sessions/{}/computer", seg(id))));
         Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
-    pub async fn switch_computer(&self, id: &str, computer_id: &str) -> ServerResult<SwitchOutcome> {
+    pub async fn switch_computer(
+        &self,
+        id: &str,
+        computer_id: &str,
+    ) -> ServerResult<SwitchOutcome> {
         let req = self
             .http
             .put(self.url(&format!("/sessions/{}/computer", seg(id))))
@@ -235,7 +260,9 @@ impl ServerApi {
     }
 
     pub async fn ide_targets(&self, id: &str, computer: Option<&str>) -> ServerResult<IdeLaunch> {
-        let mut req = self.http.get(self.url(&format!("/sessions/{}/ide", seg(id))));
+        let mut req = self
+            .http
+            .get(self.url(&format!("/sessions/{}/ide", seg(id))));
         if let Some(c) = computer {
             req = req.query(&[("computer", c)]);
         }
@@ -278,7 +305,10 @@ mod tests {
             ]
         }))
         .unwrap();
-        assert_eq!(ide.target("vscode").unwrap().url.as_deref(), Some("http://127.0.0.1:8890/?folder=%2Fw"));
+        assert_eq!(
+            ide.target("vscode").unwrap().url.as_deref(),
+            Some("http://127.0.0.1:8890/?folder=%2Fw")
+        );
         assert!(!ide.target("ember").unwrap().available);
 
         let cs: Vec<ComputerStatus> = serde_json::from_value(json!([

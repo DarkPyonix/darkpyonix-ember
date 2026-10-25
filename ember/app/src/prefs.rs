@@ -104,7 +104,13 @@ mod tests {
         let mut p = Prefs::default();
         p.last_used.insert(
             "ember".into(),
-            LastUsed { agent: "codex".into(), account: Some("a1".into()), computer: Some("c1".into()), model: Some("o3".into()), cwd: "/w".into() },
+            LastUsed {
+                agent: "codex".into(),
+                account: Some("a1".into()),
+                computer: Some("c1".into()),
+                model: Some("o3".into()),
+                cwd: "/w".into(),
+            },
         );
         p.ide_target = Some("vscode".into());
         save(&path, &p).unwrap();
@@ -120,7 +126,10 @@ mod tests {
         let path = dir.path().join("prefs.json");
         std::fs::write(&path, br#"{"format":1}"#).unwrap();
         assert_eq!(load(&path).theme, ThemePref::System);
-        let p = Prefs { theme: ThemePref::Dark, ..Prefs::default() };
+        let p = Prefs {
+            theme: ThemePref::Dark,
+            ..Prefs::default()
+        };
         save(&path, &p).unwrap();
         assert_eq!(load(&path).theme, ThemePref::Dark);
     }
@@ -137,6 +146,9 @@ mod tests {
         let p = load(&path);
         assert_eq!(p.ide_target.as_deref(), Some("ember"));
         save(&path, &p).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("pinned"), "dropped on save");
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("pinned"),
+            "dropped on save"
+        );
     }
 }

@@ -105,7 +105,9 @@ fn EmptyState() -> Element {
 pub fn ConnectionBanner() -> Element {
     let ui = use_ui();
     let _ = *ui.live.launcher.read();
-    let banner = services().client.read(|s| model::connection_banner(s.connection()));
+    let banner = services()
+        .client
+        .read(|s| model::connection_banner(s.connection()));
     match banner {
         Some((text, tone)) => rsx! { Banner { text, tone } },
         None => rsx! {},
@@ -276,7 +278,8 @@ pub fn SessionRowView(row: SessionRow) -> Element {
     let (pinned, archived) = (row.pinned, row.archived);
     let pin_label = if pinned { "Unpin" } else { "Pin" };
     let archive_label = if archived { "Unarchive" } else { "Archive" };
-    let (id_open, id_pin, id_arch, id_export, id_rename) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+    let (id_open, id_pin, id_arch, id_export, id_rename) =
+        (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
     let title_for_export = row.title.clone();
     let current_title = row.title.clone();
     let preview = row.preview.clone().unwrap_or_default();
@@ -417,18 +420,29 @@ pub fn SessionRowView(row: SessionRow) -> Element {
 
 /// Change a session's metadata on the main server (FR-L9); say so when it fails.
 pub fn patch_session(id: String, patch: SessionPatch) {
-    run(async move { services().client.patch_session(&id, &patch).await }, |r| {
-        if let Err(e) = r {
-            Message::new(format!("Could not update the session: {e}")).with_duration(MessageDuration::Long).show();
-        }
-    });
+    run(
+        async move { services().client.patch_session(&id, &patch).await },
+        |r| {
+            if let Err(e) = r {
+                Message::new(format!("Could not update the session: {e}"))
+                    .with_duration(MessageDuration::Long)
+                    .show();
+            }
+        },
+    );
 }
 
 /// Rename on the main server; an empty title leaves it as it is.
 fn rename(id: String, title: String) {
     let title = title.trim().to_string();
     if !title.is_empty() {
-        patch_session(id, SessionPatch { title: Some(title), ..Default::default() });
+        patch_session(
+            id,
+            SessionPatch {
+                title: Some(title),
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -445,7 +459,9 @@ fn set_assignment(project: String, computer_id: String, assign: bool) {
         },
         |r| {
             if let Err(e) = r {
-                Message::new(format!("Could not change the assignment: {e}")).with_duration(MessageDuration::Long).show();
+                Message::new(format!("Could not change the assignment: {e}"))
+                    .with_duration(MessageDuration::Long)
+                    .show();
             }
         },
     );
@@ -460,7 +476,9 @@ pub fn export(id: String, title: String) {
             Ok(path) => Message::new(format!("Exported to {}", path.display()))
                 .with_duration(MessageDuration::Long)
                 .show(),
-            Err(e) => Message::new(format!("Export failed: {e}")).with_duration(MessageDuration::Long).show(),
+            Err(e) => Message::new(format!("Export failed: {e}"))
+                .with_duration(MessageDuration::Long)
+                .show(),
         },
     );
 }
@@ -475,7 +493,11 @@ fn ComputerList(project: Option<String>) -> Element {
         let list = s.computers().to_vec();
         let assigned = list
             .iter()
-            .map(|c| project.as_deref().is_some_and(|p| model::is_assigned(s, p, &c.id)))
+            .map(|c| {
+                project
+                    .as_deref()
+                    .is_some_and(|p| model::is_assigned(s, p, &c.id))
+            })
             .collect();
         (list, assigned)
     });

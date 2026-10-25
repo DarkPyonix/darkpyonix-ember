@@ -453,6 +453,9 @@ fn set_assignment(project: String, computer_id: String, assign: bool) {
 
 /// Export a session to the data directory and say where it went (FR-L9).
 pub fn export(id: String, title: String) {
+    if services().demo_blocked() {
+        return;
+    }
     let dir = services().config.export_dir();
     run(
         async move { crate::export::export_session(&services().client, dir, &id, &title).await },

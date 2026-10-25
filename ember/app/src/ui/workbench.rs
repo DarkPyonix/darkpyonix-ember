@@ -25,17 +25,29 @@ fn join(base: &str, extra: &[(bool, &str)]) -> String {
 /// `.monaco-list-row` in a custom view tree: `has-actions` when the row draws an action item,
 /// `has-decoration` when its label carries a color or badge decoration.
 pub fn tree_row_classes(has_actions: bool, has_decoration: bool) -> String {
-    join("monaco-list-row", &[(has_actions, "has-actions"), (has_decoration, "has-decoration")])
+    join(
+        "monaco-list-row",
+        &[
+            (has_actions, "has-actions"),
+            (has_decoration, "has-decoration"),
+        ],
+    )
 }
 
 /// `.viewpane-filter-container`: `is-focused` while the input or a filter control has focus.
 pub fn view_filter_classes(focused: bool) -> String {
-    join("action-item viewpane-filter-container", &[(focused, "is-focused")])
+    join(
+        "action-item viewpane-filter-container",
+        &[(focused, "is-focused")],
+    )
 }
 
 /// `.action-item.command-center-center`: `compact-mode` when the command center is compact.
 pub fn command_center_classes(compact: bool) -> String {
-    join("action-item command-center-center", &[(compact, "compact-mode")])
+    join(
+        "action-item command-center-center",
+        &[(compact, "compact-mode")],
+    )
 }
 
 /// `.action-widget`: `has-header` when the widget draws a header banner.

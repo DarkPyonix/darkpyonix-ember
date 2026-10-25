@@ -6,6 +6,7 @@
 //! shared components in [`components`].
 
 pub mod compat;
+pub mod agents;
 pub mod channels;
 pub mod components;
 pub mod conversation;

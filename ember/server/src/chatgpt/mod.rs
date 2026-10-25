@@ -44,6 +44,7 @@
 //! verification needs a JOSE dependency; it is an open item.
 
 pub mod api;
+pub mod demo;
 pub mod oauth;
 pub mod responses;
 pub mod schema;

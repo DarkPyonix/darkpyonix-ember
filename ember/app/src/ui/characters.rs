@@ -762,7 +762,14 @@ pub fn Character(
 }
 
 fn draw(spec: &CharSpec, size: f32) -> Element {
-    let id = dioxus_compose::asset::register_owned(AssetKind::Svg, svg(spec).into_bytes());
+    // The renderer draws an SVG at its own width and height, so the pixel size goes in.
+    let px = format!("{}", size.round() as i32);
+    let doc = svg(spec).replacen(
+        "width=\"100\" height=\"100\"",
+        &format!("width=\"{px}\" height=\"{px}\""),
+        1,
+    );
+    let id = dioxus_compose::asset::register_owned(AssetKind::Svg, doc.into_bytes());
     rsx! { Image { asset_id: id, width: size, height: size } }
 }
 

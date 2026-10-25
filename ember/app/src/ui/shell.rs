@@ -90,8 +90,8 @@ pub enum Screen {
     Placeholder(NavMenu),
 }
 
-/// The screen for the active menu. Home is 홈, the launcher stands in for 프로젝트 and the
-/// conversation for 세션; every other menu is a placeholder until its screen lands.
+/// The screen for the active menu. Home is 홈, `Launcher` renders ProjectScreen for 프로젝트 and the
+/// conversation stands in for 세션; every other menu is a placeholder until its screen lands.
 pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
     match (active, route) {
         (NavMenu::Home, _) => Screen::Home,

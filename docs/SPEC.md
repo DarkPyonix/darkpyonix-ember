@@ -73,7 +73,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-B1–B4 | `detach.js` and `ember/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
 | NFR-B1, NFR-B2 | Not measured. | #30 |
 | FR-K1, NFR-K1 | Rules for review, no code. | |
-| FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. Not wired into the client's "Open IDE → Ember"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
+| FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. The client's "Open IDE → Ember" opens the editor screen (FR-L31, #181) but does not link these crates, so its code area says "준비 중입니다"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
 
 Cross-cutting: releases (`NFR-R1`, workflow written, no tag run yet) and
 installers (#72); the documents in the house writing style (#68).

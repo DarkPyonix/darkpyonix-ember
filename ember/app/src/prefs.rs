@@ -48,6 +48,9 @@ pub struct Prefs {
     /// TODO(server): the project stores its own style once the server has the field.
     #[serde(default)]
     pub character_styles: BTreeMap<String, crate::ui::characters::CharStyle>,
+    /// The editor's shortcut set (FR-L30). Older files have none, which reads as VS Code.
+    #[serde(default)]
+    pub keymap: crate::ui::keymap::Keymap,
 }
 
 fn format_default() -> u32 {
@@ -63,6 +66,7 @@ impl Default for Prefs {
             ide_target: None,
             theme: crate::ui::theme::ThemePref::default(),
             character_styles: BTreeMap::new(),
+            keymap: crate::ui::keymap::Keymap::default(),
         }
     }
 }

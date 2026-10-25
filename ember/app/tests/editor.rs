@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ember_app::prefs::{self, Prefs};
-use ember_app::ui::editor::{position_text, EditorTabs, Side, Stripes, ToolWindow};
+use ember_app::ui::editor::{EditorTabs, Side, Stripes, ToolWindow, position_text};
 use ember_app::ui::keymap::{Action, Chord, Keymap, Os};
 
 const OSES: [Os; 2] = [Os::Mac, Os::Other];
@@ -15,10 +15,22 @@ fn fr_l30_the_documented_defaults() {
     assert_eq!(Keymap::VsCode.hint(Action::Find, Os::Other), "Ctrl+P");
     assert_eq!(Keymap::VsCode.hint(Action::Terminal, Os::Mac), "\u{2303}`");
     assert_eq!(Keymap::VsCode.hint(Action::Terminal, Os::Other), "Ctrl+`");
-    assert_eq!(Keymap::JetBrains.hint(Action::Find, Os::Mac), "\u{21E7}\u{21E7}");
-    assert_eq!(Keymap::JetBrains.hint(Action::Find, Os::Other), "Shift Shift");
-    assert_eq!(Keymap::JetBrains.hint(Action::Terminal, Os::Mac), "\u{2325}F12");
-    assert_eq!(Keymap::JetBrains.hint(Action::Terminal, Os::Other), "Alt+F12");
+    assert_eq!(
+        Keymap::JetBrains.hint(Action::Find, Os::Mac),
+        "\u{21E7}\u{21E7}"
+    );
+    assert_eq!(
+        Keymap::JetBrains.hint(Action::Find, Os::Other),
+        "Shift Shift"
+    );
+    assert_eq!(
+        Keymap::JetBrains.hint(Action::Terminal, Os::Mac),
+        "\u{2325}F12"
+    );
+    assert_eq!(
+        Keymap::JetBrains.hint(Action::Terminal, Os::Other),
+        "Alt+F12"
+    );
     assert_eq!(Keymap::VsCode.hint(Action::Save, Os::Mac), "\u{2318}S");
     assert_eq!(Keymap::VsCode.hint(Action::Save, Os::Other), "Ctrl+S");
 }
@@ -29,7 +41,9 @@ fn fr_l30_no_chord_is_bound_to_two_actions() {
         for os in OSES {
             let mut seen: HashMap<String, Action> = HashMap::new();
             for action in Action::ALL {
-                let Some(chord) = keymap.chord(action, os) else { continue };
+                let Some(chord) = keymap.chord(action, os) else {
+                    continue;
+                };
                 let shown = chord.display(os);
                 if let Some(other) = seen.insert(shown.clone(), action) {
                     panic!("{keymap:?}/{os:?}: {shown} is bound to {other:?} and {action:?}");
@@ -60,7 +74,10 @@ fn fr_l30_every_action_has_a_chord_somewhere_and_dispatch_follows_the_table() {
     }
     // A chord of the other keymap is not handled: JetBrains' terminal key does nothing in VS Code.
     let alt_f12 = Chord::parse(Os::Other, "Alt+F12").unwrap();
-    assert_eq!(Keymap::JetBrains.action_for(&alt_f12, Os::Other), Some(Action::Terminal));
+    assert_eq!(
+        Keymap::JetBrains.action_for(&alt_f12, Os::Other),
+        Some(Action::Terminal)
+    );
     assert_eq!(Keymap::VsCode.action_for(&alt_f12, Os::Other), None);
 }
 
@@ -91,7 +108,9 @@ fn chord_formatting_orders_modifiers_and_round_trips() {
     assert_eq!(Chord::parse(Os::Other, ""), None);
     // Modifier order in the input does not matter.
     assert_eq!(
-        Chord::parse(Os::Other, "Shift+Ctrl+P").unwrap().display(Os::Other),
+        Chord::parse(Os::Other, "Shift+Ctrl+P")
+            .unwrap()
+            .display(Os::Other),
         "Ctrl+Shift+P"
     );
 }
@@ -121,7 +140,11 @@ fn keymap_default_and_prefs_round_trip() {
     };
     prefs::save(&path, &p).unwrap();
     assert_eq!(prefs::load(&path).keymap, Keymap::JetBrains);
-    assert!(std::fs::read_to_string(&path).unwrap().contains("jetbrains"));
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("jetbrains")
+    );
 }
 
 #[test]

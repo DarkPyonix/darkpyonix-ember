@@ -792,13 +792,7 @@ pub fn ComposerChips(session: String) -> Element {
             mode_menu.set(false);
             let sid = session.clone();
             run(
-                async move {
-                    services()
-                        .client
-                        .set_approve_all(&sid, enable)
-                        .await
-                        .map_err(|e| e.to_string())
-                },
+                async move { services().set_approve_all(&sid, enable).await },
                 |r| {
                     if let Err(e) = r {
                         show_message(format!("모드를 바꾸지 못했습니다: {e}"));

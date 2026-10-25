@@ -214,12 +214,23 @@ async fn refresh_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
 async fn refresh_once(s: &'static Services, live: Live, first: bool, full: bool) {
     if full {
         refresh_slow(s, live, first).await;
+    } else if s.demo.is_some() {
+        // Demo only (#199): nothing to reload.
     } else if let Err(e) = s.client.load_projects().await {
         tracing::debug!("projects refresh failed: {e}");
     }
 }
 
 async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
+    // Demo only (#199): the same signals, filled from the demo source; no request is made.
+    if s.demo.is_some() {
+        let now = crate::demo::now_ms();
+        live.accounts.set(crate::demo::accounts());
+        live.chatgpt.set(crate::demo::chatgpt_accounts(now));
+        live.usage.set(crate::demo::usage(now));
+        live.agents.set(crate::demo::agents());
+        return;
+    }
     // Computers: list at once without probing so the list renders before reachability is
     // known (FR-L3), then probe and update in place.
     if first {

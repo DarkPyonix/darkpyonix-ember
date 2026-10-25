@@ -5,6 +5,7 @@
 //! for VS Code Web. `tests/no_webview.rs` and `.github/scripts/checks/check-no-webview.sh` enforce it.
 //!
 //! - [`config`]: server URL and data paths.
+//! - [`demo`]: the data served inside the app when no server is given (demo only, #199).
 //! - [`services`]: tokio runtime, `ember_client::Client`, extra server API, outbox.
 //! - [`bridge`]: client changes → UI signals.
 //! - [`model`]: pure view models (tested).
@@ -12,6 +13,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod demo;
 pub mod export;
 pub mod ide;
 pub mod model;
@@ -64,8 +66,19 @@ pub fn launch() {
             std::process::exit(2);
         }
     };
-    // Push connection, resync worker and cache writer (they need the runtime's context).
-    {
+    // Demo only (#199): with EMBER_DEMO_DATA=1 and no EMBER_SERVER_URL the app serves itself;
+    // the push connection and sync workers stay off so nothing waits for a server.
+    let demo = demo::active_from_env().then(|| {
+        let now = demo::now_ms();
+        let source = demo::DemoSource::new(now);
+        for input in source.inputs(now) {
+            client.apply(input);
+        }
+        tracing::info!("demo mode: serving demo data, no server contacted");
+        source
+    });
+    if demo.is_none() {
+        // Push connection, resync worker and cache writer (they need the runtime's context).
         let _guard = rt.enter();
         client.start();
     }
@@ -80,6 +93,7 @@ pub fn launch() {
         rt,
         client,
         server,
+        demo,
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
         live: OnceLock::new(),
@@ -89,8 +103,11 @@ pub fn launch() {
 
     // The window is closed: write the cache once more and stop the background tasks.
     let s = services();
-    if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
-        tracing::warn!("final cache write failed: {e}");
+    // Demo data is never written to the cache.
+    if s.demo.is_none() {
+        if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
+            tracing::warn!("final cache write failed: {e}");
+        }
     }
     s.client.stop();
 }

@@ -44,6 +44,12 @@ pub struct Prefs {
     /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
     #[serde(default)]
     pub theme: crate::ui::theme::ThemePref,
+    /// The session screen's view: `multi`, `single` or `status` (FR-L18).
+    #[serde(default)]
+    pub session_view: Option<String>,
+    /// Pane tabs per project (FR-L18).
+    #[serde(default)]
+    pub panes: BTreeMap<String, crate::ui::session::ProjectPanes>,
     /// Team character style per project id (FR-L22). Absent means the default, 몽글.
     /// TODO(server): the project stores its own style once the server has the field.
     #[serde(default)]
@@ -65,6 +71,8 @@ impl Default for Prefs {
             last_project: None,
             ide_target: None,
             theme: crate::ui::theme::ThemePref::default(),
+            session_view: None,
+            panes: BTreeMap::new(),
             character_styles: BTreeMap::new(),
             keymap: crate::ui::keymap::Keymap::default(),
         }

@@ -21,6 +21,7 @@ pub mod new_session;
 pub mod project;
 pub mod routines;
 pub mod search;
+pub mod session;
 pub mod shell;
 pub mod theme;
 pub mod vcs;

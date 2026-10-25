@@ -48,9 +48,7 @@ pub fn install(s: Services) -> &'static Services {
 }
 
 pub fn services() -> &'static Services {
-    SERVICES
-        .get()
-        .expect("ember-app services are installed before the UI starts")
+    SERVICES.get().expect("ember-app services are installed before the UI starts")
 }
 
 impl Services {
@@ -131,9 +129,7 @@ where
 
 /// Persist prefs off the UI thread.
 pub fn save_prefs(prefs: crate::prefs::Prefs) {
-    let Some(path) = services().config.prefs_path() else {
-        return;
-    };
+    let Some(path) = services().config.prefs_path() else { return };
     services().rt.spawn_blocking(move || {
         if let Err(e) = crate::prefs::save(&path, &prefs) {
             tracing::warn!("could not save prefs to {}: {e}", path.display());

@@ -7,10 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use ember_client::state::{Computer, ConnectionState, Reachability, State};
 use ember_client::transcript::{Transcript, TranscriptItem};
-use ember_client::wire::{
-    ForkInfo, ForkOrigin, MentionCandidate, SearchHit, SessionStatus, TaskStatus, TeamRole,
-    TeamTask, TeamView, TurnOutcome,
-};
+use ember_client::wire::{ForkInfo, ForkOrigin, MentionCandidate, TurnOutcome, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
 use ember_client::LauncherStatus;
 
 use crate::server::{Account, ChatGptAccount, ComputerStatus};
@@ -45,27 +42,18 @@ pub fn status_label(s: LauncherStatus) -> &'static str {
 
 /// The agent is working: a new message would be queued (FR-L6), the interrupt button shows.
 pub fn is_busy(s: LauncherStatus) -> bool {
-    matches!(
-        s,
-        LauncherStatus::Running | LauncherStatus::WaitingForApproval
-    )
+    matches!(s, LauncherStatus::Running | LauncherStatus::WaitingForApproval)
 }
 
 /// Banner shown on a conversation while its approve-everything mode is on (FR-A5); `None` when
 /// off, so the indicator is visible exactly while the mode is active.
 pub fn approve_all_banner(on: bool) -> Option<&'static str> {
-    on.then_some(
-        "Approve everything is on: this session's tool requests are allowed without asking.",
-    )
+    on.then_some("Approve everything is on: this session's tool requests are allowed without asking.")
 }
 
 /// Menu entry that flips the mode.
 pub fn approve_all_menu_label(on: bool) -> &'static str {
-    if on {
-        "Ask before tools again"
-    } else {
-        "Approve everything"
-    }
+    if on { "Ask before tools again" } else { "Approve everything" }
 }
 
 /// Menu entry that forks from the last completed turn (FR-S5).
@@ -90,9 +78,7 @@ pub fn fork_turn_enabled(info: &ForkInfo, outcome: TurnOutcome, seq: i64) -> boo
 
 /// "Forked from <parent>" line of a forked session; the parent's title when known, else its id.
 pub fn fork_origin_label(origin: &ForkOrigin, parent_title: Option<&str>) -> String {
-    let name = parent_title
-        .filter(|t| !t.is_empty())
-        .unwrap_or(&origin.parent_id);
+    let name = parent_title.filter(|t| !t.is_empty()).unwrap_or(&origin.parent_id);
     format!("Forked from {name}")
 }
 
@@ -180,11 +166,7 @@ pub fn relative_time(now: i64, at: i64) -> String {
 
 /// First non-empty line, at most `max` characters (an ellipsis marks the cut).
 pub fn one_line(text: &str, max: usize) -> String {
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("");
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
     let more_lines = text.lines().filter(|l| !l.trim().is_empty()).count() > 1;
     let mut out: String = line.chars().take(max).collect();
     if line.chars().count() > max || more_lines {
@@ -196,9 +178,7 @@ pub fn one_line(text: &str, max: usize) -> String {
 /// The latest thing said in a transcript, for the session row (FR-L1 preview).
 pub fn preview(t: &Transcript) -> Option<String> {
     t.items.iter().rev().find_map(|i| match i {
-        TranscriptItem::Assistant { text, .. } | TranscriptItem::User { text, .. }
-            if !text.trim().is_empty() =>
-        {
+        TranscriptItem::Assistant { text, .. } | TranscriptItem::User { text, .. } if !text.trim().is_empty() => {
             Some(one_line(text, 120))
         }
         TranscriptItem::ToolCall { name, .. } if !name.is_empty() => Some(format!("Tool: {name}")),
@@ -258,10 +238,7 @@ pub struct SessionRow {
 
 /// Labels for account ids (`label (agent)`), from `GET /accounts`.
 pub fn account_labels(accounts: &[Account]) -> HashMap<String, String> {
-    accounts
-        .iter()
-        .map(|a| (a.id.clone(), a.label.clone()))
-        .collect()
+    accounts.iter().map(|a| (a.id.clone(), a.label.clone())).collect()
 }
 
 /// One line of the usage view for a ChatGPT plan account (FR-U4): tokens today, the weekly
@@ -270,9 +247,7 @@ pub fn chatgpt_usage_line(a: &ChatGptAccount) -> String {
     let mut parts = vec![format!("{} tokens today", a.tokens_today)];
     match &a.weekly_cap {
         Some(c) if c.known => parts.push("weekly cap known".to_string()),
-        Some(_) => {
-            parts.push("weekly cap set in ChatGPT settings, not reported to apps".to_string())
-        }
+        Some(_) => parts.push("weekly cap set in ChatGPT settings, not reported to apps".to_string()),
         None => {}
     }
     if a.limited {
@@ -327,32 +302,17 @@ pub fn project_cards(state: &State) -> Vec<ProjectCard> {
                     updated_at = updated_at.max(v.record.updated_at);
                 }
             }
-            ProjectCard {
-                name: p.name,
-                summary,
-                updated_at,
-            }
+            ProjectCard { name: p.name, summary, updated_at }
         })
         .collect();
-    cards.sort_by(|a, b| {
-        b.updated_at
-            .cmp(&a.updated_at)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    cards.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.name.cmp(&b.name)));
     cards
 }
 
 /// One project's sessions: pinned first, then most recently active; archived ones only when
 /// asked for.
-pub fn project_sessions(
-    state: &State,
-    project: &str,
-    cx: &RowContext<'_>,
-    show_archived: bool,
-) -> Vec<SessionRow> {
-    let Some(p) = state.projects().into_iter().find(|p| p.name == project) else {
-        return Vec::new();
-    };
+pub fn project_sessions(state: &State, project: &str, cx: &RowContext<'_>, show_archived: bool) -> Vec<SessionRow> {
+    let Some(p) = state.projects().into_iter().find(|p| p.name == project) else { return Vec::new() };
     let mut rows: Vec<SessionRow> = p
         .sessions
         .iter()
@@ -379,12 +339,7 @@ pub struct SearchResult {
 /// best first, then sessions whose details (title, project, agent, account, folder) contain
 /// every word of `query`, case-insensitively, most recent first. A hit whose session this
 /// client does not hold (yet) is skipped; the next session list load brings it.
-pub fn search_results(
-    state: &State,
-    query: &str,
-    hits: &[SearchHit],
-    cx: &RowContext<'_>,
-) -> Vec<SearchResult> {
+pub fn search_results(state: &State, query: &str, hits: &[SearchHit], cx: &RowContext<'_>) -> Vec<SearchResult> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     if words.is_empty() {
         return Vec::new();
@@ -393,11 +348,7 @@ pub fn search_results(
         .iter()
         .filter_map(|h| {
             let row = session_row(state, &h.session_id, cx)?;
-            Some(SearchResult {
-                row,
-                seq: Some(h.seq),
-                snippet: Some(one_line(&h.plain_snippet(), 200)),
-            })
+            Some(SearchResult { row, seq: Some(h.seq), snippet: Some(one_line(&h.plain_snippet(), 200)) })
         })
         .collect();
     let with_hits: HashSet<String> = out.iter().map(|r| r.row.id.clone()).collect();
@@ -421,11 +372,7 @@ pub fn search_results(
         })
         .collect();
     by_details.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
-    out.extend(by_details.into_iter().map(|row| SearchResult {
-        row,
-        seq: None,
-        snippet: None,
-    }));
+    out.extend(by_details.into_iter().map(|row| SearchResult { row, seq: None, snippet: None }));
     out
 }
 
@@ -439,11 +386,7 @@ pub fn recent_sessions(state: &State, cx: &RowContext<'_>, n: usize) -> Vec<Sess
         .filter_map(|id| session_row(state, &id, cx))
         .filter(|r| !r.archived)
         .collect();
-    rows.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
+    rows.sort_by(|a, b| b.pinned.cmp(&a.pinned).then_with(|| b.updated_at.cmp(&a.updated_at)));
     rows.truncate(n);
     rows
 }
@@ -488,17 +431,9 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
     match c {
         ConnectionState::Connected => None,
         ConnectionState::Offline => Some(("Offline: showing cached data".into(), Tone::Neutral)),
-        ConnectionState::Connecting { .. } => Some((
-            "Connecting to the main server\u{2026}".into(),
-            Tone::Neutral,
-        )),
-        ConnectionState::Reconnecting {
-            retry_in_ms, error, ..
-        } => Some((
-            format!(
-                "Disconnected ({error}). Retrying in {}s",
-                retry_in_ms.div_ceil(1000)
-            ),
+        ConnectionState::Connecting { .. } => Some(("Connecting to the main server\u{2026}".into(), Tone::Neutral)),
+        ConnectionState::Reconnecting { retry_in_ms, error, .. } => Some((
+            format!("Disconnected ({error}). Retrying in {}s", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
         )),
     }
@@ -523,10 +458,7 @@ pub struct Outbox {
 impl Outbox {
     pub fn push(&mut self, id: &str, text: String) {
         self.errors.remove(id);
-        self.queues
-            .entry(id.to_string())
-            .or_default()
-            .push_back(text);
+        self.queues.entry(id.to_string()).or_default().push_back(text);
     }
 
     /// Messages waiting (not counting one already sent).
@@ -535,10 +467,7 @@ impl Outbox {
     }
 
     pub fn queued_texts(&self, id: &str) -> Vec<String> {
-        self.queues
-            .get(id)
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
+        self.queues.get(id).map(|q| q.iter().cloned().collect()).unwrap_or_default()
     }
 
     pub fn clear(&mut self, id: &str) {
@@ -573,10 +502,7 @@ impl Outbox {
     /// The send failed: put the message back at the front and remember why.
     pub fn failed(&mut self, id: &str, text: String, error: String) {
         self.in_flight.remove(id);
-        self.queues
-            .entry(id.to_string())
-            .or_default()
-            .push_front(text);
+        self.queues.entry(id.to_string()).or_default().push_front(text);
         self.errors.insert(id.to_string(), error);
     }
 }
@@ -587,34 +513,23 @@ impl Outbox {
 /// recent session's.
 pub fn latest_cwd(state: &State, project: &str) -> Option<String> {
     let p = state.projects().into_iter().find(|p| p.name == project)?;
-    p.sessions
-        .first()
-        .and_then(|id| state.session(id))
-        .map(|v| v.record.cwd.clone())
+    p.sessions.first().and_then(|id| state.session(id)).map(|v| v.record.cwd.clone())
 }
 
 /// Index of `value` in `options`, else 0.
 pub fn index_of(options: &[String], value: Option<&str>) -> usize {
-    value
-        .and_then(|v| options.iter().position(|o| o == v))
-        .unwrap_or(0)
+    value.and_then(|v| options.iter().position(|o| o == v)).unwrap_or(0)
 }
 
 /// Deduplicate preserving order.
 pub fn dedup(items: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = HashSet::new();
-    items
-        .into_iter()
-        .filter(|s| seen.insert(s.clone()))
-        .collect()
+    items.into_iter().filter(|s| seen.insert(s.clone())).collect()
 }
 
 /// A computer's assignment to the selected project, for the computer list's toggle (FR-L4).
 pub fn is_assigned(state: &State, project: &str, computer_id: &str) -> bool {
-    state
-        .project_computers(project)
-        .iter()
-        .any(|c| c == computer_id)
+    state.project_computers(project).iter().any(|c| c == computer_id)
 }
 
 /// Group names for the computers list ("p1, p2").
@@ -650,18 +565,11 @@ pub fn typed_mention(draft: &str) -> Option<TypedMention> {
         None if rest.chars().any(char::is_whitespace) => return None,
         None => rest,
     };
-    Some(TypedMention {
-        raw: draft[at..].to_string(),
-        query: query.to_string(),
-    })
+    Some(TypedMention { raw: draft[at..].to_string(), query: query.to_string() })
 }
 
 /// Candidates matching `query` (title substring or id prefix, case-insensitive), at most `n`.
-pub fn filter_mentions<'a>(
-    all: &'a [MentionCandidate],
-    query: &str,
-    n: usize,
-) -> Vec<&'a MentionCandidate> {
+pub fn filter_mentions<'a>(all: &'a [MentionCandidate], query: &str, n: usize) -> Vec<&'a MentionCandidate> {
     let q = query.trim().to_lowercase();
     all.iter()
         .filter(|c| q.is_empty() || c.id.starts_with(&q) || c.title.to_lowercase().contains(&q))
@@ -674,11 +582,7 @@ pub fn filter_mentions<'a>(
 /// server resolves all three the same way.
 pub fn mention_token(c: &MentionCandidate, all: &[MentionCandidate]) -> String {
     let title = c.title.trim();
-    let unique = all
-        .iter()
-        .filter(|o| o.title.trim().eq_ignore_ascii_case(title))
-        .count()
-        == 1;
+    let unique = all.iter().filter(|o| o.title.trim().eq_ignore_ascii_case(title)).count() == 1;
     if title.is_empty() || title.contains('"') || !unique {
         format!("@@{}", c.id)
     } else if title.chars().any(char::is_whitespace) {
@@ -697,10 +601,10 @@ pub fn apply_mentions(text: &str, picks: &[(String, String)]) -> String {
         let mut from = 0;
         while let Some(i) = out[from..].find(raw.as_str()).map(|i| i + from) {
             let end = i + raw.len();
-            let ends_cleanly = out[end..].chars().next().is_none_or(|c| {
-                c.is_whitespace()
-                    || matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
-            });
+            let ends_cleanly = out[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}'));
             if ends_cleanly {
                 out.replace_range(i..end, token);
                 break;
@@ -737,9 +641,7 @@ pub fn team_member_rows(state: &State, team: &TeamView, this: &str) -> Vec<TeamM
                 Some(v) => status_label(v.status),
                 None => match m.status {
                     Some(SessionStatus::Running) => status_label(LauncherStatus::Running),
-                    Some(SessionStatus::WaitingForApproval) => {
-                        status_label(LauncherStatus::WaitingForApproval)
-                    }
+                    Some(SessionStatus::WaitingForApproval) => status_label(LauncherStatus::WaitingForApproval),
                     Some(SessionStatus::Failed) => status_label(LauncherStatus::Failed),
                     Some(SessionStatus::Finished) => status_label(LauncherStatus::Finished),
                     _ => status_label(LauncherStatus::Idle),
@@ -770,29 +672,15 @@ pub fn team_member_rows(state: &State, team: &TeamView, this: &str) -> Vec<TeamM
 
 /// One task line: `#3 [in progress] Write tests · alice`.
 pub fn task_line(t: &TeamTask) -> String {
-    let who = t
-        .assignee_name
-        .as_deref()
-        .unwrap_or(if t.assignee.is_some() {
-            "someone"
-        } else {
-            "unassigned"
-        });
-    format!(
-        "#{} [{}] {} \u{00b7} {who}",
-        t.number,
-        t.status.label(),
-        t.title
-    )
+    let who = t.assignee_name.as_deref().unwrap_or(if t.assignee.is_some() { "someone" } else { "unassigned" });
+    format!("#{} [{}] {} \u{00b7} {who}", t.number, t.status.label(), t.title)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ember_client::state::Input;
-    use ember_client::wire::{
-        AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent, TurnOutcome,
-    };
+    use ember_client::wire::{AgentEvent, Project, Push, SessionRecord, SessionStatus, StoredEvent, TurnOutcome};
     use serde_json::json;
 
     fn rec(id: &str, project: &str, status: SessionStatus, at: i64) -> SessionRecord {
@@ -844,9 +732,7 @@ mod tests {
         assert_eq!(badges[0], ("1 need approval".to_string(), Tone::Warning));
         assert_eq!(badges[1], ("2 running".to_string(), Tone::Accent));
         assert_eq!(badges[2], ("1 unread".to_string(), Tone::Success));
-        assert!(
-            status_rank(LauncherStatus::WaitingForApproval) > status_rank(LauncherStatus::Running)
-        );
+        assert!(status_rank(LauncherStatus::WaitingForApproval) > status_rank(LauncherStatus::Running));
     }
 
     #[test]
@@ -861,22 +747,13 @@ mod tests {
             limited_until: None,
             limit_reason: None,
             tokens_today: 15,
-            weekly_cap: Some(WeeklyCap {
-                known: false,
-                manage_url: String::new(),
-                note: String::new(),
-            }),
+            weekly_cap: Some(WeeklyCap { known: false, manage_url: String::new(), note: String::new() }),
         };
         let line = chatgpt_usage_line(&a);
-        assert!(
-            line.contains("15 tokens today") && line.contains("weekly cap"),
-            "{line}"
-        );
+        assert!(line.contains("15 tokens today") && line.contains("weekly cap"), "{line}");
         a.limited = true;
         a.limit_reason = Some("subscription_sharing_usage_limit_exceeded".into());
-        assert!(
-            chatgpt_usage_line(&a).contains("limited: subscription_sharing_usage_limit_exceeded")
-        );
+        assert!(chatgpt_usage_line(&a).contains("limited: subscription_sharing_usage_limit_exceeded"));
     }
 
     #[test]
@@ -896,23 +773,10 @@ mod tests {
         assert_eq!(one_line("  \nhello world\nsecond", 5), "hello\u{2026}");
         assert_eq!(one_line("short", 10), "short");
         let mut t = Transcript::new();
-        t.apply_seq(
-            1,
-            &AgentEvent::UserMessage {
-                text: "fix it".into(),
-            },
-        );
-        t.apply_seq(
-            2,
-            &AgentEvent::AssistantDelta {
-                text: "Done.".into(),
-            },
-        );
+        t.apply_seq(1, &AgentEvent::UserMessage { text: "fix it".into() });
+        t.apply_seq(2, &AgentEvent::AssistantDelta { text: "Done.".into() });
         assert_eq!(preview(&t).as_deref(), Some("Done."));
-        assert_eq!(
-            json_summary(&json!({ "command": "ls -la" }), 40),
-            "command: ls -la"
-        );
+        assert_eq!(json_summary(&json!({ "command": "ls -la" }), 40), "command: ls -la");
         assert_eq!(json_summary(&json!(null), 40), "");
     }
 
@@ -928,25 +792,11 @@ mod tests {
         meta(&mut s, "a", |r| r.pinned = true);
         let al = HashMap::from([("acc1".to_string(), "work".to_string())]);
         let cards = project_cards(&s);
-        assert_eq!(
-            cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-            vec!["alpha", "beta"]
-        );
-        assert_eq!(
-            cards[1].summary.top,
-            Some(LauncherStatus::WaitingForApproval)
-        );
+        assert_eq!(cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["alpha", "beta"]);
+        assert_eq!(cards[1].summary.top, Some(LauncherStatus::WaitingForApproval));
         let rows = project_sessions(&s, "alpha", &cx(&al), false);
-        assert_eq!(
-            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            vec!["a", "b"],
-            "pinned first"
-        );
-        assert_eq!(
-            rows[0].account.as_deref(),
-            Some("work"),
-            "account from the session record"
-        );
+        assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"], "pinned first");
+        assert_eq!(rows[0].account.as_deref(), Some("work"), "account from the session record");
         assert_eq!(rows[1].account, None);
 
         meta(&mut s, "b", |r| r.archived = true);
@@ -958,10 +808,7 @@ mod tests {
         assert_eq!(latest_cwd(&s, "alpha").as_deref(), Some("/w/alpha"));
         let recent = recent_sessions(&s, &cx(&al), 5);
         assert_eq!(recent[0].id, "a", "pinned first");
-        assert!(
-            recent.iter().all(|r| r.id != "b"),
-            "archived sessions are not recent"
-        );
+        assert!(recent.iter().all(|r| r.id != "b"), "archived sessions are not recent");
     }
 
     #[test]
@@ -990,14 +837,7 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!((found[0].row.id.as_str(), found[0].seq), ("a", Some(4)));
         assert_eq!(found[0].snippet.as_deref(), Some("the deploy failed"));
-        assert_eq!(
-            (
-                found[1].row.id.as_str(),
-                found[1].seq,
-                found[1].row.title.as_str()
-            ),
-            ("c", None, "Deploy notes")
-        );
+        assert_eq!((found[1].row.id.as_str(), found[1].seq, found[1].row.title.as_str()), ("c", None, "Deploy notes"));
         // A session with a message hit is not listed again for its details.
         let found = search_results(&s, "alpha", &[hit("a", 1, "x")], &cx(&al));
         assert_eq!(found.len(), 1);
@@ -1007,11 +847,7 @@ mod tests {
     #[test]
     fn fr_l4_assignment_comes_from_the_server_projects() {
         let mut s = state(vec![rec("a", "alpha", SessionStatus::Idle, 1)]);
-        s.apply(Input::ProjectsLoaded(vec![Project {
-            name: "alpha".into(),
-            created_at: 0,
-            computers: vec!["local".into()],
-        }]));
+        s.apply(Input::ProjectsLoaded(vec![Project { name: "alpha".into(), created_at: 0, computers: vec!["local".into()] }]));
         assert!(is_assigned(&s, "alpha", "local"));
         assert!(!is_assigned(&s, "alpha", "studio"));
         assert!(!is_assigned(&s, "nope", "local"));
@@ -1020,28 +856,16 @@ mod tests {
     #[test]
     fn fr_l2_unread_shows_until_opened() {
         let mut s = state(vec![]);
-        s.apply(Input::Push(Push::SessionCreated {
-            session: rec("a", "p", SessionStatus::Idle, 0),
-        }));
+        s.apply(Input::Push(Push::SessionCreated { session: rec("a", "p", SessionStatus::Idle, 0) }));
         s.apply(Input::Push(Push::Event {
             status: SessionStatus::Finished,
-            event: StoredEvent {
-                session_id: "a".into(),
-                seq: 1,
-                at: 1,
-                event: AgentEvent::TurnEnded {
-                    outcome: TurnOutcome::Completed,
-                },
-            },
+            event: StoredEvent { session_id: "a".into(), seq: 1, at: 1, event: AgentEvent::TurnEnded { outcome: TurnOutcome::Completed } },
         }));
         let al = HashMap::new();
         assert_eq!(project_cards(&s)[0].summary.unread, 1);
         s.apply(Input::Opened("a".into()));
         s.apply(Input::Closed("a".into()));
-        assert_eq!(
-            project_sessions(&s, "p", &cx(&al), false)[0].status,
-            LauncherStatus::Finished
-        );
+        assert_eq!(project_sessions(&s, "p", &cx(&al), false)[0].status, LauncherStatus::Finished);
     }
 
     #[test]
@@ -1059,11 +883,7 @@ mod tests {
         let probed = merge_computers(&first, &[fresh(Some(false))]);
         assert_eq!(probed[0].reachability, Reachability::Offline);
         let unprobed = merge_computers(&probed, &[fresh(None)]);
-        assert_eq!(
-            unprobed[0].reachability,
-            Reachability::Offline,
-            "an offline computer keeps its last-known state"
-        );
+        assert_eq!(unprobed[0].reachability, Reachability::Offline, "an offline computer keeps its last-known state");
     }
 
     #[test]
@@ -1076,11 +896,7 @@ mod tests {
         // Idle: the first goes out; the second waits for that turn.
         assert_eq!(o.next("s", false, 5).as_deref(), Some("one"));
         assert_eq!(o.queued("s"), 1);
-        assert_eq!(
-            o.next("s", false, 5),
-            None,
-            "still waiting for the turn to start"
-        );
+        assert_eq!(o.next("s", false, 5), None, "still waiting for the turn to start");
         assert_eq!(o.next("s", true, 6), None);
         assert_eq!(o.next("s", false, 9).as_deref(), Some("two"));
         // A turn too quick to be seen busy still releases the queue once seq moves.
@@ -1090,10 +906,7 @@ mod tests {
         // A failed send goes back to the front.
         o.push("s", "four".into());
         o.failed("s", "three".into(), "boom".into());
-        assert_eq!(
-            o.queued_texts("s"),
-            vec!["three".to_string(), "four".to_string()]
-        );
+        assert_eq!(o.queued_texts("s"), vec!["three".to_string(), "four".to_string()]);
         assert_eq!(o.error("s"), Some("boom"));
         o.clear("s");
         assert_eq!(o.queued("s"), 0);
@@ -1108,25 +921,13 @@ mod tests {
         assert_eq!(join_projects(&["b".into(), "a".into(), "b".into()]), "a, b");
         assert!(connection_banner(&ConnectionState::Connected).is_none());
         assert_eq!(
-            connection_banner(&ConnectionState::Reconnecting {
-                attempt: 1,
-                retry_in_ms: 1500,
-                error: "x".into()
-            })
-            .unwrap()
-            .1,
+            connection_banner(&ConnectionState::Reconnecting { attempt: 1, retry_in_ms: 1500, error: "x".into() }).unwrap().1,
             Tone::Warning
         );
     }
 
     fn cand(id: &str, title: &str) -> MentionCandidate {
-        MentionCandidate {
-            id: id.into(),
-            title: title.into(),
-            project: "p".into(),
-            agent: "codex".into(),
-            status: SessionStatus::Idle,
-        }
+        MentionCandidate { id: id.into(), title: title.into(), project: "p".into(), agent: "codex".into(), status: SessionStatus::Idle }
     }
 
     #[test]
@@ -1134,10 +935,7 @@ mod tests {
         let t = |d: &str| typed_mention(d).map(|m| (m.raw, m.query));
         assert_eq!(t("ask @@bet"), Some(("@@bet".into(), "bet".into())));
         assert_eq!(t("@@"), Some(("@@".into(), String::new())));
-        assert_eq!(
-            t("ask (@@\"beta te"),
-            Some(("@@\"beta te".into(), "beta te".into()))
-        );
+        assert_eq!(t("ask (@@\"beta te"), Some(("@@\"beta te".into(), "beta te".into())));
         assert_eq!(t("ask @@beta "), None, "finished by a space");
         assert_eq!(t("ask @@\"beta\""), None, "closed quote");
         assert_eq!(t("mail a@@b"), None);
@@ -1146,33 +944,17 @@ mod tests {
 
     #[test]
     fn mention_tokens_and_replacement() {
-        let all = vec![
-            cand("id-1", "Beta Tests"),
-            cand("id-2", "gamma"),
-            cand("id-3", "dup"),
-            cand("id-4", "Dup"),
-            cand("id-5", "say \"hi\""),
-        ];
+        let all = vec![cand("id-1", "Beta Tests"), cand("id-2", "gamma"), cand("id-3", "dup"), cand("id-4", "Dup"), cand("id-5", "say \"hi\"")];
         assert_eq!(mention_token(&all[0], &all), "@@\"Beta Tests\"");
         assert_eq!(mention_token(&all[1], &all), "@@gamma");
-        assert_eq!(
-            mention_token(&all[2], &all),
-            "@@id-3",
-            "ambiguous titles use the id"
-        );
+        assert_eq!(mention_token(&all[2], &all), "@@id-3", "ambiguous titles use the id");
         assert_eq!(mention_token(&all[4], &all), "@@id-5");
         assert_eq!(filter_mentions(&all, "TEST", 5).len(), 1);
         assert_eq!(filter_mentions(&all, "id-", 2).len(), 2);
         assert_eq!(filter_mentions(&all, "", 10).len(), 5);
 
-        let picks = vec![
-            ("@@bet".to_string(), "@@\"Beta Tests\"".to_string()),
-            ("@@gam".to_string(), "@@gamma".to_string()),
-        ];
-        assert_eq!(
-            apply_mentions("hi @@bet, and @@gam", &picks),
-            "hi @@\"Beta Tests\", and @@gamma"
-        );
+        let picks = vec![("@@bet".to_string(), "@@\"Beta Tests\"".to_string()), ("@@gam".to_string(), "@@gamma".to_string())];
+        assert_eq!(apply_mentions("hi @@bet, and @@gam", &picks), "hi @@\"Beta Tests\", and @@gamma");
         // Typed on after picking: left as typed.
         assert_eq!(apply_mentions("hi @@betamax", &picks[..1]), "hi @@betamax");
         assert_eq!(apply_mentions("plain", &picks), "plain");
@@ -1209,11 +991,7 @@ mod tests {
             project: "p".into(),
             leader: "l".into(),
             created_at: 0,
-            members: vec![
-                m("old", "old", TeamRole::Teammate, Some(1)),
-                m("a", "alice", TeamRole::Teammate, None),
-                m("l", "lead", TeamRole::Leader, None),
-            ],
+            members: vec![m("old", "old", TeamRole::Teammate, Some(1)), m("a", "alice", TeamRole::Teammate, None), m("l", "lead", TeamRole::Leader, None)],
             tasks: vec![
                 task(1, TaskStatus::InProgress, Some("a"), Some("alice")),
                 task(2, TaskStatus::Done, Some("a"), Some("alice")),
@@ -1221,28 +999,17 @@ mod tests {
             ],
         };
         let rows = team_member_rows(&State::new(), &team, "a");
-        assert_eq!(
-            rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
-            vec!["lead", "alice", "old"]
-        );
+        assert_eq!(rows.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["lead", "alice", "old"]);
         assert!(rows[1].this && !rows[0].this && rows[2].ended);
         assert_eq!((rows[1].open_tasks, rows[1].status), (1, "Running"));
-        assert_eq!(
-            task_line(&team.tasks[0]),
-            "#1 [in progress] task 1 \u{b7} alice"
-        );
-        assert_eq!(
-            task_line(&team.tasks[2]),
-            "#3 [open] task 3 \u{b7} unassigned"
-        );
+        assert_eq!(task_line(&team.tasks[0]), "#1 [in progress] task 1 \u{b7} alice");
+        assert_eq!(task_line(&team.tasks[2]), "#3 [open] task 3 \u{b7} unassigned");
     }
 
     #[test]
     fn fr_a5_indicator_shows_only_while_approve_all_is_on() {
         assert!(approve_all_banner(false).is_none());
-        assert!(approve_all_banner(true)
-            .unwrap()
-            .contains("Approve everything is on"));
+        assert!(approve_all_banner(true).unwrap().contains("Approve everything is on"));
         assert_eq!(approve_all_menu_label(false), "Approve everything");
         assert_eq!(approve_all_menu_label(true), "Ask before tools again");
     }
@@ -1250,17 +1017,9 @@ mod tests {
     #[test]
     fn fr_a5_indicator_follows_the_client_state() {
         let mut s = State::new();
-        s.apply(Input::SessionsLoaded(vec![rec(
-            "a",
-            "p",
-            SessionStatus::Idle,
-            0,
-        )]));
+        s.apply(Input::SessionsLoaded(vec![rec("a", "p", SessionStatus::Idle, 0)]));
         assert!(approve_all_banner(s.approve_all("a")).is_none());
-        s.apply(Input::Push(Push::ApproveAll {
-            session_id: "a".into(),
-            enabled: true,
-        }));
+        s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: true }));
         assert!(approve_all_banner(s.approve_all("a")).is_some());
     }
 
@@ -1269,11 +1028,7 @@ mod tests {
         let none = ForkInfo::default();
         assert!(!fork_menu_enabled(&none, false));
         assert!(fork_menu_enabled(&none, true));
-        let some = ForkInfo {
-            can_fork: true,
-            turns: vec![3, 8],
-            origin: None,
-        };
+        let some = ForkInfo { can_fork: true, turns: vec![3, 8], origin: None };
         assert!(fork_menu_enabled(&some, false));
         assert!(fork_turn_enabled(&some, TurnOutcome::Completed, 8));
         assert!(!fork_turn_enabled(&some, TurnOutcome::Completed, 5));
@@ -1285,15 +1040,8 @@ mod tests {
 
     #[test]
     fn fr_s5_forked_session_names_its_parent() {
-        let o = ForkOrigin {
-            parent_id: "abc".into(),
-            turn_seq: 4,
-            forked_at: 1,
-        };
-        assert_eq!(
-            fork_origin_label(&o, Some("Fix login")),
-            "Forked from Fix login"
-        );
+        let o = ForkOrigin { parent_id: "abc".into(), turn_seq: 4, forked_at: 1 };
+        assert_eq!(fork_origin_label(&o, Some("Fix login")), "Forked from Fix login");
         assert_eq!(fork_origin_label(&o, Some("")), "Forked from abc");
         assert_eq!(fork_origin_label(&o, None), "Forked from abc");
     }

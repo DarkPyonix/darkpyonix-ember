@@ -45,9 +45,7 @@ fn NewSessionForm(preset: String) -> Element {
 
     let projects: Vec<String> = {
         let _ = *ui.live.launcher.read();
-        services()
-            .client
-            .read(|s| s.projects().into_iter().map(|p| p.name).collect())
+        services().client.read(|s| s.projects().into_iter().map(|p| p.name).collect())
     };
 
     // Initial selection: the preset project (or the last one used), and what was last used
@@ -55,12 +53,7 @@ fn NewSessionForm(preset: String) -> Element {
     let initial = use_hook(|| {
         let prefs = ui.prefs.peek();
         let p = if preset.is_empty() {
-            prefs
-                .last_project
-                .clone()
-                .filter(|p| projects.contains(p))
-                .or_else(|| projects.first().cloned())
-                .unwrap_or_default()
+            prefs.last_project.clone().filter(|p| projects.contains(p)).or_else(|| projects.first().cloned()).unwrap_or_default()
         } else {
             preset.clone()
         };
@@ -82,90 +75,45 @@ fn NewSessionForm(preset: String) -> Element {
     let mut project_options = projects.clone();
     project_options.push(NEW_PROJECT.to_string());
     let creating_project = project().is_empty() || !projects.contains(&project());
-    let project_index = if creating_project {
-        project_options.len() - 1
-    } else {
-        index_of(&project_options, Some(&project()))
-    };
-    let effective_project = if creating_project {
-        new_project().trim().to_string()
-    } else {
-        project()
-    };
+    let project_index = if creating_project { project_options.len() - 1 } else { index_of(&project_options, Some(&project())) };
+    let effective_project = if creating_project { new_project().trim().to_string() } else { project() };
 
     let agents: Vec<String> = {
         let detected = ui.live.agents.read();
-        let installed: Vec<String> = detected
-            .iter()
-            .filter(|a| a.installed)
-            .map(|a| a.kind.clone())
-            .collect();
-        if installed.is_empty() {
-            FALLBACK_AGENTS.iter().map(|s| s.to_string()).collect()
-        } else {
-            installed
-        }
+        let installed: Vec<String> = detected.iter().filter(|a| a.installed).map(|a| a.kind.clone()).collect();
+        if installed.is_empty() { FALLBACK_AGENTS.iter().map(|s| s.to_string()).collect() } else { installed }
     };
-    let agent_value = if agents.contains(&agent()) {
-        agent()
-    } else {
-        agents.first().cloned().unwrap_or_default()
-    };
+    let agent_value = if agents.contains(&agent()) { agent() } else { agents.first().cloned().unwrap_or_default() };
     let agent_index = index_of(&agents, Some(&agent_value));
 
     let accounts: Vec<Choice> = {
         let list = ui.live.accounts.read();
-        let mut out = vec![Choice {
-            value: None,
-            label: "Automatic (the server's router chooses)".into(),
-        }];
-        out.extend(
-            list.iter()
-                .filter(|a| a.agent == agent_value)
-                .map(|a| Choice {
-                    value: Some(a.id.clone()),
-                    label: format!(
-                        "{}{}{}",
-                        a.label,
-                        if a.is_default { " (default)" } else { "" },
-                        if a.limited { " \u{00b7} limited" } else { "" }
-                    ),
-                }),
-        );
+        let mut out = vec![Choice { value: None, label: "Automatic (the server's router chooses)".into() }];
+        out.extend(list.iter().filter(|a| a.agent == agent_value).map(|a| Choice {
+            value: Some(a.id.clone()),
+            label: format!(
+                "{}{}{}",
+                a.label,
+                if a.is_default { " (default)" } else { "" },
+                if a.limited { " \u{00b7} limited" } else { "" }
+            ),
+        }));
         out
     };
-    let account_index = accounts
-        .iter()
-        .position(|c| c.value == account())
-        .unwrap_or(0);
+    let account_index = accounts.iter().position(|c| c.value == account()).unwrap_or(0);
 
     let computers: Vec<Choice> = {
         let _ = *ui.live.launcher.read();
-        let mut out = vec![Choice {
-            value: None,
-            label: "The main server (default)".into(),
-        }];
+        let mut out = vec![Choice { value: None, label: "The main server (default)".into() }];
         services().client.read(|s| {
-            out.extend(
-                s.computers()
-                    .iter()
-                    .filter(|c| c.id != LOCAL_COMPUTER)
-                    .map(|c| Choice {
-                        value: Some(c.id.clone()),
-                        label: format!(
-                            "{} ({})",
-                            c.name,
-                            model::reachability_label(c.reachability)
-                        ),
-                    }),
-            )
+            out.extend(s.computers().iter().filter(|c| c.id != LOCAL_COMPUTER).map(|c| Choice {
+                value: Some(c.id.clone()),
+                label: format!("{} ({})", c.name, model::reachability_label(c.reachability)),
+            }))
         });
         out
     };
-    let computer_index = computers
-        .iter()
-        .position(|c| c.value == computer())
-        .unwrap_or(0);
+    let computer_index = computers.iter().position(|c| c.value == computer()).unwrap_or(0);
 
     // Remembered or derived defaults for the free-text fields.
     let remembered = ui.prefs.read().last_used.get(&effective_project).cloned();
@@ -173,30 +121,12 @@ fn NewSessionForm(preset: String) -> Element {
         .as_ref()
         .map(|l| l.cwd.clone())
         .filter(|c| !c.is_empty())
-        .or_else(|| {
-            services()
-                .client
-                .read(|s| model::latest_cwd(s, &effective_project))
-        })
+        .or_else(|| services().client.read(|s| model::latest_cwd(s, &effective_project)))
         .unwrap_or_default();
-    let default_model = remembered
-        .as_ref()
-        .and_then(|l| l.model.clone())
-        .unwrap_or_default();
-    let cwd_value = if cwd().trim().is_empty() {
-        default_cwd.clone()
-    } else {
-        cwd().trim().to_string()
-    };
-    let model_value = if model_text().trim().is_empty() {
-        default_model.clone()
-    } else {
-        model_text().trim().to_string()
-    };
-    let can_start = !busy()
-        && !effective_project.is_empty()
-        && !cwd_value.is_empty()
-        && !agent_value.is_empty();
+    let default_model = remembered.as_ref().and_then(|l| l.model.clone()).unwrap_or_default();
+    let cwd_value = if cwd().trim().is_empty() { default_cwd.clone() } else { cwd().trim().to_string() };
+    let model_value = if model_text().trim().is_empty() { default_model.clone() } else { model_text().trim().to_string() };
+    let can_start = !busy() && !effective_project.is_empty() && !cwd_value.is_empty() && !agent_value.is_empty();
 
     let close = move || {
         let mut d = ui.new_session;
@@ -235,19 +165,13 @@ fn NewSessionForm(preset: String) -> Element {
             run(
                 async move {
                     let s = services();
-                    let rec = s
-                        .server
-                        .create_session(&body)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let rec = s.server.create_session(&body).await.map_err(|e| e.to_string())?;
                     s.client.apply(Input::SessionLoaded(rec.clone()));
                     let mut notice = None;
                     if let Some(cid) = computer_id {
                         // A session starts on the main server; move it before the first message.
                         if let Err(e) = s.server.switch_computer(&rec.id, &cid).await {
-                            notice = Some(format!(
-                                "Started on the main server: could not switch computer ({e})"
-                            ));
+                            notice = Some(format!("Started on the main server: could not switch computer ({e})"));
                         }
                     }
                     Ok::<_, String>((rec, notice))

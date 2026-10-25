@@ -896,6 +896,10 @@ fn IdeMenu(session: String) -> Element {
     use_hook({
         let sid = session.clone();
         move || {
+            // The demo has no server to ask for IDE targets (#202).
+            if services().demo.is_some() {
+                return;
+            }
             run(
                 async move {
                     services()

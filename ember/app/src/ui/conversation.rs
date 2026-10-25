@@ -50,6 +50,9 @@ pub(crate) fn item_key(item: &TranscriptItem) -> String {
 /// Fork `id` after its completed turn `seq` (the last one when `None`) and open the new
 /// session (FR-S5).
 fn fork_from(ui: crate::ui::Ui, id: String, seq: Option<i64>) {
+    if services().demo_blocked() {
+        return;
+    }
     run(
         async move { services().client.fork_session(&id, seq).await.map_err(|e| e.to_string()) },
         move |r| match r {
@@ -79,6 +82,9 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
     let load_candidates = {
         let id = id.clone();
         move || {
+            if services().demo_blocked() {
+                return;
+            }
             let sid = id.clone();
             run(
                 async move { services().client.mention_candidates(&sid, "", Some(200)).await.map_err(|e| e.to_string()) },
@@ -129,6 +135,10 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                     }
                 },
             );
+            // The demo has no server to ask about the computer or IDE targets (#202).
+            if services().demo.is_some() {
+                return;
+            }
             let a = id.clone();
             run(
                 async move { services().server.session_computer(&a).await.map_err(|e| e.to_string()) },
@@ -280,6 +290,9 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
     let open_ide = {
         move |kind: IdeKind| {
             ui.update_prefs(|p| p.ide_target = Some(kind.key().to_string()));
+            if services().demo_blocked() {
+                return;
+            }
             let launch = ide.read().clone();
             let target = match &launch {
                 None => {
@@ -356,6 +369,9 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
         let id = id.clone();
         let load = load.clone();
         move |computer_id: String| {
+            if services().demo_blocked() {
+                return;
+            }
             let sid = id.clone();
             let reload = load.clone();
             run(
@@ -379,6 +395,9 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
     let interrupt = {
         let id = id.clone();
         move |_: ()| {
+            if services().demo_blocked() {
+                return;
+            }
             let sid = id.clone();
             run(
                 async move { services().client.interrupt(&sid).await.map_err(|e| e.to_string()) },
@@ -730,8 +749,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
-                // Workaround for compose-rust #321 (material: flips window decoration); remove once Ember is on v0.0.3 and #321 is settled. Tracked in #166.
-                background: Paint::Role(ColorRole::SurfaceContainer),
+                material: MaterialRole::Regular,
                 shape_role: ShapeRole::Large,
                 padding_role: SpaceRole::Xs,
                 space_role: SpaceRole::Xs,
@@ -1047,6 +1065,9 @@ fn TeamPanel(session: String) -> Element {
         .filter(|t| !matches!(t.status, ember_client::wire::TaskStatus::Done | ember_client::wire::TaskStatus::Cancelled))
         .count();
     let end = move |team_id: String, sid: String, name: String| {
+        if services().demo_blocked() {
+            return;
+        }
         run(
             async move { services().client.end_teammate(&team_id, &sid).await.map_err(|e| e.to_string()) },
             move |r| match r {

@@ -24,6 +24,7 @@ use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
+use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
 pub const SERVER_SERVICE: &str = "ember-server";
@@ -316,6 +317,50 @@ impl Api {
     pub async fn unassign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
         let path = format!("/projects/{}/computers/{}", seg(project), seg(computer_id));
         Self::decode(self.send(Method::DELETE, &path, None).await?)
+    }
+
+    // ---- schedules (FR-A8) -----------------------------------------------------------------
+
+    /// Every schedule, or one project's.
+    pub async fn schedules(&self, project: Option<&str>) -> ApiResult<Vec<Schedule>> {
+        match project {
+            Some(p) => self.get(&format!("/schedules?project={}", seg(p))).await,
+            None => self.get("/schedules").await,
+        }
+    }
+
+    pub async fn create_schedule(&self, new: &NewSchedule) -> ApiResult<Schedule> {
+        let body = serde_json::to_value(new).expect("NewSchedule serialises");
+        Self::decode(self.post("/schedules", body).await?)
+    }
+
+    pub async fn update_schedule(&self, id: &str, patch: &SchedulePatch) -> ApiResult<Schedule> {
+        let body = serde_json::to_value(patch).expect("SchedulePatch serialises");
+        Self::decode(self.send(Method::PATCH, &format!("/schedules/{}", seg(id)), Some(body)).await?)
+    }
+
+    pub async fn delete_schedule(&self, id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &format!("/schedules/{}", seg(id)), None).await?)?;
+        Ok(())
+    }
+
+    pub async fn pause_schedule(&self, id: &str) -> ApiResult<Schedule> {
+        Self::decode(self.post(&format!("/schedules/{}/pause", seg(id)), json!({})).await?)
+    }
+
+    pub async fn resume_schedule(&self, id: &str) -> ApiResult<Schedule> {
+        Self::decode(self.post(&format!("/schedules/{}/resume", seg(id)), json!({})).await?)
+    }
+
+    /// Run now; answers the run (the server answers 202).
+    pub async fn run_schedule(&self, id: &str) -> ApiResult<ScheduleRun> {
+        Self::decode(self.post(&format!("/schedules/{}/run", seg(id)), json!({})).await?)
+    }
+
+    /// The most recent runs, newest first (server default 50, at most 500).
+    pub async fn schedule_runs(&self, id: &str, limit: Option<usize>) -> ApiResult<Vec<ScheduleRun>> {
+        let q = limit.map(|n| format!("?limit={n}")).unwrap_or_default();
+        self.get(&format!("/schedules/{}/runs{q}", seg(id))).await
     }
 
     // ---- session metadata, search, export, fork (FR-L9, FR-S4, FR-S5) -----------------------

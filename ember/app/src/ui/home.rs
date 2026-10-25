@@ -682,6 +682,27 @@ pub fn bar_rects(values: &[usize], width: f32, height: f32, gap: f32) -> Vec<(f3
         .collect()
 }
 
+/// Hatch lines for a bar `(x, y, w, h)`: 45 degree segments `(x1, y1, x2, y2)` rising to the right,
+/// `step` dp apart along the vertical, each clipped to the rectangle. Empty for a degenerate rect
+/// or a non-positive step.
+pub fn hatch_lines(x: f32, y: f32, w: f32, h: f32, step: f32) -> Vec<(f32, f32, f32, f32)> {
+    let mut out = Vec::new();
+    if w <= 0.0 || h <= 0.0 || step <= 0.0 {
+        return out;
+    }
+    // The line `d` passes (x, y + h - d) and runs (+1, -1); it is inside for t in [lo, hi].
+    let mut d = -w + step;
+    while d < h {
+        let lo = (-d).max(0.0);
+        let hi = w.min(h - d);
+        if hi > lo {
+            out.push((x + lo, y + h - d - lo, x + hi, y + h - d - hi));
+        }
+        d += step;
+    }
+    out
+}
+
 /// Ring segments as `(start_degrees, sweep_degrees)` from 12 o'clock clockwise, one per count;
 /// a zero count has a zero sweep. All zero gives no segments.
 pub fn ring_segments(counts: &[usize]) -> Vec<(f32, f32)> {
@@ -1467,7 +1488,10 @@ fn TokenTrendTile() -> Element {
     let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, W, 1.0, 0.0);
     for (x, y, w, h) in bar_rects(&values, W, H, 6.0) {
         if h > 0.0 {
-            list = list.round_rect(paint(p.blue.strong), x, y, w, h, 3.0, 0.0);
+            list = list.round_rect(paint(p.blue.strong), x, y, w, h, 3.0, 1.0);
+            for (x1, y1, x2, y2) in hatch_lines(x, y, w, h, 5.0) {
+                list = list.line(paint(p.blue.strong), x1, y1, x2, y2, 1.0);
+            }
         }
     }
     let commands = list.build();
@@ -1687,6 +1711,25 @@ fn ProjectsTile(tiles: Vec<ProjectTile>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_u7_hatch_lines_stay_inside_the_bar() {
+        let (x, y, w, h) = (10.0, 20.0, 30.0, 50.0);
+        let lines = hatch_lines(x, y, w, h, 5.0);
+        assert!(!lines.is_empty());
+        let eps = 1e-3;
+        for (x1, y1, x2, y2) in &lines {
+            for (px, py) in [(*x1, *y1), (*x2, *y2)] {
+                assert!(px >= x - eps && px <= x + w + eps, "x {px}");
+                assert!(py >= y - eps && py <= y + h + eps, "y {py}");
+            }
+            assert!(x2 > x1 && y2 < y1, "rises to the right");
+        }
+        let expected = ((w + h) / 5.0) as usize;
+        assert!(lines.len() + 2 >= expected && lines.len() <= expected + 1);
+        assert!(hatch_lines(x, y, 0.0, h, 5.0).is_empty());
+        assert!(hatch_lines(x, y, w, h, 0.0).is_empty());
+    }
 
     // ---- FR-L16: modes per harness ----
 

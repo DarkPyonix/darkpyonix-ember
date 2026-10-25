@@ -405,3 +405,122 @@ pub struct MentionCandidate {
     pub agent: String,
     pub status: SessionStatus,
 }
+
+// ---- schedules (FR-A8, server `schedules`) -----------------------------------------------
+
+/// When a schedule fires (server `ScheduleKind`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScheduleKind {
+    /// A five-field cron expression evaluated in `tz` (IANA name).
+    Cron { expr: String, tz: String },
+    /// Every `seconds`.
+    Interval { seconds: u64 },
+    /// Once, at `at` (Unix ms).
+    Once { at: i64 },
+}
+
+/// What each run does (server `ScheduleTarget`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScheduleTarget {
+    /// Send the prompt into this existing session.
+    Continue { session_id: String },
+    /// Start a new session and send the prompt there.
+    New {
+        #[serde(default)]
+        title: Option<String>,
+    },
+}
+
+/// One schedule (`GET /schedules`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    pub project: String,
+    pub agent: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub computer_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    pub prompt: String,
+    pub kind: ScheduleKind,
+    pub target: ScheduleTarget,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub catch_up: bool,
+    /// Next planned trigger (Unix ms); `None` when paused or a one-off is done.
+    #[serde(default)]
+    pub next_run_at: Option<i64>,
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// How a run ended (server `RunStatus`); a status this client does not know decodes to `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Skipped,
+    Missed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One run of a schedule (`GET /schedules/{id}/runs`, newest first).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ScheduleRun {
+    pub id: String,
+    pub schedule_id: String,
+    /// The trigger time this run belongs to (Unix ms).
+    pub scheduled_at: i64,
+    pub status: RunStatus,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// `POST /schedules` body. `agent` and `cwd` are required for `New` targets.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NewSchedule {
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub prompt: String,
+    pub kind: ScheduleKind,
+    pub target: ScheduleTarget,
+    pub catch_up: bool,
+    pub paused: bool,
+}
+
+/// `PATCH /schedules/{id}` body; `None` fields are left alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SchedulePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ScheduleKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<bool>,
+}

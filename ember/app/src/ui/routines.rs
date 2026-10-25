@@ -2269,7 +2269,11 @@ mod tests {
         strings.push(last_run_text(&[], 0));
         for s in strings {
             assert!(
-                !s.ends_with('다') || s.ends_with("입니다") || s.ends_with("합니다"),
+                !s.ends_with('다')
+                    || s.ends_with("입니다")
+                    || s.ends_with("합니다")
+                    || s.ends_with("니다")
+                    || s.ends_with("마다"),
                 "{s}"
             );
         }

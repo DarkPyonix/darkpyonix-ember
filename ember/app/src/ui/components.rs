@@ -156,6 +156,15 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
+/// The toolkit's Button pads its 20 dp label by about 10 dp above and below and clips to its
+/// height, so anything under 40 dp cuts the bottom of Hangul final consonants (검색 reads 거새).
+/// Until the toolkit exposes the padding, the small button is drawn at 40 dp.
+pub const BUTTON_MIN_RENDER_HEIGHT: f32 = 40.0;
+
+pub fn button_render_height(height: f32) -> f32 {
+    height.max(BUTTON_MIN_RENDER_HEIGHT)
+}
+
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 #[component]
 pub fn AppButton(
@@ -175,7 +184,7 @@ pub fn AppButton(
             icon,
             enabled,
             fill_max_width,
-            height: s.height,
+            height: button_render_height(s.height),
             variant: ButtonVariant::Text,
             background: paint(s.fill),
             color: paint(s.text),
@@ -381,6 +390,12 @@ mod tests {
     fn pill_sizes() {
         assert_eq!(pill_metrics(false), (24.0, Fs::Xs, Weight::Medium));
         assert_eq!(pill_metrics(true), (20.0, Fs::Xs2, Weight::Medium));
+    }
+
+    #[test]
+    fn buttons_are_drawn_tall_enough_not_to_clip_hangul() {
+        assert_eq!(button_render_height(32.0), 40.0);
+        assert_eq!(button_render_height(40.0), 40.0);
     }
 
     #[test]

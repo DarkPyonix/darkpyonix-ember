@@ -35,8 +35,9 @@ use crate::services::{install, services, Services};
 pub fn launch() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("EMBER_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ember_app=info,ember_client=info")),
+            tracing_subscriber::EnvFilter::try_from_env("EMBER_LOG").unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,ember_app=info,ember_client=info")
+            }),
         )
         .try_init();
 
@@ -56,7 +57,10 @@ pub fn launch() {
         Ok(c) => c,
         Err(e) => {
             // Only a malformed EMBER_SERVER_URL gets here.
-            eprintln!("ember-app: {e}. Set EMBER_SERVER_URL to the main server, e.g. {}", config::DEFAULT_SERVER_URL);
+            eprintln!(
+                "ember-app: {e}. Set EMBER_SERVER_URL to the main server, e.g. {}",
+                config::DEFAULT_SERVER_URL
+            );
             std::process::exit(2);
         }
     };
@@ -66,7 +70,10 @@ pub fn launch() {
         client.start();
     }
 
-    let initial_prefs = config.prefs_path().map(|p| prefs::load(&p)).unwrap_or_default();
+    let initial_prefs = config
+        .prefs_path()
+        .map(|p| prefs::load(&p))
+        .unwrap_or_default();
     let server = ServerApi::new(&config.server_url);
     install(Services {
         config,
@@ -91,6 +98,10 @@ pub fn launch() {
 fn launch_builder() -> LaunchBuilder {
     // Follows the host platform's design system (Material 3 where there is no native one).
     LaunchBuilder::new()
-        .with_theme(Theme::adaptive(DesignSystem::Material3))
+        // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
+        .with_theme(
+            Theme::adaptive(DesignSystem::Material3)
+                .with_color_scheme(services().initial_prefs.theme.color_scheme()),
+        )
         .with_window(Window::new().with_title("Ember"))
 }

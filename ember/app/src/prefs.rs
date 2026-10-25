@@ -41,6 +41,9 @@ pub struct Prefs {
     /// `ember`, `vscode` or `gateway`.
     #[serde(default)]
     pub ide_target: Option<String>,
+    /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
+    #[serde(default)]
+    pub theme: crate::ui::theme::ThemePref,
 }
 
 fn format_default() -> u32 {
@@ -54,6 +57,7 @@ impl Default for Prefs {
             last_used: BTreeMap::new(),
             last_project: None,
             ide_target: None,
+            theme: crate::ui::theme::ThemePref::default(),
         }
     }
 }
@@ -100,13 +104,34 @@ mod tests {
         let mut p = Prefs::default();
         p.last_used.insert(
             "ember".into(),
-            LastUsed { agent: "codex".into(), account: Some("a1".into()), computer: Some("c1".into()), model: Some("o3".into()), cwd: "/w".into() },
+            LastUsed {
+                agent: "codex".into(),
+                account: Some("a1".into()),
+                computer: Some("c1".into()),
+                model: Some("o3".into()),
+                cwd: "/w".into(),
+            },
         );
         p.ide_target = Some("vscode".into());
         save(&path, &p).unwrap();
         assert_eq!(load(&path), p);
         std::fs::write(&path, b"{nope").unwrap();
         assert_eq!(load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn fr_l28_theme_choice_persists_and_defaults_to_system() {
+        use crate::ui::theme::ThemePref;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).theme, ThemePref::System);
+        let p = Prefs {
+            theme: ThemePref::Dark,
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).theme, ThemePref::Dark);
     }
 
     #[test]
@@ -121,6 +146,9 @@ mod tests {
         let p = load(&path);
         assert_eq!(p.ide_target.as_deref(), Some("ember"));
         save(&path, &p).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("pinned"), "dropped on save");
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("pinned"),
+            "dropped on save"
+        );
     }
 }

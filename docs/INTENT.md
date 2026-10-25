@@ -555,13 +555,7 @@ Glass; every other platform draws the same bar opaque. Tokens, the Apple-style s
 radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), motion and every screen layout are in
 `DESIGN.md`.
 
-[user, 2026-10-25: "JetBrains 느낌도 반영"; corrected by the user, 2026-10-25: "아니 다른건 건들지
-말고 에디터와 터미널 화면만 건드리도록 해"] The design is based on the current mockup. The
-JetBrains-like feel applies only to the editor and terminal screens. Every other screen keeps the
-approved mockup design unchanged, including tool windows, the session panels, the status view and
-version control. The reason: the owner asked for that feel on the editor and terminal, and the rest
-keeps the reference look. The editor and terminal draft stays [provisional] until the owner approves
-a mockup draft (pending).
+[user, 2026-10-25: "앱 기본 스타일에서 안쪽 코드 작성이랑 도구창이 오히려 jetbrains island라는 최신 디자인 컨셉에 더 맞아. 그래서 그쪽 디자인이 맞고, 다만 지금 좌우 메뉴바의 경우 jetbrains 느낌으로 하는게 맞을거 같아. 흰색 버튼 배경이 보기 싫네."] The editor and terminal use the app's own style: rounded island panels, tabs, tool windows and the code area, matching the JetBrains Islands concept. Only the left and right tool-window stripes take the JetBrains form: 40 px icon-only stripes, with no white background or shadow on the selected button, just a faint selection tint. Breadcrumbs stay under the tabs. [provisional] The owner did not decide this, so it is a leader decision. Every other screen keeps the mockup design unchanged, including the session panels, the status view and version control.
 
 **Why.** One product that a user moves between machines should look the same on all of them, and a
 per-OS widget set multiplies the work of every screen.
@@ -703,6 +697,8 @@ as D9 and D9a already decided: **Ember 에디터** (Ember's editor core, a nativ
 (the computer's `code serve-web` wrapped in Ember's IDE window, OSE runtime by default, D10), and
 **JetBrains Gateway** (a command to the Gateway installed on that computer). This is a correction
 of the mockup, not a new decision.
+
+**Keymap.** [user, 2026-10-25: "단축키는 vscode로 할건지 jetbrains로 할건지 선택할 수 있게 해주면 될거같아."] The Ember editor's shortcuts follow a keymap the user chooses in settings, VS Code or JetBrains. The choice changes the shortcut hints shown and the keys the editor handles (`FR-L30`).
 
 **Rejected.** Cursor and Zed; VS Code over Remote SSH.
 

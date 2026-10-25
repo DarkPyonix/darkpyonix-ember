@@ -724,8 +724,13 @@ work and should not need a second app for it.
 from DarkPyonix's temporary logo: no background on the desktop taskbar, a background on mobile and
 in-app icons. The owner chose candidate B, "phoenix-fold" ("그래 뭐 주 후보인게 젤 좋긴 한거같다.")
 and asked for a rounder tail, VS Code's size and more colour layers; those were made and passed an
-independent review. Files: `.scratch/design-mockup/logo/phoenix-fold/`. **The final sign-off is
-pending**: the files are not copied into the product until the owner confirms them.
+independent review. Files: `.scratch/design-mockup/logo/phoenix-fold/`.
+
+[user, 2026-10-25: "엠버 로고가 완전히 마음에 들진 않아. 내가 로고 좀 더 동그랗게 하라고 했는데 제대로 반영도 안하고. 일단 지금꺼라도 해서 작업 시작해봐"] **Phoenix-fold B (round 9, the pink band left at 12%) is the temporary
+logo.** It is in use in the app and the mockup now, so work can start on it. The owner is not
+satisfied with it, so the final logo stays open. Reason: the owner wants the work to start without
+waiting for a finished logo. The follow-up is a Draft in `SPEC.md` (FR-L29): make the whole
+silhouette rounder. It is not scheduled; it starts only when the owner asks again.
 
 **Rejected.** The first four candidates (ring, drop, ember coal, E) ("여전히 처참한거 같아. ... 내가
 넣어준 임시 로고가 훨배 나아."); a new symbol unrelated to DarkPyonix.

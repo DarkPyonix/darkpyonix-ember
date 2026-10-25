@@ -573,7 +573,7 @@ Rules for all six:
 
 ## 8. Logo
 
-**Pending the owner's final sign-off.** Direction [user, QUEUED-logo: "엠버의 로고 디자인은
+**Temporary, rework pending (rounder silhouette).** Phoenix-fold B is the temporary logo in use in the app and the mockup; the rework (`SPEC.md` FR-L29) is a Draft and not scheduled. Direction [user, QUEUED-logo: "엠버의 로고 디자인은
 DarkPyonix의 임시 로고를 참고하도록 해. ... 데스크탑의 작업 표시줄 아이콘은 vscode 처럼 배경 없이
 구현하고, 모바일과 앱 내 아이콘은 배경 넣어서 구현해줘."]; candidate B was chosen [user: "그래 뭐
 주 후보인게 젤 좋긴 한거같다."] with three refinements (rounder tail, VS Code-like size, more colour

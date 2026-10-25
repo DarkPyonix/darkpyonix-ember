@@ -230,6 +230,11 @@ pub fn pickchip_style(selected: bool, p: &Palette) -> (f32, Color) {
     (H_CTL, if selected { p.sel } else { p.surface_2 })
 }
 
+/// A chip is drawn at the button minimum so Hangul final consonants are not clipped.
+pub fn pickchip_render_height(height: f32) -> f32 {
+    button_render_height(height)
+}
+
 /// The composer's choice chip (`.pickchip`): project, harness/model, computer, mode.
 /// With `icon_only` (390 px and below) it drops its text and keeps the glyph.
 #[component]
@@ -242,6 +247,8 @@ pub fn PickChip(
 ) -> Element {
     let theme = use_ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
+    // The toolkit clips a label below 40 dp (dioxus-compose #133): draw the chip tall enough.
+    let height = pickchip_render_height(height);
     let text = if icon_only && icon.is_some() {
         String::new()
     } else {
@@ -415,6 +422,11 @@ mod tests {
     fn pickchip_has_no_border_and_a_selected_fill() {
         assert_eq!(pickchip_style(false, &LIGHT), (32.0, LIGHT.surface_2));
         assert_eq!(pickchip_style(true, &DARK), (32.0, DARK.sel));
+    }
+
+    #[test]
+    fn chips_are_drawn_at_40_dp_or_more() {
+        assert_eq!(pickchip_render_height(pickchip_style(false, &LIGHT).0), 40.0);
     }
 
     #[test]

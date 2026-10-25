@@ -8,6 +8,7 @@
 pub mod compat;
 pub mod components;
 pub mod conversation;
+pub mod home;
 pub mod launcher;
 pub mod new_session;
 pub mod project;
@@ -123,6 +124,11 @@ impl Ui {
     }
 }
 
+/// The menu a cold start lands on: 홈 is the first menu (D26).
+pub fn initial_menu() -> NavMenu {
+    NavMenu::Home
+}
+
 pub fn use_ui() -> Ui {
     use_context::<Ui>()
 }
@@ -135,7 +141,7 @@ pub fn app() -> Element {
     let selected_project = use_signal(|| services().initial_prefs.last_project.clone());
     let new_session = use_signal(|| None::<String>);
     let show_archived = use_signal(|| false);
-    let menu = use_signal(|| NavMenu::Projects);
+    let menu = use_signal(initial_menu);
     let theme_pref = use_signal(|| services().initial_prefs.theme);
     use_context_provider(|| ThemeCtx { pref: theme_pref });
     use_context_provider(|| Ui {
@@ -149,4 +155,15 @@ pub fn app() -> Element {
     });
 
     rsx! { shell::Shell {} }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fr_l10_cold_start_lands_on_home() {
+        assert_eq!(initial_menu(), NavMenu::Home);
+        assert_eq!(NavMenu::ALL[0], NavMenu::Home);
+    }
 }

@@ -12,6 +12,7 @@ pub mod home;
 pub mod launcher;
 pub mod new_session;
 pub mod project;
+pub mod routines;
 pub mod search;
 pub mod shell;
 pub mod theme;

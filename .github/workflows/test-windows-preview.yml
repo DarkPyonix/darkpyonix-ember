@@ -1,5 +1,4 @@
-# Windows preview of the client with demo data (#197). Manual only: builds ember-app and
-# ember-server, bundles the compose-rust renderer, and uploads one zip as a run artifact. No
+# Windows preview of the client with demo data (#197). Manual only: builds ember-app, bundles the compose-rust renderer, and uploads one zip as a run artifact. No
 # release, no tag.
 name: Windows preview
 
@@ -33,12 +32,9 @@ jobs:
         with:
           workspaces: |
             ember/app
-            ember/server
       - name: Fetch the renderer
         shell: pwsh
         run: ./.github/scripts/preview/fetch-renderer.ps1 -Version $env:COMPOSE_RUST_RENDERER_VERSION -Out "$env:RUNNER_TEMP\renderer"
-      - name: Build ember-server
-        run: cd ember/server && cargo build --release --locked --bin ember-server
       - name: Build ember-app
         env:
           DIOXUS_COMPOSE_RENDERER_DIR: ${{ runner.temp }}\renderer

@@ -26,7 +26,7 @@ use ember_client::{LauncherStatus, State};
 use crate::model::status_rank;
 use crate::services::{run, services};
 use crate::ui::components::{
-    AppButton, ButtonKind, EmberCard, EmberSheet, Label, PickChip, Pill, PillTone,
+    AppButton, ButtonKind, EmberCard, EmberSheet, InsetPanel, Label, PickChip, Pill, PillTone,
 };
 use crate::ui::launcher::ConnectionBanner;
 use crate::ui::monitor::MonitorSheet;

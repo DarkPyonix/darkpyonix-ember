@@ -327,9 +327,9 @@ pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes
 // Screen
 // ---------------------------------------------------------------------------------------------
 
-const STRIPE_W: f32 = 48.0;
-/// The button fills the 40 dp stripe, so its glyph is about 20 px (JetBrains stripe icons).
-const STRIPE_BTN: f32 = 48.0;
+const STRIPE_W: f32 = 40.0;
+/// The button fills the 40 dp stripe (owner decision), so its glyph is about 20 px.
+const STRIPE_BTN: f32 = 40.0;
 /// A 40 dp button plus 12 dp above and below; a shorter row squeezes the buttons below the
 /// 40 dp the toolkit needs for Hangul (#157, dioxus-compose #133).
 const TOP_H: f32 = 64.0;

@@ -511,3 +511,11 @@ Rejected: messages as the only channel between sessions.
 | **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | **Closed** [user, 2026-10-25]: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." Home chat sessions live in a built-in Unsorted project (`FR-L13`) |
 | **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | **Closed** [user, 2026-10-25]: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" Per-channel append-only JSONL on the main server (`FR-T16`); the exact layout is [provisional] |
 | **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | **Closed** [user, 2026-10-25]: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. ..." Full quote in D22. A channel belongs to one project; every project has a default channel (`FR-L12`, `FR-T10`) |
+
+### D23: Ember vendors Code-OSS CSS by script and builds the workbench chrome rsx
+
+**Decision.** [provisional, leader decision 2026-10-25, user confirmation pending] Ember carries the Code-OSS CSS the workbench chrome needs, in `ember/app/assets/code-oss/`. `ember/ose/vendor-workbench-css.sh` fetches it from the Code-OSS commit the OSE build pins (`PINNED_COMMIT` in `ember/editor-conn/src/lib.rs`, tag in `ember/ose/VERSION`) and records the commit hash and the MIT notice in every file. Ember's only edit is `workbench-has.patch`, which turns `:has()` rules into state classes (#142). Ember builds the workbench chrome rsx (tree rows, view filter, title bar command center, action widget) and sets those classes (#143). Hover and chat markdown are drawn with `dioxus-compose-markdown` Compose widgets; there is no HTML `.rendered-markdown` path, so `renderedMarkdown.css` is not vendored.
+
+**Rejected.** Copying the CSS by hand (it drifts from the pinned Code-OSS and loses the commit record). A stylo patch for `:has()` (the replacement cost is small). Rendering markdown as HTML with `.rendered-markdown`.
+
+**Why.** The renderer drops `:has()` rules, so they need classes either way. A script plus a patch keeps the copy reproducible, and CI checks it offline against a committed pristine copy.

@@ -83,7 +83,7 @@ by 10-16, remote-browser viewing is limited, and the reason is recorded.
 | **M5** | Networking: peer-to-peer with `darkpyonix.dev` hole punching and relay (`FR-N1`–`FR-N4`) | Which transport (Rust tunnel or an existing mesh, Q7); also resolves HTTPS for phones |
 | **M6** | Remote browser with server-held profile, and agent browser use (`FR-R1`–`FR-R5`) | How the browser reaches the client without breaking E1 |
 | **M7** | IDE window: `ember/proxy/` integrated as the wrapping layer, OSE/VSC runtimes, bridge (`FR-W1`–`FR-W6`, `FR-B1`–`FR-B4`); mobile without Node (`FR-W5`) | Whether the wrapped IDE holds up from a conversation on desktop and phone |
-| **M8** | Compose-native editor core (§E), back in scope [user, 2026-10-03], target 2026-10-18; planned (#32) | See `IMPLEMENTATION.md` |
+| **M8** | Compose-native editor core (§E), back in scope [user, 2026-10-03], target 2026-10-18; planned (#32). Workbench CSS vendoring and chrome rsx: #143 (D23) | See `IMPLEMENTATION.md` |
 
 `ember/proxy/` already delivers much of M7's wrapping layer and a transitional multi-machine home; it
 keeps working throughout and is folded in rather than rewritten (`INTENT.md` D13).

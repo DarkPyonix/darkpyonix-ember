@@ -155,7 +155,7 @@ async fn fake_cli_turns_with_hook_approvals_resume_and_interrupt() {
     for pair in lines.chunks(2) {
         assert!(pair[0].starts_with("-p /hooks --output-format json --add-dir "), "{args}");
         assert!(pair[1].contains("--output-format stream-json"), "{args}");
-        assert!(pair[1].contains("--dangerously-skip-permissions") && pair[1].contains("--sandbox"), "{args}");
+        assert!(pair[1].contains("--dangerously-skip-permissions")  && !pair[1].contains("--sandbox"), "{args}");
     }
     assert!(lines[1].contains("--model m1") && !lines[1].contains("--conversation"), "{args}");
     for l in [lines[3], lines[5], lines[7]] {

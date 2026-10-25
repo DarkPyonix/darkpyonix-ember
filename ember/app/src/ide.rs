@@ -5,7 +5,7 @@
 //!   never hosts it (NFR-L2): the URL is handed to the OS URL handler.
 //! - **Gateway**: the `jetbrains-gateway://` link, handed to the OS URL handler, which starts
 //!   JetBrains Gateway on this machine.
-//! - **Ember**: the editor core arrives in M8; until then it is a placeholder.
+//! - **Ember**: the editor screen (FR-L31); its code area waits for the editor core (M8).
 //!
 //! Only `http`, `https` and the JetBrains schemes are ever passed to the OS, so a server
 //! answer cannot make this app open an arbitrary file or program.
@@ -51,7 +51,7 @@ impl IdeKind {
 pub enum IdeAction {
     /// Hand this URL to the OS.
     OpenUrl(String),
-    /// The Ember editor (M8) is not built yet.
+    /// Open the Ember editor screen (its code area waits for the editor core, M8).
     EmberPlaceholder,
     /// Why it cannot be opened.
     Unavailable(String),
@@ -59,8 +59,7 @@ pub enum IdeAction {
 
 pub fn plan(kind: IdeKind, target: Option<&IdeTarget>) -> IdeAction {
     if kind == IdeKind::Ember {
-        // TODO(M8, editor core): open the Ember IDE window with `target.launch`
-        // (session, project, computer, folder, server_url).
+        // The caller opens the editor screen (FR-L31) from the launch data (project, folder).
         return IdeAction::EmberPlaceholder;
     }
     let Some(t) = target else {

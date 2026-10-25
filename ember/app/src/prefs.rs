@@ -41,6 +41,22 @@ pub struct Prefs {
     /// `ember`, `vscode` or `gateway`.
     #[serde(default)]
     pub ide_target: Option<String>,
+    /// System, Light or Dark (FR-L28). Older files have none, which reads as System.
+    #[serde(default)]
+    pub theme: crate::ui::theme::ThemePref,
+    /// The session screen's view: `multi`, `single` or `status` (FR-L18).
+    #[serde(default)]
+    pub session_view: Option<String>,
+    /// Pane tabs per project (FR-L18).
+    #[serde(default)]
+    pub panes: BTreeMap<String, crate::ui::session::ProjectPanes>,
+    /// Team character style per project id (FR-L22). Absent means the default, 몽글.
+    /// TODO(server): the project stores its own style once the server has the field.
+    #[serde(default)]
+    pub character_styles: BTreeMap<String, crate::ui::characters::CharStyle>,
+    /// The editor's shortcut set (FR-L30). Older files have none, which reads as VS Code.
+    #[serde(default)]
+    pub keymap: crate::ui::keymap::Keymap,
 }
 
 fn format_default() -> u32 {
@@ -54,7 +70,26 @@ impl Default for Prefs {
             last_used: BTreeMap::new(),
             last_project: None,
             ide_target: None,
+            theme: crate::ui::theme::ThemePref::default(),
+            session_view: None,
+            panes: BTreeMap::new(),
+            character_styles: BTreeMap::new(),
+            keymap: crate::ui::keymap::Keymap::default(),
         }
+    }
+}
+
+impl Prefs {
+    /// The project's team character style; 몽글 when none was chosen.
+    pub fn character_style(&self, project: &str) -> crate::ui::characters::CharStyle {
+        self.character_styles
+            .get(project)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
+        self.character_styles.insert(project.to_string(), style);
     }
 }
 
@@ -100,13 +135,51 @@ mod tests {
         let mut p = Prefs::default();
         p.last_used.insert(
             "ember".into(),
-            LastUsed { agent: "codex".into(), account: Some("a1".into()), computer: Some("c1".into()), model: Some("o3".into()), cwd: "/w".into() },
+            LastUsed {
+                agent: "codex".into(),
+                account: Some("a1".into()),
+                computer: Some("c1".into()),
+                model: Some("o3".into()),
+                cwd: "/w".into(),
+            },
         );
         p.ide_target = Some("vscode".into());
         save(&path, &p).unwrap();
         assert_eq!(load(&path), p);
         std::fs::write(&path, b"{nope").unwrap();
         assert_eq!(load(&path), Prefs::default());
+    }
+
+    #[test]
+    fn fr_l28_theme_choice_persists_and_defaults_to_system() {
+        use crate::ui::theme::ThemePref;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).theme, ThemePref::System);
+        let p = Prefs {
+            theme: ThemePref::Dark,
+            ..Prefs::default()
+        };
+        save(&path, &p).unwrap();
+        assert_eq!(load(&path).theme, ThemePref::Dark);
+    }
+
+    // FR-L22: the project character style is kept per device, default 몽글.
+    #[test]
+    fn fr_l22_character_style_round_trips_per_project() {
+        use crate::ui::characters::CharStyle;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        std::fs::write(&path, br#"{"format":1}"#).unwrap();
+        assert_eq!(load(&path).character_style("ember"), CharStyle::Mongle);
+        let mut p = Prefs::default();
+        p.set_character_style("ember", CharStyle::Crew);
+        save(&path, &p).unwrap();
+        let back = load(&path);
+        assert_eq!(back.character_style("ember"), CharStyle::Crew);
+        assert_eq!(back.character_style("other"), CharStyle::Mongle);
+        back.clone().set_character_style("ember", CharStyle::Mongle);
     }
 
     #[test]
@@ -121,6 +194,9 @@ mod tests {
         let p = load(&path);
         assert_eq!(p.ide_target.as_deref(), Some("ember"));
         save(&path, &p).unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("pinned"), "dropped on save");
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("pinned"),
+            "dropped on save"
+        );
     }
 }

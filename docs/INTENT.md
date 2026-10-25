@@ -304,7 +304,7 @@ makes its own `PreToolUse` hook (matcher `*`) the only gate:
    recreated and revoked when it ends. Ending or cancelling a turn denies every pending approval.
 4. Before every run `agy -p /hooks --output-format json` must list Ember's hook, else the run is
    refused (hooks.json has been silently dropped in the past).
-5. `--sandbox` is used as well, and the agy version is pinned. Another version is warned about and
+5. `--sandbox` is used as well (reversed 2026-10-25, see #65 below), and the agy version is pinned. Another version is warned about and
    runs read-only until the tests below pass on it.
 6. A global hook, if used, passes through when Ember's environment is absent, so the user's own agy
    sessions are unaffected.
@@ -328,6 +328,8 @@ the project's `.agents/` (writes into the user's repository).
 
 **Status.** Implemented (#64, `ember/server/src/agents/antigravity.rs`). Open: shell writes fail
 under `--sandbox` even inside the project (#65).
+
+**Owner decision (E11, #65, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** This reverses the 2026-10-03 decision to keep `--sandbox`. The default becomes `EMBER_AGY_SANDBOX=0` (no `--sandbox`) and Ember's hook is the gate, because the sandbox denies shell writes in the working directory. `EMBER_AGY_SANDBOX=1` turns it back on. The code change is tracked in #65.
 ### D15: REST paths carry no version
 
 **Decision.** [user, 2026-10-03: "REST API의 버저닝은 죄악이야"; a principle for every REST API,
@@ -379,9 +381,15 @@ session, and every update needs every session stopped.
 Rejected: the current coupling, where the agent is a child of the server with `kill_on_drop`, so a
 server exit kills every agent; stopping all sessions to update the server.
 
-**Status.** Not built. The design is open: the shim protocol and how handoff is verified.
+**Owner decision (E9, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** The memory limit is a 1 s RSS poll by the shim, not `RLIMIT_AS` (V8 reserves a large address space and would die at the limit); the interval is configurable. After the agent exits the shim waits up to 1 hour for the final ack (E10 in the owner's list), configurable.
+
+**Status.** Built in part (#128); see FR-S8.
 
 ### D18: A team member is a harness plus an account, or an account-switching pipeline
+
+> **Partly superseded by D30 (2026-10-25).** The account, pipeline and proxy choice moves from
+> the member to a profile bound to the harness. The harness choice per member and the owner
+> decisions below on the proxy env still hold.
 
 **Decision.** [user, 2026-10-25: "팀원 하나를 만들 때, 지정해야 할 것이 하네스가 뭔지, 어떤 계정으로
 실행할건지 -- 혹은 계정 자동 전환 파이프라인으로 할건지 그 두가지를 지정해서 실행 가능하게 해야 해.
@@ -397,7 +405,9 @@ exactly those choices.
 Rejected: tying a harness to its vendor's models only; choosing the account only at session start
 by hand.
 
-**Status.** Member definition and the Claude Code proxy env are built (#129, awaiting CI). The proxy server is not part of Ember.
+**Owner decisions (E1, E2, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** `team spawn` with neither an account nor a pipeline keeps defaulting to the pipeline (the account router); the strict exactly-one check stays in the member API. The proxy env is added to Codex and agy one harness at a time, each only after an integration test verifies the CLI's real proxy or base-URL setting; until then only Claude Code gets it.
+
+**Status.** Member definition and the Claude Code proxy env are built (#129, awaiting CI). The proxy server is not part of Ember. Verification issues for Codex and agy are filed.
 
 ### D19: Agent API traffic exits through the current computer
 
@@ -407,6 +417,8 @@ by hand.
 traffic leaves through the session's current computer, so the model provider sees that computer's IP.
 Candidate: the CLI gets `HTTPS_PROXY` pointing at a proxy that forwards through ember node.
 The owner confirmed this reading (traffic, not only tools) on 2026-10-25.
+
+**Owner decisions (E3, E4, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** CONNECT only: no plain `http://` proxying (`HTTP_PROXY` is not served). A tunnel already open stays on its computer after a switch and the proxy stops only when the session ends (an idle release is not an end); a long stream can therefore keep leaving from the old IP until it closes.
 
 **Why.** To the provider, Claude Code should look like it runs on that computer. D6 already does
 this for the remote browser.
@@ -433,6 +445,8 @@ that it moved is clearer than telling it that its observations are invalid.
 
 Rejected: failing tool actions while the computer is away; wording the notice as invalidation.
 
+**Owner decisions (E5, E6, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** E5: the session response exposes the designated computer and the current computer to clients as read-only fields (approved as recommended; the code is in another PR). E6: the loss detection default stays 2 probes x 10 s (about 10-20 s) and is configurable; it is revisited after the two-machine disconnect test.
+
 This closes Q2 (who moves a session): the user designates, and the server moves it on a connection
 change. An agent-triggered `switch_computer` is not part of this decision.
 
@@ -451,6 +465,8 @@ session's live and past output and send it input or an interrupt, as A2A tools. 
 what it is doing.
 
 Rejected: messages as the only channel between sessions.
+
+**Owner decisions (E7, E8, [user, 2026-10-25: "K1/K2 -- 우리 웹 소켓으로 하나?, K5 -- 실제 구현까지 보류 | 외 전부 추천대로"]).** The implicit grant runs only from a team leader to its own teammates; a teammate acts on the leader's terminal only with an explicit user grant. The `ember-a2a` CLI subcommands and the agent instruction text are a separate follow-up issue, so #132 closes at the tools.
 
 **Status.** Server tools built (#132, FR-T9); the CLI subcommands are not.
 
@@ -480,6 +496,8 @@ Rejected: messages as the only channel between sessions.
 - Q12: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" (tentative wording; `FR-T16`)
 - Q13: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. 한 채널은 한 프로젝트에 속한거야. 때문에 채널 페이지에 들어가면 프로젝트별로 분류된 섹션의 하위에 채널들이 하나씩 놓여있는 형태인거지. 한 프로젝트는 기본적으로 하나의 채널을 가지고, 추가 채널을 생성할 수 있는 형태인거야." (`FR-L10`, `FR-L12`, `FR-T10`)
 
+**Later (2026-10-25).** D26 fills the open tab set with eight entries; D28 renames Unsorted to 기본 프로젝트.
+
 **Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: how an invited person authenticates (Q10, remaining part) and the exact JSONL layout of `FR-T16`.
 
 ## Open questions
@@ -496,7 +514,7 @@ Rejected: messages as the only channel between sessions.
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed: deleted** [user, 2026-10-03] |
 | **Q9** | `ember/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `ember/proxy/docs/BACKGROUND.md` §7-3. | Open; HTTPS over P2P is #10 |
 | **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Open remainder:** the authentication mechanism of the invite |
-| **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | **Closed** [user, 2026-10-25]: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." Home chat sessions live in a built-in Unsorted project (`FR-L13`) |
+| **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | **Closed** [user, 2026-10-25]: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." Home chat sessions live in a built-in Unsorted project (`FR-L13`), renamed 기본 프로젝트 by D28 |
 | **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | **Closed** [user, 2026-10-25]: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" Per-channel append-only JSONL on the main server (`FR-T16`); the exact layout is [provisional] |
 | **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | **Closed** [user, 2026-10-25]: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. ..." Full quote in D22. A channel belongs to one project; every project has a default channel (`FR-L12`, `FR-T10`) |
 
@@ -507,3 +525,228 @@ Rejected: messages as the only channel between sessions.
 **Rejected.** Copying the CSS by hand (it drifts from the pinned Code-OSS and loses the commit record). A stylo patch for `:has()` (the replacement cost is small). Rendering markdown as HTML with `.rendered-markdown`.
 
 **Why.** The renderer drops `:has()` rules, so they need classes either way. A script plus a patch keeps the copy reproducible, and CI checks it offline against a committed pristine copy.
+
+### D24: Files move between all of a user's connected devices, like AirDrop
+
+**Decision.** [user, 2026-10-25: "Ember 스펙에 파일 전송 기능도 추가하는걸로 하자. 파일 메뉴도 UI에 추가해줘. ... 이 기능을 통해 연결된 모든 사용자 장비에 대해서 파일 전송이 가능해지는거지. 모바일까지도. airdrop 처럼 쓸 수 있게 하는거야!"] Ember has a file transfer feature and a Files menu in the UI. Any file can go between any two of the user's connected devices, mobile included, with an AirDrop-like feel: pick a device, send, the other side accepts.
+
+- **Transport** *[provisional]*: files travel over the existing peer-to-peer tunnel and its relay fallback (D8, `FR-N1`, `FR-N5`), as another stream on the same transport. No new network path, no new account system.
+- **Devices** *[provisional]*: "the user's devices" are the computers and clients registered under the user's GitHub account on the hub (`FR-N2`). Another person's device is out of scope here.
+- **Receiving** *[provisional]*: a transfer needs the receiver's consent. Received files land in a known folder and are listed with a transfer history in the Files menu.
+- **Reliability** *[provisional]*: large files stream in chunks and resume after a dropped connection.
+- **Mobile** *[provisional]*: the phone and tablet clients take part through the OS share sheet.
+
+**Rejected** *[provisional]*. A separate cloud upload service (files would leave the user's own devices and need storage, quotas and a trust boundary of their own). Third-party sync tools (a second app on mobile, the objection that withdrew tailcat in D8). A new transport beside the iroh tunnel. Sending to other people's devices in this first version.
+
+**Why.** The tunnel already connects every device of the user end to end. File transfer is the missing use of it, and it removes the habit of mailing files to oneself.
+
+**Status.** Specified only (`FR-F1`–`FR-F9`, Draft; issue #152). Not built. The Files menu mock is separate UI work.
+
+### D25: One client design on every OS, after the owner's reference images; Liquid Glass on iOS only
+
+**Decision.** [user, 2026-10-25: "운영체제별 디자인 쓰지 말고 통일 디자인으로 해."] The client draws
+the same screens with the same tokens and components on macOS, Windows, Linux, Android and iOS.
+The look comes from the reference images the owner supplied during the mockup rounds (ref1 to
+ref10: a light dashboard, an agent chat app, a warm usage card, Claude Code desktop, an agent
+timeline, a system monitor, a model picker), recorded with their roles in `DESIGN.md` §1.
+[user, 2026-10-25: "모바일 뷰에서 지금 하단 앱바가 안예쁜데 floating앱바 형태로 바꿔줘. iOS에서는
+liquid glass 적용하도록 하고."] The one exception is iOS, where the floating bottom bar uses Liquid
+Glass; every other platform draws the same bar opaque. Tokens, the Apple-style squircle (fixed
+radius, smoothing 0.6: "애플의 스퀘어클과 맞지 않는 구현이야"), motion and every screen layout are in
+`DESIGN.md`.
+
+[user, 2026-10-25: "앱 기본 스타일에서 안쪽 코드 작성이랑 도구창이 오히려 jetbrains island라는 최신 디자인 컨셉에 더 맞아. 그래서 그쪽 디자인이 맞고, 다만 지금 좌우 메뉴바의 경우 jetbrains 느낌으로 하는게 맞을거 같아. 흰색 버튼 배경이 보기 싫네."] The editor and terminal use the app's own style: rounded island panels, tabs, tool windows and the code area, matching the JetBrains Islands concept. Only the left and right tool-window stripes take the JetBrains form: 40 px icon-only stripes, with no white background or shadow on the selected button, just a faint selection tint. Breadcrumbs stay under the tabs. [provisional] The owner did not decide this, so it is a leader decision. Every other screen keeps the mockup design unchanged, including the session panels, the status view and version control.
+
+**Why.** One product that a user moves between machines should look the same on all of them, and a
+per-OS widget set multiplies the work of every screen.
+
+**Rejected.** Per-OS designs. A full JetBrains New UI look with the cool grey IDE palette on every
+screen, which issue #151 first asked for ("Jetbrains 제품 같은 느낌"). The owner's later rounds
+steered the base by the reference images, so the base stays the warm mockup palette. The JetBrains
+feel is added only on the editor and terminal screens, as the 2026-10-25 correction places it (see
+the Decision). Liquid Glass on every
+platform (asked for iOS only).
+
+**Status.** Design approved in the mockup (`.scratch/design-mockup/`), not built (#154). Gaps in
+dioxus-compose and compose-rust are listed in `DESIGN.md` §10.
+
+### D26: The menu is 홈, 프로젝트, 세션, 채널, 루틴, 버전 관리, 에이전트, 파일
+
+**Decision.** [user, 2026-10-25] The client's navigation has eight entries in this order. Each was
+added by the owner's own words:
+- 세션, removed earlier as a "list of member conversations" and re-added in a different form: "세션
+  메뉴 탭 만드는거 허용했잖아. 단지 지금 보이는 형태가 아니라 내가 지시한 대로 하라니까?" (see D27);
+- 루틴: "루틴 디자인은 기존의 참고 이미지들에서 컨셉을 가져오도록 해";
+- 버전 관리: "버전 관리 메뉴를 추가해줘." (D34);
+- 에이전트: "에이전트 메뉴를 하나 더 추가해서 거기에 하네스와 모델, 그리고 라우팅 등의 우리가 지원하는
+  기능들을 설정할 수 있도록 세팅해주자. 홈에 있던 사용량 표시도 같이 넣어주고.";
+- 파일: "파일 메뉴도 UI에 추가해줘." (file transfer, D24 in PR #153).
+
+The sidebar carries no group label ("굳이 워크스페이스 라는 글자를 표기하고 있을 필요가 없을거 같아.").
+On a phone the floating bar shows 홈, 프로젝트, 세션, 채널 and 더보기, which opens the other four
+[provisional: the split is the mockup's, so the bar stays at five].
+
+**How it relates to D22.** D22's open-ended tab set ("등으로") is filled by this list; D22's Home,
+Project and Channels keep their meaning, with the Home changes in D28 and `FR-L11`.
+
+**Why.** Each entry is a place the owner works in daily; settings for harnesses and accounts were
+scattered across member forms before 에이전트 existed.
+
+**Rejected.** The four-entry menu (홈, 프로젝트, 채널, 루틴) of the first mockups; a 세션 menu that
+lists every member conversation; Home holding the detailed usage (it moves to 에이전트 → 사용량, and
+Home keeps the graphs, `FR-L11`).
+
+### D27: 세션 is being inside a project
+
+**Decision.** [user, 2026-10-25: "세션 메뉴 탭 만드는거 허용했잖아. 단지 지금 보이는 형태가 아니라 내가
+지시한 대로 하라니까?"; "세션 서브탭 안에 프로젝트에 대한 세션이 있는거니까 sesshead가 세션 탭 옆에서부터
+시작하도록 수정해줘"] The 세션 tab is the state of being inside a project: it opens the last project
+used, with its members in a multi, single or status view, and the header switches project. A
+session side list (search, one section per project) runs the full height on the left in every
+view. Further owner rules for this screen: user-arranged tabs of panes with drag and drop instead
+of a pane count ("탭을 추가해서 여러 pane을 사용자가 배치할 수 있도록 해줘"); a Claude Code desktop
+style right panel in the single view; no project breadcrumb or back button in the single view
+("굳이 상단에 어느 프로젝트껀지를 표기할 필요가 없어보여"); IDE open and the IDE chooser at the right end;
+an agent communication timeline in the status view; opening a web page on the member's computer
+IP; version control as a sheet. Members are named as team members ("@@@구현, @@@리더 이렇게 팀원
+형식으로 해줘야지"). Layout: `DESIGN.md` §6.3.
+
+**Why.** A session belongs to a project (D1), so the session screen is a project's room, not a
+global list.
+
+**Rejected.** A global list of every conversation as the 세션 tab; a fixed pane count picker; the
+project name above the single view.
+
+### D28: 기본 프로젝트 replaces Unsorted, and has no leader
+
+**Decision.** [user, 2026-10-25: "Unsorted가 아니라 기본 프로젝트가 맞지 않나. 그리고 기본 프로젝트는
+팀 리더가 없어야지."] The built-in project of `FR-L13` (Q11) is named **기본 프로젝트**. It has no team
+leader: no crown, no leader setting, no orchestrator lane. Home's composer has a project chip
+whose default is 기본 프로젝트 ("채팅 시작할 때 프로젝트 선택 옵션이 있어야 해. 프로젝트가 뭐냐가
+중요하거든."), so a Home chat can start in any project.
+
+**Why.** "Unsorted" reads as a leftover; it is where a chat starts by default. A leader orchestrates
+a team, and the default project is not a team.
+
+**Rejected.** The name Unsorted (분류되지 않은); a leader in the default project; Home chats that can
+only start in the built-in project (Q11's answer stands as the default, not as the only choice).
+
+### D29: Team character styles, chosen per project
+
+**Decision.** [user, 2026-10-25: "에이전트 캐릭터는 그냥 팀 셋업 할 때 고를 수 있도록 하자. 각각의
+디자인의 이름은 니가 적당히 지어봐."] Members are animated characters ("사각 아바타 말고 Dots 처럼
+아기자기하고 귀여운 에이전트 아이콘을 만들어두도록 해. 아이콘이라기 보다는 진짜 움직이는걸로 해줘."). A
+project chooses one of six styles at setup or in its settings, and all its members use it. The
+owner picked the six ("1. 지금 현재 기본 디자인 좀 더 색상하고 디자인 다양화 2. B 3. 역할 소품인데
+에이전트 자체는 좀 다른 디자인으로 4. D 5. E 6. G"). The names 몽글, 말랑, 크루, 포켓, 크림, 키링, the
+seeded shape and colour, and 몽글 as the default are [provisional]. A leader shows a crown badge on
+every style ("리더(오케스트레이터) 역할의 에이전트는 아이콘에 표기를 따로 해줘야지"). `DESIGN.md` §7.
+
+**Why.** The owner wants members to read as teammates, and a team chooses its own look once rather
+than per member.
+
+**Rejected.** Square letter avatars; abstract directions (geometric morph, orbs, line glyphs,
+monograms: "아니 다른걸로 바꾸라는게 아니고 캐릭터를 여러개 뽑아달라고."); one style for the whole app;
+a style per member.
+
+### D30: Profiles bind accounts and routing to a harness, replacing per-member routing
+
+**Decision.** [user, 2026-10-25: "에이전트 세팅에서 지금은 팀원 별로 따로 따로 복잡하세 라우팅을 세팅해야
+하는데 그러지 말고, 계정과 라우팅을 결합해서 프로필이라는걸 만들어서 프로필이 하네스에 할당되도록 해줘."]
+A **profile** is a name, a target harness, an account bundle (one fixed account, or an ordered list
+of accounts switched automatically), switching rules (usage threshold, failure handling, routing
+policy) and an optional model proxy. Each harness has one default profile. A member follows the
+profile of its harness; it has no account, pipeline or proxy of its own. A project may override the
+profile per harness [provisional: the leader's simplification, "예외가 꼭 필요할 때만"]; there is no
+per-member override [provisional].
+
+**Supersedes part of D18.** D18's "a team member is a harness plus an account, or an
+account-switching pipeline", with an optional proxy per member, no longer holds as the user-facing
+model. The harness choice per member stays; the account choice, the pipeline and the proxy move to
+the profile. D18's owner decisions on the proxy env per harness (verified one at a time) still
+apply, now to profiles. D7's many accounts and usage routing are unchanged; profiles are how they
+are configured. `FR-U1`, `FR-U6` and `FR-A9` are marked accordingly; profiles are `FR-L17`.
+
+**Why.** Setting accounts and routing for every member repeats the same choice many times; the
+choice belongs to the harness.
+
+**Rejected.** Per-member account, pipeline and proxy settings (the "팀원 구성" table); a per-member
+profile override.
+
+### D31: Permission modes are chosen per harness
+
+**Decision.** [user, 2026-10-25: "모드도 필요해 바이패스 모드인지 자동인지 그런거. 새 채팅에는
+없더라고."] Wherever a session is started (Home, the session composer, new member, routines,
+project defaults), a permission-mode chip lists the modes the chosen harness supports: ask for
+every command, auto-approve edits only, bypass (allow everything), plan mode. Bypass is shown in
+the warning colour. Each harness has a default mode in 에이전트 → 모델. The four modes, their names
+and which harness supports which are [provisional] until each CLI's real modes are checked by an
+integration test (AGENTS.md rule 4); bypass is today's approve-all (`FR-A5`).
+
+**Why.** The owner switches between careful and unattended runs often, and the choice belongs at
+the start of a session, not in a menu afterwards.
+
+**Rejected.** One global approval policy per project (the mockup's earlier "승인 정책"); a mode list
+that ignores what the harness supports.
+
+### D32: The IDE chooser offers exactly three IDEs
+
+**Decision.** [user, 2026-10-25: "IDE 열기 기능에서 지금은 이상하게 Cursor, Zed가 추가되어 있는데
+빼줘. 그리고 VS Code ssh로 연결되는거 아니야."] The session header's IDE chooser lists three entries,
+as D9 and D9a already decided: **Ember 에디터** (Ember's editor core, a native window), **VS Code**
+(the computer's `code serve-web` wrapped in Ember's IDE window, OSE runtime by default, D10), and
+**JetBrains Gateway** (a command to the Gateway installed on that computer). This is a correction
+of the mockup, not a new decision.
+
+**Keymap.** [user, 2026-10-25: "단축키는 vscode로 할건지 jetbrains로 할건지 선택할 수 있게 해주면 될거같아."] The Ember editor's shortcuts follow a keymap the user chooses in settings, VS Code or JetBrains. The choice changes the shortcut hints shown and the keys the editor handles (`FR-L30`).
+
+**Rejected.** Cursor and Zed; VS Code over Remote SSH.
+
+### D33: A computer monitor opens from a project's computer
+
+**Decision.** [user, 2026-10-25: "프로젝트에 있는 컴퓨터 누르면 컴퓨터의 CPU, GPU, RAM, 디스크 사용량을
+작업 관리자 처럼 띄우는 기능을 추가하도록 하자."] Clicking a computer on the project screen opens a
+task-manager sheet laid out after the owner's reference (ref7, Mole's Status screen): CPU, GPU,
+memory, disk, network, temperatures, fans and a process table, with members' agent processes
+highlighted. Network, temperature and fan cards and the process highlighting are [provisional]
+additions from the reference. ember node collects the values (`FR-X7`).
+
+**Why.** Agents run out of memory and load computers; the owner wants to see why from the place
+where computers are assigned.
+
+**Rejected.** A separate monitoring app; showing only reachability (`FR-L3`).
+
+### D34: Version control is in the app, at GitHub Desktop level
+
+**Decision.** [user, 2026-10-25: "프로젝트별로 Git을 볼 수 있도록 지원하되, vscode처럼 부족한 UI 말고
+Github Desktop을 대체할 수 있을 정도의 체계적인 UI가 필요해."; "프로젝트에서 바로 버전 관리로 이동할
+수 있는 버튼 제공하면 좋을거 같고, 세션에서도 켜볼 일이 많을거 같아서 거기도 버튼 하나 두고 거기는
+팝업으로 뜨게 하면 좋을거같아."] 버전 관리 is a menu entry with a per-project screen: changes with
+line staging and commit, history graph, branches, pull requests with checks and reviews, stash,
+conflict resolution, push/pull/fetch, and a team view of each member's branch and worktree. The
+project screen links to it; the session header opens it as a sheet. The section list and the team
+view are [provisional] details. `DESIGN.md` §6.6.
+
+**Why.** Agents work on many branches and worktrees at once; the owner reviews and merges their
+work and should not need a second app for it.
+
+**Rejected.** A VS Code style source control list; sending the user to GitHub Desktop.
+
+### D35: The logo is a phoenix after DarkPyonix's temporary logo (pending final sign-off)
+
+**Decision.** [user, 2026-10-25: "엠버의 로고 디자인은 DarkPyonix의 임시 로고를 참고하도록 해. ... 이거로
+부터 영감을 받아서 벡터로 예쁘게 잘 구현해봐. 데스크탑의 작업 표시줄 아이콘은 vscode 처럼 배경 없이
+구현하고, 모바일과 앱 내 아이콘은 배경 넣어서 구현해줘."] The Ember logo is a vector phoenix drawn
+from DarkPyonix's temporary logo: no background on the desktop taskbar, a background on mobile and
+in-app icons. The owner chose candidate B, "phoenix-fold" ("그래 뭐 주 후보인게 젤 좋긴 한거같다.")
+and asked for a rounder tail, VS Code's size and more colour layers; those were made and passed an
+independent review. Files: `.scratch/design-mockup/logo/phoenix-fold/`.
+
+[user, 2026-10-25: "엠버 로고가 완전히 마음에 들진 않아. 내가 로고 좀 더 동그랗게 하라고 했는데 제대로 반영도 안하고. 일단 지금꺼라도 해서 작업 시작해봐"] **Phoenix-fold B (round 9, the pink band left at 12%) is the temporary
+logo.** It is in use in the app and the mockup now, so work can start on it. The owner is not
+satisfied with it, so the final logo stays open. Reason: the owner wants the work to start without
+waiting for a finished logo. The follow-up is a Draft in `SPEC.md` (FR-L29): make the whole
+silhouette rounder. It is not scheduled; it starts only when the owner asks again.
+
+**Rejected.** The first four candidates (ring, drop, ember coal, E) ("여전히 처참한거 같아. ... 내가
+넣어준 임시 로고가 훨배 나아."); a new symbol unrelated to DarkPyonix.

@@ -21,9 +21,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
+    ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
+use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
 pub const SERVER_SERVICE: &str = "ember-server";
@@ -318,6 +319,50 @@ impl Api {
         Self::decode(self.send(Method::DELETE, &path, None).await?)
     }
 
+    // ---- schedules (FR-A8) -----------------------------------------------------------------
+
+    /// Every schedule, or one project's.
+    pub async fn schedules(&self, project: Option<&str>) -> ApiResult<Vec<Schedule>> {
+        match project {
+            Some(p) => self.get(&format!("/schedules?project={}", seg(p))).await,
+            None => self.get("/schedules").await,
+        }
+    }
+
+    pub async fn create_schedule(&self, new: &NewSchedule) -> ApiResult<Schedule> {
+        let body = serde_json::to_value(new).expect("NewSchedule serialises");
+        Self::decode(self.post("/schedules", body).await?)
+    }
+
+    pub async fn update_schedule(&self, id: &str, patch: &SchedulePatch) -> ApiResult<Schedule> {
+        let body = serde_json::to_value(patch).expect("SchedulePatch serialises");
+        Self::decode(self.send(Method::PATCH, &format!("/schedules/{}", seg(id)), Some(body)).await?)
+    }
+
+    pub async fn delete_schedule(&self, id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &format!("/schedules/{}", seg(id)), None).await?)?;
+        Ok(())
+    }
+
+    pub async fn pause_schedule(&self, id: &str) -> ApiResult<Schedule> {
+        Self::decode(self.post(&format!("/schedules/{}/pause", seg(id)), json!({})).await?)
+    }
+
+    pub async fn resume_schedule(&self, id: &str) -> ApiResult<Schedule> {
+        Self::decode(self.post(&format!("/schedules/{}/resume", seg(id)), json!({})).await?)
+    }
+
+    /// Run now; answers the run (the server answers 202).
+    pub async fn run_schedule(&self, id: &str) -> ApiResult<ScheduleRun> {
+        Self::decode(self.post(&format!("/schedules/{}/run", seg(id)), json!({})).await?)
+    }
+
+    /// The most recent runs, newest first (server default 50, at most 500).
+    pub async fn schedule_runs(&self, id: &str, limit: Option<usize>) -> ApiResult<Vec<ScheduleRun>> {
+        let q = limit.map(|n| format!("?limit={n}")).unwrap_or_default();
+        self.get(&format!("/schedules/{}/runs{q}", seg(id))).await
+    }
+
     // ---- session metadata, search, export, fork (FR-L9, FR-S4, FR-S5) -----------------------
 
     /// Rename, pin or archive a session; answers the updated record.
@@ -334,6 +379,12 @@ impl Api {
         }
         let q = serde_urlencoded::to_string(q).map_err(|e| ApiError::Decode(e.to_string()))?;
         self.get(&format!("/search?{q}")).await
+    }
+
+    /// Tokens per account per UTC day for the last `days` days (FR-U7), oldest first. The server
+    /// clamps `days` to 1..=366 and defaults to 7.
+    pub async fn usage(&self, days: Option<u32>) -> ApiResult<Vec<DailyUsage>> {
+        self.get(&usage_path(days)).await
     }
 
     /// The session as the server's self-contained export file (`format: "ember-transcript"`).
@@ -418,9 +469,35 @@ fn seg(s: &str) -> String {
     out
 }
 
+/// Path of `GET /usage`, with `?days=` when given.
+fn usage_path(days: Option<u32>) -> String {
+    match days {
+        Some(n) => format!("/usage?days={n}"),
+        None => "/usage".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_u7_usage_path_carries_days() {
+        assert_eq!(usage_path(None), "/usage");
+        assert_eq!(usage_path(Some(14)), "/usage?days=14");
+    }
+
+    #[test]
+    fn fr_u7_daily_usage_decodes_server_rows() {
+        let rows: Vec<DailyUsage> = serde_json::from_value(json!([
+            {"account_id": "gpt-1", "day": "2026-10-25", "input_tokens": 1200, "output_tokens": 34, "reports": 3},
+            {"account_id": null, "day": "2026-10-26", "input_tokens": 5, "output_tokens": 6, "reports": 1}
+        ]))
+        .unwrap();
+        assert_eq!(rows[0].account_id.as_deref(), Some("gpt-1"));
+        assert_eq!(rows[0].total_tokens(), 1234);
+        assert_eq!((rows[1].account_id.clone(), rows[1].day.as_str()), (None, "2026-10-26"));
+    }
 
     #[test]
     fn fr_s5_fork_body_names_turn_seq() {

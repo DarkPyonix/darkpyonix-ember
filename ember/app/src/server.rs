@@ -106,6 +106,9 @@ pub struct CurrentComputer {
     pub implicit: bool,
     #[serde(default)]
     pub notice_pending: bool,
+    /// The computer designated for the session (FR-X3), read-only.
+    #[serde(default)]
+    pub designated_computer_id: Option<String>,
 }
 
 /// `PUT /api/sessions/{id}/computer` answer.
@@ -156,6 +159,14 @@ pub struct IdeLaunch {
 impl IdeLaunch {
     pub fn target(&self, kind: &str) -> Option<&IdeTarget> {
         self.targets.iter().find(|t| t.kind == kind)
+    }
+
+    /// The `(project, folder)` the Ember editor opens (FR-L31); empty until the launch data arrives.
+    pub fn editor_target(launch: Option<&Result<IdeLaunch, String>>) -> (String, String) {
+        launch
+            .and_then(|r| r.as_ref().ok())
+            .map(|l| (l.project.clone(), l.folder.clone()))
+            .unwrap_or_default()
     }
 }
 

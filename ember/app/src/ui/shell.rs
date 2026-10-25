@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{conversation, new_session, project, search, use_ui, Route};
+use crate::ui::{Route, new_session, project, search, session, use_ui};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -427,7 +427,7 @@ pub fn Shell() -> Element {
         Column {
             weight: 1.0,
             fill_max_height: true,
-            if matches!(screen, Screen::Launcher | Screen::Search | Screen::Conversation(_)) {
+            if matches!(screen, Screen::Launcher | Screen::Search) {
                 Row {
                     fill_max_width: true,
                     padding_role: SpaceRole::Sm,
@@ -458,7 +458,8 @@ pub fn Shell() -> Element {
                 match screen {
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
-                    Screen::Conversation(id) => rsx! { conversation::ConversationView { key: "{id}", id: id.clone() } },
+                    // 세션 is the inside of a project (FR-L18); the open conversation is its focus.
+                    Screen::Conversation(id) => rsx! { session::SessionScreen { focus: Some(id.clone()) } },
                     Screen::Placeholder(menu) => rsx! { Placeholder { menu } },
                 }
             }

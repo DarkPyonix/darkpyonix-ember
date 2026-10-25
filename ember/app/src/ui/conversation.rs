@@ -34,7 +34,7 @@ use crate::ui::launcher::{export, patch_session, ConnectionBanner};
 use crate::ui::{use_ui, Route};
 
 /// A transcript row's stable key: its event sequence number.
-fn item_key(item: &TranscriptItem) -> String {
+pub(crate) fn item_key(item: &TranscriptItem) -> String {
     let seq = match item {
         TranscriptItem::User { seq, .. }
         | TranscriptItem::Assistant { seq, .. }
@@ -60,7 +60,7 @@ fn fork_from(ui: crate::ui::Ui, id: String, seq: Option<i64>) {
 }
 
 #[component]
-pub fn ConversationView(id: String) -> Element {
+pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element {
     let ui = use_ui();
     let window = use_window_size();
     let s = services();
@@ -477,7 +477,7 @@ pub fn ConversationView(id: String) -> Element {
                 fill_max_width: true,
                 alignment: Alignment::CenterStart,
                 space_role: SpaceRole::Sm,
-                if compact {
+                if compact && !embedded {
                     Button {
                         text: "",
                         icon: IconRole::Back,
@@ -577,7 +577,9 @@ pub fn ConversationView(id: String) -> Element {
                 if pending > 0 {
                     Badge { text: format!("{pending} approval{} waiting", if pending == 1 { "" } else { "s" }), tone: Tone::Warning }
                 }
-                // FR-L7: top right of the conversation view.
+                // FR-L7: top right of the conversation view. The session screen has its own
+                // chooser in its top bar (FR-L18), so an embedded view leaves it out.
+                if !embedded {
                 Menu {
                     expanded: ide_menu(),
                     on_dismiss: move |_| ide_menu.set(false),
@@ -603,6 +605,7 @@ pub fn ConversationView(id: String) -> Element {
                             },
                         }
                     }
+                }
                 }
             }
             ConnectionBanner {}
@@ -721,6 +724,10 @@ pub fn ConversationView(id: String) -> Element {
                 }
             }
 
+            // The session screen shows the model and mode chips (FR-L15, FR-L16).
+            if embedded {
+                crate::ui::session::ComposerChips { session: id.clone() }
+            }
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
@@ -764,7 +771,7 @@ pub fn ConversationView(id: String) -> Element {
 
 /// One transcript entry.
 #[component]
-fn TranscriptRow(
+pub(crate) fn TranscriptRow(
     session: String,
     agent: String,
     item: TranscriptItem,

@@ -798,7 +798,7 @@ fn StatusDisc(total: usize, top: Option<LauncherStatus>, size: f32) -> Element {
 /// The placeholder character: a circle in the harness colour, with the crown for a leader.
 /// TODO(FR-L22): the six animated team character styles replace this.
 #[component]
-fn Character(agent: String, leader: bool, size: f32, name: String) -> Element {
+pub fn Character(agent: String, leader: bool, size: f32, name: String) -> Element {
     let theme = use_ember_theme();
     let p = theme.palette;
     let (fg, bg) = tone_fill(harness_tone(&agent), p);

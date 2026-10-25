@@ -33,6 +33,42 @@ pub struct EditorTarget {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Demo files
+// ---------------------------------------------------------------------------------------------
+
+/// The environment switch the demo launch sets (the server reads the same one for its usage).
+pub const DEMO_ENV: &str = "EMBER_DEMO_DATA";
+
+/// Whether the demo switch value turns demo data on. Only `1` does.
+pub fn demo_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// A file of the demo project: its path from the project root and a short content.
+pub type DemoFile = (&'static str, &'static str);
+
+/// Demo only, replaced when the server serves files (#193): the server has no file listing yet,
+/// so the screenshot pass gets a few nested files to open tabs and breadcrumbs on. Empty unless
+/// `value` (the `EMBER_DEMO_DATA` switch) is `1`.
+pub fn demo_files(value: Option<&str>) -> Vec<DemoFile> {
+    if !demo_enabled(value) {
+        return Vec::new();
+    }
+    vec![
+        ("README.md", "# demo\n\nA small project for screenshots.\n"),
+        ("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n"),
+        ("src/main.rs", "mod config;\n\nfn main() {\n    println!(\"hello\");\n}\n"),
+        ("src/config.rs", "pub struct Config {\n    pub port: u16,\n}\n"),
+        ("src/ui/home.rs", "pub fn home() -> &'static str {\n    \"home\"\n}\n"),
+    ]
+}
+
+/// The demo files read from the environment; empty in a normal run.
+fn demo_files_from_env() -> Vec<DemoFile> {
+    demo_files(std::env::var(DEMO_ENV).ok().as_deref())
+}
+
+// ---------------------------------------------------------------------------------------------
 // Pure state
 // ---------------------------------------------------------------------------------------------
 
@@ -408,6 +444,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
     let mut tabs = use_signal(EditorTabs::default);
     let mut stripes = use_signal(Stripes::default);
     let mut menu_open = use_signal(|| false);
+    let files = demo_files_from_env();
 
     let project = target.project.clone();
     let project_name = display_name(&project);
@@ -542,7 +579,19 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                 Column { fill_max_width: true, weight: 1.0, padding: SP[3], spacing: SP[0],
                                     Label { text: "프로젝트", fs: Fs::Md, weight: Weight::Semibold }
                                     Label { text: folder_line.clone(), fs: Fs::Sm }
-                                    Label { text: format!("파일 목록은 {SOON}"), fs: Fs::Xs, color: paint(p.muted) }
+                                    if files.is_empty() {
+                                        Label { text: format!("파일 목록은 {SOON}"), fs: Fs::Xs, color: paint(p.muted) }
+                                    }
+                                    // demo only, replaced when the server serves files
+                                    for (path, _) in files.clone() {
+                                        Button {
+                                            key: "{path}",
+                                            text: path,
+                                            variant: ButtonVariant::Text,
+                                            fill_max_width: true,
+                                            on_click: move |_| tabs.write().open(path),
+                                        }
+                                    }
                                 }
                             },
                             other => rsx! { SoonBody { title: other.label(), note: "서버가 알려 주면 이곳에 표시됩니다." } },
@@ -640,7 +689,14 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                         Column { weight: 1.0, fill_max_width: true, padding: SP[3], spacing: SP[0],
                             if let Some(path) = current.clone() {
                                 Label { text: base_name(&path).to_string(), fs: Fs::Md, weight: Weight::Semibold }
-                                Label { text: SOON, fs: Fs::Sm, color: paint(p.text_2) }
+                                // demo only, replaced when the server serves files
+                                if let Some((_, body)) = files.iter().find(|(f, _)| *f == path.as_str()) {
+                                    for (n, line) in body.lines().enumerate() {
+                                        Label { key: "{n}", text: format!("{:>3}  {line}", n + 1), fs: Fs::Sm }
+                                    }
+                                } else {
+                                    Label { text: SOON, fs: Fs::Sm, color: paint(p.text_2) }
+                                }
                                 // TODO(#166: 코드 편집기 위젯): `ember/editor` widget once the pinned toolkit has CodeEditor.
                                 Label { text: "코드 편집기는 편집기 코어(FR-E1)가 연결되면 표시됩니다.", fs: Fs::Xs, color: paint(p.muted) }
                             } else {
@@ -751,6 +807,20 @@ mod tests {
         assert!(apply_action(Action::Close, &mut tabs, &mut stripes));
         assert_eq!(tabs.current_path(), None);
         assert!(!apply_action(Action::Format, &mut tabs, &mut stripes));
+    }
+
+    #[test]
+    fn demo_files_are_empty_unless_the_switch_is_one() {
+        assert!(demo_files(None).is_empty());
+        assert!(demo_files(Some("0")).is_empty());
+        assert!(demo_files(Some("true")).is_empty());
+        let f = demo_files(Some("1"));
+        assert!(f.len() >= 4);
+        assert!(f.iter().any(|(p, _)| p.contains('/')), "nested paths give breadcrumbs");
+        assert!(f.iter().all(|(_, c)| !c.is_empty()));
+        let mut tabs = EditorTabs::default();
+        tabs.open(f[2].0);
+        assert_eq!(tabs.current_path(), Some(f[2].0));
     }
 
     #[test]

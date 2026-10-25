@@ -12,7 +12,7 @@
 use dioxus_compose::prelude::*;
 
 use ember_client::wire::DailyUsage;
-use ember_client::state::{Input, LauncherStatus, Reachability, State};
+use ember_client::state::{LauncherStatus, Reachability, State};
 
 use super::components::*;
 use super::theme::*;
@@ -978,14 +978,10 @@ fn HomeComposer() -> Element {
             run(
                 async move {
                     let s = services();
-                    let rec = s
-                        .server
-                        .create_session(&body)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    s.client.apply(Input::SessionLoaded(rec.clone()));
+                    let rec = s.create_session(&body).await?;
                     let mut notice = None;
-                    if let Some(cid) = computer_id {
+                    // The demo (#199) has one computer and no node to switch.
+                    if let Some(cid) = computer_id.filter(|_| s.demo.is_none()) {
                         if let Err(e) = s.server.switch_computer(&rec.id, &cid).await {
                             notice = Some(format!(
                                 "메인 서버에서 시작했습니다. 컴퓨터를 바꾸지 못했습니다 ({e})"
@@ -993,7 +989,7 @@ fn HomeComposer() -> Element {
                         }
                     }
                     if bypass {
-                        if let Err(e) = s.client.set_approve_all(&rec.id, true).await {
+                        if let Err(e) = s.set_approve_all(&rec.id, true).await {
                             notice = Some(format!("모두 허용을 켜지 못했습니다 ({e})"));
                         }
                     }

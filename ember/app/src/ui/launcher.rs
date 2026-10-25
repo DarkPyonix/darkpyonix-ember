@@ -417,7 +417,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
 
 /// Change a session's metadata on the main server (FR-L9); say so when it fails.
 pub fn patch_session(id: String, patch: SessionPatch) {
-    run(async move { services().client.patch_session(&id, &patch).await }, |r| {
+    run(async move { services().patch_session(&id, &patch).await }, |r| {
         if let Err(e) = r {
             Message::new(format!("Could not update the session: {e}")).with_duration(MessageDuration::Long).show();
         }

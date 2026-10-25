@@ -31,6 +31,7 @@ use ember_server::store::Store;
 ///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
 ///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
+/// - `EMBER_DEMO_DATA=1`: add a demo ChatGPT plan account with 14 days of usage (screenshots only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
 ///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
@@ -93,6 +94,8 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    // Demo only (#193): off unless EMBER_DEMO_DATA=1.
+    ember_server::chatgpt::demo::seed(&store, std::env::var(ember_server::chatgpt::demo::ENV).ok().as_deref())?;
     let reset = store.reset_live_statuses()?;
     if reset > 0 {
         tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ember_app::prefs::{self, Prefs};
-use ember_app::ui::editor::{EditorTabs, Side, Stripes, ToolWindow, position_text};
+use ember_app::ui::editor::{position_text, EditorTabs, Side, Stripes, ToolWindow};
 use ember_app::ui::keymap::{Action, Chord, Keymap, Os};
 
 const OSES: [Os; 2] = [Os::Mac, Os::Other];
@@ -140,11 +140,9 @@ fn keymap_default_and_prefs_round_trip() {
     };
     prefs::save(&path, &p).unwrap();
     assert_eq!(prefs::load(&path).keymap, Keymap::JetBrains);
-    assert!(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("jetbrains")
-    );
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("jetbrains"));
 }
 
 #[test]

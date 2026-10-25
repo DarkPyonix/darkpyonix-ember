@@ -20,7 +20,7 @@ use ember_client::LauncherStatus;
 
 use crate::ui::components::Label;
 use crate::ui::keymap::{Action, Keymap, Os};
-use crate::ui::project::{SOON, display_name, project_boxes, status_pill};
+use crate::ui::project::{display_name, project_boxes, status_pill, SOON};
 use crate::ui::theme::*;
 use crate::ui::use_ui;
 

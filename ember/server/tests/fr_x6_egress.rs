@@ -157,3 +157,24 @@ async fn fr_x6_proxy_needs_the_session_credential() {
     s.read_to_string(&mut out).await.unwrap();
     assert!(out.starts_with("HTTP/1.1 407"), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_x6_ending_a_session_refuses_its_proxy_port() {
+    let eg = SessionEgress::new(route_to(Arc::new(Mutex::new(None))));
+    let url = eg.proxy_url("s1").unwrap();
+    let (_, addr) = split(&url);
+    let target = echo().await;
+    let (status, _) = connect(&url, target).await;
+    assert!(status.contains("200"), "{status}");
+
+    let end = eg.clone().end_hook();
+    end("s1");
+    // The proxy task is aborted on the runtime, so its listener closes a little later.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while TcpStream::connect(addr.as_str()).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the ended session's proxy port still accepts connections");
+}

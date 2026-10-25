@@ -86,6 +86,10 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// Contributes environment variables to an agent process when its session starts.
 pub type StartHook = Arc<dyn Fn(&SessionRecord) -> Vec<(String, String)> + Send + Sync>;
 
+/// Called with a session id when the session ends for good (its team member is ended). Releases
+/// the session's per-session resources; a later start calls the start hooks again.
+pub type EndHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Observes every event after it is stored (e.g. rate-limit detection, FR-U3). Runs inline on
 /// the session's event pump, so it must be quick.
 pub type EventHook = Arc<dyn Fn(&StoredEvent) + Send + Sync>;
@@ -129,6 +133,7 @@ pub type UserMessageHook =
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
+    end_hooks: std::sync::Mutex<Vec<EndHook>>,
     event_hooks: std::sync::Mutex<Vec<EventHook>>,
     account_router: std::sync::Mutex<Option<AccountRouter>>,
     instructions_hooks: std::sync::Mutex<Vec<InstructionsHook>>,
@@ -154,6 +159,7 @@ impl Sessions {
         Arc::new(Sessions {
             store,
             start_hooks: std::sync::Mutex::new(Vec::new()),
+            end_hooks: std::sync::Mutex::new(Vec::new()),
             event_hooks: std::sync::Mutex::new(Vec::new()),
             account_router: std::sync::Mutex::new(None),
             instructions_hooks: std::sync::Mutex::new(Vec::new()),
@@ -173,6 +179,19 @@ impl Sessions {
     /// Register a hook that adds environment to every agent process this server starts.
     pub fn add_start_hook(&self, hook: StartHook) {
         self.start_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Register a hook that runs when a session ends (see [`EndHook`]).
+    pub fn add_end_hook(&self, hook: EndHook) {
+        self.end_hooks.lock().unwrap().push(hook);
+    }
+
+    /// Run the end hooks for `id`. Call once the session has ended.
+    pub fn session_ended(&self, id: &str) {
+        let hooks: Vec<EndHook> = self.end_hooks.lock().unwrap().clone();
+        for hook in hooks {
+            hook(id);
+        }
     }
 
     /// Register a hook that sees every stored event.
@@ -312,6 +331,9 @@ impl Sessions {
             self.start_hooks.lock().unwrap().iter().flat_map(|h| h(&rec)).collect();
         let instructions: Vec<String> =
             self.instructions_hooks.lock().unwrap().iter().filter_map(|h| h(&rec)).collect();
+        let mut env = env;
+        // Lets the shared spawn helper run the agent under its per-session shim (FR-S8).
+        env.push((crate::agents::proc::SESSION_ENV.to_string(), id.to_string()));
         let mut req = StartRequest {
             cwd: PathBuf::from(&rec.cwd),
             resume_native_id: rec.native_id.clone(),
@@ -586,6 +608,38 @@ impl Sessions {
             live.run.lock().await.shutdown().await?;
         }
         Ok(())
+    }
+
+    /// Server startup (FR-S8): rejoin the sessions whose agent outlived the previous server.
+    /// Agents that can be rejoined as they run are attached from their stored output offset, so
+    /// the rest of an interrupted turn arrives; for the others the old agent is stopped and the
+    /// session resumes natively on its next message. Returns the rejoined session ids.
+    pub async fn rejoin_shims(self: &Arc<Self>, rt: &crate::agents::proc::ShimRuntime) -> Vec<String> {
+        let ids = match crate::agents::proc::live_shim_sessions(rt).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("could not scan session shims: {e:#}");
+                return Vec::new();
+            }
+        };
+        let mut rejoined = Vec::new();
+        for id in ids {
+            let rejoin = self
+                .store
+                .session(&id)
+                .ok()
+                .flatten()
+                .and_then(|rec| self.adapters.get(&rec.agent).map(|a| a.rejoins_shim()))
+                .unwrap_or(false);
+            if !rejoin {
+                continue;
+            }
+            match self.ensure_live(&id).await {
+                Ok(_) => rejoined.push(id),
+                Err(e) => tracing::warn!(session = %id, "could not rejoin its agent: {e}"),
+            }
+        }
+        rejoined
     }
 
     pub async fn is_live(&self, id: &str) -> bool {

@@ -37,7 +37,7 @@ use crate::ide::{IdeAction, IdeKind, open_external, plan};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run, services};
 use crate::ui::components::{
-    AppButton, ButtonKind, EmberCard, EmberSheet, IconButton, Label, Pill, PillTone,
+    AppButton, ButtonKind, EmberCard, EmberSheet, IconButton, Label, PickChip, Pill, PillTone,
 };
 use crate::ui::conversation::{ConversationView, TranscriptRow, item_key};
 use crate::ui::home::{Harness, PermMode, default_option, model_catalog, modes_for};
@@ -398,7 +398,7 @@ pub fn can_move(order: &[String], id: &str, dir: PaneMove) -> bool {
 
 /// One tab of panes. `members: None` shows every member of the project; the first edit pins the
 /// list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneTab {
     pub name: String,
     #[serde(default)]
@@ -449,7 +449,7 @@ pub fn reorder_pane(tab: &mut PaneTab, all: &[String], id: &str, dir: PaneMove) 
 }
 
 /// The tabs of one project and the selected one. Saved per project in the prefs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectPanes {
     pub tabs: Vec<PaneTab>,
     #[serde(default)]
@@ -2356,6 +2356,7 @@ mod tests {
                 !t.ends_with('다')
                     || t.ends_with("입니다")
                     || t.ends_with("합니다")
+                    || t.ends_with("습니다")
                     || t.ends_with("됩니다"),
                 "{t}"
             );

@@ -11,6 +11,7 @@
 
 use dioxus_compose::prelude::*;
 
+use ember_client::wire::DailyUsage;
 use ember_client::state::{Input, LauncherStatus, Reachability, State};
 
 use super::components::*;
@@ -594,6 +595,65 @@ pub fn harness_usage(state: &State) -> Vec<HarnessBar> {
                 .map(|h| h.label().to_string())
                 .unwrap_or(kind),
             sessions,
+        })
+        .collect()
+}
+
+/// Days since 1970-01-01 of a `YYYY-MM-DD` date (proleptic Gregorian), `None` if malformed.
+fn day_number(ymd: &str) -> Option<i64> {
+    let mut it = ymd.split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if it.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// `YYYY-MM-DD` of a day number from [`day_number`].
+fn day_string(n: i64) -> String {
+    let z = n + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Today's UTC date as `YYYY-MM-DD`.
+pub fn today_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    day_string(secs.div_euclid(86_400))
+}
+
+/// ChatGPT plan tokens (input plus output) for each of the last `days` UTC days ending at
+/// `today`, oldest first, as `(YYYY-MM-DD, tokens)`. Only rows of accounts in `chatgpt_ids`
+/// count: the other harnesses report no tokens here yet (FR-U7). A day with no row is 0.
+pub fn chatgpt_token_days(rows: &[DailyUsage], chatgpt_ids: &[String], today: &str, days: usize) -> Vec<(String, u64)> {
+    let Some(end) = day_number(today) else {
+        return Vec::new();
+    };
+    (0..days as i64)
+        .map(|i| day_string(end - (days as i64 - 1) + i))
+        .map(|day| {
+            let total = rows
+                .iter()
+                .filter(|r| r.day == day && r.account_id.as_ref().is_some_and(|a| chatgpt_ids.contains(a)))
+                .map(DailyUsage::total_tokens)
+                .sum();
+            (day, total)
         })
         .collect()
 }
@@ -1319,7 +1379,7 @@ fn HomeDashboard() -> Element {
                 compact,
                 start_weight: 2.0,
                 end_weight: 1.0,
-                start: rsx! { UnavailableTile { title: "비용과 토큰 추이" } },
+                start: rsx! { TokenTrendTile {} },
                 end: rsx! { StatusTile { counts: d.counts.clone() } },
             }
             TilePair {
@@ -1383,6 +1443,58 @@ fn KpiView(kpi: Kpi) -> Element {
             if let Some(note) = kpi.note.clone() {
                 Label { text: note, fs: Fs::Xs, color: muted }
             }
+        }
+    }
+}
+
+/// Token bars per day for the ChatGPT plan accounts, 7 or 14 days (FR-U7). Cost and the other
+/// harnesses are not reported yet and say so.
+#[component]
+fn TokenTrendTile() -> Element {
+    let ui = use_ui();
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let mut days = use_signal(|| 7usize);
+    let rows = ui.live.usage.read().clone();
+    let ids: Vec<String> = ui.live.chatgpt.read().iter().map(|a| a.id.clone()).collect();
+    if ids.is_empty() {
+        return rsx! { UnavailableTile { title: "비용과 토큰 추이" } };
+    }
+    let series = chatgpt_token_days(&rows, &ids, &today_utc(), *days.read());
+    const W: f32 = 420.0;
+    const H: f32 = 90.0;
+    let values: Vec<usize> = series.iter().map(|(_, t)| *t as usize).collect();
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, W, 1.0, 0.0);
+    for (x, y, w, h) in bar_rects(&values, W, H, 6.0) {
+        if h > 0.0 {
+            list = list.round_rect(paint(p.blue.strong), x, y, w, h, 3.0, 0.0);
+        }
+    }
+    let commands = list.build();
+    let total: u64 = series.iter().map(|(_, t)| *t).sum();
+    let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
+    let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
+    rsx! {
+        TileFrame { title: "비용과 토큰 추이",
+            Row { fill_max_width: true, spacing: SP[1],
+                for n in [7usize, 14] {
+                    AppButton {
+                        key: "{n}",
+                        text: format!("{n}일"),
+                        kind: if *days.read() == n { ButtonKind::Primary } else { ButtonKind::Default },
+                        small: true,
+                        on_click: move |()| days.set(n),
+                    }
+                }
+            }
+            Canvas { width: W, height: H + 1.0, commands }
+            Row { width: W,
+                Label { text: first, fs: Fs::Xs2, color: paint(p.muted), max_lines: 1 }
+                Spacer { weight: 1.0 }
+                Label { text: last, fs: Fs::Xs2, color: paint(p.muted), max_lines: 1 }
+            }
+            Label { text: format!("ChatGPT 토큰 합계 {}", super::agents::format_tokens(total)), fs: Fs::Sm }
+            Label { text: format!("비용과 다른 하네스의 토큰은 {UNAVAILABLE}"), fs: Fs::Xs2, color: paint(p.muted), max_lines: 2 }
         }
     }
 }
@@ -1577,6 +1689,33 @@ mod tests {
     use super::*;
 
     // ---- FR-L16: modes per harness ----
+
+    #[test]
+    fn fr_u7_chatgpt_token_days_fills_gaps_and_filters_accounts() {
+        let row = |a: Option<&str>, day: &str, i: u64, o: u64| DailyUsage {
+            account_id: a.map(str::to_string),
+            day: day.into(),
+            input_tokens: i,
+            output_tokens: o,
+            reports: 1,
+        };
+        let rows = [
+            row(Some("g1"), "2026-02-28", 10, 5),
+            row(Some("g1"), "2026-03-01", 100, 20),
+            row(Some("g2"), "2026-03-01", 1, 1),
+            row(Some("codex-a"), "2026-03-01", 999, 999),
+            row(None, "2026-03-01", 999, 999),
+        ];
+        let ids = ["g1".to_string(), "g2".to_string()];
+        let s = chatgpt_token_days(&rows, &ids, "2026-03-01", 3);
+        assert_eq!(
+            s,
+            vec![("2026-02-27".to_string(), 0), ("2026-02-28".to_string(), 15), ("2026-03-01".to_string(), 122)]
+        );
+        assert!(chatgpt_token_days(&rows, &ids, "nope", 7).is_empty());
+        assert_eq!(day_string(day_number("2024-02-29").unwrap() + 1), "2024-03-01");
+        assert_eq!(day_number("1970-01-02"), Some(1));
+    }
 
     #[test]
     fn fr_l16_claude_code_has_four_modes_codex_and_gemini_three() {

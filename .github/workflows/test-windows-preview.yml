@@ -5,6 +5,12 @@ name: Windows preview
 
 on:
   workflow_dispatch:
+  # A workflow file not yet on main cannot be dispatched, so a change to it runs it from the PR.
+  pull_request:
+    branches: [develop]
+    paths:
+      - .github/workflows/test-windows-preview.yml
+      - .github/scripts/preview/**
 
 permissions:
   contents: read

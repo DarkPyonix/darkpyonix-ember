@@ -126,32 +126,72 @@ pub struct Device {
 
 /// Online first, then sleeping, offline, unknown; by name (case-insensitive), then id, in a group.
 pub fn order_devices(mut devices: Vec<Device>) -> Vec<Device> {
-    todo!()
+    devices.sort_by(|a, b| {
+        a.presence
+            .rank()
+            .cmp(&b.presence.rank())
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    devices
 }
 
 /// "근처", "직접 연결" or "릴레이", with " · 12ms" when the latency is known; `None` when the path is.
 pub fn path_label(path: Option<PathKind>, latency_ms: Option<u32>) -> Option<String> {
-    todo!()
+    let base = match path? {
+        PathKind::Nearby => "근처",
+        PathKind::Direct => "직접 연결",
+        PathKind::Relay => "릴레이",
+    };
+    Some(match latency_ms {
+        Some(ms) => format!("{base} · {ms}ms"),
+        None => base.to_string(),
+    })
 }
 
 /// The user's registered computers as devices (the only devices the client knows today).
 pub fn devices_from_computers(computers: &[Computer]) -> Vec<Device> {
-    todo!()
+    computers
+        .iter()
+        .map(|c| Device {
+            id: c.id.clone(),
+            name: c.name.clone(),
+            kind: DeviceKind::Computer,
+            presence: match c.reachability {
+                Reachability::Online => Presence::Online,
+                Reachability::Offline => Presence::Offline,
+                Reachability::Unknown => Presence::Unknown,
+            },
+            path: None,
+            latency_ms: None,
+        })
+        .collect()
 }
 
 /// How many devices are online.
 pub fn connected_count(devices: &[Device]) -> usize {
-    todo!()
+    devices
+        .iter()
+        .filter(|d| d.presence == Presence::Online)
+        .count()
 }
 
 /// The devices the send sheet offers: online ones only.
 pub fn sendable_devices(devices: &[Device]) -> Vec<Device> {
-    todo!()
+    devices
+        .iter()
+        .filter(|d| d.presence == Presence::Online)
+        .cloned()
+        .collect()
 }
 
 /// Split into rows of `cols`, the last row padded with `None` so tiles keep an equal width.
 pub fn grid<T: Clone>(items: &[T], cols: usize) -> Vec<Vec<Option<T>>> {
-    todo!()
+    let cols = cols.max(1);
+    items
+        .chunks(cols)
+        .map(|c| (0..cols).map(|i| c.get(i).cloned()).collect())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -223,12 +263,34 @@ impl TransferAction {
 /// cancelled. A failed transfer can be retried (it queues again; FR-F5 resumes from the last
 /// verified chunk). `None` for an action the state does not allow.
 pub fn next_state(state: TransferState, action: TransferAction) -> Option<TransferState> {
-    todo!()
+    use TransferAction as A;
+    use TransferState as S;
+    match (state, action) {
+        (S::Queued, A::Start) => Some(S::Sending),
+        (S::Queued, A::Cancel) => Some(S::Cancelled),
+        (S::Queued, A::Fail) => Some(S::Failed),
+        (S::Sending, A::Pause) => Some(S::Paused),
+        (S::Sending, A::Complete) => Some(S::Done),
+        (S::Sending, A::Fail) => Some(S::Failed),
+        (S::Sending, A::Cancel) => Some(S::Cancelled),
+        (S::Paused, A::Resume) => Some(S::Sending),
+        (S::Paused, A::Cancel) => Some(S::Cancelled),
+        (S::Paused, A::Fail) => Some(S::Failed),
+        (S::Failed, A::Retry) => Some(S::Queued),
+        _ => None,
+    }
 }
 
 /// The buttons a state offers the user, in order.
 pub fn user_actions(state: TransferState) -> &'static [TransferAction] {
-    todo!()
+    use TransferAction as A;
+    match state {
+        TransferState::Queued => &[A::Cancel],
+        TransferState::Sending => &[A::Pause, A::Cancel],
+        TransferState::Paused => &[A::Resume, A::Cancel],
+        TransferState::Failed => &[A::Retry],
+        TransferState::Done | TransferState::Cancelled => &[],
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,7 +308,19 @@ pub struct Transfer {
 
 /// Apply an action to a transfer. `Err` leaves it unchanged.
 pub fn apply(t: &mut Transfer, action: TransferAction) -> Result<(), IllegalTransition> {
-    todo!()
+    match next_state(t.state, action) {
+        Some(next) => {
+            t.state = next;
+            if action == TransferAction::Complete {
+                t.done = t.total;
+            }
+            Ok(())
+        }
+        None => Err(IllegalTransition {
+            from: t.state,
+            action,
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,32 +331,89 @@ pub struct IllegalTransition {
 
 /// "0 B", "1.5 KB", "10 MB", "4.0 GB" (1024 steps, one decimal under 10).
 pub fn format_bytes(n: u64) -> String {
-    todo!()
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if v < 10.0 {
+        format!("{:.1} {}", v, UNITS[i])
+    } else {
+        format!("{:.0} {}", v, UNITS[i])
+    }
 }
 
 /// "12 MB/초", or "측정 중" while there is no rate.
 pub fn format_speed(bytes_per_sec: Option<u64>) -> String {
-    todo!()
+    match bytes_per_sec {
+        Some(b) => format!("{}/초", format_bytes(b)),
+        None => "측정 중".to_string(),
+    }
 }
 
 /// "8초", "2분 5초", "1시간 3분".
 pub fn format_duration(secs: u64) -> String {
-    todo!()
+    if secs < 60 {
+        format!("{secs}초")
+    } else if secs < 3600 {
+        let (m, r) = (secs / 60, secs % 60);
+        if r == 0 {
+            format!("{m}분")
+        } else {
+            format!("{m}분 {r}초")
+        }
+    } else {
+        let (h, m) = (secs / 3600, (secs % 3600) / 60);
+        if m == 0 {
+            format!("{h}시간")
+        } else {
+            format!("{h}시간 {m}분")
+        }
+    }
 }
 
 /// Whole seconds left, rounded up; `None` unless it is sending at a known, non-zero rate.
 pub fn eta_secs(t: &Transfer) -> Option<u64> {
-    todo!()
+    if t.state != TransferState::Sending {
+        return None;
+    }
+    let rate = t.bytes_per_sec.filter(|r| *r > 0)?;
+    Some(t.total.saturating_sub(t.done).div_ceil(rate))
 }
 
 /// 0 to 100, rounded down so 100 means finished.
 pub fn percent(t: &Transfer) -> u32 {
-    todo!()
+    if t.state == TransferState::Done {
+        return 100;
+    }
+    if t.total == 0 {
+        return 0;
+    }
+    ((t.done as u128 * 100 / t.total as u128).min(100)) as u32
 }
 
 /// The line under a transfer's bar.
 pub fn progress_line(t: &Transfer) -> String {
-    todo!()
+    let p = percent(t);
+    match t.state {
+        TransferState::Queued => "대기 중입니다".to_string(),
+        TransferState::Sending => {
+            let mut s = format!("{p}% · {}", format_speed(t.bytes_per_sec));
+            if let Some(eta) = eta_secs(t) {
+                s.push_str(&format!(" · {} 남음", format_duration(eta)));
+            }
+            s
+        }
+        TransferState::Paused => format!("{p}% · 일시 정지됨"),
+        TransferState::Done => "완료되었습니다".to_string(),
+        TransferState::Failed => format!("{p}% · 연결이 끊겼습니다"),
+        TransferState::Cancelled => "취소되었습니다".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -346,12 +477,25 @@ pub enum Answer {
 
 /// "iPhone에서 사진.jpg 외 2개 (3.2 MB)를 보내려고 합니다".
 pub fn offer_line(o: &Offer) -> String {
-    todo!()
+    let names = match o.files.as_slice() {
+        [] => "파일".to_string(),
+        [one] => one.clone(),
+        [first, rest @ ..] => format!("{first} 외 {}개", rest.len()),
+    };
+    format!(
+        "{}에서 {names} ({})를 보내려고 합니다",
+        o.from,
+        format_bytes(o.total)
+    )
 }
 
 /// The offers still waiting for an answer.
 pub fn visible_offers(pending: &[Offer], answered: &[String]) -> Vec<Offer> {
-    todo!()
+    pending
+        .iter()
+        .filter(|o| !answered.contains(&o.id))
+        .cloned()
+        .collect()
 }
 
 /// Answer an offer: tell the service and remember it as answered. `false` (and nothing sent)
@@ -363,7 +507,12 @@ pub fn answer_offer(
     id: &str,
     answer: Answer,
 ) -> bool {
-    todo!()
+    if answered.iter().any(|a| a == id) || !pending.iter().any(|o| o.id == id) {
+        return false;
+    }
+    svc.answer(id, answer);
+    answered.push(id.to_string());
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -437,7 +586,16 @@ pub struct FilesModel {
 
 /// Devices are the service's when it has them, else the registered computers; always ordered.
 pub fn build_model(computers: &[Computer], svc: &dyn TransferService) -> FilesModel {
-    todo!()
+    let devices = svc
+        .devices()
+        .unwrap_or_else(|| devices_from_computers(computers));
+    FilesModel {
+        devices: order_devices(devices),
+        transfers: svc.transfers(),
+        received: svc.received(),
+        history: svc.history(),
+        ready: svc.ready(),
+    }
 }
 
 /// Which section an empty state belongs to.
@@ -453,7 +611,14 @@ pub enum Section {
 /// The text of an empty section: [`UNAVAILABLE`] where the service is not ready (sending,
 /// receiving and history cannot be known), else the section's own empty text.
 pub fn empty_text(section: Section, ready: bool) -> &'static str {
-    todo!()
+    match section {
+        Section::Devices => EMPTY_DEVICES,
+        Section::Agents => EMPTY_AGENTS,
+        _ if !ready => UNAVAILABLE,
+        Section::Transfers => EMPTY_TRANSFERS,
+        Section::Received => EMPTY_RECEIVED,
+        Section::History => EMPTY_HISTORY,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -466,7 +631,50 @@ pub struct FilesKpi {
 /// Connected devices, transfers in progress, sent this week, direct connection ratio.
 /// Only the first is known without the service; the others say [`UNAVAILABLE`].
 pub fn kpis(m: &FilesModel) -> [FilesKpi; 4] {
-    todo!()
+    let unavailable = |label| FilesKpi {
+        label,
+        value: UNAVAILABLE.to_string(),
+        available: false,
+    };
+    let in_progress = if m.ready {
+        FilesKpi {
+            label: "전송 중",
+            value: m
+                .transfers
+                .iter()
+                .filter(|t| t.state.is_active())
+                .count()
+                .to_string(),
+            available: true,
+        }
+    } else {
+        unavailable("전송 중")
+    };
+    let known: Vec<&Device> = m.devices.iter().filter(|d| d.path.is_some()).collect();
+    let direct = if m.ready && !known.is_empty() {
+        let near = known
+            .iter()
+            .filter(|d| matches!(d.path, Some(PathKind::Nearby | PathKind::Direct)))
+            .count();
+        FilesKpi {
+            label: "직접 연결 비율",
+            value: format!("{}%", near * 100 / known.len()),
+            available: true,
+        }
+    } else {
+        unavailable("직접 연결 비율")
+    };
+    [
+        FilesKpi {
+            label: "연결된 장비",
+            value: format!("{}/{}", connected_count(&m.devices), m.devices.len()),
+            available: true,
+        },
+        in_progress,
+        // TODO(FR-F8): sum the sent bytes of the last 7 days once the history has timestamps.
+        unavailable("이번 주 보낸 용량"),
+        direct,
+    ]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -492,7 +700,425 @@ pub fn send_blocker(
     picker_available: bool,
     service_ready: bool,
 ) -> Option<&'static str> {
-    todo!()
+    if !service_ready {
+        return Some(UNAVAILABLE);
+    }
+    if d.target.is_none() {
+        return Some(PICK_RECEIVER);
+    }
+    if d.files.is_empty() {
+        return Some(if picker_available {
+            PICK_FILES
+        } else {
+            FILE_PICK_UNAVAILABLE
+        });
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------------------------------
+
+fn presence_tone(p: Presence) -> PillTone {
+    match p {
+        Presence::Online => PillTone::Green,
+        Presence::Sleeping => PillTone::Orange,
+        Presence::Offline | Presence::Unknown => PillTone::Grey,
+    }
+}
+
+fn path_tone(p: PathKind) -> PillTone {
+    match p {
+        PathKind::Nearby => PillTone::Green,
+        PathKind::Direct => PillTone::Blue,
+        PathKind::Relay => PillTone::Grey,
+    }
+}
+
+/// The muted text colour.
+fn muted_paint() -> Paint {
+    paint(use_ember_theme().palette.muted)
+}
+
+/// The Files screen.
+#[component]
+pub fn Files() -> Element {
+    let ui = use_ui();
+    let window = use_window_size();
+    let compact = window.is_compact();
+    let muted = muted_paint();
+    // The service has no change signal yet: redraw with the launcher state.
+    let _ = *ui.live.launcher.read();
+    let svc = transfer_service();
+    let (computers, members): (Vec<Computer>, Vec<CrewMember>) = services()
+        .client
+        .read(|s| (s.computers().to_vec(), crew(s, 4)));
+    let model = build_model(&computers, svc);
+    let k = kpis(&model);
+    let mut sheet = use_signal(|| None::<SendDraft>);
+    let mut answered = use_signal(Vec::<String>::new);
+    let answered_now = answered.read().clone();
+    let offers = visible_offers(&svc.pending_offers(), &answered_now);
+    let pad = if compact { SP[3] } else { SP[6] };
+    let cols = if compact { 1 } else { 3 };
+    let rows = grid(&model.devices, cols);
+    let ready = model.ready;
+
+    rsx! {
+        ScrollColumn {
+            fill_max_width: true,
+            fill_max_height: true,
+            Column {
+                fill_max_width: true,
+                padding: pad,
+                spacing: SP[4],
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    Label { text: "파일", fs: Fs::Xl2, weight: Weight::Semibold }
+                    Spacer { weight: 1.0 }
+                    AppButton {
+                        text: "보내기",
+                        icon: IconRole::Send,
+                        kind: ButtonKind::Primary,
+                        small: true,
+                        on_click: move |()| sheet.set(Some(SendDraft::default())),
+                    }
+                }
+                if compact {
+                    Row { fill_max_width: true, spacing: SP[3],
+                        FilesKpiView { kpi: k[0].clone() }
+                        FilesKpiView { kpi: k[1].clone() }
+                    }
+                    Row { fill_max_width: true, spacing: SP[3],
+                        FilesKpiView { kpi: k[2].clone() }
+                        FilesKpiView { kpi: k[3].clone() }
+                    }
+                } else {
+                    Row { fill_max_width: true, spacing: SP[3],
+                        for kpi in k.iter().cloned() {
+                            FilesKpiView { key: "{kpi.label}", kpi }
+                        }
+                    }
+                }
+
+                for offer in offers {
+                    OfferPrompt {
+                        key: "{offer.id}",
+                        offer: offer.clone(),
+                        on_answer: move |(id, a): (String, Answer)| {
+                            let pending = svc.pending_offers();
+                            let mut list = answered.write();
+                            answer_offer(svc, &pending, &mut list, &id, a);
+                        },
+                    }
+                }
+
+                Label { text: "장비", fs: Fs::Xl, weight: Weight::Semibold }
+                if rows.is_empty() {
+                    Label { text: empty_text(Section::Devices, ready), color: muted }
+                }
+                for (i, row) in rows.into_iter().enumerate() {
+                    Row { key: "{i}", fill_max_width: true, spacing: SP[3],
+                        for (j, cell) in row.into_iter().enumerate() {
+                            if let Some(device) = cell {
+                                Column { key: "{j}", weight: 1.0,
+                                    DeviceTile {
+                                        device,
+                                        on_send: move |id: String| {
+                                            sheet.set(Some(SendDraft {
+                                                target: Some(SendTarget::Device(id)),
+                                                files: Vec::new(),
+                                            }));
+                                        },
+                                    }
+                                }
+                            } else {
+                                Spacer { key: "{j}", weight: 1.0 }
+                            }
+                        }
+                    }
+                }
+
+                Label { text: "에이전트에게 보내기", fs: Fs::Xl, weight: Weight::Semibold }
+                if members.is_empty() {
+                    Label { text: empty_text(Section::Agents, ready), color: muted }
+                }
+                for m in members {
+                    AgentTile {
+                        key: "{m.id}",
+                        member: m.clone(),
+                        on_open: move |id: String| ui.open_conversation(&id),
+                        on_send: move |id: String| {
+                            sheet.set(Some(SendDraft {
+                                target: Some(SendTarget::Agent(id)),
+                                files: Vec::new(),
+                            }));
+                        },
+                    }
+                }
+
+                Label { text: "전송 중", fs: Fs::Xl, weight: Weight::Semibold }
+                EmberCard { fill_max_width: true,
+                    Column { fill_max_width: true, padding: PAD_CARD_V, spacing: SP[2],
+                        if model.transfers.is_empty() {
+                            Label { text: empty_text(Section::Transfers, ready), color: muted }
+                        }
+                        for t in model.transfers.iter().cloned() {
+                            TransferRow { key: "{t.id}", transfer: t }
+                        }
+                        Label { text: LOCK_LINE, fs: Fs::Xs, color: muted }
+                    }
+                }
+
+                Label { text: "받은 파일", fs: Fs::Xl, weight: Weight::Semibold }
+                EmberCard { fill_max_width: true,
+                    Column { fill_max_width: true, padding: PAD_CARD_V, spacing: SP[1],
+                        if model.received.is_empty() {
+                            Label { text: empty_text(Section::Received, ready), color: muted }
+                        }
+                        for (i, f) in model.received.iter().cloned().enumerate() {
+                            Label {
+                                key: "{i}",
+                                text: format!("{} · {} · {}", f.name, format_bytes(f.size), f.from),
+                                fs: Fs::Sm,
+                                max_lines: 1,
+                            }
+                        }
+                    }
+                }
+
+                Label { text: "전송 기록", fs: Fs::Xl, weight: Weight::Semibold }
+                EmberCard { fill_max_width: true,
+                    Column { fill_max_width: true, padding: PAD_CARD_V, spacing: SP[1],
+                        if model.history.is_empty() {
+                            Label { text: empty_text(Section::History, ready), color: muted }
+                        }
+                        for (i, h) in model.history.iter().cloned().enumerate() {
+                            Label {
+                                key: "{i}",
+                                text: format!(
+                                    "{} · {} · {} · {} · {}",
+                                    h.name, h.direction.label(), h.device, h.result.label(), h.when
+                                ),
+                                fs: Fs::Sm,
+                                max_lines: 1,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SendSheet {
+            draft: sheet.read().clone(),
+            devices: model.devices.clone(),
+            ready,
+            on_change: move |d: Option<SendDraft>| sheet.set(d),
+        }
+    }
+}
+
+#[component]
+fn FilesKpiView(kpi: FilesKpi) -> Element {
+    let muted = muted_paint();
+    rsx! {
+        Column { weight: 1.0, spacing: SP[0],
+            Label { text: kpi.label, fs: Fs::Sm, color: muted }
+            if kpi.available {
+                Label { text: kpi.value.clone(), fs: Fs::Xl3, weight: Weight::Semibold }
+            } else {
+                Label { text: kpi.value.clone(), fs: Fs::Md, color: muted }
+            }
+        }
+    }
+}
+
+#[component]
+fn DeviceTile(device: Device, on_send: EventHandler<String>) -> Element {
+    let muted = muted_paint();
+    let path = path_label(device.path, device.latency_ms);
+    let id = device.id.clone();
+    rsx! {
+        EmberCard { fill_max_width: true,
+            Column { fill_max_width: true, padding: PAD_CARD_V, spacing: SP[1],
+                Label { text: device.name.clone(), fs: Fs::Lg, weight: Weight::Semibold, max_lines: 1 }
+                Label { text: device.kind.label(), fs: Fs::Sm, color: muted }
+                Row { spacing: SP[1],
+                    Pill { text: device.presence.label(), tone: presence_tone(device.presence), small: true }
+                    if let Some(text) = path {
+                        Pill { text, tone: path_tone(device.path.unwrap_or(PathKind::Relay)), small: true }
+                    }
+                }
+                AppButton {
+                    text: "보내기",
+                    small: true,
+                    enabled: device.presence == Presence::Online,
+                    on_click: move |()| on_send.call(id.clone()),
+                }
+            }
+        }
+    }
+}
+
+/// An agent's tile: send to the computer it works on, or open its session.
+#[component]
+fn AgentTile(
+    member: CrewMember,
+    on_open: EventHandler<String>,
+    on_send: EventHandler<String>,
+) -> Element {
+    let muted = muted_paint();
+    let (open_id, send_id) = (member.id.clone(), member.id.clone());
+    // TODO(server): which computer a session runs on is not in the client's state.
+    let note = format!("{} · 컴퓨터 정보는 {}", member.project, UNAVAILABLE);
+    rsx! {
+        EmberCard { fill_max_width: true,
+            Column { fill_max_width: true, padding: PAD_CARD_V, spacing: SP[1],
+                Label { text: member.title.clone(), fs: Fs::Md, weight: Weight::Semibold, max_lines: 1 }
+                Label { text: note, fs: Fs::Xs, color: muted, max_lines: 1 }
+                Row { spacing: SP[1],
+                    AppButton { text: "대화 열기", small: true, on_click: move |()| on_open.call(open_id.clone()) }
+                    AppButton { text: "보내기", small: true, on_click: move |()| on_send.call(send_id.clone()) }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TransferRow(transfer: Transfer) -> Element {
+    let muted = muted_paint();
+    let svc = transfer_service();
+    let actions = user_actions(transfer.state);
+    let title = format!(
+        "{} · {} · {}",
+        transfer.name,
+        transfer.direction.label(),
+        transfer.device
+    );
+    let line = progress_line(&transfer);
+    let value = percent(&transfer) as f32 / 100.0;
+    let id = transfer.id.clone();
+    rsx! {
+        Column { fill_max_width: true, spacing: SP[1],
+            Label { text: title, fs: Fs::Md, weight: Weight::Medium, max_lines: 1 }
+            ProgressIndicator { fill_max_width: true, determinate: true, value }
+            Label { text: line, fs: Fs::Xs, color: muted }
+            Row { spacing: SP[1],
+                for action in actions.iter().copied() {
+                    AppButton {
+                        key: "{action.label()}",
+                        text: action.label(),
+                        small: true,
+                        on_click: {
+                            let id = id.clone();
+                            move |()| svc.control(&id, action)
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The accept/decline prompt for an incoming offer (FR-F3).
+#[component]
+pub fn OfferPrompt(offer: Offer, on_answer: EventHandler<(String, Answer)>) -> Element {
+    let (accept_id, decline_id) = (offer.id.clone(), offer.id.clone());
+    let line = offer_line(&offer);
+    rsx! {
+        EmberCard { fill_max_width: true, selected: true,
+            Column { fill_max_width: true, padding: PAD_CARD_V, spacing: SP[2],
+                Label { text: line, fs: Fs::Md, weight: Weight::Medium }
+                Row { spacing: SP[1],
+                    AppButton {
+                        text: "받기",
+                        small: true,
+                        kind: ButtonKind::Primary,
+                        on_click: move |()| on_answer.call((accept_id.clone(), Answer::Accept)),
+                    }
+                    AppButton {
+                        text: "거절",
+                        small: true,
+                        on_click: move |()| on_answer.call((decline_id.clone(), Answer::Decline)),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The send sheet: pick the receiver, then the files (FR-L27.5).
+#[component]
+fn SendSheet(
+    draft: Option<SendDraft>,
+    devices: Vec<Device>,
+    ready: bool,
+    on_change: EventHandler<Option<SendDraft>>,
+) -> Element {
+    let muted = muted_paint();
+    let open = draft.is_some();
+    let d = draft.unwrap_or_default();
+    let blocker = send_blocker(&d, FILE_PICKER_AVAILABLE, ready);
+    let target_device = match &d.target {
+        Some(SendTarget::Device(id)) => Some(id.clone()),
+        _ => None,
+    };
+    let can_send = blocker.is_none() && target_device.is_some();
+    let choices = sendable_devices(&devices);
+    let count = format!("{}개 선택됨", d.files.len());
+    let files = d.files.clone();
+    let base = d.clone();
+    let selected_id = target_device.clone();
+    rsx! {
+        EmberSheet {
+            title: "보내기",
+            open,
+            on_dismiss: move |()| on_change.call(None),
+            Column { fill_max_width: true, padding: PAD_CARD_H, spacing: SP[2],
+                Label { text: "받는 곳", fs: Fs::Sm, color: muted }
+                if choices.is_empty() {
+                    Label { text: "보낼 수 있는 장비가 없습니다", fs: Fs::Sm, color: muted }
+                }
+                Row { spacing: SP[1],
+                    for dev in choices {
+                        PickChip {
+                            key: "{dev.id}",
+                            text: dev.name.clone(),
+                            selected: selected_id.as_deref() == Some(dev.id.as_str()),
+                            on_click: {
+                                let mut next = base.clone();
+                                let id = dev.id.clone();
+                                move |()| {
+                                    next.target = Some(SendTarget::Device(id.clone()));
+                                    on_change.call(Some(next.clone()));
+                                }
+                            },
+                        }
+                    }
+                }
+                Label { text: "파일", fs: Fs::Sm, color: muted }
+                // TODO(dioxus-compose): file picker and drag and drop; until then the files stay empty.
+                Label { text: count, fs: Fs::Sm }
+                if let Some(text) = blocker {
+                    Label { text, fs: Fs::Sm, color: muted }
+                }
+                AppButton {
+                    text: "보내기",
+                    kind: ButtonKind::Primary,
+                    enabled: can_send,
+                    on_click: move |()| {
+                        if let Some(id) = target_device.as_deref() {
+                            if transfer_service().send(id, files.clone()).is_ok() {
+                                on_change.call(None);
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

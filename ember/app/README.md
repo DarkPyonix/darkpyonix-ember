@@ -15,6 +15,7 @@ EMBER_SERVER_URL=http://127.0.0.1:8740 cargo run      # the main server (default
 | Variable | Default | Meaning |
 |---|---|---|
 | `EMBER_SERVER_URL` | `http://127.0.0.1:8740` | Main server base URL |
+| `EMBER_DEMO_DATA` | off | `1` with no `EMBER_SERVER_URL`: the app serves demo data itself and contacts no server (demo only) |
 | `EMBER_DATA_DIR` | `<OS data dir>/ember` | Cache (`client-cache.json`), prefs (`prefs.json`), `exports/` |
 | `EMBER_LOG` | `warn,ember_app=info,ember_client=info` | `tracing` filter |
 | `DIOXUS_COMPOSE_RENDERER_DIR` | (download) | Use a renderer you built instead of the released one (absolute path) |

@@ -7,7 +7,6 @@
 
 use dioxus_compose::prelude::*;
 
-use ember_client::state::Input;
 
 use crate::model::{self, index_of};
 use crate::prefs::LastUsed;
@@ -165,10 +164,10 @@ fn NewSessionForm(preset: String) -> Element {
             run(
                 async move {
                     let s = services();
-                    let rec = s.server.create_session(&body).await.map_err(|e| e.to_string())?;
-                    s.client.apply(Input::SessionLoaded(rec.clone()));
+                    let rec = s.create_session(&body).await?;
                     let mut notice = None;
-                    if let Some(cid) = computer_id {
+                    // The demo (#199) has one computer and no node to switch.
+                    if let Some(cid) = computer_id.filter(|_| s.demo.is_none()) {
                         // A session starts on the main server; move it before the first message.
                         if let Err(e) = s.server.switch_computer(&rec.id, &cid).await {
                             notice = Some(format!("Started on the main server: could not switch computer ({e})"));

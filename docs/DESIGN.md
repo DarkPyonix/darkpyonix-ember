@@ -35,9 +35,10 @@ team's reading or detail that the owner has not confirmed.
   wording] Warm grey backgrounds, white cards with a hairline border and an almost invisible
   shadow, regular-weight large numbers, pills for status, outline icons. The base is not the cool
   grey of a JetBrains IDE: the owner's later rounds pointed at the reference images (D25). [user,
-  D25, 2026-10-25] Tool windows and the IDE screens (editor, terminal) add a JetBrains-like feel,
-  because the owner asked for it on those work surfaces. Which areas and how is [provisional]
-  until the owner approves a mockup draft (pending).
+  D25, 2026-10-25] Only the editor and terminal screens add a JetBrains-like feel, because the
+  owner asked for it on those work surfaces. Every other screen, including tool windows, keeps the
+  mockup design. The editor and terminal draft is [provisional] until the owner approves a mockup
+  draft (pending).
 - **Visual elements over block lists.** [user, FEEDBACK v6: "자꾸 쉽게 쉽게 가려고 블록 리스트
   형식으로 가는데 그건 너무 별로야."] Dashboards use rings, stacked bars, avatar groups and large
   numbers in tiles of different sizes. A stack of same-sized rows reads as a block list.

@@ -773,7 +773,7 @@ fn draw(spec: &CharSpec, size: f32) -> Element {
     rsx! { Image { asset_id: id, width: size, height: size } }
 }
 
-/// The 팀 캐릭터 picker of the project settings sheet: six preview cards, two rows of three.
+/// The 팀 캐릭터 picker of the project settings sheet: six preview cards, three rows of two, so the Korean names are not clipped.
 /// The choice is saved to prefs at once. TODO(server): save it on the project instead.
 #[component]
 pub fn StylePicker(project_id: String, seed_name: String) -> Element {
@@ -782,7 +782,7 @@ pub fn StylePicker(project_id: String, seed_name: String) -> Element {
     let p = theme.palette;
     let current = ui.prefs.read().character_style(&project_id);
     let dark = theme.scheme == Scheme::Dark;
-    let rows: Vec<Vec<CharStyle>> = CharStyle::ALL.chunks(3).map(|c| c.to_vec()).collect();
+    let rows: Vec<Vec<CharStyle>> = CharStyle::ALL.chunks(2).map(|c| c.to_vec()).collect();
     rsx! {
         Column {
             fill_max_width: true,
@@ -815,7 +815,7 @@ pub fn StylePicker(project_id: String, seed_name: String) -> Element {
                                     move |()| ui.update_prefs(|pr| pr.set_character_style(&pid, style))
                                 },
                             }
-                            Label { text: style.blurb(), fs: Fs::Xs2, color: paint(p.text_2), max_lines: 2 }
+                            Label { text: style.blurb(), fs: Fs::Xs2, color: paint(p.text_2), max_lines: 3 }
                         }
                     }
                 }

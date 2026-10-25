@@ -3,7 +3,7 @@
 //! Top to bottom: the computer strip, then the project boxes in 3, 2 or 1 columns. A box is two
 //! levels: a header (status disc, name, repository, counts, buttons) over an inset of up to five
 //! member tiles and a "+N" deck. Tapping the header opens the full project view; the gear opens
-//! the settings sheet. A computer chip opens a detail sheet.
+//! the settings sheet. A computer chip opens the monitor sheet (`monitor.rs`).
 //!
 //! The decisions (columns per size class, member order, the deck count, who wears the leader
 //! badge, settings validation, which settings the server can save) are plain functions at the top
@@ -30,6 +30,7 @@ use crate::ui::components::{
     AppButton, ButtonKind, EmberCard, EmberSheet, InsetPanel, Label, PickChip, Pill, PillTone,
 };
 use crate::ui::launcher::ConnectionBanner;
+use crate::ui::monitor::MonitorSheet;
 use crate::ui::theme::*;
 use crate::ui::use_ui;
 
@@ -273,6 +274,23 @@ impl ProjectBox {
     }
 }
 
+/// The tile's name: the team's own name when it has one, else `<project>-<harness>`, else the
+/// session title when the harness is empty. It never ends with "-".
+pub fn member_name(team_name: Option<&str>, project: &str, agent: &str, title: &str) -> String {
+    if let Some(n) = team_name.map(str::trim).filter(|n| !n.is_empty()) {
+        return n.to_string();
+    }
+    let agent = agent.trim();
+    if agent.is_empty() {
+        let title = title.trim();
+        if title.is_empty() {
+            return display_name(project);
+        }
+        return title.to_string();
+    }
+    format!("{}-{}", display_name(project), agent)
+}
+
 fn member_of(state: &State, project: &str, id: &str, leader_seen: &mut bool) -> Option<Member> {
     let v = state.session(id).filter(|v| !v.record.archived)?;
     let team: Option<&TeamView> = state.team_for_session(id);
@@ -281,11 +299,12 @@ fn member_of(state: &State, project: &str, id: &str, leader_seen: &mut bool) -> 
     if leader {
         *leader_seen = true;
     }
-    let name = team
-        .and_then(|t| t.member(id))
-        .map(|m| m.name.clone())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| format!("{}-{}", display_name(project), v.record.agent));
+    let name = member_name(
+        team.and_then(|t| t.member(id)).map(|m| m.name.as_str()),
+        project,
+        &v.record.agent,
+        &v.record.title,
+    );
     Some(Member {
         session_id: id.to_string(),
         name,
@@ -604,8 +623,9 @@ pub fn ProjectScreen() -> Element {
             }
         }
         if let Some(c) = cur.computer.clone() {
-            ComputerSheet {
+            MonitorSheet {
                 chip: chips.iter().find(|x| x.id == c).cloned(),
+                boxes: boxes.clone(),
                 on_close: move |()| overlay.write().computer = None,
             }
         }
@@ -642,6 +662,29 @@ fn ComputerStrip(chips: Vec<ComputerChip>, on_open: EventHandler<String>) -> Ele
     }
 }
 
+/// A left-aligned label that is also a hit target. The toolkit's `Button` centres its label and has
+/// no content-alignment prop, so a `Label` sits at the start of a `Box` and a transparent,
+/// text-less `Button` lies over it.
+/// TODO(GAPS: 클릭 가능한 컨테이너): replace with a clickable Row once the toolkit has one.
+#[component]
+fn HitLabel(#[props(into)] text: String, on_click: EventHandler<()>) -> Element {
+    rsx! {
+        dioxus_compose::Box {
+            fill_max_width: true,
+            height: 40.0,
+            alignment: Alignment::CenterStart,
+            Label { text: text.clone(), weight: Weight::Medium, max_lines: 1 }
+            Button {
+                text: "",
+                fill_max_width: true,
+                fill_max_height: true,
+                variant: ButtonVariant::Text,
+                on_click: move |()| on_click.call(()),
+            }
+        }
+    }
+}
+
 #[component]
 fn ComputerChipView(chip: ComputerChip, on_open: EventHandler<String>) -> Element {
     let theme = use_ember_theme();
@@ -662,71 +705,11 @@ fn ComputerChipView(chip: ComputerChip, on_open: EventHandler<String>) -> Elemen
             Column {
                 weight: 1.0,
                 // TODO(GAPS: 클릭 가능한 컨테이너): the name button is the hit target of the chip.
-                Button {
-                    text: chip.name.clone(),
-                    height: 40.0,
-                    variant: ButtonVariant::Text,
-                    color: paint(p.text),
-                    fill_max_width: true,
-                    on_click: move |()| on_open.call(id.clone()),
-                }
+                HitLabel { text: chip.name.clone(), on_click: move |()| on_open.call(id.clone()) }
                 Label { text: chip_line(&chip), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
             }
         }
         Spacer { width: SP[1] }
-    }
-}
-
-/// The computer detail sheet. TODO(FR-L21, FR-X7): the full monitor (CPU per core, GPU, memory,
-/// disk, network, process table) replaces this once ember node reports it. Until then the sheet
-/// shows what the client has: reachability, assigned projects and running count.
-#[component]
-fn ComputerSheet(chip: Option<ComputerChip>, on_close: EventHandler<()>) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
-    let title = chip
-        .as_ref()
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| "컴퓨터".to_string());
-    rsx! {
-        EmberSheet {
-            title,
-            open: true,
-            on_dismiss: move |()| on_close.call(()),
-            Column {
-                fill_max_width: true,
-                padding: SP[4],
-                space_role: SpaceRole::Md,
-                if let Some(c) = chip {
-                    Row {
-                        fill_max_width: true,
-                        alignment: Alignment::CenterStart,
-                        space_role: SpaceRole::Sm,
-                        Pill { text: reach_pill(c.reachability).0, tone: reach_pill(c.reachability).1 }
-                        Label { text: format!("실행 중 {}", c.running), fs: Fs::Sm, color: paint(p.text_2) }
-                    }
-                    Label { text: "할당된 프로젝트", fs: Fs::Sm, weight: Weight::Medium, color: paint(p.text_2) }
-                    if c.projects.is_empty() {
-                        Label { text: "할당된 프로젝트가 없습니다", color: paint(p.text_2) }
-                    }
-                    for pr in c.projects.iter() {
-                        Label { key: "{pr}", text: display_name(pr) }
-                    }
-                    InsetPanel {
-                        fill_max_width: true,
-                        Label { text: format!("CPU, GPU, 메모리, 디스크 사용량 모니터는 {SOON}"), fs: Fs::Sm, color: paint(p.text_2) }
-                    }
-                    // TODO(FR-L21): monitor sheet fed by FR-X7 (about 1 s while visible).
-                } else {
-                    Label { text: "컴퓨터를 찾을 수 없습니다" }
-                }
-                Row {
-                    fill_max_width: true,
-                    arrangement: Arrangement::End,
-                    AppButton { text: "닫기", on_click: move |()| on_close.call(()) }
-                }
-            }
-        }
     }
 }
 
@@ -817,14 +800,7 @@ fn MemberTile(member: Member, project_id: String, on_open: EventHandler<String>)
             Column {
                 weight: 1.0,
                 // TODO(GAPS: 클릭 가능한 컨테이너): the name button opens the member's session.
-                Button {
-                    text: member.accessible_name(),
-                    height: 40.0,
-                    variant: ButtonVariant::Text,
-                    color: paint(p.text),
-                    fill_max_width: true,
-                    on_click: move |()| on_open.call(id.clone()),
-                }
+                HitLabel { text: member.accessible_name(), on_click: move |()| on_open.call(id.clone()) }
                 Label { text: member.task.clone(), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
             }
             Pill { text: label, tone, small: true }
@@ -845,8 +821,12 @@ fn ProjectBoxView(
     let total = project.members.len();
     let shown = visible_tiles(total, expanded());
     let deck = deck_count(total, expanded());
-    let (id_open, id_set, id_sessions) =
-        (project.id.clone(), project.id.clone(), project.id.clone());
+    let (id_open, id_set, id_sessions, id_vcs) = (
+        project.id.clone(),
+        project.id.clone(),
+        project.id.clone(),
+        project.id.clone(),
+    );
     let first = project.members.first().map(|m| m.session_id.clone());
     rsx! {
         EmberCard {
@@ -864,14 +844,7 @@ fn ProjectBoxView(
                     Column {
                         weight: 1.0,
                         // TODO(GAPS: 클릭 가능한 컨테이너): the name button opens the full view.
-                        Button {
-                            text: project.name.clone(),
-                            height: 40.0,
-                            variant: ButtonVariant::Text,
-                            color: paint(p.text),
-                            fill_max_width: true,
-                            on_click: move |()| on_open.call(id_open.clone()),
-                        }
+                        HitLabel { text: project.name.clone(), on_click: move |()| on_open.call(id_open.clone()) }
                         Label { text: project.repo_line(), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
                     }
                 }
@@ -898,13 +871,10 @@ fn ProjectBoxView(
                             None => ui.open_new_session(Some(id_sessions.clone())),
                         },
                     }
-                    // TODO(version control screen): 버전 관리 is not built; the notice stands in.
                     AppButton {
                         text: "버전 관리",
                         icon: IconRole::List,
-                        on_click: move |()| {
-                            Message::new(format!("버전 관리는 {SOON}")).with_duration(MessageDuration::Short).show();
-                        },
+                        on_click: move |()| crate::ui::vcs::open_for_project(ui, &id_vcs),
                     }
                     AppButton {
                         text: "설정",
@@ -1219,6 +1189,24 @@ mod tests {
             leader: false,
             updated_at: at,
         }
+    }
+
+    #[test]
+    fn member_name_never_ends_with_a_dash() {
+        assert_eq!(
+            member_name(Some("ember-리더"), "ember", "codex", "t"),
+            "ember-리더"
+        );
+        assert_eq!(
+            member_name(Some(""), "demo-project", "codex", "t"),
+            "demo-project-codex"
+        );
+        assert_eq!(
+            member_name(None, "demo-project", "", "빌드 고치기"),
+            "빌드 고치기"
+        );
+        assert_eq!(member_name(None, "demo-project", " ", ""), "demo-project");
+        assert!(!member_name(None, "demo-project", "", "").ends_with('-'));
     }
 
     // FR-L1: 3, 2 or 1 columns by size class.

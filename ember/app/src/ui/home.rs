@@ -9,9 +9,18 @@
 //! client's state yet (FR-U7 has no endpoint), so those tiles say [`UNAVAILABLE`] and carry a
 //! TODO, never an estimate.
 
-use ember_client::state::{LauncherStatus, Reachability, State};
+use dioxus_compose::prelude::*;
 
+use ember_client::state::{Input, LauncherStatus, Reachability, State};
+
+use super::components::*;
+use super::theme::*;
 use crate::model;
+use crate::prefs::LastUsed;
+use crate::server::CreateSession;
+use crate::services::{run, services};
+use crate::ui::shell::NavMenu;
+use crate::ui::{Route, use_ui};
 
 /// What a tile shows while the server does not provide its data.
 pub const UNAVAILABLE: &str = "준비 중입니다";
@@ -42,20 +51,28 @@ impl Harness {
     /// TODO(Gemini): the server's built-in Google harness is Antigravity (`agy`); a Gemini CLI
     /// agent would be an ACP agent. Verify before FR-L15 is marked done (AGENTS.md rule 4).
     pub fn kind(self) -> &'static str {
-        todo!()
+        match self {
+            Harness::ClaudeCode => "claude-code",
+            Harness::Codex => "codex",
+            Harness::Gemini => "antigravity",
+        }
     }
 
     pub fn label(self) -> &'static str {
-        todo!()
+        match self {
+            Harness::ClaudeCode => "Claude Code",
+            Harness::Codex => "Codex",
+            Harness::Gemini => "Gemini",
+        }
     }
 
     pub fn from_kind(kind: &str) -> Option<Harness> {
-        todo!()
+        Harness::ALL.into_iter().find(|h| h.kind() == kind)
     }
 
     /// Whether the harness has an effort setting (Gemini has none: one row per model).
     pub fn has_effort(self) -> bool {
-        todo!()
+        !matches!(self, Harness::Gemini)
     }
 }
 
@@ -74,29 +91,46 @@ pub enum PermMode {
 
 impl PermMode {
     pub fn label(self) -> &'static str {
-        todo!()
+        match self {
+            PermMode::Ask => "명령마다 확인",
+            PermMode::Edits => "자동 승인(편집만)",
+            PermMode::Bypass => "바이패스(모두 허용)",
+            PermMode::Plan => "계획 모드",
+        }
     }
 
     /// Bypass is drawn in the warning colour so it is never chosen by accident.
     pub fn is_bypass(self) -> bool {
-        todo!()
+        self == PermMode::Bypass
     }
 }
 
 /// The modes a harness supports, in menu order. [provisional] until each CLI is verified
 /// (FR-L16): Claude Code has the four, Codex and Gemini three.
 pub fn modes_for(h: Harness) -> &'static [PermMode] {
-    todo!()
+    match h {
+        Harness::ClaudeCode => &[
+            PermMode::Ask,
+            PermMode::Edits,
+            PermMode::Plan,
+            PermMode::Bypass,
+        ],
+        Harness::Codex | Harness::Gemini => &[PermMode::Ask, PermMode::Edits, PermMode::Bypass],
+    }
 }
 
 pub fn default_mode(_h: Harness) -> PermMode {
-    todo!()
+    PermMode::Ask
 }
 
 /// The mode after the harness changed: kept when the new harness supports it, else the new
 /// harness's default (FR-L16).
 pub fn mode_after_harness_change(h: Harness, current: PermMode) -> PermMode {
-    todo!()
+    if modes_for(h).contains(&current) {
+        current
+    } else {
+        default_mode(h)
+    }
 }
 
 /// One selectable row of the model picker: a model and one effort.
@@ -112,12 +146,18 @@ pub struct ModelOption {
 impl ModelOption {
     /// "Opus 5.5 (High)", the row title; a harness without effort shows the name alone.
     pub fn row_title(&self) -> String {
-        todo!()
+        match self.effort {
+            Some(e) => format!("{} ({})", self.name, e),
+            None => self.name.to_string(),
+        }
     }
 
     /// "Claude Code · Opus 5.5 · High", the chip text.
     pub fn chip_label(&self) -> String {
-        todo!()
+        match self.effort {
+            Some(e) => format!("{} · {} · {}", self.harness.label(), self.name, e),
+            None => format!("{} · {}", self.harness.label(), self.name),
+        }
     }
 }
 
@@ -145,17 +185,54 @@ const GEMINI_MODELS: [(&str, &str); 2] = [
 pub const EFFORTS: [&str; 3] = ["Low", "Medium", "High"];
 
 fn models_of(h: Harness) -> &'static [(&'static str, &'static str)] {
-    todo!()
+    match h {
+        Harness::ClaudeCode => &CLAUDE_MODELS,
+        Harness::Codex => &CODEX_MODELS,
+        Harness::Gemini => &GEMINI_MODELS,
+    }
 }
 
 /// Every row of the picker: harness by harness, model by model, one row per effort.
 pub fn model_catalog() -> Vec<ModelOption> {
-    todo!()
+    let mut out = Vec::new();
+    for h in Harness::ALL {
+        for (model, name) in models_of(h) {
+            if h.has_effort() {
+                for e in EFFORTS {
+                    out.push(ModelOption {
+                        harness: h,
+                        model,
+                        name,
+                        effort: Some(e),
+                    });
+                }
+            } else {
+                out.push(ModelOption {
+                    harness: h,
+                    model,
+                    name,
+                    effort: None,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// The harness's default row: its first model at its default effort (Medium; Claude Code High).
 pub fn default_option(h: Harness) -> ModelOption {
-    todo!()
+    let (model, name) = models_of(h)[0];
+    let effort = match h {
+        Harness::ClaudeCode => Some("High"),
+        Harness::Codex => Some("Medium"),
+        Harness::Gemini => None,
+    };
+    ModelOption {
+        harness: h,
+        model,
+        name,
+        effort,
+    }
 }
 
 /// The rows to list: one harness when the rail picked one, else every harness; a non-empty
@@ -166,12 +243,30 @@ pub fn filter_models(
     harness: Option<Harness>,
     query: &str,
 ) -> Vec<ModelOption> {
-    todo!()
+    let q = query.trim().to_lowercase();
+    all.iter()
+        .filter(|o| {
+            if q.is_empty() {
+                harness.is_none_or(|h| o.harness == h)
+            } else {
+                let hay = format!(
+                    "{} {} {} {}",
+                    o.name,
+                    o.model,
+                    o.harness.label(),
+                    o.effort.unwrap_or("")
+                )
+                .to_lowercase();
+                q.split_whitespace().all(|w| hay.contains(w))
+            }
+        })
+        .copied()
+        .collect()
 }
 
 /// "Ctrl+1" to "Ctrl+9" for the first nine visible rows, nothing after.
 pub fn shortcut_label(row: usize) -> Option<String> {
-    todo!()
+    (row < 9).then(|| format!("Ctrl+{}", row + 1))
 }
 
 /// Why a harness cannot be used now: not installed on the main server, or its account hit a
@@ -183,7 +278,16 @@ pub fn harness_block(
     agents: &[(String, bool)],
     limited: &[String],
 ) -> Option<&'static str> {
-    todo!()
+    if !agents.is_empty() {
+        let installed = agents.iter().any(|(k, i)| k == h.kind() && *i);
+        if !installed {
+            return Some("이 컴퓨터에 설치되어 있지 않습니다");
+        }
+    }
+    if limited.iter().any(|k| k == h.kind()) {
+        return Some("계정의 사용 한도에 도달했습니다");
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -203,34 +307,62 @@ pub struct Selection {
 impl Selection {
     /// The first view: 기본 프로젝트, Claude Code's default, ask mode, the main server.
     pub fn initial() -> Selection {
-        todo!()
+        Selection {
+            project: DEFAULT_PROJECT.to_string(),
+            option: default_option(Harness::ClaudeCode),
+            mode: default_mode(Harness::ClaudeCode),
+            computer: None,
+        }
     }
 
     /// Choosing a row of the picker. A changed harness moves the mode chip to that harness
     /// (FR-L16); the same harness keeps the mode.
     pub fn with_option(&self, option: ModelOption) -> Selection {
-        todo!()
+        Selection {
+            mode: mode_after_harness_change(option.harness, self.mode),
+            option,
+            ..self.clone()
+        }
     }
 
     /// Choosing another harness resets model and effort to its defaults (FR-L15).
     pub fn with_harness(&self, h: Harness) -> Selection {
-        todo!()
+        if h == self.option.harness {
+            return self.clone();
+        }
+        self.with_option(default_option(h))
     }
 
     pub fn with_mode(&self, mode: PermMode) -> Selection {
-        todo!()
+        if modes_for(self.option.harness).contains(&mode) {
+            Selection {
+                mode,
+                ..self.clone()
+            }
+        } else {
+            self.clone()
+        }
     }
 }
 
 /// The project chip's options: 기본 프로젝트 first, then the existing projects (most recent
 /// first as given), without duplicates.
 pub fn project_options(existing: &[String]) -> Vec<String> {
-    todo!()
+    let mut out = vec![DEFAULT_PROJECT.to_string()];
+    for p in existing {
+        if !out.contains(p) {
+            out.push(p.clone());
+        }
+    }
+    out
 }
 
 /// The computer chip's text: the computer's name, or 이 서버 for the main server.
 pub fn computer_chip_text(selected: Option<&str>, computers: &[(String, String)]) -> String {
-    todo!()
+    selected
+        .and_then(|id| computers.iter().find(|(cid, _)| cid == id))
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| "이 서버".to_string())
 }
 
 /// A suggestion chip fills the composer with its text, replacing a draft.
@@ -241,12 +373,24 @@ pub const SUGGESTIONS: [&str; 3] = [
 ];
 
 pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
-    todo!()
+    suggestion.to_string()
+}
+
+/// The text to send: what was typed, else the chosen suggestion. The toolkit's `TextField` has
+/// no initial value (GAPS: uncontrolled field), so a suggestion cannot be written into the
+/// field; it is shown as a pending line and used when the field is empty.
+pub fn effective_message(typed: &str, suggestion: Option<&str>) -> String {
+    let t = typed.trim();
+    if t.is_empty() {
+        suggestion.unwrap_or("").trim().to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 /// Whether send does anything: some text, and no create already running.
-pub fn can_send(draft: &str, busy: bool) -> bool {
-    todo!()
+pub fn can_send(message: &str, busy: bool) -> bool {
+    !busy && !message.trim().is_empty()
 }
 
 /// The folder a new session starts in. The server needs one (`CreateSession.cwd`) and Home has
@@ -258,12 +402,17 @@ pub fn resolve_cwd(
     latest_in_project: Option<&str>,
     latest_any: Option<&str>,
 ) -> Option<String> {
-    todo!()
+    [remembered, latest_in_project, latest_any]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// The session title taken from the first message.
 pub fn title_from_message(text: &str) -> String {
-    todo!()
+    model::one_line(text, 40)
 }
 
 /// Whether the new session must be switched to approve-all right after it is created: only
@@ -271,7 +420,7 @@ pub fn title_from_message(text: &str) -> String {
 /// TODO(server): `POST /sessions` has no mode field; ask and edits start in the agent's own
 /// default, plan likewise, until the server takes a permission mode.
 pub fn needs_approve_all(mode: PermMode) -> bool {
-    todo!()
+    mode.is_bypass()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -291,27 +440,48 @@ pub struct StatusCounts {
 
 impl StatusCounts {
     pub fn add(&mut self, s: LauncherStatus) {
-        todo!()
+        match s {
+            LauncherStatus::Running => self.running += 1,
+            LauncherStatus::WaitingForApproval => self.waiting += 1,
+            LauncherStatus::FinishedUnread => self.unread += 1,
+            LauncherStatus::Finished => self.done += 1,
+            LauncherStatus::Failed => self.failed += 1,
+            LauncherStatus::Idle | LauncherStatus::Unknown => self.idle += 1,
+        }
     }
 
     pub fn total(&self) -> usize {
-        todo!()
+        self.running + self.waiting + self.unread + self.done + self.failed + self.idle
     }
 }
 
 pub fn status_counts(state: &State) -> StatusCounts {
-    todo!()
+    let mut c = StatusCounts::default();
+    for p in state.projects() {
+        for id in &p.sessions {
+            if let Some(v) = state.session(id).filter(|v| !v.record.archived) {
+                c.add(v.status);
+            }
+        }
+    }
+    c
 }
 
 /// Success rate in percent: sessions that finished over sessions that finished or failed.
 /// `None` while none has ended, so the tile says so instead of 0 or 100.
 pub fn success_percent(finished: usize, failed: usize) -> Option<u32> {
-    todo!()
+    let ended = finished + failed;
+    (ended > 0).then(|| ((finished as f64 / ended as f64) * 100.0).round() as u32)
 }
 
 /// (online, total) over the registered computers.
 pub fn computers_online(state: &State) -> (usize, usize) {
-    todo!()
+    let all = state.computers();
+    let online = all
+        .iter()
+        .filter(|c| c.reachability == Reachability::Online)
+        .count();
+    (online, all.len())
 }
 
 /// One big number of the KPI row.
@@ -330,7 +500,46 @@ pub struct Kpi {
 /// Approval wait shows how many are waiting now (the client has that) but not the median
 /// (TODO(server): no approval timing in the client's state).
 pub fn kpis(counts: &StatusCounts, online: usize, computers: usize) -> [Kpi; 4] {
-    todo!()
+    let success = success_percent(counts.done + counts.unread, counts.failed);
+    [
+        Kpi {
+            label: "실행 중 팀원",
+            value: counts.running.to_string(),
+            unit: "명",
+            note: Some(format!("대기 {}", counts.waiting)),
+            available: true,
+        },
+        Kpi {
+            label: "온라인 컴퓨터",
+            value: format!("{}/{}", online, computers),
+            unit: "",
+            note: None,
+            available: true,
+        },
+        match success {
+            Some(p) => Kpi {
+                label: "성공률",
+                value: p.to_string(),
+                unit: "%",
+                note: Some(format!("실패 {}", counts.failed)),
+                available: true,
+            },
+            None => Kpi {
+                label: "성공률",
+                value: "집계 전".to_string(),
+                unit: "",
+                note: Some("끝난 세션이 없습니다".to_string()),
+                available: false,
+            },
+        },
+        Kpi {
+            label: "승인 대기 중앙값",
+            value: UNAVAILABLE.to_string(),
+            unit: "",
+            note: Some(format!("지금 {}건 대기", counts.waiting)),
+            available: false,
+        },
+    ]
 }
 
 /// One bar of the usage-by-harness tile: sessions per harness. This is a session count, not
@@ -342,20 +551,72 @@ pub struct HarnessBar {
 }
 
 pub fn harness_usage(state: &State) -> Vec<HarnessBar> {
-    todo!()
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for p in state.projects() {
+        for id in &p.sessions {
+            let Some(v) = state.session(id).filter(|v| !v.record.archived) else {
+                continue;
+            };
+            let kind = v.record.agent.clone();
+            match counts.iter_mut().find(|(k, _)| *k == kind) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((kind, 1)),
+            }
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counts
+        .into_iter()
+        .map(|(kind, sessions)| HarnessBar {
+            label: Harness::from_kind(&kind)
+                .map(|h| h.label().to_string())
+                .unwrap_or(kind),
+            sessions,
+        })
+        .collect()
 }
 
 /// A bar's rectangle inside a chart `width` by `height` dp: `(x, y, w, h)`, bars side by side
 /// with `gap` between, heights relative to the largest value, at least 2 dp for a non-zero
 /// value so it stays visible. All zero gives zero-height bars.
 pub fn bar_rects(values: &[usize], width: f32, height: f32, gap: f32) -> Vec<(f32, f32, f32, f32)> {
-    todo!()
+    let n = values.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let bar_w = ((width - gap * (n as f32 - 1.0)) / n as f32).max(1.0);
+    let max = values.iter().copied().max().unwrap_or(0);
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let h = if max == 0 || *v == 0 {
+                0.0
+            } else {
+                (height * (*v as f32 / max as f32)).max(2.0)
+            };
+            (i as f32 * (bar_w + gap), height - h, bar_w, h)
+        })
+        .collect()
 }
 
 /// Ring segments as `(start_degrees, sweep_degrees)` from 12 o'clock clockwise, one per count;
 /// a zero count has a zero sweep. All zero gives no segments.
 pub fn ring_segments(counts: &[usize]) -> Vec<(f32, f32)> {
-    todo!()
+    let total: usize = counts.iter().sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut start = -90.0_f32;
+    counts
+        .iter()
+        .map(|c| {
+            let sweep = 360.0 * (*c as f32 / total as f32);
+            let seg = (start, sweep);
+            start += sweep;
+            seg
+        })
+        .collect()
 }
 
 /// A working member for the crew row.
@@ -370,12 +631,35 @@ pub struct CrewMember {
 
 /// Running and waiting sessions, waiting first, then most recently active; at most `max`.
 pub fn crew(state: &State, max: usize) -> Vec<CrewMember> {
-    todo!()
+    let mut rows: Vec<(bool, i64, CrewMember)> = Vec::new();
+    for p in state.projects() {
+        for id in &p.sessions {
+            let Some(v) = state.session(id).filter(|v| !v.record.archived) else {
+                continue;
+            };
+            let waiting = v.status == LauncherStatus::WaitingForApproval;
+            if waiting || v.status == LauncherStatus::Running {
+                rows.push((
+                    waiting,
+                    v.record.updated_at,
+                    CrewMember {
+                        id: v.record.id.clone(),
+                        title: v.record.title.clone(),
+                        project: v.record.project.clone(),
+                        agent: v.record.agent.clone(),
+                        waiting,
+                    },
+                ));
+            }
+        }
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    rows.into_iter().take(max).map(|r| r.2).collect()
 }
 
 /// The text under the crew row: "컴퓨터 2/3 온라인".
 pub fn computers_line(online: usize, total: usize) -> String {
-    todo!()
+    format!("컴퓨터 {}/{} 온라인", online, total)
 }
 
 /// Empty states, in 합니다체.
@@ -393,15 +677,843 @@ pub struct ProjectTile {
 }
 
 pub fn project_tiles(state: &State, max: usize) -> Vec<ProjectTile> {
-    todo!()
+    model::project_cards(state)
+        .into_iter()
+        .take(max)
+        .map(|c| ProjectTile {
+            name: c.name,
+            total: c.summary.total,
+            running: c.summary.running,
+            waiting: c.summary.waiting,
+        })
+        .collect()
 }
 
 /// "팀원 3명 · 실행 1 · 대기 1", the tile's second line.
 pub fn project_tile_line(t: &ProjectTile) -> String {
-    todo!()
+    format!(
+        "팀원 {}명 · 실행 {} · 대기 {}",
+        t.total, t.running, t.waiting
+    )
 }
 
-// ---- components follow -----------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------------------------------
+
+/// The Home screen: the chat-first top, then the dashboard.
+#[component]
+pub fn Home() -> Element {
+    let window = use_window_size();
+    let pad = if window.is_compact() { SP[3] } else { SP[6] };
+    rsx! {
+        ScrollColumn {
+            fill_max_width: true,
+            fill_max_height: true,
+            Column {
+                fill_max_width: true,
+                padding: pad,
+                spacing: SP[5],
+                HomeComposer {}
+                HomeDashboard {}
+            }
+        }
+    }
+}
+
+/// One entry of a chip's menu.
+#[component]
+fn MenuItem(
+    #[props(into)] text: String,
+    #[props(default)] selected: bool,
+    #[props(default)] danger: bool,
+    #[props(default = true)] enabled: bool,
+    on_click: EventHandler<()>,
+) -> Element {
+    let theme = use_ember_theme();
+    let text = if selected {
+        format!("✓ {text}")
+    } else {
+        text
+    };
+    let color = if danger {
+        paint(theme.palette.red.strong)
+    } else {
+        paint(theme.palette.text)
+    };
+    rsx! {
+        Button {
+            text,
+            enabled,
+            variant: ButtonVariant::Text,
+            fill_max_width: true,
+            height: BUTTON_MIN_RENDER_HEIGHT,
+            color,
+            on_click: move |()| on_click.call(()),
+        }
+    }
+}
+
+#[component]
+fn HomeComposer() -> Element {
+    let ui = use_ui();
+    let window = use_window_size();
+    let theme = use_ember_theme();
+    let compact = window.is_compact();
+
+    let mut selection = use_signal(Selection::initial);
+    let mut typed = use_signal(String::new);
+    let mut suggestion = use_signal(|| None::<String>);
+    // Changing this rebuilds the (uncontrolled) text field, which is how it is cleared.
+    let mut generation = use_signal(|| 0_u64);
+    let mut busy = use_signal(|| false);
+    let mut project_menu = use_signal(|| false);
+    let mut mode_menu = use_signal(|| false);
+    let mut computer_menu = use_signal(|| false);
+    let mut picker_open = use_signal(|| false);
+    let mut picker_harness = use_signal(|| None::<Harness>);
+    let mut picker_query = use_signal(String::new);
+
+    // ---- live data ----------------------------------------------------------------------------
+    let (existing_projects, computers): (Vec<String>, Vec<(String, String)>) = {
+        let _ = *ui.live.launcher.read();
+        services().client.read(|s| {
+            let projects = model::project_cards(s)
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            let computers = s
+                .computers()
+                .iter()
+                .filter(|c| c.id != "local")
+                .map(|c| (c.id.clone(), c.name.clone()))
+                .collect();
+            (projects, computers)
+        })
+    };
+    let agents: Vec<(String, bool)> = ui
+        .live
+        .agents
+        .read()
+        .iter()
+        .map(|a| (a.kind.clone(), a.installed))
+        .collect();
+    let limited: Vec<String> = {
+        let accounts = ui.live.accounts.read();
+        Harness::ALL
+            .iter()
+            .map(|h| h.kind())
+            .filter(|k| {
+                let of_kind: Vec<_> = accounts.iter().filter(|a| a.agent == *k).collect();
+                !of_kind.is_empty() && of_kind.iter().all(|a| a.limited)
+            })
+            .map(String::from)
+            .collect()
+    };
+
+    let sel = selection();
+    let projects = project_options(&existing_projects);
+    let message = effective_message(&typed(), suggestion().as_deref());
+    let sendable = can_send(&message, busy());
+
+    // ---- send ---------------------------------------------------------------------------------
+    let send = use_callback({
+        move |()| {
+            let message = effective_message(&typed.peek(), suggestion.peek().as_deref());
+            if !can_send(&message, *busy.peek()) {
+                return;
+            }
+            let sel = selection.peek().clone();
+            let (remembered, latest_in_project, latest_any) = {
+                let prefs = ui.prefs.peek();
+                let remembered = prefs.last_used.get(&sel.project).map(|l| l.cwd.clone());
+                services().client.read(|s| {
+                    let any = model::recent_sessions(
+                        s,
+                        &model::RowContext {
+                            account_labels: &Default::default(),
+                        },
+                        1,
+                    )
+                    .first()
+                    .map(|r| r.cwd.clone());
+                    (remembered, model::latest_cwd(s, &sel.project), any)
+                })
+            };
+            let Some(cwd) = resolve_cwd(
+                remembered.as_deref(),
+                latest_in_project.as_deref(),
+                latest_any.as_deref(),
+            ) else {
+                // Home has no folder field; the new-session dialog asks for one.
+                Message::new("작업 폴더를 알 수 없습니다. 새 세션 창에서 폴더를 정해 주세요")
+                    .with_duration(MessageDuration::Long)
+                    .show();
+                ui.open_new_session(Some(sel.project.clone()));
+                return;
+            };
+            busy.set(true);
+            let body = CreateSession {
+                project: sel.project.clone(),
+                agent: sel.option.harness.kind().to_string(),
+                cwd: cwd.clone(),
+                model: Some(sel.option.model.to_string()),
+                title: Some(title_from_message(&message)),
+                account: None,
+            };
+            let computer_id = sel.computer.clone();
+            let bypass = needs_approve_all(sel.mode);
+            let remember = LastUsed {
+                agent: body.agent.clone(),
+                account: None,
+                computer: computer_id.clone(),
+                model: body.model.clone(),
+                cwd,
+            };
+            let project_name = sel.project.clone();
+            run(
+                async move {
+                    let s = services();
+                    let rec = s
+                        .server
+                        .create_session(&body)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    s.client.apply(Input::SessionLoaded(rec.clone()));
+                    let mut notice = None;
+                    if let Some(cid) = computer_id {
+                        if let Err(e) = s.server.switch_computer(&rec.id, &cid).await {
+                            notice = Some(format!(
+                                "메인 서버에서 시작했습니다. 컴퓨터를 바꾸지 못했습니다 ({e})"
+                            ));
+                        }
+                    }
+                    if bypass {
+                        if let Err(e) = s.client.set_approve_all(&rec.id, true).await {
+                            notice = Some(format!("모두 허용을 켜지 못했습니다 ({e})"));
+                        }
+                    }
+                    Ok::<_, String>((rec, notice))
+                },
+                move |r| {
+                    busy.set(false);
+                    match r {
+                        Ok((rec, notice)) => {
+                            ui.update_prefs(|p| {
+                                p.last_used.insert(project_name.clone(), remember);
+                                p.last_project = Some(project_name);
+                            });
+                            let s = services();
+                            s.outbox.lock().unwrap().push(&rec.id, message);
+                            s.bump_outbox();
+                            typed.set(String::new());
+                            suggestion.set(None);
+                            generation += 1;
+                            ui.open_conversation(&rec.id);
+                            s.drive_outbox(&rec.id);
+                            if let Some(n) = notice {
+                                Message::new(n).with_duration(MessageDuration::Long).show();
+                            }
+                        }
+                        Err(e) => Message::new(format!("세션을 시작하지 못했습니다 ({e})"))
+                            .with_duration(MessageDuration::Long)
+                            .show(),
+                    }
+                },
+            );
+        }
+    });
+
+    // ---- picker rows --------------------------------------------------------------------------
+    let all = model_catalog();
+    let rows = filter_models(&all, picker_harness(), &picker_query());
+
+    let computer_text = computer_chip_text(sel.computer.as_deref(), &computers);
+    let mode_label = sel.mode.label();
+    let placeholder = match suggestion() {
+        Some(s) => s,
+        None => COMPOSER_PLACEHOLDER.to_string(),
+    };
+
+    rsx! {
+        Column {
+            fill_max_width: true,
+            spacing: SP[4],
+            Label { text: GREETING, fs: Fs::Xl3, weight: Weight::Medium }
+            EmberCard { fill_max_width: true,
+                Column {
+                    fill_max_width: true,
+                    padding: PAD_CARD_H,
+                    spacing: SP[2],
+                    Spacer { height: SP[2] }
+                    for g in [generation()] {
+                        TextField {
+                            key: "home-composer-{g}",
+                            fill_max_width: true,
+                            height: 96.0,
+                            multiline: true,
+                            placeholder: placeholder.clone(),
+                            on_value_change: move |v: String| typed.set(v),
+                            on_submit: move |_| send.call(()),
+                        }
+                    }
+                    if suggestion().is_some() {
+                        Row {
+                            fill_max_width: true,
+                            alignment: Alignment::CenterStart,
+                            spacing: SP[1],
+                            Label { text: "제안을 고르셨습니다. 입력하지 않으면 이 내용으로 시작합니다", fs: Fs::Xs, color: paint(theme.palette.muted), max_lines: 2 }
+                            Spacer { weight: 1.0 }
+                            PickChip { text: "취소", on_click: move |()| suggestion.set(None) }
+                        }
+                    }
+                    Row {
+                        fill_max_width: true,
+                        alignment: Alignment::CenterStart,
+                        spacing: SP[1],
+                        IconButton {
+                            icon: IconRole::Add,
+                            small: true,
+                            // TODO(FR-L11): attachments need the file picker and an upload API.
+                            on_click: move |()| Message::new(UNAVAILABLE).show(),
+                        }
+                        ScrollRow {
+                            weight: 1.0,
+                            Row {
+                            spacing: SP[1],
+                            Menu {
+                                expanded: project_menu(),
+                                on_dismiss: move |_| project_menu.set(false),
+                                anchor: rsx! {
+                                    PickChip {
+                                        text: sel.project.clone(),
+                                        icon: IconRole::Library,
+                                        on_click: move |()| project_menu.set(true),
+                                    }
+                                },
+                                for p in projects.iter().cloned() {
+                                    MenuItem {
+                                        key: "{p}",
+                                        text: p.clone(),
+                                        selected: p == sel.project,
+                                        on_click: move |()| {
+                                            let mut s = selection.peek().clone();
+                                            s.project = p.clone();
+                                            selection.set(s);
+                                            project_menu.set(false);
+                                        },
+                                    }
+                                }
+                            }
+                            PickChip {
+                                text: sel.option.chip_label(),
+                                icon: IconRole::Compose,
+                                icon_only: compact,
+                                on_click: move |()| picker_open.set(true),
+                            }
+                            Menu {
+                                expanded: mode_menu(),
+                                on_dismiss: move |_| mode_menu.set(false),
+                                anchor: rsx! {
+                                    PickChip {
+                                        text: mode_label,
+                                        icon: IconRole::Settings,
+                                        icon_only: compact,
+                                        selected: sel.mode.is_bypass(),
+                                        on_click: move |()| mode_menu.set(true),
+                                    }
+                                },
+                                for m in modes_for(sel.option.harness).iter().copied() {
+                                    MenuItem {
+                                        key: "{m.label()}",
+                                        text: m.label(),
+                                        selected: m == sel.mode,
+                                        danger: m.is_bypass(),
+                                        on_click: move |()| {
+                                            let s = selection.peek().with_mode(m);
+                                            selection.set(s);
+                                            mode_menu.set(false);
+                                        },
+                                    }
+                                }
+                            }
+                            Menu {
+                                expanded: computer_menu(),
+                                on_dismiss: move |_| computer_menu.set(false),
+                                anchor: rsx! {
+                                    PickChip {
+                                        text: computer_text.clone(),
+                                        icon: IconRole::Sidebar,
+                                        icon_only: compact,
+                                        on_click: move |()| computer_menu.set(true),
+                                    }
+                                },
+                                MenuItem {
+                                    text: "이 서버",
+                                    selected: sel.computer.is_none(),
+                                    on_click: move |()| {
+                                        let mut s = selection.peek().clone();
+                                        s.computer = None;
+                                        selection.set(s);
+                                        computer_menu.set(false);
+                                    },
+                                }
+                                for (id, name) in computers.iter().cloned() {
+                                    MenuItem {
+                                        key: "{id}",
+                                        text: name.clone(),
+                                        selected: sel.computer.as_deref() == Some(id.as_str()),
+                                        on_click: move |()| {
+                                            let mut s = selection.peek().clone();
+                                            s.computer = Some(id.clone());
+                                            selection.set(s);
+                                            computer_menu.set(false);
+                                        },
+                                    }
+                                }
+                            }
+                            }
+                        }
+                        if busy() {
+                            ProgressIndicator { determinate: false, circular: true, width: 18.0, height: 18.0 }
+                        }
+                        AppButton {
+                            text: "보내기",
+                            icon: IconRole::Send,
+                            kind: ButtonKind::Primary,
+                            enabled: sendable,
+                            on_click: move |()| send.call(()),
+                        }
+                    }
+                    Spacer { height: SP[2] }
+                }
+            }
+            ScrollRow {
+                fill_max_width: true,
+                Row {
+                    spacing: SP[2],
+                    for text in SUGGESTIONS {
+                        PickChip {
+                            key: "{text}",
+                            text,
+                            on_click: move |()| suggestion.set(Some(apply_suggestion(&typed.peek(), text))),
+                        }
+                    }
+                }
+            }
+        }
+
+        EmberSheet {
+            title: "모델 선택",
+            open: picker_open(),
+            on_dismiss: move |()| picker_open.set(false),
+            Column {
+                fill_max_width: true,
+                padding_role: SpaceRole::Md,
+                spacing: SP[2],
+                ScrollRow {
+                    fill_max_width: true,
+                    Row {
+                        spacing: SP[1],
+                        PickChip {
+                            text: "전체",
+                            selected: picker_harness().is_none(),
+                            on_click: move |()| picker_harness.set(None),
+                        }
+                        for h in Harness::ALL {
+                            PickChip {
+                                key: "{h.label()}",
+                                text: h.label(),
+                                selected: picker_harness() == Some(h),
+                                on_click: move |()| picker_harness.set(Some(h)),
+                            }
+                        }
+                    }
+                }
+                TextField {
+                    fill_max_width: true,
+                    placeholder: "모델 검색",
+                    on_value_change: move |v: String| picker_query.set(v),
+                }
+                if rows.is_empty() {
+                    Label { text: "맞는 모델이 없습니다", fs: Fs::Sm, color: paint(theme.palette.muted) }
+                }
+                ScrollColumn {
+                    fill_max_width: true,
+                    height: 320.0,
+                    Column {
+                        fill_max_width: true,
+                        spacing: SP[1],
+                        for (i, o) in rows.iter().copied().enumerate() {
+                        ModelRow {
+                            key: "{i}-{o.model}",
+                            option: o,
+                            shortcut: shortcut_label(i),
+                            selected: o == sel.option,
+                            block: harness_block(o.harness, &agents, &limited),
+                            on_pick: move |()| {
+                                let s = selection.peek().with_option(o);
+                                selection.set(s);
+                                picker_open.set(false);
+                            },
+                        }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One row of the model picker: "model (effort)", harness and shortcut; dimmed with its reason
+/// when the harness cannot be used (FR-L15).
+#[component]
+fn ModelRow(
+    option: ModelOption,
+    shortcut: Option<String>,
+    selected: bool,
+    block: Option<&'static str>,
+    on_pick: EventHandler<()>,
+) -> Element {
+    let theme = use_ember_theme();
+    let text = match &shortcut {
+        Some(k) => format!(
+            "{}   {}   {}",
+            option.row_title(),
+            option.harness.label(),
+            k
+        ),
+        None => format!("{}   {}", option.row_title(), option.harness.label()),
+    };
+    rsx! {
+        Column {
+            fill_max_width: true,
+            AppButton {
+                text,
+                fill_max_width: true,
+                kind: if selected { ButtonKind::Primary } else { ButtonKind::Default },
+                enabled: block.is_none(),
+                on_click: move |()| on_pick.call(()),
+            }
+            if let Some(reason) = block {
+                Label { text: reason, fs: Fs::Xs, color: paint(theme.palette.red.strong) }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------------------------
+
+/// Everything the dashboard reads from the client in one pass.
+struct Dash {
+    counts: StatusCounts,
+    online: usize,
+    computers: usize,
+    harness: Vec<HarnessBar>,
+    crew: Vec<CrewMember>,
+    projects: Vec<ProjectTile>,
+}
+
+fn read_dash(state: &State) -> Dash {
+    let (online, computers) = computers_online(state);
+    Dash {
+        counts: status_counts(state),
+        online,
+        computers,
+        harness: harness_usage(state),
+        crew: crew(state, 7),
+        projects: project_tiles(state, 12),
+    }
+}
+
+#[component]
+fn HomeDashboard() -> Element {
+    let ui = use_ui();
+    let window = use_window_size();
+    let compact = window.is_compact();
+    let _ = *ui.live.launcher.read();
+    let d = services().client.read(read_dash);
+    let k = kpis(&d.counts, d.online, d.computers);
+
+    rsx! {
+        Column {
+            fill_max_width: true,
+            spacing: SP[4],
+            Label { text: "오늘의 팀", fs: Fs::Xl, weight: Weight::Semibold }
+            if compact {
+                Row { fill_max_width: true, spacing: SP[3],
+                    KpiView { kpi: k[0].clone() }
+                    KpiView { kpi: k[1].clone() }
+                }
+                Row { fill_max_width: true, spacing: SP[3],
+                    KpiView { kpi: k[2].clone() }
+                    KpiView { kpi: k[3].clone() }
+                }
+            } else {
+                Row { fill_max_width: true, spacing: SP[3],
+                    for kpi in k.iter().cloned() {
+                        KpiView { key: "{kpi.label}", kpi }
+                    }
+                }
+            }
+            TilePair {
+                compact,
+                start_weight: 2.0,
+                end_weight: 1.0,
+                start: rsx! { UnavailableTile { title: "비용과 토큰 추이" } },
+                end: rsx! { StatusTile { counts: d.counts.clone() } },
+            }
+            TilePair {
+                compact,
+                start_weight: 1.0,
+                end_weight: 1.0,
+                start: rsx! { HarnessTile { bars: d.harness.clone() } },
+                end: rsx! { CrewTile { crew: d.crew.clone(), online: d.online, computers: d.computers } },
+            }
+            ProjectsTile { tiles: d.projects.clone() }
+        }
+    }
+}
+
+/// Two tiles side by side, or stacked on a compact window (FR-L10).
+#[component]
+fn TilePair(
+    compact: bool,
+    start_weight: f32,
+    end_weight: f32,
+    start: Element,
+    end: Element,
+) -> Element {
+    if compact {
+        rsx! {
+            Column { fill_max_width: true, spacing: SP[3], {start} {end} }
+        }
+    } else {
+        rsx! {
+            Row {
+                fill_max_width: true,
+                spacing: SP[3],
+                Column { weight: start_weight, {start} }
+                Column { weight: end_weight, {end} }
+            }
+        }
+    }
+}
+
+#[component]
+fn KpiView(kpi: Kpi) -> Element {
+    let theme = use_ember_theme();
+    let muted = paint(theme.palette.muted);
+    rsx! {
+        Column {
+            weight: 1.0,
+            spacing: SP[0],
+            Label { text: kpi.label, fs: Fs::Sm, color: muted }
+            if kpi.available {
+                Row {
+                    alignment: Alignment::CenterStart,
+                    spacing: SP[0],
+                    Label { text: kpi.value.clone(), fs: Fs::Xl3, weight: Weight::Semibold }
+                    if !kpi.unit.is_empty() {
+                        Label { text: kpi.unit, fs: Fs::Md, color: muted }
+                    }
+                }
+            } else {
+                Label { text: kpi.value.clone(), fs: Fs::Md, color: muted }
+            }
+            if let Some(note) = kpi.note.clone() {
+                Label { text: note, fs: Fs::Xs, color: muted }
+            }
+        }
+    }
+}
+
+/// A tile for data the server does not provide yet: the title and "준비 중입니다".
+/// TODO(server, FR-U7): tokens and cost per day are not in the client's state; draw
+/// the hatched token bars with the cost line when an endpoint exists. Charts then use `Canvas`
+/// (GAPS: a line over bars needs `Path`, `DrawCommand` has only polylines; fall back to bars).
+#[component]
+fn UnavailableTile(#[props(into)] title: String) -> Element {
+    let theme = use_ember_theme();
+    rsx! {
+        EmberCard { fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: PAD_CARD_H,
+                spacing: SP[2],
+                Label { text: title, fs: Fs::Lg, weight: Weight::Semibold }
+                Label { text: UNAVAILABLE, fs: Fs::Md, color: paint(theme.palette.muted) }
+            }
+        }
+    }
+}
+
+#[component]
+fn TileFrame(#[props(into)] title: String, children: Element) -> Element {
+    rsx! {
+        EmberCard { fill_max_width: true,
+            Column {
+                fill_max_width: true,
+                padding: PAD_CARD_H,
+                spacing: SP[2],
+                Label { text: title, fs: Fs::Lg, weight: Weight::Semibold }
+                {children}
+            }
+        }
+    }
+}
+
+/// Usage by harness: bars of sessions per harness. A session count, not tokens (see
+/// [`UnavailableTile`]).
+#[component]
+fn HarnessTile(bars: Vec<HarnessBar>) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    const W: f32 = 280.0;
+    const H: f32 = 80.0;
+    let values: Vec<usize> = bars.iter().map(|b| b.sessions).collect();
+    let rects = bar_rects(&values, W, H, 8.0);
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, W, 1.0, 0.0);
+    for (x, y, w, h) in rects {
+        if h > 0.0 {
+            list = list.round_rect(paint(p.blue.strong), x, y, w, h, 4.0, 0.0);
+        }
+    }
+    let commands = list.build();
+    rsx! {
+        TileFrame { title: "하네스별 사용량",
+            if bars.is_empty() {
+                Label { text: EMPTY_HARNESS_USAGE, fs: Fs::Md, color: paint(p.muted) }
+            } else {
+                Canvas { width: W, height: H + 1.0, commands }
+                Row {
+                    width: W,
+                    for b in bars.iter().cloned() {
+                        Label { key: "{b.label}", text: format!("{} {}", b.label, b.sessions), fs: Fs::Xs, color: paint(p.muted), max_lines: 1 }
+                        Spacer { weight: 1.0 }
+                    }
+                }
+                Label { text: "세션 수 기준입니다. 토큰 사용량은 준비 중입니다", fs: Fs::Xs2, color: paint(p.muted), max_lines: 2 }
+            }
+        }
+    }
+}
+
+/// Member status: a ring and a legend.
+#[component]
+fn StatusTile(counts: StatusCounts) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let parts: [(&str, usize, Color); 5] = [
+        ("실행", counts.running, p.blue.strong),
+        ("승인 대기", counts.waiting, p.orange.strong),
+        ("새 결과", counts.unread, p.sky.strong),
+        ("완료", counts.done, p.grey.strong),
+        ("실패", counts.failed, p.red.strong),
+    ];
+    let values: Vec<usize> = parts.iter().map(|x| x.1).collect();
+    let mut list = DrawList::builder().circle(paint(p.track), 48.0, 48.0, 40.0, 10.0);
+    for ((start, sweep), part) in ring_segments(&values).into_iter().zip(parts.iter()) {
+        if sweep > 0.0 {
+            list = list.arc(paint(part.2), 48.0, 48.0, 40.0, start, sweep, 10.0);
+        }
+    }
+    let commands = list.build();
+    rsx! {
+        TileFrame { title: "팀원 상태",
+            Row {
+                fill_max_width: true,
+                spacing: SP[3],
+                alignment: Alignment::CenterStart,
+                Canvas { width: 96.0, height: 96.0, commands }
+                Column {
+                    spacing: SP[0],
+                    for part in parts.iter() {
+                        Label { key: "{part.0}", text: format!("{} {}", part.0, part.1), fs: Fs::Sm, color: paint(part.2) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The working crew: running and waiting members, each opening its conversation.
+#[component]
+fn CrewTile(crew: Vec<CrewMember>, online: usize, computers: usize) -> Element {
+    let ui = use_ui();
+    let theme = use_ember_theme();
+    let muted = paint(theme.palette.muted);
+    rsx! {
+        TileFrame { title: "지금 일하는 팀원",
+            if crew.is_empty() {
+                Label { text: EMPTY_CREW, fs: Fs::Md, color: muted }
+            }
+            for m in crew.iter().cloned() {
+                Row {
+                    key: "{m.id}",
+                    fill_max_width: true,
+                    spacing: SP[1],
+                    alignment: Alignment::CenterStart,
+                    AppButton {
+                        text: model::one_line(&m.title, 24),
+                        small: true,
+                        on_click: {
+                            let id = m.id.clone();
+                            move |()| ui.open_conversation(&id)
+                        },
+                    }
+                    Label { text: m.project.clone(), fs: Fs::Xs, color: muted, max_lines: 1 }
+                    Spacer { weight: 1.0 }
+                    if m.waiting {
+                        Pill { text: "승인 대기", tone: PillTone::Orange, small: true }
+                    } else {
+                        Pill { text: "실행", tone: PillTone::Blue, small: true }
+                    }
+                }
+            }
+            Label { text: computers_line(online, computers), fs: Fs::Xs, color: muted }
+        }
+    }
+}
+
+/// The project list: each opens the Projects menu on that project.
+#[component]
+fn ProjectsTile(tiles: Vec<ProjectTile>) -> Element {
+    let ui = use_ui();
+    let theme = use_ember_theme();
+    rsx! {
+        TileFrame { title: "프로젝트",
+            if tiles.is_empty() {
+                Label { text: EMPTY_PROJECTS, fs: Fs::Md, color: paint(theme.palette.muted) }
+            }
+            for t in tiles.iter().cloned() {
+                Row {
+                    key: "{t.name}",
+                    fill_max_width: true,
+                    spacing: SP[2],
+                    alignment: Alignment::CenterStart,
+                    AppButton {
+                        text: t.name.clone(),
+                        small: true,
+                        on_click: {
+                            let name = t.name.clone();
+                            move |()| {
+                                let mut sel = ui.selected_project;
+                                sel.set(Some(name.clone()));
+                                ui.go(Route::Projects);
+                                let mut menu = ui.menu;
+                                menu.set(NavMenu::Projects);
+                            }
+                        },
+                    }
+                    Label { text: project_tile_line(&t), fs: Fs::Xs, color: paint(theme.palette.muted), max_lines: 1 }
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -516,9 +1628,10 @@ mod tests {
         // Case-insensitive; several words must all match.
         let rows = filter_models(&all, None, "gpt-5-codex HIGH");
         assert!(!rows.is_empty());
-        assert!(rows
-            .iter()
-            .all(|o| o.model == "gpt-5-codex" && o.effort == Some("High")));
+        assert!(
+            rows.iter()
+                .all(|o| o.model == "gpt-5-codex" && o.effort == Some("High"))
+        );
         assert!(filter_models(&all, None, "zzz").is_empty());
         // A blank query is not a search.
         assert_eq!(filter_models(&all, Some(Harness::Gemini), "  ").len(), 2);
@@ -547,7 +1660,10 @@ mod tests {
 
     #[test]
     fn fr_l15_blocked_harness_is_dimmed_with_a_reason() {
-        let agents = vec![("claude-code".to_string(), true), ("codex".to_string(), false)];
+        let agents = vec![
+            ("claude-code".to_string(), true),
+            ("codex".to_string(), false),
+        ];
         assert_eq!(harness_block(Harness::ClaudeCode, &agents, &[]), None);
         assert!(harness_block(Harness::Codex, &agents, &[]).is_some());
         // Not listed at all: not installed.
@@ -625,6 +1741,13 @@ mod tests {
     }
 
     #[test]
+    fn fr_l11_typed_text_wins_over_a_pending_suggestion() {
+        assert_eq!(effective_message(" hi ", Some("s")), "hi");
+        assert_eq!(effective_message("", Some(" s ")), "s");
+        assert_eq!(effective_message("  ", None), "");
+    }
+
+    #[test]
     fn fr_l11_send_needs_text_and_no_create_in_flight() {
         assert!(can_send("hello", false));
         assert!(!can_send("   \n", false));
@@ -634,15 +1757,27 @@ mod tests {
 
     #[test]
     fn fr_l11_cwd_falls_back_through_remembered_project_then_any() {
-        assert_eq!(resolve_cwd(Some("/a"), Some("/b"), Some("/c")).as_deref(), Some("/a"));
-        assert_eq!(resolve_cwd(None, Some("/b"), Some("/c")).as_deref(), Some("/b"));
-        assert_eq!(resolve_cwd(Some(" "), None, Some("/c")).as_deref(), Some("/c"));
+        assert_eq!(
+            resolve_cwd(Some("/a"), Some("/b"), Some("/c")).as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            resolve_cwd(None, Some("/b"), Some("/c")).as_deref(),
+            Some("/b")
+        );
+        assert_eq!(
+            resolve_cwd(Some(" "), None, Some("/c")).as_deref(),
+            Some("/c")
+        );
         assert_eq!(resolve_cwd(None, None, None), None);
     }
 
     #[test]
     fn fr_l11_title_is_the_first_line_of_the_message() {
-        assert_eq!(title_from_message("고쳐 주세요\n자세히"), "고쳐 주세요\u{2026}");
+        assert_eq!(
+            title_from_message("고쳐 주세요\n자세히"),
+            "고쳐 주세요\u{2026}"
+        );
         assert_eq!(title_from_message("짧은 말"), "짧은 말");
     }
 
@@ -671,7 +1806,10 @@ mod tests {
         ] {
             c.add(s);
         }
-        assert_eq!((c.running, c.waiting, c.unread, c.done, c.failed, c.idle), (2, 1, 1, 1, 1, 2));
+        assert_eq!(
+            (c.running, c.waiting, c.unread, c.done, c.failed, c.idle),
+            (2, 1, 1, 1, 1, 2)
+        );
         assert_eq!(c.total(), 8);
     }
 
@@ -717,7 +1855,11 @@ mod tests {
         assert!(r[1].0 > r[0].0 + r[0].2);
         assert!(r[3].0 + r[3].2 <= 100.0 + 0.01);
         assert!(bar_rects(&[], 100.0, 40.0, 4.0).is_empty());
-        assert!(bar_rects(&[0, 0], 100.0, 40.0, 4.0).iter().all(|b| b.3 == 0.0));
+        assert!(
+            bar_rects(&[0, 0], 100.0, 40.0, 4.0)
+                .iter()
+                .all(|b| b.3 == 0.0)
+        );
     }
 
     #[test]
@@ -785,7 +1927,10 @@ mod tests {
         }
         for s in strings {
             assert!(
-                !s.ends_with('다') || s.ends_with("입니다") || s.ends_with("합니다") || s.ends_with("습니다"),
+                !s.ends_with('다')
+                    || s.ends_with("입니다")
+                    || s.ends_with("합니다")
+                    || s.ends_with("습니다"),
                 "{s}"
             );
         }

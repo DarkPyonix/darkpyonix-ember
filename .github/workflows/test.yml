@@ -3,6 +3,7 @@
 #   transport-isolation  .github/scripts/checks/check-transport-isolation.sh (SPEC FR-N5), when present
 #   editor-conn-pin      ember/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
 #                        Code-OSS tag in ember/ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   vendored-css         .github/scripts/checks/check-vendored-css.sh + check-no-has-selector.sh (D23, #143)
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
 #   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1)
@@ -63,6 +64,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: bash .github/scripts/checks/check-release-workflow.sh
+
+  vendored-css:
+    name: Vendored Code-OSS CSS is reproducible
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Vendored copy equals pristine plus patch (offline)
+        run: bash .github/scripts/checks/check-vendored-css.sh
+      - name: No :has( in Ember-owned CSS
+        run: bash .github/scripts/checks/check-no-has-selector.sh
 
   no-webview:
     name: No webview in the launcher (NFR-L2)

@@ -15,7 +15,7 @@
 //!
 //! Wire protocol (all on the one socket):
 //! - client to shim: `ATTACH <offset>\n` first, then `IN <len>\n<bytes>`, `ACK <offset>\n`,
-//!   `KILL\n`.
+//!   `KILL\n`, `CLOSE\n` (close the agent's stdin).
 //! - shim to client: `O <start> <len>\n<bytes>` (stdout bytes at absolute offset `start`) and
 //!   `X <reason>\n` (the agent ended; reason is `exit:<code>`, `signal:<n>` or `memory-limit`).
 //!
@@ -411,6 +411,9 @@ async fn read_commands(
             }
         } else if l == "KILL" {
             shared.kill.notify_one();
+        } else if l == "CLOSE" {
+            // End of the agent's input stream, like closing its stdin when it is a child.
+            shared.stdin.lock().await.take();
         }
     }
 }
@@ -446,6 +449,12 @@ impl ShimClient {
     /// Tell the shim everything before `offset` is stored, so it may drop it.
     pub async fn ack(&self, offset: u64) -> anyhow::Result<()> {
         self.writer.lock().await.write_all(format!("ACK {offset}\n").as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Close the agent's stdin (it ends its input stream; the agent usually exits).
+    pub async fn close_stdin(&self) -> anyhow::Result<()> {
+        self.writer.lock().await.write_all(b"CLOSE\n").await?;
         Ok(())
     }
 

@@ -48,13 +48,14 @@ impl Harness {
     pub const ALL: [Harness; 3] = [Harness::ClaudeCode, Harness::Codex, Harness::Gemini];
 
     /// The agent kind `POST /sessions` takes.
-    /// TODO(Gemini): the server's built-in Google harness is Antigravity (`agy`); a Gemini CLI
-    /// agent would be an ACP agent. Verify before FR-L15 is marked done (AGENTS.md rule 4).
+    /// Gemini CLI is not Antigravity (`agy`). The server has no Gemini kind yet (a Gemini CLI
+    /// agent would be a configured ACP agent), so `gemini` is never sent: [`harness_block`]
+    /// disables the Gemini row with "준비 중입니다".
     pub fn kind(self) -> &'static str {
         match self {
             Harness::ClaudeCode => "claude-code",
             Harness::Codex => "codex",
-            Harness::Gemini => "antigravity",
+            Harness::Gemini => "gemini",
         }
     }
 
@@ -278,6 +279,9 @@ pub fn harness_block(
     agents: &[(String, bool)],
     limited: &[String],
 ) -> Option<&'static str> {
+    if h == Harness::Gemini {
+        return Some("준비 중입니다");
+    }
     if !agents.is_empty() {
         let installed = agents.iter().any(|(k, i)| k == h.kind() && *i);
         if !installed {
@@ -1674,9 +1678,20 @@ mod tests {
 
     #[test]
     fn fr_l15_nothing_is_blocked_before_the_server_answers() {
-        for h in Harness::ALL {
+        for h in Harness::ALL.into_iter().filter(|h| *h != Harness::Gemini) {
             assert_eq!(harness_block(h, &[], &[]), None);
         }
+    }
+
+    #[test]
+    fn fr_l15_gemini_is_not_antigravity_and_is_disabled() {
+        assert_ne!(Harness::Gemini.kind(), "antigravity");
+        assert_eq!(Harness::ClaudeCode.kind(), "claude-code");
+        assert_eq!(Harness::Codex.kind(), "codex");
+        // Disabled even when the server lists it as installed, and before the server answers.
+        assert_eq!(harness_block(Harness::Gemini, &[], &[]), Some("준비 중입니다"));
+        let agents = vec![("gemini".to_string(), true)];
+        assert_eq!(harness_block(Harness::Gemini, &agents, &[]), Some("준비 중입니다"));
     }
 
     #[test]

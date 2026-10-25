@@ -10,7 +10,7 @@ use dioxus_compose::prelude::*;
 use crate::model;
 use crate::ui::components::{AppButton, EmberSheet, Label};
 use crate::ui::theme::*;
-use crate::ui::{conversation, home, new_session, project, search, use_ui, Route};
+use crate::ui::{agents, conversation, home, new_session, project, search, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -86,6 +86,8 @@ pub enum Screen {
     Launcher,
     Search,
     Conversation(String),
+    /// 에이전트: harnesses, models, profiles, network, usage (FR-L20).
+    Agents,
     /// A menu whose screen is not built yet ("준비 중입니다").
     Placeholder(NavMenu),
 }
@@ -98,6 +100,7 @@ pub fn screen_for(route: &Route, active: NavMenu) -> Screen {
         (NavMenu::Sessions, Route::Conversation(id)) => Screen::Conversation(id.clone()),
         (NavMenu::Projects, Route::Search) => Screen::Search,
         (NavMenu::Projects, _) => Screen::Launcher,
+        (NavMenu::Agents, _) => Screen::Agents,
         (other, _) => Screen::Placeholder(other),
     }
 }
@@ -462,6 +465,7 @@ pub fn Shell() -> Element {
                     Screen::Home => rsx! { home::Home {} },
                     Screen::Launcher => rsx! { project::ProjectScreen {} },
                     Screen::Search => rsx! { search::SearchScreen {} },
+                    Screen::Agents => rsx! { agents::Agents {} },
                     Screen::Conversation(id) => rsx! { conversation::ConversationView { key: "{id}", id: id.clone() } },
                     Screen::Placeholder(menu) => rsx! { Placeholder { menu } },
                 }
@@ -612,11 +616,11 @@ mod tests {
             NavMenu::Channels,
             NavMenu::Routines,
             NavMenu::VersionControl,
-            NavMenu::Agents,
             NavMenu::Files,
         ] {
             assert_eq!(screen_for(&Route::Projects, m), Screen::Placeholder(m));
         }
+        assert_eq!(screen_for(&Route::Projects, NavMenu::Agents), Screen::Agents);
         // 세션 with no open conversation has nothing to show yet.
         assert_eq!(
             screen_for(&Route::Projects, NavMenu::Sessions),

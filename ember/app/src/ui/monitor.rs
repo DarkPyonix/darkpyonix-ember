@@ -9,8 +9,9 @@ use dioxus_compose::prelude::*;
 use ember_client::state::Reachability;
 
 use crate::ui::components::{EmberCard, EmberSheet, InsetPanel, Label, Pill};
+use crate::ui::characters::Character;
 use crate::ui::project::{
-    display_name, reach_pill, Character, ComputerChip, Member, ProjectBox, SOON,
+    display_name, reach_pill, ComputerChip, Member, ProjectBox, SOON,
 };
 use crate::ui::theme::*;
 use crate::ui::{use_ui, Route};

@@ -526,6 +526,22 @@ Rejected: messages as the only channel between sessions.
 
 **Why.** The renderer drops `:has()` rules, so they need classes either way. A script plus a patch keeps the copy reproducible, and CI checks it offline against a committed pristine copy.
 
+### D24: Files move between all of a user's connected devices, like AirDrop
+
+**Decision.** [user, 2026-10-25: "Ember 스펙에 파일 전송 기능도 추가하는걸로 하자. 파일 메뉴도 UI에 추가해줘. ... 이 기능을 통해 연결된 모든 사용자 장비에 대해서 파일 전송이 가능해지는거지. 모바일까지도. airdrop 처럼 쓸 수 있게 하는거야!"] Ember has a file transfer feature and a Files menu in the UI. Any file can go between any two of the user's connected devices, mobile included, with an AirDrop-like feel: pick a device, send, the other side accepts.
+
+- **Transport** *[provisional]*: files travel over the existing peer-to-peer tunnel and its relay fallback (D8, `FR-N1`, `FR-N5`), as another stream on the same transport. No new network path, no new account system.
+- **Devices** *[provisional]*: "the user's devices" are the computers and clients registered under the user's GitHub account on the hub (`FR-N2`). Another person's device is out of scope here.
+- **Receiving** *[provisional]*: a transfer needs the receiver's consent. Received files land in a known folder and are listed with a transfer history in the Files menu.
+- **Reliability** *[provisional]*: large files stream in chunks and resume after a dropped connection.
+- **Mobile** *[provisional]*: the phone and tablet clients take part through the OS share sheet.
+
+**Rejected** *[provisional]*. A separate cloud upload service (files would leave the user's own devices and need storage, quotas and a trust boundary of their own). Third-party sync tools (a second app on mobile, the objection that withdrew tailcat in D8). A new transport beside the iroh tunnel. Sending to other people's devices in this first version.
+
+**Why.** The tunnel already connects every device of the user end to end. File transfer is the missing use of it, and it removes the habit of mailing files to oneself.
+
+**Status.** Specified only (`FR-F1`–`FR-F9`, Draft; issue #152). Not built. The Files menu mock is separate UI work.
+
 ### D25: One client design on every OS, after the owner's reference images; Liquid Glass on iOS only
 
 **Decision.** [user, 2026-10-25: "운영체제별 디자인 쓰지 말고 통일 디자인으로 해."] The client draws

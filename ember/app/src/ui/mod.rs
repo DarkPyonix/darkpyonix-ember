@@ -10,6 +10,7 @@ pub mod components;
 pub mod conversation;
 pub mod launcher;
 pub mod new_session;
+pub mod project;
 pub mod search;
 pub mod shell;
 pub mod theme;

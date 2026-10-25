@@ -25,7 +25,7 @@ path = "src/main.rs"
 # dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (dioxus-compose is not yet published).
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "b71b20e" }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "d37fb3cd" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }

@@ -106,6 +106,9 @@ pub struct CurrentComputer {
     pub implicit: bool,
     #[serde(default)]
     pub notice_pending: bool,
+    /// The computer designated for the session (FR-X3), read-only.
+    #[serde(default)]
+    pub designated_computer_id: Option<String>,
 }
 
 /// `PUT /api/sessions/{id}/computer` answer.

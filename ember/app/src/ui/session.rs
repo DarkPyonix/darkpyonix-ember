@@ -1642,6 +1642,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
     let mut query = use_signal(String::new);
     let mut drawer = use_signal(|| false);
     let mut project_menu = use_signal(|| false);
+    let mut more_menu = use_signal(|| false);
 
     let boxes = {
         let _ = *ui.live.launcher.read();
@@ -1773,14 +1774,48 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                         PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
                     }
                     Spacer { width: SP[2] }
-                    AppButton { text: "새 팀원", icon: IconRole::Add, on_click: { let c = current.clone(); move |()| ui.open_new_session(Some(c.clone())) } }
-                    Spacer { width: SP[1] }
-                    // TODO(version control screen): a large sheet for this project (FR-L18).
-                    AppButton { text: "버전 관리", on_click: move |()| show_message(VCS_SOON) }
-                    Spacer { width: SP[1] }
-                    // TODO(server): the ports detected on the member's computer (FR-L18).
-                    AppButton { text: "웹 페이지", on_click: move |()| show_message(WEB_SOON) }
-                    Spacer { width: SP[1] }
+                    if mode == SideListMode::Column {
+                        AppButton { text: "새 팀원", icon: IconRole::Add, on_click: { let c = current.clone(); move |()| ui.open_new_session(Some(c.clone())) } }
+                        Spacer { width: SP[1] }
+                        // TODO(version control screen): a large sheet for this project (FR-L18).
+                        AppButton { text: "버전 관리", on_click: move |()| show_message(VCS_SOON) }
+                        Spacer { width: SP[1] }
+                        // TODO(server): the ports detected on the member's computer (FR-L18).
+                        AppButton { text: "웹 페이지", on_click: move |()| show_message(WEB_SOON) }
+                        Spacer { width: SP[1] }
+                    } else {
+                        // Medium and compact: the less used actions fold into a ⋯ menu so
+                        // IDE 열기 stays on screen at 800 px.
+                        Menu {
+                            expanded: more_menu(),
+                            on_dismiss: move |_| more_menu.set(false),
+                            anchor: rsx! {
+                                AppButton { text: "⋯", on_click: move |()| more_menu.set(true) }
+                            },
+                            Button {
+                                text: "새 팀원",
+                                variant: ButtonVariant::Text,
+                                height: H_BTN,
+                                fill_max_width: true,
+                                on_click: { let c = current.clone(); move |_: ()| { more_menu.set(false); ui.open_new_session(Some(c.clone())) } },
+                            }
+                            Button {
+                                text: "버전 관리",
+                                variant: ButtonVariant::Text,
+                                height: H_BTN,
+                                fill_max_width: true,
+                                on_click: move |_: ()| { more_menu.set(false); show_message(VCS_SOON) },
+                            }
+                            Button {
+                                text: "웹 페이지",
+                                variant: ButtonVariant::Text,
+                                height: H_BTN,
+                                fill_max_width: true,
+                                on_click: move |_: ()| { more_menu.set(false); show_message(WEB_SOON) },
+                            }
+                        }
+                        Spacer { width: SP[1] }
+                    }
                     if let Some(t) = target.clone() {
                         IdeMenu { key: "{t}", session: t }
                     } else {

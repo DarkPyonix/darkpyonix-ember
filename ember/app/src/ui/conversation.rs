@@ -731,7 +731,9 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
-                material: MaterialRole::Regular,
+                // No `material` here: any Material modifier makes the renderer flip the live
+                // window to undecorated and AWT throws IllegalComponentStateException (#166).
+                background: Paint::Role(ColorRole::SurfaceContainer),
                 shape_role: ShapeRole::Large,
                 padding_role: SpaceRole::Xs,
                 space_role: SpaceRole::Xs,

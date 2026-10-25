@@ -6,6 +6,7 @@
 //! shared components in [`components`].
 
 pub mod compat;
+pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod home;
@@ -16,6 +17,7 @@ pub mod search;
 pub mod session;
 pub mod shell;
 pub mod theme;
+pub mod vcs;
 
 use dioxus_compose::prelude::*;
 

@@ -380,6 +380,24 @@ pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
     suggestion.to_string()
 }
 
+/// Window width (dp) under which the Home composer puts the mode and computer chips and the send
+/// button on a second line. The toolkit has no wrapping row (`FlowRow`), so the split is by width.
+pub const CHIP_WRAP_WIDTH: f32 = 1100.0;
+
+pub fn split_chip_rows(width_dp: f32) -> bool {
+    width_dp < CHIP_WRAP_WIDTH
+}
+
+/// The suggestion chips as lines: all on one line when wide, one chip per line when narrow, so
+/// none scrolls out of view.
+pub fn suggestion_lines<'a>(all: &[&'a str], width_dp: f32) -> Vec<Vec<&'a str>> {
+    if split_chip_rows(width_dp) {
+        all.iter().map(|t| vec![*t]).collect()
+    } else {
+        vec![all.to_vec()]
+    }
+}
+
 /// The text to send: what was typed, else the chosen suggestion. The toolkit's `TextField` has
 /// no initial value (GAPS: uncontrolled field), so a suggestion cannot be written into the
 /// field; it is shown as a pending line and used when the field is empty.
@@ -727,7 +745,7 @@ pub fn Home() -> Element {
 
 /// One entry of a chip's menu.
 #[component]
-fn MenuItem(
+pub fn MenuItem(
     #[props(into)] text: String,
     #[props(default)] selected: bool,
     #[props(default)] danger: bool,
@@ -939,6 +957,123 @@ fn HomeComposer() -> Element {
         None => COMPOSER_PLACEHOLDER.to_string(),
     };
 
+    let add_button = rsx! {
+        IconButton {
+            icon: IconRole::Add,
+            small: true,
+            // TODO(FR-L11): attachments need the file picker and an upload API.
+            on_click: move |()| Message::new(UNAVAILABLE).show(),
+        }
+    };
+    let send_part = rsx! {
+        if busy() {
+            ProgressIndicator { determinate: false, circular: true, width: 18.0, height: 18.0 }
+        }
+        AppButton {
+            text: "보내기",
+            icon: IconRole::Send,
+            kind: ButtonKind::Primary,
+            enabled: sendable,
+            on_click: move |()| send.call(()),
+        }
+    };
+    let two_lines = split_chip_rows(window.width_dp);
+    let chips_project = rsx! {
+            Menu {
+                expanded: project_menu(),
+                on_dismiss: move |_| project_menu.set(false),
+                anchor: rsx! {
+                    PickChip {
+                        text: sel.project.clone(),
+                        icon: IconRole::Library,
+                        on_click: move |()| project_menu.set(true),
+                    }
+                },
+                for p in projects.iter().cloned() {
+                    MenuItem {
+                        key: "{p}",
+                        text: p.clone(),
+                        selected: p == sel.project,
+                        on_click: move |()| {
+                            let mut s = selection.peek().clone();
+                            s.project = p.clone();
+                            selection.set(s);
+                            project_menu.set(false);
+                        },
+                    }
+                }
+            }
+            PickChip {
+                text: sel.option.chip_label(),
+                icon: IconRole::Compose,
+                icon_only: compact,
+                on_click: move |()| picker_open.set(true),
+            }
+    };
+    let chips_mode = rsx! {
+            Menu {
+                expanded: mode_menu(),
+                on_dismiss: move |_| mode_menu.set(false),
+                anchor: rsx! {
+                    PickChip {
+                        text: mode_label,
+                        icon: IconRole::Settings,
+                        icon_only: compact,
+                        selected: sel.mode.is_bypass(),
+                        on_click: move |()| mode_menu.set(true),
+                    }
+                },
+                for m in modes_for(sel.option.harness).iter().copied() {
+                    MenuItem {
+                        key: "{m.label()}",
+                        text: m.label(),
+                        selected: m == sel.mode,
+                        danger: m.is_bypass(),
+                        on_click: move |()| {
+                            let s = selection.peek().with_mode(m);
+                            selection.set(s);
+                            mode_menu.set(false);
+                        },
+                    }
+                }
+            }
+            Menu {
+                expanded: computer_menu(),
+                on_dismiss: move |_| computer_menu.set(false),
+                anchor: rsx! {
+                    PickChip {
+                        text: computer_text.clone(),
+                        icon: IconRole::Sidebar,
+                        icon_only: compact,
+                        on_click: move |()| computer_menu.set(true),
+                    }
+                },
+                MenuItem {
+                    text: "이 서버",
+                    selected: sel.computer.is_none(),
+                    on_click: move |()| {
+                        let mut s = selection.peek().clone();
+                        s.computer = None;
+                        selection.set(s);
+                        computer_menu.set(false);
+                    },
+                }
+                for (id, name) in computers.iter().cloned() {
+                    MenuItem {
+                        key: "{id}",
+                        text: name.clone(),
+                        selected: sel.computer.as_deref() == Some(id.as_str()),
+                        on_click: move |()| {
+                            let mut s = selection.peek().clone();
+                            s.computer = Some(id.clone());
+                            selection.set(s);
+                            computer_menu.set(false);
+                        },
+                    }
+                }
+            }
+    };
+
     rsx! {
         Column {
             fill_max_width: true,
@@ -956,6 +1091,11 @@ fn HomeComposer() -> Element {
                             fill_max_width: true,
                             height: 96.0,
                             multiline: true,
+                            // The field's fill and border follow the theme; the toolkit has no
+                            // text-colour prop, so the ink comes from the renderer's theme.
+                            background: paint(theme.palette.surface_2),
+                            border_width: 1.0,
+                            border_color: paint(theme.palette.line),
                             placeholder: placeholder.clone(),
                             on_value_change: move |v: String| typed.set(v),
                             on_submit: move |_| send.call(()),
@@ -971,132 +1111,42 @@ fn HomeComposer() -> Element {
                             PickChip { text: "취소", on_click: move |()| suggestion.set(None) }
                         }
                     }
-                    Row {
-                        fill_max_width: true,
-                        alignment: Alignment::CenterStart,
-                        spacing: SP[1],
-                        IconButton {
-                            icon: IconRole::Add,
-                            small: true,
-                            // TODO(FR-L11): attachments need the file picker and an upload API.
-                            on_click: move |()| Message::new(UNAVAILABLE).show(),
-                        }
-                        ScrollRow {
-                            weight: 1.0,
-                            Row {
+                    if two_lines {
+                        Row {
+                            fill_max_width: true,
+                            alignment: Alignment::CenterStart,
                             spacing: SP[1],
-                            Menu {
-                                expanded: project_menu(),
-                                on_dismiss: move |_| project_menu.set(false),
-                                anchor: rsx! {
-                                    PickChip {
-                                        text: sel.project.clone(),
-                                        icon: IconRole::Library,
-                                        on_click: move |()| project_menu.set(true),
-                                    }
-                                },
-                                for p in projects.iter().cloned() {
-                                    MenuItem {
-                                        key: "{p}",
-                                        text: p.clone(),
-                                        selected: p == sel.project,
-                                        on_click: move |()| {
-                                            let mut s = selection.peek().clone();
-                                            s.project = p.clone();
-                                            selection.set(s);
-                                            project_menu.set(false);
-                                        },
-                                    }
-                                }
-                            }
-                            PickChip {
-                                text: sel.option.chip_label(),
-                                icon: IconRole::Compose,
-                                icon_only: compact,
-                                on_click: move |()| picker_open.set(true),
-                            }
-                            Menu {
-                                expanded: mode_menu(),
-                                on_dismiss: move |_| mode_menu.set(false),
-                                anchor: rsx! {
-                                    PickChip {
-                                        text: mode_label,
-                                        icon: IconRole::Settings,
-                                        icon_only: compact,
-                                        selected: sel.mode.is_bypass(),
-                                        on_click: move |()| mode_menu.set(true),
-                                    }
-                                },
-                                for m in modes_for(sel.option.harness).iter().copied() {
-                                    MenuItem {
-                                        key: "{m.label()}",
-                                        text: m.label(),
-                                        selected: m == sel.mode,
-                                        danger: m.is_bypass(),
-                                        on_click: move |()| {
-                                            let s = selection.peek().with_mode(m);
-                                            selection.set(s);
-                                            mode_menu.set(false);
-                                        },
-                                    }
-                                }
-                            }
-                            Menu {
-                                expanded: computer_menu(),
-                                on_dismiss: move |_| computer_menu.set(false),
-                                anchor: rsx! {
-                                    PickChip {
-                                        text: computer_text.clone(),
-                                        icon: IconRole::Sidebar,
-                                        icon_only: compact,
-                                        on_click: move |()| computer_menu.set(true),
-                                    }
-                                },
-                                MenuItem {
-                                    text: "이 서버",
-                                    selected: sel.computer.is_none(),
-                                    on_click: move |()| {
-                                        let mut s = selection.peek().clone();
-                                        s.computer = None;
-                                        selection.set(s);
-                                        computer_menu.set(false);
-                                    },
-                                }
-                                for (id, name) in computers.iter().cloned() {
-                                    MenuItem {
-                                        key: "{id}",
-                                        text: name.clone(),
-                                        selected: sel.computer.as_deref() == Some(id.as_str()),
-                                        on_click: move |()| {
-                                            let mut s = selection.peek().clone();
-                                            s.computer = Some(id.clone());
-                                            selection.set(s);
-                                            computer_menu.set(false);
-                                        },
-                                    }
-                                }
-                            }
-                            }
+                            {add_button}
+                            {chips_project}
                         }
-                        if busy() {
-                            ProgressIndicator { determinate: false, circular: true, width: 18.0, height: 18.0 }
+                        Row {
+                            fill_max_width: true,
+                            alignment: Alignment::CenterStart,
+                            spacing: SP[1],
+                            {chips_mode}
+                            Spacer { weight: 1.0 }
+                            {send_part}
                         }
-                        AppButton {
-                            text: "보내기",
-                            icon: IconRole::Send,
-                            kind: ButtonKind::Primary,
-                            enabled: sendable,
-                            on_click: move |()| send.call(()),
+                    } else {
+                        Row {
+                            fill_max_width: true,
+                            alignment: Alignment::CenterStart,
+                            spacing: SP[1],
+                            {add_button}
+                            {chips_project}
+                            {chips_mode}
+                            Spacer { weight: 1.0 }
+                            {send_part}
                         }
                     }
                     Spacer { height: SP[2] }
                 }
             }
-            ScrollRow {
-                fill_max_width: true,
+            for line in suggestion_lines(&SUGGESTIONS, window.width_dp) {
                 Row {
+                    fill_max_width: true,
                     spacing: SP[2],
-                    for text in SUGGESTIONS {
+                    for text in line {
                         PickChip {
                             key: "{text}",
                             text,
@@ -1136,6 +1186,9 @@ fn HomeComposer() -> Element {
                 }
                 TextField {
                     fill_max_width: true,
+                    background: paint(theme.palette.surface_2),
+                    border_width: 1.0,
+                    border_color: paint(theme.palette.line),
                     placeholder: "모델 검색",
                     on_value_change: move |v: String| picker_query.set(v),
                 }
@@ -1753,6 +1806,17 @@ mod tests {
         assert_eq!(computer_chip_text(Some("c1"), &cs), "mac-mini");
         assert_eq!(computer_chip_text(None, &cs), "이 서버");
         assert_eq!(computer_chip_text(Some("gone"), &cs), "이 서버");
+    }
+
+    #[test]
+    fn fr_l11_narrow_window_wraps_chips_and_suggestions() {
+        assert!(split_chip_rows(800.0));
+        assert!(!split_chip_rows(1400.0));
+        assert_eq!(
+            suggestion_lines(&SUGGESTIONS, 800.0).len(),
+            SUGGESTIONS.len()
+        );
+        assert_eq!(suggestion_lines(&SUGGESTIONS, 1400.0).len(), 1);
     }
 
     #[test]

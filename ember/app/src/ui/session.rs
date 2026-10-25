@@ -193,6 +193,15 @@ pub fn side_list_mode(class: WindowSizeClass) -> SideListMode {
     }
 }
 
+/// Below this width the session toolbar keeps only the project, the view chips and IDE 열기;
+/// 새 팀원, 버전 관리 and 웹 페이지 fold into ⋯. The navigation column and the side list take
+/// about 500 dp, so a window under 1100 dp cannot show every button (FR-L layout, #191).
+pub const TOOLBAR_FOLD_WIDTH: f32 = 1100.0;
+
+pub fn fold_toolbar_actions(width_dp: f32) -> bool {
+    width_dp < TOOLBAR_FOLD_WIDTH
+}
+
 /// 264 dp at 1440 in the design.
 pub const SIDE_LIST_W: f32 = 264.0;
 /// A pane's height in the grid (a scroll column cannot give a list a bounded height).
@@ -1669,6 +1678,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
     let target = single_target(&members, focus.as_deref());
     let sections = side_sections(&boxes, &current, &query.read());
     let mode = side_list_mode(window.class);
+    let fold = fold_toolbar_actions(window.width_dp);
 
     let set_view = use_callback(move |v: SessionView| {
         view.set(v);
@@ -1774,7 +1784,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                         PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
                     }
                     Spacer { width: SP[2] }
-                    if mode == SideListMode::Column {
+                    if !fold {
                         AppButton { text: "새 팀원", icon: IconRole::Add, on_click: { let c = current.clone(); move |()| ui.open_new_session(Some(c.clone())) } }
                         Spacer { width: SP[1] }
                         AppButton { text: "버전 관리", on_click: { let c = current.clone(); move |()| crate::ui::vcs::open_for_project(ui, &c) } }
@@ -1989,6 +1999,13 @@ mod tests {
             "an out-of-range page is clamped first"
         );
         assert_eq!(page_step(0, 0, true), 0);
+    }
+
+    #[test]
+    fn fr_l_toolbar_folds_at_800_so_ide_open_stays_visible() {
+        assert!(fold_toolbar_actions(800.0));
+        assert!(fold_toolbar_actions(900.0));
+        assert!(!fold_toolbar_actions(1440.0));
     }
 
     #[test]

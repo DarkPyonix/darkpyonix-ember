@@ -292,9 +292,13 @@ pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes
 // ---------------------------------------------------------------------------------------------
 
 const STRIPE_W: f32 = 40.0;
-const STRIPE_BTN: f32 = 30.0;
-const TOP_H: f32 = 52.0;
-const STATUS_H: f32 = 32.0;
+/// The button fills the 40 dp stripe, so its glyph is about 20 px (JetBrains stripe icons).
+const STRIPE_BTN: f32 = 40.0;
+/// A 40 dp button plus 12 dp above and below; a shorter row squeezes the buttons below the
+/// 40 dp the toolkit needs for Hangul (#157, dioxus-compose #133).
+const TOP_H: f32 = 64.0;
+/// The status bar is 40 dp tall for the same reason.
+const STATUS_H: f32 = 40.0;
 const LEFT_W: f32 = 260.0;
 const BOTTOM_H: f32 = 240.0;
 
@@ -570,8 +574,8 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                     Button {
                                         text: "",
                                         icon: IconRole::Close,
-                                        width: 28.0,
-                                        height: 28.0,
+                                        width: 40.0,
+                                        height: 40.0,
                                         variant: ButtonVariant::Text,
                                         on_click: {
                                             let path = path.clone();
@@ -585,7 +589,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                 expanded: menu_open(),
                                 on_dismiss: move |_| menu_open.set(false),
                                 anchor: rsx! {
-                                    Button { text: "", icon: IconRole::More, width: 32.0, height: 32.0, variant: ButtonVariant::Text, on_click: move |_| menu_open.set(true) }
+                                    Button { text: "", icon: IconRole::More, width: 40.0, height: 40.0, variant: ButtonVariant::Text, on_click: move |_| menu_open.set(true) }
                                 },
                                 for a in [Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Palette] {
                                     Button {
@@ -595,6 +599,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                             &hint(a),
                                         ),
                                         variant: ButtonVariant::Text,
+                                        height: 40.0,
                                         fill_max_width: true,
                                         on_click: move |_| {
                                             menu_open.set(false);
@@ -602,7 +607,9 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                         },
                                     }
                                 }
-                                Label { text: "단축키 체계", fs: Fs::Xs2, color: paint(p.muted) }
+                                Row { fill_max_width: true, height: 40.0, padding_role: SpaceRole::Sm, alignment: Alignment::CenterStart,
+                                    Label { text: "단축키 체계", fs: Fs::Xs, color: paint(p.muted) }
+                                }
                                 for k in Keymap::ALL {
                                     Button {
                                         key: "{k.label()}",
@@ -613,6 +620,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                             k.hint(Action::Find, os),
                                         ),
                                         variant: ButtonVariant::Text,
+                                        height: 40.0,
                                         fill_max_width: true,
                                         on_click: move |_| {
                                             menu_open.set(false);
@@ -665,8 +673,8 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                 Button {
                                     text: "",
                                     icon: IconRole::Collapse,
-                                    width: 32.0,
-                                    height: 32.0,
+                                    width: 40.0,
+                                    height: 40.0,
                                     variant: ButtonVariant::Text,
                                     on_click: move |()| stripes.write().hide(Side::Bottom),
                                 }

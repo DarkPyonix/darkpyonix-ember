@@ -25,6 +25,7 @@ pub mod session;
 pub mod shell;
 pub mod theme;
 pub mod vcs;
+pub mod workbench;
 
 use dioxus_compose::prelude::*;
 

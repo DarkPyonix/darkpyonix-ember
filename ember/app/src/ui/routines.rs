@@ -29,6 +29,7 @@ use super::home::{
     default_option, filter_models, harness_block, model_catalog, modes_for, project_options,
 };
 use super::theme::*;
+use super::components::ButtonKind;
 use crate::model;
 use crate::services::{run, services};
 use crate::ui::use_ui;

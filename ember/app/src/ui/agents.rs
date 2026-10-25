@@ -19,6 +19,7 @@ use ember_client::state::Reachability;
 use super::components::*;
 use super::home::{self, Harness, PermMode, UNAVAILABLE};
 use super::theme::*;
+use super::components::ButtonKind;
 use crate::server::{Account, ChatGptAccount};
 use crate::ui::use_ui;
 use ember_client::wire::DetectedAgent;

@@ -5,28 +5,34 @@
 //! The decisions are plain functions and types in the first half of this file, unit-tested
 //! without a renderer. The components in the second half only hand them to dioxus-compose.
 //!
-//! The server has a schedule API (FR-A8, `ember/server/src/schedules/`) but `ember-client` does
-//! not wrap it yet, so the screen runs on [`RoutineStore`]. [`LocalStore`] keeps routines in
-//! memory for this app run and starts empty: nothing here is sample data. Run history and
-//! "지금 실행" need the server, so they say [`UNAVAILABLE`].
+//! The routines live on the server's schedule API (FR-A8, `ember/server/src/schedules/`),
+//! wrapped by `ember-client`: list, create, edit, pause and resume, run now and run history.
+//! The server has no name, model or permission mode per schedule and no event trigger, so the
+//! name is the first line of the prompt (also the session title), model and mode show the
+//! harness defaults, and event routines stay on this device. [`LocalStore`] keeps those, and
+//! every routine while the server cannot be reached, in memory for this app run; it starts
+//! empty and nothing here is sample data.
 
+use std::future::Future;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dioxus_compose::prelude::*;
+use ember_client::api::ApiError;
+use ember_client::wire::{
+    self, NewSchedule, Schedule, SchedulePatch, ScheduleKind, ScheduleRun, ScheduleTarget,
+};
 
 use super::components::*;
 use super::home::{
-    DEFAULT_PROJECT, Harness, Selection, bar_rects, computer_chip_text, filter_models,
-    harness_block, model_catalog, modes_for, project_options,
+    DEFAULT_PROJECT, Harness, Selection, bar_rects, computer_chip_text, default_mode,
+    default_option, filter_models, harness_block, model_catalog, modes_for, project_options,
 };
 use super::theme::*;
 use crate::model;
-use crate::services::services;
+use crate::services::{run, services};
 use crate::ui::use_ui;
 
-/// What a part shows or says while the server does not provide it.
-pub const UNAVAILABLE: &str = "준비 중입니다";
 
 /// Minutes since 1970-01-01 00:00 UTC. Local time is this plus the offset the caller passes.
 pub type Minutes = i64;
@@ -330,6 +336,10 @@ pub enum RunStatus {
     Done,
     Failed,
     Running,
+    /// The target session was busy, so nothing was sent.
+    Skipped,
+    /// The trigger passed while the server was down.
+    Missed,
 }
 
 impl RunStatus {
@@ -338,6 +348,8 @@ impl RunStatus {
             RunStatus::Done => "성공",
             RunStatus::Failed => "실패",
             RunStatus::Running => "실행 중",
+            RunStatus::Skipped => "건너뜀",
+            RunStatus::Missed => "놓침",
         }
     }
 }
@@ -355,11 +367,15 @@ pub struct Run {
 pub struct Entry {
     pub routine: Routine,
     pub runs: Vec<Run>,
+    /// The server's next planned trigger; `None` for routines that live on this device.
+    pub next_at: Option<Minutes>,
 }
 
 /// The schedule sentence: "매일 오전 9시", or the event text.
 pub fn schedule_line(r: &Routine) -> String {
     match r.trigger {
+        // An interval or one-off schedule keeps its own sentence in `cron`.
+        Trigger::Time if !cron_valid(&r.cron) => r.cron.clone(),
         Trigger::Time => describe_cron(&r.cron),
         Trigger::Event => r.cron.clone(),
     }
@@ -665,7 +681,7 @@ pub fn weekday_bars(entries: &[Entry], now: Minutes, offset: i64) -> [DayBar; 7]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
-    /// The server cannot do it yet: shown as [`UNAVAILABLE`].
+    /// A routine on this device cannot run: only the server runs them.
     Unavailable,
     NotFound,
 }
@@ -696,6 +712,7 @@ impl RoutineStore for LocalStore {
             .map(|r| Entry {
                 routine: r.clone(),
                 runs: Vec::new(),
+                next_at: None,
             })
             .collect()
     }
@@ -738,25 +755,243 @@ impl RoutineStore for LocalStore {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Server schedules (FR-A8)
+// ---------------------------------------------------------------------------------------------
+
+/// Runs fetched per routine for the history and the dashboard.
+const RUNS_SHOWN: usize = 20;
+/// The longest routine name taken from a prompt.
+const NAME_MAX: usize = 28;
+
+/// Server time (Unix ms) as [`Minutes`].
+pub fn ms_to_minutes(ms: i64) -> Minutes {
+    ms.div_euclid(60_000) + LOCAL_OFFSET_MIN
+}
+
+/// The server keeps no name, so a routine is named by its prompt's first line.
+pub fn name_from_prompt(prompt: &str) -> String {
+    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.chars().count() <= NAME_MAX {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(NAME_MAX).collect();
+    format!("{cut}...")
+}
+
+/// The sentence for a schedule that is not a cron expression.
+pub fn kind_text(kind: &ScheduleKind) -> String {
+    match kind {
+        ScheduleKind::Cron { expr, .. } => expr.clone(),
+        ScheduleKind::Interval { seconds } => match *seconds {
+            s if s % 3600 == 0 => format!("{}시간마다", s / 3600),
+            s if s % 60 == 0 => format!("{}분마다", s / 60),
+            s => format!("{s}초마다"),
+        },
+        ScheduleKind::Once { .. } => "한 번만 실행".to_string(),
+    }
+}
+
+fn run_status(s: wire::RunStatus) -> RunStatus {
+    match s {
+        wire::RunStatus::Running => RunStatus::Running,
+        wire::RunStatus::Completed => RunStatus::Done,
+        wire::RunStatus::Skipped => RunStatus::Skipped,
+        wire::RunStatus::Missed => RunStatus::Missed,
+        wire::RunStatus::Failed | wire::RunStatus::Interrupted | wire::RunStatus::Unknown => {
+            RunStatus::Failed
+        }
+    }
+}
+
+pub fn run_from_server(r: &ScheduleRun) -> Run {
+    Run {
+        at: ms_to_minutes(r.started_at.unwrap_or(r.scheduled_at)),
+        status: run_status(r.status),
+        session: r.session_id.clone(),
+    }
+}
+
+/// A server schedule as a routine. Model and mode are the harness defaults, since the server
+/// stores neither.
+pub fn schedule_to_routine(s: &Schedule) -> Routine {
+    let harness = Harness::from_kind(&s.agent).unwrap_or(Harness::ClaudeCode);
+    Routine {
+        id: s.id.clone(),
+        name: name_from_prompt(&s.prompt),
+        trigger: Trigger::Time,
+        cron: kind_text(&s.kind),
+        prompt: s.prompt.clone(),
+        enabled: !s.paused,
+        sel: Selection {
+            project: s.project.clone(),
+            option: default_option(harness),
+            mode: default_mode(harness),
+            computer: s.computer_id.clone().filter(|c| c != "local"),
+        },
+    }
+}
+
+/// A server schedule with its runs (newest first, as the server answers).
+pub fn schedule_to_entry(s: &Schedule, runs: &[ScheduleRun]) -> Entry {
+    Entry {
+        routine: schedule_to_routine(s),
+        runs: runs.iter().map(run_from_server).collect(),
+        next_at: s.next_run_at.map(ms_to_minutes),
+    }
+}
+
+/// The create body for a time routine. Cron is read in UTC (no time-zone source yet); each run
+/// starts a session titled with the routine's name, in `cwd`.
+pub fn new_schedule(d: &FormDraft, cwd: &str) -> NewSchedule {
+    NewSchedule {
+        project: d.sel.project.clone(),
+        agent: Some(d.sel.option.harness.kind().to_string()),
+        account: None,
+        computer: d.sel.computer.clone(),
+        cwd: Some(cwd.to_string()),
+        prompt: d.prompt.trim().to_string(),
+        kind: ScheduleKind::Cron {
+            expr: d.cron.trim().to_string(),
+            tz: "UTC".to_string(),
+        },
+        target: ScheduleTarget::New {
+            title: Some(d.name.trim().to_string()),
+        },
+        catch_up: false,
+        paused: false,
+    }
+}
+
+/// The edit body: the prompt and the cron expression are all the server lets change.
+pub fn schedule_patch(d: &FormDraft) -> SchedulePatch {
+    SchedulePatch {
+        prompt: Some(d.prompt.trim().to_string()),
+        kind: Some(ScheduleKind::Cron {
+            expr: d.cron.trim().to_string(),
+            tz: "UTC".to_string(),
+        }),
+        catch_up: None,
+    }
+}
+
+/// Whether the draft changes something the server cannot patch.
+pub fn changes_frozen_fields(d: &FormDraft, old: &Routine) -> bool {
+    d.sel.project != old.sel.project
+        || d.sel.option.harness != old.sel.option.harness
+        || d.sel.computer != old.sel.computer
+}
+
+// ---------------------------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------------------------
 
-/// Shown while routines live only in this app run.
+/// Shown while the server cannot be reached.
+pub const OFFLINE_NOTE: &str =
+    "서버에 연결되지 않아 루틴이 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
+/// Shown when routines that only this device keeps are listed beside the server's.
 pub const LOCAL_NOTE: &str =
-    "루틴은 이 앱을 실행하는 동안만 이 기기에 보관됩니다. 서버와의 연결은 준비 중입니다";
-const RUN_NOTICE: &str = "지금 실행은 서버에 연결되어야 합니다. 준비 중입니다";
-const HISTORY_NOTE: &str = "실행 기록은 서버에 연결되면 표시됩니다. 준비 중입니다";
+    "이벤트 루틴은 서버가 지원하지 않아 이 앱을 실행하는 동안만 이 기기에 보관됩니다";
+const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
+const NO_CWD_NOTICE: &str =
+    "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
+const FROZEN_NOTICE: &str = "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 바꿀 수 없어 프롬프트와 일정만 저장했습니다";
 
 fn store() -> &'static Mutex<LocalStore> {
     static STORE: OnceLock<Mutex<LocalStore>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(LocalStore::default()))
 }
 
-/// Runs `f` on the store. TODO(server): swap [`LocalStore`] for a store over `/api/schedules`
-/// once `ember-client` wraps it.
+/// Runs `f` on the device-local store.
 fn with_store<R>(f: impl FnOnce(&mut LocalStore) -> R) -> R {
     let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
+}
+
+/// What the server last answered: `online` is false until a load succeeds, and again after one
+/// fails on the network.
+#[derive(Default)]
+struct Remote {
+    online: bool,
+    entries: Vec<Entry>,
+}
+
+fn remote() -> &'static Mutex<Remote> {
+    static REMOTE: OnceLock<Mutex<Remote>> = OnceLock::new();
+    REMOTE.get_or_init(|| Mutex::new(Remote::default()))
+}
+
+fn with_remote<R>(f: impl FnOnce(&mut Remote) -> R) -> R {
+    let mut guard = remote().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+/// Whether `id` is a server schedule (else it is on this device).
+fn is_remote(id: &str) -> bool {
+    with_remote(|r| r.online && r.entries.iter().any(|e| e.routine.id == id))
+}
+
+/// The server's schedules with their recent runs.
+async fn load_remote() -> Result<Vec<Entry>, ApiError> {
+    let api = services().client.api();
+    let mut out = Vec::new();
+    for s in api.schedules(None).await? {
+        let runs = api.schedule_runs(&s.id, Some(RUNS_SHOWN)).await?;
+        out.push(schedule_to_entry(&s, &runs));
+    }
+    Ok(out)
+}
+
+/// A failure that means the server could not be reached, not that it said no.
+fn unreachable(e: &ApiError) -> bool {
+    e.status().is_none()
+}
+
+/// Loads the server's schedules into [`remote`], then bumps `tick`.
+fn refresh(tick: Signal<u32>) {
+    run(load_remote(), move |r| {
+        apply_load(r);
+        let mut tick = tick;
+        tick += 1;
+    });
+}
+
+fn apply_load(r: Result<Vec<Entry>, ApiError>) {
+    with_remote(|st| match r {
+        Ok(entries) => {
+            st.online = true;
+            st.entries = entries;
+        }
+        Err(e) => {
+            tracing::warn!("loading routines failed: {e}");
+            if unreachable(&e) {
+                st.online = false;
+                st.entries.clear();
+            }
+        }
+    });
+}
+
+/// Runs a server call, reloads the list, and shows the call's failure (if any) as the notice.
+fn remote_action<F>(tick: Signal<u32>, notice: Signal<Option<String>>, work: F)
+where
+    F: Future<Output = Result<Option<String>, ApiError>> + Send + 'static,
+{
+    run(
+        async move {
+            let done = work.await;
+            (done, load_remote().await)
+        },
+        move |(done, list)| {
+            apply_load(list);
+            let mut notice = notice;
+            notice.set(match done {
+                Ok(text) => text,
+                Err(e) => Some(format!("서버가 요청을 처리하지 못했습니다: {e}")),
+            });
+            let mut tick = tick;
+            tick += 1;
+        },
+    );
 }
 
 /// Local minutes now.
@@ -792,6 +1027,7 @@ fn status_tone(s: RunStatus) -> PillTone {
         RunStatus::Done => PillTone::Green,
         RunStatus::Failed => PillTone::Red,
         RunStatus::Running => PillTone::Blue,
+        RunStatus::Skipped | RunStatus::Missed => PillTone::Orange,
     }
 }
 
@@ -818,9 +1054,12 @@ pub fn Routines() -> Element {
     let mut query = use_signal(String::new);
     let mut notice = use_signal(|| None::<String>);
 
+    use_hook(|| refresh(tick));
     let _ = tick();
-    let entries = with_store(|s| s.entries());
-    let local = with_store(|s| s.is_local());
+    let (online, mut entries) = with_remote(|r| (r.online, r.entries.clone()));
+    let device = with_store(|s| s.entries());
+    let device_only = !device.is_empty();
+    entries.extend(device);
     let now = now_local();
     let (computers, existing_projects) = live_choices();
 
@@ -847,15 +1086,93 @@ pub fn Routines() -> Element {
     let pad = if compact { SP[3] } else { SP[6] };
 
     let toggle = use_callback(move |(id, on): (String, bool)| {
-        let _ = with_store(|s| s.set_enabled(&id, on));
-        tick += 1;
+        if is_remote(&id) {
+            remote_action(tick, notice, async move {
+                let api = services().client.api();
+                if on {
+                    api.resume_schedule(&id).await?;
+                } else {
+                    api.pause_schedule(&id).await?;
+                }
+                Ok(None)
+            });
+        } else {
+            let _ = with_store(|s| s.set_enabled(&id, on));
+            tick += 1;
+        }
     });
-    let run_now = use_callback(move |id: String| match with_store(|s| s.run_now(&id)) {
-        Err(StoreError::Unavailable) => notice.set(Some(RUN_NOTICE.to_string())),
-        Err(StoreError::NotFound) => notice.set(Some("루틴을 찾을 수 없습니다".to_string())),
-        Ok(()) => notice.set(None),
+    let run_now = use_callback(move |id: String| {
+        if is_remote(&id) {
+            remote_action(tick, notice, async move {
+                let run = services().client.api().run_schedule(&id).await?;
+                Ok(run.error.map(|e| format!("실행하지 못했습니다: {e}")))
+            });
+            return;
+        }
+        match with_store(|s| s.run_now(&id)) {
+            Err(StoreError::Unavailable) => notice.set(Some(RUN_NOTICE.to_string())),
+            Err(StoreError::NotFound) => notice.set(Some("루틴을 찾을 수 없습니다".to_string())),
+            Ok(()) => notice.set(None),
+        }
     });
     let save = use_callback(move |(draft, editing): (FormDraft, Option<String>)| {
+        // An edit of a server schedule: only the prompt and the cron expression can change.
+        if let Some(id) = editing.clone().filter(|id| is_remote(id)) {
+            let old = with_remote(|r| {
+                r.entries
+                    .iter()
+                    .find(|e| e.routine.id == id)
+                    .map(|e| e.routine.clone())
+            });
+            let frozen = old.is_some_and(|o| changes_frozen_fields(&draft, &o));
+            let patch = schedule_patch(&draft);
+            remote_action(tick, notice, async move {
+                services().client.api().update_schedule(&id, &patch).await?;
+                Ok(frozen.then(|| FROZEN_NOTICE.to_string()))
+            });
+            panel.set(Panel::View);
+            return;
+        }
+        // A new time routine goes to the server when it answers.
+        if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| r.online) {
+            let cwd = services()
+                .client
+                .read(|s| model::latest_cwd(s, &draft.sel.project));
+            let Some(cwd) = cwd else {
+                notice.set(Some(NO_CWD_NOTICE.to_string()));
+                return;
+            };
+            let body = new_schedule(&draft, &cwd);
+            run(
+                async move {
+                    let made = services().client.api().create_schedule(&body).await;
+                    (made, load_remote().await)
+                },
+                move |(made, list)| {
+                    apply_load(list);
+                    let mut notice = notice;
+                    let mut selected = selected;
+                    match made {
+                        Ok(s) => {
+                            selected.set(Some(s.id));
+                            notice.set(None);
+                        }
+                        Err(e) if unreachable(&e) => {
+                            // Server gone since the last load: keep the routine on this device.
+                            let id = with_store(|st| st.next_id());
+                            with_store(|st| st.save(draft.into_routine(&id, true)));
+                            selected.set(Some(id));
+                            notice.set(Some(OFFLINE_NOTE.to_string()));
+                        }
+                        Err(e) => notice.set(Some(format!("서버가 루틴을 만들지 못했습니다: {e}"))),
+                    }
+                    let mut tick = tick;
+                    tick += 1;
+                },
+            );
+            panel.set(Panel::View);
+            return;
+        }
         let id = editing
             .clone()
             .unwrap_or_else(|| with_store(|s| s.next_id()));
@@ -910,7 +1227,9 @@ pub fn Routines() -> Element {
                         }
                     }
                 }
-                if local {
+                if !online {
+                    Label { text: OFFLINE_NOTE, fs: Fs::Xs, color: paint(p.muted), max_lines: 3 }
+                } else if device_only {
                     Label { text: LOCAL_NOTE, fs: Fs::Xs, color: paint(p.muted), max_lines: 3 }
                 }
                 if let Some(text) = notice() {
@@ -1324,13 +1643,14 @@ fn DetailPane(
     let (edit_id, run_id, toggle_id) = (r.id.clone(), r.id.clone(), r.id.clone());
     let rate = success_percent(&entry.runs);
     let when_big = match r.trigger {
+        Trigger::Time if !cron_valid(&r.cron) => r.cron.clone(),
         Trigger::Time => big_time(&r.cron),
         Trigger::Event => r.cron.clone(),
     };
     let next = match r.trigger {
         _ if !r.enabled => "꺼져 있습니다".to_string(),
         Trigger::Event => "이벤트가 있을 때 실행됩니다".to_string(),
-        Trigger::Time => match next_run(&r.cron, now) {
+        Trigger::Time => match entry.next_at.or_else(|| next_run(&r.cron, now)) {
             Some(t) => format!("다음 실행 {}", format_next(t, now)),
             None => "다음 실행 없음".to_string(),
         },
@@ -1392,7 +1712,7 @@ fn DetailPane(
                         spacing: SP[0],
                         Label { text: when_big, fs: Fs::Xl3, weight: Weight::Semibold, max_lines: 1 }
                         Label { text: schedule_line(&r), fs: Fs::Lg, weight: Weight::Medium, max_lines: 1 }
-                        if r.trigger == Trigger::Time {
+                        if r.trigger == Trigger::Time && cron_valid(&r.cron) {
                             Label { text: r.cron.clone(), fs: Fs::Xs, color: paint(p.muted), max_lines: 1 }
                         }
                         Label { text: next, fs: Fs::Sm, color: paint(p.text_2), max_lines: 1 }
@@ -1430,7 +1750,6 @@ fn DetailPane(
                 Label { text: "실행 기록", fs: Fs::Lg, weight: Weight::Semibold }
                 if entry.runs.is_empty() {
                     Label { text: "아직 실행하지 않았습니다", color: paint(p.muted) }
-                    Label { text: HISTORY_NOTE, fs: Fs::Xs, color: paint(p.muted), max_lines: 2 }
                 }
                 for run in entry.runs.iter().cloned() {
                     RunTile { key: "{run.at}", run, now }
@@ -1761,7 +2080,11 @@ mod tests {
     }
 
     fn entry(r: Routine, runs: Vec<Run>) -> Entry {
-        Entry { routine: r, runs }
+        Entry {
+            routine: r,
+            runs,
+            next_at: None,
+        }
     }
 
     // ---- calendar ---------------------------------------------------------------------------
@@ -2249,11 +2572,169 @@ mod tests {
         assert!(s.entries()[0].runs.is_empty());
     }
 
+    // ---- server schedules -------------------------------------------------------------------
+
+    fn schedule(kind: ScheduleKind, paused: bool) -> Schedule {
+        Schedule {
+            id: "sch1".into(),
+            project: "ember".into(),
+            agent: "codex".into(),
+            account_id: None,
+            computer_id: Some("local".into()),
+            cwd: Some("/w".into()),
+            prompt: "\n  Summarise the open PRs\nthen post it".into(),
+            kind,
+            target: ScheduleTarget::New { title: None },
+            paused,
+            catch_up: false,
+            next_run_at: Some(120_000),
+            last_run_at: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn server_run(status: wire::RunStatus) -> ScheduleRun {
+        ScheduleRun {
+            id: "r1".into(),
+            schedule_id: "sch1".into(),
+            scheduled_at: 60_000,
+            status,
+            session_id: Some("s9".into()),
+            started_at: Some(180_000),
+            finished_at: None,
+            error: None,
+        }
+    }
+
+    fn cron_kind(expr: &str) -> ScheduleKind {
+        ScheduleKind::Cron {
+            expr: expr.into(),
+            tz: "UTC".into(),
+        }
+    }
+
+    #[test]
+    fn fr_a8_a_schedule_reads_as_a_routine() {
+        let e = schedule_to_entry(
+            &schedule(cron_kind("0 9 * * 1-5"), false),
+            &[server_run(wire::RunStatus::Completed)],
+        );
+        let r = &e.routine;
+        assert_eq!(r.id, "sch1");
+        assert_eq!(r.name, "Summarise the open PRs");
+        assert_eq!(r.trigger, Trigger::Time);
+        assert_eq!(r.cron, "0 9 * * 1-5");
+        assert!(r.enabled);
+        assert_eq!(r.sel.project, "ember");
+        assert_eq!(r.sel.option.harness, Harness::Codex);
+        assert_eq!(r.sel.computer, None, "local is the main server");
+        assert_eq!(e.next_at, Some(2), "server ms become minutes");
+        assert_eq!(e.runs.len(), 1);
+        assert_eq!(e.runs[0].at, 3, "the start time, not the trigger time");
+        assert_eq!(e.runs[0].status, RunStatus::Done);
+        assert_eq!(e.runs[0].session.as_deref(), Some("s9"));
+    }
+
+    #[test]
+    fn fr_a8_a_paused_schedule_is_off() {
+        let e = schedule_to_entry(&schedule(cron_kind("0 9 * * *"), true), &[]);
+        assert!(!e.routine.enabled);
+    }
+
+    #[test]
+    fn fr_a8_interval_and_one_off_schedules_keep_their_own_sentence() {
+        let every = |s| schedule_to_routine(&schedule(ScheduleKind::Interval { seconds: s }, false));
+        assert_eq!(schedule_line(&every(1800)), "30분마다");
+        assert_eq!(schedule_line(&every(7200)), "2시간마다");
+        assert_eq!(schedule_line(&every(90 + 1)), "91초마다");
+        let once = schedule_to_routine(&schedule(ScheduleKind::Once { at: 1 }, false));
+        assert_eq!(schedule_line(&once), "한 번만 실행");
+    }
+
+    #[test]
+    fn fr_a8_run_statuses_map_to_the_screens() {
+        use wire::RunStatus as W;
+        let cases = [
+            (W::Running, RunStatus::Running),
+            (W::Completed, RunStatus::Done),
+            (W::Failed, RunStatus::Failed),
+            (W::Interrupted, RunStatus::Failed),
+            (W::Unknown, RunStatus::Failed),
+            (W::Skipped, RunStatus::Skipped),
+            (W::Missed, RunStatus::Missed),
+        ];
+        for (w, want) in cases {
+            assert_eq!(run_from_server(&server_run(w)).status, want);
+        }
+        let waiting = ScheduleRun {
+            started_at: None,
+            ..server_run(W::Missed)
+        };
+        assert_eq!(run_from_server(&waiting).at, 1, "falls back to the trigger time");
+    }
+
+    #[test]
+    fn fr_a8_names_come_from_the_first_line_of_the_prompt() {
+        assert_eq!(name_from_prompt("  \n daily report \nmore"), "daily report");
+        assert_eq!(name_from_prompt(""), "");
+        let long = "가".repeat(40);
+        let name = name_from_prompt(&long);
+        assert_eq!(name.chars().count(), NAME_MAX + 3);
+        assert!(name.ends_with("..."));
+    }
+
+    #[test]
+    fn fr_a8_a_draft_becomes_the_create_and_patch_bodies() {
+        let mut d = FormDraft::new("ember");
+        d.name = " 아침 요약 ".into();
+        d.prompt = " Summarise ".into();
+        d.cron = " 30 8 * * 1 ".into();
+        d.sel.computer = Some("c1".into());
+        let body = new_schedule(&d, "/w/ember");
+        assert_eq!(body.project, "ember");
+        assert_eq!(body.agent.as_deref(), Some("claude-code"));
+        assert_eq!(body.computer.as_deref(), Some("c1"));
+        assert_eq!(body.cwd.as_deref(), Some("/w/ember"));
+        assert_eq!(body.prompt, "Summarise");
+        assert_eq!(body.kind, cron_kind("30 8 * * 1"));
+        assert_eq!(
+            body.target,
+            ScheduleTarget::New {
+                title: Some("아침 요약".into())
+            }
+        );
+        assert!(!body.paused);
+        let patch = schedule_patch(&d);
+        assert_eq!(patch.prompt.as_deref(), Some("Summarise"));
+        assert_eq!(patch.kind, Some(cron_kind("30 8 * * 1")));
+        assert_eq!(patch.catch_up, None);
+    }
+
+    #[test]
+    fn fr_a8_only_prompt_and_schedule_can_be_edited_on_the_server() {
+        let old = schedule_to_routine(&schedule(cron_kind("0 9 * * *"), false));
+        let same = FormDraft::from_routine(&old);
+        assert!(!changes_frozen_fields(&same, &old));
+        let mut moved = same.clone();
+        moved.sel.project = "other".into();
+        assert!(changes_frozen_fields(&moved, &old));
+        let mut other_computer = same;
+        other_computer.sel.computer = Some("c2".into());
+        assert!(changes_frozen_fields(&other_computer, &old));
+    }
+
     // ---- text -------------------------------------------------------------------------------
 
     #[test]
     fn nfr_l4_routine_text_has_no_plain_da_endings() {
-        let mut strings: Vec<String> = vec![UNAVAILABLE.into()];
+        let mut strings: Vec<String> = vec![
+            OFFLINE_NOTE.into(),
+            LOCAL_NOTE.into(),
+            RUN_NOTICE.into(),
+            NO_CWD_NOTICE.into(),
+            FROZEN_NOTICE.into(),
+        ];
         strings.extend(Trigger::ALL.iter().map(|t| t.label().to_string()));
         for e in [
             FormError::NameEmpty,

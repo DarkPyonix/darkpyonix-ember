@@ -1,0 +1,46 @@
+# Windows preview of the client with demo data (#197). Manual only: builds ember-app and
+# ember-server, bundles the compose-rust renderer, and uploads one zip as a run artifact. No
+# release, no tag.
+name: Windows preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The renderer the app links and runs against (compose-rust release asset).
+  COMPOSE_RUST_RENDERER_VERSION: v0.0.3
+
+jobs:
+  preview:
+    name: Build the Windows preview
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ember/app
+            ember/server
+      - name: Fetch the renderer
+        shell: pwsh
+        run: ./.github/scripts/preview/fetch-renderer.ps1 -Version $env:COMPOSE_RUST_RENDERER_VERSION -Out "$env:RUNNER_TEMP\renderer"
+      - name: Build ember-server
+        run: cd ember/server && cargo build --release --locked --bin ember-server
+      - name: Build ember-app
+        env:
+          DIOXUS_COMPOSE_RENDERER_DIR: ${{ runner.temp }}\renderer
+        run: cd ember/app && cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: ./.github/scripts/preview/package-windows.ps1 -Renderer "$env:RUNNER_TEMP\renderer" -Out dist/ember-preview-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ember-preview-windows-x64
+          path: dist/ember-preview-windows-x64.zip

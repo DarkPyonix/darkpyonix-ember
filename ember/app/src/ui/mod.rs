@@ -6,6 +6,8 @@
 //! shared components in [`components`].
 
 pub mod compat;
+pub mod agents;
+pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod files;
@@ -13,9 +15,11 @@ pub mod home;
 pub mod launcher;
 pub mod new_session;
 pub mod project;
+pub mod routines;
 pub mod search;
 pub mod shell;
 pub mod theme;
+pub mod vcs;
 
 use dioxus_compose::prelude::*;
 

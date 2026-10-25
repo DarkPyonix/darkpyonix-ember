@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod launcher;
 pub mod new_session;
 pub mod search;
+pub mod workbench;
 
 use std::collections::HashMap;
 

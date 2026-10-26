@@ -126,9 +126,11 @@ pub fn Txt(
     #[props(default)] color: Option<Paint>,
     #[props(default)] max_lines: Option<u32>,
     #[props(default)] overflow: Option<TextOverflow>,
+    #[props(default)] weight: Option<f32>,
+    #[props(default)] text_align: Option<TextAlign>,
 ) -> Element {
     let theme = use_ember_theme();
-    let (fs, weight, mono) = type_role_style(type_role);
+    let (fs, font_weight, mono) = type_role_style(type_role);
     let color = match color {
         Some(c) => resolve_paint(c, theme.palette),
         None => paint(theme.palette.text),
@@ -138,11 +140,13 @@ pub fn Txt(
             text,
             font_size: fs.size(),
             line_height: fs.line_height(),
-            font_weight: weight.value(),
+            font_weight: font_weight.value(),
             letter_spacing: fs.letter_spacing(),
             color,
             max_lines,
             overflow,
+            weight,
+            text_align,
             font: font_refs(mono),
         }
     }

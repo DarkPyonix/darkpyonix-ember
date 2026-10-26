@@ -10,6 +10,7 @@ use ember_client::LauncherStatus;
 use crate::model::{status_label, Tone};
 use crate::ui::components::Txt;
 use crate::ui::theme::*;
+use crate::ui::theme::Palette;
 
 /// `(fill, ink)` of a tone: the strong colour on its soft pair, from the palette.
 pub fn tone_colors(tone: Tone, p: &Palette) -> (Color, Color) {

@@ -13,6 +13,7 @@ pub mod components;
 pub mod conversation;
 pub mod editor;
 pub mod files;
+pub mod fonts;
 pub mod home;
 pub mod keymap;
 pub mod launcher;

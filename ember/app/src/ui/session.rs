@@ -218,6 +218,12 @@ pub fn toolbar_fold_level(toolbar_dp: f32) -> usize {
     }
 }
 
+/// Whether the 멀티/싱글/상태 chips move to their own row: at the bottom-bar width (mockup
+/// `max-width:560px`) the toolbar has no room for them beside the project and IDE 열기 (#218).
+pub fn view_chips_below(window_dp: f32) -> bool {
+    window_dp <= crate::ui::shell::BAR_MAX_DP
+}
+
 /// 264 dp at 1440 in the design.
 pub const SIDE_LIST_W: f32 = 264.0;
 /// A pane's height in the grid (a scroll column cannot give a list a bounded height).
@@ -896,8 +902,14 @@ fn IdeMenu(session: String) -> Element {
     use_hook({
         let sid = session.clone();
         move || {
-            // The demo has no server to ask for IDE targets (#202).
+            // The demo has no server to ask: it serves the list itself (#218).
             if services().demo.is_some() {
+                let (project, cwd) = services()
+                    .client
+                    .read(|s| s.session(&sid).map(|v| (v.record.project.clone(), v.record.cwd.clone())))
+                    .unwrap_or_default();
+                let mut ide = ide;
+                ide.set(Some(Ok(crate::demo::ide_launch(&sid, &project, &cwd))));
                 return;
             }
             run(
@@ -1705,6 +1717,7 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
     let target = single_target(&members, focus.as_deref());
     let sections = side_sections(&boxes, &current, &query.read());
     let mode = side_list_mode(window.class);
+    let chips_below = view_chips_below(window.width_dp);
     let fold_level = toolbar_fold_level(toolbar_width(window.width_dp, mode == SideListMode::Column));
 
     let set_view = use_callback(move |v: SessionView| {
@@ -1807,8 +1820,10 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                         }
                     }
                     Spacer { width: SP[1] }
-                    for v in SessionView::ALL {
-                        PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
+                    if !chips_below {
+                        for v in SessionView::ALL {
+                            PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
+                        }
                     }
                     Spacer { width: SP[2] }
                     if fold_level < 3 {
@@ -1865,6 +1880,17 @@ pub fn SessionScreen(#[props(default)] focus: Option<String>) -> Element {
                         IdeMenu { key: "{t}", session: t }
                     } else {
                         AppButton { text: "IDE 열기", icon: IconRole::Forward, enabled: false }
+                    }
+                }
+                if chips_below {
+                    // Phone width: the view chips get their own row so 상태 is not clipped (#218).
+                    ScrollRow {
+                        fill_max_width: true,
+                        padding_role: SpaceRole::Sm,
+                        for v in SessionView::ALL {
+                            PickChip { key: "{v.key()}", text: v.label(), selected: view_now == v, on_click: move |()| set_view.call(v) }
+                            Spacer { width: SP[1] }
+                        }
                     }
                 }
                 Separator { color: paint(p.line) }
@@ -2045,6 +2071,13 @@ mod tests {
         assert_eq!(level(1200.0), 2);
         assert_eq!(level(1500.0), 0);
         assert_eq!(toolbar_width(1200.0, true), 864.0);
+    }
+
+    #[test]
+    fn view_chips_get_their_own_row_at_phone_width() {
+        assert!(view_chips_below(390.0));
+        assert!(view_chips_below(560.0));
+        assert!(!view_chips_below(768.0));
     }
 
     #[test]

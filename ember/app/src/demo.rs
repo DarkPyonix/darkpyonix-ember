@@ -47,6 +47,39 @@ pub fn unavailable(demo_active: bool) -> Option<&'static str> {
     demo_active.then_some(UNAVAILABLE)
 }
 
+/// The IDE list the demo serves itself (#218): Ember 에디터 opens the session's folder, the
+/// other two say they are not available. Pure, for tests.
+pub fn ide_launch(session: &str, project: &str, cwd: &str) -> crate::server::IdeLaunch {
+    use crate::server::{IdeComputer, IdeLaunch, IdeTarget};
+    let target = |kind: &str, available: bool| IdeTarget {
+        kind: kind.to_string(),
+        available,
+        url: None,
+        command: None,
+        launch: None,
+        reason: (!available).then(|| UNAVAILABLE.to_string()),
+    };
+    IdeLaunch {
+        session: session.to_string(),
+        project: project.to_string(),
+        folder: cwd.to_string(),
+        computer: IdeComputer { name: "이 컴퓨터".to_string(), local: true },
+        targets: vec![target("ember", true), target("vscode", false), target("gateway", false)],
+    }
+}
+
+/// The name for a new demo project: trimmed, not empty, not already taken. Pure, for tests.
+pub fn new_project_name(raw: &str, existing: &[String]) -> Result<String, &'static str> {
+    let name = raw.trim();
+    if name.is_empty() {
+        Err("프로젝트 이름을 입력하세요")
+    } else if existing.iter().any(|e| e == name) {
+        Err("같은 이름의 프로젝트가 이미 있습니다")
+    } else {
+        Ok(name.to_string())
+    }
+}
+
 /// Whether the demo source is used: the switch is `1` and no server URL is given (an empty one
 /// counts as not given, like `AppConfig`). Pure, for tests.
 pub fn active(demo_switch: Option<&str>, server_url: Option<&str>) -> bool {
@@ -342,6 +375,15 @@ impl DemoSource {
         rec
     }
 
+    /// A new project on this computer, kept in this run only (#218).
+    pub fn create_project(&self, client: &Client, raw: &str) -> Result<Project, String> {
+        let existing: Vec<String> = client.read(|s| s.projects().into_iter().map(|p| p.name).collect());
+        let name = new_project_name(raw, &existing).map_err(str::to_string)?;
+        let project = Project { name, created_at: now_ms() / 1000, computers: vec!["local".into()] };
+        client.apply(Input::Push(Push::ProjectUpdated { project: project.clone() }));
+        Ok(project)
+    }
+
     /// Rename, pin or archive in this run only.
     pub fn patch_session(&self, client: &Client, id: &str, patch: &SessionPatch) {
         let Some(mut rec) = client.read(|s| s.session(id).map(|v| v.record.clone())) else { return };
@@ -395,6 +437,24 @@ mod tests {
         assert_eq!(day_string(0), "1970-01-01");
         assert_eq!(day_string(951_782_400_000), "2000-02-29");
         assert_eq!(day_string(1_788_000_000_000), "2026-08-29");
+    }
+
+    #[test]
+    fn ide_list_serves_ember_and_blocks_the_others() {
+        let l = ide_launch("demo-s1", "demo-project", "C:/demo/demo-project");
+        assert!(l.target("ember").unwrap().available);
+        assert!(!l.target("vscode").unwrap().available);
+        assert_eq!(l.target("gateway").unwrap().reason.as_deref(), Some(UNAVAILABLE));
+        let (p, f) = crate::server::IdeLaunch::editor_target(Some(&Ok(l)));
+        assert_eq!((p.as_str(), f.as_str()), ("demo-project", "C:/demo/demo-project"));
+    }
+
+    #[test]
+    fn new_project_name_is_trimmed_and_unique() {
+        let ex = vec!["a".to_string()];
+        assert_eq!(new_project_name("  b ", &ex), Ok("b".to_string()));
+        assert!(new_project_name("   ", &ex).is_err());
+        assert!(new_project_name("a", &ex).is_err());
     }
 
     #[test]

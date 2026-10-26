@@ -314,6 +314,19 @@ fn choose(ui: crate::ui::Ui, menu: NavMenu) {
     chosen.set(menu);
 }
 
+/// Width of the three caption buttons Windows draws at the window's top-right (46 dp each).
+/// compose-rust #340 draws them when the app takes the caption; `LocalWindowCaption.buttonsWidth`
+/// reaches only a TopAppBar at the top of the tree, which Ember's shell does not open with, and
+/// dioxus-compose at the pinned rev exposes no caption width. So Ember reserves it itself.
+pub const WINDOWS_CAPTION_BUTTONS_DP: f32 = 138.0;
+/// Windows 11 caption height (compose-rust #340).
+pub const WINDOWS_CAPTION_HEIGHT_DP: f32 = 32.0;
+
+/// Width to keep clear at the top-right: the caption buttons on Windows, nothing elsewhere.
+pub fn caption_reserved_width(windows: bool) -> f32 {
+    if windows { WINDOWS_CAPTION_BUTTONS_DP } else { 0.0 }
+}
+
 fn transparent() -> Paint {
     Paint::Literal(Color::argb(0))
 }
@@ -719,6 +732,15 @@ pub fn Shell() -> Element {
         Column {
             weight: 1.0,
             fill_max_height: true,
+            if cfg!(target_os = "windows") {
+                // Caption strip: an empty drag region, then the width the caption buttons cover.
+                Row {
+                    fill_max_width: true,
+                    height: WINDOWS_CAPTION_HEIGHT_DP,
+                    Spacer { weight: 1.0 }
+                    Spacer { width: caption_reserved_width(true) }
+                }
+            }
             if matches!(screen, Screen::Launcher | Screen::Search) {
                 Row {
                     fill_max_width: true,
@@ -1049,6 +1071,12 @@ mod tests {
         assert_eq!(ORG_NAME, "darkpyonix");
         assert_eq!(avatar_initial(DEMO_USER.0), "B");
         assert_eq!(avatar_initial(""), "");
+    }
+
+    #[test]
+    fn caption_width_is_reserved_only_on_windows() {
+        assert_eq!(caption_reserved_width(true), 138.0);
+        assert_eq!(caption_reserved_width(false), 0.0);
     }
 
     #[test]

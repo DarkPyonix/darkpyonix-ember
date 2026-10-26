@@ -26,7 +26,7 @@ use ember_client::{LauncherStatus, State};
 use crate::model::status_rank;
 use crate::services::{run, services};
 use crate::ui::characters::{CharState, Character, StylePicker};
-use crate::ui::components::{
+use crate::ui::components::{EmberField, 
     AppButton, ButtonKind, EmberCard, EmberSheet, InsetPanel, Label, PickChip, Pill, PillTone,
 };
 use crate::ui::launcher::ConnectionBanner;
@@ -983,7 +983,7 @@ fn FullProject(
                 space_role: SpaceRole::Sm,
                 Label { text: "멤버", fs: Fs::Lg, weight: Weight::Semibold }
                 // TODO(dioxus-compose): TextField is uncontrolled and has no initial value.
-                TextField {
+                EmberField {
                     fill_max_width: true,
                     placeholder: "멤버 검색",
                     on_value_change: move |v: String| query.set(v),
@@ -1079,19 +1079,19 @@ fn SettingsSheet(
                     space_role: SpaceRole::Md,
                     SettingsSection { title: "기본", hint: if part_supported(SettingsPart::Name) { "" } else { SOON },
                         // TODO(server): rename and repository need a project settings API.
-                        TextField {
+                        EmberField {
                             fill_max_width: true,
                             placeholder: project.name.clone(),
                             enabled: part_supported(SettingsPart::Name) && !default_project,
                             on_value_change: move |v: String| draft.write().name = v,
                         }
-                        TextField {
+                        EmberField {
                             fill_max_width: true,
                             placeholder: "저장소",
                             enabled: part_supported(SettingsPart::Repository),
                             on_value_change: move |v: String| draft.write().repo = v,
                         }
-                        TextField {
+                        EmberField {
                             fill_max_width: true,
                             placeholder: "기본 브랜치",
                             enabled: part_supported(SettingsPart::Repository),

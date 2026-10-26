@@ -1509,7 +1509,7 @@ fn ListPane(
                 }
             }
             // TODO(dioxus-compose): TextField is uncontrolled and has no initial value.
-            TextField {
+            EmberField {
                 fill_max_width: true,
                 placeholder: "루틴 검색",
                 on_value_change: move |v: String| on_query.call(v),
@@ -1873,7 +1873,7 @@ fn RoutineForm(
                         Label { text: "입력하지 않은 항목은 지금 값을 유지합니다", fs: Fs::Xs, color: paint(p.muted) }
                     }
                     FormLabel { text: "이름" }
-                    TextField {
+                    EmberField {
                         fill_max_width: true,
                         placeholder: if initial.name.is_empty() { "예: develop CI 실패 요약".to_string() } else { initial.name.clone() },
                         on_value_change: move |v: String| draft.write().name = v,
@@ -1912,7 +1912,7 @@ fn RoutineForm(
                     }
                     FormLabel { text: if d.trigger == Trigger::Time { "일정 (cron)" } else { "이벤트" } }
                     for t in [d.trigger] {
-                        TextField {
+                        EmberField {
                             key: "schedule-{t.label()}",
                             fill_max_width: true,
                             placeholder: if initial.trigger == t && !initial.cron.is_empty() {
@@ -2004,7 +2004,7 @@ fn RoutineForm(
                         }
                     }
                     FormLabel { text: "프롬프트" }
-                    TextField {
+                    EmberField {
                         fill_max_width: true,
                         height: 120.0,
                         multiline: true,

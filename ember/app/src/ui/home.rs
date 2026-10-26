@@ -1164,10 +1164,11 @@ fn HomeComposer() -> Element {
                     spacing: SP[2],
                     Spacer { height: SP[2] }
                     for g in [generation()] {
-                        TextField {
+                        EmberField {
                             key: "home-composer-{g}",
                             fill_max_width: true,
                             height: 96.0,
+                            corner_radius: CORNER_XL,
                             multiline: true,
                             // The field's fill and border follow the theme; the toolkit has no
                             // text-colour prop, so the ink comes from the renderer's theme.
@@ -1262,7 +1263,7 @@ fn HomeComposer() -> Element {
                         }
                     }
                 }
-                TextField {
+                EmberField {
                     fill_max_width: true,
                     background: paint(theme.palette.surface_2),
                     border_width: 1.0,

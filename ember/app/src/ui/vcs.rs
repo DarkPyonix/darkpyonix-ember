@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::*;
 
 use crate::services::services;
-use crate::ui::components::{AppButton, ButtonKind, EmberCard, Label, PickChip, Pill, PillTone};
+use crate::ui::components::{AppButton, ButtonKind, EmberCard, EmberField, Label, PickChip, Pill, PillTone};
 use crate::ui::home::MenuItem;
 use crate::ui::project::{display_name, is_default_project, project_boxes, ProjectBox};
 use crate::ui::shell::NavMenu;
@@ -1290,7 +1290,7 @@ fn ChangesPane(
                 fill_max_width: true,
                 padding: SP[2],
                 space_role: SpaceRole::Sm,
-                TextField {
+                EmberField {
                     fill_max_width: true,
                     placeholder: "요약 (필수)",
                     on_value_change: move |v: String| summary.set(v),

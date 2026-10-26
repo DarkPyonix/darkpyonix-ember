@@ -13,7 +13,7 @@
 
 use dioxus_compose::prelude::*;
 
-use crate::ui::components::{
+use crate::ui::components::{EmberField, 
     AppButton, ButtonKind, EmberCard, Label, PickChip, Pill, PillTone, pill_colors,
 };
 use crate::ui::project::{SOON, display_name, harness_tone};
@@ -444,7 +444,7 @@ fn RoomList(
             space_role: SpaceRole::Sm,
             Label { text: "채널", fs: Fs::Xl2, weight: Weight::Semibold }
             // TODO(dioxus-compose): TextField is uncontrolled and has no initial value.
-            TextField {
+            EmberField {
                 fill_max_width: true,
                 placeholder: "채널, 메시지 검색",
                 on_value_change: move |v: String| on_query.call(v),
@@ -625,7 +625,7 @@ fn RoomView(room: Room, show_back: bool, on_back: EventHandler<()>) -> Element {
                 padding: SP[2],
                 space_role: SpaceRole::Sm,
                 alignment: Alignment::CenterStart,
-                TextField { weight: 1.0, placeholder: "메시지 입력" }
+                EmberField { weight: 1.0, placeholder: "메시지 입력" }
                 // Sending needs the channel feed (FR-T11, not built): the button stays disabled.
                 AppButton { text: "전송", kind: ButtonKind::Primary, enabled: false }
             }

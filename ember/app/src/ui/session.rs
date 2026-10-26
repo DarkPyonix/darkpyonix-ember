@@ -36,7 +36,7 @@ use ember_client::wire::SessionRecord;
 use crate::ide::{IdeAction, IdeKind, open_external, plan};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run, services};
-use crate::ui::components::{
+use crate::ui::components::{EmberField, 
     AppButton, ButtonKind, EmberCard, EmberSheet, IconButton, Label, PickChip, Pill, PillTone,
 };
 use crate::ui::characters::{CharState, Character};
@@ -963,7 +963,7 @@ fn SideList(
             fill_max_height: true,
             padding_role: SpaceRole::Sm,
             space_role: SpaceRole::Sm,
-            TextField {
+            EmberField {
                 fill_max_width: true,
                 placeholder: "세션 검색",
                 on_value_change: move |v: String| on_query.call(v),
@@ -1135,14 +1135,17 @@ fn PaneComposer(session: String, busy: bool) -> Element {
             ComposerChips { session: session.clone() }
             Row {
                 fill_max_width: true,
-                background: paint(p.surface_2),
-                corner_radius: CORNER_MD,
+                background: paint(p.surface),
+                border_width: 1.0,
+                border_color: paint(p.line),
+                corner_radius: CORNER_XL,
                 padding_role: SpaceRole::Xs,
                 space_role: SpaceRole::Xs,
                 alignment: Alignment::CenterStart,
                 for g in [generation()] {
-                    TextField {
+                    EmberField {
                         key: "pane-composer-{g}",
+                        bare: true,
                         weight: 1.0,
                         multiline: true,
                         placeholder: if busy { "다음 턴에 보낼 메시지를 입력하세요" } else { "메시지를 입력하세요" },

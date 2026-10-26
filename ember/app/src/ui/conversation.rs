@@ -29,6 +29,8 @@ use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::model::{self, Tone};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run, services};
+use crate::ui::components::{EmberCard, EmberField, Txt};
+use crate::ui::theme::*;
 use crate::ui::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use crate::ui::launcher::{export, patch_session, ConnectionBanner};
 use crate::ui::{use_ui, Route};
@@ -64,6 +66,7 @@ fn fork_from(ui: crate::ui::Ui, id: String, seq: Option<i64>) {
 
 #[component]
 pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element {
+    let theme = use_ember_theme();
     let ui = use_ui();
     let window = use_window_size();
     let s = services();
@@ -205,8 +208,8 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                 space_role: SpaceRole::Md,
                 alignment: Alignment::Center,
                 arrangement: Arrangement::Center,
-                Text { text: "This session is not on the main server.", type_role: TypeRole::Title }
-                Text {
+                Txt { text: "This session is not on the main server.", type_role: TypeRole::Title }
+                Txt {
                     text: "It may have been deleted, or the list has not loaded yet.",
                     type_role: TypeRole::Body,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -505,8 +508,8 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                 }
                 Column {
                     weight: 1.0,
-                    Text { text: title.clone(), type_role: TypeRole::Title, max_lines: 1, overflow: TextOverflow::Ellipsis }
-                    Text {
+                    Txt { text: title.clone(), type_role: TypeRole::Title, max_lines: 1, overflow: TextOverflow::Ellipsis }
+                    Txt {
                         text: meta.clone(),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -546,7 +549,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                     fill_max_width: true,
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
-                    Text { text, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Txt { text, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                     Button {
                         text: "Open",
                         variant: ButtonVariant::Text,
@@ -559,7 +562,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                 fill_max_width: true,
                 alignment: Alignment::CenterStart,
                 space_role: SpaceRole::Sm,
-                Text { text: "On", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                Txt { text: "On", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                 Menu {
                     expanded: computer_menu(),
                     on_dismiss: move |_| computer_menu.set(false),
@@ -572,7 +575,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                         }
                     },
                     if computers.is_empty() {
-                        Text { text: "No computers registered", type_role: TypeRole::Caption }
+                        Txt { text: "No computers registered", type_role: TypeRole::Caption }
                     }
                     for c in computers.iter().cloned() {
                         Button {
@@ -661,7 +664,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                         fill_max_height: true,
                         alignment: Alignment::Center,
                         arrangement: Arrangement::Center,
-                        Text {
+                        Txt {
                             text: if status == LauncherStatus::Idle { "Say what to work on." } else { "Loading the conversation\u{2026}" },
                             type_role: TypeRole::Body,
                             color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -677,7 +680,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
                     Badge { text: format!("{} queued", queued.len()), tone: Tone::Accent }
-                    Text {
+                    Txt {
                         text: format!("Sent in order when the current turn ends. Next: {}", model::one_line(&queued[0], 60)),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -700,12 +703,12 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
 
             // ---- mention suggestions (FR-T6) ------------------------------------------------------
             if !suggestions.is_empty() {
-                Card {
+                EmberCard {
                     fill_max_width: true,
-                    padding_role: SpaceRole::Xs,
+                    padding: SP[1],
                     Column {
                         fill_max_width: true,
-                        Text {
+                        Txt {
                             text: "Mention a session",
                             type_role: TypeRole::Caption,
                             color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -730,7 +733,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
                     fill_max_width: true,
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
-                    Text {
+                    Txt {
                         text: format!("Mentioning {}", picked.join(", ")),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -749,14 +752,17 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
-                material: MaterialRole::Regular,
-                shape_role: ShapeRole::Large,
-                padding_role: SpaceRole::Xs,
+                background: paint(theme.palette.surface),
+                border_width: 1.0,
+                border_color: paint(theme.palette.line),
+                corner_radius: CORNER_XL,
+                padding: SP[1],
                 space_role: SpaceRole::Xs,
                 alignment: Alignment::CenterStart,
                 for generation in [composer_generation()] {
-                    TextField {
+                    EmberField {
                         key: "composer-{generation}",
+                        bare: true,
                         weight: 1.0,
                         multiline: true,
                         placeholder: if busy { "Queue a message for the next turn" } else { "Message (@@ mentions a session)" },
@@ -796,6 +802,7 @@ pub(crate) fn TranscriptRow(
     expanded: Signal<HashSet<String>>,
     answering: Signal<HashSet<String>>,
 ) -> Element {
+    let theme = use_ember_theme();
     match item {
         TranscriptItem::User { text, .. } => rsx! {
             dioxus_compose::Box {
@@ -805,12 +812,12 @@ pub(crate) fn TranscriptRow(
                 Column {
                     alignment: Alignment::CenterEnd,
                     space_role: SpaceRole::Xs,
-                    Text { text: "You", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Txt { text: "You", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                     Column {
-                        background: Paint::Role(ColorRole::PrimaryContainer),
-                        shape_role: ShapeRole::Large,
-                        padding_role: SpaceRole::Md,
-                        MessageText { text, ink: ColorRole::OnPrimaryContainer }
+                        background: paint(theme.palette.ink),
+                        corner_radius: CORNER_BUBBLE,
+                        padding: SP[2] + 4.0,
+                        MessageText { text, ink: ColorRole::OnPrimary }
                     }
                 }
             }
@@ -825,15 +832,15 @@ pub(crate) fn TranscriptRow(
                     Row {
                         space_role: SpaceRole::Xs,
                         alignment: Alignment::CenterStart,
-                        Text { text: agent, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                        Txt { text: agent, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                         if streaming {
                             Spinner { size: 10.0 }
                         }
                     }
                     Column {
-                        background: Paint::Role(ColorRole::SurfaceContainer),
-                        shape_role: ShapeRole::Large,
-                        padding_role: SpaceRole::Md,
+                        background: paint(theme.palette.surface_2),
+                        corner_radius: CORNER_BUBBLE,
+                        padding: SP[2] + 4.0,
                         // A reply still arriving shows a caret, so an empty one does not look dead.
                         MessageText { text: if streaming { format!("{text}\u{2589}") } else { text } }
                     }
@@ -863,9 +870,9 @@ pub(crate) fn TranscriptRow(
             let (out_text, out_err) = result.as_ref().map(|r| (r.output.clone(), r.is_error)).unwrap_or_default();
             let show_tail = has_result && !out_text.trim().is_empty();
             rsx! {
-                Card {
+                EmberCard {
                     fill_max_width: true,
-                    padding_role: SpaceRole::Sm,
+                    padding: SP[2],
                     Column {
                         fill_max_width: true,
                         space_role: SpaceRole::Xs,
@@ -876,8 +883,8 @@ pub(crate) fn TranscriptRow(
                             if !has_result {
                                 Spinner {}
                             }
-                            Text { text: name, type_role: TypeRole::BodyStrong }
-                            Text {
+                            Txt { text: name, type_role: TypeRole::BodyStrong }
+                            Txt {
                                 text: summary,
                                 type_role: TypeRole::Caption,
                                 color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -894,10 +901,10 @@ pub(crate) fn TranscriptRow(
                             }
                         }
                         if open {
-                            Text { text: "Input", type_role: TypeRole::Label }
+                            Txt { text: "Input", type_role: TypeRole::Label }
                             CodeText { text: model::json_pretty(&input) }
                             if has_result {
-                                Text { text: if out_err { "Error" } else { "Result" }, type_role: TypeRole::Label }
+                                Txt { text: if out_err { "Error" } else { "Result" }, type_role: TypeRole::Label }
                                 CodeText { text: out_text.clone(), error: out_err }
                             }
                         } else if show_tail {
@@ -931,15 +938,14 @@ pub(crate) fn TranscriptRow(
             };
             let (a1, a2, a3) = (answer.clone(), answer.clone(), answer);
             rsx! {
-                Card {
+                EmberCard {
                     fill_max_width: true,
-                    padding_role: SpaceRole::Sm,
-                    border_width: if state == ApprovalState::Pending { Some(2.0) } else { None },
-                    border_color: Paint::Role(ColorRole::Tertiary),
+                    padding: SP[2],
+                    border: if state == ApprovalState::Pending { Some(theme.palette.orange.strong) } else { None },
                     Column {
                         fill_max_width: true,
                         space_role: SpaceRole::Xs,
-                        Text { text: format!("{tool} wants approval"), type_role: TypeRole::BodyStrong }
+                        Txt { text: format!("{tool} wants approval"), type_role: TypeRole::BodyStrong }
                         CodeText { text: model::json_pretty(&input), max_lines: 12 }
                         match state {
                             ApprovalState::Pending => rsx! {
@@ -972,7 +978,7 @@ pub(crate) fn TranscriptRow(
                                 }
                             },
                             ApprovalState::Resolved(d) => rsx! {
-                                Text {
+                                Txt {
                                     text: match d {
                                         ApprovalDecision::AllowOnce => "Allowed once",
                                         ApprovalDecision::AllowAlways => "Always allowed",
@@ -983,7 +989,7 @@ pub(crate) fn TranscriptRow(
                                 }
                             },
                             ApprovalState::Abandoned => rsx! {
-                                Text {
+                                Txt {
                                     text: "Not answered before the turn ended",
                                     type_role: TypeRole::Caption,
                                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -1016,7 +1022,7 @@ pub(crate) fn TranscriptRow(
                     space_role: SpaceRole::Sm,
                     padding_role: SpaceRole::Xs,
                     dioxus_compose::Box { weight: 1.0, Divider {} }
-                    Text { text, type_role: TypeRole::Caption, color: Paint::Role(ink) }
+                    Txt { text, type_role: TypeRole::Caption, color: Paint::Role(ink) }
                     if outcome == TurnOutcome::Completed {
                         Button { text: model::FORK_TURN_LABEL, variant: ButtonVariant::Text, enabled: can, on_click: fork_here }
                     }
@@ -1032,7 +1038,7 @@ pub(crate) fn TranscriptRow(
                 fill_max_width: true,
                 alignment: Alignment::Center,
                 padding_role: SpaceRole::Xs,
-                Text {
+                Txt {
                     text,
                     type_role: TypeRole::Caption,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -1077,9 +1083,9 @@ fn TeamPanel(session: String) -> Element {
         );
     };
     rsx! {
-        Card {
+        EmberCard {
             fill_max_width: true,
-            padding_role: SpaceRole::Sm,
+            padding: SP[2],
             Column {
                 fill_max_width: true,
                 space_role: SpaceRole::Xs,
@@ -1087,7 +1093,7 @@ fn TeamPanel(session: String) -> Element {
                     fill_max_width: true,
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
-                    Text {
+                    Txt {
                         text: format!(
                             "Team \u{00b7} {active} teammate{} \u{00b7} {open} open task{}",
                             if active == 1 { "" } else { "s" },
@@ -1110,11 +1116,11 @@ fn TeamPanel(session: String) -> Element {
                             fill_max_width: true,
                             alignment: Alignment::CenterStart,
                             space_role: SpaceRole::Sm,
-                            Text {
+                            Txt {
                                 text: if r.leader { format!("{} (leader)", r.name) } else { r.name.clone() },
                                 type_role: if r.this { TypeRole::BodyStrong } else { TypeRole::Body },
                             }
-                            Text {
+                            Txt {
                                 text: if r.ended { format!("{} \u{00b7} ended", r.agent) } else { format!("{} \u{00b7} {}", r.agent, r.status) },
                                 type_role: TypeRole::Caption,
                                 color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -1149,10 +1155,10 @@ fn TeamPanel(session: String) -> Element {
                         }
                     }
                     if tasks.is_empty() {
-                        Text { text: "No tasks yet", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                        Txt { text: "No tasks yet", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                     }
                     for t in tasks.iter().cloned() {
-                        Text {
+                        Txt {
                             key: "{t.id}",
                             text: model::task_line(&t),
                             type_role: TypeRole::Caption,

@@ -54,20 +54,33 @@ impl NavMenu {
         }
     }
 
-    /// The nearest glyph the pinned toolkit has.
-    /// TODO(GAPS: 임의 아이콘 세트): Heroicons outline per menu once `Icon` takes an SVG asset.
-    pub fn icon(self) -> IconRole {
+    /// The mockup's icon for the menu (Heroicons outline, 1.5 stroke), as an SVG whose stroke is
+    /// `currentColor`. The toolkit's `IconRole` set has no such glyphs, so the app registers
+    /// these itself.
+    pub fn svg(self) -> &'static str {
         match self {
-            NavMenu::Home => IconRole::Home,
-            NavMenu::Projects => IconRole::Library,
-            NavMenu::Sessions => IconRole::Compose,
-            NavMenu::Channels => IconRole::Inbox,
-            NavMenu::Routines => IconRole::History,
-            NavMenu::VersionControl => IconRole::List,
-            NavMenu::Agents => IconRole::Sidebar,
-            NavMenu::Files => IconRole::Image,
+            NavMenu::Home => include_str!("../../assets/nav/home.svg"),
+            NavMenu::Projects => include_str!("../../assets/nav/folder.svg"),
+            NavMenu::Sessions => include_str!("../../assets/nav/grid.svg"),
+            NavMenu::Channels => include_str!("../../assets/nav/hash.svg"),
+            NavMenu::Routines => include_str!("../../assets/nav/repeat.svg"),
+            NavMenu::VersionControl => include_str!("../../assets/nav/git.svg"),
+            NavMenu::Agents => include_str!("../../assets/nav/cpu.svg"),
+            NavMenu::Files => include_str!("../../assets/nav/arrows-right-left.svg"),
         }
     }
+}
+
+pub const ICON_MORE_SVG: &str = include_str!("../../assets/nav/more.svg");
+pub const ICON_SUN_SVG: &str = include_str!("../../assets/nav/sun.svg");
+pub const ICON_MOON_SVG: &str = include_str!("../../assets/nav/moon.svg");
+pub const ICON_GEAR_SVG: &str = include_str!("../../assets/nav/gear.svg");
+
+/// `svg` at `px` dp with its `currentColor` stroke set to `argb` (alpha dropped).
+pub fn tinted_svg(svg: &str, px: f32, argb: u32) -> String {
+    let size = format!("{}", px.round() as i32);
+    svg.replace("currentColor", &format!("#{:06x}", argb & 0x00ff_ffff))
+        .replacen("width=\"24\" height=\"24\"", &format!("width=\"{size}\" height=\"{size}\""), 1)
 }
 
 /// The menu to mark active: an open conversation always belongs to 세션.
@@ -154,10 +167,10 @@ impl BottomTab {
         }
     }
 
-    pub fn icon(self) -> IconRole {
+    pub fn svg(self) -> &'static str {
         match self {
-            BottomTab::NavMenu(m) => m.icon(),
-            BottomTab::More => IconRole::More,
+            BottomTab::NavMenu(m) => m.svg(),
+            BottomTab::More => ICON_MORE_SVG,
         }
     }
 }
@@ -185,19 +198,93 @@ pub enum ShellMode {
     BottomTabs,
 }
 
-/// The layout for a window size class.
-///
-/// TODO(GAPS: 창 폭 레이아웃): the design breaks at 1279 (sidebar to rail) and 560 (rail to
-/// bar). The pinned toolkit reports only its three classes (600 and 840 dp), so Compact is
-/// the bar, Medium the rail and Expanded the sidebar; the exact boundaries come with
-/// `use_window_breakpoints`.
-pub fn shell_mode(class: WindowSizeClass, collapsed: bool) -> ShellMode {
-    match class {
-        WindowSizeClass::Compact => ShellMode::BottomTabs,
-        WindowSizeClass::Medium => ShellMode::Rail,
-        WindowSizeClass::Expanded if collapsed => ShellMode::Rail,
-        WindowSizeClass::Expanded => ShellMode::Sidebar,
+/// Widest window (dp) that shows the icon rail; wider shows the full sidebar (mockup
+/// `@media (max-width:1279px)`).
+pub const RAIL_MAX_DP: f32 = 1279.0;
+/// Widest window (dp) that shows the bottom tab bar (mockup `@media (max-width:560px)`).
+pub const BAR_MAX_DP: f32 = 560.0;
+
+/// The layout for a window width. 1024 and 768 get the rail, 390 the bar. The collapse toggle
+/// turns a wide window's sidebar into the rail.
+pub fn nav_mode(width_dp: f32, collapsed: bool) -> ShellMode {
+    if width_dp <= BAR_MAX_DP {
+        ShellMode::BottomTabs
+    } else if width_dp <= RAIL_MAX_DP || collapsed {
+        ShellMode::Rail
+    } else {
+        ShellMode::Sidebar
     }
+}
+
+/// Live numbers for the navigation. `None` or 0 means no data feeds it yet, so nothing is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavCounts {
+    /// Projects, shown as a muted count beside 프로젝트.
+    pub projects: Option<usize>,
+    /// Sessions waiting for approval, shown as a red badge on 세션.
+    pub waiting: usize,
+    /// Unread channel rooms, a red badge on 채널 (no live source yet).
+    pub unread_rooms: usize,
+    /// Enabled routines, a muted count beside 루틴 (no live source yet).
+    pub routines: Option<usize>,
+    /// Running file transfers, a muted count beside 파일 (no live source yet).
+    pub transfers: usize,
+}
+
+/// What sits at the right of a menu row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavBadge {
+    None,
+    /// Plain muted number (sidebar only).
+    Count(usize),
+    /// Red badge (everywhere).
+    Alert(usize),
+}
+
+pub fn nav_badge(menu: NavMenu, c: &NavCounts) -> NavBadge {
+    let alert = |n: usize| if n > 0 { NavBadge::Alert(n) } else { NavBadge::None };
+    match menu {
+        NavMenu::Projects => c.projects.map_or(NavBadge::None, NavBadge::Count),
+        NavMenu::Sessions => alert(c.waiting),
+        NavMenu::Channels => alert(c.unread_rooms),
+        NavMenu::Routines => c.routines.map_or(NavBadge::None, NavBadge::Count),
+        NavMenu::Files if c.transfers > 0 => NavBadge::Count(c.transfers),
+        _ => NavBadge::None,
+    }
+}
+
+/// The red badge a bottom tab shows: the alert of its menu. 더보기 sums the alerts of the
+/// menus it hides (none today).
+pub fn tab_badge(tab: BottomTab, c: &NavCounts) -> Option<usize> {
+    match tab {
+        BottomTab::NavMenu(m) => match nav_badge(m, c) {
+            NavBadge::Alert(n) => Some(n),
+            _ => None,
+        },
+        BottomTab::More => {
+            let n: usize = MORE_MENUS
+                .iter()
+                .map(|m| if let NavBadge::Alert(n) = nav_badge(*m, c) { n } else { 0 })
+                .sum();
+            (n > 0).then_some(n)
+        }
+    }
+}
+
+/// Badge text: the number, capped at `99+`.
+pub fn badge_text(n: usize) -> String {
+    if n > 99 { "99+".into() } else { n.to_string() }
+}
+
+/// The signed-in user shown in the sidebar footer. No account source exists yet, so this is
+/// the mockup's demo user.
+pub const DEMO_USER: (&str, &str) = ("BREW", "ncmnd");
+/// The org line under the wordmark.
+pub const ORG_NAME: &str = "darkpyonix";
+
+/// First letter of a name, for the avatar.
+pub fn avatar_initial(name: &str) -> String {
+    name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -251,40 +338,193 @@ pub fn mark_svg_for(size: f32) -> &'static str {
 
 /// The logo slot: the temporary mark, with the wordmark beside it when there is room.
 /// Only this component changes when the final logo lands.
+/// A stroke icon from the app's own SVG set, tinted to `argb` (the toolkit's `IconRole` set has
+/// no such glyphs).
 #[component]
-fn LogoSlot(#[props(default)] compact: bool) -> Element {
-    let size = 28.0;
-    let id = asset(AssetKind::Svg, mark_svg_for(size).as_bytes());
+fn NavIcon(svg: &'static str, argb: u32, #[props(default = 18.0)] size: f32) -> Element {
+    let doc = tinted_svg(svg, size, argb);
+    let id = dioxus_compose::asset::register_owned(AssetKind::Svg, doc.into_bytes());
+    rsx! { Image { asset_id: id, width: size, height: size } }
+}
+
+/// The 18 px red count badge (`.redbadge`): white 11 px bold-looking number on `red`.
+#[component]
+fn RedBadge(n: usize) -> Element {
+    let p = use_ember_theme().palette;
+    let text = badge_text(n);
+    let narrow = text.chars().count() <= 1;
     rsx! {
-        Row {
-            height: SHEET_HEADER_H,
-            alignment: Alignment::CenterStart,
-            space_role: SpaceRole::Sm,
-            Spacer { width: SP[3] }
-            Image { asset_id: id, width: size, height: size }
-            if !compact {
-                Label { text: "Ember", fs: Fs::Xl, weight: Weight::Semibold }
+        Surface {
+            width: if narrow { Some(18.0) } else { None },
+            height: 18.0,
+            background: paint(p.red.strong),
+            corner_radius: 9.0,
+            Row {
+                fill_max_height: true,
+                alignment: Alignment::Center,
+                arrangement: Arrangement::Center,
+                fill_max_width: narrow,
+                if !narrow {
+                    Spacer { width: 5.0 }
+                }
+                Label { text, fs: Fs::Xs2, weight: Weight::Semibold, color: paint(Color::rgb(0xffffff)) }
+                if !narrow {
+                    Spacer { width: 5.0 }
+                }
             }
         }
     }
 }
 
+/// One sidebar row: 38 px pill, icon, label, then a muted count or a red badge at the right.
 #[component]
-fn NavItem(menu: NavMenu, active: bool, icon_only: bool, on_click: EventHandler<()>) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
+fn NavRow(
+    menu: NavMenu,
+    active: bool,
+    badge: NavBadge,
+    on_click: EventHandler<()>,
+) -> Element {
+    let p = use_ember_theme().palette;
+    let fg = if active { p.ink_text } else { p.text_2 };
     rsx! {
-        Button {
-            text: if icon_only { "" } else { menu.label() },
-            icon: menu.icon(),
-            fill_max_width: !icon_only,
-            width: if icon_only { Some(48.0) } else { None },
+        Row {
+            fill_max_width: true,
             height: H_NAV_ITEM,
-            variant: ButtonVariant::Text,
-            shape_role: ShapeRole::Full,
             background: if active { paint(p.ink) } else { transparent() },
-            color: if active { paint(p.ink_text) } else { paint(p.text_2) },
+            corner_radius: H_NAV_ITEM / 2.0,
+            alignment: Alignment::CenterStart,
             on_click: move |()| on_click.call(()),
+            Spacer { width: SP[2] }
+            NavIcon { svg: menu.svg(), argb: fg.to_argb() }
+            Spacer { width: SP[2] }
+            Label { text: menu.label(), fs: Fs::Md, weight: Weight::Medium, color: paint(fg), max_lines: 1 }
+            Spacer { weight: 1.0 }
+            match badge {
+                NavBadge::None => rsx! {},
+                NavBadge::Count(n) => rsx! {
+                    Label { text: n.to_string(), fs: Fs::Xs, color: paint(if active { p.ink_text } else { p.muted }) }
+                },
+                NavBadge::Alert(n) => rsx! { RedBadge { n } },
+            }
+            Spacer { width: SP[2] }
+        }
+    }
+}
+
+/// One rail item: a 44 px rounded square with the icon centred and the red badge at its top
+/// right corner.
+#[component]
+fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: EventHandler<()>) -> Element {
+    let p = use_ember_theme().palette;
+    let fg = if active { p.ink_text } else { p.text_2 };
+    rsx! {
+        dioxus_compose::Box {
+            width: 44.0,
+            height: 44.0,
+            alignment: Alignment::Center,
+            background: if active { paint(p.ink) } else { transparent() },
+            corner_radius: 12.0,
+            on_click: move |()| on_click.call(()),
+            NavIcon { svg: menu.svg(), argb: fg.to_argb(), size: 20.0 }
+            if let NavBadge::Alert(n) = badge {
+                dioxus_compose::Box {
+                    fill_max_width: true,
+                    fill_max_height: true,
+                    alignment: Alignment::TopEnd,
+                    RedBadge { n }
+                }
+            }
+        }
+    }
+}
+
+/// A footer tool row (theme, settings): icon and label in the sidebar, icon alone in the rail.
+#[component]
+fn ToolRow(svg: &'static str, #[props(into)] label: String, rail: bool, on_click: EventHandler<()>) -> Element {
+    let p = use_ember_theme().palette;
+    if rail {
+        return rsx! {
+            dioxus_compose::Box {
+                width: 44.0,
+                height: 44.0,
+                alignment: Alignment::Center,
+                corner_radius: 12.0,
+                on_click: move |()| on_click.call(()),
+                NavIcon { svg, argb: p.text_2.to_argb(), size: 20.0 }
+            }
+        };
+    }
+    rsx! {
+        Row {
+            fill_max_width: true,
+            height: H_NAV_ITEM,
+            corner_radius: H_NAV_ITEM / 2.0,
+            alignment: Alignment::CenterStart,
+            on_click: move |()| on_click.call(()),
+            Spacer { width: SP[2] }
+            NavIcon { svg, argb: p.text_2.to_argb() }
+            Spacer { width: SP[2] }
+            Label { text: label, fs: Fs::Md, weight: Weight::Medium, color: paint(p.text_2), max_lines: 1 }
+        }
+    }
+}
+
+/// The brand block: mark, "Ember" 15 px semibold and the org line 12 px muted. A click folds
+/// or unfolds the sidebar (the mockup's logo button).
+#[component]
+fn Brand(compact: bool, on_click: EventHandler<()>) -> Element {
+    let p = use_ember_theme().palette;
+    let size = 32.0;
+    let id = asset(AssetKind::Svg, mark_svg_for(size).as_bytes());
+    rsx! {
+        Row {
+            fill_max_width: !compact,
+            alignment: Alignment::CenterStart,
+            arrangement: if compact { Arrangement::Center } else { Arrangement::Start },
+            on_click: move |()| on_click.call(()),
+            if !compact {
+                Spacer { width: 6.0 }
+            }
+            Image { asset_id: id, width: size, height: size }
+            if !compact {
+                Spacer { width: 10.0 }
+                Column {
+                    Label { text: "Ember", fs: Fs::Lg, weight: Weight::Semibold }
+                    Label { text: ORG_NAME, fs: Fs::Xs, color: paint(p.muted) }
+                }
+            }
+        }
+    }
+}
+
+/// The user row at the foot of the sidebar: blue round avatar, name, handle.
+#[component]
+fn UserRow() -> Element {
+    let p = use_ember_theme().palette;
+    let (name, handle) = DEMO_USER;
+    rsx! {
+        Row {
+            fill_max_width: true,
+            alignment: Alignment::CenterStart,
+            Spacer { width: 6.0 }
+            Surface {
+                width: 28.0,
+                height: 28.0,
+                background: paint(p.blue.strong),
+                corner_radius: 14.0,
+                Row {
+                    fill_max_width: true,
+                    fill_max_height: true,
+                    alignment: Alignment::Center,
+                    arrangement: Arrangement::Center,
+                    Label { text: avatar_initial(name), fs: Fs::Sm, weight: Weight::Semibold, color: paint(Color::rgb(0xffffff)) }
+                }
+            }
+            Spacer { width: 10.0 }
+            Column {
+                Label { text: name, fs: Fs::Sm, weight: Weight::Semibold }
+                Label { text: handle, fs: Fs::Xs, color: paint(p.muted) }
+            }
         }
     }
 }
@@ -293,73 +533,81 @@ fn NavItem(menu: NavMenu, active: bool, icon_only: bool, on_click: EventHandler<
 fn Sidebar(
     rail: bool,
     active: NavMenu,
+    counts: NavCounts,
     on_choose: EventHandler<NavMenu>,
     on_theme: EventHandler<()>,
     on_settings: EventHandler<()>,
     on_collapse: EventHandler<()>,
 ) -> Element {
     let theme = use_ember_theme();
+    let p = theme.palette;
     let pref = *use_context::<ThemeCtx>().pref.read();
     let width = if rail { RAIL_W } else { SIDE_W };
+    let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
     rsx! {
-        Column {
-            width,
+        // 1 px line on the right edge, then the column.
+        Row {
             fill_max_height: true,
-            background: paint(theme.palette.bg),
-            space_role: SpaceRole::Xs,
-            alignment: Alignment::TopCenter,
-            LogoSlot { compact: rail }
-            for menu in NavMenu::ALL {
-                NavItem {
-                    key: "{menu.label()}",
-                    menu,
-                    active: menu == active,
-                    icon_only: rail,
-                    on_click: move |()| on_choose.call(menu),
+            Column {
+                width: width - 1.0,
+                fill_max_height: true,
+                background: paint(p.bg),
+                spacing: 2.0,
+                alignment: if rail { Alignment::TopCenter } else { Alignment::TopStart },
+                Spacer { height: SP[4] }
+                Brand { compact: rail, on_click: move |()| on_collapse.call(()) }
+                Spacer { height: SP[4] }
+                for menu in NavMenu::ALL {
+                    if rail {
+                        RailItem {
+                            key: "{menu.label()}",
+                            menu,
+                            active: menu == active,
+                            badge: nav_badge(menu, &counts),
+                            on_click: move |()| on_choose.call(menu),
+                        }
+                    } else {
+                        Row {
+                            key: "{menu.label()}",
+                            fill_max_width: true,
+                            Spacer { width: SP[2] }
+                            NavRow {
+                                menu,
+                                active: menu == active,
+                                badge: nav_badge(menu, &counts),
+                                on_click: move |()| on_choose.call(menu),
+                            }
+                            Spacer { width: SP[2] }
+                        }
+                    }
                 }
+                Spacer { weight: 1.0 }
+                // Divider above the footer tools.
+                Row {
+                    fill_max_width: true,
+                    Spacer { width: SP[2] }
+                    Spacer { weight: 1.0, height: 1.0, background: paint(p.line) }
+                    Spacer { width: SP[2] }
+                }
+                ToolRow { svg: theme_svg, label: format!("테마: {}", pref.label()), rail, on_click: move |()| on_theme.call(()) }
+                ToolRow { svg: ICON_GEAR_SVG, label: "설정", rail, on_click: move |()| on_settings.call(()) }
+                if !rail {
+                    Spacer { height: SP[2] }
+                    UserRow {}
+                }
+                Spacer { height: SP[3] }
             }
-            Spacer { weight: 1.0 }
-            // Tools: theme, collapse, settings.
-            Button {
-                text: if rail { String::new() } else { format!("테마: {}", pref.label()) },
-                icon: IconRole::Image,
-                variant: ButtonVariant::Text,
-                fill_max_width: !rail,
-                height: H_NAV_ITEM,
-                shape_role: ShapeRole::Full,
-                color: paint(theme.palette.text_2),
-                on_click: move |()| on_theme.call(()),
-            }
-            Button {
-                text: if rail { "" } else { "접기" },
-                icon: if rail { IconRole::Sidebar } else { IconRole::Collapse },
-                variant: ButtonVariant::Text,
-                fill_max_width: !rail,
-                height: H_NAV_ITEM,
-                shape_role: ShapeRole::Full,
-                color: paint(theme.palette.text_2),
-                on_click: move |()| on_collapse.call(()),
-            }
-            Button {
-                text: if rail { "" } else { "설정" },
-                icon: IconRole::Settings,
-                variant: ButtonVariant::Text,
-                fill_max_width: !rail,
-                height: H_NAV_ITEM,
-                shape_role: ShapeRole::Full,
-                color: paint(theme.palette.text_2),
-                on_click: move |()| on_settings.call(()),
-            }
-            Spacer { height: SP[2] }
+            Spacer { width: 1.0, background: paint(p.line) }
         }
     }
 }
 
-/// The floating bottom bar. Opaque on every platform for now.
+/// The floating bottom bar: five equal-width tabs, icon above an 11 px label, red badges.
+/// Opaque on every platform for now.
 /// TODO(GAPS: 배경 흐림): Liquid Glass on iOS only. TODO(GAPS: 떠 있는 하단 바): the safe-area
 /// inset (`use_safe_area`) is not available, so only the 10 px gap is added.
 #[component]
-fn BottomBar(active: NavMenu, on_choose: EventHandler<BottomTab>) -> Element {
+fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: EventHandler<BottomTab>) -> Element {
     let theme = use_ember_theme();
     let p = theme.palette;
     let marked = tab_for_menu(active);
@@ -380,18 +628,36 @@ fn BottomBar(active: NavMenu, on_choose: EventHandler<BottomTab>) -> Element {
                     Row {
                         fill_max_width: true,
                         fill_max_height: true,
-                        arrangement: Arrangement::SpaceEvenly,
                         alignment: Alignment::Center,
                         for tab in BOTTOM_TABS {
-                            Button {
+                            dioxus_compose::Box {
                                 key: "{tab.label()}",
-                                text: tab.label(),
-                                icon: tab.icon(),
-                                variant: ButtonVariant::Text,
-                                shape_role: ShapeRole::Full,
-                                background: if tab == marked { paint(p.sel) } else { transparent() },
-                                color: if tab == marked { paint(p.text) } else { paint(p.muted) },
+                                weight: 1.0,
+                                fill_max_height: true,
+                                alignment: Alignment::Center,
                                 on_click: move |()| on_choose.call(tab),
+                                Column {
+                                    alignment: Alignment::TopCenter,
+                                    spacing: 2.0,
+                                    dioxus_compose::Box {
+                                        alignment: Alignment::TopEnd,
+                                        NavIcon {
+                                            svg: tab.svg(),
+                                            argb: (if tab == marked { p.text } else { p.muted }).to_argb(),
+                                            size: 22.0,
+                                        }
+                                        if let Some(n) = tab_badge(tab, &counts) {
+                                            RedBadge { n }
+                                        }
+                                    }
+                                    Label {
+                                        text: tab.label(),
+                                        fs: Fs::Xs2,
+                                        weight: Weight::Medium,
+                                        color: paint(if tab == marked { p.text } else { p.muted }),
+                                        max_lines: 1,
+                                    }
+                                }
                             }
                         }
                     }
@@ -430,7 +696,15 @@ pub fn Shell() -> Element {
     let route = ui.route.read().clone();
     let active = active_menu(&route, *ui.menu.read());
     let screen = screen_for(&route, active);
-    let mode = shell_mode(window.class, *collapsed.read());
+    let mode = nav_mode(window.width_dp, *collapsed.read());
+    let counts = ui.with_rows_no_previews(|st, _| {
+        let cards = model::project_cards(st);
+        NavCounts {
+            projects: Some(cards.len()),
+            waiting: cards.iter().map(|c| c.summary.waiting).sum(),
+            ..NavCounts::default()
+        }
+    });
 
     let on_choose = move |m: NavMenu| choose(ui, m);
     let theme_ctx = use_context::<ThemeCtx>();
@@ -502,6 +776,7 @@ pub fn Shell() -> Element {
                     {content}
                     BottomBar {
                         active,
+                        counts,
                         on_choose: move |tab: BottomTab| match tab {
                             BottomTab::NavMenu(m) => on_choose(m),
                             BottomTab::More => more_open.set(true),
@@ -515,6 +790,7 @@ pub fn Shell() -> Element {
                     Sidebar {
                         rail: mode == ShellMode::Rail,
                         active,
+                        counts,
                         on_choose,
                         on_theme,
                         on_settings: move |()| settings_open.set(true),
@@ -536,15 +812,20 @@ pub fn Shell() -> Element {
                     padding_role: SpaceRole::Md,
                     space_role: SpaceRole::Sm,
                     for menu in MORE_MENUS {
-                        AppButton {
+                        Row {
                             key: "{menu.label()}",
-                            text: menu.label(),
-                            icon: menu.icon(),
                             fill_max_width: true,
-                            on_click: move |()| {
-                                more_open.set(false);
-                                on_choose(menu);
-                            },
+                            Spacer { width: SP[1] }
+                            NavRow {
+                                menu,
+                                active: menu == active,
+                                badge: NavBadge::None,
+                                on_click: move |()| {
+                                    more_open.set(false);
+                                    on_choose(menu);
+                                },
+                            }
+                            Spacer { width: SP[1] }
                         }
                     }
                 }
@@ -692,22 +973,82 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_layout_per_size_class() {
-        assert_eq!(
-            shell_mode(WindowSizeClass::Compact, false),
-            ShellMode::BottomTabs
-        );
-        assert_eq!(
-            shell_mode(WindowSizeClass::Compact, true),
-            ShellMode::BottomTabs
-        );
-        assert_eq!(shell_mode(WindowSizeClass::Medium, false), ShellMode::Rail);
-        assert_eq!(
-            shell_mode(WindowSizeClass::Expanded, false),
-            ShellMode::Sidebar
-        );
-        // The collapse control turns the sidebar into the rail.
-        assert_eq!(shell_mode(WindowSizeClass::Expanded, true), ShellMode::Rail);
+    fn fr_l10_nav_mode_follows_the_mockup_breakpoints() {
+        // 1440: sidebar. 1280 is still the sidebar, 1279 and 1024 and 768 are the rail,
+        // 561 is the rail, 560 and 390 are the bar.
+        assert_eq!(nav_mode(1440.0, false), ShellMode::Sidebar);
+        assert_eq!(nav_mode(1280.0, false), ShellMode::Sidebar);
+        assert_eq!(nav_mode(1279.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(1024.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(768.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(561.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(560.0, false), ShellMode::BottomTabs);
+        assert_eq!(nav_mode(390.0, false), ShellMode::BottomTabs);
+        assert_eq!(nav_mode(390.0, true), ShellMode::BottomTabs);
+    }
+
+    #[test]
+    fn fr_l10_collapse_turns_the_sidebar_into_the_rail() {
+        assert_eq!(nav_mode(1440.0, true), ShellMode::Rail);
+        assert_eq!(nav_mode(1024.0, true), ShellMode::Rail);
+    }
+
+    #[test]
+    fn fr_l10_every_menu_has_its_own_mockup_icon() {
+        let mut seen = std::collections::BTreeSet::new();
+        for m in NavMenu::ALL {
+            let svg = m.svg();
+            assert!(svg.trim_start().starts_with("<svg"), "{}", m.label());
+            assert!(svg.contains("currentColor"), "{}", m.label());
+            assert!(seen.insert(svg), "{} shares an icon", m.label());
+        }
+        assert!(BottomTab::More.svg().contains("<svg"));
+    }
+
+    #[test]
+    fn tinted_svg_sets_colour_and_size() {
+        let t = tinted_svg(NavMenu::Home.svg(), 18.0, 0xff1c1b19);
+        assert!(t.contains("stroke=\"#1c1b19\""));
+        assert!(t.contains("width=\"18\" height=\"18\""));
+        assert!(!t.contains("currentColor"));
+    }
+
+    #[test]
+    fn fr_l10_badges_come_from_live_counts_only() {
+        let none = NavCounts::default();
+        for m in NavMenu::ALL {
+            assert_eq!(nav_badge(m, &none), NavBadge::None, "{}", m.label());
+        }
+        let c = NavCounts { projects: Some(5), waiting: 3, unread_rooms: 5, routines: Some(6), transfers: 2 };
+        assert_eq!(nav_badge(NavMenu::Projects, &c), NavBadge::Count(5));
+        assert_eq!(nav_badge(NavMenu::Sessions, &c), NavBadge::Alert(3));
+        assert_eq!(nav_badge(NavMenu::Channels, &c), NavBadge::Alert(5));
+        assert_eq!(nav_badge(NavMenu::Routines, &c), NavBadge::Count(6));
+        assert_eq!(nav_badge(NavMenu::Files, &c), NavBadge::Count(2));
+        assert_eq!(nav_badge(NavMenu::Home, &c), NavBadge::None);
+    }
+
+    #[test]
+    fn fr_l28_tab_badges_are_red_alerts_only() {
+        let c = NavCounts { projects: Some(5), waiting: 3, unread_rooms: 5, routines: Some(6), transfers: 2 };
+        assert_eq!(tab_badge(BottomTab::NavMenu(NavMenu::Sessions), &c), Some(3));
+        assert_eq!(tab_badge(BottomTab::NavMenu(NavMenu::Channels), &c), Some(5));
+        assert_eq!(tab_badge(BottomTab::NavMenu(NavMenu::Projects), &c), None);
+        assert_eq!(tab_badge(BottomTab::More, &c), None);
+    }
+
+    #[test]
+    fn badge_text_caps_at_99() {
+        assert_eq!(badge_text(3), "3");
+        assert_eq!(badge_text(99), "99");
+        assert_eq!(badge_text(100), "99+");
+    }
+
+    #[test]
+    fn sidebar_footer_and_brand_text() {
+        assert_eq!(ORG_NAME, "darkpyonix");
+        assert_eq!(avatar_initial(DEMO_USER.0), "B");
+        assert_eq!(avatar_initial(""), "");
     }
 
     #[test]

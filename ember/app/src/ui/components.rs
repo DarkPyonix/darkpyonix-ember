@@ -10,9 +10,83 @@
 //! press feedback stays), no backdrop blur.
 
 use dioxus_compose::prelude::*;
+use dioxus_compose::{FontRef, FontRefs, GenericFamily};
 
 use super::theme::*;
 use super::theme::Palette;
+
+// ---------------------------------------------------------------------------------------------
+// Fonts
+// ---------------------------------------------------------------------------------------------
+
+/// The font stack for prose (`--font`): Inter, then Apple SD Gothic Neo and Noto Sans KR for
+/// Hangul, then the system UI face. The toolkit resolves installed families by name; it has no
+/// way to bundle a font file yet, so Inter applies where it is installed
+/// (`.scratch/issues/custom-font.md`).
+pub fn font_refs(mono: bool) -> FontRefs {
+    if mono {
+        FontRefs::new([
+            FontRef::System("JetBrains Mono".into()),
+            FontRef::System("SF Mono".into()),
+            FontRef::System("Menlo".into()),
+            FontRef::Generic(GenericFamily::Monospace),
+        ])
+    } else {
+        FontRefs::new([
+            FontRef::System("Inter".into()),
+            FontRef::System("Apple SD Gothic Neo".into()),
+            FontRef::System("Noto Sans KR".into()),
+            FontRef::Generic(GenericFamily::SystemUi),
+        ])
+    }
+}
+
+/// The app palette colour standing in for a toolkit colour role, so a screen that still names
+/// a role draws the mockup's tokens in both schemes.
+pub fn role_color(role: ColorRole, p: &Palette) -> Color {
+    match role {
+        ColorRole::Primary => p.blue.strong,
+        ColorRole::OnPrimary => p.ink_text,
+        ColorRole::PrimaryContainer => p.blue.soft,
+        ColorRole::OnPrimaryContainer => p.blue.strong,
+        ColorRole::Secondary => p.green.strong,
+        ColorRole::SecondaryContainer => p.green.soft,
+        ColorRole::OnSecondaryContainer => p.green.strong,
+        ColorRole::Tertiary => p.orange.strong,
+        ColorRole::TertiaryContainer => p.orange.soft,
+        ColorRole::OnTertiaryContainer => p.orange.strong,
+        ColorRole::Error => p.red.strong,
+        ColorRole::OnError => p.ink_text,
+        ColorRole::SurfaceVariant | ColorRole::SurfaceContainer => p.surface_2,
+        ColorRole::OnSurfaceVariant => p.text_2,
+        ColorRole::Outline | ColorRole::OutlineVariant => p.line,
+        ColorRole::Background => p.bg,
+        ColorRole::Surface => p.surface,
+        _ => p.text,
+    }
+}
+
+/// A paint resolved against the palette: roles become tokens, literals pass through.
+pub fn resolve_paint(paint: Paint, p: &Palette) -> Paint {
+    match paint {
+        Paint::Role(role) => Paint::Literal(role_color(role, p)),
+        other => other,
+    }
+}
+
+/// The type step, weight and face a toolkit type role stands for (400/500/600, never bold).
+pub fn type_role_style(role: TypeRole) -> (Fs, Weight, bool) {
+    match role {
+        TypeRole::Headline => (Fs::Xl2, Weight::Semibold, false),
+        TypeRole::Title => (Fs::Xl, Weight::Semibold, false),
+        TypeRole::Subtitle => (Fs::Lg, Weight::Medium, false),
+        TypeRole::BodyStrong => (Fs::Md, Weight::Medium, false),
+        TypeRole::Caption => (Fs::Xs, Weight::Regular, false),
+        TypeRole::Label => (Fs::Sm, Weight::Medium, false),
+        TypeRole::Mono => (Fs::Sm, Weight::Regular, true),
+        _ => (Fs::Md, Weight::Regular, false),
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Text
@@ -38,6 +112,96 @@ pub fn Label(
             letter_spacing: fs.letter_spacing(),
             color,
             max_lines,
+            font: font_refs(false),
+        }
+    }
+}
+
+/// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
+/// and a role colour maps to its token in the current scheme.
+#[component]
+pub fn Txt(
+    #[props(into)] text: String,
+    #[props(default = TypeRole::Body)] type_role: TypeRole,
+    #[props(default)] color: Option<Paint>,
+    #[props(default)] max_lines: Option<u32>,
+    #[props(default)] overflow: Option<TextOverflow>,
+    #[props(default)] weight: Option<f32>,
+    #[props(default)] text_align: Option<TextAlign>,
+) -> Element {
+    let theme = use_ember_theme();
+    let (fs, font_weight, mono) = type_role_style(type_role);
+    let color = match color {
+        Some(c) => resolve_paint(c, theme.palette),
+        None => paint(theme.palette.text),
+    };
+    rsx! {
+        Text {
+            text,
+            font_size: fs.size(),
+            line_height: fs.line_height(),
+            font_weight: font_weight.value(),
+            letter_spacing: fs.letter_spacing(),
+            color,
+            max_lines,
+            overflow,
+            weight,
+            text_align,
+            font: font_refs(mono),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Text field
+// ---------------------------------------------------------------------------------------------
+
+/// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
+/// in the dark scheme. `bare` is the field inside the composer or a row (no fill, no border);
+/// otherwise it is a `surface-2` field on a `line` border with the `corner-md` radius.
+#[component]
+pub fn EmberField(
+    #[props(default)] weight: Option<f32>,
+    #[props(default)] fill_max_width: bool,
+    #[props(into, default)] placeholder: String,
+    #[props(default)] multiline: bool,
+    #[props(default = true)] enabled: bool,
+    #[props(default)] bare: bool,
+    #[props(default)] height: Option<f32>,
+    #[props(default)] corner_radius: Option<f32>,
+    #[props(default)] background: Option<Paint>,
+    #[props(default)] border_width: Option<f32>,
+    #[props(default)] border_color: Option<Paint>,
+    #[props(default)] type_role: Option<TypeRole>,
+    #[props(default)] on_value_change: EventHandler<String>,
+    #[props(default)] on_submit: EventHandler<String>,
+    #[props(default)] on_focus_lost: EventHandler<()>,
+    #[props(default)] on_key_down: EventHandler<KeyEvent>,
+) -> Element {
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let (fill, border_w) = if bare {
+        (Color::argb(0), 0.0)
+    } else {
+        (p.surface_2, 1.0)
+    };
+    rsx! {
+        TextField {
+            weight,
+            fill_max_width,
+            placeholder,
+            multiline,
+            enabled,
+            type_role,
+            height,
+            background: background.unwrap_or_else(|| paint(fill)),
+            border_width: border_width.unwrap_or(border_w),
+            border_color: border_color.unwrap_or_else(|| paint(p.line)),
+            corner_radius: corner_radius.unwrap_or(CORNER_MD),
+            on_value_change: move |v: String| on_value_change.call(v),
+            on_submit: move |v: String| on_submit.call(v),
+            on_focus_lost: move |()| on_focus_lost.call(()),
+            on_key_down: move |k: KeyEvent| on_key_down.call(k),
         }
     }
 }
@@ -303,14 +467,18 @@ pub fn EmberCard(
     #[props(default)] selected: bool,
     #[props(default)] fill_max_width: bool,
     #[props(default)] weight: Option<f32>,
+    #[props(default)] padding: Option<f32>,
+    #[props(default)] border: Option<Color>,
     children: Element,
 ) -> Element {
     let theme = use_ember_theme();
-    let (fill, border) = card_colors(selected, theme.palette);
+    let (fill, line) = card_colors(selected, theme.palette);
+    let border = border.unwrap_or(line);
     rsx! {
         Card {
             fill_max_width,
             weight,
+            padding,
             background: paint(fill),
             border_width: 1.0,
             border_color: paint(border),
@@ -398,6 +566,52 @@ pub fn EmberSheet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_roles_never_use_bold() {
+        for role in [
+            TypeRole::Headline,
+            TypeRole::Title,
+            TypeRole::Subtitle,
+            TypeRole::BodyStrong,
+            TypeRole::Caption,
+            TypeRole::Label,
+            TypeRole::Mono,
+            TypeRole::Body,
+        ] {
+            let (_, w, _) = type_role_style(role);
+            assert!(w.value() <= 600);
+        }
+        assert_eq!(type_role_style(TypeRole::Headline).0, Fs::Xl2);
+        assert_eq!(type_role_style(TypeRole::Caption).0, Fs::Xs);
+        assert!(type_role_style(TypeRole::Mono).2);
+    }
+
+    #[test]
+    fn role_colours_follow_the_scheme() {
+        assert_eq!(role_color(ColorRole::OnSurfaceVariant, &LIGHT), LIGHT.text_2);
+        assert_eq!(role_color(ColorRole::OnSurfaceVariant, &DARK), DARK.text_2);
+        assert_eq!(role_color(ColorRole::Error, &DARK), DARK.red.strong);
+        assert_eq!(role_color(ColorRole::SurfaceContainer, &DARK), DARK.surface_2);
+        assert_ne!(
+            role_color(ColorRole::SurfaceContainer, &LIGHT),
+            role_color(ColorRole::SurfaceContainer, &DARK)
+        );
+    }
+
+    #[test]
+    fn radii_and_heights_are_the_mockups() {
+        assert_eq!((CORNER_LG, CORNER_XL, H_PILL), (14.0, 24.0, 24.0));
+        assert_eq!((CORNER_BUBBLE, CORNER_MD), (18.0, 12.0));
+    }
+
+    #[test]
+    fn font_stack_names_inter_then_korean() {
+        let refs = font_refs(false).refs();
+        assert_eq!(refs[0], FontRef::System("Inter".into()));
+        assert_eq!(refs[1], FontRef::System("Apple SD Gothic Neo".into()));
+        assert!(font_refs(true).refs().contains(&FontRef::Generic(GenericFamily::Monospace)));
+    }
 
     #[test]
     fn pill_is_strong_text_on_soft_fill() {

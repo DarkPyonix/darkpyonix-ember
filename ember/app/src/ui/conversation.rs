@@ -169,6 +169,7 @@ pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element
     });
 
     // ---- composer state ----------------------------------------------------------------------
+    let composer_shadow = crate::ui::theme::use_ember_theme().shadow_sm();
     let mut draft = use_signal(String::new);
     // Picked mentions: (fragment as typed, token to send). Applied on send.
     let mut picks = use_signal(Vec::<(String, String)>::new);

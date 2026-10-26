@@ -6,7 +6,7 @@
 //!
 //! Workarounds for what the pinned dioxus-compose cannot draw yet, from
 //! `.scratch/design-mockup/GAPS-WORKLIST.md` section 3: plain arc corners instead of the
-//! squircle, one `elevation` instead of the two-layer shadow, no press scale (the toolkit's own
+//! squircle, no press scale (the toolkit's own
 //! press feedback stays), no backdrop blur.
 
 use dioxus_compose::prelude::*;
@@ -461,7 +461,7 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
 }
 
 /// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
-/// TODO(GAPS: 스퀘어클, 그림자 2겹): plain arc corners and one elevation for now.
+/// TODO(GAPS: 스퀘어클): plain arc corners for now.
 #[component]
 pub fn EmberCard(
     #[props(default)] selected: bool,
@@ -483,7 +483,7 @@ pub fn EmberCard(
             border_width: 1.0,
             border_color: paint(border),
             corner_radius: CORNER_LG,
-            elevation: ELEVATION_CARD,
+            shadow: theme.shadow_sm(),
             {children}
         }
     }
@@ -551,7 +551,7 @@ pub fn EmberSheet(
             fill_max_width: true,
             background: paint(theme.palette.surface),
             corner_radius: CORNER_XL,
-            elevation: ELEVATION_LARGE,
+            shadow: theme.shadow_lg(),
             on_dismiss: move |()| on_dismiss.call(()),
             Column {
                 fill_max_width: true,

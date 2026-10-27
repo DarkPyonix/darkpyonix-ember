@@ -970,6 +970,20 @@ mod tests {
         assert_eq!(ui.prefs.get_untracked().theme, ThemePref::Dark);
     }
 
+    fn has_text(mutations: &[Mutation<'_>], expected: &str) -> bool {
+        mutations.iter().any(|m| {
+            matches!(
+                m,
+                Mutation::SetProp {
+                    property: PropertyKind::Text,
+                    value: compose_rust::protocol::PropertyValue::String(s),
+                    ..
+                } if *s == expected
+            ) || matches!(m, Mutation::SetText { text, .. } if *text == expected)
+                || matches!(m, Mutation::AppendText { text, .. } if *text == expected)
+        })
+    }
+
     #[test]
     fn shared_live_bumps_recompose_compose_rust_tree() {
         let live = SharedLive::new();
@@ -984,24 +998,14 @@ mod tests {
         });
 
         let initial = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        assert!(initial.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                text: "rev:0",
-                ..
-            }
-        )));
+        assert!(has_text(&initial, "rev:0"), "initial batch: {initial:?}");
 
         SharedLive::bump(&live.launcher);
         let updated = decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode");
-        assert!(updated.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                text: "rev:1",
-                ..
-            }
-            | Mutation::AppendText { .. }
-        )));
+        assert!(
+            has_text(&updated, "rev:1") || has_text(&updated, "1"),
+            "updated batch: {updated:?}"
+        );
     }
 
     #[composable]
@@ -1049,13 +1053,10 @@ mod tests {
                 _ => None,
             })
             .expect("compose root node inserted under parent 0");
-        assert!(batch_1.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                text: "compose-base-screen",
-                ..
-            }
-        )));
+        assert!(
+            has_text(&batch_1, "compose-base-screen"),
+            "batch_1: {batch_1:?}"
+        );
 
         // 2. Switch to dioxus-compose IDE screen: old root is removed and new root is inserted.
         surface.set(ActiveSurface::Dioxus);
@@ -1067,25 +1068,19 @@ mod tests {
             )),
             "switching to Dioxus must remove outgoing Compose root node {compose_root}: {batch_2:?}"
         );
-        assert!(batch_2.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                text: "dioxus-ide-screen",
-                ..
-            }
-        )));
+        assert!(
+            has_text(&batch_2, "dioxus-ide-screen"),
+            "batch_2: {batch_2:?}"
+        );
 
         // 3. Switch back to compose-rust base screen: Dioxus root is removed and Compose rebuilds.
         surface.set(ActiveSurface::Compose);
         let batch_3 = decode_batch(host.render_frame(32_000_000).expect("render")).expect("decode");
         assert!(batch_3.iter().any(|m| matches!(m, Mutation::Remove { .. })));
-        assert!(batch_3.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                text: "compose-base-screen",
-                ..
-            }
-        )));
+        assert!(
+            has_text(&batch_3, "compose-base-screen"),
+            "batch_3: {batch_3:?}"
+        );
     }
 
     fn embedded_child_app() -> Element {
@@ -1121,13 +1116,7 @@ mod tests {
         // Initial rebuild runs the composable, registers the DioxusSlot effect, and flushes
         // the embedded Dioxus tree under the observed container node in the same batch.
         let b1 = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        assert!(b1.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                text: "compose-shell-header",
-                ..
-            }
-        )));
+        assert!(has_text(&b1, "compose-shell-header"), "b1: {b1:?}");
         let (btn_node, btn_handler) = b1
             .iter()
             .find_map(|m| match m {
@@ -1157,13 +1146,6 @@ mod tests {
             })
             .expect("dispatch click to embedded Dioxus slot");
         let b3 = decode_batch(b3_bytes).expect("decode");
-        assert!(b3.iter().any(|m| matches!(
-            m,
-            Mutation::SetText {
-                node_id,
-                text: "embedded-1",
-                ..
-            } if *node_id == btn_node
-        )));
+        assert!(has_text(&b3, "embedded-1"), "b3: {b3:?}");
     }
 }

@@ -644,7 +644,7 @@ fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: EventHandler<BottomT
                     border_width: 1.0,
                     border_color: paint(p.line),
                     corner_radius: TABBAR_RADIUS,
-                    elevation: ELEVATION_LARGE,
+                    shadow: theme.shadow_md(),
                     Row {
                         fill_max_width: true,
                         fill_max_height: true,

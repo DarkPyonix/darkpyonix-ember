@@ -178,6 +178,30 @@ impl EmberTheme {
         EmberTheme::new(pref.resolve(system))
     }
 
+    /// `--shadow`: cards and the composer.
+    pub fn shadow_sm(&self) -> Vec<ShadowLayer> {
+        match self.scheme {
+            Scheme::Light => SHADOW_SM_LIGHT.to_vec(),
+            Scheme::Dark => SHADOW_SM_DARK.to_vec(),
+        }
+    }
+
+    /// The floating tab bar's shadow.
+    pub fn shadow_md(&self) -> Vec<ShadowLayer> {
+        match self.scheme {
+            Scheme::Light => SHADOW_MD_LIGHT.to_vec(),
+            Scheme::Dark => SHADOW_MD_DARK.to_vec(),
+        }
+    }
+
+    /// `--shadow-lg`: popovers, sheets and toasts.
+    pub fn shadow_lg(&self) -> Vec<ShadowLayer> {
+        match self.scheme {
+            Scheme::Light => SHADOW_LG_LIGHT.to_vec(),
+            Scheme::Dark => SHADOW_LG_DARK.to_vec(),
+        }
+    }
+
     /// The press tint: black at 7 % in light, 10 % in dark (DESIGN section 5).
     pub fn press_tint(&self) -> Color {
         match self.scheme {
@@ -335,11 +359,51 @@ pub const PRESS_IN_MS: u32 = 180;
 pub const PRESS_HOLD_MS: u32 = 120;
 pub const PRESS_OUT_MS: u32 = 200;
 
-/// Elevation (dp) standing in for the card shadow, "0 1px 2px / 3 %" plus "0 1px 4px / 3 %".
-/// TODO(GAPS: 그림자 2겹): the toolkit has a single `elevation`; the nearest value is used.
-pub const ELEVATION_CARD: f32 = 1.0;
-/// Popover and sheet shadow, "0 10px 32px / 10 %". TODO(GAPS: 그림자 2겹).
-pub const ELEVATION_LARGE: f32 = 8.0;
+/// The shadow tokens of the mockup, two layers where it has two. Each is a list in CSS order
+/// (the first layer is on top), which is what the toolkit's `shadow` attribute takes.
+///
+/// `sm` is the mockup's `--shadow` (cards, the composer), `lg` is `--shadow-lg` (popovers,
+/// sheets, toasts) and `md` is the floating tab bar's shadow, which the mockup writes inline.
+/// Colour is black or the warm ink at the alpha the mockup gives, rounded to 8 bits.
+pub const SHADOW_SM_LIGHT: [ShadowLayer; 2] = [
+    ShadowLayer::new(0.0, 1.0, 2.0, 0.0, Paint::Literal(Color::argb(0x08_1c1b19))),
+    ShadowLayer::new(0.0, 1.0, 4.0, 0.0, Paint::Literal(Color::argb(0x08_1c1b19))),
+];
+pub const SHADOW_SM_DARK: [ShadowLayer; 2] = [
+    ShadowLayer::new(0.0, 1.0, 2.0, 0.0, Paint::Literal(Color::argb(0x4d_000000))),
+    ShadowLayer::new(0.0, 2.0, 8.0, 0.0, Paint::Literal(Color::argb(0x33_000000))),
+];
+pub const SHADOW_MD_LIGHT: [ShadowLayer; 2] = [
+    ShadowLayer::new(
+        0.0,
+        10.0,
+        30.0,
+        0.0,
+        Paint::Literal(Color::argb(0x24_1c1b19)),
+    ),
+    ShadowLayer::new(0.0, 2.0, 6.0, 0.0, Paint::Literal(Color::argb(0x0f_1c1b19))),
+];
+pub const SHADOW_MD_DARK: [ShadowLayer; 1] = [ShadowLayer::new(
+    0.0,
+    10.0,
+    30.0,
+    0.0,
+    Paint::Literal(Color::argb(0x80_000000)),
+)];
+pub const SHADOW_LG_LIGHT: [ShadowLayer; 1] = [ShadowLayer::new(
+    0.0,
+    10.0,
+    32.0,
+    0.0,
+    Paint::Literal(Color::argb(0x1a_1c1b19)),
+)];
+pub const SHADOW_LG_DARK: [ShadowLayer; 1] = [ShadowLayer::new(
+    0.0,
+    10.0,
+    32.0,
+    0.0,
+    Paint::Literal(Color::argb(0x73_000000)),
+)];
 
 // ---------------------------------------------------------------------------------------------
 // Theme context
@@ -363,6 +427,34 @@ mod tests {
 
     fn hex(c: Color) -> u32 {
         c.to_argb() & 0x00ff_ffff
+    }
+
+    /// The tokens are the mockup's `--shadow` and `--shadow-lg`, light and dark.
+    #[test]
+    fn shadow_tokens_match_the_mockup() {
+        let light = EmberTheme::new(Scheme::Light);
+        let dark = EmberTheme::new(Scheme::Dark);
+        let rows = |layers: Vec<ShadowLayer>| -> Vec<(f32, f32, u32)> {
+            layers
+                .iter()
+                .map(|l| match l.paint {
+                    Paint::Literal(c) => (l.y, l.blur, c.to_argb()),
+                    _ => panic!("shadows are literal colours"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            rows(light.shadow_sm()),
+            [(1.0, 2.0, 0x08_1c1b19), (1.0, 4.0, 0x08_1c1b19)]
+        );
+        assert_eq!(
+            rows(dark.shadow_sm()),
+            [(1.0, 2.0, 0x4d_000000), (2.0, 8.0, 0x33_000000)]
+        );
+        assert_eq!(rows(light.shadow_lg()), [(10.0, 32.0, 0x1a_1c1b19)]);
+        assert_eq!(rows(dark.shadow_lg()), [(10.0, 32.0, 0x73_000000)]);
+        assert_eq!(light.shadow_md().len(), 2);
+        assert_eq!(dark.shadow_md().len(), 1);
     }
 
     #[test]

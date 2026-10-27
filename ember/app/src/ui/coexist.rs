@@ -1101,8 +1101,8 @@ mod tests {
             ))
         });
 
-        // Initial rebuild runs the composable and registers the DioxusSlot effect; the next
-        // frame flushes the embedded Dioxus tree under the observed container node.
+        // Initial rebuild runs the composable, registers the DioxusSlot effect, and flushes
+        // the embedded Dioxus tree under the observed container node in the same batch.
         let b1 = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         assert!(b1.iter().any(|m| matches!(
             m,
@@ -1111,11 +1111,8 @@ mod tests {
                 ..
             }
         )));
-
-        let b2 = decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode");
-        let (btn_node, btn_handler) = b2
+        let (btn_node, btn_handler) = b1
             .iter()
-            .chain(b1.iter())
             .find_map(|m| match m {
                 Mutation::SetProp {
                     node_id,
@@ -1126,7 +1123,7 @@ mod tests {
             })
             .expect("embedded Dioxus button handler registered in EMBED_NODE_BASE range");
 
-        assert!(b2.iter().any(|m| matches!(
+        assert!(b1.iter().any(|m| matches!(
             m,
             Mutation::Create {
                 node_id,

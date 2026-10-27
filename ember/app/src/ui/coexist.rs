@@ -17,7 +17,7 @@ use std::task::{Context, Poll};
 
 use compose_rust::protocol::{decode_batch, HostEvent, Mutation, ProtocolError};
 use compose_rust::runtime::{
-    composable, disposable_effect, mutable_state_of, on_dispose, remember_node_size, MutableState,
+    composable, mutable_state_of, remember, remember_node_size, MutableState,
 };
 use compose_rust::ui as cu;
 use compose_rust::{Batch, Recomposer, Runtime};
@@ -407,6 +407,26 @@ fn unregister_embedded_dioxus(token: u32) {
     });
 }
 
+/// RAII handle kept in a composable's `remember` slot so its embedded `VirtualDom` is dropped
+/// as soon as the composable slot or its `Recomposer` is dropped (never left in TLS until
+/// thread exit, when `dioxus_core`'s runtime TLS may already be destroyed).
+struct EmbeddedHandle {
+    token: u32,
+}
+
+impl EmbeddedHandle {
+    fn new(token: u32, app: fn() -> Element) -> Rc<Self> {
+        register_embedded_dioxus(token, app);
+        Rc::new(Self { token })
+    }
+}
+
+impl Drop for EmbeddedHandle {
+    fn drop(&mut self) {
+        unregister_embedded_dioxus(self.token);
+    }
+}
+
 /// Mounts a Dioxus `rsx!` component inside a `compose-rust` composable container (#220).
 ///
 /// Used while `shell.rs` is in `compose-rust` (Phase 2) and individual child screens are still
@@ -417,10 +437,7 @@ pub fn DioxusSlot(app: fn() -> Element, modifier: cu::Modifier) {
     let size = remember_node_size();
     let token = size.token();
     let token_u32 = token as u32;
-    disposable_effect(token_u32, move || {
-        register_embedded_dioxus(token_u32, app);
-        on_dispose(move || unregister_embedded_dioxus(token_u32))
-    });
+    let _handle = remember(move || EmbeddedHandle::new(token_u32, app));
     cu::Box()
         .modifier(modifier.observe_size(token))
         .content(|| {});

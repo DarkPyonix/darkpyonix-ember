@@ -78,7 +78,7 @@ boundary, agreed with the darkpyonix leader]
 
 | ID | Constraint | Source |
 | -- | ---------- | ------ |
-| **E1** | The client's launcher and conversation screens never contain a webview, under any circumstance. They are built on `dioxus-compose`. The IDE window is the one place a webview may exist. | [user, 2026-10-03] |
+| **E1** | The client's launcher and conversation screens never contain a webview, under any circumstance. They are built on `compose-rust` directly; only the IDE screens use `dioxus-compose` (D9). The IDE window is the one place a webview may exist. | [user, 2026-10-03; toolkit split: user, 2026-10-26] |
 | **E2** | A wrapped agent CLI (Claude Code, Codex, Antigravity, OMP (oh-my-pi), …) keeps its native behaviour. Ember adds around it (A2A, computer switching, browser) and never patches or reimplements the agent itself. | [user]: "본연의 동작을 보존해주면서 에이전트간 소통 기능만 추가" |
 | **E3** | All conversations, all agent processes and all account credentials live on the main server. A computer is a place where tools run; it is never the system of record for a conversation. | [user] |
 | **E4** | VS Code is wrapped, never modified: Ember does not patch VS Code's source and never reimplements the Extension Host. Which extension marketplace applies follows the chosen VS Code runtime (Open VSX for OSE, the Microsoft Marketplace for the official build). | [provisional, narrowed from the 09-22 "official marketplace required"; see D10] |
@@ -197,11 +197,33 @@ so that, as with Paseo, users do not have to think about connectivity.
 **Consequence.** This also settles the HTTPS problem `ember/proxy/` has had for phones and tablets
 (`ember/proxy/docs/BACKGROUND.md` §7-1), whichever transport is chosen [provisional].
 
-### D9: The client is native (dioxus-compose); the IDE window is wrapped VS Code Web
+### D9: The client is native (compose-rust, the IDE on dioxus-compose); the IDE window is wrapped VS Code Web
 
-**Decision.** [user, 2026-10-03] The launcher and the conversation screens are built on
-`dioxus-compose` with no webview (E1). The IDE window is a webview running VS Code Web through
-Ember's wrapping layer, whose current implementation is `ember/proxy/` (merged in #1).
+**Decision.** [user, 2026-10-03] The client has no webview (E1). The IDE window is a webview
+running VS Code Web through Ember's wrapping layer, whose current implementation is
+`ember/proxy/` (merged in #1).
+
+[user, 2026-10-26: "dioxus-compose를 쓰고 있는데 왜 위젯을 쓰고 있어? 그럴거면 compose-rust로 기본
+UI 구현하고 IDE 부분만 dioxus-compose로 해야지"] The base UI (launcher, shell, 홈, 프로젝트, 세션,
+conversation, 채널, 루틴, 버전 관리, 에이전트, 파일, the computer monitor, characters, settings and
+search) is built on `compose-rust` directly. Only the IDE part is built on `dioxus-compose`: the
+Ember 에디터 screen and the workbench chrome drawn with Code-OSS CSS (D9a, D23). Both run in one
+app, with no webview.
+
+**Previous wording.** Until 2026-10-26 this decision read "The launcher and the conversation
+screens are built on `dioxus-compose`", and the client was written that way: about 21k lines of
+`ember/app/src/ui/` use dioxus-compose's typed Compose widgets (`Column`, `Row`, `Button`,
+`Card`, ...) with Dioxus hooks and signals, and almost no HTML or CSS.
+
+**Why it changed.** dioxus-compose exists for the editor core (D9a): it lays out HTML and CSS so
+that the Code-OSS workbench can be drawn with Code-OSS's own CSS. A screen that only places
+Compose widgets does not need that layer; it adds a second runtime (a Dioxus `VirtualDom`) and a
+second copy of every widget change (a feature reaches the base UI only after compose-rust and then
+dioxus-compose ship it). The owner's point is that a widget screen should be written against the
+toolkit that owns the widgets.
+
+**Status.** Not migrated. The plan (API mapping, gaps, how the two coexist in one window, order)
+is #220; until it lands the base UI stays on dioxus-compose's widget path.
 
 **Tauri.** [user, 2026-10-03] The Tauri scaffold has been deleted ("Tauri 스캐폴드가 왜 필요해?
 지워."). The Tauri parts of `docs/design/INTEGRATION.md` are marked obsolete; its VS Code runtime
@@ -480,7 +502,7 @@ Rejected: messages as the only channel between sessions.
 
 **How it relates to earlier decisions.**
 
-- D9: the tabs are native `dioxus-compose` screens, with no webview (`NFR-L2`).
+- D9: the tabs are native `compose-rust` screens (dioxus-compose until #220 lands), with no webview (`NFR-L2`).
 - D7: Home shows usage already recorded for accounts (`FR-U3`, `FR-U4`); it adds a view, not a new meter.
 - D5: a channel mention reaches an agent through the same A2A delivery as a composer mention (`FR-T6`, `FR-T3`). The agents' requests and reports in the feed reuse the idle and completion reports (`FR-T8`). The new rule is the mention gate: no mention, no delivery to agents.
 - Teams (`FR-T7`, D18): a channel's agent subset is a selection of sessions; it does not create a team, and the team messaging rule still applies to team members.

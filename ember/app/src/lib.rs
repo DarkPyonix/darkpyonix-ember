@@ -117,8 +117,8 @@ fn launch_builder() -> LaunchBuilder {
     LaunchBuilder::new()
         // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
         .with_theme(
-            Theme::adaptive(DesignSystem::Material3)
-                .with_color_scheme(services().initial_prefs.theme.color_scheme()),
+            // Inter, then Pretendard, then system fonts for every role but Mono.
+            ui::fonts::app_theme(services().initial_prefs.theme.color_scheme()),
         )
         .with_window(Window::new().with_title("Ember"))
 }

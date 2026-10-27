@@ -87,6 +87,7 @@ pub fn launch() {
         .prefs_path()
         .map(|p| prefs::load(&p))
         .unwrap_or_default();
+    let shared_ui = ui::coexist::SharedUi::new(initial_prefs.clone());
     let server = ServerApi::new(&config.server_url);
     install(Services {
         config,
@@ -96,6 +97,7 @@ pub fn launch() {
         demo,
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
+        ui: shared_ui,
         live: OnceLock::new(),
     });
 

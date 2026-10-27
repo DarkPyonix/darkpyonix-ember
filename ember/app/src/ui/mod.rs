@@ -6,6 +6,7 @@
 //! shared components in [`components`].
 
 pub mod characters;
+pub mod coexist;
 pub mod compat;
 pub mod agents;
 pub mod channels;
@@ -83,15 +84,23 @@ impl Ui {
                 .read(|s| s.session(id).map(|v| v.record.project.clone()));
             if let Some(p) = project {
                 let mut sel = self.selected_project;
-                sel.set(Some(p));
+                sel.set(Some(p.clone()));
+                services().ui.selected_project.set(Some(p));
             }
         }
         // Each route belongs to a menu, so the shell marks the right item however it was reached.
         let mut menu = self.menu;
         match &to {
-            Route::Projects | Route::Search => menu.set(NavMenu::Projects),
-            Route::Conversation(_) => menu.set(NavMenu::Sessions),
+            Route::Projects | Route::Search => {
+                menu.set(NavMenu::Projects);
+                services().ui.menu.set(NavMenu::Projects);
+            }
+            Route::Conversation(_) => {
+                menu.set(NavMenu::Sessions);
+                services().ui.menu.set(NavMenu::Sessions);
+            }
         }
+        services().ui.route.set(to.clone());
         route.set(to);
     }
 
@@ -107,23 +116,29 @@ impl Ui {
             f(&mut w);
             w.clone()
         };
+        services().ui.prefs.set(snapshot.clone());
         save_prefs(snapshot);
     }
 
     /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
     pub fn open_editor(&self, project: String, folder: String) {
+        let target = Some(editor::EditorTarget { project, folder });
+        services().ui.editor.set(target.clone());
         let mut e = self.editor;
-        e.set(Some(editor::EditorTarget { project, folder }));
+        e.set(target);
     }
 
     pub fn close_editor(&self) {
+        services().ui.editor.set(None);
         let mut e = self.editor;
         e.set(None);
     }
 
     pub fn open_new_session(&self, project: Option<String>) {
+        let val = Some(project.unwrap_or_default());
+        services().ui.new_session.set(val.clone());
         let mut d = self.new_session;
-        d.set(Some(project.unwrap_or_default()));
+        d.set(val);
     }
 
     /// Read the live data a session row needs (subscribing the caller to it, previews

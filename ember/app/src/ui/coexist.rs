@@ -456,7 +456,7 @@ fn flush_embedded_dioxus(recomposer: &mut Recomposer) {
             let Some(&host_node) = token_to_node.get(&token) else {
                 continue;
             };
-            std::mem::swap(island.renderer.batch_mut(), batch);
+            island.renderer.begin_frame();
             if !island.built {
                 island.dom.rebuild(&mut island.renderer);
                 island.built = true;
@@ -465,23 +465,60 @@ fn flush_embedded_dioxus(recomposer: &mut Recomposer) {
                 island.dom.render_immediate(&mut island.renderer);
                 island.dirty = false;
             }
-            std::mem::swap(island.renderer.batch_mut(), batch);
-            let current_root = island.renderer.root_node();
-            if island.attached_to != Some(host_node) || island.root != current_root {
-                if let Some(old_root) = island.root
-                    && Some(old_root) != current_root
-                {
-                    batch.write(Mutation::Remove { node_id: old_root });
+            let mut current_root = island.root;
+            if let Ok(bytes) = island.renderer.finish_frame()
+                && let Ok(mutations) = decode_batch(bytes)
+            {
+                for m in mutations {
+                    match &m {
+                        Mutation::Insert {
+                            parent_id: 0,
+                            node_id,
+                            index,
+                        } => {
+                            if Some(*node_id) != island.root
+                                && let Some(old_root) = island.root
+                            {
+                                batch.write(Mutation::Remove { node_id: old_root });
+                            }
+                            current_root = Some(*node_id);
+                            island.attached_to = Some(host_node);
+                            batch.write(Mutation::Insert {
+                                parent_id: host_node,
+                                node_id: *node_id,
+                                index: *index,
+                            });
+                        }
+                        Mutation::Move {
+                            parent_id: 0,
+                            node_id,
+                            index,
+                        } => {
+                            batch.write(Mutation::Move {
+                                parent_id: host_node,
+                                node_id: *node_id,
+                                index: *index,
+                            });
+                        }
+                        Mutation::Remove { node_id } if Some(*node_id) == current_root => {
+                            current_root = None;
+                            island.attached_to = None;
+                            batch.write(m);
+                        }
+                        _ => batch.write(m),
+                    }
                 }
-                if let Some(root) = current_root {
-                    batch.write(Mutation::Insert {
-                        parent_id: host_node,
-                        node_id: root,
-                        index: 0,
-                    });
-                    island.root = Some(root);
-                    island.attached_to = Some(host_node);
-                }
+            }
+            island.root = current_root;
+            if island.attached_to != Some(host_node)
+                && let Some(root) = island.root
+            {
+                batch.write(Mutation::Insert {
+                    parent_id: host_node,
+                    node_id: root,
+                    index: 0,
+                });
+                island.attached_to = Some(host_node);
             }
         }
     });
@@ -963,8 +1000,8 @@ mod tests {
             Column {
                 Text { text: "dioxus-ide-screen" }
                 Button {
-                    label: "dioxus-btn",
-                    onclick: move |_| {},
+                    text: "dioxus-btn",
+                    on_click: move |_| {},
                 }
             }
         }
@@ -1038,8 +1075,8 @@ mod tests {
         let mut clicks = use_signal(|| 0);
         rsx! {
             Button {
-                label: "embedded-{clicks}",
-                onclick: move |_| clicks += 1,
+                text: "embedded-{clicks}",
+                on_click: move |_| clicks += 1,
             }
         }
     }
@@ -1108,10 +1145,10 @@ mod tests {
         let b3 = decode_batch(b3_bytes).expect("decode");
         assert!(b3.iter().any(|m| matches!(
             m,
-            Mutation::SetProp {
+            Mutation::SetText {
                 node_id,
-                property: PropertyKind::Label,
-                value: compose_rust::protocol::PropertyValue::String("embedded-1"),
+                text: "embedded-1",
+                ..
             } if *node_id == btn_node
         )));
     }

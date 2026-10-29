@@ -383,9 +383,17 @@ impl Registry {
 fn row_to_computer(r: &rusqlite::Row<'_>) -> rusqlite::Result<Computer> {
     let peer_json: Option<String> = r.get(5)?;
     let peer = match peer_json {
-        Some(j) => Some(serde_json::from_str::<PeerAddr>(&j).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
-        })?),
+        // Every stored identity is re-validated (FR-N6): a non-canonical or small-order key
+        // written before that rule is refused and logged, and the computer loses its peer
+        // address so it cannot be dialed or matched against a revocation by an alias.
+        Some(j) => match serde_json::from_str::<PeerAddr>(&j) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let id: String = r.get(0)?;
+                tracing::warn!(computer = %id, "refusing stored peer address: {e}");
+                None
+            }
+        },
         None => None,
     };
     Ok(Computer {
@@ -1340,6 +1348,31 @@ mod tests {
             roots: vec!["/home/pi".into()],
             toolchains,
         }
+    }
+
+    #[test]
+    fn fr_n6_stored_peer_json_is_revalidated_on_load() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let r = Registry::new(store.clone());
+        let good = ember_transport::SecretKey::generate().peer_id();
+        let put = |id: &str, name: &str, peer: &str| {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO computers (id, name, url, token, created_at, peer_json) VALUES (?1, ?2, '', 't', 0, ?3)",
+                    params![id, name, peer],
+                )
+                .unwrap();
+        };
+        put("a", "good", &format!(r#"{{"peer":"{}"}}"#, good.to_string().to_uppercase()));
+        put("b", "identity", r#"{"peer":"0100000000000000000000000000000000000000000000000000000000000000"}"#);
+        put("c", "negzero", r#"{"peer":"0100000000000000000000000000000000000000000000000000000000000080"}"#);
+        // A valid row loads unchanged (re-canonicalized to lowercase); invalid ones lose the
+        // identity instead of being trusted, and the rest of the list still loads.
+        assert_eq!(r.get("a").unwrap().unwrap().peer.unwrap().peer, good);
+        assert!(r.get("b").unwrap().unwrap().peer.is_none());
+        assert!(r.get("c").unwrap().unwrap().peer.is_none());
+        assert_eq!(r.list().unwrap().len(), 3);
     }
 
     #[test]

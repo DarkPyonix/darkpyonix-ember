@@ -9,6 +9,8 @@ PR #75). Contract: `darkpyonix-core` `docs/api/hub.openapi.yaml` and SPEC FR-H1,
 NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember-gaps`, base
 `feat/m4-hub-workers`). Worker source `ember/hub/worker/src/`.
 
+> Update 2026-10-30 (`INTENT.md` D36): the relay rows below describe the iroh backend. With letify-link the main server is the relay and the hub keeps the directory and sign-in only; `relay_urls` then goes unused.
+
 ## What it does
 
 | Need (SPEC) | How |

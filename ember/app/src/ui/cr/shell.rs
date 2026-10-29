@@ -384,11 +384,18 @@ pub fn Placeholder(menu: NavMenu) {
 // Root
 // ---------------------------------------------------------------------------------------------
 
+/// The layout the window's width asks for. `current_window_size` is read through the
+/// composition's own state, so the shell recomposes when the renderer reports a new size
+/// class; `compose_rust::window_size()` is a plain read that never wakes anything, and reads
+/// zero (so: bottom tabs) until the first report.
+pub fn current_mode(collapsed: bool) -> ShellMode {
+    nav_mode(compose_rust::runtime::current_window_size().width_dp, collapsed)
+}
+
 /// The root layout: navigation around the content area.
 #[composable]
 pub fn shell() {
     let ui = shared_ui().clone();
-    let window = compose_rust::window_size();
     let theme = ember_theme();
     let collapsed = remember(|| mutable_state_of(false));
     let more_open = remember(|| mutable_state_of(false));
@@ -397,7 +404,7 @@ pub fn shell() {
     let route = ui.route.get();
     let active = active_menu(&route, ui.menu.get());
     let screen = screen_for(&route, active);
-    let mode = nav_mode(window.width_dp, collapsed.get());
+    let mode = current_mode(collapsed.get());
     let counts = ui.with_rows_no_previews(|st, _| {
         let cards = model::project_cards(st);
         NavCounts {
@@ -568,5 +575,46 @@ mod tests {
         assert!(std::ptr::eq(a, b));
         let c = icon_bytes(NavMenu::Home.svg(), 18.0, 0xff445566);
         assert!(!std::ptr::eq(a, c));
+    }
+
+    #[composable]
+    fn mode_probe() {
+        Label(&format!("{:?}", current_mode(false)), Fs::Md, Weight::Regular, None, None);
+    }
+
+    fn has_text(batch: &[compose_rust::protocol::Mutation<'_>], want: &str) -> bool {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(t), .. } if *t == want)
+        })
+    }
+
+    #[test]
+    fn fr_l28_the_shell_mode_follows_the_window_size_events() {
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass};
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(mode_probe)));
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        // Nothing reported yet: the phone layout.
+        assert!(has_text(&first, "BottomTabs"));
+        let mut report = |width: f32, class: WindowSizeClass| {
+            let event = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: width,
+                    height_dp: 900.0,
+                    class,
+                    height_class: WindowHeightClass::Medium,
+                },
+            };
+            let (bytes, _) = host.dispatch(event).expect("dispatch");
+            decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")).collect::<String>()
+        };
+        assert!(report(1440.0, WindowSizeClass::Expanded).contains("Sidebar"));
+        assert!(report(1024.0, WindowSizeClass::Medium).contains("Rail"));
+        assert!(report(390.0, WindowSizeClass::Compact).contains("BottomTabs"));
+        compose_rust::window::reset_window_size();
     }
 }

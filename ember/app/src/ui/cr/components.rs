@@ -617,7 +617,7 @@ pub fn EmberSheet(
             content();
         });
     };
-    if compose_rust::window_size().is_compact() {
+    if compose_rust::runtime::current_window_size().is_compact() {
         cu::Sheet(open)
             .modifier(modifier.fill_max_width())
             .on_dismiss(on_dismiss.clone())

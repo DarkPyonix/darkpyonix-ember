@@ -5,3 +5,4 @@
 pub mod theme;
 pub mod components;
 pub mod compat;
+pub mod gallery;

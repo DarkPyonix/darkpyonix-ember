@@ -101,7 +101,12 @@ pub fn launch() {
         live: OnceLock::new(),
     });
 
-    launch_builder().launch(ui::app);
+    if let Some(pref) = ui::cr::gallery::requested() {
+        // Phase 1 review window (#220): the compose-rust components, no app.
+        ui::cr::gallery::launch(pref);
+    } else {
+        launch_builder().launch(ui::app);
+    }
 
     // The window is closed: write the cache once more and stop the background tasks.
     let s = services();

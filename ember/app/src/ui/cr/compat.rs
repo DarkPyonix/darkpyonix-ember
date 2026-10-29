@@ -5,6 +5,10 @@
 //! looks do not match the mockup tokens yet, so these stay Ember widgets built from the same
 //! primitives as the Dioxus ones. Each says what would replace it.
 
+#![allow(non_snake_case)]
+
+#![allow(non_snake_case)]
+
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, Color, ColorRole, Paint, ShapeRole, SpaceRole, TextOverflow, TypeRole};

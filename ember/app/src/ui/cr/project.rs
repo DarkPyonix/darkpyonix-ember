@@ -442,7 +442,7 @@ fn TeamDonut(members: &[Member], size: f32) {
 
 /// `.pbox`: the header (ring, name and repository, actions, stats) and, below a rule, the
 /// full-width `surface-2` team area.
-/// TODO(compose-rust): per-corner radii and clipping; the team area is a rounded box over the
+/// TODO(compose-rust#392): per-corner radii and clipping; the team area is a rounded box over the
 /// card's bottom corners, so its top corners are rounded too.
 fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
     let p = ember_theme().palette;
@@ -1146,6 +1146,15 @@ mod tests {
         let g = grouped(&ms);
         assert_eq!(g[0].0, LauncherStatus::WaitingForApproval);
         assert_eq!(g[1].1.len(), 2);
+    }
+
+    #[test]
+    fn fr_l1_stats_wrap_greedily_into_lines() {
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 200.0), vec![vec![0, 1, 2]]);
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 150.0), vec![vec![0, 1], vec![2]]);
+        assert_eq!(wrap_lines(&[300.0, 20.0], 14.0, 100.0), vec![vec![0], vec![1]]);
+        assert!(wrap_lines(&[], 14.0, 100.0).is_empty());
+        assert!(stat_width(12, "승인 대기") > stat_width(1, "실행"));
     }
 
     #[test]

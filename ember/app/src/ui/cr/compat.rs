@@ -108,6 +108,23 @@ pub fn StatusIndicator(status: LauncherStatus) {
     });
 }
 
+/// The status of a session row: an 8 px dot and a pill, for every status alike
+/// (`.list-row`: `dot` + `.pill`).
+pub fn RowStatus(status: LauncherStatus) {
+    let tone = match status {
+        LauncherStatus::Running | LauncherStatus::FinishedUnread => Tone::Accent,
+        LauncherStatus::WaitingForApproval => Tone::Warning,
+        LauncherStatus::Failed => Tone::Error,
+        LauncherStatus::Finished => Tone::Success,
+        LauncherStatus::Idle | LauncherStatus::Unknown => Tone::Neutral,
+    };
+    cu::Row().alignment(Alignment::CenterStart).content(|| {
+        Dot(tone);
+        cu::Spacer().modifier(Modifier::new().width(6.0));
+        Badge(super::ko::status_label(status), tone);
+    });
+}
+
 /// Conversation text.
 ///
 /// TODO(markdown): render with a markdown component (and its stream form for streaming

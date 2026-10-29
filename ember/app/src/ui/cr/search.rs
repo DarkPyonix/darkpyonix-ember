@@ -19,7 +19,8 @@ use compose_rust::{ColorRole, Paint, SpaceRole, TextOverflow, TypeRole};
 
 use ember_client::wire::SearchHit;
 
-use super::components::{EmberField, FieldOptions, Txt};
+use super::components::{EmberField, FieldOptions, Label, Txt};
+use super::theme::*;
 use super::launcher::{ConnectionBanner, SessionRowView};
 use crate::model::{self, SearchResult};
 use crate::services::{run_shared, services};
@@ -154,8 +155,7 @@ pub fn SearchScreen() {
                 );
             }
             let note = search_note(&q, count, searching);
-            let role = if count > 0 { TypeRole::Caption } else { TypeRole::Body };
-            Txt(&note, role, muted(), None, None, None, None);
+            Label(&note, Fs::Sm, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
             cu::LazyColumn()
                 .modifier(Modifier::new().fill_max_width().weight(1.0))
                 .content(|scope| {

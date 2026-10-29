@@ -153,9 +153,45 @@ pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + '
     );
 }
 
-/// A closed select: a 40 px field showing the chosen option and an arrow, opening a popup
-/// list under it. The toolkit `Dropdown` is a wheel on Apple design systems and a flat list of
-/// every option in the tree, so this is built from a `Menu`.
+/// A small modal list of options: opaque `--surface`, 1 px `--line`, the `corner-md` radius.
+/// The toolkit `Menu` hangs its popup from the anchor's bottom-start corner and grows upward
+/// over the anchor, with no way to place it below, so option lists are a modal instead.
+/// TODO(compose-rust#383): an anchored popup placed below or beside its anchor.
+pub fn OptionSheet(
+    open: bool,
+    options: &[String],
+    chosen: Option<usize>,
+    width: f32,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    let p = ember_theme().palette;
+    cu::Dialog(open)
+        .modifier(
+            Modifier::new()
+                .width(width + 2.0 * SP[0])
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_MD)
+                .padding(SP[0]),
+        )
+        .on_dismiss(on_dismiss.clone())
+        .content(|| {
+            cu::Column().content(|| {
+                for (i, label) in options.iter().enumerate() {
+                    let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
+                    MenuRow(label, width, chosen == Some(i), move || {
+                        dismiss();
+                        choose(i);
+                    });
+                }
+            });
+        });
+}
+
+/// A closed select: a 40 px field showing the chosen option and an arrow, opening an
+/// [`OptionSheet`]. The toolkit `Dropdown` is a wheel on Apple design systems and a flat list
+/// of every option in the tree.
 /// TODO(compose-rust#383): a `Dropdown` presentation that does not depend on the design system.
 pub fn Select(
     shown: &str,
@@ -167,40 +203,28 @@ pub fn Select(
     use compose_rust::runtime::{mutable_state_of, remember};
     let p = ember_theme().palette;
     let open = remember(|| mutable_state_of(false));
+    let toggle = open.clone();
+    Clickable(
+        Modifier::new()
+            .fill_max_width()
+            .height(H_BTN)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        move || toggle.set(!toggle.get_untracked()),
+        || {
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                Label(shown, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                super::shell::NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+        },
+    );
     let dismiss = open.clone();
-    cu::Menu(open.get())
-        .on_dismiss(move || dismiss.set(false))
-        .anchor(|| {
-            let toggle = open.clone();
-            Clickable(
-                Modifier::new()
-                    .fill_max_width()
-                    .height(H_BTN)
-                    .background(paint(p.surface))
-                    .border(1.0, paint(p.line))
-                    .corner_radius(CORNER_SM),
-                Alignment::CenterStart,
-                move || toggle.set(!toggle.get_untracked()),
-                || {
-                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                        Label(shown, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        super::shell::NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
-                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                    });
-                },
-            );
-        })
-        .content(|| {
-            for (i, label) in options.iter().enumerate() {
-                let (open, mut choose) = (open.clone(), on_choose.clone());
-                MenuRow(label, popup_width, i == chosen, move || {
-                    open.set(false);
-                    choose(i);
-                });
-            }
-        });
+    OptionSheet(open.get(), options, Some(chosen), popup_width, move || dismiss.set(false), on_choose);
 }
 
 /// The footer every sheet and dialog shares: a line, then actions right-aligned (`.snew-foot`).
@@ -210,11 +234,11 @@ pub fn SheetFooter(content: impl FnOnce()) {
     cu::Row()
         .space_role(compose_rust::SpaceRole::Sm)
         .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(60.0))
+        .modifier(Modifier::new().fill_max_width().height(64.0))
         .content(|| {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             content();
-            cu::Spacer().modifier(Modifier::new().width(SP[3]));
+            cu::Spacer().modifier(Modifier::new().width(SP[4]));
         });
 }
 
@@ -314,14 +338,18 @@ pub fn EmberField(o: FieldOptions) {
     let theme = ember_theme();
     let p = theme.palette;
     let (fill, border_w) = if o.bare { (Color::argb(0), 0.0) } else { (p.surface, 1.0) };
-    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
-        .fill_max_width_if(o.fill_max_width)
-        .background(o.background.unwrap_or_else(|| paint(fill)))
-        .border(
-            o.border_width.unwrap_or(border_w),
-            o.border_color.unwrap_or_else(|| paint(p.line)),
-        )
-        .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
+    // The renderer paints the design system's own field frame over these, so a frame drawn here
+    // only shows at the corners as a second box. The height is honored; the rest is left to the
+    // toolkit until #376, and only a caller that asks for a frame gets one.
+    let asked = o.background.is_some() || o.border_width.is_some() || o.border_color.is_some() || o.corner_radius.is_some();
+    let mut modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
+        .fill_max_width_if(o.fill_max_width);
+    if asked {
+        modifier = modifier
+            .background(o.background.unwrap_or_else(|| paint(fill)))
+            .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
+            .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
+    }
     // TODO(compose-rust#376): the renderer paints the design system's field frame over these
     // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
     // appear once the node's own are honored. 14 px text needs #374.
@@ -657,6 +685,22 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
 // Sheet header
 // ---------------------------------------------------------------------------------------------
 
+/// The 32 px round close button of a sheet header, with the mockup's line icon.
+/// TODO(compose-rust#372): a pointer-up subscription; Escape and the scrim also dismiss.
+pub fn CloseButton(on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new()
+            .size(H_CTL, H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || super::shell::NavIcon(super::shell::ICON_CLOSE_SVG, p.text_2.to_argb(), 16.0),
+    );
+}
+
 /// The header every sheet shares: 60 px high, 20 px side padding, the title in `fs-xl` 600 on
 /// the left, actions right-aligned, a 32 px close button at the far right.
 pub fn SheetHeader(
@@ -674,7 +718,7 @@ pub fn SheetHeader(
             if let Some(actions) = actions {
                 actions();
             }
-            IconButton(IconRole::Close, true, on_close);
+            CloseButton(on_close);
             cu::Spacer().modifier(Modifier::new().width(SP[4]));
         });
 }
@@ -884,7 +928,7 @@ mod tests {
             EmberField(FieldOptions { ..Default::default() });
         });
         assert!(field.iter().any(|m| m == "Height(40.0)"), "{field:?}");
-        assert!(field.iter().any(|m| m.starts_with("Shape { top_start: 8.0")), "{field:?}");
+        assert!(!field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
     }
 
     #[test]

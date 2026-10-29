@@ -36,6 +36,8 @@ pub use crate::ui::shell::{
 use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
+pub const ICON_CLOSE_SVG: &str = include_str!("../../../assets/nav/close.svg");
+pub const ICON_INFO_SVG: &str = include_str!("../../../assets/nav/info.svg");
 pub const ICON_CHEVRON_DOWN_SVG: &str = include_str!("../../../assets/nav/chevron-down.svg");
 
 use crate::model;
@@ -554,7 +556,7 @@ pub fn shell() {
                         cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
                     });
             }
-            if matches!(screen, Screen::Launcher | Screen::Search) {
+            if matches!(screen, Screen::Launcher) {
                 cu::Row()
                     .space_role(SpaceRole::Sm)
                     .alignment(Alignment::CenterEnd)

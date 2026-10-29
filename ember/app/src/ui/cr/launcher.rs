@@ -15,8 +15,8 @@ use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 
 use ember_client::wire::SessionPatch;
 
-use super::compat::{Badge, Banner, StatusIndicator};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, Label, MenuRow, SheetFooter};
+use super::compat::{Badge, Banner, RowStatus};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, Label, OptionSheet, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, SessionRow, Tone};
@@ -24,16 +24,36 @@ use crate::services::{run_shared, services};
 use crate::ui::coexist::shared_ui;
 
 /// Width of the row menu popup.
-const MENU_WIDTH: f32 = 168.0;
+const MENU_WIDTH: f32 = 200.0;
 
-/// The push connection's state, when it is not simply "connected" (PR-1).
+/// The push connection's state, when it is not simply "connected" (PR-1): an info icon, the
+/// message, and a retry button.
 pub fn ConnectionBanner() {
     let ui = shared_ui();
     let _ = ui.live.launcher.get();
     let banner = services().client.read(|s| super::ko::connection_banner(s.connection()));
-    if let Some((text, tone)) = banner {
-        Banner(&text, tone);
-    }
+    let Some((text, tone)) = banner else { return };
+    let (fill, ink) = super::compat::tone_colors(tone, ember_theme().palette);
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .height(48.0)
+                .background(paint(fill))
+                .corner_radius(CORNER_MD),
+        )
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[3]));
+            super::shell::NavIcon(super::shell::ICON_INFO_SVG, ink.to_argb(), 18.0);
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            Label(&text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
+            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            AppButton("다시 시도", None, ButtonKind::Default, true, true, false, || {
+                services().client.reconnect_push();
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+        });
 }
 
 /// The patch the Pin / Unpin item sends (FR-L9).
@@ -81,9 +101,9 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
     let preview = row.preview.clone().unwrap_or_default();
     let p = theme.palette;
 
-    // `.list-row`: a status and the title on one line with the time and the menu at the right,
-    // the preview under it, then the agent line, all muted below the title.
-    EmberCard(false, true, None, Some(SP[3]), None, || {
+    // `.list-row`: status dot and pill, the title, the preview and the agent line muted below;
+    // the time and the menu button sit on the first line at the right.
+    EmberCard(false, true, None, None, None, || {
         cu::Row().alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
             let (u, id) = (ui.clone(), row.id.clone());
             Clickable(
@@ -93,7 +113,7 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
                 || {
                     cu::Column().spacing(SP[0]).content(|| {
                         cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).content(|| {
-                            StatusIndicator(row.status);
+                            RowStatus(row.status);
                             if row.pinned {
                                 Badge("고정됨", Tone::Neutral);
                             }
@@ -107,43 +127,38 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
                 },
             );
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
-            Label(&when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-            let dismiss = menu_open.clone();
-            cu::Menu(menu_open.get())
-                .on_dismiss(move || dismiss.set(false))
-                .anchor(|| {
-                    let open = menu_open.clone();
-                    cu::Button("")
-                        .icon(compose_rust::IconRole::More)
-                        .variant(ButtonVariant::Text)
-                        .color(paint(p.text_2))
-                        .on_click(move || open.set(true));
-                })
-                .content(|| {
-                    let (open, id) = (menu_open.clone(), row.id.clone());
-                    MenuRow(pin_label, MENU_WIDTH, false, move || {
-                        open.set(false);
-                        patch_session(id.clone(), pin_patch(pinned));
-                    });
-                    let (open, rename_open, title) = (menu_open.clone(), renaming.clone(), new_title.clone());
-                    MenuRow("이름 변경", MENU_WIDTH, false, move || {
-                        open.set(false);
-                        title.set(String::new());
-                        rename_open.set(true);
-                    });
-                    let (open, id) = (menu_open.clone(), row.id.clone());
-                    MenuRow(archive_label, MENU_WIDTH, false, move || {
-                        open.set(false);
-                        patch_session(id.clone(), archive_patch(archived));
-                    });
-                    let (open, id, title) = (menu_open.clone(), row.id.clone(), row.title.clone());
-                    MenuRow("내보내기", MENU_WIDTH, false, move || {
-                        open.set(false);
-                        export(id.clone(), title.clone());
-                    });
-                });
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().height(H_CTL)).content(|| {
+                Label(&when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                let open = menu_open.clone();
+                cu::Button("")
+                    .icon(compose_rust::IconRole::More)
+                    .variant(ButtonVariant::Text)
+                    .color(paint(p.text_2))
+                    .modifier(Modifier::new().size(H_CTL, H_CTL))
+                    .on_click(move || open.set(true));
+            });
         });
     });
+    // The row menu is a modal list: the toolkit `Menu` cannot be placed below its anchor.
+    let labels: Vec<String> = [pin_label, "이름 변경", archive_label, "내보내기"].iter().map(|s| s.to_string()).collect();
+    let (dismiss, open, rename_open, title_state) = (menu_open.clone(), menu_open.clone(), renaming.clone(), new_title.clone());
+    let (id, title) = (row.id.clone(), row.title.clone());
+    OptionSheet(
+        open.get(),
+        &labels,
+        None,
+        MENU_WIDTH,
+        move || dismiss.set(false),
+        move |i| match i {
+            0 => patch_session(id.clone(), pin_patch(pinned)),
+            1 => {
+                title_state.set(String::new());
+                rename_open.set(true);
+            }
+            2 => patch_session(id.clone(), archive_patch(archived)),
+            _ => export(id.clone(), title.clone()),
+        },
+    );
 
     // FR-L9 rename, on the main server. TODO(compose-rust#374): TextField has no initial value
     // (it is uncontrolled), so the current title is the placeholder; an empty entry keeps it.
@@ -186,7 +201,7 @@ pub fn rows_preview() {
     cu::ScrollColumn()
         .modifier(Modifier::new().fill_max_size().background(paint(theme.palette.bg)).padding_role(SpaceRole::Md))
         .content(|| {
-            cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
                 Banner("오프라인: 저장된 데이터를 보여주는 중입니다", Tone::Neutral);
                 ConnectionBanner();
                 for (i, row) in rows.iter().take(4).enumerate() {

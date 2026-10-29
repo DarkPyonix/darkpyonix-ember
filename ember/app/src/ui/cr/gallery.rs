@@ -109,6 +109,7 @@ pub fn gallery() {
             section("Cards", || {
                 EmberCard(false, false, None, None, None, || {
                     Label("카드", Fs::Lg, Weight::Semibold, None, None);
+                    cu::Spacer().modifier(Modifier::new().height(SP[2]));
                     InsetPanel(false, || Label("안쪽 패널", Fs::Md, Weight::Regular, None, None));
                 });
                 EmberCard(true, false, None, None, None, || {

@@ -491,6 +491,8 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
 }
 
 /// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
+/// TODO(compose-rust#378): corner radii render at about 0.55x the dp value on macOS, so the
+/// card, inset and field corners look tighter than the mockup until that is fixed.
 /// TODO(compose-rust#375): one elevation stands in for the layered shadow (#214); plain arc
 /// corners instead of the squircle.
 pub fn EmberCard(
@@ -776,5 +778,25 @@ mod tests {
         });
         assert!(field.iter().any(|m| m == "Height(40.0)"), "{field:?}");
         assert!(field.iter().any(|m| m.starts_with("Shape { top_start: 8.0")), "{field:?}");
+    }
+
+    #[test]
+    fn fr_l10_body_text_sends_14_over_22_in_text_colour() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                Txt("본문", TypeRole::Body, None, None, None, None, None)
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let floats: Vec<f32> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { value: PropertyValue::Float(f), .. } => Some(*f),
+                _ => None,
+            })
+            .collect();
+        assert!(floats.contains(&14.0) && floats.contains(&22.0), "{floats:?}");
     }
 }

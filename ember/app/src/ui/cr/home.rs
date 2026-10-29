@@ -1507,7 +1507,7 @@ mod tests {
     #[test]
     fn fr_l11_a_chip_that_fits_its_natural_width_is_not_cut() {
         for t in ["이 서버", "기본 프로젝트", "명령마다 확인", "mac-mini"] {
-            assert_eq!(chip_text(t, chip_natural(t), ), t);
+            assert_eq!(chip_text(t, chip_natural(t)), t);
         }
         assert!(chip_text("Claude Code · Opus 5.5 · High", 200.0).ends_with('\u{2026}'));
     }

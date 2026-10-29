@@ -24,7 +24,7 @@ use compose_rust::schema::Window;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
-    Alignment, AssetKind, ColorScheme, DesignSystem, IconRole, Paint, SpaceRole, Theme,
+    Alignment, AssetKind, ColorScheme, DesignSystem, Paint, SpaceRole, Theme,
 };
 
 pub use crate::ui::shell::{
@@ -33,7 +33,7 @@ pub use crate::ui::shell::{
     NavCounts, NavMenu, Screen, ShellMode, BOTTOM_TABS, DEMO_USER, ICON_GEAR_SVG, ICON_MOON_SVG,
     ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
 };
-use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
+use super::components::{Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
 pub const ICON_HASH_SVG: &str = include_str!("../../../assets/nav/hash.svg");
@@ -581,30 +581,14 @@ pub fn shell() {
                         cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
                     });
             }
-            if matches!(screen, Screen::Launcher) {
-                cu::Row()
-                    .space_role(SpaceRole::Sm)
-                    .alignment(Alignment::CenterEnd)
-                    .modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Sm))
-                    .content(|| {
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        let u = ui.clone();
-                        AppButton("검색", Some(IconRole::Search), ButtonKind::Default, true, true, false, move || {
-                            u.go(Route::Search)
-                        });
-                        let u = ui.clone();
-                        AppButton("새 세션", Some(IconRole::Compose), ButtonKind::Primary, true, true, false, move || {
-                            let project = u.selected_project.get_untracked();
-                            u.open_new_session(project);
-                        });
-                    });
-            }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
                 if matches!(screen, Screen::Search) {
                     super::search::SearchScreen();
                 } else if matches!(screen, Screen::Channels) {
                     super::channels::ChannelsScreen();
+                } else if matches!(screen, Screen::Launcher) {
+                    super::project::ProjectScreen();
                 } else if matches!(screen, Screen::Home) {
                     super::home::HomeScreen();
                 } else {
@@ -730,6 +714,10 @@ pub fn launch(pref: ThemePref) {
         Some("monitor") => super::monitor::preview,
         Some("channels") => {
             ui.set_menu(NavMenu::Channels);
+            shell
+        }
+        Some("project") | Some("project-detail") => {
+            ui.set_menu(NavMenu::Projects);
             shell
         }
         Some("home") => {

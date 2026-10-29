@@ -12,7 +12,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, DrawList, IconRole, ShapeRole};
+use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
@@ -55,13 +55,6 @@ const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
 const ICON_ZAP: &str = line_icon!("M13 3L5 13.5h6L10 21l8-10.5h-6z");
-const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
-const ICON_STAR: &str = line_icon!("M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9");
-const ICON_SHIELD: &str = line_icon!("M12 3l7 3v5.5c0 4.5-3 7.8-7 9.5-4-1.7-7-5-7-9.5V6l7-3zM9 12l2.2 2.2L15.2 10");
-const ICON_MONITOR: &str = line_icon!("M5 5h14a1 1 0 011 1v9a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1zM9 20h6M12 16v4");
-const ICON_PLANE: &str = line_icon!("M21 3L3 10.5l7 3 3 7L21 3zM10 13.5L21 3");
-const ICON_SPARK: &str = line_icon!("M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z");
-const ICON_BRANCH: &str = line_icon!("M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9c0 6-12 3-12 6");
 const ICON_CHART: &str = line_icon!("M5 20V11M12 20V5M19 20v-7");
 
 // ---------------------------------------------------------------------------------------------
@@ -143,15 +136,15 @@ pub fn shrink_widths(natural: &[f32], avail: f32, min: f32) -> Vec<f32> {
     natural.iter().map(|w| w.min(lo).max(min.min(*w))).collect()
 }
 
-/// A composer chip's natural width: 12 side padding, the 16 px icon, 8 gap, the text, and the
-/// 14 px chevron with its 4 px gap when it has one.
-pub fn chip_natural(text: &str, chevron: bool) -> f32 {
-    12.0 + 16.0 + 8.0 + text_px(text, Fs::Sm.size()) + if chevron { 18.0 } else { 0.0 } + 12.0
+/// A composer chip's natural width: the toolkit button's own padding and icon slot around the
+/// text (`label_min_width`), at the 13 px chip size.
+pub fn chip_natural(text: &str) -> f32 {
+    super::components::label_min_width(text, Fs::Sm.size(), true)
 }
 
 /// The text a chip of width `w` can show.
-pub fn chip_text(text: &str, w: f32, chevron: bool) -> String {
-    fit_label(text, (w - 36.0 - if chevron { 18.0 } else { 0.0 }).max(0.0), Fs::Sm.size())
+pub fn chip_text(text: &str, w: f32) -> String {
+    fit_label(text, (w - (chip_natural("") )).max(0.0), Fs::Sm.size())
 }
 
 /// "10월 25일 토요일" for `YYYY-MM-DD`.
@@ -370,7 +363,7 @@ fn initial_suggestion() -> Option<String> {
 }
 
 /// `EMBER_CR_SCROLL=<dp|bottom>` for review captures: the toolkit cannot scroll a column from
-/// code, so the blocks that would have scrolled out (by their estimated heights) are left out.
+/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out (by their estimated heights) are left out.
 struct Skip(std::cell::Cell<f32>);
 
 impl Skip {
@@ -715,7 +708,7 @@ fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f
         // The mockup greets the signed-in user by name.
         let greeting = format!("{}, {}", DEMO_USER.0, GREETING);
         Label(&greeting, if l.compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(2));
-        ComposerCard(c, ui, width_dp, composer_width(content_w), l);
+        ComposerCard(c, ui, composer_width(content_w), l);
         Suggestions(c, width_dp);
         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
             Label("오늘의 팀", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
@@ -758,55 +751,24 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
     cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, shell::leak_doc(doc))).modifier(Modifier::new().size(px, px));
 }
 
-/// A composer chip (`.pickchip`): 32 px, `surface-2`, a 16 px line icon, the text in 13 px medium,
-/// an optional chevron. `w` is the width the row gave it; the text is cut to fit and `icon_only`
-/// chips are 32 px circles. TODO(compose-rust#372, #373): a pointer-up `Clickable`, no keyboard
-/// focus or role; the toolkit chip has neither the icon set nor a shrinkable label.
-fn ComposerChip(text: &str, icon: &'static str, icon_color: compose_rust::Color, chevron: bool, selected: bool, icon_only: bool, w: f32, on_click: impl FnMut() + 'static) {
+/// A composer chip (`.pickchip`): the toolkit button on a `surface-2` pill with its glyph and the
+/// text cut to the width `w` the row gave it; `icon_only` chips are 32 px circles.
+/// TODO(compose-rust#372, #373): the mockup's folder, star, shield and monitor line icons and the
+/// chevron of the model and mode chips need a button that takes an SVG icon; the toolkit glyph
+/// roles stand in.
+fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, w: f32, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
-    let base = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
-    if icon_only {
-        Clickable(base.width(H_CTL), Alignment::Center, on_click, || NavIcon(icon, icon_color.to_argb(), 16.0));
-        return;
-    }
-    let shown = chip_text(text, w, chevron);
-    Clickable(base, Alignment::CenterStart, on_click, || {
-        cu::Row().alignment(Alignment::CenterStart).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(12.0));
-            NavIcon(icon, icon_color.to_argb(), 16.0);
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-            Label(&shown, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
-            if chevron {
-                cu::Spacer().modifier(Modifier::new().width(4.0));
-                NavIcon(shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 14.0);
-            }
-            cu::Spacer().modifier(Modifier::new().width(12.0));
-        });
-    });
+    let (shown, width) = if icon_only { (String::new(), H_CTL) } else { (chip_text(text, w), w) };
+    cu::Button(shown)
+        .variant(ButtonVariant::Text)
+        .color(paint(p.text_2))
+        .icon(icon)
+        .modifier(Modifier::new().width(width).height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full))
+        .on_click(on_click);
 }
 
-/// `.chip.outline`: the suggestion chip, `surface` on a `line` border, 12 px regular text.
-fn OutlineChip(icon: &'static str, text: &str, on_click: impl FnMut() + 'static) {
-    let p = ember_theme().palette;
-    let shown = fit_label(text, 240.0 - 36.0, Fs::Xs.size());
-    Clickable(
-        Modifier::new().height(H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
-        Alignment::CenterStart,
-        on_click,
-        || {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(12.0));
-                NavIcon(icon, p.text_2.to_argb(), 16.0);
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                Label(&shown, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(12.0));
-            });
-        },
-    );
-}
-
-fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
+fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let p = ember_theme().palette;
     let sel = c.selection.get();
     let (_, computers) = c.live(ui);
@@ -824,24 +786,23 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
     // share what is left and are cut to it.
     let (widths, project_w): (Vec<f32>, f32) = if icon_only {
         let project_avail = (inner - 32.0 - 3.0 * H_CTL - 36.0 - 6.0 * gap).max(60.0);
-        let project_nat = chip_natural(&fit_label(&sel.project, 110.0, Fs::Sm.size()), false);
+        let project_nat = chip_natural(&fit_label(&sel.project, 110.0, Fs::Sm.size()));
         (vec![], project_nat.min(project_avail))
     } else {
         let avail = inner - 32.0 - 36.0 - 6.0 * gap;
         let nat = [
-            chip_natural(&fit_label(&sel.project, 180.0, Fs::Sm.size()), false),
-            chip_natural(&fit_label(&model_text, 180.0, Fs::Sm.size()), true),
-            chip_natural(&fit_label(&mode_text, 180.0, Fs::Sm.size()), true),
-            chip_natural(&fit_label(&computer_text, 180.0, Fs::Sm.size()), false),
+            chip_natural(&fit_label(&sel.project, 180.0, Fs::Sm.size())),
+            chip_natural(&fit_label(&model_text, 180.0, Fs::Sm.size())),
+            chip_natural(&fit_label(&mode_text, 180.0, Fs::Sm.size())),
+            chip_natural(&fit_label(&computer_text, 180.0, Fs::Sm.size())),
         ];
         let w4 = shrink_widths(&nat, avail, 56.0);
         (w4.clone(), w4[0])
     };
     let width_of = |i: usize| widths.get(i).copied().unwrap_or(0.0);
-    let model_color = if sel.option.harness == Harness::ClaudeCode { p.orange.strong } else { p.blue.strong };
-    let chip = |text: &str, icon: &'static str, color: compose_rust::Color, pick: Pick, chevron: bool, selected: bool, w: f32| {
+    let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool, w: f32| {
         let open = c.open.clone();
-        ComposerChip(text, icon, color, chevron, selected, icon_only && pick != Pick::Project, w, move || open.set(Some(pick)));
+        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, w, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(FR-L11): attachments need the file picker and an upload API.
@@ -849,19 +810,15 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
-        // `.sendround`: a 36 px `--ink` circle with the paper plane.
-        // TODO(compose-rust#372): a pointer-up `Clickable`; the toolkit button has no plane.
-        let m = Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full);
-        Clickable(
-            if sendable { m } else { m.alpha(0.4) },
-            Alignment::Center,
-            move || {
-                if sendable {
-                    c2.send(&ui2)
-                }
-            },
-            || NavIcon(ICON_PLANE, p.ink_text.to_argb(), 18.0),
-        );
+        // `.sendround`: a 36 px `--ink` circle with the send glyph.
+        // TODO(compose-rust#372): the toolkit glyph is not the mockup's paper plane.
+        cu::Button("")
+            .icon(IconRole::Send)
+            .enabled(sendable)
+            .variant(ButtonVariant::Text)
+            .color(paint(p.ink_text))
+            .modifier(Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full))
+            .on_click(move || c2.send(&ui2));
     };
 
     // `.bigcomposer`: surface, 1 px line, the xl radius, 16 / 16 / 12 padding.
@@ -899,10 +856,10 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
                 }
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     add();
-                    chip(&sel.project, ICON_FOLDER, p.text_2, Pick::Project, false, false, if icon_only { project_w } else { width_of(0) });
-                    chip(&model_text, ICON_STAR, model_color, Pick::Model, true, false, width_of(1));
-                    chip(&mode_text, ICON_SHIELD, p.text_2, Pick::Mode, true, sel.mode.is_bypass(), width_of(2));
-                    chip(&computer_text, ICON_MONITOR, p.text_2, Pick::Computer, false, false, width_of(3));
+                    chip(&sel.project, IconRole::Library, Pick::Project, false, if icon_only { project_w } else { width_of(0) });
+                    chip(&model_text, IconRole::Compose, Pick::Model, false, width_of(1));
+                    chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass(), width_of(2));
+                    chip(&computer_text, IconRole::Sidebar, Pick::Computer, false, width_of(3));
                     cu::Spacer().modifier(Modifier::new().weight(1.0));
                     if c.busy.get() {
                         cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
@@ -922,8 +879,9 @@ fn Suggestions(c: &Composer, width_dp: f32) {
                 for text in line {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
-                    let icon = [ICON_SPARK, ICON_BRANCH, ICON_CHART][SUGGESTIONS.iter().position(|x| x == text).unwrap_or(0) % 3];
-                    OutlineChip(icon, text, move || s.set(Some(t.clone())));
+                    // TODO(compose-rust#372): the mockup's sparkle, branch and bars icons.
+                    let shown = fit_label(text, 240.0 - 52.0, Fs::Sm.size());
+                    AppButton(&shown, None, ButtonKind::Default, true, true, false, move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -1317,8 +1275,9 @@ mod tests {
         let nat = [150.0, 300.0, 120.0, 90.0];
         let w = shrink_widths(&nat, 480.0, 56.0);
         assert!(w.iter().sum::<f32>() <= 480.5, "{w:?}");
-        assert_eq!(w[0], 150.0, "short chips keep their width");
-        assert!(w[1] < 300.0);
+        // Water-filling: the widest are capped to one width (135 here), the short ones keep theirs.
+        assert!((w[0] - 135.0).abs() < 0.5 && (w[1] - 135.0).abs() < 0.5, "{w:?}");
+        assert_eq!((w[2], w[3]), (120.0, 90.0));
         assert_eq!(shrink_widths(&nat, 1000.0, 56.0), nat.to_vec());
         let cut = fit_label("Claude Code · Opus 5.5 · High", 120.0, 13.0);
         assert!(cut.ends_with('\u{2026}') && text_px(&cut, 13.0) <= 120.0, "{cut}");

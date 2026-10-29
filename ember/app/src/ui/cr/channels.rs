@@ -494,13 +494,48 @@ mod tests {
         assert!(text.contains("채널") && text.contains(SOON));
     }
 
+    /// Everything emitted composing the sample list, then after the window reports `width`.
+    fn list_text_at(width: f32, class: compose_rust::WindowSizeClass) -> String {
+        use compose_rust::protocol::{decode_batch, HostEvent};
+        use compose_rust::{EventPayload, WindowHeightClass};
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| ChannelsScreenWith(sample_rooms()))));
+        let mut text: String = decode_batch(host.rebuild().expect("rebuild"))
+            .expect("decode")
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect();
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: width,
+                height_dp: 900.0,
+                class,
+                height_class: WindowHeightClass::Medium,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
+        compose_rust::window::reset_window_size();
+        text
+    }
+
     #[test]
-    fn fr_l12_the_list_groups_rooms_by_project_with_unread_badges() {
-        // A phone-sized window shows the list alone.
-        let text = text_of(|| ChannelsScreenWith(sample_rooms()));
+    fn fr_l12_the_wide_list_groups_rooms_and_has_the_search_field() {
+        let text = list_text_at(1440.0, compose_rust::WindowSizeClass::Expanded);
         for want in ["배포 논의", "디자인 리뷰", "자유 채널", "전체", "채널, 메시지 검색"] {
             assert!(text.contains(want), "missing {want}");
         }
+    }
+
+    #[test]
+    fn fr_l12_the_phone_list_has_no_search_field() {
+        let text = list_text_at(390.0, compose_rust::WindowSizeClass::Compact);
+        for want in ["배포 논의", "전체"] {
+            assert!(text.contains(want), "missing {want}");
+        }
+        assert!(!text.contains("채널, 메시지 검색"));
     }
 
     #[test]

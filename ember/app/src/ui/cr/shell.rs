@@ -36,6 +36,18 @@ pub use crate::ui::shell::{
 use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
+pub const ICON_HASH_SVG: &str = include_str!("../../../assets/nav/hash.svg");
+pub const ICON_USERS_SVG: &str = include_str!("../../../assets/nav/users.svg");
+pub const ICON_SMILE_SVG: &str = include_str!("../../../assets/nav/smile.svg");
+pub const ICON_PLUS_SVG: &str = include_str!("../../../assets/nav/plus.svg");
+pub const ICON_CPU_SVG: &str = include_str!("../../../assets/nav/cpu.svg");
+pub const ICON_GPU_SVG: &str = include_str!("../../../assets/nav/gpu.svg");
+pub const ICON_MEMORY_SVG: &str = include_str!("../../../assets/nav/memory.svg");
+pub const ICON_THERMO_SVG: &str = include_str!("../../../assets/nav/thermo.svg");
+pub const ICON_DISK_SVG: &str = include_str!("../../../assets/nav/disk.svg");
+pub const ICON_NETWORK_SVG: &str = include_str!("../../../assets/nav/network.svg");
+pub const ICON_FAN_SVG: &str = include_str!("../../../assets/nav/fan.svg");
+pub const ICON_GAUGE_SVG: &str = include_str!("../../../assets/nav/gauge.svg");
 pub const ICON_CLOSE_SVG: &str = include_str!("../../../assets/nav/close.svg");
 pub const ICON_INFO_SVG: &str = include_str!("../../../assets/nav/info.svg");
 pub const ICON_CHEVRON_DOWN_SVG: &str = include_str!("../../../assets/nav/chevron-down.svg");
@@ -71,6 +83,7 @@ pub fn choose(ui: &SharedUi, menu: NavMenu) {
             }
         }
     }
+    ui.detail_open.set(false);
     ui.set_menu(menu);
 }
 
@@ -82,6 +95,19 @@ thread_local! {
     /// Tinted icon documents by (icon, size, colour). The toolkit takes `'static` bytes, so each
     /// distinct icon is leaked once and then reused.
     static ICONS: RefCell<HashMap<(usize, i32, u32), &'static [u8]>> = RefCell::new(HashMap::new());
+}
+
+/// A generated document (a ring, a mark) as `'static` bytes, leaked once per distinct text.
+pub fn leak_doc(doc: String) -> &'static [u8] {
+    thread_local! {
+        static DOCS: RefCell<HashMap<String, &'static [u8]>> = RefCell::new(HashMap::new());
+    }
+    DOCS.with(|cache| {
+        *cache
+            .borrow_mut()
+            .entry(doc.clone())
+            .or_insert_with(|| Box::leak(doc.into_bytes().into_boxed_slice()))
+    })
 }
 
 fn icon_bytes(svg: &'static str, size: f32, argb: u32) -> &'static [u8] {
@@ -499,14 +525,13 @@ fn menu_item(svg: &'static str, label: &str, on_click: impl FnMut() + 'static) {
 
 /// A menu whose screen is not built yet ("준비 중입니다").
 pub fn Placeholder(menu: NavMenu) {
-    cu::Column()
-        .alignment(Alignment::Center)
-        .space_role(SpaceRole::Sm)
-        .modifier(Modifier::new().fill_max_width().fill_max_height())
-        .content(|| {
+    // A `Box` centers on both axes; a `Column`'s alignment is the horizontal one only.
+    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+        cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
             Label(menu.label(), Fs::Xl3, Weight::Medium, None, None);
             Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
         });
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -578,6 +603,8 @@ pub fn shell() {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
                 if matches!(screen, Screen::Search) {
                     super::search::SearchScreen();
+                } else if matches!(screen, Screen::Channels) {
+                    super::channels::ChannelsScreen();
                 } else {
                     let menu = match &screen {
                         Screen::Conversation(_) => NavMenu::Sessions,
@@ -604,7 +631,10 @@ pub fn shell() {
                     });
                 });
                 let s = settings_open.clone();
-                PhoneMenu(phone_menu.clone(), move || s.set(true));
+                // The mockup hides the menu while a detail view (an open room) is shown.
+                if !ui.detail_open.get() {
+                    PhoneMenu(phone_menu.clone(), move || s.set(true));
+                }
             } else {
                 cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                     let c = collapsed.clone();
@@ -695,6 +725,11 @@ pub fn launch(pref: ThemePref) {
             shell
         }
         Some("launcher-row") => super::launcher::rows_preview,
+        Some("monitor") => super::monitor::preview,
+        Some("channels") => {
+            ui.set_menu(NavMenu::Channels);
+            shell
+        }
         _ => shell,
     };
     compose_rust::LaunchBuilder::new()

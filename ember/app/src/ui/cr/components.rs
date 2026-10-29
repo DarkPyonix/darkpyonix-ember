@@ -398,6 +398,21 @@ pub enum PillTone {
     Grey,
 }
 
+/// The Dioxus component's tone enum, for the shared `reach_pill` and `harness_tone` helpers.
+impl From<crate::ui::components::PillTone> for PillTone {
+    fn from(t: crate::ui::components::PillTone) -> Self {
+        use crate::ui::components::PillTone as D;
+        match t {
+            D::Blue => PillTone::Blue,
+            D::Orange => PillTone::Orange,
+            D::Red => PillTone::Red,
+            D::Green => PillTone::Green,
+            D::Sky => PillTone::Sky,
+            D::Grey => PillTone::Grey,
+        }
+    }
+}
+
 /// `(text, fill)`: the strong colour as text on its soft pair.
 pub fn pill_colors(tone: PillTone, p: &Palette) -> (Color, Color) {
     match tone {
@@ -741,6 +756,20 @@ pub fn EmberSheet(
     actions: Option<&mut dyn FnMut()>,
     content: impl FnOnce(),
 ) {
+    EmberSheetSized(title, open, 560.0, on_dismiss, actions, content);
+}
+
+/// [`EmberSheet`] with the dialog's width (`min(560px, 100%)` for most sheets, `min(1360px,
+/// 100%)` for the computer monitor). Without a width the dialog takes the whole window,
+/// because its content asks for the full width.
+pub fn EmberSheetSized(
+    title: &str,
+    open: bool,
+    width: f32,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    actions: Option<&mut dyn FnMut()>,
+    content: impl FnOnce(),
+) {
     let theme = ember_theme();
     let modifier = Modifier::new()
         .background(paint(theme.palette.surface))
@@ -761,12 +790,28 @@ pub fn EmberSheet(
             .on_dismiss(on_dismiss.clone())
             .content(body);
     } else {
-        // The mockup's centered modal: `min(560px, 100%)` wide. Without a width the dialog
-        // takes the whole window, because its content asks for the full width.
-        cu::Dialog(open).modifier(modifier.width(560.0)).on_dismiss(on_dismiss).content(body);
+        cu::Dialog(open).modifier(modifier.width(width)).on_dismiss(on_dismiss).content(body);
     }
 }
 
+/// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
+/// TODO(compose-rust#372): a pointer-up `Clickable`.
+pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (bg, ink) = if selected { (p.ink, p.ink_text) } else { (p.surface_2, p.text_2) };
+    Clickable(
+        Modifier::new().height(H_CTL).background(paint(bg)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+        },
+    );
+}
 
 #[cfg(test)]
 mod tests {

@@ -817,6 +817,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         let (c2, ui2) = (c.clone(), ui.clone());
         // `.sendround`: a 36 px `--ink` circle with the send glyph.
         // TODO(compose-rust#372): the toolkit glyph is not the mockup's paper plane.
+        // TODO(compose-rust#387): a disabled button turns grey instead of keeping `--ink`.
         cu::Button("")
             .icon(IconRole::Send)
             .enabled(sendable)
@@ -1082,7 +1083,7 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
         // `.hm-blocks`: coloured blocks sized by count, each with the 18 % white stripes. The
         // stripes are a canvas at the block's estimated width (the card's inner width shared by
         // the weights, less 8 dp so an estimate that is a little high stops short rather than
-        // spilling past the block); TODO(compose-rust): a stripe fill that follows its box.
+        // spilling past the block); TODO(compose-rust#388): size-aware drawing so the stripes follow their box.
         let bh = if compact { 88.0 } else { 116.0 };
         let weights: Vec<f32> = parts.iter().map(|(_, n, _)| (*n as f32).max(0.6)).collect();
         let sum: f32 = weights.iter().sum();

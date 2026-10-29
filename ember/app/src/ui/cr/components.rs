@@ -346,8 +346,8 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
 /// Workaround until compose-rust#373 (`Button` `max_lines` / `overflow`): Button and Chip labels
 /// are measured too narrow, so a short Korean label such as "보내기" wraps to two lines. The
 /// button gets a width that fits its label: an estimate of the label's advance (a wide glyph is
-/// one em, a narrow one about 0.55 em), the 16 dp side padding on both sides, and room for the
-/// icon. Remove this once #373 is in.
+/// one em, a narrow one about 0.55 em), the 24 dp side padding of the toolkit button on both sides (measured: 16 dp left only
+/// one glyph and an ellipsis), and room for the icon. Remove this once #373 is in.
 pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
     let advance: f32 = text
         .chars()
@@ -355,7 +355,7 @@ pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
         .sum::<f32>()
         * font_px;
     let icon = if has_icon { 20.0 + 8.0 } else { 0.0 };
-    advance + icon + 2.0 * 16.0
+    advance + icon + 2.0 * 24.0 + 4.0
 }
 
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
@@ -635,9 +635,9 @@ mod tests {
 
     #[test]
     fn label_min_width_grows_with_the_label_and_the_icon() {
-        // Three Hangul glyphs at 14 px, no icon: 42 + 32 padding.
-        assert_eq!(label_min_width("보내기", 14.0, false), 74.0);
-        assert_eq!(label_min_width("보내기", 14.0, true), 102.0);
+        // Three Hangul glyphs at 14 px, no icon: 42 + 48 padding + 4 slack.
+        assert_eq!(label_min_width("보내기", 14.0, false), 94.0);
+        assert_eq!(label_min_width("보내기", 14.0, true), 122.0);
         assert!(label_min_width("명령마다 확인", 13.0, false) > label_min_width("확인", 13.0, false));
         // Latin letters are narrower than Hangul.
         assert!(label_min_width("abc", 14.0, false) < label_min_width("가나다", 14.0, false));

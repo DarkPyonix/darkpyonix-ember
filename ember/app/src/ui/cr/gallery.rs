@@ -30,7 +30,7 @@ pub fn launch(pref: ThemePref) {
     let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
     compose_rust::LaunchBuilder::new()
         .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
-        .with_window(Window::new().with_title("Ember components (compose-rust)"))
+        .with_window(Window::new().with_title("Ember components (compose-rust)").with_size(1100, 800))
         .launch(gallery);
 }
 

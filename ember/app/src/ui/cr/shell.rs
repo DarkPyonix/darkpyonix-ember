@@ -578,6 +578,8 @@ pub fn shell() {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
                 if matches!(screen, Screen::Search) {
                     super::search::SearchScreen();
+                } else if matches!(screen, Screen::Channels) {
+                    super::channels::ChannelsScreen();
                 } else {
                     let menu = match &screen {
                         Screen::Conversation(_) => NavMenu::Sessions,
@@ -696,6 +698,7 @@ pub fn launch(pref: ThemePref) {
         }
         Some("launcher-row") => super::launcher::rows_preview,
         Some("monitor") => super::monitor::preview,
+        Some("channels") => super::channels::preview,
         _ => shell,
     };
     compose_rust::LaunchBuilder::new()

@@ -398,6 +398,21 @@ pub enum PillTone {
     Grey,
 }
 
+/// The Dioxus component's tone enum, for the shared `reach_pill` and `harness_tone` helpers.
+impl From<crate::ui::components::PillTone> for PillTone {
+    fn from(t: crate::ui::components::PillTone) -> Self {
+        use crate::ui::components::PillTone as D;
+        match t {
+            D::Blue => PillTone::Blue,
+            D::Orange => PillTone::Orange,
+            D::Red => PillTone::Red,
+            D::Green => PillTone::Green,
+            D::Sky => PillTone::Sky,
+            D::Grey => PillTone::Grey,
+        }
+    }
+}
+
 /// `(text, fill)`: the strong colour as text on its soft pair.
 pub fn pill_colors(tone: PillTone, p: &Palette) -> (Color, Color) {
     match tone {

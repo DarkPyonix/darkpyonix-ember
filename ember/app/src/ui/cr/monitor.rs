@@ -18,24 +18,11 @@ pub use crate::ui::monitor::{
     sort_rows, toggle_sort, ComputerMetrics, Metric, NoMetrics, ProcessRow, SortKey, SortState,
 };
 use super::characters::{Character, CharState};
-use super::components::{EmberCard, EmberSheet, InsetPanel, Label, Pill, PillTone};
+use super::components::{EmberCard, EmberSheet, InsetPanel, Label, Pill};
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
-use crate::ui::components::PillTone as DioxusTone;
 use crate::ui::project::{display_name, reach_pill, ComputerChip, ProjectBox, SOON};
 use crate::ui::Route;
-
-/// `reach_pill` speaks the Dioxus component's tone enum; the same colours here.
-fn tone(t: DioxusTone) -> PillTone {
-    match t {
-        DioxusTone::Blue => PillTone::Blue,
-        DioxusTone::Orange => PillTone::Orange,
-        DioxusTone::Red => PillTone::Red,
-        DioxusTone::Green => PillTone::Green,
-        DioxusTone::Sky => PillTone::Sky,
-        DioxusTone::Grey => PillTone::Grey,
-    }
-}
 
 fn header_label(key: SortKey) -> &'static str {
     match key {
@@ -82,7 +69,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                 let cur = sort.get();
                 sort_rows(&mut rows, cur);
                 cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
-                    Pill(state_text, tone(state_tone), false);
+                    Pill(state_text, state_tone.into(), false);
                     Label(&format!("실행 중 {}", c.running), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                 });
                 if let Some(n) = offline_notice(c.reachability) {

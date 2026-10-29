@@ -695,6 +695,7 @@ pub fn launch(pref: ThemePref) {
             shell
         }
         Some("launcher-row") => super::launcher::rows_preview,
+        Some("monitor") => super::monitor::preview,
         _ => shell,
     };
     compose_rust::LaunchBuilder::new()

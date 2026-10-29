@@ -12,3 +12,5 @@ pub mod notice;
 pub mod search;
 pub mod new_session;
 pub mod ko;
+pub mod characters;
+pub mod monitor;

@@ -7,3 +7,8 @@ pub mod components;
 pub mod compat;
 pub mod gallery;
 pub mod shell;
+pub mod launcher;
+pub mod notice;
+pub mod search;
+pub mod new_session;
+pub mod ko;

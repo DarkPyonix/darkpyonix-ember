@@ -36,6 +36,9 @@ pub use crate::ui::shell::{
 use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
+pub const ICON_CLOSE_SVG: &str = include_str!("../../../assets/nav/close.svg");
+pub const ICON_INFO_SVG: &str = include_str!("../../../assets/nav/info.svg");
+pub const ICON_CHEVRON_DOWN_SVG: &str = include_str!("../../../assets/nav/chevron-down.svg");
 
 use crate::model;
 use crate::ui::coexist::{shared_ui, SharedUi};
@@ -522,6 +525,7 @@ pub fn current_mode(collapsed: bool) -> ShellMode {
 #[composable]
 pub fn shell() {
     let ui = shared_ui().clone();
+    super::notice::NoticeHost();
     let theme = ember_theme();
     let collapsed = remember(|| mutable_state_of(false));
     let more_open = remember(|| mutable_state_of(false));
@@ -552,7 +556,7 @@ pub fn shell() {
                         cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
                     });
             }
-            if matches!(screen, Screen::Launcher | Screen::Search) {
+            if matches!(screen, Screen::Launcher) {
                 cu::Row()
                     .space_role(SpaceRole::Sm)
                     .alignment(Alignment::CenterEnd)
@@ -571,13 +575,17 @@ pub fn shell() {
                     });
             }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
-                // TODO(#220 phases 3-7): each screen replaces its placeholder as it moves.
-                let menu = match &screen {
-                    Screen::Conversation(_) => NavMenu::Sessions,
-                    Screen::Placeholder(m) => *m,
-                    _ => active,
-                };
-                Placeholder(menu);
+                // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
+                if matches!(screen, Screen::Search) {
+                    super::search::SearchScreen();
+                } else {
+                    let menu = match &screen {
+                        Screen::Conversation(_) => NavMenu::Sessions,
+                        Screen::Placeholder(m) => *m,
+                        _ => active,
+                    };
+                    Placeholder(menu);
+                }
             });
         });
     };
@@ -641,7 +649,7 @@ pub fn shell() {
                     Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(theme.palette.muted)), None);
                 });
             });
-            // TODO(#220 phase 3): `NewSessionDialog` moves with new_session.rs.
+            super::new_session::NewSessionDialog();
         });
 }
 
@@ -675,10 +683,24 @@ pub fn launch(pref: ThemePref) {
     shared_ui().theme_pref.set(pref);
     let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
     let (w, h) = requested_size();
+    // `EMBER_CR_ROUTE` opens a screen directly, for review captures.
+    let ui = shared_ui();
+    let content: fn() = match std::env::var("EMBER_CR_ROUTE").ok().as_deref() {
+        Some("search") => {
+            ui.go(Route::Search);
+            shell
+        }
+        Some("new-session") => {
+            ui.open_new_session(None);
+            shell
+        }
+        Some("launcher-row") => super::launcher::rows_preview,
+        _ => shell,
+    };
     compose_rust::LaunchBuilder::new()
         .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
         .with_window(Window::new().with_title("Ember shell (compose-rust)").with_size(w, h))
-        .launch(shell);
+        .launch(content);
 }
 
 #[cfg(test)]

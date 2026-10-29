@@ -226,3 +226,57 @@ pub fn save_prefs(prefs: crate::prefs::Prefs) {
         }
     });
 }
+
+/// Services for unit tests that compose screens: demo data, no server contacted, data under
+/// `.scratch/`. Installed once per test process; tests that change shared UI state take
+/// [`test_guard`] first so they do not see each other's.
+#[cfg(test)]
+pub fn test_services() -> &'static Services {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/test-data");
+        let config = crate::config::AppConfig::from_values(
+            Some("http://127.0.0.1:9".to_string()),
+            Some(data),
+            None,
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let client = rt.block_on(ember_client::Client::new(config.client_config())).expect("client");
+        let now = crate::demo::now_ms();
+        let source = crate::demo::DemoSource::new(now);
+        for input in source.inputs(now) {
+            client.apply(input);
+        }
+        let initial_prefs = crate::prefs::Prefs::default();
+        let server = crate::server::ServerApi::new(&config.server_url);
+        install(Services {
+            config,
+            rt,
+            client,
+            server,
+            demo: Some(source),
+            outbox: Arc::new(Mutex::new(crate::model::Outbox::default())),
+            ui: crate::ui::coexist::SharedUi::new(initial_prefs.clone()),
+            initial_prefs,
+            live: OnceLock::new(),
+        });
+    });
+    services()
+}
+
+/// Serialises tests that touch the shared UI state and resets what they change.
+#[cfg(test)]
+pub fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let ui = &test_services().ui;
+    ui.new_session.set(None);
+    ui.notice.set(None);
+    ui.route.set(crate::ui::Route::Projects);
+    guard
+}

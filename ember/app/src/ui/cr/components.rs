@@ -133,6 +133,91 @@ pub fn Clickable(
         .content(content);
 }
 
+/// One row of a popup menu: 36 px high, left-aligned `--text`, the chosen row on `--sel`.
+/// The toolkit `Button` as a menu entry centres its label in link colour and stretches the
+/// popup to the window, so rows are Ember's own until `Menu` entries can be styled.
+/// TODO(compose-rust#372): no keyboard focus or role, as for every `Clickable`.
+pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let bg = if chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+    Clickable(
+        Modifier::new().width(width).height(36.0).background(bg).corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
+            });
+        },
+    );
+}
+
+/// A closed select: a 40 px field showing the chosen option and an arrow, opening a popup
+/// list under it. The toolkit `Dropdown` is a wheel on Apple design systems and a flat list of
+/// every option in the tree, so this is built from a `Menu`.
+/// TODO(compose-rust#383): a `Dropdown` presentation that does not depend on the design system.
+pub fn Select(
+    shown: &str,
+    options: &[String],
+    chosen: usize,
+    popup_width: f32,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    use compose_rust::runtime::{mutable_state_of, remember};
+    let p = ember_theme().palette;
+    let open = remember(|| mutable_state_of(false));
+    let dismiss = open.clone();
+    cu::Menu(open.get())
+        .on_dismiss(move || dismiss.set(false))
+        .anchor(|| {
+            let toggle = open.clone();
+            Clickable(
+                Modifier::new()
+                    .fill_max_width()
+                    .height(H_BTN)
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .corner_radius(CORNER_SM),
+                Alignment::CenterStart,
+                move || toggle.set(!toggle.get_untracked()),
+                || {
+                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                        Label(shown, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        super::shell::NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
+                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                    });
+                },
+            );
+        })
+        .content(|| {
+            for (i, label) in options.iter().enumerate() {
+                let (open, mut choose) = (open.clone(), on_choose.clone());
+                MenuRow(label, popup_width, i == chosen, move || {
+                    open.set(false);
+                    choose(i);
+                });
+            }
+        });
+}
+
+/// The footer every sheet and dialog shares: a line, then actions right-aligned (`.snew-foot`).
+pub fn SheetFooter(content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+    cu::Row()
+        .space_role(compose_rust::SpaceRole::Sm)
+        .alignment(Alignment::CenterStart)
+        .modifier(Modifier::new().fill_max_width().height(60.0))
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            content();
+            cu::Spacer().modifier(Modifier::new().width(SP[3]));
+        });
+}
+
 // ---------------------------------------------------------------------------------------------
 // Text
 // ---------------------------------------------------------------------------------------------
@@ -623,7 +708,9 @@ pub fn EmberSheet(
             .on_dismiss(on_dismiss.clone())
             .content(body);
     } else {
-        cu::Dialog(open).modifier(modifier).on_dismiss(on_dismiss).content(body);
+        // The mockup's centered modal: `min(560px, 100%)` wide. Without a width the dialog
+        // takes the whole window, because its content asks for the full width.
+        cu::Dialog(open).modifier(modifier.width(560.0)).on_dismiss(on_dismiss).content(body);
     }
 }
 

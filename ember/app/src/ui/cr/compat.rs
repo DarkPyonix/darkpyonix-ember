@@ -17,17 +17,29 @@ use ember_client::LauncherStatus;
 use super::components::Txt;
 use super::theme::*;
 use super::theme::Palette;
-use crate::model::{status_label, Tone};
+use crate::model::Tone;
 
 /// `(fill, ink)` of a tone: the strong colour on its soft pair, from the palette.
 pub fn tone_colors(tone: Tone, p: &Palette) -> (Color, Color) {
     match tone {
         Tone::Neutral => (p.grey.soft, p.text_2),
         Tone::Accent => (p.blue.soft, p.blue.strong),
-        Tone::Warning => (p.orange.soft, p.orange.strong),
+        // The orange accent on its soft pair is about 1.8:1 in light; the text is the accent
+        // pulled toward the page text colour so a pill reads.
+        Tone::Warning => (p.orange.soft, mix(p.orange.strong, p.text, 0.45)),
         Tone::Error => (p.red.soft, p.red.strong),
         Tone::Success => (p.green.soft, p.green.strong),
     }
+}
+
+/// `a` moved `t` of the way to `b`, opaque.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    let (a, b) = (a.to_argb(), b.to_argb());
+    let ch = |shift: u32| {
+        let (x, y) = (((a >> shift) & 0xff) as f32, ((b >> shift) & 0xff) as f32);
+        (x + (y - x) * t).round() as u32
+    };
+    Color::rgb((ch(16) << 16) | (ch(8) << 8) | ch(0))
 }
 
 /// The strong colour of a tone, for dots.
@@ -80,7 +92,7 @@ pub fn Spinner(size: f32) {
 /// A session's status as the launcher shows it (FR-L2): running spinner, waiting-for-approval
 /// pill (outranks running), finished-unread dot, finished, failed.
 pub fn StatusIndicator(status: LauncherStatus) {
-    let label = status_label(status);
+    let label = super::ko::status_label(status);
     cu::Row().space_role(SpaceRole::Xs).alignment(Alignment::CenterStart).content(|| match status {
         LauncherStatus::Running => {
             Spinner(12.0);
@@ -89,7 +101,7 @@ pub fn StatusIndicator(status: LauncherStatus) {
         LauncherStatus::WaitingForApproval => Badge(&label, Tone::Warning),
         LauncherStatus::FinishedUnread => {
             Dot(Tone::Accent);
-            Txt("Unread", TypeRole::Caption, Some(Paint::Role(ColorRole::Primary)), None, None, None, None);
+            Txt(&label, TypeRole::Caption, Some(Paint::Role(ColorRole::Primary)), None, None, None, None);
         }
         LauncherStatus::Failed => Badge(&label, Tone::Error),
         _ => Txt(&label, TypeRole::Caption, Some(Paint::Role(ColorRole::OnSurfaceVariant)), None, None, None, None),
@@ -194,7 +206,7 @@ mod tests {
             }))
         });
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        let want = status_label(LauncherStatus::WaitingForApproval);
+        let want = super::ko::status_label(LauncherStatus::WaitingForApproval);
         let has = |s: &str| {
             batch.iter().any(|m| {
                 matches!(m, Mutation::SetProp { value: PropertyValue::String(t), .. } if *t == s)

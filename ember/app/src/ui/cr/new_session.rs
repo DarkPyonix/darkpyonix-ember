@@ -10,9 +10,9 @@
 use compose_rust::runtime::{mutable_state_of, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, ColorRole, Paint, SpaceRole, TypeRole};
+use compose_rust::{ColorRole, Paint, SpaceRole, TypeRole};
 
-use super::components::{EmberField, FieldOptions, Txt};
+use super::components::{AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, Select, SheetFooter, Txt};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, index_of};
@@ -20,6 +20,9 @@ use crate::prefs::LastUsed;
 use crate::server::CreateSession;
 use crate::services::{run_shared, services};
 use crate::ui::coexist::shared_ui;
+
+/// Width of the option popups, a little under the 560 px sheet's field.
+const POPUP_WIDTH: f32 = 440.0;
 
 /// Agents offered when the server has not answered `GET /agents` yet.
 const FALLBACK_AGENTS: [&str; 2] = ["claude-code", "codex"];
@@ -114,7 +117,7 @@ fn NewSessionForm(preset: &str) {
     let busy = remember_with_key(key, || mutable_state_of(false));
 
     // ---- options ---------------------------------------------------------------------------
-    const NEW_PROJECT: &str = "New project\u{2026}";
+    const NEW_PROJECT: &str = "새 프로젝트\u{2026}";
     let mut project_options = projects.clone();
     project_options.push(NEW_PROJECT.to_string());
     let project_now = project.get();
@@ -145,14 +148,14 @@ fn NewSessionForm(preset: &str) {
 
     let accounts: Vec<Choice> = {
         let list = ui.live.accounts.get();
-        let mut out = vec![Choice { value: None, label: "Automatic (the server's router chooses)".into() }];
+        let mut out = vec![Choice { value: None, label: "자동 (서버 라우터가 고름)".into() }];
         out.extend(list.iter().filter(|a| a.agent == agent_value).map(|a| Choice {
             value: Some(a.id.clone()),
             label: format!(
                 "{}{}{}",
                 a.label,
-                if a.is_default { " (default)" } else { "" },
-                if a.limited { " \u{00b7} limited" } else { "" }
+                if a.is_default { " (기본)" } else { "" },
+                if a.limited { " \u{00b7} 한도 도달" } else { "" }
             ),
         }));
         out
@@ -162,7 +165,7 @@ fn NewSessionForm(preset: &str) {
 
     let computers: Vec<Choice> = {
         let _ = ui.live.launcher.get();
-        let mut out = vec![Choice { value: None, label: "The main server (default)".into() }];
+        let mut out = vec![Choice { value: None, label: "메인 서버 (기본)".into() }];
         services().client.read(|s| {
             out.extend(s.computers().iter().filter(|c| c.id != LOCAL_COMPUTER).map(|c| Choice {
                 value: Some(c.id.clone()),
@@ -228,7 +231,7 @@ fn NewSessionForm(preset: &str) {
                     if let Some(cid) = computer_id.filter(|_| s.demo.is_none()) {
                         // A session starts on the main server; move it before the first message.
                         if let Err(e) = s.server.switch_computer(&rec.id, &cid).await {
-                            notice = Some(format!("Started on the main server: could not switch computer ({e})"));
+                            notice = Some(format!("메인 서버에서 시작했습니다. 컴퓨터를 바꾸지 못했습니다({e})"));
                         }
                     }
                     Ok::<_, String>((rec, notice))
@@ -247,136 +250,109 @@ fn NewSessionForm(preset: &str) {
                                 notice::post(n);
                             }
                         }
-                        Err(e) => notice::post(format!("Could not start the session: {e}")),
+                        Err(e) => notice::post(format!("세션을 시작하지 못했습니다: {e}")),
                     }
                 },
             );
         }
     };
 
-    cu::Dialog(true)
-        .modifier(Modifier::new().background(paint(theme.palette.surface)).corner_radius(CORNER_XL))
-        .on_dismiss(close.clone())
-        .content(|| {
-            // A long form on a short window scrolls inside the dialog.
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().padding_role(SpaceRole::Md)).content(|| {
-                    Txt("New session", TypeRole::Title, None, None, None, None, None);
-
-                    Field("Project", || {
-                        let (options, projects) = (project_options.clone(), projects.clone());
-                        let (ui, project, agent, account, computer) =
-                            (ui.clone(), project.clone(), agent.clone(), account.clone(), computer.clone());
-                        cu::Dropdown(project_index)
-                            .modifier(Modifier::new().fill_max_width())
-                            .on_change(move |i| {
-                                let p = options.get(i).cloned().unwrap_or_default();
-                                let p = if projects.contains(&p) { p } else { String::new() };
-                                let remembered = ui.prefs.get_untracked().last_used.get(&p).cloned();
-                                seed(&p, remembered, &project, &agent, &account, &computer);
-                            })
-                            .content(|| {
-                                for o in project_options.iter() {
-                                    Txt(o, TypeRole::Body, None, None, None, None, None);
-                                }
-                            });
+    // The mockup's sheet: a centered 560 px modal, a 60 px header with the title and a close
+    // button, the form scrolling in between, and a footer with cancel and create.
+    let body_height = (compose_rust::runtime::current_window_size().height_dp - 32.0 - 60.0 - 61.0).clamp(240.0, 560.0);
+    EmberSheet("새 세션", true, close.clone(), None, || {
+        // A long form on a short window scrolls inside the dialog.
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
+            cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                Field("프로젝트", || {
+                    let (options, projects) = (project_options.clone(), projects.clone());
+                    let (ui, project, agent, account, computer) =
+                        (ui.clone(), project.clone(), agent.clone(), account.clone(), computer.clone());
+                    Select(
+                        &project_options[project_index.min(project_options.len() - 1)],
+                        &project_options,
+                        project_index,
+                        POPUP_WIDTH,
+                        move |i| {
+                            let p = options.get(i).cloned().unwrap_or_default();
+                            let p = if projects.contains(&p) { p } else { String::new() };
+                            let remembered = ui.prefs.get_untracked().last_used.get(&p).cloned();
+                            seed(&p, remembered, &project, &agent, &account, &computer);
+                        },
+                    );
+                });
+                if creating_project {
+                    Field("프로젝트 이름", || {
+                        let v = new_project.clone();
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            placeholder: "my-project".to_string(),
+                            on_value_change: Some(Box::new(move |t| v.set(t))),
+                            ..Default::default()
+                        });
                     });
-                    cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width()).content(|| {
-                        if creating_project {
-                            Field("Project name", || {
-                                let v = new_project.clone();
-                                EmberField(FieldOptions {
-                                    fill_max_width: true,
-                                    placeholder: "my-project".to_string(),
-                                    on_value_change: Some(Box::new(move |t| v.set(t))),
-                                    ..Default::default()
-                                });
-                            });
+                }
+                Field("컴퓨터의 폴더", || {
+                    let v = cwd.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: if default_cwd.is_empty() { "/path/to/project".to_string() } else { default_cwd.clone() },
+                        on_value_change: Some(Box::new(move |t| v.set(t))),
+                        ..Default::default()
+                    });
+                });
+                Field("모델 (선택)", || {
+                    let v = model_text.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: if default_model.is_empty() { "에이전트 기본값".to_string() } else { default_model.clone() },
+                        on_value_change: Some(Box::new(move |t| v.set(t))),
+                        ..Default::default()
+                    });
+                });
+                Field("제목 (선택)", || {
+                    let v = title.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: "새 대화".to_string(),
+                        on_value_change: Some(Box::new(move |t| v.set(t))),
+                        ..Default::default()
+                    });
+                });
+                Field("에이전트", || {
+                    let (agents_for, agent, account) = (agents.clone(), agent.clone(), account.clone());
+                    Select(&agent_value, &agents, agent_index, POPUP_WIDTH, move |i| {
+                        if let Some(a) = agents_for.get(i) {
+                            agent.set(a.clone());
+                            // Accounts belong to an agent.
+                            account.set(None);
                         }
-                        Field("Folder on the computer", || {
-                            let v = cwd.clone();
-                            EmberField(FieldOptions {
-                                fill_max_width: true,
-                                placeholder: if default_cwd.is_empty() { "/path/to/project".to_string() } else { default_cwd.clone() },
-                                on_value_change: Some(Box::new(move |t| v.set(t))),
-                                ..Default::default()
-                            });
-                        });
-                        Field("Model (optional)", || {
-                            let v = model_text.clone();
-                            EmberField(FieldOptions {
-                                fill_max_width: true,
-                                placeholder: if default_model.is_empty() { "Agent default".to_string() } else { default_model.clone() },
-                                on_value_change: Some(Box::new(move |t| v.set(t))),
-                                ..Default::default()
-                            });
-                        });
-                        Field("Title (optional)", || {
-                            let v = title.clone();
-                            EmberField(FieldOptions {
-                                fill_max_width: true,
-                                placeholder: "New conversation".to_string(),
-                                on_value_change: Some(Box::new(move |t| v.set(t))),
-                                ..Default::default()
-                            });
-                        });
                     });
-                    Field("Agent", || {
-                        let (agents_for, agent, account) = (agents.clone(), agent.clone(), account.clone());
-                        cu::Dropdown(agent_index)
-                            .modifier(Modifier::new().fill_max_width())
-                            .on_change(move |i| {
-                                if let Some(a) = agents_for.get(i) {
-                                    agent.set(a.clone());
-                                    // Accounts belong to an agent.
-                                    account.set(None);
-                                }
-                            })
-                            .content(|| {
-                                for a in agents.iter() {
-                                    Txt(a, TypeRole::Body, None, None, None, None, None);
-                                }
-                            });
+                });
+                Field("계정", || {
+                    let (choices, account) = (accounts.clone(), account.clone());
+                    let labels: Vec<String> = accounts.iter().map(|c| c.label.clone()).collect();
+                    Select(&labels[account_index.min(labels.len() - 1)], &labels, account_index, POPUP_WIDTH, move |i| {
+                        account.set(choices.get(i).and_then(|c| c.value.clone()))
                     });
-                    Field("Account", || {
-                        let (choices, account) = (accounts.clone(), account.clone());
-                        cu::Dropdown(account_index)
-                            .modifier(Modifier::new().fill_max_width())
-                            .on_change(move |i| account.set(choices.get(i).and_then(|c| c.value.clone())))
-                            .content(|| {
-                                for c in accounts.iter() {
-                                    Txt(&c.label, TypeRole::Body, None, None, None, None, None);
-                                }
-                            });
+                });
+                Field("컴퓨터", || {
+                    let (choices, computer) = (computers.clone(), computer.clone());
+                    let labels: Vec<String> = computers.iter().map(|c| c.label.clone()).collect();
+                    Select(&labels[computer_index.min(labels.len() - 1)], &labels, computer_index, POPUP_WIDTH, move |i| {
+                        computer.set(choices.get(i).and_then(|c| c.value.clone()))
                     });
-                    Field("Computer", || {
-                        let (choices, computer) = (computers.clone(), computer.clone());
-                        cu::Dropdown(computer_index)
-                            .modifier(Modifier::new().fill_max_width())
-                            .on_change(move |i| computer.set(choices.get(i).and_then(|c| c.value.clone())))
-                            .content(|| {
-                                for c in computers.iter() {
-                                    Txt(&c.label, TypeRole::Body, None, None, None, None, None);
-                                }
-                            });
-                    });
-                    cu::Row()
-                        .space_role(SpaceRole::Sm)
-                        .alignment(Alignment::CenterStart)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            if busy.get() {
-                                cu::IndeterminateProgressIndicator()
-                                    .circular(true)
-                                    .modifier(Modifier::new().size(18.0, 18.0));
-                            }
-                            cu::Button("Cancel").variant(ButtonVariant::Text).on_click(close.clone());
-                            cu::Button("Start").variant(ButtonVariant::Filled).enabled(can_start).on_click(start);
-                        });
                 });
             });
         });
+        SheetFooter(|| {
+            if busy.get() {
+                cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
+            }
+            AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
+            AppButton("만들기", None, ButtonKind::Primary, true, can_start, false, start);
+        });
+    });
 }
 
 /// Apply a project's remembered combination to the selection states.
@@ -404,7 +380,7 @@ fn seed(
 
 /// A labelled form row.
 fn Field(label: &str, content: impl FnOnce()) {
-    cu::Column().space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
         Txt(label, TypeRole::Label, muted(), None, None, None, None);
         content();
     });
@@ -461,11 +437,11 @@ mod tests {
         };
         let mut host = Host::new(|| Box::new(Recomposer::new(NewSessionDialog)));
         let closed = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        assert!(!texts(&closed).iter().any(|t| t == "New session"));
+        assert!(!texts(&closed).iter().any(|t| t == "새 세션"));
         ui.open_new_session(None);
         let open = decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode");
         let all = texts(&open);
-        for want in ["New session", "Project", "Agent", "Account", "Computer", "Start"] {
+        for want in ["새 세션", "프로젝트", "에이전트", "계정", "컴퓨터", "만들기"] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
         }
         ui.close_new_session();

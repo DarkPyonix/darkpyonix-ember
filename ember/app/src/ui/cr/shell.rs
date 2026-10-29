@@ -36,6 +36,7 @@ pub use crate::ui::shell::{
 use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
+pub const ICON_CHEVRON_DOWN_SVG: &str = include_str!("../../../assets/nav/chevron-down.svg");
 
 use crate::model;
 use crate::ui::coexist::{shared_ui, SharedUi};

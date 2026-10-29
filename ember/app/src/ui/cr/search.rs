@@ -33,13 +33,13 @@ const HIT_LIMIT: usize = 100;
 /// The line above the results.
 pub fn search_note(query: &str, count: usize, searching: bool) -> String {
     if query.trim().is_empty() {
-        "Type to search every conversation's messages, and titles, projects, agents, accounts and folders.".to_string()
+        "모든 대화의 메시지와 제목, 프로젝트, 에이전트, 계정, 폴더를 검색합니다.".to_string()
     } else if count == 0 && searching {
-        "Searching\u{2026}".to_string()
+        "검색 중\u{2026}".to_string()
     } else if count == 0 {
-        "Nothing matches.".to_string()
+        "일치하는 항목이 없습니다.".to_string()
     } else {
-        format!("{count} result{}", if count == 1 { "" } else { "s" })
+        format!("결과 {count}건")
     }
 }
 
@@ -138,13 +138,13 @@ pub fn SearchScreen() {
             ConnectionBanner();
             EmberField(FieldOptions {
                 fill_max_width: true,
-                placeholder: "Search conversations".to_string(),
+                placeholder: "세션 검색".to_string(),
                 on_value_change: Some(Box::new(on_change)),
                 ..Default::default()
             });
             if let Some(e) = &error_text {
                 Txt(
-                    &format!("Message search failed: {e}. Showing title matches only."),
+                    &format!("메시지 검색에 실패했습니다: {e}. 제목 일치만 보여줍니다."),
                     TypeRole::Caption,
                     Some(Paint::Role(ColorRole::Error)),
                     None,
@@ -203,12 +203,12 @@ mod tests {
 
     #[test]
     fn fr_l9_search_note_says_what_the_list_is_doing() {
-        assert!(search_note("", 0, false).starts_with("Type to search"));
-        assert_eq!(search_note("  ", 3, false).chars().next(), Some('T'));
-        assert_eq!(search_note("a", 0, true), "Searching\u{2026}");
-        assert_eq!(search_note("a", 0, false), "Nothing matches.");
-        assert_eq!(search_note("a", 1, false), "1 result");
-        assert_eq!(search_note("a", 2, false), "2 results");
+        assert!(search_note("", 0, false).starts_with("모든 대화"));
+        assert_eq!(search_note("  ", 3, false).chars().next(), Some('모'));
+        assert_eq!(search_note("a", 0, true), "검색 중\u{2026}");
+        assert_eq!(search_note("a", 0, false), "일치하는 항목이 없습니다.");
+        assert_eq!(search_note("a", 1, false), "결과 1건");
+        assert_eq!(search_note("a", 2, false), "결과 2건");
     }
 
     #[test]
@@ -235,7 +235,7 @@ mod tests {
                 matches!(m, Mutation::SetProp { value: PropertyValue::String(t), .. } if t.starts_with(want))
             })
         };
-        assert!(has("Search conversations"));
-        assert!(has("Type to search"));
+        assert!(has("세션 검색"));
+        assert!(has("모든 대화"));
     }
 }

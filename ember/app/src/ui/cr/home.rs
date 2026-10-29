@@ -118,22 +118,16 @@ pub fn fit_label(text: &str, max_px: f32, font_px: f32) -> String {
     format!("{out}\u{2026}")
 }
 
-/// Widths for chips whose natural widths do not all fit in `avail`: the widest are cut down to a
-/// common cap until the row fits (the mockup's `flex: 0 1 auto` chips), never below `min`.
+/// Widths for chips whose natural widths do not all fit in `avail`: every chip gives up the same
+/// share of its width (the mockup's `flex: 0 1 auto` chips shrink in proportion to their basis),
+/// never below `min`.
 pub fn shrink_widths(natural: &[f32], avail: f32, min: f32) -> Vec<f32> {
-    if natural.iter().sum::<f32>() <= avail {
+    let total: f32 = natural.iter().sum();
+    if total <= avail || total <= 0.0 {
         return natural.to_vec();
     }
-    let (mut lo, mut hi) = (min, natural.iter().cloned().fold(0.0, f32::max));
-    for _ in 0..24 {
-        let cap = (lo + hi) / 2.0;
-        if natural.iter().map(|w| w.min(cap)).sum::<f32>() > avail {
-            hi = cap;
-        } else {
-            lo = cap;
-        }
-    }
-    natural.iter().map(|w| w.min(lo).max(min.min(*w))).collect()
+    let k = avail / total;
+    natural.iter().map(|w| (w * k).max(min.min(*w))).collect()
 }
 
 /// A composer chip's natural width: the toolkit button's own padding and icon slot around the
@@ -465,6 +459,16 @@ impl Composer {
         })
     }
 
+    /// The name the main server's computer goes by (`이 서버` until the registry names it).
+    fn local_name(&self, ui: &SharedUi) -> String {
+        let _ = ui.live.launcher.get();
+        services()
+            .client
+            .read(|s| s.computers().iter().find(|c| c.id == "local").map(|c| c.name.clone()))
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "이 서버".to_string())
+    }
+
     fn send(&self, ui: &SharedUi) {
         let message = effective_message(&self.typed.get_untracked(), self.suggestion.get_untracked().as_deref());
         if !can_send(&message, self.busy.get_untracked()) {
@@ -584,7 +588,7 @@ impl Composer {
                 },
             );
         }
-        let mut labels = vec!["이 서버".to_string()];
+        let mut labels = vec![self.local_name(ui)];
         labels.extend(computers.iter().map(|(_, n)| n.clone()));
         {
             let (selection, list) = (self.selection.clone(), computers.clone());
@@ -776,6 +780,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let sendable = can_send(&message, c.busy.get());
     let placeholder = c.suggestion.get().unwrap_or_else(|| COMPOSER_PLACEHOLDER.to_string());
     let computer_text = crate::ui::home::computer_chip_text(sel.computer.as_deref(), &computers);
+    let computer_text = if sel.computer.is_none() { c.local_name(ui) } else { computer_text };
     let icon_only = l.compact;
     let pad = if l.compact { SP[2] } else { SP[3] };
     let gap = if l.compact { SP[0] } else { 6.0 };
@@ -814,7 +819,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         // TODO(compose-rust#372): the toolkit glyph is not the mockup's paper plane.
         cu::Button("")
             .icon(IconRole::Send)
-            .enabled(sendable)
+            // Always enabled so it stays `--ink`; an empty message is refused in `send`.
             .variant(ButtonVariant::Text)
             .color(paint(p.ink_text))
             .modifier(Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full))
@@ -893,6 +898,7 @@ fn Suggestions(c: &Composer, width_dp: f32) {
 // ---------------------------------------------------------------------------------------------
 
 fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
+    let week = services().client.read(|s| weekday_usage(s, now_ms()));
     let p = ember_theme().palette;
     let k = kpis(&d.counts, d.online, d.computers);
     cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -911,14 +917,17 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
         if skip.show(EST_TREND) {
             Weighted(stacked, GAP_CARD, vec![
                 (8.0, Box::new(|| TokenTrendTile(ui, chart_w)) as Part),
-                (4.0, Box::new(|| StatusTile(&d.counts, ui))),
+                (4.0, Box::new(|| StatusTile(&d.counts, ui, if l.wide { content_w * 4.0 / 12.0 } else { content_w }, l.compact))),
             ]);
         }
         if skip.show(EST_USAGE) {
             Weighted(stacked, GAP_CARD, vec![
-                (7.0, Box::new(|| HarnessTile(&d.harness))),
+                (7.0, Box::new(|| HarnessTile(&d.harness, &week, ui))),
                 (5.0, Box::new(|| CrewTile(&d.crew, d.online, d.computers, ui, content_w * 5.0 / 12.0))),
             ]);
+        }
+        if skip.show(EST_EFF) {
+            Unavailable(ICON_ZAP, "팀원별 효율");
         }
         // Three small tiles: in a row when wide, success beside wait up to 900, else stacked.
         if !skip.show(EST_SMALL) {
@@ -934,9 +943,6 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
                 (1.0, Box::new(|| Unavailable(ICON_CLOCK, "승인 대기 시간"))),
             ]);
             Unavailable(shell::ICON_CPU_SVG, "컴퓨터 부하");
-        }
-        if skip.show(EST_EFF) {
-            Unavailable(ICON_ZAP, "팀원별 효율");
         }
         ProjectsTile(&d.projects, ui, l);
     });
@@ -967,7 +973,7 @@ fn KpiCell(kpi: &Kpi, tone: PillTone, rule: bool) {
             if kpi.available {
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                     // The unit hugs the number (`small{margin-left:2px}`).
-                    cu::Row().spacing(2.0).alignment(Alignment::CenterStart).content(|| {
+                    cu::Row().spacing(0.0).alignment(Alignment::CenterStart).content(|| {
                         Label(&kpi.value, Fs::Xl2, Weight::Regular, None, Some(1));
                         if !kpi.unit.is_empty() {
                             Label(kpi.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
@@ -1049,7 +1055,7 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
 }
 
 /// 팀원 상태 (`.hm-status`): the waiting alert, four coloured blocks sized by count, a legend.
-fn StatusTile(c: &StatusCounts, ui: &SharedUi) {
+fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
     let p = ember_theme().palette;
     let parts = [
         ("실행", c.running, p.blue.strong),
@@ -1073,10 +1079,26 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi) {
                 Pill(&format!("실패 {}", c.failed), if c.failed > 0 { PillTone::Red } else { PillTone::Green }, true);
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             });
-        cu::Row().spacing(6.0).modifier(Modifier::new().fill_max_width().height(104.0)).content(|| {
-            for (_, n, color) in parts {
-                // TODO(compose-rust): the blocks' diagonal stripe overlay.
-                cu::Spacer().modifier(Modifier::new().weight((n as f32).max(0.6)).height(104.0).background(paint(color)).corner_radius(CORNER_MD));
+        // `.hm-blocks`: coloured blocks sized by count, each with the 18 % white stripes. The
+        // stripes are a canvas at the block's estimated width (the card's inner width shared by
+        // the weights); TODO(compose-rust#385 family): a stripe fill that follows its box.
+        let bh = if compact { 88.0 } else { 116.0 };
+        let weights: Vec<f32> = parts.iter().map(|(_, n, _)| (*n as f32).max(0.6)).collect();
+        let sum: f32 = weights.iter().sum();
+        let inner = (tile_w - 2.0 * PAD_CARD_H - 3.0 * 6.0).max(60.0);
+        cu::Row().spacing(6.0).modifier(Modifier::new().fill_max_width().height(bh)).content(|| {
+            for ((_, _, color), wt) in parts.iter().zip(weights.iter()) {
+                let w = inner * wt / sum;
+                cu::Box()
+                    .modifier(Modifier::new().weight(*wt).height(bh).background(paint(*color)).corner_radius(CORNER_MD))
+                    .content(|| {
+                        let stripe = paint(compose_rust::Color::argb(0x2eff_ffff));
+                        let mut list = DrawList::builder();
+                        for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, (w - 2.0).max(1.0), bh, 7.0) {
+                            list = list.line(stripe, x1, y1, x2, y2, 1.0);
+                        }
+                        cu::Canvas(list.build()).modifier(Modifier::new().size((w - 2.0).max(1.0), bh));
+                    });
             }
         });
         Cols(2, SP[2], parts.iter().map(|(label, n, color)| -> Part {
@@ -1092,30 +1114,121 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi) {
     });
 }
 
-/// 하네스별 사용량: bars of sessions per harness (a count, not tokens).
-fn HarnessTile(bars: &[HarnessBar]) {
+/// One day of the usage bars: its weekday and the sessions touched that day per harness
+/// (Claude Code, Codex, Gemini).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeekDay {
+    pub label: &'static str,
+    pub counts: [usize; 3],
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The last seven UTC days ending at `now_ms`, oldest first, with the sessions last updated on
+/// each day per harness. A session count, not tokens (TODO(server, FR-U7): token usage).
+pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
+    const DAY: i64 = 86_400_000;
+    let today = now_ms.div_euclid(DAY);
+    let names = ["일", "월", "화", "수", "목", "금", "토"];
+    let mut days: Vec<WeekDay> = (0..7)
+        .map(|i| WeekDay { label: names[((today - 6 + i + 4).rem_euclid(7)) as usize], counts: [0; 3] })
+        .collect();
+    for p in state.projects() {
+        for id in &p.sessions {
+            let Some(v) = state.session(id).filter(|v| !v.record.archived) else { continue };
+            let age = today - v.record.updated_at.div_euclid(DAY);
+            if !(0..7).contains(&age) {
+                continue;
+            }
+            let Some(h) = Harness::from_kind(&v.record.agent) else { continue };
+            let i = Harness::ALL.iter().position(|x| *x == h).unwrap_or(0);
+            days[(6 - age) as usize].counts[i] += 1;
+        }
+    }
+    days
+}
+
+/// 하네스별 사용량 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
+/// bars per harness, one ring per harness with its share, and a "자세히" button to 에이전트.
+fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
     let p = ember_theme().palette;
+    let colors = [p.orange.strong, p.blue.strong, p.sky.strong];
+    let totals: Vec<u64> = week.iter().map(|d| d.counts.iter().sum::<usize>() as u64).collect();
+    let today = totals.last().copied().unwrap_or(0);
+    let all: u64 = totals.iter().sum();
+    const H: f32 = 100.0;
+    let heights = bar_heights(&totals, H);
     Tile(|| {
-        CardHead(ICON_CHART, "하네스별 사용량", || {});
+        CardHead(ICON_CHART, "하네스별 사용량", || {
+            let u = ui.clone();
+            AppButton("자세히", None, ButtonKind::Default, true, true, false, move || shell::choose(&u, NavMenu::Agents));
+        });
         if bars.is_empty() {
             Label(EMPTY_HARNESS_USAGE, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             return;
         }
-        let values: Vec<u64> = bars.iter().map(|b| b.sessions as u64).collect();
-        let heights = bar_heights(&values, 100.0);
-        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (b, h) in bars.iter().zip(heights.iter()) {
-                cu::Column().alignment(Alignment::Center).spacing(SP[0]).modifier(Modifier::new().weight(1.0)).content(|| {
-                    cu::Column().modifier(Modifier::new().fill_max_width().height(100.0)).content(|| {
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        cu::Spacer().modifier(Modifier::new().fill_max_width().height(*h).background(paint(p.blue.strong)).corner_radius(CORNER_XS));
-                    });
-                    Label(&b.sessions.to_string(), Fs::Sm, Weight::Medium, None, None);
-                    Label(&b.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        cu::Row().spacing(SP[5]).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (label, v) in [("오늘 세션", today), ("7일 합계", all)] {
+                cu::Column().content(|| {
+                    Label(label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label(&v.to_string(), Fs::Xl2, Weight::Regular, None, Some(1));
                 });
             }
         });
-        Label("세션 수 기준입니다. 토큰 사용량은 준비 중입니다", Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
+        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
+                cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                    Dot(*color);
+                    Label(h.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                });
+            }
+        });
+        // Stacked bars: each day's column is split by harness; the stack's height follows the day's total.
+        cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width().height(H)).content(|| {
+            for (day, total_h) in week.iter().zip(heights.iter()) {
+                cu::Column().modifier(Modifier::new().weight(1.0).height(H)).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    let n: usize = day.counts.iter().sum();
+                    for (count, color) in day.counts.iter().zip(colors.iter()).rev() {
+                        if *count > 0 && n > 0 {
+                            let h = total_h * *count as f32 / n as f32;
+                            cu::Spacer().modifier(Modifier::new().fill_max_width().height(h).background(paint(*color)).corner_radius(CORNER_2XS));
+                        }
+                    }
+                });
+            }
+        });
+        cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (i, day) in week.iter().enumerate() {
+                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0)).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    let today = i + 1 == week.len();
+                    Label(day.label, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                });
+            }
+        });
+        // `.hm-rings`: one 52 px ring per harness with its share of the sessions.
+        // TODO(server, FR-U7): rings per account with their usage share.
+        let total: usize = bars.iter().map(|b| b.sessions).sum::<usize>().max(1);
+        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
+                let n = bars.iter().find(|b| b.label == h.label()).map(|b| b.sessions).unwrap_or(0);
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0)).content(|| {
+                    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(52.0, 52.0)).content(|| {
+                        ring_image(52.0, 6.0, &[(color.to_argb(), n as f32 / total as f32)]);
+                        Label(&n.to_string(), Fs::Sm, Weight::Semibold, None, None);
+                    });
+                    Label(h.label(), Fs::Xs, Weight::Medium, None, Some(1));
+                });
+            }
+        });
     });
 }
 
@@ -1191,6 +1304,23 @@ fn SuccessTile(c: &StatusCounts) {
     });
 }
 
+/// The first `max` sessions of a project as (agent, status, title), for the tile's robot row.
+pub fn project_members(state: &ember_client::State, project: &str, max: usize) -> Vec<(String, ember_client::LauncherStatus, String)> {
+    state
+        .projects()
+        .into_iter()
+        .find(|p| p.name == project)
+        .map(|p| {
+            p.sessions
+                .iter()
+                .filter_map(|id| state.session(id).filter(|v| !v.record.archived))
+                .take(max)
+                .map(|v| (v.record.agent.clone(), v.status, v.record.title.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 프로젝트 (`.b-proj`): each project as a tile that opens it in 프로젝트.
 fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
     let p = ember_theme().palette;
@@ -1234,7 +1364,13 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                                 Label(&crate::ui::project::display_name(&t.name), Fs::Md, Weight::Semibold, None, Some(1));
-                                Label(&project_tile_line(t), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                // `.botrow`: up to five 20 px team members in their state.
+                                let members = services().client.read(|s| project_members(s, &t.name, 5));
+                                cu::Row().spacing(2.0).alignment(Alignment::CenterStart).content(|| {
+                                    for (agent, status, title) in members.iter() {
+                                        super::characters::Character(agent, false, 20.0, title, &t.name, super::characters::CharState::from_status(*status), None);
+                                    }
+                                });
                             });
                         });
                     },
@@ -1275,9 +1411,9 @@ mod tests {
         let nat = [150.0, 300.0, 120.0, 90.0];
         let w = shrink_widths(&nat, 480.0, 56.0);
         assert!(w.iter().sum::<f32>() <= 480.5, "{w:?}");
-        // Water-filling: the widest are capped to one width (135 here), the short ones keep theirs.
-        assert!((w[0] - 135.0).abs() < 0.5 && (w[1] - 135.0).abs() < 0.5, "{w:?}");
-        assert_eq!((w[2], w[3]), (120.0, 90.0));
+        // Proportional: every chip keeps 480/660 of its width.
+        assert!((w[0] - 109.1).abs() < 0.2 && (w[1] - 218.2).abs() < 0.2, "{w:?}");
+        assert!((w[3] - 65.5).abs() < 0.2, "{w:?}");
         assert_eq!(shrink_widths(&nat, 1000.0, 56.0), nat.to_vec());
         let cut = fit_label("Claude Code · Opus 5.5 · High", 120.0, 13.0);
         assert!(cut.ends_with('\u{2026}') && text_px(&cut, 13.0) <= 120.0, "{cut}");
@@ -1296,6 +1432,16 @@ mod tests {
         let svg = hero_bot_svg("codex", "run", 40.0, &LIGHT);
         assert!(svg.contains("#3f74d4") && svg.contains("width=\"40\""));
         assert!(hero_bot_svg("gemini", "wait", 32.0, &DARK).contains("#8fb1df"));
+    }
+
+    #[test]
+    fn fr_l23_the_week_has_seven_days_ending_today() {
+        let _guard = crate::services::test_guard();
+        let days = services().client.read(|s| weekday_usage(s, 1_761_350_400_000));
+        assert_eq!(days.len(), 7);
+        // 2025-10-25 is a Saturday.
+        assert_eq!(days.last().map(|d| d.label), Some("토"));
+        assert_eq!(days[0].label, "일");
     }
 
     #[test]

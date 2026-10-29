@@ -15,16 +15,18 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, IconRole, SpaceRole};
 
 pub use crate::ui::channels::{
-    badge_text, bubble_side, compact_shows_room, feed, filter_chips, group_rooms, rooms_snapshot,
+    bubble_side, compact_shows_room, feed, filter_chips, group_rooms, rooms_snapshot,
     split_view, time_label, BubbleView, FeedItem, ListFilter, Member, Message, Room, RoomRow,
     Section, Side,
 };
 use super::components::{
-    pill_colors, AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, Label, PickChip, Pill,
-    PillTone,
+    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone,
 };
 use super::theme::*;
 use crate::ui::project::{display_name, harness_tone, SOON};
+
+/// The list panel's width at the mockup's 1440 window.
+const LIST_W: f32 = 235.0;
 
 /// The local zone's offset in seconds. TODO: read the device zone; UTC until the app can.
 fn local_tz() -> i64 {
@@ -47,39 +49,37 @@ pub fn Avatar(name: &str, harness: &str, size: f32) {
         .content(|| Label(&initial, Fs::Sm, Weight::Semibold, Some(paint(fg)), None));
 }
 
-/// The room picture for the list: a row of up to three member pictures.
-/// TODO(channel icons): each channel gets its own animated mark (`channels.js` roomIcon).
-pub fn AvatarStack(members: &[Member], size: f32) {
-    cu::Row().content(|| {
-        for m in members.iter().take(3) {
-            Avatar(&m.name, &m.harness, size);
-        }
-    });
-}
-
-/// The screen with no data: the server has no channels yet.
+/// The screen with no data: the server has no channels yet. With `EMBER_CR_ROUTE=channels` the
+/// sample rooms stand in, for review captures.
 pub fn ChannelsScreen() {
-    ChannelsScreenWith(rooms_snapshot());
+    let rooms = if std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("channels") {
+        sample_rooms()
+    } else {
+        rooms_snapshot()
+    };
+    ChannelsScreenWith(rooms);
 }
 
 pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     let p = ember_theme().palette;
     let filter = remember(|| mutable_state_of(ListFilter::default()));
-    let open = remember(|| mutable_state_of(None::<String>));
+    // `EMBER_CR_ROOM=<index>` opens a room at the start, for review captures.
+    let open = remember(|| {
+        let index = std::env::var("EMBER_CR_ROOM").ok().and_then(|v| v.parse::<usize>().ok());
+        mutable_state_of(index.and_then(|i| rooms.get(i)).map(|r| r.id.clone()))
+    });
     let window = compose_rust::runtime::current_window_size();
     let split = split_view(window.class);
     let cur = open.get();
     let show_room = compact_shows_room(&cur);
 
     if rooms.is_empty() {
-        cu::Column()
-            .alignment(Alignment::Center)
-            .space_role(SpaceRole::Sm)
-            .modifier(Modifier::new().fill_max_width().fill_max_height())
-            .content(|| {
+        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+            cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
                 Label("채널", Fs::Xl3, Weight::Medium, None, None);
                 Label(SOON, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             });
+        });
         return;
     }
 
@@ -92,7 +92,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
             RoomView(&r, !split, move || back.set(None));
         }
         None => {
-            cu::Column()
+            cu::Box()
                 .alignment(Alignment::Center)
                 .modifier(Modifier::new().fill_max_width().fill_max_height())
                 .content(|| Label("채널을 선택하십시오", Fs::Md, Weight::Regular, Some(paint(p.muted)), None));
@@ -100,7 +100,8 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     };
     if split {
         cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().modifier(Modifier::new().width(340.0).fill_max_height()).content(list);
+            cu::Column().modifier(Modifier::new().width(LIST_W).fill_max_height()).content(list);
+            cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(detail);
         });
     } else if show_room {
@@ -116,12 +117,33 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
     let sections = group_rooms(rooms, order, &current);
     let chips = filter_chips(rooms, order);
     let selected = open.get();
-    cu::Column()
-        .space_role(SpaceRole::Sm)
-        .modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2]))
-        .content(|| {
-            Label("채널", Fs::Xl2, Weight::Semibold, None, None);
-            // TODO(compose-rust#374): TextField is uncontrolled and has no initial value.
+    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+        // Header: the title at 15 px and a round "+" (new channel, FR-T10 not built).
+        cu::Row()
+            .alignment(Alignment::CenterStart)
+            .modifier(Modifier::new().fill_max_width().height(56.0))
+            .content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                Label("채널", Fs::Lg, Weight::Semibold, None, None);
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                // TODO(FR-T10): creates a channel; disabled until the server has them.
+                cu::Box()
+                    .alignment(Alignment::Center)
+                    .modifier(
+                        Modifier::new()
+                            .size(H_CTL, H_CTL)
+                            .background(paint(p.surface))
+                            .border(1.0, paint(p.line))
+                            .shape_role(compose_rust::ShapeRole::Full)
+                            .alpha(0.4),
+                    )
+                    .content(|| super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0));
+                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+            });
+        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+        cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2])).content(|| {
+            // TODO(compose-rust#376, #374): the field frame and the leading magnifier; the
+            // field is uncontrolled and has no initial value.
             let query = filter.clone();
             EmberField(FieldOptions {
                 fill_max_width: true,
@@ -133,11 +155,11 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 })),
                 ..Default::default()
             });
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(48.0)).content(|| {
+            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_PILL + SP[0])).content(|| {
                 for c in chips.iter() {
                     let (filter, c2) = (filter.clone(), c.clone());
                     let text = c.as_ref().map(|x| display_name(x)).unwrap_or_else(|| "전체".to_string());
-                    PickChip(&text, None, *c == current.project, false, move || {
+                    FilterChip(&text, *c == current.project, move || {
                         let mut f = filter.get_untracked();
                         f.project = c2.clone();
                         filter.set(f);
@@ -146,40 +168,37 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 }
             });
             cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
-                cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
-                    if sections.is_empty() {
-                        Label("채널이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
-                    }
+                if sections.is_empty() {
+                    Label("채널이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                }
+                // The mockup list is flat, one row per room, newest first; the project is a chip.
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
                     for s in sections.iter() {
-                        SectionView(s, rooms, selected.as_deref(), open);
+                        for r in s.rooms.iter() {
+                            let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
+                            RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open);
+                        }
                     }
                 });
             });
         });
+    });
 }
 
-fn SectionView(section: &Section, rooms: &[Room], selected: Option<&str>, open: &MutableState<Option<String>>) {
+/// The room's mark: a 40 px rounded tile in the project's colour family with a hash glyph.
+/// TODO(channel icons): each channel gets its own animated mark (`channels.js` roomIcon).
+fn RoomIcon(project: &str, size: f32) {
     let p = ember_theme().palette;
-    let unread = section.unread();
-    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
-        Label(&display_name(&section.project), Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), None);
-        cu::Spacer().modifier(Modifier::new().weight(1.0));
-        if let Some(b) = badge_text(unread) {
-            Pill(&b, PillTone::Red, true);
-        }
-    });
-    EmberCard(false, true, None, Some(SP[1]), None, || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-            for r in section.rooms.iter() {
-                let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
-                RoomItem(r, &members, selected == Some(r.id.as_str()), open);
-            }
-        });
-    });
+    let tones = [p.blue, p.orange, p.green, p.sky, p.red];
+    let a = tones[(crate::ui::characters::seed_hash(project) as usize) % tones.len()];
+    cu::Box()
+        .alignment(Alignment::Center)
+        .modifier(Modifier::new().size(size, size).background(paint(a.soft)).corner_radius(CORNER_MD))
+        .content(|| super::shell::NavIcon(super::shell::ICON_HASH_SVG, a.strong.to_argb(), size * 0.5));
 }
 
 /// One room in the list. TODO(compose-rust#372): the row is a pointer-up `Clickable`.
-fn RoomItem(row: &RoomRow, members: &[Member], selected: bool, open: &MutableState<Option<String>>) {
+fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, open: &MutableState<Option<String>>) {
     let p = ember_theme().palette;
     let time = row.last_at.map(|t| time_label(t, local_tz())).unwrap_or_default();
     let (open, id) = (open.clone(), row.id.clone());
@@ -190,16 +209,19 @@ fn RoomItem(row: &RoomRow, members: &[Member], selected: bool, open: &MutableSta
         move || open.set(Some(id.clone())),
         || {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                AvatarStack(members, 28.0);
+                RoomIcon(project, 40.0);
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label(&format!("{}  {}", row.name, row.member_count), Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
+                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
+                        Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
+                        Label(&row.member_count.to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    });
                     let last = if row.last_text.is_empty() { "메시지가 없습니다".to_string() } else { row.last_text.clone() };
-                    Label(&last, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    Label(&last, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 cu::Column().alignment(Alignment::CenterEnd).content(|| {
                     Label(&time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    if let Some(b) = badge_text(row.unread) {
-                        Pill(&b, PillTone::Red, true);
+                    if row.unread > 0 {
+                        super::shell::RedBadge(row.unread as usize);
                     }
                 });
             });

@@ -756,6 +756,20 @@ pub fn EmberSheet(
     actions: Option<&mut dyn FnMut()>,
     content: impl FnOnce(),
 ) {
+    EmberSheetSized(title, open, 560.0, on_dismiss, actions, content);
+}
+
+/// [`EmberSheet`] with the dialog's width (`min(560px, 100%)` for most sheets, `min(1360px,
+/// 100%)` for the computer monitor). Without a width the dialog takes the whole window,
+/// because its content asks for the full width.
+pub fn EmberSheetSized(
+    title: &str,
+    open: bool,
+    width: f32,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    actions: Option<&mut dyn FnMut()>,
+    content: impl FnOnce(),
+) {
     let theme = ember_theme();
     let modifier = Modifier::new()
         .background(paint(theme.palette.surface))
@@ -776,12 +790,28 @@ pub fn EmberSheet(
             .on_dismiss(on_dismiss.clone())
             .content(body);
     } else {
-        // The mockup's centered modal: `min(560px, 100%)` wide. Without a width the dialog
-        // takes the whole window, because its content asks for the full width.
-        cu::Dialog(open).modifier(modifier.width(560.0)).on_dismiss(on_dismiss).content(body);
+        cu::Dialog(open).modifier(modifier.width(width)).on_dismiss(on_dismiss).content(body);
     }
 }
 
+/// A filter chip (`.chip`): 24 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
+/// TODO(compose-rust#372): a pointer-up `Clickable`.
+pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (bg, ink) = if selected { (p.ink, p.ink_text) } else { (p.surface_2, p.text_2) };
+    Clickable(
+        Modifier::new().height(H_PILL).background(paint(bg)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                Label(text, Fs::Xs, Weight::Medium, Some(paint(ink)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+        },
+    );
+}
 
 #[cfg(test)]
 mod tests {

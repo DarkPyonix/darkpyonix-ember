@@ -605,6 +605,8 @@ pub fn shell() {
                     super::search::SearchScreen();
                 } else if matches!(screen, Screen::Channels) {
                     super::channels::ChannelsScreen();
+                } else if matches!(screen, Screen::Home) {
+                    super::home::HomeScreen();
                 } else {
                     let menu = match &screen {
                         Screen::Conversation(_) => NavMenu::Sessions,
@@ -728,6 +730,10 @@ pub fn launch(pref: ThemePref) {
         Some("monitor") => super::monitor::preview,
         Some("channels") => {
             ui.set_menu(NavMenu::Channels);
+            shell
+        }
+        Some("home") => {
+            ui.set_menu(NavMenu::Home);
             shell
         }
         _ => shell,

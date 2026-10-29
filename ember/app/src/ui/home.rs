@@ -1343,16 +1343,16 @@ fn ModelRow(
 // ---------------------------------------------------------------------------------------------
 
 /// Everything the dashboard reads from the client in one pass.
-struct Dash {
-    counts: StatusCounts,
-    online: usize,
-    computers: usize,
-    harness: Vec<HarnessBar>,
-    crew: Vec<CrewMember>,
-    projects: Vec<ProjectTile>,
+pub struct Dash {
+    pub counts: StatusCounts,
+    pub online: usize,
+    pub computers: usize,
+    pub harness: Vec<HarnessBar>,
+    pub crew: Vec<CrewMember>,
+    pub projects: Vec<ProjectTile>,
 }
 
-fn read_dash(state: &State) -> Dash {
+pub fn read_dash(state: &State) -> Dash {
     let (online, computers) = computers_online(state);
     Dash {
         counts: status_counts(state),

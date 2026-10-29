@@ -15,3 +15,4 @@ pub mod ko;
 pub mod characters;
 pub mod monitor;
 pub mod channels;
+pub mod home;

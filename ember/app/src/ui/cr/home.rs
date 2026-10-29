@@ -36,7 +36,7 @@ use crate::services::{run_shared, services};
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::shell::{NavMenu, ShellMode, DEMO_USER};
 
-type Part<'a> = Box<dyn FnOnce() + 'a>;
+pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
 /// The width of the option popups of the composer's chips.
 const POPUP_WIDTH: f32 = 280.0;
@@ -185,7 +185,7 @@ pub fn suggestion_cols(width_dp: f32) -> usize {
 }
 
 /// The width the main column has: the window minus the navigation and the page padding.
-fn content_width(window_dp: f32, pad: f32) -> f32 {
+pub fn content_width(window_dp: f32, pad: f32) -> f32 {
     let nav = match shell::current_mode(false) {
         ShellMode::BottomTabs => 0.0,
         ShellMode::Rail => RAIL_W,
@@ -266,7 +266,7 @@ pub fn note_tone(index: usize, counts: &StatusCounts) -> PillTone {
 // Small pieces
 // ---------------------------------------------------------------------------------------------
 
-fn ring_image(size: f32, stroke: f32, parts: &[(u32, f32)]) {
+pub fn ring_image(size: f32, stroke: f32, parts: &[(u32, f32)]) {
     let p = ember_theme().palette;
     let doc = ring_svg(size, stroke, p.track.to_argb(), parts);
     cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, shell::leak_doc(doc)))
@@ -274,7 +274,7 @@ fn ring_image(size: f32, stroke: f32, parts: &[(u32, f32)]) {
 }
 
 /// `n` equal columns of `items`, `gap` apart; the last line is padded with empty columns.
-fn Cols(n: usize, gap: f32, items: Vec<Part<'_>>) {
+pub fn Cols(n: usize, gap: f32, items: Vec<Part<'_>>) {
     let n = n.max(1);
     cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
         let mut it = items.into_iter().peekable();
@@ -311,7 +311,7 @@ fn Weighted(stacked: bool, gap: f32, parts: Vec<(f32, Part<'_>)>) {
 }
 
 /// A dashboard tile: a card with its content in a column.
-fn Tile(content: impl FnOnce()) {
+pub fn Tile(content: impl FnOnce()) {
     TileH(None, content);
 }
 
@@ -329,7 +329,7 @@ fn TileH(height: Option<f32>, content: impl FnOnce()) {
 }
 
 /// `.hm-ch`: the 30 px outlined icon, the title, and what goes at the right.
-fn CardHead(icon: &'static str, title: &str, trailing: impl FnOnce()) {
+pub fn CardHead(icon: &'static str, title: &str, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(30.0)).content(|| {
         cu::Box()
@@ -354,7 +354,7 @@ fn GoButton(on_click: impl FnMut() + 'static) {
     );
 }
 
-fn Dot(color: compose_rust::Color) {
+pub fn Dot(color: compose_rust::Color) {
     cu::Spacer().modifier(Modifier::new().size(8.0, 8.0).background(paint(color)).shape_role(ShapeRole::Full));
 }
 

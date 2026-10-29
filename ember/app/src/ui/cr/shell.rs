@@ -302,7 +302,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let side = if rail { 0.0 } else { SP[2] };
     // Spacers include the column's 2 px gap on either side.
     let top = if rail { 14.0 } else { SP[4] };
-    let below_brand = if rail { 10.0 } else { 24.0 };
+    let below_brand = if rail { 10.0 } else { 20.0 };
     let bottom = if rail { 26.0 } else { 30.0 };
     cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
         cu::Column()

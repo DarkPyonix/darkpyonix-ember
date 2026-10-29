@@ -386,7 +386,14 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                                 .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
                                 .on_click(open);
                         } else {
-                            AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
+                            // The mockup's 보내기 is 96 px wide; `AppButton` estimates wider.
+                            let p = ember_theme().palette;
+                            cu::Button("보내기")
+                                .icon(IconRole::Send)
+                                .variant(ButtonVariant::Text)
+                                .color(paint(p.ink_text))
+                                .modifier(Modifier::new().width(96.0).height(H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
+                                .on_click(open);
                         }
                     });
                     Cols(
@@ -956,7 +963,7 @@ fn TransferRow(t: &Transfer, devices: &[Device]) {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                 Label(&format!("{} / {}", format_bytes(t.done), format_bytes(t.total)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                Label(&progress_line(t), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                Label(&fit_label(&progress_line(t), 230.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
             for action in user_actions(t.state).iter().copied() {
                 let id = t.id.clone();
@@ -975,8 +982,6 @@ fn TransferRow(t: &Transfer, devices: &[Device]) {
             NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
             Label(&route_line(path), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
-        // The measured item pitch is 157; the toolkit's line boxes leave it about 5 short.
-        cu::Spacer().modifier(Modifier::new().height(5.0));
     });
 }
 

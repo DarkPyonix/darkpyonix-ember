@@ -36,6 +36,8 @@ pub struct Services {
     pub outbox: Arc<Mutex<Outbox>>,
     /// Prefs as read from disk at start-up; the UI owns them from then on.
     pub initial_prefs: crate::prefs::Prefs,
+    /// Shared UI and live state for `compose-rust` composables (#220).
+    pub ui: crate::ui::coexist::SharedUi,
     /// The UI's sync signals, set when the root component mounts (see [`crate::bridge`]).
     pub live: OnceLock<crate::bridge::Live>,
 }
@@ -52,6 +54,11 @@ pub fn install(s: Services) -> &'static Services {
 
 pub fn services() -> &'static Services {
     SERVICES.get().expect("ember-app services are installed before the UI starts")
+}
+
+/// Returns `Some` when [`install`] has run, or `None` in isolated unit tests.
+pub fn try_services() -> Option<&'static Services> {
+    SERVICES.get()
 }
 
 impl Services {
@@ -173,6 +180,7 @@ impl Services {
 
     /// Tell the UI the outbox changed (queued-message indicator).
     pub fn bump_outbox(&self) {
+        crate::ui::coexist::SharedLive::bump(&self.ui.live.outbox);
         if let Some(live) = self.live.get() {
             let mut sig = live.outbox;
             *sig.write() += 1;
@@ -193,6 +201,19 @@ where
             Ok(v) => then(v),
             Err(e) => show_message(format!("Background task failed: {e}")),
         }
+    });
+}
+
+/// Like [`run`], for `compose-rust` composables and handlers that do not sit inside a Dioxus
+/// scope (#220). `then` runs on the tokio worker and may write [`compose_rust::MutableState`]s
+/// or [`crate::ui::coexist::SharedUi`] fields, which automatically request a frame.
+pub fn run_shared<T, F>(work: F, then: impl FnOnce(T) + Send + 'static)
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    services().rt.spawn(async move {
+        then(work.await);
     });
 }
 

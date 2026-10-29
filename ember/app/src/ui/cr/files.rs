@@ -842,12 +842,13 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
             });
     };
     if compact {
-        // Above the floating tab bar, not over it: a column that pushes the card to the bottom
+        // Above the tab bar, not over it: a column that pushes the card to the bottom
         // (`Alignment` is not relied on for a bottom placement).
         cu::Column().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             card();
-            cu::Spacer().modifier(Modifier::new().height(TABBAR_H + TABBAR_BOTTOM_GAP + SP[1]));
+            // The shell lays the tab bar out below the content, so only a small gap.
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
         });
     } else {
         cu::Box().alignment(Alignment::TopEnd).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[5])).content(card);

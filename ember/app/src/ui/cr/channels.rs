@@ -25,6 +25,11 @@ use super::components::{
 use super::theme::*;
 use crate::ui::project::{display_name, harness_tone, SOON};
 
+/// The shell's "a detail view is open" flag; `None` in unit tests without services.
+fn detail_state() -> Option<MutableState<bool>> {
+    crate::services::try_services().map(|s| s.ui.detail_open.clone())
+}
+
 /// The list panel's width (`.split`): 340 above 1279 dp, 280 up to 1279, 260 up to 900.
 pub fn list_width(width_dp: f32) -> f32 {
     if width_dp > 1279.0 {
@@ -74,7 +79,11 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     // `EMBER_CR_ROOM=<index>` opens a room at the start, for review captures.
     let open = remember(|| {
         let index = std::env::var("EMBER_CR_ROOM").ok().and_then(|v| v.parse::<usize>().ok());
-        mutable_state_of(index.and_then(|i| rooms.get(i)).map(|r| r.id.clone()))
+        let id = index.and_then(|i| rooms.get(i)).map(|r| r.id.clone());
+        if let (Some(d), true) = (detail_state(), id.is_some()) {
+            d.set(true);
+        }
+        mutable_state_of(id)
     });
     let window = compose_rust::runtime::current_window_size();
     let split = split_view(window.class);
@@ -97,9 +106,11 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
-            let detail = crate::ui::coexist::shared_ui().detail_open.clone();
+            let detail = detail_state();
             RoomView(&r, !split, move || {
-                detail.set(false);
+                if let Some(d) = &detail {
+                    d.set(false);
+                }
                 back.set(None);
             });
         }
@@ -217,13 +228,15 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
     let p = ember_theme().palette;
     let time = row.last_at.map(|t| time_label(t, local_tz())).unwrap_or_default();
     let (open, id) = (open.clone(), row.id.clone());
-    let detail = crate::ui::coexist::shared_ui().detail_open.clone();
+    let detail = detail_state();
     let fill = if selected { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
     super::components::Clickable(
         Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(SP[1]),
         Alignment::CenterStart,
         move || {
-            detail.set(true);
+            if let Some(d) = &detail {
+                d.set(true);
+            }
             open.set(Some(id.clone()));
         },
         || {

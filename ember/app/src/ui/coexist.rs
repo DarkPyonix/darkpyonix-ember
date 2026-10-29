@@ -119,6 +119,9 @@ pub struct SharedUi {
     pub theme_pref: MutableState<ThemePref>,
     /// The latest message for the user, posted from any thread (see `cr::notice`).
     pub notice: MutableState<Option<(u64, String)>>,
+    /// A phone screen shows a detail view (an open room): the shell hides its top-right menu
+    /// there (`body.view-detail .phonemenu { display: none }`).
+    pub detail_open: MutableState<bool>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -137,6 +140,7 @@ impl SharedUi {
             editor: mutable_state_of(None),
             theme_pref: mutable_state_of(theme),
             notice: mutable_state_of(None),
+            detail_open: mutable_state_of(false),
             mirrors: Arc::new(OnceLock::new()),
         }
     }

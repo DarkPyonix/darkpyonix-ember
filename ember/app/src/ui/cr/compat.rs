@@ -33,7 +33,7 @@ pub fn tone_colors(tone: Tone, p: &Palette) -> (Color, Color) {
 }
 
 /// `a` moved `t` of the way to `b`, opaque.
-fn mix(a: Color, b: Color, t: f32) -> Color {
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
     let (a, b) = (a.to_argb(), b.to_argb());
     let ch = |shift: u32| {
         let (x, y) = (((a >> shift) & 0xff) as f32, ((b >> shift) & 0xff) as f32);

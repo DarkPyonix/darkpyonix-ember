@@ -314,10 +314,11 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
 /// the bar has no `--shadow-lg`.
 fn InputBar() {
     let p = ember_theme().palette;
-    let width = (compose_rust::runtime::current_window_size().width_dp - 32.0).clamp(240.0, 740.0);
-    // The room's own width is not known here, so the bar is sized from the window and kept
-    // inside the room by the centering row.
-    let width = width.min(compose_rust::runtime::current_window_size().width_dp - 32.0 - 235.0).max(240.0);
+    // The room's own width is not known here, so it is the window less the sidebar's rail share,
+    // the list panel and the margins, kept to 740 at most.
+    let window = compose_rust::runtime::current_window_size().width_dp;
+    let room_w = if window > 900.0 { window - list_width(window) - 1.0 - 234.0 } else { window };
+    let width = (room_w - 32.0).clamp(240.0, 740.0);
     cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
         cu::Spacer().modifier(Modifier::new().weight(1.0));
         cu::Row()
@@ -332,7 +333,7 @@ fn InputBar() {
                     .shape_role(compose_rust::ShapeRole::Full),
             )
             .content(|| {
-                cu::Spacer().modifier(Modifier::new().width(6.0 - 8.0 + 8.0));
+                cu::Spacer().modifier(Modifier::new().width(6.0));
                 for svg in [super::shell::ICON_PLUS_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)

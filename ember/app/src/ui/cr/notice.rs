@@ -31,3 +31,24 @@ pub fn NoticeHost() {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compose_rust::protocol::decode_batch;
+    use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_l9_a_notice_posted_from_a_worker_thread_is_shown_on_the_ui_thread() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(NoticeHost)));
+        decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        std::thread::spawn(|| post("Export failed: disk full")).join().expect("worker");
+        let mut shown = String::new();
+        for _ in 0..4 {
+            let batch = decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode");
+            shown.extend(batch.iter().map(|m| format!("{m:?}")));
+        }
+        assert!(shown.contains("Export failed: disk full"), "{shown}");
+    }
+}

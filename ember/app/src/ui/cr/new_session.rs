@@ -43,6 +43,35 @@ pub fn NewSessionDialog() {
     }
 }
 
+/// Whether Start is enabled: not already starting, and a project, a folder and an agent chosen.
+pub fn can_start(busy: bool, project: &str, cwd: &str, agent: &str) -> bool {
+    !busy && !project.is_empty() && !cwd.is_empty() && !agent.is_empty()
+}
+
+/// The request for the server and the combination to remember for the project (FR-L8).
+pub fn build_request(
+    project: &str,
+    agent: &str,
+    cwd: &str,
+    model: &str,
+    title: &str,
+    account: Option<String>,
+    computer: Option<String>,
+) -> (CreateSession, LastUsed) {
+    let model = (!model.is_empty()).then(|| model.to_string());
+    let title = title.trim();
+    let body = CreateSession {
+        project: project.to_string(),
+        agent: agent.to_string(),
+        cwd: cwd.to_string(),
+        model: model.clone(),
+        title: (!title.is_empty()).then(|| title.to_string()),
+        account: account.clone(),
+    };
+    let remember = LastUsed { agent: agent.to_string(), account, computer, model, cwd: cwd.to_string() };
+    (body, remember)
+}
+
 fn muted() -> Option<Paint> {
     Some(Paint::Role(ColorRole::OnSurfaceVariant))
 }
@@ -158,7 +187,7 @@ fn NewSessionForm(preset: &str) {
     let cwd_value = if cwd_text.trim().is_empty() { default_cwd.clone() } else { cwd_text.trim().to_string() };
     let model_typed = model_text.get();
     let model_value = if model_typed.trim().is_empty() { default_model.clone() } else { model_typed.trim().to_string() };
-    let can_start = !busy.get() && !effective_project.is_empty() && !cwd_value.is_empty() && !agent_value.is_empty();
+    let can_start = can_start(busy.get(), &effective_project, &cwd_value, &agent_value);
 
     let close = {
         let open = ui.new_session.clone();
@@ -178,23 +207,16 @@ fn NewSessionForm(preset: &str) {
             busy.set(true);
             let account_id = accounts.get(account_index).and_then(|c| c.value.clone());
             let computer_id = computers.get(computer_index).and_then(|c| c.value.clone());
-            let model = (!model_value.is_empty()).then(|| model_value.clone());
-            let t = title.get_untracked().trim().to_string();
-            let body = CreateSession {
-                project: effective_project.clone(),
-                agent: agent_value.clone(),
-                cwd: cwd_value.clone(),
-                model: model.clone(),
-                title: (!t.is_empty()).then_some(t),
-                account: account_id.clone(),
-            };
-            let remember = LastUsed {
-                agent: agent_value.clone(),
-                account: account_id,
-                computer: computer_id.clone(),
-                model,
-                cwd: cwd_value.clone(),
-            };
+            let t = title.get_untracked();
+            let (body, remember) = build_request(
+                &effective_project,
+                &agent_value,
+                &cwd_value,
+                &model_value,
+                &t,
+                account_id,
+                computer_id.clone(),
+            );
             let project_name = effective_project.clone();
             let (ui, busy) = (ui.clone(), busy.clone());
             run_shared(
@@ -386,4 +408,66 @@ fn Field(label: &str, content: impl FnOnce()) {
         Txt(label, TypeRole::Label, muted(), None, None, None, None);
         content();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+    use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_l8_start_needs_a_project_a_folder_and_an_agent() {
+        assert!(can_start(false, "ember", "/work", "codex"));
+        assert!(!can_start(true, "ember", "/work", "codex"));
+        assert!(!can_start(false, "", "/work", "codex"));
+        assert!(!can_start(false, "ember", "", "codex"));
+        assert!(!can_start(false, "ember", "/work", ""));
+    }
+
+    #[test]
+    fn fr_l8_the_request_carries_the_choices_and_the_remembered_combination() {
+        let (body, remember) = build_request(
+            "ember",
+            "codex",
+            "/work",
+            "o3",
+            "  Fix it  ",
+            Some("acc1".into()),
+            Some("laptop".into()),
+        );
+        assert_eq!(body.project, "ember");
+        assert_eq!(body.title.as_deref(), Some("Fix it"));
+        assert_eq!(body.model.as_deref(), Some("o3"));
+        assert_eq!(body.account.as_deref(), Some("acc1"));
+        assert_eq!(remember.computer.as_deref(), Some("laptop"));
+        assert_eq!(remember.cwd, "/work");
+        let (blank, _) = build_request("p", "a", "/w", "", "   ", None, None);
+        assert_eq!((blank.model, blank.title), (None, None));
+    }
+
+    #[test]
+    fn fr_l8_the_dialog_is_composed_only_while_it_is_open() {
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        let texts = |batch: &[Mutation<'_>]| -> Vec<String> {
+            batch
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut host = Host::new(|| Box::new(Recomposer::new(NewSessionDialog)));
+        let closed = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(!texts(&closed).iter().any(|t| t == "New session"));
+        ui.open_new_session(None);
+        let open = decode_batch(host.render_frame(16_000_000).expect("render")).expect("decode");
+        let all = texts(&open);
+        for want in ["New session", "Project", "Agent", "Account", "Computer", "Start"] {
+            assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
+        }
+        ui.close_new_session();
+    }
 }

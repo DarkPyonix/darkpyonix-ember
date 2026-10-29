@@ -680,10 +680,24 @@ pub fn launch(pref: ThemePref) {
     shared_ui().theme_pref.set(pref);
     let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
     let (w, h) = requested_size();
+    // `EMBER_CR_ROUTE` opens a screen directly, for review captures.
+    let ui = shared_ui();
+    let content: fn() = match std::env::var("EMBER_CR_ROUTE").ok().as_deref() {
+        Some("search") => {
+            ui.go(Route::Search);
+            shell
+        }
+        Some("new-session") => {
+            ui.open_new_session(None);
+            shell
+        }
+        Some("launcher-row") => super::launcher::rows_preview,
+        _ => shell,
+    };
     compose_rust::LaunchBuilder::new()
         .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
         .with_window(Window::new().with_title("Ember shell (compose-rust)").with_size(w, h))
-        .launch(shell);
+        .launch(content);
 }
 
 #[cfg(test)]

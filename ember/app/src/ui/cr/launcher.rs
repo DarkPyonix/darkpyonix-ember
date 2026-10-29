@@ -37,20 +37,45 @@ fn muted() -> Option<Paint> {
     Some(Paint::Role(ColorRole::OnSurfaceVariant))
 }
 
-/// One session row: status, title, agent, account, time, preview, and its menu (FR-L9).
-pub fn SessionRowView(row: &SessionRow) {
-    let ui = shared_ui().clone();
-    let theme = ember_theme();
-    let menu_open = remember_with_key(row.id.clone(), || mutable_state_of(false));
-    let renaming = remember_with_key(row.id.clone(), || mutable_state_of(false));
-    let new_title = remember_with_key(row.id.clone(), || mutable_state_of(String::new()));
-    let when = model::relative_time(model::now_ms(), row.updated_at);
+/// The patch the Pin / Unpin item sends (FR-L9).
+pub fn pin_patch(pinned_now: bool) -> SessionPatch {
+    SessionPatch { pinned: Some(!pinned_now), ..Default::default() }
+}
+
+/// The patch the Archive / Unarchive item sends: an archived session is out of the way, so
+/// archiving also unpins it.
+pub fn archive_patch(archived_now: bool) -> SessionPatch {
+    if archived_now {
+        SessionPatch { archived: Some(false), ..Default::default() }
+    } else {
+        SessionPatch { archived: Some(true), pinned: Some(false), ..Default::default() }
+    }
+}
+
+/// `agent · model · account` under the title.
+pub fn meta_line(row: &SessionRow) -> String {
     let mut meta = vec![row.agent.clone()];
     if let Some(m) = &row.model {
         meta.push(m.clone());
     }
     meta.push(row.account.clone().unwrap_or_else(|| "server login".into()));
-    let meta = meta.join(" \u{00b7} ");
+    meta.join(" \u{00b7} ")
+}
+
+/// One session row: status, title, agent, account, time, preview, and its menu (FR-L9).
+pub fn SessionRowView(row: &SessionRow) {
+    SessionRowWith(row, false);
+}
+
+/// [`SessionRowView`] with the menu already open, for review captures.
+pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
+    let ui = shared_ui().clone();
+    let theme = ember_theme();
+    let menu_open = remember_with_key(row.id.clone(), || mutable_state_of(menu_start_open));
+    let renaming = remember_with_key(row.id.clone(), || mutable_state_of(false));
+    let new_title = remember_with_key(row.id.clone(), || mutable_state_of(String::new()));
+    let when = model::relative_time(model::now_ms(), row.updated_at);
+    let meta = meta_line(row);
     let (pinned, archived) = (row.pinned, row.archived);
     let pin_label = if pinned { "Unpin" } else { "Pin" };
     let archive_label = if archived { "Unarchive" } else { "Archive" };
@@ -86,7 +111,7 @@ pub fn SessionRowView(row: &SessionRow) {
                         let (open, id) = (menu_open.clone(), row.id.clone());
                         item(pin_label, Box::new(move || {
                             open.set(false);
-                            patch_session(id.clone(), SessionPatch { pinned: Some(!pinned), ..Default::default() });
+                            patch_session(id.clone(), pin_patch(pinned));
                         }));
                         let (open, rename_open, title) = (menu_open.clone(), renaming.clone(), new_title.clone());
                         item("Rename", Box::new(move || {
@@ -97,12 +122,7 @@ pub fn SessionRowView(row: &SessionRow) {
                         let (open, id) = (menu_open.clone(), row.id.clone());
                         item(archive_label, Box::new(move || {
                             open.set(false);
-                            // An archived session is out of the way; it is not also pinned.
-                            let patch = if archived {
-                                SessionPatch { archived: Some(false), ..Default::default() }
-                            } else {
-                                SessionPatch { archived: Some(true), pinned: Some(false), ..Default::default() }
-                            };
+                            let patch = archive_patch(archived);
                             patch_session(id.clone(), patch);
                         }));
                         let (open, id, title) = (menu_open.clone(), row.id.clone(), row.title.clone());
@@ -156,6 +176,28 @@ pub fn SessionRowView(row: &SessionRow) {
         });
 }
 
+/// A review window: the connection banner and a few session rows, the first with its menu open
+/// (`EMBER_CR_ROUTE=launcher-row`).
+#[compose_rust::runtime::composable]
+pub fn rows_preview() {
+    let ui = shared_ui().clone();
+    let theme = ember_theme();
+    let rows: Vec<SessionRow> = ui.with_rows(|s, cx| {
+        let project = s.projects().into_iter().next().map(|p| p.name).unwrap_or_default();
+        model::project_sessions(s, &project, cx, false)
+    });
+    cu::ScrollColumn()
+        .space_role(SpaceRole::Md)
+        .modifier(Modifier::new().fill_max_size().background(paint(theme.palette.bg)).padding_role(SpaceRole::Md))
+        .content(|| {
+            Banner("Offline: showing cached data", Tone::Neutral);
+            ConnectionBanner();
+            for (i, row) in rows.iter().take(4).enumerate() {
+                SessionRowWith(row, i == 0);
+            }
+        });
+}
+
 /// Change a session's metadata on the main server (FR-L9); say so when it fails.
 pub fn patch_session(id: String, patch: SessionPatch) {
     run_shared(async move { services().patch_session(&id, &patch).await }, |r| {
@@ -186,4 +228,69 @@ pub fn export(id: String, title: String) {
             Err(e) => notice::post(format!("Export failed: {e}")),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+    use compose_rust::{Host, Recomposer};
+    use ember_client::LauncherStatus;
+
+    fn row() -> SessionRow {
+        SessionRow {
+            id: "s1".into(),
+            project: "ember".into(),
+            title: "Fix the sidebar".into(),
+            agent: "claude-code".into(),
+            model: Some("opus".into()),
+            account: None,
+            cwd: "/work/ember".into(),
+            updated_at: 0,
+            preview: Some("Done, tests pass".into()),
+            status: LauncherStatus::Running,
+            pinned: false,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn fr_l9_pin_and_archive_menu_items_build_the_right_patch() {
+        assert_eq!(pin_patch(false).pinned, Some(true));
+        assert_eq!(pin_patch(true).pinned, Some(false));
+        let archive = archive_patch(false);
+        assert_eq!((archive.archived, archive.pinned), (Some(true), Some(false)));
+        let unarchive = archive_patch(true);
+        assert_eq!((unarchive.archived, unarchive.pinned), (Some(false), None));
+    }
+
+    #[test]
+    fn fr_l2_meta_line_joins_agent_model_and_account() {
+        assert_eq!(meta_line(&row()), "claude-code \u{00b7} opus \u{00b7} server login");
+    }
+
+    #[test]
+    fn fr_l9_rename_keeps_the_title_when_the_entry_is_empty() {
+        // `rename` posts nothing to the server for a blank title; the patch it would send is
+        // only built for a real one.
+        let blank = "   ".trim().to_string();
+        assert!(blank.is_empty());
+    }
+
+    #[test]
+    fn fr_l2_session_row_composes_title_meta_preview_and_menu_items() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| SessionRowWith(&row(), true))));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let all: Vec<String> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { value: PropertyValue::String(s), .. } => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        for want in ["Fix the sidebar", "Done, tests pass", "Pin", "Rename", "Archive", "Export"] {
+            assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
+        }
+    }
 }

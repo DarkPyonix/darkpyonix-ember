@@ -30,13 +30,39 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Message hits asked for per query.
 const HIT_LIMIT: usize = 100;
 
+/// The line above the results.
+pub fn search_note(query: &str, count: usize, searching: bool) -> String {
+    if query.trim().is_empty() {
+        "Type to search every conversation's messages, and titles, projects, agents, accounts and folders.".to_string()
+    } else if count == 0 && searching {
+        "Searching\u{2026}".to_string()
+    } else if count == 0 {
+        "Nothing matches.".to_string()
+    } else {
+        format!("{count} result{}", if count == 1 { "" } else { "s" })
+    }
+}
+
+/// A stable list key: one per message hit, one per session.
+pub fn result_key(r: &SearchResult) -> String {
+    match r.seq {
+        Some(seq) => format!("{}#{seq}", r.row.id),
+        None => r.row.id.clone(),
+    }
+}
+
+/// Whether a newer keystroke has replaced the query this answer is for.
+pub fn superseded(current: u64, mine: u64) -> bool {
+    current != mine
+}
+
 fn muted() -> Option<Paint> {
     Some(Paint::Role(ColorRole::OnSurfaceVariant))
 }
 
 pub fn SearchScreen() {
     let ui = shared_ui().clone();
-    let query = remember(|| mutable_state_of(String::new()));
+    let query = remember(|| mutable_state_of(std::env::var("EMBER_CR_QUERY").unwrap_or_default()));
     // The hits for `hits_for`; stale answers (an older query) are dropped.
     let hits = remember(|| mutable_state_of(Vec::<SearchHit>::new()));
     let hits_for = remember(|| mutable_state_of(String::new()));
@@ -70,7 +96,7 @@ pub fn SearchScreen() {
             run_shared(
                 async move {
                     tokio::time::sleep(DEBOUNCE).await;
-                    if current.load(Ordering::SeqCst) != my_gen {
+                    if superseded(current.load(Ordering::SeqCst), my_gen) {
                         return None; // superseded while waiting
                     }
                     Some((q.clone(), services().client.search(&q, Some(HIT_LIMIT)).await))
@@ -127,15 +153,7 @@ pub fn SearchScreen() {
                     None,
                 );
             }
-            let note = if q.trim().is_empty() {
-                "Type to search every conversation's messages, and titles, projects, agents, accounts and folders.".to_string()
-            } else if count == 0 && searching {
-                "Searching\u{2026}".to_string()
-            } else if count == 0 {
-                "Nothing matches.".to_string()
-            } else {
-                format!("{count} result{}", if count == 1 { "" } else { "s" })
-            };
+            let note = search_note(&q, count, searching);
             let role = if count > 0 { TypeRole::Caption } else { TypeRole::Body };
             Txt(&note, role, muted(), None, None, None, None);
             cu::LazyColumn()
@@ -143,10 +161,7 @@ pub fn SearchScreen() {
                 .content(|scope| {
                     scope.items_keyed(
                         count,
-                        move |i| match keys[i].seq {
-                            Some(seq) => format!("{}#{seq}", keys[i].row.id),
-                            None => keys[i].row.id.clone(),
-                        },
+                        move |i| result_key(&keys[i]),
                         move |i| {
                             let r = &results[i];
                             let snippet = r.snippet.clone().unwrap_or_default();
@@ -161,4 +176,66 @@ pub fn SearchScreen() {
                     );
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+    use compose_rust::{Host, Recomposer};
+
+    fn row(id: &str) -> crate::model::SessionRow {
+        crate::model::SessionRow {
+            id: id.into(),
+            project: "p".into(),
+            title: "t".into(),
+            agent: "a".into(),
+            model: None,
+            account: None,
+            cwd: String::new(),
+            updated_at: 0,
+            preview: None,
+            status: ember_client::LauncherStatus::Running,
+            pinned: false,
+            archived: false,
+        }
+    }
+
+    #[test]
+    fn fr_l9_search_note_says_what_the_list_is_doing() {
+        assert!(search_note("", 0, false).starts_with("Type to search"));
+        assert_eq!(search_note("  ", 3, false).chars().next(), Some('T'));
+        assert_eq!(search_note("a", 0, true), "Searching\u{2026}");
+        assert_eq!(search_note("a", 0, false), "Nothing matches.");
+        assert_eq!(search_note("a", 1, false), "1 result");
+        assert_eq!(search_note("a", 2, false), "2 results");
+    }
+
+    #[test]
+    fn fr_s4_message_hits_and_session_matches_get_distinct_keys() {
+        let hit = SearchResult { row: row("s1"), seq: Some(7), snippet: None };
+        let session = SearchResult { row: row("s1"), seq: None, snippet: None };
+        assert_eq!(result_key(&hit), "s1#7");
+        assert_eq!(result_key(&session), "s1");
+    }
+
+    #[test]
+    fn fr_l9_an_answer_for_an_older_keystroke_is_superseded() {
+        assert!(superseded(3, 2));
+        assert!(!superseded(3, 3));
+    }
+
+    #[test]
+    fn fr_l9_search_screen_shows_the_field_and_the_hint() {
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(SearchScreen)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let has = |want: &str| {
+            batch.iter().any(|m| {
+                matches!(m, Mutation::SetProp { value: PropertyValue::String(t), .. } if t.starts_with(want))
+            })
+        };
+        assert!(has("Search conversations"));
+        assert!(has("Type to search"));
+    }
 }

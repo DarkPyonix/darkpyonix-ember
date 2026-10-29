@@ -218,8 +218,9 @@ pub fn EmberField(o: FieldOptions) {
             o.border_color.unwrap_or_else(|| paint(p.line)),
         )
         .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
-    // TODO(compose-rust#374): 14 px text and 12 px side padding need `TextField` font size and
-    // content padding; the toolkit's own are used meanwhile.
+    // TODO(compose-rust#376): the renderer paints the design system's field frame over these
+    // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
+    // appear once the node's own are honored. 14 px text needs #374.
     let mut f = cu::TextField()
         .modifier(modifier)
         .placeholder(o.placeholder)

@@ -15,7 +15,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, IconRole, ShapeRole};
+use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
 
 use ember_client::state::Computer;
 
@@ -28,8 +28,8 @@ pub use crate::ui::files::{
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
 use super::characters::{CharState, Character};
-use super::components::{AppButton, ButtonKind, EmberCard, EmberSheet, FilterChip, Label, Pill, PillTone};
-use super::home::{fit_label, Cols, Part};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheetSized, FilterChip, Label, Pill, PillTone};
+use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{Header, ThemeButton};
 use super::shell::NavIcon;
@@ -220,131 +220,338 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
     let window = compose_rust::runtime::current_window_size();
     let w = window.width_dp;
     let compact = w <= 560.0;
-    let pad = if compact { SP[3] } else { SP[6] };
-    let k = kpis(model);
+    let pad = page_pad(w);
+    let cells = kpi_cells(model);
     let offers = visible_offers(&pending, &st.answered.get());
     let ready = model.ready;
+    let skip = Skip::from_env(EST_HEAD + EST_DEVICES + EST_AGENTS + EST_TRAY + EST_TRANSFERS + EST_HISTORY, window.height_dp);
 
     cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width().padding(pad)).content(|| {
-                Header("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, || {
-                    ThemeButton(&ui);
-                    let s = st.sheet.clone();
-                    AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, move || s.set(Some(SendDraft::default())));
-                });
-                Cols(
-                    if w > 900.0 { 4 } else { 2 },
-                    SP[4],
-                    k.iter().map(|kpi| -> Part { Box::new(move || KpiView(kpi)) }).collect(),
-                );
-                for offer in offers.iter() {
-                    OfferPrompt(offer, &pending, &st);
-                }
-                Stage(model, &members, &st, &ui, w);
-                let transfers = || TransfersCard(model, ready);
-                let received = || ReceivedCard(model, ready);
-                if side_by_side(w) {
-                    cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Column().modifier(Modifier::new().weight(1.1)).content(transfers);
-                        cu::Column().modifier(Modifier::new().weight(1.0)).content(received);
+                if skip.show(EST_HEAD) {
+                    // On a phone the title sits below the menu button's row.
+                    if compact {
+                        cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
+                    }
+                    Header("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, || {
+                        ThemeButton(&ui);
+                        let s = st.sheet.clone();
+                        let open = move || s.set(Some(SendDraft::default()));
+                        if compact {
+                            // A round ink button, icon only (`.lbl{display:none}`).
+                            let p = ember_theme().palette;
+                            cu::Button("")
+                                .icon(IconRole::Send)
+                                .variant(ButtonVariant::Text)
+                                .color(paint(p.ink_text))
+                                .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
+                                .on_click(open);
+                        } else {
+                            AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
+                        }
                     });
-                } else {
-                    transfers();
-                    received();
+                    Cols(
+                        if w > 1279.0 { 4 } else { 2 },
+                        SP[4],
+                        cells.iter().map(|c| -> Part { Box::new(move || KpiView(c)) }).collect(),
+                    );
                 }
-                HistoryCard(model, &st, ready, w);
+                Stage(model, &members, &st, &ui, w, &skip);
+                if skip.show(EST_TRANSFERS) {
+                    let transfers = || TransfersCard(model, ready);
+                    let received = || ReceivedCard(model, ready);
+                    if side_by_side(w) {
+                        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            cu::Column().modifier(Modifier::new().weight(1.1)).content(transfers);
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(received);
+                        });
+                    } else {
+                        transfers();
+                        received();
+                    }
+                }
+                if skip.show(EST_HISTORY) {
+                    HistoryCard(model, &st, ready, w);
+                }
             });
         });
-        SendSheet(&st, &model.devices, ready);
+        // The incoming offer floats over the page, at the top right (above the tab bar on a phone).
+        if let Some(offer) = offers.first() {
+            OfferCard(offer, &pending, &model.devices, &st, w);
+        }
+        SendSheet(&st, &model.devices, &members, ready, w);
     });
 }
 
-fn KpiView(kpi: &FilesKpi) {
-    let p = ember_theme().palette;
-    cu::Column().spacing(SP[0]).content(|| {
-        Label(kpi.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
-        if kpi.available {
-            Label(&kpi.value, Fs::Xl2, Weight::Regular, None, Some(1));
+/// The page padding: 16 on a phone, 24 up to 1279, 32 above.
+pub fn page_pad(width_dp: f32) -> f32 {
+    if width_dp <= 560.0 {
+        SP[3]
+    } else if width_dp <= 1279.0 {
+        SP[5]
+    } else {
+        SP[6]
+    }
+}
+
+/// The room of the shell's menu button row at the top of a phone.
+const PHONE_MENU_ROW: f32 = 44.0;
+
+/// `EMBER_CR_SCROLL=<dp|bottom|agents|tray|transfers|history>` for review captures: the toolkit
+/// cannot scroll a column from code (TODO(compose-rust#385)), so the blocks that would have
+/// scrolled out, by estimated height, are left out.
+struct Skip(std::cell::Cell<f32>);
+
+const EST_HEAD: f32 = 230.0;
+const EST_DEVICES: f32 = 470.0;
+const EST_AGENTS: f32 = 250.0;
+const EST_TRAY: f32 = 130.0;
+const EST_TRANSFERS: f32 = 330.0;
+const EST_HISTORY: f32 = 400.0;
+
+impl Skip {
+    fn from_env(total_est: f32, window_h: f32) -> Skip {
+        let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
+            Some("bottom") => (total_est - window_h).max(0.0),
+            Some("agents") => EST_HEAD + EST_DEVICES,
+            Some("tray") => EST_HEAD + EST_DEVICES + EST_AGENTS,
+            Some("transfers") => EST_HEAD + EST_DEVICES + EST_AGENTS + EST_TRAY,
+            Some("history") => EST_HEAD + EST_DEVICES + EST_AGENTS + EST_TRAY + EST_TRANSFERS,
+            Some(n) => n.parse::<f32>().unwrap_or(0.0),
+            None => 0.0,
+        };
+        Skip(std::cell::Cell::new(v))
+    }
+
+    /// Whether a block of about `est` dp is still in view.
+    fn show(&self, est: f32) -> bool {
+        let left = self.0.get();
+        if left >= est {
+            self.0.set(left - est);
+            false
         } else {
-            Label(&kpi.value, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            self.0.set(0.0);
+            true
+        }
+    }
+}
+
+/// One KPI of the strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KpiCell {
+    pub label: &'static str,
+    pub value: String,
+    pub unit: &'static str,
+    /// A pill beside the value (`전체 7`, `멈춤 1`).
+    pub pill: Option<(String, PillTone)>,
+    /// A meter under the value, in percent (the direct connection ratio).
+    pub meter: Option<u32>,
+    pub available: bool,
+}
+
+/// The four KPIs as the mockup draws them. What the service cannot say is "준비 중입니다".
+pub fn kpi_cells(m: &FilesModel) -> [KpiCell; 4] {
+    let base = kpis(m);
+    let unavailable = |label| KpiCell { label, value: UNAVAILABLE.to_string(), unit: "", pill: None, meter: None, available: false };
+    let running = m.transfers.iter().filter(|t| matches!(t.state, TransferState::Sending | TransferState::Queued)).count();
+    let stopped = m.transfers.iter().filter(|t| matches!(t.state, TransferState::Paused | TransferState::Failed)).count();
+    let active = if m.ready {
+        KpiCell {
+            label: "지금 전송 중",
+            value: running.to_string(),
+            unit: "",
+            pill: Some(if stopped > 0 { (format!("멈춤 {stopped}"), PillTone::Blue) } else { ("모두 진행".to_string(), PillTone::Grey) }),
+            meter: None,
+            available: true,
+        }
+    } else {
+        unavailable("지금 전송 중")
+    };
+    let direct = match base[3].value.strip_suffix('%').and_then(|v| v.parse::<u32>().ok()).filter(|_| base[3].available) {
+        Some(p) => KpiCell { label: "직접 연결 비율", value: p.to_string(), unit: "%", pill: None, meter: Some(p), available: true },
+        None => unavailable("직접 연결 비율"),
+    };
+    [
+        KpiCell {
+            label: "연결된 장비",
+            value: connected_count(&m.devices).to_string(),
+            unit: "",
+            pill: Some((format!("전체 {}", m.devices.len()), PillTone::Green)),
+            meter: None,
+            available: true,
+        },
+        active,
+        unavailable("이번 주 보낸 용량"),
+        direct,
+    ]
+}
+
+/// The row weights of a tile grid: equal, except that a last row of three tiles in four columns
+/// gives its last tile two, one of two tiles gives its last three, and an odd last tile of two
+/// columns takes both (`.fl-devgrid>.fl-dev:last-child:nth-child(...)`).
+pub fn grid_weights(n: usize, cols: usize) -> Vec<Vec<f32>> {
+    let cols = cols.max(1);
+    let mut rows: Vec<Vec<f32>> = Vec::new();
+    let mut left = n;
+    while left > 0 {
+        let k = left.min(cols);
+        let mut row = vec![1.0; k];
+        if k < cols {
+            let extra = (cols - k) as f32;
+            if let Some(last) = row.last_mut() {
+                *last += extra;
+            }
+        }
+        rows.push(row);
+        left -= k;
+    }
+    rows
+}
+
+/// A grid of tiles by [`grid_weights`].
+fn TileGrid<'a>(cols: usize, gap: f32, tiles: Vec<Part<'a>>) {
+    let weights = grid_weights(tiles.len(), cols);
+    cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+        let mut it = tiles.into_iter();
+        for row in weights {
+            cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                for wt in row {
+                    if let Some(tile) = it.next() {
+                        cu::Column().modifier(Modifier::new().weight(wt)).content(tile);
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// A KPI: the label, the number with its small unit and pill, and the green meter.
+fn KpiView(c: &KpiCell) {
+    let p = ember_theme().palette;
+    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+        Label(c.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+        if c.available {
+            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                cu::Row().alignment(Alignment::CenterStart).content(|| {
+                    Label(&c.value, Fs::Xl2, Weight::Regular, None, Some(1));
+                    if !c.unit.is_empty() {
+                        Label(c.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
+                    }
+                });
+                if let Some((text, tone)) = &c.pill {
+                    Pill(text, *tone, true);
+                }
+            });
+            if let Some(pct) = c.meter {
+                // `.fl-meter`: a 6 px track with the green fill.
+                cu::Row().modifier(Modifier::new().fill_max_width().height(6.0).background(paint(p.track)).shape_role(ShapeRole::Full)).content(|| {
+                    cu::Spacer().modifier(Modifier::new().weight((pct as f32).max(0.5)).height(6.0).background(paint(p.green.strong)).shape_role(ShapeRole::Full));
+                    cu::Spacer().modifier(Modifier::new().weight((100 - pct.min(100)) as f32 + 0.001));
+                });
+            }
+        } else {
+            Label(&c.value, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         }
     });
 }
 
 /// 장비: my devices, the agents and the tray, in one card (`.fl-stage`).
-fn Stage(model: &FilesModel, members: &[CrewMember], st: &State, ui: &SharedUi, w: f32) {
+fn Stage(model: &FilesModel, members: &[CrewMember], st: &State, ui: &SharedUi, w: f32, skip: &Skip) {
     let p = ember_theme().palette;
     let ready = model.ready;
+    let (devices, agents, tray) = (skip.show(EST_DEVICES), skip.show(EST_AGENTS), skip.show(EST_TRAY));
+    if !(devices || agents || tray) {
+        return;
+    }
     super::components::EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-            super::home::CardHead(ICON_DESKTOP, "장비", || {
-                Pill(&format!("{}/{}", connected_count(&model.devices), model.devices.len()), PillTone::Green, false);
-            });
-            if model.devices.is_empty() {
-                Label(empty_text(crate::ui::files::Section::Devices, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-            }
             let cols = device_cols(w);
-            Cols(
-                cols,
-                SP[2],
-                model
-                    .devices
-                    .iter()
-                    .map(|d| -> Part {
-                        let s = st.sheet.clone();
-                        Box::new(move || {
-                            DeviceTile(d, move |id| {
-                                s.set(Some(SendDraft { target: Some(SendTarget::Device(id)), files: Vec::new() }))
+            if devices {
+                super::home::CardHead(ICON_DESKTOP, "장비", || {});
+                if model.devices.is_empty() {
+                    Label(empty_text(crate::ui::files::Section::Devices, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                }
+                TileGrid(
+                    cols,
+                    SP[2],
+                    model
+                        .devices
+                        .iter()
+                        .map(|d| -> Part {
+                            let s = st.sheet.clone();
+                            Box::new(move || {
+                                DeviceTile(d, move |id| {
+                                    s.set(Some(SendDraft { target: Some(SendTarget::Device(id)), files: Vec::new() }))
+                                })
                             })
                         })
-                    })
-                    .collect(),
-            );
-            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label("에이전트에게 보내기", Fs::Lg, Weight::Semibold, None, Some(1));
-            });
-            Label("팀원이 일하는 컴퓨터의 작업 폴더로 보내고 그 대화에 첨부합니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-            if members.is_empty() {
-                Label(empty_text(crate::ui::files::Section::Agents, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                        .collect(),
+                );
             }
-            Cols(
-                cols,
-                SP[2],
-                members
-                    .iter()
-                    .map(|m| -> Part {
-                        let s = st.sheet.clone();
-                        Box::new(move || {
-                            AgentTile(m, ui, move |id| {
-                                s.set(Some(SendDraft { target: Some(SendTarget::Agent(id)), files: Vec::new() }))
+            if agents {
+                // The title and its hint share a line, the hint wrapping below on a phone.
+                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("에이전트에게 보내기", Fs::Lg, Weight::Semibold, None, Some(1));
+                    if w > 900.0 {
+                        Label("팀원이 일하는 컴퓨터의 작업 폴더로 보내고 그 대화에 첨부합니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
+                });
+                if w <= 900.0 {
+                    Label("팀원이 일하는 컴퓨터의 작업 폴더로 보내고 그 대화에 첨부합니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                }
+                if members.is_empty() {
+                    Label(empty_text(crate::ui::files::Section::Agents, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                }
+                TileGrid(
+                    cols,
+                    SP[2],
+                    members
+                        .iter()
+                        .map(|m| -> Part {
+                            let s = st.sheet.clone();
+                            Box::new(move || {
+                                AgentTile(m, ui, move |id| {
+                                    s.set(Some(SendDraft { target: Some(SendTarget::Agent(id)), files: Vec::new() }))
+                                })
                             })
                         })
-                    })
-                    .collect(),
-            );
-            // `.fl-tray`: the files to send. TODO(#166, compose-rust): no file picker or drag
-            // and drop yet, so the tray is empty and its button says so.
-            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label("보낼 파일", Fs::Md, Weight::Semibold, None, Some(1));
-                Label(if w > 560.0 { "장비 옆의 보내기를 누르면 받는 곳을 고릅니다." } else { "장비의 보내기를 누릅니다." }, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            });
-            AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, true, false, || notice::post(FILE_PICK_UNAVAILABLE));
+                        .collect(),
+                );
+            }
+            if tray {
+                // `.fl-tray`: the files to send. TODO(#166, compose-rust): no file picker or drag
+                // and drop yet, so the tray is empty and its button says so.
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("보낼 파일", Fs::Md, Weight::Semibold, None, Some(1));
+                    Label(if w > 560.0 { "장비를 누르면 받는 곳을 고르고 파일을 보냅니다." } else { "장비를 누르면 보낼 파일을 고릅니다." }, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                });
+                AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, true, false, || notice::post(FILE_PICK_UNAVAILABLE));
+            }
         });
     });
 }
 
-/// `.fl-dev`: a device card: the kind glyph with its presence dot, the name, the kind, the
-/// presence and path pills, and a send button (the tile is not a clickable container, #372).
+/// "근처", "직접 연결" or "릴레이".
+pub fn path_name(p: PathKind) -> &'static str {
+    match p {
+        PathKind::Nearby => "근처",
+        PathKind::Direct => "직접 연결",
+        PathKind::Relay => "릴레이",
+    }
+}
+
+/// `.fl-dev`: a device card: the kind glyph with its presence dot, the name, the kind, and the
+/// path pill with the latency beside it. The whole tile sends to the device (it opens the send
+/// sheet), as in the mockup. TODO(compose-rust#372): a pointer-up `Clickable`.
 fn DeviceTile(d: &Device, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
-    let path = path_label(d.path, d.latency_ms);
     let id = d.id.clone();
     let mut on_send = on_send;
     let m = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]);
     let offline = matches!(d.presence, Presence::Offline | Presence::Unknown);
-    cu::Box().modifier(if offline { m.alpha(0.62) } else { m }).content(|| {
+    Clickable(if offline { m.alpha(0.62) } else { m }, Alignment::TopStart, move || on_send(id.clone()), || {
         cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Box().modifier(Modifier::new().size(48.0, 48.0)).content(|| {
                 cu::Box()
@@ -361,30 +568,35 @@ fn DeviceTile(d: &Device, on_send: impl FnMut(String) + 'static) {
             Label(&fit_label(&d.name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
             Label(d.kind.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             cu::Spacer().modifier(Modifier::new().height(SP[0]));
-            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
-                Pill(d.presence.label(), presence_tone(d.presence), true);
-                if let (Some(text), Some(path)) = (path.as_ref(), d.path) {
-                    Pill(text, path_tone(path), true);
+            // The foot: the path pill and the latency as plain text; sleeping, offline and
+            // unknown devices show their state.
+            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| match (d.presence, d.path) {
+                (Presence::Online, Some(path)) => {
+                    Pill(path_name(path), path_tone(path), true);
+                    if let Some(ms) = d.latency_ms {
+                        Label(&format!("{ms} ms"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
                 }
+                (presence, _) => Pill(presence.label(), presence_tone(presence), true),
             });
-            cu::Spacer().modifier(Modifier::new().height(SP[0]));
-            AppButton("보내기", None, ButtonKind::Default, true, d.presence == Presence::Online, false, move || on_send(id.clone()));
         });
     });
 }
 
-/// An agent's tile: its character, name, project and task, status, and the buttons to open its
-/// session or send to the computer it works on.
+/// An agent's tile: its character, name, computer and task, and its status. The tile sends to the
+/// computer the agent works on. TODO(compose-rust#372): a pointer-up `Clickable`.
 fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let mut on_send = on_send;
-    let (open_id, send_id) = (m.id.clone(), m.id.clone());
-    let u = ui.clone();
+    let send_id = m.id.clone();
+    let _ = ui;
     let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
     let state = if m.waiting { CharState::Wait } else { CharState::Run };
-    cu::Box()
-        .modifier(Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]))
-        .content(|| {
+    Clickable(
+        Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]),
+        Alignment::TopStart,
+        move || on_send(send_id.clone()),
+        || {
             cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
                 Character(&m.agent, false, 34.0, &name, &m.project, state, None);
                 Label(&fit_label(&name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
@@ -397,33 +609,78 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'stati
                 } else {
                     Pill("실행 중", PillTone::Blue, true);
                 }
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                cu::Row().spacing(SP[0]).content(|| {
-                    AppButton("대화", None, ButtonKind::Default, true, true, false, move || u.open_conversation(&open_id));
-                    AppButton("보내기", None, ButtonKind::Default, true, true, false, move || on_send(send_id.clone()));
-                });
             });
-        });
+        },
+    );
 }
 
-/// The accept and decline prompt for an incoming offer (FR-F3).
-fn OfferPrompt(offer: &Offer, pending: &[Offer], st: &State) {
-    let line = offer_line(offer);
-    EmberCard(true, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            Label(&line, Fs::Md, Weight::Medium, None, Some(3));
-            cu::Row().spacing(SP[1]).content(|| {
-                for (text, kind, answer) in [("받기", ButtonKind::Primary, Answer::Accept), ("거절", ButtonKind::Default, Answer::Decline)] {
-                    let (id, pending, answered) = (offer.id.clone(), pending.to_vec(), st.answered.clone());
-                    AppButton(text, None, kind, true, true, false, move || {
-                        let mut list = answered.get_untracked();
-                        answer_offer(transfer_service(), &pending, &mut list, &id, answer);
-                        answered.set(list);
+/// Where received files land. TODO(FR-F8): the real inbox comes from the transfer settings.
+pub const DEFAULT_INBOX: &str = "~/Downloads/Ember";
+
+/// The incoming offer (FR-F3) as the mockup's floating card (`.fl-offer`): the sender's icon and
+/// name, the files, where they will be saved, the encryption note, and equal 거절 and 받기.
+fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w: f32) {
+    let p = ember_theme().palette;
+    let compact = w <= 560.0;
+    let sender = devices.iter().find(|d| d.name == offer.from);
+    let card_w = (w - 2.0 * SP[3]).min(360.0);
+    let route = sender.and_then(|d| d.path).map(path_name);
+    let card = || {
+        cu::Box()
+            .modifier(Modifier::new().width(card_w).background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]))
+            .content(|| {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        cu::Box()
+                            .alignment(Alignment::Center)
+                            .modifier(Modifier::new().size(40.0, 40.0).background(paint(p.surface_2)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full))
+                            .content(|| NavIcon(kind_icon(sender.map(|d| d.kind).unwrap_or(DeviceKind::Computer)), p.text.to_argb(), 20.0));
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            Label(&fit_label(&offer.from, card_w - 100.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
+                            Label(&format!("파일 {}개, {}를 보내려고 합니다", offer.files.len(), format_bytes(offer.total)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        });
                     });
-                }
+                    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for _ in offer.files.iter().take(3) {
+                            FileChip(ICON_DOC, PillTone::Blue);
+                        }
+                        Label(&fit_label(&offer.files.join(", "), card_w - 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    });
+                    Label(&format!("저장 위치 {DEFAULT_INBOX}"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+                        NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
+                        let text = match route {
+                            Some(r) => format!("종단 간 암호화 \u{b7} {r}"),
+                            None => "종단 간 암호화".to_string(),
+                        };
+                        Label(&text, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    });
+                    cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for (text, kind, answer) in [("거절", ButtonKind::Default, Answer::Decline), ("받기", ButtonKind::Primary, Answer::Accept)] {
+                            let (id, pending, answered) = (offer.id.clone(), pending.to_vec(), st.answered.clone());
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                AppButton(text, None, kind, false, true, true, move || {
+                                    let mut list = answered.get_untracked();
+                                    answer_offer(transfer_service(), &pending, &mut list, &id, answer);
+                                    answered.set(list);
+                                });
+                            });
+                        }
+                    });
+                });
+            });
+    };
+    if compact {
+        cu::Box().alignment(Alignment::BottomCenter).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+            cu::Column().modifier(Modifier::new().padding(SP[3])).content(|| {
+                card();
+                // Above the floating tab bar.
+                cu::Spacer().modifier(Modifier::new().height(TABBAR_H + TABBAR_BOTTOM_GAP));
             });
         });
-    });
+    } else {
+        cu::Box().alignment(Alignment::TopEnd).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[5])).content(card);
+    }
 }
 
 // --- transfers, received, history -------------------------------------------------------------
@@ -576,49 +833,122 @@ fn HistoryRow(h: &HistoryEntry) {
 
 // --- the send sheet ---------------------------------------------------------------------------
 
-/// The send sheet: pick the receiver, then the files (FR-L27.5).
-fn SendSheet(st: &State, devices: &[Device], ready: bool) {
+/// A receiver chip of the send sheet (`.fl-tg`): an outlined pill with the device glyph or the
+/// agent's character; the selected one takes the `ink` border, an offline one is dimmed.
+/// TODO(compose-rust#372): a pointer-up `Clickable`.
+fn TargetChip(label: &str, icon: TargetIcon, selected: bool, dim: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let fill = if selected { p.sel } else { p.surface };
+    let border = if selected { p.ink } else { p.line };
+    let m = Modifier::new().height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full);
+    Clickable(if dim { m.alpha(0.55) } else { m }, Alignment::CenterStart, on_click, || {
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(12.0));
+            match &icon {
+                TargetIcon::Kind(k) => NavIcon(kind_icon(*k), p.text_2.to_argb(), 16.0),
+                TargetIcon::Agent(m) => {
+                    let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
+                    Character(&m.agent, false, 22.0, &name, &m.project, if m.waiting { CharState::Wait } else { CharState::Run }, None);
+                }
+            }
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            Label(label, Fs::Sm, Weight::Regular, Some(paint(if selected { p.text } else { p.text_2 })), Some(1));
+            cu::Spacer().modifier(Modifier::new().width(12.0));
+        });
+    });
+}
+
+enum TargetIcon {
+    Kind(DeviceKind),
+    Agent(CrewMember),
+}
+
+/// A chip's width: 12 padding, the 16 px glyph (22 for a character), 8, the text, 12 padding.
+pub fn target_chip_width(label: &str, glyph: f32) -> f32 {
+    12.0 + glyph + 8.0 + text_px(label, Fs::Sm.size()) + 12.0
+}
+
+/// The send sheet: pick the receiver (every device and every agent), then the files (FR-L27.5).
+fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool, w: f32) {
     let p = ember_theme().palette;
     let draft = st.sheet.get();
     let open = draft.is_some();
     let d = draft.unwrap_or_default();
-    let blocker = send_blocker(&d, FILE_PICKER_AVAILABLE, ready);
+    let mut blocker = send_blocker(&d, FILE_PICKER_AVAILABLE, ready);
     let target_device = match &d.target {
         Some(SendTarget::Device(id)) => Some(id.clone()),
         _ => None,
     };
+    let offline_target = target_device
+        .as_deref()
+        .and_then(|id| devices.iter().find(|x| x.id == id))
+        .is_some_and(|x| x.presence != Presence::Online);
+    if blocker.is_none() && offline_target {
+        blocker = Some("이 장비는 지금 연결되어 있지 않습니다");
+    }
     let can_send = blocker.is_none() && target_device.is_some();
+    let sheet_w = (w - 32.0).clamp(280.0, 620.0);
+    let inner = sheet_w - 2.0 * SP[4];
     let close = {
         let s = st.sheet.clone();
         move || s.set(None)
     };
-    EmberSheet("보내기", open, close.clone(), None, || {
+    // The receivers flow left to right and wrap: devices first, then agents.
+    let mut chips: Vec<(String, TargetIcon, bool, bool, SendTarget)> = Vec::new();
+    for dev in devices {
+        let sel = target_device.as_deref() == Some(dev.id.as_str());
+        chips.push((dev.name.clone(), TargetIcon::Kind(dev.kind), sel, dev.presence != Presence::Online, SendTarget::Device(dev.id.clone())));
+    }
+    for m in members {
+        let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
+        let sel = matches!(&d.target, Some(SendTarget::Agent(id)) if *id == m.id);
+        chips.push((name, TargetIcon::Agent(m.clone()), sel, false, SendTarget::Agent(m.id.clone())));
+    }
+    let widths: Vec<f32> = chips
+        .iter()
+        .map(|(l, icon, ..)| target_chip_width(&fit_label(l, 160.0, Fs::Sm.size()), if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 }))
+        .collect();
+    let lines = super::project::wrap_lines(&widths, SP[1], inner);
+    EmberSheetSized("파일 보내기", open, sheet_w, close.clone(), None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-            let choices = sendable_devices(devices);
-            if choices.is_empty() {
+            if chips.is_empty() {
                 Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
             }
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                for dev in choices {
-                    let (s, base, id) = (st.sheet.clone(), d.clone(), dev.id.clone());
-                    FilterChip(&dev.name, target_device.as_deref() == Some(dev.id.as_str()), move || {
-                        let mut next = base.clone();
-                        next.target = Some(SendTarget::Device(id.clone()));
-                        s.set(Some(next));
-                    });
-                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                }
-            });
+            for line in lines.iter() {
+                cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    for &i in line {
+                        let (label, icon, sel, dim, target) = &chips[i];
+                        let (s, base) = (st.sheet.clone(), d.clone());
+                        let target = target.clone();
+                        let shown = fit_label(label, 160.0, Fs::Sm.size());
+                        let icon = match icon {
+                            TargetIcon::Kind(k) => TargetIcon::Kind(*k),
+                            TargetIcon::Agent(m) => TargetIcon::Agent(m.clone()),
+                        };
+                        TargetChip(&shown, icon, *sel, *dim, move || {
+                            let mut next = base.clone();
+                            next.target = Some(target.clone());
+                            s.set(Some(next));
+                        });
+                    }
+                });
+            }
             Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
             // TODO(compose-rust): a file picker and drag and drop; until then the files stay empty.
             Label(&format!("{}개 선택됨", d.files.len()), Fs::Sm, Weight::Regular, None, None);
             if let Some(text) = blocker {
                 Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
             }
+        });
+        // The footer: the encryption note at the left, the send button at the right.
+        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+            NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
+            Label("종단 간 암호화", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            cu::Spacer().modifier(Modifier::new().weight(1.0));
             let (files, s) = (d.files.clone(), st.sheet.clone());
             let target = target_device.clone();
-            AppButton("보내기", None, ButtonKind::Primary, false, can_send, true, move || {
+            AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, true, can_send, false, move || {
                 if let Some(id) = target.as_deref() {
                     if transfer_service().send(id, files.clone()).is_ok() {
                         s.set(None);
@@ -638,6 +968,13 @@ mod tests {
     #[test]
     fn fr_l27_the_device_grid_and_columns_follow_the_mockup_breakpoints() {
         assert_eq!((device_cols(1440.0), device_cols(768.0), device_cols(390.0)), (4, 4, 2));
+        assert_eq!((page_pad(1440.0), page_pad(1024.0), page_pad(768.0), page_pad(390.0)), (32.0, 24.0, 24.0, 16.0));
+        // Seven tiles in four columns: the last tile of the second row takes two columns.
+        assert_eq!(grid_weights(7, 4), vec![vec![1.0; 4], vec![1.0, 1.0, 2.0]]);
+        assert_eq!(grid_weights(6, 4), vec![vec![1.0; 4], vec![1.0, 3.0]]);
+        assert_eq!(grid_weights(5, 2), vec![vec![1.0, 1.0], vec![1.0, 1.0], vec![2.0]]);
+        assert_eq!(grid_weights(4, 4), vec![vec![1.0; 4]]);
+        assert!(grid_weights(0, 4).is_empty());
         assert!(side_by_side(1440.0) && !side_by_side(1024.0));
     }
 
@@ -646,6 +983,34 @@ mod tests {
         let (m, _) = sample_model();
         let n = |f: HistoryFilter| m.history.iter().filter(|h| f.matches(h)).count();
         assert_eq!((n(HistoryFilter::All), n(HistoryFilter::Sent), n(HistoryFilter::Received), n(HistoryFilter::Problems)), (3, 1, 0, 2));
+    }
+
+    #[test]
+    fn fr_l27_the_kpis_carry_pills_units_and_the_meter() {
+        let (m, _) = sample_model();
+        let k = kpi_cells(&m);
+        assert_eq!((k[0].value.as_str(), k[0].pill.clone()), ("4", Some(("전체 7".to_string(), PillTone::Green))));
+        assert_eq!(k[1].pill.as_ref().map(|p| p.0.as_str()), Some("멈춤 1"));
+        assert!(!k[2].available);
+        assert_eq!((k[3].unit, k[3].meter), ("%", Some(75)));
+        // No service data: only the connected count is known.
+        let none = FilesModel { ready: false, ..m };
+        let k = kpi_cells(&none);
+        assert!(k[0].available && !k[1].available && !k[3].available);
+    }
+
+    #[test]
+    fn capture_scroll_skips_whole_blocks() {
+        let s = Skip(std::cell::Cell::new(700.0));
+        assert!(!s.show(230.0));
+        assert!(!s.show(470.0));
+        assert!(s.show(250.0));
+    }
+
+    #[test]
+    fn fr_l27_a_target_chip_grows_with_its_label() {
+        assert!(target_chip_width("macbook-pro", 16.0) > target_chip_width("gpu", 16.0));
+        assert!(target_chip_width("gpu", 22.0) > target_chip_width("gpu", 16.0));
     }
 
     #[test]

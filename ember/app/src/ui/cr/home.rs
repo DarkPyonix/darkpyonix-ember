@@ -819,7 +819,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         // TODO(compose-rust#372): the toolkit glyph is not the mockup's paper plane.
         cu::Button("")
             .icon(IconRole::Send)
-            // Always enabled so it stays `--ink`; an empty message is refused in `send`.
+            .enabled(sendable)
             .variant(ButtonVariant::Text)
             .color(paint(p.ink_text))
             .modifier(Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full))
@@ -917,7 +917,7 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
         if skip.show(EST_TREND) {
             Weighted(stacked, GAP_CARD, vec![
                 (8.0, Box::new(|| TokenTrendTile(ui, chart_w)) as Part),
-                (4.0, Box::new(|| StatusTile(&d.counts, ui, if l.wide { content_w * 4.0 / 12.0 } else { content_w }, l.compact))),
+                (4.0, Box::new(|| StatusTile(&d.counts, ui, if l.wide { (content_w - GAP_CARD) * 4.0 / 12.0 } else { content_w }, l.compact))),
             ]);
         }
         if skip.show(EST_USAGE) {
@@ -1081,7 +1081,8 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
             });
         // `.hm-blocks`: coloured blocks sized by count, each with the 18 % white stripes. The
         // stripes are a canvas at the block's estimated width (the card's inner width shared by
-        // the weights); TODO(compose-rust#385 family): a stripe fill that follows its box.
+        // the weights, less 8 dp so an estimate that is a little high stops short rather than
+        // spilling past the block); TODO(compose-rust): a stripe fill that follows its box.
         let bh = if compact { 88.0 } else { 116.0 };
         let weights: Vec<f32> = parts.iter().map(|(_, n, _)| (*n as f32).max(0.6)).collect();
         let sum: f32 = weights.iter().sum();
@@ -1094,10 +1095,10 @@ fn StatusTile(c: &StatusCounts, ui: &SharedUi, tile_w: f32, compact: bool) {
                     .content(|| {
                         let stripe = paint(compose_rust::Color::argb(0x2eff_ffff));
                         let mut list = DrawList::builder();
-                        for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, (w - 2.0).max(1.0), bh, 7.0) {
+                        for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, (w - 8.0).max(1.0), bh, 7.0) {
                             list = list.line(stripe, x1, y1, x2, y2, 1.0);
                         }
-                        cu::Canvas(list.build()).modifier(Modifier::new().size((w - 2.0).max(1.0), bh));
+                        cu::Canvas(list.build()).modifier(Modifier::new().size((w - 8.0).max(1.0), bh));
                     });
             }
         });

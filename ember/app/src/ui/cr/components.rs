@@ -16,8 +16,9 @@
 
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
+use compose_rust::PointerKinds;
 use compose_rust::{
-    Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
+    Alignment, AssetKind, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
     KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
 };
 
@@ -366,6 +367,39 @@ pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
     advance + icon + 2.0 * 24.0 + 4.0
 }
 
+/// The mockup's close glyph: 1.5 px round-capped lines on an 18 px grid (`svg.i`).
+static CLOSE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"##;
+
+/// A pill-shaped control built from a Box and a pointer subscription, so its label is set in
+/// the type scale (the toolkit `Button` sets its own label size, compose-rust#373) and it needs
+/// no width estimate.
+/// TODO(compose-rust#372): replace the pointer-up subscription with `Modifier.clickable`, which
+/// also gives the hover and press feedback this loses.
+#[allow(clippy::too_many_arguments)]
+fn pill_control(
+    text: &str,
+    modifier: Modifier,
+    enabled: bool,
+    fs: Fs,
+    weight: Weight,
+    ink: Color,
+    side_pad: f32,
+    mut on_click: impl FnMut() + 'static,
+) {
+    let modifier = if enabled { modifier } else { modifier.alpha(0.4) };
+    let mut b = cu::Box().modifier(modifier).alignment(Alignment::Center);
+    if enabled {
+        b = b.on_pointer(PointerKinds::UP, move |_| on_click());
+    }
+    b.content(|| {
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(side_pad));
+            Label(text, fs, weight, Some(paint(ink)), Some(1));
+            cu::Spacer().modifier(Modifier::new().width(side_pad));
+        });
+    });
+}
+
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 pub fn AppButton(
     text: &str,
@@ -378,10 +412,24 @@ pub fn AppButton(
 ) {
     let theme = ember_theme();
     let s = button_style(kind, small, theme.palette);
+    if icon.is_none() {
+        // 16 px side padding, 12 px small (`.btn`, `.btn.sm`).
+        let side = if small { SP[2] } else { SP[3] };
+        let m = Modifier::new()
+            .fill_max_width_if(fill_max_width)
+            .height(s.height)
+            .background(paint(s.fill))
+            .border(1.0, paint(s.border))
+            .shape_role(ShapeRole::Full);
+        pill_control(text, m, enabled, s.fs, Weight::Medium, s.text, side, on_click);
+        return;
+    }
+    // TODO(compose-rust#372): a labelled button with a glyph still uses the toolkit `Button`
+    // (and its width estimate) until icons can be drawn beside the label.
     let width = if fill_max_width || text.is_empty() {
         None
     } else {
-        Some(label_min_width(text, s.fs.size(), icon.is_some()))
+        Some(label_min_width(text, s.fs.size(), true))
     };
     let mut b = cu::Button(text)
         .enabled(enabled)
@@ -404,23 +452,34 @@ pub fn AppButton(
 }
 
 /// A 40 px (or 32 px) circle with a 1 px border and a glyph.
-pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static) {
+pub fn IconButton(icon: IconRole, small: bool, mut on_click: impl FnMut() + 'static) {
     let theme = ember_theme();
     let size = if small { H_CTL } else { H_BTN };
-    // TODO(compose-rust#372): the mockup's 1.5 px line icons (18 px, 16 px small) are SVG
-    // assets; they need a container click to sit in a bordered circle. Until then the toolkit
-    // glyph is tinted `--text-2`.
+    let ring = Modifier::new()
+        .size(size, size)
+        .background(paint(theme.palette.surface))
+        .border(1.0, paint(theme.palette.line))
+        .shape_role(ShapeRole::Full);
+    if icon == IconRole::Close {
+        // The mockup's line icon: 18 px, 16 px in the small button, tinted `--text-2`.
+        let glyph = if small { 16.0 } else { 18.0 };
+        cu::Box()
+            .modifier(ring)
+            .alignment(Alignment::Center)
+            .on_pointer(PointerKinds::UP, move |_| on_click())
+            .content(|| {
+                cu::Icon(compose_rust::asset(AssetKind::Svg, CLOSE_SVG))
+                    .color(paint(theme.palette.text_2))
+                    .modifier(Modifier::new().size(glyph, glyph));
+            });
+        return;
+    }
+    // TODO(compose-rust#372): other glyphs are toolkit icons until they are drawn as assets.
     cu::Button("")
         .icon(icon)
         .color(paint(theme.palette.text_2))
         .variant(ButtonVariant::Text)
-        .modifier(
-            Modifier::new()
-                .size(size, size)
-                .background(paint(theme.palette.surface))
-                .border(1.0, paint(theme.palette.line))
-                .shape_role(ShapeRole::Full),
-        )
+        .modifier(ring)
         .on_click(on_click);
 }
 
@@ -445,10 +504,17 @@ pub fn PickChip(
     let theme = ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
     let text = if icon_only && icon.is_some() { "" } else { text };
+    if icon.is_none() {
+        // 13 px medium `--text-2` with 12 px side padding (`.pickchip`).
+        let m = Modifier::new().height(height).background(paint(fill)).shape_role(ShapeRole::Full);
+        pill_control(text, m, true, Fs::Sm, Weight::Medium, theme.palette.text_2, SP[2], on_click);
+        return;
+    }
+    // TODO(compose-rust#372): a chip with a glyph still uses the toolkit `Button`.
     let width = if text.is_empty() {
         None
     } else {
-        Some(label_min_width(text, Fs::Sm.size(), icon.is_some()))
+        Some(label_min_width(text, Fs::Sm.size(), true))
     };
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)
@@ -726,5 +792,35 @@ mod tests {
         for want in ["진행 중", "보내기", "프로젝트"] {
             assert!(all.iter().any(|t| t == want), "missing {want}: {all:?}");
         }
+    }
+
+    /// What the Host actually emits for a widget: every `SetModifier` record, as debug text.
+    fn emitted_modifiers(content: fn()) -> Vec<String> {
+        use compose_rust::protocol::{decode_batch, Mutation};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(move || Box::new(Recomposer::new(content)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetModifier { modifier, .. } => Some(format!("{modifier:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fr_l10_pill_and_card_send_the_mockup_metrics_to_the_renderer() {
+        let pill = emitted_modifiers(|| Pill("진행 중", PillTone::Blue, false));
+        assert!(pill.iter().any(|m| m == "Height(24.0)"), "{pill:?}");
+        let small = emitted_modifiers(|| Pill("작음", PillTone::Blue, true));
+        assert!(small.iter().any(|m| m == "Height(20.0)"), "{small:?}");
+        let card = emitted_modifiers(|| EmberCard(false, false, None, None, None, || {}));
+        assert!(card.iter().any(|m| m.starts_with("Shape { top_start: 14.0")), "{card:?}");
+        let field = emitted_modifiers(|| {
+            EmberField(FieldOptions { ..Default::default() });
+        });
+        assert!(field.iter().any(|m| m == "Height(40.0)"), "{field:?}");
+        assert!(field.iter().any(|m| m.starts_with("Shape { top_start: 8.0")), "{field:?}");
     }
 }

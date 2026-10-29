@@ -118,15 +118,19 @@ pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
                 .padding(PAD_ROW_V),
         )
         .content(|| {
-            Txt(
-                text,
-                TypeRole::Mono,
-                Some(Paint::Role(if error { ColorRole::Error } else { ColorRole::OnSurfaceVariant })),
-                max_lines,
-                max_lines.map(|_| TextOverflow::Ellipsis),
-                None,
-                None,
-            );
+            // `.inset` pads 12 16; the uniform 12 above plus this 4 makes the left edge 16.
+            cu::Row().content(|| {
+                cu::Spacer().modifier(Modifier::new().width(4.0));
+                Txt(
+                    text,
+                    TypeRole::Mono,
+                    Some(Paint::Role(if error { ColorRole::Error } else { ColorRole::OnSurfaceVariant })),
+                    max_lines,
+                    max_lines.map(|_| TextOverflow::Ellipsis),
+                    None,
+                    None,
+                );
+            });
         });
 }
 

@@ -35,6 +35,8 @@ pub use crate::ui::shell::{
 };
 use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
+pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
+
 use crate::model;
 use crate::ui::coexist::{shared_ui, SharedUi};
 use crate::ui::Route;
@@ -175,7 +177,13 @@ pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnM
                 cu::Box()
                     .modifier(Modifier::new().fill_max_width().fill_max_height())
                     .alignment(Alignment::TopEnd)
-                    .content(|| RedBadge(n));
+                    .content(|| {
+                        // `.nav .redbadge`: top 2, right 0.
+                        cu::Column().content(|| {
+                            cu::Spacer().modifier(Modifier::new().height(2.0));
+                            RedBadge(n);
+                        });
+                    });
             }
         },
     );
@@ -225,7 +233,7 @@ pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
                 .modifier(Modifier::new().size(size, size));
             if !compact {
                 cu::Spacer().modifier(Modifier::new().width(10.0));
-                cu::Column().content(|| {
+                cu::Column().spacing(6.0).content(|| {
                     Label("Ember", Fs::Lg, Weight::Semibold, None, None);
                     Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                 });
@@ -269,7 +277,7 @@ pub fn UserRow(rail: bool) {
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
             } else {
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                cu::Column().content(|| {
+                cu::Column().spacing(4.0).content(|| {
                     Label(name, Fs::Sm, Weight::Semibold, None, None);
                     Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                 });
@@ -286,7 +294,10 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let width = if rail { RAIL_W } else { SIDE_W };
     let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
     let side = if rail { 0.0 } else { SP[2] };
-    let top = if rail { SP[3] } else { SP[4] };
+    // Spacers include the column's 2 px gap on either side.
+    let top = if rail { 14.0 } else { SP[4] };
+    let below_brand = if rail { 10.0 } else { 24.0 };
+    let bottom = if rail { 26.0 } else { 30.0 };
     cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
         cu::Column()
             .modifier(Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)))
@@ -300,7 +311,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                         .content(|| {
                             cu::Spacer().modifier(Modifier::new().height(top));
                             Brand(rail, on_collapse);
-                            cu::Spacer().modifier(Modifier::new().height(top));
+                            cu::Spacer().modifier(Modifier::new().height(below_brand));
                             for menu in NavMenu::ALL {
                                 let u = ui.clone();
                                 let badge = nav_badge(menu, &counts);
@@ -311,7 +322,12 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                 }
                             }
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            // `.sidetools` has no divider in the mockup, only a gap.
+                            // `.sidetools`: 8 margin, a 1 px `--line` border, 8 padding.
+                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                            cu::Spacer().modifier(
+                                Modifier::new().fill_max_width().height(1.0).background(paint(p.line)),
+                            );
+                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
                             let u = ui.clone();
                             ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
@@ -319,7 +335,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
                             cu::Spacer().modifier(Modifier::new().height(SP[1]));
                             UserRow(rail);
-                            cu::Spacer().modifier(Modifier::new().height(top));
+                            cu::Spacer().modifier(Modifier::new().height(bottom));
                         });
                     cu::Spacer().modifier(Modifier::new().width(side));
                 });
@@ -344,12 +360,15 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                         .height(TABBAR_H)
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
-                        .corner_radius(TABBAR_RADIUS)
-                        .elevation(ELEVATION_LARGE),
+                        .corner_radius(TABBAR_RADIUS),
+                    // TODO(compose-rust#375): the bar's shadow; `elevation` also tints the fill
+                    // with a vertical gradient under Material 3, so the bar stays flat.
                 )
                 .alignment(Alignment::Center)
                 .content(|| {
                     cu::Row().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                        // `.side` padding 6 4: the tabs sit 4 px inside the border.
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                         for tab in BOTTOM_TABS {
                             let mut choose_tab = on_choose.clone();
                             let ink = if tab == marked { p.text } else { p.muted };
@@ -367,16 +386,21 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                                         });
                                         // `.nav.tab .redbadge`: top 0, right 4, on the tab itself.
                                         if let Some(n) = tab_badge(tab, &counts) {
-                                            cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
-                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                                RedBadge(n);
-                                                cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                                            });
+                                            cu::Box()
+                                                .modifier(Modifier::new().fill_max_width().fill_max_height())
+                                                .alignment(Alignment::TopEnd)
+                                                .content(|| {
+                                                    cu::Row().content(|| {
+                                                        RedBadge(n);
+                                                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                                    });
+                                                });
                                         }
                                     });
                                 },
                             );
                         }
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
                     });
                 });
             cu::Spacer().modifier(Modifier::new().width(TABBAR_SIDE_GAP));
@@ -402,11 +426,11 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                     .size(H_CTL, H_CTL)
                     .background(paint(p.surface))
                     .border(1.0, paint(p.line))
-                    .shape_role(compose_rust::ShapeRole::Full)
-                    .elevation(ELEVATION_CARD),
+                    .shape_role(compose_rust::ShapeRole::Full),
+                // TODO(compose-rust#375): the button's and popover's shadows.
                 Alignment::Center,
                 move || o.set(!o.get_untracked()),
-                || NavIcon(ICON_MORE_SVG, p.text_2.to_argb(), 16.0),
+                || NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0),
             );
             if open.get() {
                 cu::Spacer().modifier(Modifier::new().height(4.0));
@@ -417,7 +441,6 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                             .background(paint(p.surface))
                             .border(1.0, paint(p.line))
                             .corner_radius(CORNER_MD)
-                            .elevation(ELEVATION_LARGE)
                             .padding(4.0),
                     )
                     .content(|| {

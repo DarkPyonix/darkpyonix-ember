@@ -589,6 +589,8 @@ pub fn shell() {
                     super::channels::ChannelsScreen();
                 } else if matches!(screen, Screen::Launcher) {
                     super::project::ProjectScreen();
+                } else if matches!(screen, Screen::Files) {
+                    super::files::FilesScreen();
                 } else if matches!(screen, Screen::Home) {
                     super::home::HomeScreen();
                 } else {
@@ -718,6 +720,10 @@ pub fn launch(pref: ThemePref) {
         }
         Some("project") | Some("project-detail") => {
             ui.set_menu(NavMenu::Projects);
+            shell
+        }
+        Some("files") => {
+            ui.set_menu(NavMenu::Files);
             shell
         }
         Some("home") => {

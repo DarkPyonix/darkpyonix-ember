@@ -17,3 +17,4 @@ pub mod monitor;
 pub mod channels;
 pub mod home;
 pub mod project;
+pub mod files;

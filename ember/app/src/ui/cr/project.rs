@@ -246,7 +246,7 @@ pub fn ProjectScreen() {
 
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
-fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
+pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
@@ -273,11 +273,11 @@ fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
 }
 
 /// The room the shell's floating menu button takes at the top right of a phone.
-const PHONE_MENU_ROOM: f32 = 52.0;
+pub const PHONE_MENU_ROOM: f32 = 52.0;
 
 /// The theme toggle of the page header: a 40 px round button with a sun or a moon.
 /// TODO(compose-rust#372): a pointer-up `Clickable`; the toolkit has no sun or moon glyph.
-fn ThemeButton(ui: &SharedUi) {
+pub fn ThemeButton(ui: &SharedUi) {
     let p = ember_theme().palette;
     let dark = ember_theme().scheme == Scheme::Dark;
     let u = ui.clone();

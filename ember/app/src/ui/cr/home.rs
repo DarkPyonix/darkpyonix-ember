@@ -12,7 +12,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, Paint, ShapeRole};
+use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
@@ -193,10 +193,6 @@ pub fn note_tone(index: usize, counts: &StatusCounts) -> PillTone {
 // ---------------------------------------------------------------------------------------------
 // Small pieces
 // ---------------------------------------------------------------------------------------------
-
-fn clear() -> Paint {
-    Paint::Literal(compose_rust::Color::argb(0))
-}
 
 fn ring_image(size: f32, stroke: f32, parts: &[(u32, f32)]) {
     let p = ember_theme().palette;
@@ -737,8 +733,10 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32) {
         });
         KpiStrip(&k, &d.counts, l);
         let stacked = !l.wide;
+        // The trend's chart is a fixed-width canvas: the card's inner width.
+        let chart_w = if l.wide { content_w * 8.0 / 12.0 - GAP_CARD - 2.0 * PAD_CARD_H } else { content_w - 2.0 * PAD_CARD_H }.max(200.0);
         Weighted(stacked, GAP_CARD, vec![
-            (8.0, Box::new(|| TokenTrendTile(ui)) as Part),
+            (8.0, Box::new(|| TokenTrendTile(ui, chart_w)) as Part),
             (4.0, Box::new(|| StatusTile(&d.counts, ui))),
         ]);
         Weighted(stacked, GAP_CARD, vec![
@@ -818,9 +816,9 @@ fn Unavailable(icon: &'static str, title: &str) {
 
 /// Token bars per day for the ChatGPT plan accounts, 7 or 14 days (FR-U7). Cost and the other
 /// harnesses are not reported yet and say so.
-/// TODO(compose-rust): the mockup's hatched bars and the cost line need drawing the toolkit has
-/// only through `Canvas` at a fixed width; plain bars until the chart can follow its container.
-fn TokenTrendTile(ui: &SharedUi) {
+/// The hatched bars (Ember #190) are a `Canvas` at the card's width; the cost line needs a path
+/// and the cost is not reported yet.
+fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     let p = ember_theme().palette;
     let days = remember(|| mutable_state_of(7usize));
     let rows = ui.live.usage.get();
@@ -830,7 +828,21 @@ fn TokenTrendTile(ui: &SharedUi) {
     }
     let series = crate::ui::home::chatgpt_token_days(&rows, &ids, &crate::ui::home::today_utc(), days.get());
     let values: Vec<u64> = series.iter().map(|(_, t)| *t).collect();
-    let heights = bar_heights(&values, 160.0);
+    const H: f32 = 160.0;
+    let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
+    let rects = crate::ui::home::bar_rects(&usize_values, chart_w, H, 6.0);
+    let now = rects.len().saturating_sub(1);
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
+    for (i, (x, y, w, h)) in rects.into_iter().enumerate() {
+        if h > 0.0 {
+            let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
+            list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
+            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, 5.0) {
+                list = list.line(color, x1, y1, x2, y2, 1.0);
+            }
+        }
+    }
+    let commands = list.build();
     let total: u64 = values.iter().sum();
     let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
     let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
@@ -842,16 +854,7 @@ fn TokenTrendTile(ui: &SharedUi) {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             }
         });
-        cu::Row().spacing(6.0).modifier(Modifier::new().fill_max_width().height(160.0)).content(|| {
-            let now = heights.len().saturating_sub(1);
-            for (i, h) in heights.iter().enumerate() {
-                cu::Column().modifier(Modifier::new().weight(1.0).height(160.0)).content(|| {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    let color = if i == now { p.orange.strong } else { p.grey.strong };
-                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(*h).background(paint(color)).corner_radius(CORNER_XS));
-                });
-            }
-        });
+        cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             Label(&first, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
             cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -1136,7 +1139,8 @@ mod tests {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
         let mut host = Host::new(|| Box::new(Recomposer::new(HomeScreen)));
-        decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let first = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let mut all = texts(&first);
         let event = HostEvent {
             node_id: 0,
             handler_id: 0,
@@ -1149,9 +1153,10 @@ mod tests {
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         let batch = decode_batch(bytes).expect("decode");
-        let all = texts(&batch);
+        // The resize only re-emits what changed, so the greeting is in the first batch.
+        all.extend(texts(&batch));
         let has = |want: &str| all.iter().any(|t| t.contains(want));
-        for want in ["무엇을 도와드릴까요?", "기본 프로젝트", "오늘의 팀", "실행 중 팀원", "팀원 상태", "프로젝트", "모두 보기"] {
+        for want in ["무엇을 도와줄까요?", "기본 프로젝트", "오늘의 팀", "실행 중 팀원", "팀원 상태", "프로젝트", "모두 보기"] {
             assert!(has(want), "missing {want}: {all:?}");
         }
         for s in SUGGESTIONS {

@@ -15,7 +15,7 @@ use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 
 use ember_client::wire::SessionPatch;
 
-use super::compat::{Badge, Banner, RowStatus};
+use super::compat::{Badge, StatusDot, StatusPill};
 use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, Label, OptionSheet, SheetFooter};
 use super::notice;
 use super::theme::*;
@@ -32,7 +32,13 @@ pub fn ConnectionBanner() {
     let ui = shared_ui();
     let _ = ui.live.launcher.get();
     let banner = services().client.read(|s| super::ko::connection_banner(s.connection()));
-    let Some((text, tone)) = banner else { return };
+    if let Some((text, tone)) = banner {
+        ConnectionBannerView(&text, tone);
+    }
+}
+
+/// The banner itself, so a review window can show it without a live connection problem.
+pub fn ConnectionBannerView(text: &str, tone: Tone) {
     let (fill, ink) = super::compat::tone_colors(tone, ember_theme().palette);
     cu::Row()
         .alignment(Alignment::CenterStart)
@@ -47,7 +53,7 @@ pub fn ConnectionBanner() {
             cu::Spacer().modifier(Modifier::new().width(SP[3]));
             super::shell::NavIcon(super::shell::ICON_INFO_SVG, ink.to_argb(), 18.0);
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
-            Label(&text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
+            Label(text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             AppButton("다시 시도", None, ButtonKind::Default, true, true, false, || {
                 services().client.reconnect_push();
@@ -101,42 +107,42 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
     let preview = row.preview.clone().unwrap_or_default();
     let p = theme.palette;
 
-    // `.list-row`: status dot and pill, the title, the preview and the agent line muted below;
-    // the time and the menu button sit on the first line at the right.
+    // `.list-row`: a status dot tile, the title over the agent line (and the preview when
+    // there is one), then the status pill, the time and the menu button at the right.
+    // Everything of the row is one node, so the sheets below are not spaced as siblings.
+    cu::Box().modifier(Modifier::new().fill_max_width()).content(|| {
     EmberCard(false, true, None, None, None, || {
-        cu::Row().alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
             let (u, id) = (ui.clone(), row.id.clone());
             Clickable(
                 Modifier::new().weight(1.0),
-                Alignment::TopStart,
+                Alignment::CenterStart,
                 move || u.open_conversation(&id),
                 || {
-                    cu::Column().spacing(SP[0]).content(|| {
-                        cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).content(|| {
-                            RowStatus(row.status);
-                            if row.pinned {
-                                Badge("고정됨", Tone::Neutral);
+                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).content(|| {
+                        StatusDot(row.status);
+                        cu::Column().content(|| {
+                            Label(&row.title, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
+                            if !preview.is_empty() {
+                                Label(&preview, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                             }
+                            Label(&meta, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
-                        Label(&row.title, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
-                        if !preview.is_empty() {
-                            Label(&preview, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        }
-                        Label(&meta, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                 },
             );
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().height(H_CTL)).content(|| {
-                Label(&when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                let open = menu_open.clone();
-                cu::Button("")
-                    .icon(compose_rust::IconRole::More)
-                    .variant(ButtonVariant::Text)
-                    .color(paint(p.text_2))
-                    .modifier(Modifier::new().size(H_CTL, H_CTL))
-                    .on_click(move || open.set(true));
-            });
+            if row.pinned {
+                Badge("고정됨", Tone::Neutral);
+            }
+            StatusPill(row.status);
+            Label(&when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+            let open = menu_open.clone();
+            cu::Button("")
+                .icon(compose_rust::IconRole::More)
+                .variant(ButtonVariant::Text)
+                .color(paint(p.text_2))
+                .modifier(Modifier::new().size(H_CTL, H_CTL))
+                .on_click(move || open.set(true));
         });
     });
     // The row menu is a modal list: the toolkit `Menu` cannot be placed below its anchor.
@@ -185,6 +191,7 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
             });
         });
     });
+    });
 }
 
 /// A review window: the connection banner and a few session rows, the first with its menu open
@@ -202,10 +209,15 @@ pub fn rows_preview() {
         .modifier(Modifier::new().fill_max_size().background(paint(theme.palette.bg)).padding_role(SpaceRole::Md))
         .content(|| {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-                Banner("오프라인: 저장된 데이터를 보여주는 중입니다", Tone::Neutral);
+                ConnectionBannerView("오프라인: 저장된 데이터를 보여주는 중입니다", Tone::Neutral);
                 ConnectionBanner();
                 for (i, row) in rows.iter().take(4).enumerate() {
-                    SessionRowWith(row, i == 0);
+                    // The demo sessions carry no preview; the first two get one to show the line.
+                    let mut row = row.clone();
+                    if i < 2 && row.preview.is_none() {
+                        row.preview = Some("테스트가 모두 통과했습니다. 변경 사항을 정리했어요.".to_string());
+                    }
+                    SessionRowWith(&row, false);
                 }
             });
         });

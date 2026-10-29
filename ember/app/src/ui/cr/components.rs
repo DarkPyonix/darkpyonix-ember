@@ -133,7 +133,7 @@ pub fn Clickable(
         .content(content);
 }
 
-/// One row of a popup menu: 36 px high, left-aligned `--text`, the chosen row on `--sel`.
+/// One row of a popup menu: 38 px high, left-aligned `--text`, the chosen row on `--sel`.
 /// The toolkit `Button` as a menu entry centres its label in link colour and stretches the
 /// popup to the window, so rows are Ember's own until `Menu` entries can be styled.
 /// TODO(compose-rust#372): no keyboard focus or role, as for every `Clickable`.
@@ -141,7 +141,7 @@ pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + '
     let p = ember_theme().palette;
     let bg = if chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
     Clickable(
-        Modifier::new().width(width).height(36.0).background(bg).corner_radius(CORNER_SM),
+        Modifier::new().width(width).height(38.0).background(bg).corner_radius(CORNER_SM),
         Alignment::CenterStart,
         on_click,
         || {
@@ -204,6 +204,8 @@ pub fn Select(
     let p = ember_theme().palette;
     let open = remember(|| mutable_state_of(false));
     let toggle = open.clone();
+    // One node, so the popup's `Dialog` is not a separate child that a parent's spacing counts.
+    cu::Box().modifier(Modifier::new().fill_max_width()).content(|| {
     Clickable(
         Modifier::new()
             .fill_max_width()
@@ -225,21 +227,26 @@ pub fn Select(
     );
     let dismiss = open.clone();
     OptionSheet(open.get(), options, Some(chosen), popup_width, move || dismiss.set(false), on_choose);
+    });
 }
 
 /// The footer every sheet and dialog shares: a line, then actions right-aligned (`.snew-foot`).
 pub fn SheetFooter(content: impl FnOnce()) {
     let p = ember_theme().palette;
     cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+    // `.snew-foot`: 12 above, 20 below, 20 at the right, 6 between the buttons.
+    cu::Spacer().modifier(Modifier::new().height(SP[2]));
     cu::Row()
-        .space_role(compose_rust::SpaceRole::Sm)
+        .spacing(6.0)
         .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(64.0))
+        .modifier(Modifier::new().fill_max_width().height(H_CTL))
         .content(|| {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             content();
-            cu::Spacer().modifier(Modifier::new().width(SP[4]));
+            // The row's 6 px gap sits before this spacer too.
+            cu::Spacer().modifier(Modifier::new().width(SP[4] - 6.0));
         });
+    cu::Spacer().modifier(Modifier::new().height(SP[4]));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -736,8 +743,9 @@ pub fn EmberSheet(
     let theme = ember_theme();
     let modifier = Modifier::new()
         .background(paint(theme.palette.surface))
-        .corner_radius(CORNER_XL)
-        .elevation(ELEVATION_LARGE);
+        // TODO(compose-rust#375): no `elevation` here. Under Material 3 it paints a tinted shadow
+        // ring inside the dialog's own frame, which showed as a band at the top and sides.
+        .corner_radius(CORNER_XL);
     let dismiss = on_dismiss.clone();
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {

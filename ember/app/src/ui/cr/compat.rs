@@ -108,21 +108,24 @@ pub fn StatusIndicator(status: LauncherStatus) {
     });
 }
 
-/// The status of a session row: an 8 px dot and a pill, for every status alike
-/// (`.list-row`: `dot` + `.pill`).
-pub fn RowStatus(status: LauncherStatus) {
-    let tone = match status {
+fn status_tone(status: LauncherStatus) -> Tone {
+    match status {
         LauncherStatus::Running | LauncherStatus::FinishedUnread => Tone::Accent,
         LauncherStatus::WaitingForApproval => Tone::Warning,
         LauncherStatus::Failed => Tone::Error,
         LauncherStatus::Finished => Tone::Success,
         LauncherStatus::Idle | LauncherStatus::Unknown => Tone::Neutral,
-    };
-    cu::Row().alignment(Alignment::CenterStart).content(|| {
-        Dot(tone);
-        cu::Spacer().modifier(Modifier::new().width(6.0));
-        Badge(super::ko::status_label(status), tone);
-    });
+    }
+}
+
+/// The 8 px status dot of a session row (`sdot`).
+pub fn StatusDot(status: LauncherStatus) {
+    Dot(status_tone(status));
+}
+
+/// The Korean status pill of a session row (`pill`).
+pub fn StatusPill(status: LauncherStatus) {
+    Badge(super::ko::status_label(status), status_tone(status));
 }
 
 /// Conversation text.

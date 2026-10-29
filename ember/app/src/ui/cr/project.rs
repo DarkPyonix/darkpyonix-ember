@@ -247,11 +247,19 @@ pub fn ProjectScreen() {
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
 pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
+    HeaderGap(title, sub, compact, 0.0, trailing)
+}
+
+/// [`Header`] with `gap` dp between the title and the subtitle.
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, gap: f32, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
             Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(1));
             if !sub.is_empty() {
+                if gap > 0.0 {
+                    cu::Spacer().modifier(Modifier::new().height(gap));
+                }
                 Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
             }
         });

@@ -28,10 +28,10 @@ pub use crate::ui::files::{
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
 use super::characters::{CharState, Character};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheetSized, FilterChip, Label, Pill, PillTone};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheetSized, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
-use super::project::{Header, ThemeButton};
+use super::project::{HeaderGap, ThemeButton};
 use super::shell::NavIcon;
 use super::theme::*;
 use crate::services::services;
@@ -78,6 +78,126 @@ pub fn device_cols(width_dp: f32) -> usize {
 pub fn side_by_side(width_dp: f32) -> bool {
     width_dp > 1100.0
 }
+
+// More mockup glyphs (`FL_IC`): the file types, pause and play.
+const ICON_IMG: &str = line_icon!("m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0 0 22.5 18.75V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Zm10.5-11.25h.008v.008h-.008V9.75Z");
+const ICON_VIDEO: &str = line_icon!("m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9A2.25 2.25 0 0 0 13.5 5.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z");
+const ICON_AUDIO: &str = line_icon!("m9 9 10.5-3m0 6.553v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 1 1-.99-3.467l2.31-.66a2.25 2.25 0 0 0 1.632-2.163Zm0 0V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 0 1-1.632 2.163l-1.32.377a1.803 1.803 0 0 1-.99-3.467l2.31-.66A2.25 2.25 0 0 0 9 15.553Z");
+const ICON_ZIP: &str = line_icon!("m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z");
+const ICON_PAUSE: &str = line_icon!("M15.75 5.25v13.5m-7.5-13.5v13.5");
+const ICON_PLAY: &str = line_icon!("M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z");
+
+/// What the device list shows beyond [`Device`]: the system line and when it was last seen. The
+/// service does not report them yet, so only the sample fills it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub os: String,
+    pub seen: String,
+}
+
+/// Extra display data keyed by device id, and the times of the received files by index.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extras {
+    pub devices: std::collections::HashMap<String, DeviceInfo>,
+    pub received_at: Vec<String>,
+}
+
+/// The kind of a file, by its extension (`.t-img`, `.t-video`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Image,
+    Video,
+    Audio,
+    Zip,
+    Doc,
+}
+
+impl FileKind {
+    pub fn of(name: &str) -> FileKind {
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "heic" | "webp" | "svg" => FileKind::Image,
+            "mov" | "mp4" | "mkv" | "avi" | "webm" => FileKind::Video,
+            "mp3" | "wav" | "flac" | "m4a" | "aac" => FileKind::Audio,
+            "zip" | "tar" | "gz" | "7z" | "rar" | "tgz" => FileKind::Zip,
+            _ => FileKind::Doc,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FileKind::Image => "이미지",
+            FileKind::Video => "동영상",
+            FileKind::Audio => "오디오",
+            FileKind::Zip => "압축",
+            FileKind::Doc => "문서",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            FileKind::Image => ICON_IMG,
+            FileKind::Video => ICON_VIDEO,
+            FileKind::Audio => ICON_AUDIO,
+            FileKind::Zip => ICON_ZIP,
+            FileKind::Doc => ICON_DOC,
+        }
+    }
+
+    /// The colour family of the type chip (`.t-img` sky, `.t-video` red, `.t-audio` orange,
+    /// `.t-zip` green, `.t-doc` blue).
+    pub fn tone(self) -> PillTone {
+        match self {
+            FileKind::Image => PillTone::Sky,
+            FileKind::Video => PillTone::Red,
+            FileKind::Audio => PillTone::Orange,
+            FileKind::Zip => PillTone::Green,
+            FileKind::Doc => PillTone::Blue,
+        }
+    }
+}
+
+/// A history entry's `when` ("오늘 09:41") as its day and its time.
+pub fn split_when(when: &str) -> (&str, &str) {
+    when.split_once(' ').unwrap_or(("", when))
+}
+
+/// The entries grouped by day, in the order the days first appear.
+pub fn history_days<'a>(rows: &[&'a HistoryEntry]) -> Vec<(String, Vec<&'a HistoryEntry>)> {
+    let mut days: Vec<(String, Vec<&HistoryEntry>)> = Vec::new();
+    for h in rows {
+        let day = split_when(&h.when).0.to_string();
+        match days.iter_mut().find(|(d, _)| *d == day) {
+            Some((_, v)) => v.push(*h),
+            None => days.push((day, vec![*h])),
+        }
+    }
+    days
+}
+
+/// The device names in the history, for the device filter.
+pub fn history_devices(history: &[HistoryEntry]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for h in history {
+        if !out.contains(&h.device) {
+            out.push(h.device.clone());
+        }
+    }
+    out
+}
+
+/// The widths of a tile grid's rows, so that a tile spanning several columns lines up with the
+/// columns above it: a span of `s` columns is `s * column + (s - 1) * gap` wide. `avail` is the
+/// width of the grid; see [`grid_weights`] for the spans.
+pub fn grid_widths(n: usize, cols: usize, avail: f32, gap: f32) -> Vec<Vec<f32>> {
+    let cols = cols.max(1);
+    let column = ((avail - (cols as f32 - 1.0) * gap) / cols as f32).max(1.0);
+    grid_weights(n, cols)
+        .into_iter()
+        .map(|row| row.into_iter().map(|s| s * column + (s - 1.0) * gap).collect())
+        .collect()
+}
+
 
 /// The history filter (`.fl-hfilter`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +296,20 @@ pub fn sample_model() -> (FilesModel, Vec<Offer>) {
     (FilesModel { devices, transfers, received, history, ready: true }, offers)
 }
 
+/// The sample's system lines, last-seen times and received times.
+pub fn sample_extras() -> Extras {
+    let info = |os: &str, seen: &str| DeviceInfo { os: os.into(), seen: seen.into() };
+    let mut devices = std::collections::HashMap::new();
+    devices.insert("d1".to_string(), info("macOS 26", ""));
+    devices.insert("d2".to_string(), info("iOS 26 \u{b7} 배터리 64%", ""));
+    devices.insert("d3".to_string(), info("Ubuntu 24.04", ""));
+    devices.insert("d4".to_string(), info("iPadOS 26 \u{b7} 배터리 88%", ""));
+    devices.insert("d5".to_string(), info("Android 17", "12분 전"));
+    devices.insert("d6".to_string(), info("Windows 11", "2일 전"));
+    devices.insert("d7".to_string(), info("Linux (확인 중)", ""));
+    Extras { devices, received_at: vec!["오늘 오전 5:33".into(), "어제 오후 9:12".into()] }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------------------------------
@@ -186,6 +320,8 @@ struct State {
     sheet: MutableState<Option<SendDraft>>,
     answered: MutableState<Vec<String>>,
     filter: MutableState<HistoryFilter>,
+    /// The history's device filter: 0 is every device, then the devices in the history.
+    peer: MutableState<usize>,
 }
 
 impl State {
@@ -194,6 +330,7 @@ impl State {
             sheet: mutable_state_of((std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("send")).then(SendDraft::default)),
             answered: mutable_state_of(Vec::new()),
             filter: mutable_state_of(HistoryFilter::All),
+            peer: mutable_state_of(0),
         }
     }
 }
@@ -207,14 +344,14 @@ pub fn FilesScreen() {
     if std::env::var("EMBER_CR_FILES_SAMPLE").as_deref() == Ok("1") {
         let (model, offers) = sample_model();
         let members = services().client.read(|s| crew(s, 4));
-        return FilesScreenWith(&model, offers, members);
+        return FilesScreenWith(&model, offers, members, &sample_extras());
     }
     let (computers, members): (Vec<Computer>, Vec<CrewMember>) =
         services().client.read(|s| (s.computers().to_vec(), crew(s, 4)));
-    FilesScreenWith(&build_model(&computers, svc), svc.pending_offers(), members);
+    FilesScreenWith(&build_model(&computers, svc), svc.pending_offers(), members, &Extras::default());
 }
 
-pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<CrewMember>) {
+pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<CrewMember>, extras: &Extras) {
     let ui = shared_ui().clone();
     let st = remember(State::new);
     let window = compose_rust::runtime::current_window_size();
@@ -234,7 +371,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     if compact {
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
-                    Header("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, || {
+                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, 6.0, || {
                         ThemeButton(&ui);
                         let s = st.sheet.clone();
                         let open = move || s.set(Some(SendDraft::default()));
@@ -257,10 +394,10 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         cells.iter().map(|c| -> Part { Box::new(move || KpiView(c)) }).collect(),
                     );
                 }
-                Stage(model, &members, &st, &ui, w, &skip);
+                Stage(model, &members, extras, &st, &ui, w, &skip);
                 if skip.show(EST_TRANSFERS) {
                     let transfers = || TransfersCard(model, ready);
-                    let received = || ReceivedCard(model, ready);
+                    let received = || ReceivedCard(model, extras, ready, w);
                     if side_by_side(w) {
                         cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
                             cu::Column().modifier(Modifier::new().weight(1.1)).content(transfers);
@@ -409,12 +546,12 @@ pub fn grid_weights(n: usize, cols: usize) -> Vec<Vec<f32>> {
     rows
 }
 
-/// A grid of tiles by [`grid_weights`].
-fn TileGrid<'a>(cols: usize, gap: f32, tiles: Vec<Part<'a>>) {
-    let weights = grid_weights(tiles.len(), cols);
+/// A grid of tiles by [`grid_widths`], so spanning tiles line up with the columns above.
+fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, tiles: Vec<Part<'a>>) {
+    let widths = grid_widths(tiles.len(), cols, avail, gap);
     cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
         let mut it = tiles.into_iter();
-        for row in weights {
+        for row in widths {
             cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
                 for wt in row {
                     if let Some(tile) = it.next() {
@@ -429,7 +566,7 @@ fn TileGrid<'a>(cols: usize, gap: f32, tiles: Vec<Part<'a>>) {
 /// A KPI: the label, the number with its small unit and pill, and the green meter.
 fn KpiView(c: &KpiCell) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+    cu::Column().spacing(0.0).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(c.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         if c.available {
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
@@ -457,7 +594,7 @@ fn KpiView(c: &KpiCell) {
 }
 
 /// 장비: my devices, the agents and the tray, in one card (`.fl-stage`).
-fn Stage(model: &FilesModel, members: &[CrewMember], st: &State, ui: &SharedUi, w: f32, skip: &Skip) {
+fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State, ui: &SharedUi, w: f32, skip: &Skip) {
     let p = ember_theme().palette;
     let ready = model.ready;
     let (devices, agents, tray) = (skip.show(EST_DEVICES), skip.show(EST_AGENTS), skip.show(EST_TRAY));
@@ -467,6 +604,8 @@ fn Stage(model: &FilesModel, members: &[CrewMember], st: &State, ui: &SharedUi, 
     super::components::EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
             let cols = device_cols(w);
+            // The card's inner width, for the spanning tiles to line up with the columns.
+            let avail = super::home::content_width(w, page_pad(w)) - 2.0 * PAD_CARD_H;
             if devices {
                 super::home::CardHead(ICON_DESKTOP, "장비", || {});
                 if model.devices.is_empty() {
@@ -475,13 +614,14 @@ fn Stage(model: &FilesModel, members: &[CrewMember], st: &State, ui: &SharedUi, 
                 TileGrid(
                     cols,
                     SP[2],
+                    avail,
                     model
                         .devices
                         .iter()
                         .map(|d| -> Part {
                             let s = st.sheet.clone();
                             Box::new(move || {
-                                DeviceTile(d, move |id| {
+                                DeviceTile(d, extras.devices.get(&d.id), move |id| {
                                     s.set(Some(SendDraft { target: Some(SendTarget::Device(id)), files: Vec::new() }))
                                 })
                             })
@@ -506,6 +646,7 @@ fn Stage(model: &FilesModel, members: &[CrewMember], st: &State, ui: &SharedUi, 
                 TileGrid(
                     cols,
                     SP[2],
+                    avail,
                     members
                         .iter()
                         .map(|m| -> Part {
@@ -542,15 +683,17 @@ pub fn path_name(p: PathKind) -> &'static str {
     }
 }
 
-/// `.fl-dev`: a device card: the kind glyph with its presence dot, the name, the kind, and the
-/// path pill with the latency beside it. The whole tile sends to the device (it opens the send
-/// sheet), as in the mockup. TODO(compose-rust#372): a pointer-up `Clickable`.
-fn DeviceTile(d: &Device, on_send: impl FnMut(String) + 'static) {
+/// `.fl-dev`: a device card: the kind glyph with its presence dot, the name, the system line, and
+/// the path pill with the latency beside it (or the state and when it was last seen). The whole
+/// tile sends to the device (it opens the send sheet), as in the mockup.
+/// TODO(compose-rust#372): a pointer-up `Clickable`.
+fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let id = d.id.clone();
     let mut on_send = on_send;
     let m = Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]);
     let offline = matches!(d.presence, Presence::Offline | Presence::Unknown);
+    let sub = info.map(|i| i.os.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| d.kind.label().to_string());
     Clickable(if offline { m.alpha(0.62) } else { m }, Alignment::TopStart, move || on_send(id.clone()), || {
         cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Box().modifier(Modifier::new().size(48.0, 48.0)).content(|| {
@@ -564,27 +707,44 @@ fn DeviceTile(d: &Device, on_send: impl FnMut(String) + 'static) {
                     );
                 });
             });
-            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
             Label(&fit_label(&d.name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
-            Label(d.kind.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            Label(&fit_label(&sub, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
             // The foot: the path pill and the latency as plain text; sleeping, offline and
-            // unknown devices show their state.
+            // unknown devices show their state and when they were last seen.
+            let seen = info.map(|i| i.seen.clone()).unwrap_or_default();
             cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| match (d.presence, d.path) {
                 (Presence::Online, Some(path)) => {
-                    Pill(path_name(path), path_tone(path), true);
+                    Pill(path_name(path), path_tone(path), false);
                     if let Some(ms) = d.latency_ms {
                         Label(&format!("{ms} ms"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     }
                 }
-                (presence, _) => Pill(presence.label(), presence_tone(presence), true),
+                (presence, _) => {
+                    Pill(presence.label(), presence_tone(presence), false);
+                    if !seen.is_empty() {
+                        Label(&seen, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
+                }
             });
         });
     });
 }
 
-/// An agent's tile: its character, name, computer and task, and its status. The tile sends to the
-/// computer the agent works on. TODO(compose-rust#372): a pointer-up `Clickable`.
+/// The computer an agent works on: the first computer assigned to its project (the client does
+/// not know which computer a session runs on, TODO(FR-X7)), else [`UNAVAILABLE`].
+pub fn agent_host(project: &str) -> String {
+    services().client.read(|s| {
+        let id = s.project_computers(project).first().cloned()?;
+        s.computers().iter().find(|c| c.id == id).map(|c| c.name.clone())
+    })
+    .unwrap_or_else(|| format!("컴퓨터 정보는 {UNAVAILABLE}"))
+}
+
+/// An agent's tile: its character (48 px, as the mockup's `.fl-dev-ic.bot`), name, computer and
+/// task, and its status. The tile sends to the computer the agent works on.
+/// TODO(compose-rust#372): a pointer-up `Clickable`.
 fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let mut on_send = on_send;
@@ -592,18 +752,19 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'stati
     let _ = ui;
     let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
     let state = if m.waiting { CharState::Wait } else { CharState::Run };
+    let host = agent_host(&m.project);
     Clickable(
         Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]),
         Alignment::TopStart,
         move || on_send(send_id.clone()),
         || {
             cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
-                Character(&m.agent, false, 34.0, &name, &m.project, state, None);
+                Character(&m.agent, false, 48.0, &name, &m.project, state, None);
+                cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
                 Label(&fit_label(&name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
-                // TODO(server): which computer a session runs on is not in the client's state.
-                Label(&format!("컴퓨터 정보는 {UNAVAILABLE}"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                Label(&fit_label(&host, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 Label(&fit_label(&m.title, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
                 if m.waiting {
                     Pill("승인 대기", PillTone::Orange, true);
                 } else {
@@ -671,12 +832,12 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
             });
     };
     if compact {
-        cu::Box().alignment(Alignment::BottomCenter).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().modifier(Modifier::new().padding(SP[3])).content(|| {
-                card();
-                // Above the floating tab bar.
-                cu::Spacer().modifier(Modifier::new().height(TABBAR_H + TABBAR_BOTTOM_GAP));
-            });
+        // A bottom sheet over the page and the tab bar; leaving it does not answer the offer.
+        let answered = st.answered.clone();
+        cu::Sheet(true).modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_XL)).on_dismiss(move || {
+            let _ = &answered;
+        }).content(|| {
+            cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[3])).content(card);
         });
     } else {
         cu::Box().alignment(Alignment::TopEnd).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[5])).content(card);
@@ -695,6 +856,32 @@ fn FileChip(icon: &'static str, tone: PillTone) {
         .content(|| NavIcon(icon, fg.to_argb(), 16.0));
 }
 
+/// A 32 px round icon button with a line glyph (`.icon-btn.sm`).
+/// TODO(compose-rust#372): a pointer-up `Clickable`; the toolkit has no pause or play glyph.
+fn RoundGlyph(icon: &'static str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || NavIcon(icon, p.text_2.to_argb(), 16.0),
+    );
+}
+
+/// A single-line bar: `pct` of the track in `fill` (`.fl-bar`). Drawn here rather than with the
+/// toolkit indicator, whose colours are the design system's (compose-rust#377), so the done part
+/// is the token colour and the rest the track in both schemes.
+fn Bar(pct: u32, height: f32, fill: compose_rust::Color) {
+    let p = ember_theme().palette;
+    let pct = pct.min(100);
+    cu::Row().modifier(Modifier::new().fill_max_width().height(height).background(paint(p.track)).shape_role(ShapeRole::Full)).content(|| {
+        if pct > 0 {
+            cu::Spacer().modifier(Modifier::new().weight(pct as f32).height(height).background(paint(fill)).shape_role(ShapeRole::Full));
+        }
+        cu::Spacer().modifier(Modifier::new().weight((100 - pct) as f32 + 0.001));
+    });
+}
+
 fn TransfersCard(model: &FilesModel, ready: bool) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, None, None, || {
@@ -709,28 +896,40 @@ fn TransfersCard(model: &FilesModel, ready: bool) {
                 if i > 0 {
                     cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 }
-                TransferRow(t);
+                TransferRow(t, &model.devices);
             }
-            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
-                NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
-                Label(LOCK_LINE, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
-            });
         });
     });
 }
 
-fn TransferRow(t: &Transfer) {
+/// "종단 간 암호화 · P2P 직접 연결" and the like, from the other device's path.
+pub fn route_line(path: Option<PathKind>) -> String {
+    match path {
+        Some(PathKind::Nearby) => "종단 간 암호화 \u{b7} 근처 직접 연결".to_string(),
+        Some(PathKind::Direct) => "종단 간 암호화 \u{b7} P2P 직접 연결".to_string(),
+        Some(PathKind::Relay) => "종단 간 암호화 \u{b7} 릴레이 경유".to_string(),
+        None => "종단 간 암호화".to_string(),
+    }
+}
+
+fn TransferRow(t: &Transfer, devices: &[Device]) {
     let p = ember_theme().palette;
     let svc = transfer_service();
     let dir = match t.direction {
         Direction::Send => "보내는 중",
         Direction::Receive => "받는 중",
     };
+    let path = devices.iter().find(|d| d.name == t.device).and_then(|d| d.path);
+    let fill = match t.state {
+        TransferState::Sending | TransferState::Done => p.blue.strong,
+        TransferState::Failed => p.orange.strong,
+        _ => p.grey.strong,
+    };
     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
         cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-            FileChip(ICON_DOC, PillTone::Grey);
+            FileChip(FileKind::of(&t.name).icon(), FileKind::of(&t.name).tone());
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                Label(&t.name, Fs::Md, Weight::Medium, None, Some(1));
+                Label(&fit_label(&t.name, 260.0, Fs::Md.size()), Fs::Md, Weight::Medium, None, Some(1));
                 cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
                     NavIcon(if t.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, p.muted.to_argb(), 12.0);
                     Label(&format!("{dir} \u{b7} {}", t.device), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -741,37 +940,86 @@ fn TransferRow(t: &Transfer) {
                 Label("%", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
         });
-        // TODO(compose-rust#377): the bar's stroke and track colours are the toolkit's.
-        cu::LinearProgressIndicator(percent(t) as f32 / 100.0).modifier(Modifier::new().fill_max_width());
-        Label(&format!("{} / {} \u{b7} {}", format_bytes(t.done), format_bytes(t.total), progress_line(t)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-        cu::Row().spacing(SP[0]).content(|| {
+        Bar(percent(t), 8.0, fill);
+        // The foot: the amounts and the state at the left, the round buttons at the right.
+        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(&format!("{} / {}", format_bytes(t.done), format_bytes(t.total)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&progress_line(t), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            });
             for action in user_actions(t.state).iter().copied() {
                 let id = t.id.clone();
-                AppButton(action.label(), None, if action == TransferAction::Cancel { ButtonKind::Destructive } else { ButtonKind::Default }, true, true, false, move || {
-                    svc.control(&id, action)
-                });
+                let glyph = match action {
+                    TransferAction::Pause => Some(ICON_PAUSE),
+                    TransferAction::Resume | TransferAction::Retry | TransferAction::Start => Some(ICON_PLAY),
+                    _ => None,
+                };
+                match glyph {
+                    Some(g) => RoundGlyph(g, move || svc.control(&id, action)),
+                    None => IconButton(IconRole::Close, true, move || svc.control(&id, action)),
+                }
             }
+        });
+        cu::Row().spacing(4.0).alignment(Alignment::CenterStart).content(|| {
+            NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
+            Label(&route_line(path), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
     });
 }
 
-fn ReceivedCard(model: &FilesModel, ready: bool) {
+fn ReceivedCard(model: &FilesModel, extras: &Extras, ready: bool, w: f32) {
     let p = ember_theme().palette;
+    let cols = if w <= 560.0 || side_by_side(w) { 2 } else { 3 };
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            super::home::CardHead(ICON_DOWN, "받은 파일", || {});
+            super::home::CardHead(ICON_DOWN, "받은 파일", || {
+                // TODO(FR-F8): the real inbox from the transfer settings.
+                Label(DEFAULT_INBOX, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
             if model.received.is_empty() {
                 Label(empty_text(crate::ui::files::Section::Received, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             }
-            for f in model.received.iter() {
-                cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                    FileChip(ICON_DOC, PillTone::Blue);
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                        Label(&fit_label(&f.name, 260.0, Fs::Sm.size()), Fs::Sm, Weight::Medium, None, Some(1));
-                        Label(&format!("{} \u{b7} {}", format_bytes(f.size), f.from), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
+            Cols(
+                cols,
+                SP[2],
+                model
+                    .received
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| -> Part { Box::new(move || ReceivedTile(f, extras.received_at.get(i).map(String::as_str))) })
+                    .collect(),
+            );
+        });
+    });
+}
+
+/// `.fl-rc`: an 84 px preview tile in the file type's colour with the type label, the name, the
+/// size and sender, the time, the folder, and the 열기 and show-in-folder buttons.
+fn ReceivedTile(f: &ReceivedFile, at: Option<&str>) {
+    let p = ember_theme().palette;
+    let kind = FileKind::of(&f.name);
+    let (fg, bg) = super::components::pill_colors(kind.tone(), p);
+    cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Box()
+            .alignment(Alignment::Center)
+            .modifier(Modifier::new().fill_max_width().height(84.0).background(paint(bg)).corner_radius(CORNER_MD))
+            .content(|| {
+                NavIcon(kind.icon(), fg.to_argb(), 28.0);
+                cu::Box().alignment(Alignment::TopStart).modifier(Modifier::new().fill_max_width().height(84.0).padding(SP[1])).content(|| {
+                    Label(kind.label(), Fs::Xs2, Weight::Medium, Some(paint(fg)), Some(1));
                 });
-            }
+            });
+        cu::Spacer().modifier(Modifier::new().height(SP[0]));
+        Label(&fit_label(&f.name, 150.0, Fs::Sm.size()), Fs::Sm, Weight::Medium, None, Some(1));
+        Label(&fit_label(&format!("{} \u{b7} {}", format_bytes(f.size), f.from), 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        if let Some(at) = at {
+            Label(at, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        }
+        Label(DEFAULT_INBOX, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+            // TODO(FR-F8): opening and revealing a received file need the transfer client.
+            AppButton("열기", None, ButtonKind::Default, true, true, false, || notice::post(UNAVAILABLE));
+            IconButton(IconRole::Library, true, || notice::post(UNAVAILABLE));
         });
     });
 }
@@ -779,26 +1027,65 @@ fn ReceivedCard(model: &FilesModel, ready: bool) {
 fn HistoryCard(model: &FilesModel, st: &State, ready: bool, w: f32) {
     let p = ember_theme().palette;
     let filter = st.filter.get();
-    let rows: Vec<&HistoryEntry> = model.history.iter().filter(|h| filter.matches(h)).collect();
+    let peers = history_devices(&model.history);
+    let peer = st.peer.get().min(peers.len());
+    let rows: Vec<&HistoryEntry> = model
+        .history
+        .iter()
+        .filter(|h| filter.matches(h))
+        .filter(|h| peer == 0 || peers.get(peer - 1) == Some(&h.device))
+        .collect();
+    let days = history_days(&rows);
+    let mut options = vec!["모든 장비".to_string()];
+    options.extend(peers.iter().cloned());
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             super::home::CardHead(ICON_CLOCK, "전송 기록", || {});
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                for f in HistoryFilter::ALL {
-                    let s = st.filter.clone();
-                    FilterChip(f.label(), f == filter, move || s.set(f));
-                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            // `.fl-hfilter`: the direction filter and the device filter.
+            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::ScrollRow().modifier(Modifier::new().weight(1.0).height(H_CTL + SP[0])).content(|| {
+                    for f in HistoryFilter::ALL {
+                        let s = st.filter.clone();
+                        FilterChip(f.label(), f == filter, move || s.set(f));
+                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                    }
+                });
+                if w > 560.0 {
+                    let s = st.peer.clone();
+                    cu::Column().modifier(Modifier::new().width(200.0)).content(|| {
+                        super::components::Select(&options[peer], &options, peer, 200.0, move |i| s.set(i));
+                    });
                 }
             });
             if rows.is_empty() {
                 let text = if model.history.is_empty() { empty_text(crate::ui::files::Section::History, ready) } else { "조건에 맞는 전송 기록이 없습니다" };
                 Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             }
-            Cols(
-                if w > 900.0 { 2 } else { 1 },
-                SP[4],
-                rows.into_iter().map(|h| -> Part { Box::new(move || HistoryRow(h)) }).collect(),
-            );
+            for (i, (day, entries)) in days.iter().enumerate() {
+                if i > 0 {
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                }
+                // `.fl-day`: the day label at the left (96 px; above the rows on a phone).
+                let label = || Label(day, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                let list = || {
+                    Cols(
+                        if w > 900.0 { 2 } else { 1 },
+                        SP[2],
+                        entries.iter().map(|h| -> Part { let h = *h; Box::new(move || HistoryRow(h)) }).collect(),
+                    )
+                };
+                if w > 560.0 {
+                    cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        cu::Column().modifier(Modifier::new().width(96.0)).content(label);
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(list);
+                    });
+                } else {
+                    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        label();
+                        list();
+                    });
+                }
+            }
         });
     });
 }
@@ -817,12 +1104,13 @@ fn HistoryRow(h: &HistoryEntry) {
         Direction::Send => "받는 곳",
         Direction::Receive => "보낸 곳",
     };
+    let time = split_when(&h.when).1;
     cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
         FileChip(if h.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, tone);
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
             Label(&fit_label(&h.name, 220.0, Fs::Sm.size()), Fs::Sm, Weight::Medium, None, Some(1));
             Label(&format!("{who} {}", h.device), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            Label(&h.when, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            Label(time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
         cu::Column().alignment(Alignment::CenterEnd).spacing(2.0).content(|| {
             Label(&format_bytes(h.size), Fs::Md, Weight::Regular, None, Some(1));
@@ -1005,6 +1293,30 @@ mod tests {
         assert!(!s.show(230.0));
         assert!(!s.show(470.0));
         assert!(s.show(250.0));
+    }
+
+    #[test]
+    fn fr_l27_spanning_tiles_line_up_with_the_columns_above() {
+        // 4 columns, 12 gap, 1000 wide: a column is 241; two columns are 494 (= 2 * 241 + 12).
+        let w = grid_widths(7, 4, 1000.0, 12.0);
+        assert_eq!(w[0].len(), 4);
+        assert!((w[0].iter().sum::<f32>() + 3.0 * 12.0 - 1000.0).abs() < 0.01);
+        assert!((w[1].iter().sum::<f32>() + 2.0 * 12.0 - 1000.0).abs() < 0.01);
+        assert!((w[1][2] - (2.0 * w[0][0] + 12.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn fr_l27_files_are_typed_by_extension_and_history_groups_by_day() {
+        assert_eq!(FileKind::of("IMG_2041.MOV"), FileKind::Video);
+        assert_eq!(FileKind::of("a.tar"), FileKind::Zip);
+        assert_eq!(FileKind::of("noext"), FileKind::Doc);
+        assert_eq!(split_when("어제 22:10"), ("어제", "22:10"));
+        let (m, _) = sample_model();
+        let rows: Vec<&HistoryEntry> = m.history.iter().collect();
+        let days = history_days(&rows);
+        assert_eq!(days.iter().map(|(d, v)| (d.as_str(), v.len())).collect::<Vec<_>>(), vec![("오늘", 1), ("어제", 2)]);
+        assert_eq!(history_devices(&m.history).len(), 3);
+        assert_eq!(route_line(Some(PathKind::Direct)), "종단 간 암호화 \u{b7} P2P 직접 연결");
     }
 
     #[test]

@@ -92,7 +92,19 @@ pub fn gallery() {
                     Badge("상태", tone);
                     Dot(tone);
                 }
-                Spinner(14.0);
+                Spinner(12.0);
+            });
+            section("Radius ruler (8, 12, 14, 24 dp)", || {
+                for r in [8.0_f32, 12.0, 14.0, 24.0] {
+                    cu::Box()
+                        .modifier(
+                            Modifier::new()
+                                .size(64.0, 64.0)
+                                .background(paint(p.ink))
+                                .corner_radius(r),
+                        )
+                        .content(|| {});
+                }
             });
             section("Cards", || {
                 EmberCard(false, false, None, None, None, || {

@@ -513,8 +513,14 @@ pub fn EmberCard(
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
     // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
     // uniform, so 16 is used on all sides unless the caller passes one.
+    // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
+    let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
-        cu::Column().content(content);
+        cu::Row().content(|| {
+            cu::Spacer().modifier(Modifier::new().width(side));
+            cu::Column().content(content);
+            cu::Spacer().modifier(Modifier::new().width(side));
+        });
     });
 }
 
@@ -531,7 +537,12 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
                 .padding(PAD_ROW_V),
         )
         .content(|| {
-            cu::Column().content(content);
+            // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
+            cu::Row().content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                cu::Column().content(content);
+                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            });
         });
 }
 

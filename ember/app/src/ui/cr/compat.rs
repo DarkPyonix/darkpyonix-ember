@@ -68,7 +68,9 @@ pub fn Dot(tone: Tone) {
         .content(|| {});
 }
 
-/// An indeterminate circular spinner.
+/// An indeterminate circular spinner, 12 px as in the mockup.
+/// TODO(compose-rust#377): the stroke is the design system's (about 3 px), the mockup has 2 px
+/// with a `--c-blue-soft` track.
 pub fn Spinner(size: f32) {
     cu::IndeterminateProgressIndicator()
         .circular(true)
@@ -81,7 +83,7 @@ pub fn StatusIndicator(status: LauncherStatus) {
     let label = status_label(status);
     cu::Row().space_role(SpaceRole::Xs).alignment(Alignment::CenterStart).content(|| match status {
         LauncherStatus::Running => {
-            Spinner(14.0);
+            Spinner(12.0);
             Txt(&label, TypeRole::Caption, Some(Paint::Role(ColorRole::Primary)), None, None, None, None);
         }
         LauncherStatus::WaitingForApproval => Badge(&label, Tone::Warning),

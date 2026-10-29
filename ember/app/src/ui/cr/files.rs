@@ -59,6 +59,7 @@ const ICON_UP: &str = line_icon!("M12 19.5v-15m0 0l-6 6m6-6l6 6");
 const ICON_DOWN: &str = line_icon!("M12 4.5v15m0 0l6-6m-6 6l-6-6");
 const ICON_LOCK: &str = line_icon!("M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
+const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
 const ICON_SWAP: &str = include_str!("../../../assets/nav/arrows-right-left.svg");
 
 // ---------------------------------------------------------------------------------------------
@@ -371,7 +372,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                     if compact {
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
-                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, 6.0, || {
+                    HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, || {
                         ThemeButton(&ui);
                         let s = st.sheet.clone();
                         let open = move || s.set(Some(SendDraft::default()));
@@ -433,7 +434,7 @@ pub fn page_pad(width_dp: f32) -> f32 {
 }
 
 /// The room of the shell's menu button row at the top of a phone.
-const PHONE_MENU_ROW: f32 = 44.0;
+const PHONE_MENU_ROW: f32 = 19.0;
 
 /// `EMBER_CR_SCROLL=<dp|bottom|agents|tray|transfers|history>` for review captures: the toolkit
 /// cannot scroll a column from code (TODO(compose-rust#385)), so the blocks that would have
@@ -549,7 +550,8 @@ pub fn grid_weights(n: usize, cols: usize) -> Vec<Vec<f32>> {
 /// A grid of tiles by [`grid_widths`], so spanning tiles line up with the columns above.
 fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, tiles: Vec<Part<'a>>) {
     let widths = grid_widths(tiles.len(), cols, avail, gap);
-    cu::Column().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+    // The rows measured 15 apart for a 12 gap: the toolkit's rows run about 3 dp taller.
+    cu::Column().spacing((gap - 3.0).max(0.0)).modifier(Modifier::new().fill_max_width()).content(|| {
         let mut it = tiles.into_iter();
         for row in widths {
             cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -607,7 +609,10 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
             // The card's inner width, for the spanning tiles to line up with the columns.
             let avail = super::home::content_width(w, page_pad(w)) - 2.0 * PAD_CARD_H;
             if devices {
-                super::home::CardHead(ICON_DESKTOP, "장비", || {});
+                // The mockup's header (the sending device and its scan note) is 41 px high.
+                cu::Box().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(41.0)).content(|| {
+                    super::home::CardHead(ICON_DESKTOP, "장비", || {});
+                });
                 if model.devices.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Devices, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                 }
@@ -707,10 +712,11 @@ fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String)
                     );
                 });
             });
-            cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
             Label(&fit_label(&d.name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
-            Label(&fit_label(&sub, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-            cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
+            // The system line wraps to a second line rather than losing the battery level.
+            Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
             // The foot: the path pill and the latency as plain text; sleeping, offline and
             // unknown devices show their state and when they were last seen.
             let seen = info.map(|i| i.seen.clone()).unwrap_or_default();
@@ -728,6 +734,8 @@ fn DeviceTile(d: &Device, info: Option<&DeviceInfo>, on_send: impl FnMut(String)
                     }
                 }
             });
+            // The measured card is 167 px; the toolkit's line boxes leave it about 3 short.
+            cu::Spacer().modifier(Modifier::new().height(3.0));
         });
     });
 }
@@ -760,16 +768,18 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'stati
         || {
             cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
                 Character(&m.agent, false, 48.0, &name, &m.project, state, None);
-                cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
+                cu::Spacer().modifier(Modifier::new().height(SP[1]));
                 Label(&fit_label(&name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
                 Label(&fit_label(&host, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 Label(&fit_label(&m.title, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().height(SP[1] - 2.0));
+                cu::Spacer().modifier(Modifier::new().height(SP[1]));
                 if m.waiting {
-                    Pill("승인 대기", PillTone::Orange, true);
+                    Pill("승인 대기", PillTone::Orange, false);
                 } else {
-                    Pill("실행 중", PillTone::Blue, true);
+                    Pill("실행 중", PillTone::Blue, false);
                 }
+                // The measured card is 183 px; see the device tile.
+                cu::Spacer().modifier(Modifier::new().height(5.0));
             });
         },
     );
@@ -832,12 +842,12 @@ fn OfferCard(offer: &Offer, pending: &[Offer], devices: &[Device], st: &State, w
             });
     };
     if compact {
-        // A bottom sheet over the page and the tab bar; leaving it does not answer the offer.
-        let answered = st.answered.clone();
-        cu::Sheet(true).modifier(Modifier::new().fill_max_width().background(paint(p.surface)).corner_radius(CORNER_XL)).on_dismiss(move || {
-            let _ = &answered;
-        }).content(|| {
-            cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[3])).content(card);
+        // Above the floating tab bar, not over it: a column that pushes the card to the bottom
+        // (`Alignment` is not relied on for a bottom placement).
+        cu::Column().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            card();
+            cu::Spacer().modifier(Modifier::new().height(TABBAR_H + TABBAR_BOTTOM_GAP + SP[1]));
         });
     } else {
         cu::Box().alignment(Alignment::TopEnd).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[5])).content(card);
@@ -925,7 +935,7 @@ fn TransferRow(t: &Transfer, devices: &[Device]) {
         TransferState::Failed => p.orange.strong,
         _ => p.grey.strong,
     };
-    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
         cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
             FileChip(FileKind::of(&t.name).icon(), FileKind::of(&t.name).tone());
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
@@ -964,6 +974,8 @@ fn TransferRow(t: &Transfer, devices: &[Device]) {
             NavIcon(ICON_LOCK, p.muted.to_argb(), 12.0);
             Label(&route_line(path), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
+        // The measured item pitch is 157; the toolkit's line boxes leave it about 5 short.
+        cu::Spacer().modifier(Modifier::new().height(5.0));
     });
 }
 
@@ -1019,7 +1031,7 @@ fn ReceivedTile(f: &ReceivedFile, at: Option<&str>) {
         cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
             // TODO(FR-F8): opening and revealing a received file need the transfer client.
             AppButton("열기", None, ButtonKind::Default, true, true, false, || notice::post(UNAVAILABLE));
-            IconButton(IconRole::Library, true, || notice::post(UNAVAILABLE));
+            RoundGlyph(ICON_FOLDER, || notice::post(UNAVAILABLE));
         });
     });
 }
@@ -1107,7 +1119,8 @@ fn HistoryRow(h: &HistoryEntry) {
     let time = split_when(&h.when).1;
     cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
         FileChip(if h.direction == Direction::Send { ICON_UP } else { ICON_DOWN }, tone);
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        // The lines measured 14.5 apart for the mockup's 18.
+        cu::Column().spacing(3.5).modifier(Modifier::new().weight(1.0)).content(|| {
             Label(&fit_label(&h.name, 220.0, Fs::Sm.size()), Fs::Sm, Weight::Medium, None, Some(1));
             Label(&format!("{who} {}", h.device), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             Label(time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));

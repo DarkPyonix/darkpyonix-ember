@@ -247,11 +247,13 @@ pub fn ProjectScreen() {
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
 pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
-    HeaderGap(title, sub, compact, 0.0, trailing)
+    HeaderGap(title, sub, compact, compact, 0.0, trailing)
 }
 
-/// [`Header`] with `gap` dp between the title and the subtitle.
-pub fn HeaderGap(title: &str, sub: &str, compact: bool, gap: f32, trailing: impl FnOnce()) {
+/// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
+/// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
+/// phone: the smaller title and the room for the menu button.
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
@@ -264,11 +266,13 @@ pub fn HeaderGap(title: &str, sub: &str, compact: bool, gap: f32, trailing: impl
             }
         });
     };
-    if compact {
+    if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                 titles();
-                cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
+                if compact {
+                    cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
+                }
             });
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
         });

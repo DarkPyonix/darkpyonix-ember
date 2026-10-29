@@ -15,9 +15,10 @@
 #![allow(non_snake_case)]
 
 use compose_rust::ui as cu;
+use compose_rust::ui::Modifier;
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
-    KeyEvent, Modifier, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
+    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
 };
 
 use super::theme::*;

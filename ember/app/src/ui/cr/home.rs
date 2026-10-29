@@ -118,38 +118,34 @@ pub fn fit_label(text: &str, max_px: f32, font_px: f32) -> String {
     format!("{out}\u{2026}")
 }
 
-/// Widths for chips whose natural widths do not all fit in `avail`: every chip gives up the same
-/// share of its width (the mockup's `flex: 0 1 auto` chips shrink in proportion to their basis),
-/// but none goes below its minimum, so a short label such as "이 서버" stays readable; the rest
-/// share what is left.
+/// Widths for chips whose natural widths do not all fit in `avail`. The chips are in shrink
+/// order (project, model, mode, computer): the first gives up width down to its minimum, then
+/// the next, and so on, so the last keeps its full width while the others can still give.
 pub fn shrink_widths(natural: &[f32], mins: &[f32], avail: f32) -> Vec<f32> {
-    if natural.iter().sum::<f32>() <= avail {
-        return natural.to_vec();
-    }
-    let n = natural.len();
     let mut w = natural.to_vec();
-    let mut fixed = vec![false; n];
-    loop {
-        let free: f32 = (0..n).filter(|i| !fixed[*i]).map(|i| natural[i]).sum();
-        let held: f32 = (0..n).filter(|i| fixed[*i]).map(|i| w[i]).sum();
-        let k = if free > 0.0 { ((avail - held) / free).max(0.0) } else { 0.0 };
-        let mut changed = false;
-        for i in 0..n {
-            if fixed[i] {
-                continue;
-            }
-            let floor = mins[i].min(natural[i]);
-            if natural[i] * k < floor {
-                w[i] = floor;
-                fixed[i] = true;
-                changed = true;
-            } else {
-                w[i] = natural[i] * k;
-            }
+    let mut deficit = natural.iter().sum::<f32>() - avail;
+    // Two passes: down to the minimums, then (a row too narrow even for those) down to the hard
+    // floor of a glyph and an ellipsis, in the same order.
+    for floors in [mins.to_vec(), vec![HARD_MIN; natural.len()]] {
+        for (wi, floor) in w.iter_mut().zip(floors) {
+            let cut = deficit.max(0.0).min((*wi - floor.min(*wi)).max(0.0));
+            deficit -= cut;
+            *wi -= cut;
         }
-        if !changed {
-            return w;
-        }
+    }
+    w
+}
+
+/// The narrowest a composer chip gets.
+const HARD_MIN: f32 = 96.0;
+
+/// A short label (at most six Hangul or ten Latin characters) keeps its full chip width while the
+/// row has room for it; a longer one can be cut to four characters.
+pub fn chip_floor(text: &str, natural: f32) -> f32 {
+    if text_px(text, Fs::Sm.size()) <= 6.0 * Fs::Sm.size() {
+        natural
+    } else {
+        chip_natural(&fit_label(text, 52.0, Fs::Sm.size())).min(natural)
     }
 }
 
@@ -843,9 +839,9 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
             chip_natural(&fit_label(&mode_text, 180.0, Fs::Sm.size())),
             chip_natural(&fit_label(&computer_text, 180.0, Fs::Sm.size())),
         ];
-        // At least four Hangul of text, so "이 서버" is never cut.
-        let floor = |t: &str| chip_natural(&fit_label(t, 52.0, Fs::Sm.size()));
-        let mins = [floor(&sel.project), floor(&model_text), floor(&mode_text), floor(&computer_text)];
+        // At least four Hangul of text, except a short computer label, which stays whole.
+        let floor = |t: &str, n: f32| chip_floor(t, n);
+        let mins = [floor(&sel.project, nat[0]), floor(&model_text, nat[1]), floor(&mode_text, nat[2]), floor(&computer_text, nat[3])];
         let w4 = shrink_widths(&nat, &mins, avail);
         (w4.clone(), w4[0])
     };
@@ -1470,10 +1466,8 @@ mod tests {
         let nat = [150.0, 300.0, 120.0, 90.0];
         let w = shrink_widths(&nat, &[80.0; 4], 480.0);
         assert!(w.iter().sum::<f32>() <= 480.5, "{w:?}");
-        // Proportional, but the 90 chip would fall under its 80 minimum and is held there.
-        assert!((w.iter().sum::<f32>() - 480.0).abs() < 0.5, "{w:?}");
-        assert_eq!(w[3], 80.0);
-        assert!(w[0] > 80.0 && w[1] > w[0], "{w:?}");
+        // In order: the first gives up 70 (to its 80 minimum), the second the remaining 110.
+        assert_eq!(w, vec![80.0, 190.0, 120.0, 90.0]);
         assert_eq!(shrink_widths(&nat, &[80.0; 4], 1000.0), nat.to_vec());
         let cut = fit_label("Claude Code · Opus 5.5 · High", 120.0, 13.0);
         assert!(cut.ends_with('\u{2026}') && text_px(&cut, 13.0) <= 120.0, "{cut}");
@@ -1502,6 +1496,24 @@ mod tests {
         // 2025-10-25 is a Saturday.
         assert_eq!(days.last().map(|d| d.label), Some("토"));
         assert_eq!(days[0].label, "일");
+    }
+
+    #[test]
+    fn fr_l11_the_computer_chip_keeps_its_label_at_the_1440_budget() {
+        // 1440: composer 720, inner 686, less the add (32), send (36) and six 6 dp gaps.
+        let avail = 686.0 - 32.0 - 36.0 - 6.0 * 6.0;
+        let texts = ["기본 프로젝트", "Claude Code \u{b7} Opus 5.5 \u{b7} High", "명령마다 확인", "이 컴퓨터"];
+        let nat: Vec<f32> = texts.iter().map(|t| chip_natural(&fit_label(t, 180.0, 13.0))).collect();
+        let mins: Vec<f32> = texts.iter().zip(&nat).map(|(t, n)| chip_floor(t, *n)).collect();
+        let w = shrink_widths(&nat, &mins, avail);
+        assert!(w.iter().sum::<f32>() <= avail + 0.5, "{w:?}");
+        assert_eq!(w[3], nat[3], "the short computer label keeps its width");
+        assert_eq!(chip_text("이 컴퓨터", w[3]), "이 컴퓨터");
+        assert!(w[0] < nat[0], "the project chip gives first");
+        // A row that cannot fit even that shrinks the computer chip last.
+        let tight = shrink_widths(&nat, &mins, 300.0);
+        assert!(tight[3] < nat[3] && tight[0] <= w[0]);
+        assert!(tight.iter().all(|x| *x >= HARD_MIN));
     }
 
     #[test]

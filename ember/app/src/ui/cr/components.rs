@@ -88,13 +88,13 @@ pub fn resolve_paint(paint: Paint, p: &Palette) -> Paint {
 /// The type step, weight and face a toolkit type role stands for (400/500/600, never bold).
 pub fn type_role_style(role: TypeRole) -> (Fs, Weight, bool) {
     match role {
-        TypeRole::Headline => (Fs::Xl2, Weight::Semibold, false),
+        TypeRole::Headline => (Fs::Xl3, Weight::Regular, false),
         TypeRole::Title => (Fs::Xl, Weight::Semibold, false),
         TypeRole::Subtitle => (Fs::Lg, Weight::Medium, false),
         TypeRole::BodyStrong => (Fs::Md, Weight::Medium, false),
         TypeRole::Caption => (Fs::Xs, Weight::Regular, false),
         TypeRole::Label => (Fs::Sm, Weight::Medium, false),
-        TypeRole::Mono => (Fs::Sm, Weight::Regular, true),
+        TypeRole::Mono => (Fs::Xs, Weight::Regular, true),
         _ => (Fs::Md, Weight::Regular, false),
     }
 }
@@ -145,12 +145,18 @@ pub fn Txt(
     text_align: Option<TextAlign>,
 ) {
     let theme = ember_theme();
-    let (fs, font_weight, _mono) = type_role_style(type_role);
+    let (fs, font_weight, mono) = type_role_style(type_role);
     let color = match color {
         Some(c) => resolve_paint(c, theme.palette),
+        None if type_role == TypeRole::Caption => paint(theme.palette.muted),
         None => paint(theme.palette.text),
     };
-    let mut t = cu::Text(text)
+    let mut t = cu::Text(text);
+    if mono {
+        // The theme's monospace face; the bundled font stack lands with compose-rust#374.
+        t = t.type_role(TypeRole::Mono);
+    }
+    let mut t = t
         .font_size(fs.size())
         .line_height(fs.line_height())
         .font_weight(font_weight.value())
@@ -197,20 +203,22 @@ pub struct FieldOptions {
 }
 
 /// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
-/// in the dark scheme. Not `bare`: a `surface-2` field on a `line` border with the
-/// `corner-md` radius.
+/// in the dark scheme. Not `bare`: a `surface` field on a `line` border with the
+/// `corner-sm` radius and the 40 px control height (style.css `.field`).
 pub fn EmberField(o: FieldOptions) {
     let theme = ember_theme();
     let p = theme.palette;
-    let (fill, border_w) = if o.bare { (Color::argb(0), 0.0) } else { (p.surface_2, 1.0) };
-    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height)
+    let (fill, border_w) = if o.bare { (Color::argb(0), 0.0) } else { (p.surface, 1.0) };
+    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
         .fill_max_width_if(o.fill_max_width)
         .background(o.background.unwrap_or_else(|| paint(fill)))
         .border(
             o.border_width.unwrap_or(border_w),
             o.border_color.unwrap_or_else(|| paint(p.line)),
         )
-        .corner_radius(o.corner_radius.unwrap_or(CORNER_MD));
+        .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
+    // TODO(compose-rust#374): 14 px text and 12 px side padding need `TextField` font size and
+    // content padding; the toolkit's own are used meanwhile.
     let mut f = cu::TextField()
         .modifier(modifier)
         .placeholder(o.placeholder)
@@ -251,15 +259,16 @@ pub enum PillTone {
 
 /// `(text, fill)`: the strong colour as text on its soft pair.
 pub fn pill_colors(tone: PillTone, p: &Palette) -> (Color, Color) {
-    let a = match tone {
-        PillTone::Blue => p.blue,
-        PillTone::Orange => p.orange,
-        PillTone::Red => p.red,
-        PillTone::Green => p.green,
-        PillTone::Sky => p.sky,
-        PillTone::Grey => p.grey,
-    };
-    (a.strong, a.soft)
+    match tone {
+        PillTone::Blue => (p.blue.strong, p.blue.soft),
+        PillTone::Orange => (p.orange.strong, p.orange.soft),
+        PillTone::Red => (p.red.strong, p.red.soft),
+        PillTone::Green => (p.green.strong, p.green.soft),
+        // style.css: `.pill.sky` is blue text on the sky fill, the default grey pill is
+        // `--text-2` on the grey fill; the sky and grey strong colours are not text colours.
+        PillTone::Sky => (p.blue.strong, p.sky.soft),
+        PillTone::Grey => (p.text_2, p.grey.soft),
+    }
 }
 
 /// `(height, font step, weight)`: 24 px with 12/500, or 20 px with 11/500 when small.
@@ -276,15 +285,14 @@ pub fn Pill(text: &str, tone: PillTone, small: bool) {
     let theme = ember_theme();
     let (fg, bg) = pill_colors(tone, theme.palette);
     let (height, fs, weight) = pill_metrics(small);
-    cu::Box()
+    // A Row carries the fill so the height is the pill's own (24 or 20), not its content's.
+    cu::Row()
+        .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().height(height).background(paint(bg)).shape_role(ShapeRole::Full))
-        .alignment(Alignment::Center)
         .content(|| {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-                Label(text, fs, weight, Some(paint(fg)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-            });
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            Label(text, fs, weight, Some(paint(fg)), Some(1));
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
         });
 }
 
@@ -399,8 +407,12 @@ pub fn AppButton(
 pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static) {
     let theme = ember_theme();
     let size = if small { H_CTL } else { H_BTN };
+    // TODO(compose-rust#372): the mockup's 1.5 px line icons (18 px, 16 px small) are SVG
+    // assets; they need a container click to sit in a bordered circle. Until then the toolkit
+    // glyph is tinted `--text-2`.
     cu::Button("")
         .icon(icon)
+        .color(paint(theme.palette.text_2))
         .variant(ButtonVariant::Text)
         .modifier(
             Modifier::new()
@@ -440,7 +452,7 @@ pub fn PickChip(
     };
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)
-        .color(paint(theme.palette.text))
+        .color(paint(theme.palette.text_2))
         .modifier(
             Modifier::new()
                 .width_if(width)
@@ -483,22 +495,25 @@ pub fn EmberCard(
     let theme = ember_theme();
     let (fill, line) = card_colors(selected, theme.palette);
     let border = border.unwrap_or(line);
-    let mut m = with_weight(Modifier::new(), weight)
+    let m = with_weight(Modifier::new(), weight)
         .fill_max_width_if(fill_max_width)
         .background(paint(fill))
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG)
         .elevation(ELEVATION_CARD);
-    if let Some(p) = padding {
-        m = m.padding(p);
-    }
-    cu::Card().modifier(m).content(content);
+    // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
+    // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
+    // uniform, so 16 is used on all sides unless the caller passes one.
+    cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
+        cu::Column().content(content);
+    });
 }
 
 /// The inset panel one level below a card: `surface-2`, `corner-md`.
 pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
     let theme = ember_theme();
-    cu::Surface()
+    // TODO(compose-rust): the mockup's 12/16 padding is asymmetric; 12 on all sides for now.
+    cu::Box()
         .modifier(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
@@ -506,7 +521,9 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
                 .corner_radius(CORNER_MD)
                 .padding(PAD_ROW_V),
         )
-        .content(content);
+        .content(|| {
+            cu::Column().content(content);
+        });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -588,7 +605,7 @@ mod tests {
             let (_, w, _) = type_role_style(role);
             assert!(w.value() <= 600);
         }
-        assert_eq!(type_role_style(TypeRole::Headline).0, Fs::Xl2);
+        assert_eq!(type_role_style(TypeRole::Headline), (Fs::Xl3, Weight::Regular, false));
         assert_eq!(type_role_style(TypeRole::Caption).0, Fs::Xs);
         assert!(type_role_style(TypeRole::Mono).2);
     }
@@ -625,6 +642,12 @@ mod tests {
         assert_eq!((fg, bg), (LIGHT.green.strong, LIGHT.green.soft));
         let (fg, bg) = pill_colors(PillTone::Red, &DARK);
         assert_eq!((fg, bg), (DARK.red.strong, DARK.red.soft));
+    }
+
+    #[test]
+    fn pill_sky_is_blue_text_and_grey_is_text_2() {
+        assert_eq!(pill_colors(PillTone::Sky, &LIGHT), (LIGHT.blue.strong, LIGHT.sky.soft));
+        assert_eq!(pill_colors(PillTone::Grey, &DARK), (DARK.text_2, DARK.grey.soft));
     }
 
     #[test]

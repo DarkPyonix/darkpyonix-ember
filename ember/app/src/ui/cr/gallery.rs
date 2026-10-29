@@ -95,12 +95,12 @@ pub fn gallery() {
                 Spinner(14.0);
             });
             section("Cards", || {
-                EmberCard(false, false, None, Some(16.0), None, || {
-                    Label("카드", Fs::Md, Weight::Medium, None, None);
-                    InsetPanel(false, || Label("안쪽 패널", Fs::Sm, Weight::Regular, None, None));
+                EmberCard(false, false, None, None, None, || {
+                    Label("카드", Fs::Lg, Weight::Semibold, None, None);
+                    InsetPanel(false, || Label("안쪽 패널", Fs::Md, Weight::Regular, None, None));
                 });
-                EmberCard(true, false, None, Some(16.0), None, || {
-                    Label("선택된 카드", Fs::Md, Weight::Medium, None, None);
+                EmberCard(true, false, None, None, None, || {
+                    Label("선택된 카드", Fs::Lg, Weight::Semibold, None, None);
                 });
             });
             section("Text and field", || {

@@ -45,15 +45,13 @@ pub fn tone_strong(tone: Tone, p: &Palette) -> Color {
 pub fn Badge(text: &str, tone: Tone) {
     let theme = ember_theme();
     let (fill, ink) = tone_colors(tone, theme.palette);
-    cu::Box()
+    cu::Row()
+        .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().height(H_PILL).background(paint(fill)).shape_role(ShapeRole::Full))
-        .alignment(Alignment::Center)
         .content(|| {
-            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-                Txt(text, TypeRole::Label, Some(paint(ink)), Some(1), None, None, None);
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-            });
+            cu::Spacer().modifier(Modifier::new().width(10.0));
+            Txt(text, TypeRole::Label, Some(paint(ink)), Some(1), None, None, None);
+            cu::Spacer().modifier(Modifier::new().width(10.0));
         });
 }
 
@@ -117,7 +115,7 @@ pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
                 .fill_max_width()
                 .background(paint(theme.palette.surface_2))
                 .corner_radius(CORNER_SM)
-                .padding(SP[1]),
+                .padding(PAD_ROW_V),
         )
         .content(|| {
             Txt(

@@ -642,7 +642,7 @@ pub fn shell() {
                     Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(theme.palette.muted)), None);
                 });
             });
-            // TODO(#220 phase 3): `NewSessionDialog` moves with new_session.rs.
+            super::new_session::NewSessionDialog();
         });
 }
 

@@ -10,3 +10,4 @@ pub mod shell;
 pub mod launcher;
 pub mod notice;
 pub mod search;
+pub mod new_session;

@@ -161,7 +161,9 @@ pub fn chip_natural(text: &str) -> f32 {
 
 /// The text a chip of width `w` can show.
 pub fn chip_text(text: &str, w: f32) -> String {
-    fit_label(text, (w - (chip_natural("") )).max(0.0), Fs::Sm.size())
+    // The estimate's own slack (4 dp) and a little more: text that exactly fits its natural width
+    // must not be cut by float rounding ("이 서버" read "이…" at 1440).
+    fit_label(text, (w - chip_natural("") + 6.0).max(0.0), Fs::Sm.size())
 }
 
 /// "10월 25일 토요일" for `YYYY-MM-DD`.
@@ -390,7 +392,7 @@ fn initial_suggestion() -> Option<String> {
     SUGGESTIONS.get(i).map(|s| s.to_string())
 }
 
-/// `EMBER_CR_SCROLL=<dp|bottom>` for review captures: the toolkit cannot scroll a column from
+/// `EMBER_CR_SCROLL=<dp|bottom|status|usage|efficiency|small>` for review captures: the toolkit cannot scroll a column from
 /// code (TODO(compose-rust#385)), so the blocks that would have scrolled out (by their estimated heights) are left out.
 struct Skip(std::cell::Cell<f32>);
 
@@ -398,6 +400,12 @@ impl Skip {
     fn from_env(total_est: f32, window_h: f32) -> Skip {
         let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
             Some("bottom") => (total_est - window_h).max(0.0),
+            // Named starts: the first block in view. `status` shows the 팀원 상태 card with its
+            // legend at the top, `usage` the 하네스별 사용량 and 지금 일하는 팀원 row.
+            Some("status") => EST_HERO + EST_HEAD,
+            Some("usage") => EST_HERO + EST_HEAD + EST_TREND,
+            Some("efficiency") => EST_HERO + EST_HEAD + EST_TREND + EST_USAGE,
+            Some("small") => EST_HERO + EST_HEAD + EST_TREND + EST_USAGE + EST_EFF,
             Some(n) => n.parse::<f32>().unwrap_or(0.0),
             None => 0.0,
         };
@@ -1494,6 +1502,14 @@ mod tests {
         // 2025-10-25 is a Saturday.
         assert_eq!(days.last().map(|d| d.label), Some("토"));
         assert_eq!(days[0].label, "일");
+    }
+
+    #[test]
+    fn fr_l11_a_chip_that_fits_its_natural_width_is_not_cut() {
+        for t in ["이 서버", "기본 프로젝트", "명령마다 확인", "mac-mini"] {
+            assert_eq!(chip_text(t, chip_natural(t), ), t);
+        }
+        assert!(chip_text("Claude Code · Opus 5.5 · High", 200.0).ends_with('\u{2026}'));
     }
 
     #[test]

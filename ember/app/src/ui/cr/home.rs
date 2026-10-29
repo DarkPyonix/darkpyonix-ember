@@ -185,7 +185,7 @@ pub fn suggestion_cols(width_dp: f32) -> usize {
 }
 
 /// The width the main column has: the window minus the navigation and the page padding.
-fn content_width(window_dp: f32, pad: f32) -> f32 {
+pub fn content_width(window_dp: f32, pad: f32) -> f32 {
     let nav = match shell::current_mode(false) {
         ShellMode::BottomTabs => 0.0,
         ShellMode::Rail => RAIL_W,

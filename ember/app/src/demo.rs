@@ -300,6 +300,13 @@ impl DemoSource {
         vec![
             record("demo-s1", "demo-project", "claude-code", "포트 설정 추가", SessionStatus::WaitingForApproval, now, n("demo-s1")),
             record("demo-s2", "demo-project", "codex", "README 정리", SessionStatus::Finished, now - 600_000, n("demo-s2")),
+            // A fuller team in the second project, so the box's "외 N명" deck, the pinned chips
+            // and every status group show in review captures (no transcripts).
+            SessionRecord { pinned: true, ..record("demo-s3", "second-project", "codex", "빌드 스크립트 점검", SessionStatus::Running, now - 60_000, 0) },
+            record("demo-s4", "second-project", "claude-code", "릴리스 노트 초안", SessionStatus::Finished, now - 900_000, 0),
+            record("demo-s5", "second-project", "codex", "테스트 플레이크 조사", SessionStatus::Failed, now - 1_200_000, 0),
+            record("demo-s6", "second-project", "claude-code", "문서 링크 정리", SessionStatus::WaitingForApproval, now - 120_000, 0),
+            record("demo-s7", "second-project", "codex", "의존성 업데이트", SessionStatus::Finished, now - 1_800_000, 0),
         ]
     }
 
@@ -493,6 +500,9 @@ mod tests {
         assert_eq!(s1.record.project, "demo-project");
         assert_eq!(s1.status, ember_client::LauncherStatus::WaitingForApproval);
         assert!(st.session("demo-s2").is_some());
+        // The second project has more than the five tiles a box shows before its deck.
+        let second = st.projects().into_iter().find(|p| p.name == "second-project").expect("project");
+        assert!(second.sessions.len() > 5);
         assert_eq!(st.computers().len(), 2);
         let ev = demo.events_for("demo-s1");
         assert_eq!(ev.len() as i64, s1.record.last_seq);

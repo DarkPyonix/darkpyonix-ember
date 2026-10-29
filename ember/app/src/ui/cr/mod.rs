@@ -7,3 +7,5 @@ pub mod components;
 pub mod compat;
 pub mod gallery;
 pub mod shell;
+pub mod launcher;
+pub mod notice;

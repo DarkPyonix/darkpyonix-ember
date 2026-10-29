@@ -117,6 +117,8 @@ pub struct SharedUi {
     pub editor: MutableState<Option<EditorTarget>>,
     /// System / Light / Dark choice (FR-L28).
     pub theme_pref: MutableState<ThemePref>,
+    /// The latest message for the user, posted from any thread (see `cr::notice`).
+    pub notice: MutableState<Option<(u64, String)>>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -134,6 +136,7 @@ impl SharedUi {
             menu: mutable_state_of(initial_menu()),
             editor: mutable_state_of(None),
             theme_pref: mutable_state_of(theme),
+            notice: mutable_state_of(None),
             mirrors: Arc::new(OnceLock::new()),
         }
     }

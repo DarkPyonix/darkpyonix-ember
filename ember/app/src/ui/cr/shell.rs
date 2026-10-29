@@ -522,6 +522,7 @@ pub fn current_mode(collapsed: bool) -> ShellMode {
 #[composable]
 pub fn shell() {
     let ui = shared_ui().clone();
+    super::notice::NoticeHost();
     let theme = ember_theme();
     let collapsed = remember(|| mutable_state_of(false));
     let more_open = remember(|| mutable_state_of(false));

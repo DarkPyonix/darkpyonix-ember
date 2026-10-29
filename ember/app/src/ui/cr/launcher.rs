@@ -11,12 +11,12 @@
 use compose_rust::runtime::{mutable_state_of, remember_with_key};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, ColorRole, Paint, SpaceRole, TextOverflow, TypeRole};
+use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 
 use ember_client::wire::SessionPatch;
 
 use super::compat::{Badge, Banner, StatusIndicator};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, Label, MenuRow, SheetFooter, Txt};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, Label, MenuRow, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, SessionRow, Tone};
@@ -34,10 +34,6 @@ pub fn ConnectionBanner() {
     if let Some((text, tone)) = banner {
         Banner(&text, tone);
     }
-}
-
-fn muted() -> Option<Paint> {
-    Some(Paint::Role(ColorRole::OnSurfaceVariant))
 }
 
 /// The patch the Pin / Unpin item sends (FR-L9).

@@ -206,7 +206,7 @@ mod tests {
             }))
         });
         let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
-        let want = super::ko::status_label(LauncherStatus::WaitingForApproval);
+        let want = crate::ui::cr::ko::status_label(LauncherStatus::WaitingForApproval);
         let has = |s: &str| {
             batch.iter().any(|m| {
                 matches!(m, Mutation::SetProp { value: PropertyValue::String(t), .. } if *t == s)

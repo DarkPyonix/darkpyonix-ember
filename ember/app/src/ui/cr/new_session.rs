@@ -80,7 +80,6 @@ fn muted() -> Option<Paint> {
 }
 
 fn NewSessionForm(preset: &str) {
-    let theme = ember_theme();
     let ui = shared_ui().clone();
     let key = preset.to_string();
 

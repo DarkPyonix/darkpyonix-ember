@@ -31,7 +31,7 @@ pub use crate::ui::shell::{
     active_menu, avatar_initial, badge_text, caption_reserved_width, nav_badge, nav_mode,
     screen_for, tab_badge, tab_for_menu, toggled_collapse, tinted_svg, BottomTab, NavBadge,
     NavCounts, NavMenu, Screen, ShellMode, BOTTOM_TABS, DEMO_USER, ICON_GEAR_SVG, ICON_MOON_SVG,
-    ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
+    ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
 };
 use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
@@ -182,27 +182,28 @@ pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnM
 }
 
 /// A footer tool row (theme, settings): icon and label in the sidebar, icon alone in the rail.
+/// `.tool`: 34 px high (44 x 40 in the rail), 12 px side padding and gap, 13 px medium `--muted`.
 pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     if rail {
         Clickable(
-            Modifier::new().size(44.0, 44.0).corner_radius(12.0),
+            Modifier::new().size(44.0, 40.0).corner_radius(CORNER_SM),
             Alignment::Center,
             on_click,
-            || NavIcon(svg, p.text_2.to_argb(), 20.0),
+            || NavIcon(svg, p.muted.to_argb(), 20.0),
         );
         return;
     }
     Clickable(
-        Modifier::new().fill_max_width().height(H_NAV_ITEM).corner_radius(H_NAV_ITEM / 2.0),
+        Modifier::new().fill_max_width().height(34.0).corner_radius(CORNER_SM),
         Alignment::CenterStart,
         on_click,
         || {
             cu::Row().alignment(Alignment::CenterStart).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                NavIcon(svg, p.text_2.to_argb(), 18.0);
+                NavIcon(svg, p.muted.to_argb(), 18.0);
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                Label(label, Fs::Md, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                Label(label, Fs::Sm, Weight::Medium, Some(paint(p.muted)), Some(1));
             });
         },
     );
@@ -233,15 +234,20 @@ pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
     });
 }
 
-/// The user row at the foot of the sidebar: blue round avatar, name, handle.
-pub fn UserRow() {
+/// The user row at the foot of the sidebar: blue round avatar, name, handle. In the rail only
+/// the avatar stays (`.me div { display: none }`). `.me`: 12 8 padding, 12 gap.
+pub fn UserRow(rail: bool) {
     let p = ember_theme().palette;
     let (name, handle) = DEMO_USER;
     cu::Row()
         .alignment(Alignment::CenterStart)
         .modifier(Modifier::new().fill_max_width())
         .content(|| {
-            cu::Spacer().modifier(Modifier::new().width(6.0));
+            if rail {
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+            } else {
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
             cu::Box()
                 .modifier(
                     Modifier::new()
@@ -259,15 +265,19 @@ pub fn UserRow() {
                         None,
                     );
                 });
-            cu::Spacer().modifier(Modifier::new().width(10.0));
-            cu::Column().content(|| {
-                Label(name, Fs::Sm, Weight::Semibold, None, None);
-                Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-            });
+            if rail {
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+            } else {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                cu::Column().content(|| {
+                    Label(name, Fs::Sm, Weight::Semibold, None, None);
+                    Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+            }
         });
 }
 
-/// The sidebar, or the rail when `rail`.
+/// The sidebar, or the rail when `rail`. `.side`: 20 12 padding (16 0 in the rail), 2 gap.
 pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl FnMut() + 'static, on_settings: impl FnMut() + 'static) {
     let ui = shared_ui().clone();
     let theme = ember_theme();
@@ -275,45 +285,44 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let pref = ui.theme_pref.get();
     let width = if rail { RAIL_W } else { SIDE_W };
     let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+    let side = if rail { 0.0 } else { SP[2] };
+    let top = if rail { SP[3] } else { SP[4] };
     cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
         cu::Column()
-            .spacing(2.0)
-            .alignment(if rail { Alignment::TopCenter } else { Alignment::TopStart })
             .modifier(Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)))
             .content(|| {
-                cu::Spacer().modifier(Modifier::new().height(SP[3]));
-                Brand(rail, on_collapse);
-                cu::Spacer().modifier(Modifier::new().height(SP[3]));
-                for menu in NavMenu::ALL {
-                    let u = ui.clone();
-                    let badge = nav_badge(menu, &counts);
-                    if rail {
-                        RailItem(menu, menu == active, badge, move || choose(&u, menu));
-                    } else {
-                        cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                            NavRow(menu, menu == active, badge, move || choose(&u, menu));
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(side));
+                    cu::Column()
+                        .spacing(2.0)
+                        .alignment(if rail { Alignment::TopCenter } else { Alignment::TopStart })
+                        .modifier(Modifier::new().weight(1.0).fill_max_height())
+                        .content(|| {
+                            cu::Spacer().modifier(Modifier::new().height(top));
+                            Brand(rail, on_collapse);
+                            cu::Spacer().modifier(Modifier::new().height(top));
+                            for menu in NavMenu::ALL {
+                                let u = ui.clone();
+                                let badge = nav_badge(menu, &counts);
+                                if rail {
+                                    RailItem(menu, menu == active, badge, move || choose(&u, menu));
+                                } else {
+                                    NavRow(menu, menu == active, badge, move || choose(&u, menu));
+                                }
+                            }
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            // `.sidetools` has no divider in the mockup, only a gap.
+                            let u = ui.clone();
+                            ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
+                                u.set_theme_pref(u.theme_pref.get_untracked().next());
+                            });
+                            ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
+                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                            UserRow(rail);
+                            cu::Spacer().modifier(Modifier::new().height(top));
                         });
-                    }
-                }
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
-                // Divider above the footer tools.
-                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                    cu::Spacer().modifier(Modifier::new().weight(1.0).height(1.0).background(paint(p.line)));
-                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    cu::Spacer().modifier(Modifier::new().width(side));
                 });
-                let u = ui.clone();
-                ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
-                    u.set_theme_pref(u.theme_pref.get_untracked().next());
-                });
-                ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
-                if !rail {
-                    cu::Spacer().modifier(Modifier::new().height(SP[1]));
-                    UserRow();
-                }
-                cu::Spacer().modifier(Modifier::new().height(SP[2]));
             });
         cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
     });
@@ -338,24 +347,32 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                         .corner_radius(TABBAR_RADIUS)
                         .elevation(ELEVATION_LARGE),
                 )
+                .alignment(Alignment::Center)
                 .content(|| {
                     cu::Row().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                         for tab in BOTTOM_TABS {
                             let mut choose_tab = on_choose.clone();
                             let ink = if tab == marked { p.text } else { p.muted };
+                            // The selected tab sits on a `--sel` pill, 52 px high.
+                            let bg = if tab == marked { paint(p.sel) } else { transparent() };
                             Clickable(
-                                Modifier::new().weight(1.0).fill_max_height(),
+                                Modifier::new().weight(1.0).height(52.0).background(bg).corner_radius(20.0),
                                 Alignment::Center,
                                 move || choose_tab(tab),
                                 || {
-                                    cu::Column().alignment(Alignment::TopCenter).spacing(2.0).content(|| {
-                                        cu::Box().alignment(Alignment::TopEnd).content(|| {
+                                    cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).alignment(Alignment::Center).content(|| {
+                                        cu::Column().alignment(Alignment::TopCenter).spacing(2.0).content(|| {
                                             NavIcon(tab.svg(), ink.to_argb(), 22.0);
-                                            if let Some(n) = tab_badge(tab, &counts) {
-                                                RedBadge(n);
-                                            }
+                                            Label(tab.label(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
                                         });
-                                        Label(tab.label(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
+                                        // `.nav.tab .redbadge`: top 0, right 4, on the tab itself.
+                                        if let Some(n) = tab_badge(tab, &counts) {
+                                            cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
+                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                RedBadge(n);
+                                                cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                                            });
+                                        }
                                     });
                                 },
                             );
@@ -366,6 +383,79 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
         });
         cu::Spacer().modifier(Modifier::new().height(TABBAR_BOTTOM_GAP));
     });
+}
+
+/// The phone's top-right tool menu (`.phonemenu`): a 32 px round button at top 10 / right 12 that
+/// opens a popover with the theme switch and settings. The mockup's demo-only rows (platform,
+/// reset) are left out.
+pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: impl FnMut() + Clone + 'static) {
+    let p = ember_theme().palette;
+    let ui = shared_ui().clone();
+    let theme_svg = if ember_theme().scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+    cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
+        cu::Spacer().modifier(Modifier::new().weight(1.0));
+        cu::Column().alignment(Alignment::TopEnd).content(|| {
+            cu::Spacer().modifier(Modifier::new().height(10.0));
+            let o = open.clone();
+            Clickable(
+                Modifier::new()
+                    .size(H_CTL, H_CTL)
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .shape_role(compose_rust::ShapeRole::Full)
+                    .elevation(ELEVATION_CARD),
+                Alignment::Center,
+                move || o.set(!o.get_untracked()),
+                || NavIcon(ICON_MORE_SVG, p.text_2.to_argb(), 16.0),
+            );
+            if open.get() {
+                cu::Spacer().modifier(Modifier::new().height(4.0));
+                cu::Box()
+                    .modifier(
+                        Modifier::new()
+                            .width(168.0)
+                            .background(paint(p.surface))
+                            .border(1.0, paint(p.line))
+                            .corner_radius(CORNER_MD)
+                            .elevation(ELEVATION_LARGE)
+                            .padding(4.0),
+                    )
+                    .content(|| {
+                        cu::Column().content(|| {
+                            let (u, o) = (ui.clone(), open.clone());
+                            menu_item(theme_svg, "테마 전환", move || {
+                                u.set_theme_pref(u.theme_pref.get_untracked().next());
+                                o.set(false);
+                            });
+                            let (o, mut s) = (open.clone(), on_settings.clone());
+                            menu_item(ICON_GEAR_SVG, "설정", move || {
+                                o.set(false);
+                                s();
+                            });
+                        });
+                    });
+            }
+        });
+        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+    });
+}
+
+/// `.pmenu-pop button`: 38 px high, 10 px side padding, 8 px gap.
+fn menu_item(svg: &'static str, label: &str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new().fill_max_width().height(38.0).corner_radius(CORNER_SM),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(10.0));
+                NavIcon(svg, p.text.to_argb(), 18.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[0] * 2.0));
+                Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
+            });
+        },
+    );
 }
 
 /// A menu whose screen is not built yet ("준비 중입니다").
@@ -400,6 +490,7 @@ pub fn shell() {
     let collapsed = remember(|| mutable_state_of(false));
     let more_open = remember(|| mutable_state_of(false));
     let settings_open = remember(|| mutable_state_of(false));
+    let phone_menu = remember(|| mutable_state_of(false));
 
     let route = ui.route.get();
     let active = active_menu(&route, ui.menu.get());
@@ -468,6 +559,8 @@ pub fn shell() {
                         BottomTab::More => more.set(true),
                     });
                 });
+                let s = settings_open.clone();
+                PhoneMenu(phone_menu.clone(), move || s.set(true));
             } else {
                 cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                     let c = collapsed.clone();

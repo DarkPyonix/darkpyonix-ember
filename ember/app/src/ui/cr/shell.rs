@@ -572,13 +572,17 @@ pub fn shell() {
                     });
             }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
-                // TODO(#220 phases 3-7): each screen replaces its placeholder as it moves.
-                let menu = match &screen {
-                    Screen::Conversation(_) => NavMenu::Sessions,
-                    Screen::Placeholder(m) => *m,
-                    _ => active,
-                };
-                Placeholder(menu);
+                // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
+                if matches!(screen, Screen::Search) {
+                    super::search::SearchScreen();
+                } else {
+                    let menu = match &screen {
+                        Screen::Conversation(_) => NavMenu::Sessions,
+                        Screen::Placeholder(m) => *m,
+                        _ => active,
+                    };
+                    Placeholder(menu);
+                }
             });
         });
     };

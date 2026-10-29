@@ -7,6 +7,7 @@
 
 pub mod characters;
 pub mod coexist;
+pub mod cr;
 pub mod compat;
 pub mod agents;
 pub mod channels;

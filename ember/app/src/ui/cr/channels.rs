@@ -97,7 +97,11 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
-            RoomView(&r, !split, move || back.set(None));
+            let detail = crate::ui::coexist::shared_ui().detail_open.clone();
+            RoomView(&r, !split, move || {
+                detail.set(false);
+                back.set(None);
+            });
         }
         None => {
             cu::Box()
@@ -213,11 +217,15 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
     let p = ember_theme().palette;
     let time = row.last_at.map(|t| time_label(t, local_tz())).unwrap_or_default();
     let (open, id) = (open.clone(), row.id.clone());
+    let detail = crate::ui::coexist::shared_ui().detail_open.clone();
     let fill = if selected { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
     super::components::Clickable(
         Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(SP[1]),
         Alignment::CenterStart,
-        move || open.set(Some(id.clone())),
+        move || {
+            detail.set(true);
+            open.set(Some(id.clone()));
+        },
         || {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 RoomIcon(project, 40.0);

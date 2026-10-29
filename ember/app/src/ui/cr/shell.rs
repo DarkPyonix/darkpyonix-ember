@@ -83,6 +83,7 @@ pub fn choose(ui: &SharedUi, menu: NavMenu) {
             }
         }
     }
+    ui.detail_open.set(false);
     ui.set_menu(menu);
 }
 
@@ -630,7 +631,10 @@ pub fn shell() {
                     });
                 });
                 let s = settings_open.clone();
-                PhoneMenu(phone_menu.clone(), move || s.set(true));
+                // The mockup hides the menu while a detail view (an open room) is shown.
+                if !ui.detail_open.get() {
+                    PhoneMenu(phone_menu.clone(), move || s.set(true));
+                }
             } else {
                 cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
                     let c = collapsed.clone();

@@ -225,19 +225,25 @@ pub fn Brand(compact: bool, on_click: impl FnMut() + 'static) {
     let mark = crate::ui::shell::mark_svg_for(size).as_bytes();
     let m = Modifier::new().fill_max_width_if(!compact);
     Clickable(m, if compact { Alignment::Center } else { Alignment::CenterStart }, on_click, || {
-        cu::Row().alignment(Alignment::CenterStart).content(|| {
+        // A Box centers both children on the cross axis: the logo against the two-line text.
+        cu::Box().alignment(Alignment::CenterStart).content(|| {
             if !compact {
-                cu::Spacer().modifier(Modifier::new().width(6.0));
-            }
-            cu::Image(compose_rust::asset(AssetKind::Svg, mark))
-                .modifier(Modifier::new().size(size, size));
-            if !compact {
-                cu::Spacer().modifier(Modifier::new().width(10.0));
-                cu::Column().spacing(6.0).content(|| {
-                    Label("Ember", Fs::Lg, Weight::Semibold, None, None);
-                    Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                cu::Row().alignment(Alignment::CenterStart).content(|| {
+                    // 6 side padding, the 32 px mark, then the 10 px gap.
+                    cu::Spacer().modifier(Modifier::new().width(6.0 + size + 10.0));
+                    cu::Column().spacing(6.0).content(|| {
+                        Label("Ember", Fs::Lg, Weight::Semibold, None, None);
+                        Label(ORG_NAME, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    });
                 });
             }
+            cu::Row().content(|| {
+                if !compact {
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                }
+                cu::Image(compose_rust::asset(AssetKind::Svg, mark))
+                    .modifier(Modifier::new().size(size, size));
+            });
         });
     });
 }
@@ -324,16 +330,17 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             // `.sidetools`: 8 margin, a 1 px `--line` border, 8 padding.
                             cu::Spacer().modifier(Modifier::new().height(SP[1]));
-                            cu::Spacer().modifier(
-                                Modifier::new().fill_max_width().height(1.0).background(paint(p.line)),
-                            );
-                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                            // In the rail the border spans the 44 px tool width only.
+                            let divider = Modifier::new().height(1.0).background(paint(p.line));
+                            cu::Spacer().modifier(if rail { divider.width(44.0) } else { divider.fill_max_width() });
+                            cu::Spacer().modifier(Modifier::new().height(4.0));
                             let u = ui.clone();
                             ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                             });
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
-                            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                            // `.me`: 8 margin and 12 padding above the avatar.
+                            cu::Spacer().modifier(Modifier::new().height(16.0));
                             UserRow(rail);
                             cu::Spacer().modifier(Modifier::new().height(bottom));
                         });
@@ -375,13 +382,18 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                             // The selected tab sits on a `--sel` pill, 52 px high.
                             let bg = if tab == marked { paint(p.sel) } else { transparent() };
                             Clickable(
-                                Modifier::new().weight(1.0).height(52.0).background(bg).corner_radius(20.0),
+                                Modifier::new().weight(1.0).height(52.0),
                                 Alignment::Center,
                                 move || choose_tab(tab),
                                 || {
+                                  // The pill is the tab's content width, not the whole cell.
+                                  cu::Box()
+                                    .modifier(Modifier::new().width(70.0).height(52.0).background(bg).corner_radius(20.0))
+                                    .alignment(Alignment::Center)
+                                    .content(|| {
                                     cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).alignment(Alignment::Center).content(|| {
                                         cu::Column().alignment(Alignment::TopCenter).spacing(2.0).content(|| {
-                                            NavIcon(tab.svg(), ink.to_argb(), 22.0);
+                                            NavIcon(tab.svg(), ink.to_argb(), 18.0);
                                             Label(tab.label(), Fs::Xs2, Weight::Medium, Some(paint(ink)), Some(1));
                                         });
                                         // `.nav.tab .redbadge`: top 0, right 4, on the tab itself.
@@ -396,6 +408,7 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
                                                     });
                                                 });
                                         }
+                                    });
                                     });
                                 },
                             );

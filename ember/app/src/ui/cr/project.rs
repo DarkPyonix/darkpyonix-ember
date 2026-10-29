@@ -246,21 +246,33 @@ pub fn ProjectScreen() {
 
 /// The page header: the title and subtitle, and the actions at the right; on a phone the actions
 /// are a row below the title (and the title leaves room for the menu button at the top right).
-fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
+pub fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
+    HeaderGap(title, sub, compact, compact, 0.0, trailing)
+}
+
+/// [`Header`] with `gap` dp between the title and the subtitle, and the actions stacked below
+/// the title when `stacked` (a phone, or a tablet in the mockup's files header); `compact` is the
+/// phone: the smaller title and the room for the menu button.
+pub fn HeaderGap(title: &str, sub: &str, compact: bool, stacked: bool, gap: f32, trailing: impl FnOnce()) {
     let p = ember_theme().palette;
     let titles = || {
         cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
             Label(title, if compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Medium, None, Some(1));
             if !sub.is_empty() {
+                if gap > 0.0 {
+                    cu::Spacer().modifier(Modifier::new().height(gap));
+                }
                 Label(sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
             }
         });
     };
-    if compact {
+    if stacked {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                 titles();
-                cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
+                if compact {
+                    cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
+                }
             });
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
         });
@@ -273,11 +285,11 @@ fn Header(title: &str, sub: &str, compact: bool, trailing: impl FnOnce()) {
 }
 
 /// The room the shell's floating menu button takes at the top right of a phone.
-const PHONE_MENU_ROOM: f32 = 52.0;
+pub const PHONE_MENU_ROOM: f32 = 52.0;
 
 /// The theme toggle of the page header: a 40 px round button with a sun or a moon.
 /// TODO(compose-rust#372): a pointer-up `Clickable`; the toolkit has no sun or moon glyph.
-fn ThemeButton(ui: &SharedUi) {
+pub fn ThemeButton(ui: &SharedUi) {
     let p = ember_theme().palette;
     let dark = ember_theme().scheme == Scheme::Dark;
     let u = ui.clone();

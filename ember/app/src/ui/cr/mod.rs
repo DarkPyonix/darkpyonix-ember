@@ -3,3 +3,4 @@
 //! originals). Nothing in here imports `dioxus_compose`.
 
 pub mod theme;
+pub mod components;

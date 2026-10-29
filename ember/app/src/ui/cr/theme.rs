@@ -15,7 +15,6 @@
 //! TODO(compose-rust#375): the layered card/sheet shadow (#214) needs `Modifier.shadow`.
 
 use compose_rust::{Color, Paint};
-use serde::{Deserialize, Serialize};
 
 // `Scheme` and `ThemePref` are plain enums that `SharedUi` and `Prefs` already hold, so the
 // Dioxus module's definitions are the single source until phase 8 moves them here.
@@ -300,7 +299,10 @@ pub const ELEVATION_LARGE: f32 = 8.0;
 /// The theme to draw with now. Reading it inside a composable subscribes the caller to the
 /// preference, because [`crate::ui::coexist::SharedUi::theme_pref`] is a `MutableState`.
 pub fn ember_theme() -> EmberTheme {
-    let pref = crate::ui::coexist::shared_ui().theme_pref.get();
+    // Unit tests run without installed services; they draw the default (System) theme.
+    let pref = crate::services::try_services()
+        .map(|s| s.ui.theme_pref.get())
+        .unwrap_or_default();
     EmberTheme::select(pref, system_scheme())
 }
 
@@ -514,10 +516,8 @@ mod tests {
 
     #[test]
     fn fr_l28_ember_theme_follows_the_shared_preference() {
-        use crate::ui::coexist::shared_ui;
-        // `shared_ui` needs installed services, so the preference rule is checked on the
-        // pure path it delegates to.
-        let _ = shared_ui;
+        // Without installed services `ember_theme` falls back to the default preference.
+        assert_eq!(ember_theme().scheme, Scheme::Light);
         assert_eq!(EmberTheme::select(ThemePref::Dark, system_scheme()).scheme, Scheme::Dark);
         assert_eq!(EmberTheme::select(ThemePref::System, system_scheme()).scheme, Scheme::Light);
     }

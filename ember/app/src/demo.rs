@@ -307,6 +307,8 @@ impl DemoSource {
             record("demo-s5", "second-project", "codex", "테스트 플레이크 조사", SessionStatus::Failed, now - 1_200_000, 0),
             record("demo-s6", "second-project", "claude-code", "문서 링크 정리", SessionStatus::WaitingForApproval, now - 120_000, 0),
             record("demo-s7", "second-project", "codex", "의존성 업데이트", SessionStatus::Finished, now - 1_800_000, 0),
+            record("demo-s8", "second-project", "claude-code", "CI 캐시 정리", SessionStatus::Running, now - 240_000, 0),
+            record("demo-s9", "second-project", "codex", "로그 형식 통일", SessionStatus::Finished, now - 2_400_000, 0),
         ]
     }
 

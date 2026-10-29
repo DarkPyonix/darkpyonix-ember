@@ -724,7 +724,8 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
 fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     let session = b.members.first().map(|m| m.session_id.clone());
     let key = session.clone().unwrap_or_default();
-    let open = remember_with_key(key.clone(), || mutable_state_of(false));
+    // `EMBER_CR_IDE_MENU=1` opens the chooser at the start, for review captures.
+    let open = remember_with_key(key.clone(), || mutable_state_of(std::env::var("EMBER_CR_IDE_MENU").as_deref() == Ok("1")));
     let ide = remember_with_key(key.clone(), || mutable_state_of(None::<Result<IdeLaunch, String>>));
     let started = remember_with_key(key, || mutable_state_of(false));
     if let (Some(sid), false) = (session.clone(), started.get_untracked()) {
@@ -866,8 +867,11 @@ fn MembersCard(b: &ProjectBox, st: &Ui, ui: &SharedUi) {
             if list.is_empty() {
                 Label("일치하는 멤버가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
             }
-            for (status, members) in grouped(&list) {
-                // `.grp`: the status and its count.
+            for (gi, (status, members)) in grouped(&list).into_iter().enumerate() {
+                // `.grp`: a rule above every group but the first, the status and its count.
+                if gi > 0 {
+                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                }
                 Label(&format!("{} \u{b7} {}", status_pill(status).0, members.len()), Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
                 for (i, m) in members.iter().enumerate() {
                     MemberRow(m, &b.id, ui, i > 0);
@@ -1046,9 +1050,6 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                                 });
                             });
                         });
-                        if !part_supported(SettingsPart::Name) {
-                            Label(SOON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                        }
                         for e in errors.iter() {
                             Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
                         }

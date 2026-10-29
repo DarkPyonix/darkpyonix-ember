@@ -12,7 +12,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole};
+use compose_rust::{Alignment, DrawList, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
@@ -55,6 +55,13 @@ const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
 const ICON_ZAP: &str = line_icon!("M13 3L5 13.5h6L10 21l8-10.5h-6z");
+const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
+const ICON_STAR: &str = line_icon!("M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9");
+const ICON_SHIELD: &str = line_icon!("M12 3l7 3v5.5c0 4.5-3 7.8-7 9.5-4-1.7-7-5-7-9.5V6l7-3zM9 12l2.2 2.2L15.2 10");
+const ICON_MONITOR: &str = line_icon!("M5 5h14a1 1 0 011 1v9a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1zM9 20h6M12 16v4");
+const ICON_PLANE: &str = line_icon!("M21 3L3 10.5l7 3 3 7L21 3zM10 13.5L21 3");
+const ICON_SPARK: &str = line_icon!("M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z");
+const ICON_BRANCH: &str = line_icon!("M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9c0 6-12 3-12 6");
 const ICON_CHART: &str = line_icon!("M5 20V11M12 20V5M19 20v-7");
 
 // ---------------------------------------------------------------------------------------------
@@ -97,10 +104,67 @@ pub fn layout(width_dp: f32) -> Layout {
     }
 }
 
-/// Between the phone and the tablet width the mode and computer chips and the send button go to
-/// a second line; the mockup lets the chips shrink, which the toolkit cannot do.
-pub fn two_line_chips(width_dp: f32) -> bool {
-    width_dp > 560.0 && width_dp <= 900.0
+/// Estimated text width in dp: Hangul and other wide glyphs one em, ASCII 0.55 em.
+pub fn text_px(text: &str, font_px: f32) -> f32 {
+    text.chars().map(|c| if c.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * font_px
+}
+
+/// `text` cut to fit `max_px` at `font_px`, ending in an ellipsis when it was cut.
+pub fn fit_label(text: &str, max_px: f32, font_px: f32) -> String {
+    if text_px(text, font_px) <= max_px {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let next = format!("{out}{ch}\u{2026}");
+        if text_px(&next, font_px) > max_px {
+            break;
+        }
+        out.push(ch);
+    }
+    format!("{out}\u{2026}")
+}
+
+/// Widths for chips whose natural widths do not all fit in `avail`: the widest are cut down to a
+/// common cap until the row fits (the mockup's `flex: 0 1 auto` chips), never below `min`.
+pub fn shrink_widths(natural: &[f32], avail: f32, min: f32) -> Vec<f32> {
+    if natural.iter().sum::<f32>() <= avail {
+        return natural.to_vec();
+    }
+    let (mut lo, mut hi) = (min, natural.iter().cloned().fold(0.0, f32::max));
+    for _ in 0..24 {
+        let cap = (lo + hi) / 2.0;
+        if natural.iter().map(|w| w.min(cap)).sum::<f32>() > avail {
+            hi = cap;
+        } else {
+            lo = cap;
+        }
+    }
+    natural.iter().map(|w| w.min(lo).max(min.min(*w))).collect()
+}
+
+/// A composer chip's natural width: 12 side padding, the 16 px icon, 8 gap, the text, and the
+/// 14 px chevron with its 4 px gap when it has one.
+pub fn chip_natural(text: &str, chevron: bool) -> f32 {
+    12.0 + 16.0 + 8.0 + text_px(text, Fs::Sm.size()) + if chevron { 18.0 } else { 0.0 } + 12.0
+}
+
+/// The text a chip of width `w` can show.
+pub fn chip_text(text: &str, w: f32, chevron: bool) -> String {
+    fit_label(text, (w - 36.0 - if chevron { 18.0 } else { 0.0 }).max(0.0), Fs::Sm.size())
+}
+
+/// "10월 25일 토요일" for `YYYY-MM-DD`.
+pub fn date_line(ymd: &str) -> String {
+    let n = crate::ui::home::day_number(ymd);
+    let parts: Vec<&str> = ymd.split('-').collect();
+    match (n, parts.get(1).and_then(|m| m.parse::<u32>().ok()), parts.get(2).and_then(|d| d.parse::<u32>().ok())) {
+        (Some(n), Some(m), Some(d)) => {
+            let wd = ["일", "월", "화", "수", "목", "금", "토"][((n + 4).rem_euclid(7)) as usize];
+            format!("{m}월 {d}일 {wd}요일")
+        }
+        _ => String::new(),
+    }
 }
 
 /// The suggestion chips per line: three, two up to 900 px.
@@ -305,6 +369,42 @@ fn initial_suggestion() -> Option<String> {
     SUGGESTIONS.get(i).map(|s| s.to_string())
 }
 
+/// `EMBER_CR_SCROLL=<dp|bottom>` for review captures: the toolkit cannot scroll a column from
+/// code, so the blocks that would have scrolled out (by their estimated heights) are left out.
+struct Skip(std::cell::Cell<f32>);
+
+impl Skip {
+    fn from_env(total_est: f32, window_h: f32) -> Skip {
+        let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
+            Some("bottom") => (total_est - window_h).max(0.0),
+            Some(n) => n.parse::<f32>().unwrap_or(0.0),
+            None => 0.0,
+        };
+        Skip(std::cell::Cell::new(v))
+    }
+
+    /// Whether a block of about `est` dp is still in view.
+    fn show(&self, est: f32) -> bool {
+        let left = self.0.get();
+        if left >= est {
+            self.0.set(left - est);
+            false
+        } else {
+            self.0.set(0.0);
+            true
+        }
+    }
+}
+
+/// Estimated heights of the blocks, wide layout, for [`Skip`].
+const EST_HERO: f32 = 560.0;
+const EST_HEAD: f32 = 190.0;
+const EST_TREND: f32 = 380.0;
+const EST_USAGE: f32 = 340.0;
+const EST_SMALL: f32 = 340.0;
+const EST_EFF: f32 = 120.0;
+const EST_PROJ: f32 = 330.0;
+
 /// The Home screen: the chat-first top, then the dashboard.
 pub fn HomeScreen() {
     let window = compose_rust::runtime::current_window_size();
@@ -317,12 +417,15 @@ pub fn HomeScreen() {
 
     // The lists are modals; they sit beside the scroller so no parent's spacing counts them.
     let composer = remember(|| Composer::new());
+    let skip = Skip::from_env(EST_HERO + EST_HEAD + EST_TREND + EST_USAGE + EST_SMALL + EST_EFF + EST_PROJ, window.height_dp);
     cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Column().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().padding(pad)).content(|| {
-                Hero(&composer, &ui, window.width_dp, window.height_dp, content_w, l);
-                cu::Spacer().modifier(Modifier::new().height(SP[5]));
-                Dashboard(&dash, &ui, l, content_w);
+                if skip.show(EST_HERO) {
+                    Hero(&composer, &ui, window.width_dp, window.height_dp, content_w, l);
+                    cu::Spacer().modifier(Modifier::new().height(SP[5]));
+                }
+                Dashboard(&dash, &ui, l, content_w, &skip);
             });
         });
         composer.lists(&ui);
@@ -546,23 +649,36 @@ impl Composer {
                 cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(320.0)).content(|| {
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for (i, o) in rows.iter().copied().enumerate() {
-                            let text = match shortcut_label(i) {
-                                Some(k) => format!("{}   {}   {}", o.row_title(), o.harness.label(), k),
-                                None => format!("{}   {}", o.row_title(), o.harness.label()),
-                            };
                             let block = harness_block(o.harness, &agents, &limited);
                             let (selection, open, mut dismiss) = (self.selection.clone(), self.open.clone(), close.clone());
-                            AppButton(
-                                &text,
-                                None,
-                                if o == sel.option { ButtonKind::Primary } else { ButtonKind::Default },
-                                false,
-                                block.is_none(),
-                                true,
+                            let fill = if o == sel.option { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
+                            let m = Modifier::new().fill_max_width().height(40.0).background(fill).corner_radius(CORNER_SM);
+                            // A row: the name at the left, the harness and the shortcut in columns.
+                            // TODO(compose-rust#372): a pointer-up `Clickable`.
+                            Clickable(
+                                if block.is_some() { m.alpha(0.5) } else { m },
+                                Alignment::CenterStart,
                                 move || {
-                                    selection.set(selection.get_untracked().with_option(o));
-                                    open.set(None);
-                                    dismiss();
+                                    if block.is_none() {
+                                        selection.set(selection.get_untracked().with_option(o));
+                                        open.set(None);
+                                        dismiss();
+                                    }
+                                },
+                                || {
+                                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                                        Label(&o.row_title(), Fs::Md, Weight::Medium, None, Some(1));
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                        Label(o.harness.label(), Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                                        cu::Row().modifier(Modifier::new().width(56.0)).content(|| {
+                                            if let Some(k) = shortcut_label(i) {
+                                                Label(&k, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                                            }
+                                        });
+                                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                                    });
                                 },
                             );
                             if let Some(reason) = block {
@@ -582,18 +698,19 @@ impl Composer {
 
 fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f32, l: Layout) {
     let p = ember_theme().palette;
-    let top = if l.compact { 48.0 } else { (height_dp * 0.10).clamp(24.0, 96.0) };
+    // `.home .hero{padding:10vh 0 ...}`, less the 30 dp the capture measured over the mockup.
+    let top = if l.compact { 48.0 } else { (height_dp * 0.10 - 30.0).clamp(8.0, 96.0) };
     cu::Column().alignment(Alignment::Center).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
         cu::Spacer().modifier(Modifier::new().height(top));
-        // `.hero-bots`: three team members, the middle one raised 6 px.
+        // `.hero-bots`: three characters on their baseline, the middle one raised 6 px.
         let bot = if l.compact { 32.0 } else { 40.0 };
-        cu::Row().spacing(10.0).alignment(Alignment::CenterStart).content(|| {
-            super::characters::Character("claude", false, bot, "claude", "", super::characters::CharState::Done, None);
+        cu::Row().spacing(10.0).alignment(Alignment::BottomStart).content(|| {
+            HeroBot("claude", "done", bot);
             cu::Column().content(|| {
-                super::characters::Character("codex", false, bot, "codex", "", super::characters::CharState::Run, None);
-                cu::Spacer().modifier(Modifier::new().height(12.0));
+                HeroBot("codex", "run", bot);
+                cu::Spacer().modifier(Modifier::new().height(6.0));
             });
-            super::characters::Character("gemini", false, bot, "gemini", "", super::characters::CharState::Wait, None);
+            HeroBot("gemini", "wait", bot);
         });
         // The mockup greets the signed-in user by name.
         let greeting = format!("{}, {}", DEMO_USER.0, GREETING);
@@ -607,6 +724,88 @@ fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f
     });
 }
 
+/// The plain vendor character of `core.js` `bot()`: one shape per harness in its colour.
+pub fn hero_bot_svg(vendor: &str, status: &str, px: f32, p: &Palette) -> String {
+    let hex = |c: compose_rust::Color| format!("#{:06x}", c.to_argb() & 0x00ff_ffff);
+    let (fill, shape) = match vendor {
+        "codex" => (hex(p.blue.strong), "M13 8h14c3.9 0 6 2.1 6 6v13c0 3.9-2.1 6-6 6H13c-3.9 0-6-2.1-6-6V14c0-3.9 2.1-6 6-6z"),
+        "gemini" => (hex(p.sky.strong), "M20 5.5c2.2 6.4 6.3 10.6 13.5 13.6-7.2 3-11.3 7.4-13.5 14.4-2.2-7-6.3-11.4-13.5-14.4C13.7 16.1 17.8 11.9 20 5.5z"),
+        _ => (hex(p.orange.strong), "M20 6.5c8.2 0 13.8 5.6 13.8 14.2S28.4 34.5 20 34.5 6.2 29.3 6.2 20.7 11.8 6.5 20 6.5z"),
+    };
+    let ink = if vendor == "gemini" { "#26374f" } else { "#2a2522" };
+    let mouth = match status {
+        "run" => "M17 25.5h6",
+        "wait" => "M18 25a2 2 0 0 0 4 0",
+        "fail" => "M16.5 27q3.5-3 7 0",
+        _ => "M16.5 24.5q3.5 3.2 7 0",
+    };
+    let size = px.round() as i32;
+    let mut s = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 40 40\"><ellipse cx=\"20\" cy=\"37.6\" rx=\"9\" ry=\"1.5\" fill=\"#1c1b19\" fill-opacity=\".12\"/><path d=\"{shape}\" fill=\"{fill}\"/><path d=\"M11.5 23.5h2.5M26 23.5h2.5\" fill=\"none\" stroke=\"#ffffff\" stroke-opacity=\".35\" stroke-width=\"2.2\" stroke-linecap=\"round\"/><ellipse cx=\"15.5\" cy=\"19\" rx=\"1.9\" ry=\"2.5\" fill=\"{ink}\"/><ellipse cx=\"24.5\" cy=\"19\" rx=\"1.9\" ry=\"2.5\" fill=\"{ink}\"/><path d=\"{mouth}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"1.6\" stroke-linecap=\"round\"/>"
+    );
+    if status == "wait" {
+        s.push_str(&format!("<circle cx=\"35\" cy=\"15\" r=\"3\" fill=\"{fill}\"/>"));
+    }
+    if status == "run" {
+        s.push_str(&format!("<circle cx=\"31\" cy=\"7\" r=\"1.5\" fill=\"{0}\"/><circle cx=\"35\" cy=\"5\" r=\"1.2\" fill=\"{0}\"/>", hex(p.blue.strong)));
+    }
+    s.push_str("</svg>");
+    s
+}
+
+fn HeroBot(vendor: &str, status: &str, px: f32) {
+    let doc = hero_bot_svg(vendor, status, px, ember_theme().palette);
+    cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, shell::leak_doc(doc))).modifier(Modifier::new().size(px, px));
+}
+
+/// A composer chip (`.pickchip`): 32 px, `surface-2`, a 16 px line icon, the text in 13 px medium,
+/// an optional chevron. `w` is the width the row gave it; the text is cut to fit and `icon_only`
+/// chips are 32 px circles. TODO(compose-rust#372, #373): a pointer-up `Clickable`, no keyboard
+/// focus or role; the toolkit chip has neither the icon set nor a shrinkable label.
+fn ComposerChip(text: &str, icon: &'static str, icon_color: compose_rust::Color, chevron: bool, selected: bool, icon_only: bool, w: f32, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let fill = if selected { p.sel } else { p.surface_2 };
+    let base = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
+    if icon_only {
+        Clickable(base.width(H_CTL), Alignment::Center, on_click, || NavIcon(icon, icon_color.to_argb(), 16.0));
+        return;
+    }
+    let shown = chip_text(text, w, chevron);
+    Clickable(base, Alignment::CenterStart, on_click, || {
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(12.0));
+            NavIcon(icon, icon_color.to_argb(), 16.0);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            Label(&shown, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            if chevron {
+                cu::Spacer().modifier(Modifier::new().width(4.0));
+                NavIcon(shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 14.0);
+            }
+            cu::Spacer().modifier(Modifier::new().width(12.0));
+        });
+    });
+}
+
+/// `.chip.outline`: the suggestion chip, `surface` on a `line` border, 12 px regular text.
+fn OutlineChip(icon: &'static str, text: &str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let shown = fit_label(text, 240.0 - 36.0, Fs::Xs.size());
+    Clickable(
+        Modifier::new().height(H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(12.0));
+                NavIcon(icon, p.text_2.to_argb(), 16.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                Label(&shown, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(12.0));
+            });
+        },
+    );
+}
+
 fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
     let p = ember_theme().palette;
     let sel = c.selection.get();
@@ -616,11 +815,33 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
     let placeholder = c.suggestion.get().unwrap_or_else(|| COMPOSER_PLACEHOLDER.to_string());
     let computer_text = crate::ui::home::computer_chip_text(sel.computer.as_deref(), &computers);
     let icon_only = l.compact;
-    let two_lines = two_line_chips(width_dp);
-
-    let chip = |text: String, icon: IconRole, pick: Pick, selected: bool, icon_only: bool| {
+    let pad = if l.compact { SP[2] } else { SP[3] };
+    let gap = if l.compact { SP[0] } else { 6.0 };
+    let inner = w - 2.0 * pad - 2.0;
+    let model_text = sel.option.chip_label();
+    let mode_text = sel.mode.label().to_string();
+    // The row: add (32), the chips, a spacer, send (36), `gap` between all of them. The chips
+    // share what is left and are cut to it.
+    let (widths, project_w): (Vec<f32>, f32) = if icon_only {
+        let project_avail = (inner - 32.0 - 3.0 * H_CTL - 36.0 - 6.0 * gap).max(60.0);
+        let project_nat = chip_natural(&fit_label(&sel.project, 110.0, Fs::Sm.size()), false);
+        (vec![], project_nat.min(project_avail))
+    } else {
+        let avail = inner - 32.0 - 36.0 - 6.0 * gap;
+        let nat = [
+            chip_natural(&fit_label(&sel.project, 180.0, Fs::Sm.size()), false),
+            chip_natural(&fit_label(&model_text, 180.0, Fs::Sm.size()), true),
+            chip_natural(&fit_label(&mode_text, 180.0, Fs::Sm.size()), true),
+            chip_natural(&fit_label(&computer_text, 180.0, Fs::Sm.size()), false),
+        ];
+        let w4 = shrink_widths(&nat, avail, 56.0);
+        (w4.clone(), w4[0])
+    };
+    let width_of = |i: usize| widths.get(i).copied().unwrap_or(0.0);
+    let model_color = if sel.option.harness == Harness::ClaudeCode { p.orange.strong } else { p.blue.strong };
+    let chip = |text: &str, icon: &'static str, color: compose_rust::Color, pick: Pick, chevron: bool, selected: bool, w: f32| {
         let open = c.open.clone();
-        PickChip(&text, Some(icon), selected, icon_only, move || open.set(Some(pick)));
+        ComposerChip(text, icon, color, chevron, selected, icon_only && pick != Pick::Project, w, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(FR-L11): attachments need the file picker and an upload API.
@@ -628,15 +849,19 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
-        // `.sendround`: a 36 px `--ink` circle with the send glyph. TODO(compose-rust#372): the
-        // toolkit glyph and no label until a clickable container has button semantics.
-        cu::Button("")
-            .icon(IconRole::Send)
-            .enabled(sendable)
-            .variant(ButtonVariant::Text)
-            .color(paint(p.ink_text))
-            .modifier(Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full))
-            .on_click(move || c2.send(&ui2));
+        // `.sendround`: a 36 px `--ink` circle with the paper plane.
+        // TODO(compose-rust#372): a pointer-up `Clickable`; the toolkit button has no plane.
+        let m = Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full);
+        Clickable(
+            if sendable { m } else { m.alpha(0.4) },
+            Alignment::Center,
+            move || {
+                if sendable {
+                    c2.send(&ui2)
+                }
+            },
+            || NavIcon(ICON_PLANE, p.ink_text.to_argb(), 18.0),
+        );
     };
 
     // `.bigcomposer`: surface, 1 px line, the xl radius, 16 / 16 / 12 padding.
@@ -672,32 +897,18 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, width_dp: f32, w: f32, l: Layout) {
                         PickChip("취소", None, false, false, move || s.set(None));
                     });
                 }
-                if two_lines {
-                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        add();
-                        chip(sel.project.clone(), IconRole::Library, Pick::Project, false, false);
-                        chip(sel.option.chip_label(), IconRole::Compose, Pick::Model, false, false);
-                    });
-                    cu::Row().spacing(6.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        chip(sel.mode.label().to_string(), IconRole::Settings, Pick::Mode, sel.mode.is_bypass(), false);
-                        chip(computer_text.clone(), IconRole::Sidebar, Pick::Computer, false, false);
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        send();
-                    });
-                } else {
-                    cu::Row().spacing(if l.compact { SP[0] } else { 6.0 }).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        add();
-                        chip(sel.project.clone(), IconRole::Library, Pick::Project, false, false);
-                        chip(sel.option.chip_label(), IconRole::Compose, Pick::Model, false, icon_only);
-                        chip(sel.mode.label().to_string(), IconRole::Settings, Pick::Mode, sel.mode.is_bypass(), icon_only);
-                        chip(computer_text.clone(), IconRole::Sidebar, Pick::Computer, false, icon_only);
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        if c.busy.get() {
-                            cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
-                        }
-                        send();
-                    });
-                }
+                cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    add();
+                    chip(&sel.project, ICON_FOLDER, p.text_2, Pick::Project, false, false, if icon_only { project_w } else { width_of(0) });
+                    chip(&model_text, ICON_STAR, model_color, Pick::Model, true, false, width_of(1));
+                    chip(&mode_text, ICON_SHIELD, p.text_2, Pick::Mode, true, sel.mode.is_bypass(), width_of(2));
+                    chip(&computer_text, ICON_MONITOR, p.text_2, Pick::Computer, false, false, width_of(3));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    if c.busy.get() {
+                        cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
+                    }
+                    send();
+                });
             });
         });
 }
@@ -711,8 +922,8 @@ fn Suggestions(c: &Composer, width_dp: f32) {
                 for text in line {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
-                    // An outlined small button: `surface` on a `line` border.
-                    AppButton(text, None, ButtonKind::Default, true, true, false, move || s.set(Some(t.clone())));
+                    let icon = [ICON_SPARK, ICON_BRANCH, ICON_CHART][SUGGESTIONS.iter().position(|x| x == text).unwrap_or(0) % 3];
+                    OutlineChip(icon, text, move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -723,28 +934,37 @@ fn Suggestions(c: &Composer, width_dp: f32) {
 // Dashboard
 // ---------------------------------------------------------------------------------------------
 
-fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32) {
+fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
     let p = ember_theme().palette;
     let k = kpis(&d.counts, d.online, d.computers);
     cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-        cu::Column().content(|| {
-            Label("오늘의 팀", if l.compact { Fs::Xl } else { Fs::Xl2 }, Weight::Semibold, None, None);
-            Label("지금 서버가 알고 있는 세션과 컴퓨터입니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-        });
-        KpiStrip(&k, &d.counts, l);
+        if skip.show(EST_HEAD) {
+            cu::Column().content(|| {
+                Label("오늘의 팀", if l.compact { Fs::Xl } else { Fs::Xl2 }, Weight::Semibold, None, None);
+                cu::Spacer().modifier(Modifier::new().height(10.0));
+                Label(&format!("{} · 서버 기준", date_line(&crate::ui::home::today_utc())), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                cu::Spacer().modifier(Modifier::new().height(12.0));
+            });
+            KpiStrip(&k, &d.counts, l);
+        }
         let stacked = !l.wide;
         // The trend's chart is a fixed-width canvas: the card's inner width.
         let chart_w = if l.wide { content_w * 8.0 / 12.0 - GAP_CARD - 2.0 * PAD_CARD_H } else { content_w - 2.0 * PAD_CARD_H }.max(200.0);
-        Weighted(stacked, GAP_CARD, vec![
-            (8.0, Box::new(|| TokenTrendTile(ui, chart_w)) as Part),
-            (4.0, Box::new(|| StatusTile(&d.counts, ui))),
-        ]);
-        Weighted(stacked, GAP_CARD, vec![
-            (7.0, Box::new(|| HarnessTile(&d.harness))),
-            (5.0, Box::new(|| CrewTile(&d.crew, d.online, d.computers, ui, content_w * 5.0 / 12.0))),
-        ]);
+        if skip.show(EST_TREND) {
+            Weighted(stacked, GAP_CARD, vec![
+                (8.0, Box::new(|| TokenTrendTile(ui, chart_w)) as Part),
+                (4.0, Box::new(|| StatusTile(&d.counts, ui))),
+            ]);
+        }
+        if skip.show(EST_USAGE) {
+            Weighted(stacked, GAP_CARD, vec![
+                (7.0, Box::new(|| HarnessTile(&d.harness))),
+                (5.0, Box::new(|| CrewTile(&d.crew, d.online, d.computers, ui, content_w * 5.0 / 12.0))),
+            ]);
+        }
         // Three small tiles: in a row when wide, success beside wait up to 900, else stacked.
-        if l.wide {
+        if !skip.show(EST_SMALL) {
+        } else if l.wide {
             Weighted(false, GAP_CARD, vec![
                 (1.0, Box::new(|| SuccessTile(&d.counts)) as Part),
                 (1.0, Box::new(|| Unavailable(ICON_CLOCK, "승인 대기 시간"))),
@@ -757,7 +977,9 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32) {
             ]);
             Unavailable(shell::ICON_CPU_SVG, "컴퓨터 부하");
         }
-        Unavailable(ICON_ZAP, "팀원별 효율");
+        if skip.show(EST_EFF) {
+            Unavailable(ICON_ZAP, "팀원별 효율");
+        }
         ProjectsTile(&d.projects, ui, l);
     });
 }
@@ -783,13 +1005,16 @@ fn KpiCell(kpi: &Kpi, tone: PillTone, rule: bool) {
             cu::Spacer().modifier(Modifier::new().width(SP[3]));
         }
         cu::Column().spacing(6.0).modifier(Modifier::new().weight(1.0)).content(|| {
-            Label(kpi.label, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+            Label(kpi.label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             if kpi.available {
                 cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                    Label(&kpi.value, Fs::Xl2, Weight::Regular, None, Some(1));
-                    if !kpi.unit.is_empty() {
-                        Label(kpi.unit, Fs::Xl, Weight::Medium, Some(paint(p.muted)), Some(1));
-                    }
+                    // The unit hugs the number (`small{margin-left:2px}`).
+                    cu::Row().spacing(2.0).alignment(Alignment::CenterStart).content(|| {
+                        Label(&kpi.value, Fs::Xl2, Weight::Regular, None, Some(1));
+                        if !kpi.unit.is_empty() {
+                            Label(kpi.unit, Fs::Md, Weight::Medium, Some(paint(p.muted)), Some(1));
+                        }
+                    });
                     if let Some(note) = &kpi.note {
                         Pill(note, tone, true);
                     }
@@ -1084,14 +1309,42 @@ mod tests {
     }
 
     #[test]
-    fn fr_l11_the_composer_chips_split_only_between_phone_and_tablet() {
-        assert!(!two_line_chips(390.0));
-        assert!(two_line_chips(768.0));
-        assert!(!two_line_chips(1024.0));
+    fn fr_l11_composer_chips_shrink_to_the_row_and_end_in_an_ellipsis() {
         assert_eq!(suggestion_cols(1440.0), 3);
         assert_eq!(suggestion_cols(768.0), 2);
         assert_eq!(composer_width(1158.0), 720.0);
         assert_eq!(composer_width(340.0), 340.0);
+        let nat = [150.0, 300.0, 120.0, 90.0];
+        let w = shrink_widths(&nat, 480.0, 56.0);
+        assert!(w.iter().sum::<f32>() <= 480.5, "{w:?}");
+        assert_eq!(w[0], 150.0, "short chips keep their width");
+        assert!(w[1] < 300.0);
+        assert_eq!(shrink_widths(&nat, 1000.0, 56.0), nat.to_vec());
+        let cut = fit_label("Claude Code · Opus 5.5 · High", 120.0, 13.0);
+        assert!(cut.ends_with('\u{2026}') && text_px(&cut, 13.0) <= 120.0, "{cut}");
+        assert_eq!(fit_label("이 서버", 120.0, 13.0), "이 서버");
+    }
+
+    #[test]
+    fn fr_l23_the_date_line_names_the_weekday() {
+        assert_eq!(date_line("2026-10-25"), "10월 25일 일요일");
+        assert_eq!(date_line("1970-01-01"), "1월 1일 목요일");
+        assert_eq!(date_line("nope"), "");
+    }
+
+    #[test]
+    fn fr_l11_hero_bots_use_the_vendor_colours() {
+        let svg = hero_bot_svg("codex", "run", 40.0, &LIGHT);
+        assert!(svg.contains("#3f74d4") && svg.contains("width=\"40\""));
+        assert!(hero_bot_svg("gemini", "wait", 32.0, &DARK).contains("#8fb1df"));
+    }
+
+    #[test]
+    fn capture_scroll_skips_whole_blocks() {
+        let s = Skip(std::cell::Cell::new(600.0));
+        assert!(!s.show(560.0));
+        assert!(s.show(190.0));
+        assert!(s.show(380.0));
     }
 
     #[test]

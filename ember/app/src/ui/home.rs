@@ -601,7 +601,7 @@ pub fn harness_usage(state: &State) -> Vec<HarnessBar> {
 }
 
 /// Days since 1970-01-01 of a `YYYY-MM-DD` date (proleptic Gregorian), `None` if malformed.
-fn day_number(ymd: &str) -> Option<i64> {
+pub fn day_number(ymd: &str) -> Option<i64> {
     let mut it = ymd.split('-');
     let y: i64 = it.next()?.parse().ok()?;
     let m: i64 = it.next()?.parse().ok()?;

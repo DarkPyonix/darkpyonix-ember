@@ -650,8 +650,9 @@ pub fn EmberCard(
         .fill_max_width_if(fill_max_width)
         .background(paint(fill))
         .border(1.0, paint(border))
-        .corner_radius(CORNER_LG)
-        .elevation(ELEVATION_CARD);
+        // TODO(compose-rust#375): no `elevation`: under Material 3 it tints the fill and paints a
+        // lighter band along the top edge; the card shadow comes with `Modifier.shadow`.
+        .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
     // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
     // uniform, so 16 is used on all sides unless the caller passes one.

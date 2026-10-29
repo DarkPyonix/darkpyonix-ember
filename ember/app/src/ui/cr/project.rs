@@ -11,7 +11,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole, SpaceRole};
+use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
 
 use ember_client::LauncherStatus;
 
@@ -1150,7 +1150,9 @@ mod tests {
 
     #[test]
     fn fr_l1_stats_wrap_greedily_into_lines() {
-        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 200.0), vec![vec![0, 1, 2]]);
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 208.0), vec![vec![0, 1, 2]]);
+        // Three 60 wide stats and two 14 gaps take 208.
+        assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 207.0), vec![vec![0, 1], vec![2]]);
         assert_eq!(wrap_lines(&[60.0, 60.0, 60.0], 14.0, 150.0), vec![vec![0, 1], vec![2]]);
         assert_eq!(wrap_lines(&[300.0, 20.0], 14.0, 100.0), vec![vec![0], vec![1]]);
         assert!(wrap_lines(&[], 14.0, 100.0).is_empty());

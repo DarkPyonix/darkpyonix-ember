@@ -101,7 +101,10 @@ pub fn launch() {
         live: OnceLock::new(),
     });
 
-    if let Some(pref) = ui::cr::gallery::requested() {
+    if let Some(pref) = ui::cr::shell::requested() {
+        // Phase 2 review window (#220): the compose-rust shell, no Dioxus app.
+        ui::cr::shell::launch(pref);
+    } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
         ui::cr::gallery::launch(pref);
     } else {

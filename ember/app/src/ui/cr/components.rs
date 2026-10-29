@@ -16,6 +16,7 @@
 
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
+use compose_rust::PointerKinds;
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
     KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
@@ -111,6 +112,25 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
         Some(h) => m.height(h),
         None => m,
     }
+}
+
+/// A container that reacts to a click.
+///
+/// TODO(compose-rust#372): this is a pointer-up subscription on a `Box`. It has no keyboard
+/// focus or activation, no button role for screen readers and no hover or press feedback, which
+/// `Modifier.clickable` is to bring. Every clickable container in `ui/cr` goes through here so
+/// the swap is one function.
+pub fn Clickable(
+    modifier: Modifier,
+    alignment: Alignment,
+    mut on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    cu::Box()
+        .modifier(modifier)
+        .alignment(alignment)
+        .on_pointer(PointerKinds::UP, move |_| on_click())
+        .content(content);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -25,8 +25,16 @@ use super::components::{
 use super::theme::*;
 use crate::ui::project::{display_name, harness_tone, SOON};
 
-/// The list panel's width at the mockup's 1440 window.
-const LIST_W: f32 = 235.0;
+/// The list panel's width (`.split`): 340 above 1279 dp, 280 up to 1279, 260 up to 900.
+pub fn list_width(width_dp: f32) -> f32 {
+    if width_dp > 1279.0 {
+        340.0
+    } else if width_dp > 900.0 {
+        280.0
+    } else {
+        260.0
+    }
+}
 
 /// The local zone's offset in seconds. TODO: read the device zone; UTC until the app can.
 fn local_tz() -> i64 {
@@ -85,7 +93,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
 
     let order: Vec<String> = Vec::new();
     let room = cur.as_ref().and_then(|id| rooms.iter().find(|r| &r.id == id)).cloned();
-    let list = || RoomList(&rooms, &order, &filter, &open);
+    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0);
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
@@ -100,7 +108,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     };
     if split {
         cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().modifier(Modifier::new().width(LIST_W).fill_max_height()).content(list);
+            cu::Column().modifier(Modifier::new().width(list_width(window.width_dp)).fill_max_height()).content(list);
             cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(detail);
         });
@@ -111,7 +119,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     }
 }
 
-fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>) {
+fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool) {
     let p = ember_theme().palette;
     let current = filter.get();
     let sections = group_rooms(rooms, order, &current);
@@ -124,7 +132,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             .modifier(Modifier::new().fill_max_width().height(56.0))
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                Label("채널", Fs::Lg, Weight::Semibold, None, None);
+                Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, None);
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 // TODO(FR-T10): creates a channel; disabled until the server has them.
                 cu::Box()
@@ -144,18 +152,21 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
         cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2])).content(|| {
             // TODO(compose-rust#376, #374): the field frame and the leading magnifier; the
             // field is uncontrolled and has no initial value.
-            let query = filter.clone();
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "채널, 메시지 검색".to_string(),
-                on_value_change: Some(Box::new(move |v| {
-                    let mut f = query.get_untracked();
-                    f.query = v;
-                    query.set(f);
-                })),
-                ..Default::default()
-            });
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_PILL + SP[0])).content(|| {
+            // `.searchbox{display:none}` up to 900 dp: no search field on a phone.
+            if !narrow {
+                let query = filter.clone();
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    placeholder: "채널, 메시지 검색".to_string(),
+                    on_value_change: Some(Box::new(move |v| {
+                        let mut f = query.get_untracked();
+                        f.query = v;
+                        query.set(f);
+                    })),
+                    ..Default::default()
+                });
+            }
+            cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
                 for c in chips.iter() {
                     let (filter, c2) = (filter.clone(), c.clone());
                     let text = c.as_ref().map(|x| display_name(x)).unwrap_or_else(|| "전체".to_string());
@@ -233,27 +244,56 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     // The signed-in user's member id. TODO: the server names it once channels exist (FR-T10).
     let items = feed(room, "me", local_tz());
-    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+    // `.room{background:var(--room)}`: the room is on `--surface`, not the page.
+    cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface))).content(|| {
+        // `.topbar`: the room mark, the name with the member count and the project, round
+        // buttons at the right, a 1 px line below.
         cu::Row()
             .space_role(SpaceRole::Sm)
             .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(Modifier::new().fill_max_width().height(56.0))
             .content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 if show_back {
                     AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
                 }
-                Label(&room.name, Fs::Lg, Weight::Semibold, None, None);
-                Label(&room.members.len().to_string(), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                RoomIcon(&room.project, 36.0);
+                cu::Column().content(|| {
+                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
+                        Label(&room.name, Fs::Md, Weight::Semibold, None, Some(1));
+                        Label(&room.members.len().to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    });
+                    cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
+                        super::compat::Dot(crate::model::Tone::Neutral);
+                        Label(&display_name(&room.project), Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                    });
+                });
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                Pill(&display_name(&room.project), PillTone::Grey, true);
+                for svg in [super::shell::ICON_USERS_SVG, super::shell::ICON_MORE_SVG] {
+                    cu::Box()
+                        .alignment(Alignment::Center)
+                        .modifier(
+                            Modifier::new()
+                                .size(H_CTL, H_CTL)
+                                .background(paint(p.surface))
+                                .border(1.0, paint(p.line))
+                                .shape_role(compose_rust::ShapeRole::Full),
+                        )
+                        .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0));
+                }
+                cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });
+        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
-            cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            cu::Column().spacing(6.0).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                 for item in items.iter() {
                     match item {
                         FeedItem::Divider(d) => {
-                            cu::Row().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width()).content(|| {
+                            // `.datediv`: the label centered between two 1 px rules.
+                            cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().height(32.0)).content(|| {
+                                cu::Spacer().modifier(Modifier::new().weight(1.0).height(1.0).background(paint(p.line)));
                                 Label(d, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                                cu::Spacer().modifier(Modifier::new().weight(1.0).height(1.0).background(paint(p.line)));
                             });
                         }
                         FeedItem::Bubble(b) => {
@@ -264,19 +304,55 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
                 }
             });
         });
+        InputBar();
+    });
+}
+
+/// `.inputbar`: a white pill with a 1 px border, 740 wide at most and centered, holding a plus
+/// button, the field, an emoji button and the ink send button.
+/// TODO(compose-rust#376, #375): the field keeps the toolkit's own frame inside the pill, and
+/// the bar has no `--shadow-lg`.
+fn InputBar() {
+    let p = ember_theme().palette;
+    let width = (compose_rust::runtime::current_window_size().width_dp - 32.0).clamp(240.0, 740.0);
+    // The room's own width is not known here, so the bar is sized from the window and kept
+    // inside the room by the centering row.
+    let width = width.min(compose_rust::runtime::current_window_size().width_dp - 32.0 - 235.0).max(240.0);
+    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
+        cu::Spacer().modifier(Modifier::new().weight(1.0));
         cu::Row()
             .space_role(SpaceRole::Sm)
             .alignment(Alignment::CenterStart)
-            .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+            .modifier(
+                Modifier::new()
+                    .width(width)
+                    .height(50.0)
+                    .background(paint(p.surface))
+                    .border(1.0, paint(p.line))
+                    .shape_role(compose_rust::ShapeRole::Full),
+            )
             .content(|| {
+                cu::Spacer().modifier(Modifier::new().width(6.0 - 8.0 + 8.0));
+                for svg in [super::shell::ICON_PLUS_SVG] {
+                    cu::Box()
+                        .alignment(Alignment::Center)
+                        .modifier(Modifier::new().size(H_CTL, H_CTL))
+                        .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0));
+                }
                 EmberField(FieldOptions {
                     weight: Some(1.0),
                     placeholder: "메시지 입력".to_string(),
                     ..Default::default()
                 });
+                cu::Box()
+                    .alignment(Alignment::Center)
+                    .modifier(Modifier::new().size(H_CTL, H_CTL))
+                    .content(|| super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0));
                 // Sending needs the channel feed (FR-T11, not built): the button stays disabled.
                 AppButton("전송", None, ButtonKind::Primary, false, false, false, || {});
+                cu::Spacer().modifier(Modifier::new().width(6.0));
             });
+        cu::Spacer().modifier(Modifier::new().weight(1.0));
     });
 }
 

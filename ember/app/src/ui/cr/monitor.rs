@@ -138,10 +138,17 @@ fn OfflineBanner(title: &str) {
                 .padding(SP[2]),
         )
         .content(|| {
-            super::shell::NavIcon(super::shell::ICON_INFO_SVG, p.red.strong.to_argb(), 20.0);
+            // The glyph's circle fills 18 of 24 units, so 24 px draws the mockup's 20 px mark.
+            super::shell::NavIcon(super::shell::ICON_INFO_SVG, p.red.strong.to_argb(), 24.0);
             cu::Column().spacing(2.0).content(|| {
                 Label(title, Fs::Md, Weight::Semibold, Some(paint(p.red.strong)), None);
-                Label("마지막 연결 시각은 아직 알 수 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                Label(
+                    "마지막 연결 시각은 아직 알 수 없습니다. 아래는 마지막으로 받은 값입니다.",
+                    Fs::Sm,
+                    Weight::Regular,
+                    Some(paint(p.text_2)),
+                    None,
+                );
             });
         });
 }
@@ -246,7 +253,7 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
                     let (width, end) = match key {
                         SortKey::Name => (None, false),
                         SortKey::Pid => (Some(PID_W), true),
-                        SortKey::Cpu => (Some(CPU_W + PWR_W), true),
+                        SortKey::Cpu => (Some(CPU_W), true),
                         SortKey::Memory => (Some(MEM_W), true),
                     };
                     let ink = if cur.key == key { p.text } else { p.muted };
@@ -264,6 +271,13 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
                         move || sort.set(toggle_sort(sort.get_untracked(), key)),
                         || Label(&text, Fs::Xs, Weight::Medium, Some(paint(ink)), Some(1)),
                     );
+                    // The power column sits before CPU; the node reports no power yet, so it
+                    // is a label only (`th.c-pwr`).
+                    if key == SortKey::Pid {
+                        cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(PWR_W).height(H_CTL)).content(|| {
+                            Label("전력", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                        });
+                    }
                 }
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });

@@ -37,6 +37,8 @@ use super::components::{AppButton, ButtonKind, Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
 pub const ICON_HASH_SVG: &str = include_str!("../../../assets/nav/hash.svg");
+pub const ICON_USERS_SVG: &str = include_str!("../../../assets/nav/users.svg");
+pub const ICON_SMILE_SVG: &str = include_str!("../../../assets/nav/smile.svg");
 pub const ICON_PLUS_SVG: &str = include_str!("../../../assets/nav/plus.svg");
 pub const ICON_CPU_SVG: &str = include_str!("../../../assets/nav/cpu.svg");
 pub const ICON_GPU_SVG: &str = include_str!("../../../assets/nav/gpu.svg");

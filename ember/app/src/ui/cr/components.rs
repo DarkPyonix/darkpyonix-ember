@@ -794,19 +794,19 @@ pub fn EmberSheetSized(
     }
 }
 
-/// A filter chip (`.chip`): 24 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
+/// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
 /// TODO(compose-rust#372): a pointer-up `Clickable`.
 pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let (bg, ink) = if selected { (p.ink, p.ink_text) } else { (p.surface_2, p.text_2) };
     Clickable(
-        Modifier::new().height(H_PILL).background(paint(bg)).shape_role(ShapeRole::Full),
+        Modifier::new().height(H_CTL).background(paint(bg)).shape_role(ShapeRole::Full),
         Alignment::Center,
         on_click,
         || {
             cu::Row().alignment(Alignment::CenterStart).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                Label(text, Fs::Xs, Weight::Medium, Some(paint(ink)), Some(1));
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(ink)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
             });
         },

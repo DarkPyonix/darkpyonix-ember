@@ -16,9 +16,8 @@
 
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::PointerKinds;
 use compose_rust::{
-    Alignment, AssetKind, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
+    Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
     KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
 };
 
@@ -368,38 +367,11 @@ pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
     advance + icon + 2.0 * 24.0 + 4.0
 }
 
-/// The mockup's close glyph: 1.5 px round-capped lines on an 18 px grid (`svg.i`).
-static CLOSE_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>"##;
-
-/// A pill-shaped control built from a Box and a pointer subscription, so its label is set in
-/// the type scale (the toolkit `Button` sets its own label size, compose-rust#373) and it needs
-/// no width estimate.
-/// TODO(compose-rust#372): replace the pointer-up subscription with `Modifier.clickable`, which
-/// also gives the hover and press feedback this loses.
-#[allow(clippy::too_many_arguments)]
-fn pill_control(
-    text: &str,
-    modifier: Modifier,
-    enabled: bool,
-    fs: Fs,
-    weight: Weight,
-    ink: Color,
-    side_pad: f32,
-    mut on_click: impl FnMut() + 'static,
-) {
-    let modifier = if enabled { modifier } else { modifier.alpha(0.4) };
-    let mut b = cu::Box().modifier(modifier).alignment(Alignment::Center);
-    if enabled {
-        b = b.on_pointer(PointerKinds::UP, move |_| on_click());
-    }
-    b.content(|| {
-        cu::Row().alignment(Alignment::CenterStart).content(|| {
-            cu::Spacer().modifier(Modifier::new().width(side_pad));
-            Label(text, fs, weight, Some(paint(ink)), Some(1));
-            cu::Spacer().modifier(Modifier::new().width(side_pad));
-        });
-    });
-}
+// A Box with a pointer-up subscription would give the mockup's label sizes and no width
+// estimate, but it has no keyboard focus or activation, no button role for screen readers and
+// no hover or press feedback (only the toolkit `Button` and `Chip` carry those), so every
+// control here is the toolkit's. The differences from the mockup (label size, side padding,
+// the 16 px close glyph in the small icon button) are compose-rust#373 and #372.
 
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 pub fn AppButton(
@@ -413,24 +385,12 @@ pub fn AppButton(
 ) {
     let theme = ember_theme();
     let s = button_style(kind, small, theme.palette);
-    if icon.is_none() {
-        // 16 px side padding, 12 px small (`.btn`, `.btn.sm`).
-        let side = if small { SP[2] } else { SP[3] };
-        let m = Modifier::new()
-            .fill_max_width_if(fill_max_width)
-            .height(s.height)
-            .background(paint(s.fill))
-            .border(1.0, paint(s.border))
-            .shape_role(ShapeRole::Full);
-        pill_control(text, m, enabled, s.fs, Weight::Medium, s.text, side, on_click);
-        return;
-    }
-    // TODO(compose-rust#372): a labelled button with a glyph still uses the toolkit `Button`
-    // (and its width estimate) until icons can be drawn beside the label.
+    // TODO(compose-rust#373): the toolkit label size and padding stand in for the mockup's,
+    // and `label_min_width` keeps Korean labels on one line until `max_lines` exists.
     let width = if fill_max_width || text.is_empty() {
         None
     } else {
-        Some(label_min_width(text, s.fs.size(), true))
+        Some(label_min_width(text, s.fs.size(), icon.is_some()))
     };
     let mut b = cu::Button(text)
         .enabled(enabled)
@@ -453,7 +413,7 @@ pub fn AppButton(
 }
 
 /// A 40 px (or 32 px) circle with a 1 px border and a glyph.
-pub fn IconButton(icon: IconRole, small: bool, mut on_click: impl FnMut() + 'static) {
+pub fn IconButton(icon: IconRole, small: bool, on_click: impl FnMut() + 'static) {
     let theme = ember_theme();
     let size = if small { H_CTL } else { H_BTN };
     let ring = Modifier::new()
@@ -461,21 +421,9 @@ pub fn IconButton(icon: IconRole, small: bool, mut on_click: impl FnMut() + 'sta
         .background(paint(theme.palette.surface))
         .border(1.0, paint(theme.palette.line))
         .shape_role(ShapeRole::Full);
-    if icon == IconRole::Close {
-        // The mockup's line icon: 18 px, 16 px in the small button, tinted `--text-2`.
-        let glyph = if small { 16.0 } else { 18.0 };
-        cu::Box()
-            .modifier(ring)
-            .alignment(Alignment::Center)
-            .on_pointer(PointerKinds::UP, move |_| on_click())
-            .content(|| {
-                cu::Icon(compose_rust::asset(AssetKind::Svg, CLOSE_SVG))
-                    .color(paint(theme.palette.text_2))
-                    .modifier(Modifier::new().size(glyph, glyph));
-            });
-        return;
-    }
-    // TODO(compose-rust#372): other glyphs are toolkit icons until they are drawn as assets.
+    // TODO(compose-rust#372): the mockup's 1.5 px line icons (18 px, 16 px small) are SVG
+    // assets that need a clickable container with button semantics; the toolkit glyph is
+    // tinted `--text-2` until then, and the small button shows it small.
     cu::Button("")
         .icon(icon)
         .color(paint(theme.palette.text_2))
@@ -505,17 +453,11 @@ pub fn PickChip(
     let theme = ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
     let text = if icon_only && icon.is_some() { "" } else { text };
-    if icon.is_none() {
-        // 13 px medium `--text-2` with 12 px side padding (`.pickchip`).
-        let m = Modifier::new().height(height).background(paint(fill)).shape_role(ShapeRole::Full);
-        pill_control(text, m, true, Fs::Sm, Weight::Medium, theme.palette.text_2, SP[2], on_click);
-        return;
-    }
-    // TODO(compose-rust#372): a chip with a glyph still uses the toolkit `Button`.
+    // TODO(compose-rust#373): label size and padding are the toolkit's, see AppButton.
     let width = if text.is_empty() {
         None
     } else {
-        Some(label_min_width(text, Fs::Sm.size(), true))
+        Some(label_min_width(text, Fs::Sm.size(), icon.is_some()))
     };
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)

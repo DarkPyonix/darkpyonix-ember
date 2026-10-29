@@ -319,7 +319,8 @@ fn Tile(content: impl FnOnce()) {
 
 /// The inner height of the success tile (donut 132 + head 30 + gap 8 + the card's 16 px padding
 /// each side is outside it): tiles beside it take the same, since the toolkit rows do not
-/// stretch their children. TODO(compose-rust): equal-height cards in a row.
+/// stretch their children. TODO(compose-rust#389): equal-height cards in a row; this number is
+/// fragile when the success tile's content changes.
 const ROW_TILE_H: f32 = 171.0;
 
 fn TileH(height: Option<f32>, content: impl FnOnce()) {

@@ -120,14 +120,37 @@ pub fn fit_label(text: &str, max_px: f32, font_px: f32) -> String {
 
 /// Widths for chips whose natural widths do not all fit in `avail`: every chip gives up the same
 /// share of its width (the mockup's `flex: 0 1 auto` chips shrink in proportion to their basis),
-/// never below `min`.
-pub fn shrink_widths(natural: &[f32], avail: f32, min: f32) -> Vec<f32> {
-    let total: f32 = natural.iter().sum();
-    if total <= avail || total <= 0.0 {
+/// but none goes below its minimum, so a short label such as "이 서버" stays readable; the rest
+/// share what is left.
+pub fn shrink_widths(natural: &[f32], mins: &[f32], avail: f32) -> Vec<f32> {
+    if natural.iter().sum::<f32>() <= avail {
         return natural.to_vec();
     }
-    let k = avail / total;
-    natural.iter().map(|w| (w * k).max(min.min(*w))).collect()
+    let n = natural.len();
+    let mut w = natural.to_vec();
+    let mut fixed = vec![false; n];
+    loop {
+        let free: f32 = (0..n).filter(|i| !fixed[*i]).map(|i| natural[i]).sum();
+        let held: f32 = (0..n).filter(|i| fixed[*i]).map(|i| w[i]).sum();
+        let k = if free > 0.0 { ((avail - held) / free).max(0.0) } else { 0.0 };
+        let mut changed = false;
+        for i in 0..n {
+            if fixed[i] {
+                continue;
+            }
+            let floor = mins[i].min(natural[i]);
+            if natural[i] * k < floor {
+                w[i] = floor;
+                fixed[i] = true;
+                changed = true;
+            } else {
+                w[i] = natural[i] * k;
+            }
+        }
+        if !changed {
+            return w;
+        }
+    }
 }
 
 /// A composer chip's natural width: the toolkit button's own padding and icon slot around the
@@ -291,8 +314,18 @@ fn Weighted(stacked: bool, gap: f32, parts: Vec<(f32, Part<'_>)>) {
 
 /// A dashboard tile: a card with its content in a column.
 fn Tile(content: impl FnOnce()) {
+    TileH(None, content);
+}
+
+/// The inner height of the success tile (donut 132 + head 30 + gap 8 + the card's 16 px padding
+/// each side is outside it): tiles beside it take the same, since the toolkit rows do not
+/// stretch their children. TODO(compose-rust): equal-height cards in a row.
+const ROW_TILE_H: f32 = 171.0;
+
+fn TileH(height: Option<f32>, content: impl FnOnce()) {
     super::components::EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(content);
+        let m = Modifier::new().fill_max_width();
+        cu::Column().spacing(SP[2]).modifier(match height { Some(h) => m.height(h), None => m }).content(content);
     });
 }
 
@@ -801,7 +834,10 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
             chip_natural(&fit_label(&mode_text, 180.0, Fs::Sm.size())),
             chip_natural(&fit_label(&computer_text, 180.0, Fs::Sm.size())),
         ];
-        let w4 = shrink_widths(&nat, avail, 56.0);
+        // At least four Hangul of text, so "이 서버" is never cut.
+        let floor = |t: &str| chip_natural(&fit_label(t, 52.0, Fs::Sm.size()));
+        let mins = [floor(&sel.project), floor(&model_text), floor(&mode_text), floor(&computer_text)];
+        let w4 = shrink_widths(&nat, &mins, avail);
         (w4.clone(), w4[0])
     };
     let width_of = |i: usize| widths.get(i).copied().unwrap_or(0.0);
@@ -935,13 +971,13 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
         } else if l.wide {
             Weighted(false, GAP_CARD, vec![
                 (1.0, Box::new(|| SuccessTile(&d.counts)) as Part),
-                (1.0, Box::new(|| Unavailable(ICON_CLOCK, "승인 대기 시간"))),
-                (1.0, Box::new(|| Unavailable(shell::ICON_CPU_SVG, "컴퓨터 부하"))),
+                (1.0, Box::new(|| UnavailableH(ICON_CLOCK, "승인 대기 시간", Some(ROW_TILE_H)))),
+                (1.0, Box::new(|| UnavailableH(shell::ICON_CPU_SVG, "컴퓨터 부하", Some(ROW_TILE_H)))),
             ]);
         } else {
             Weighted(!l.pair_mid, GAP_CARD, vec![
                 (1.0, Box::new(|| SuccessTile(&d.counts)) as Part),
-                (1.0, Box::new(|| Unavailable(ICON_CLOCK, "승인 대기 시간"))),
+                (1.0, Box::new(|| UnavailableH(ICON_CLOCK, "승인 대기 시간", if l.pair_mid { Some(ROW_TILE_H) } else { None }))),
             ]);
             Unavailable(shell::ICON_CPU_SVG, "컴퓨터 부하");
         }
@@ -997,8 +1033,12 @@ fn KpiCell(kpi: &Kpi, tone: PillTone, rule: bool) {
 /// A tile for what the server does not report yet: the title and "준비 중입니다".
 /// TODO(server, FR-U7, FR-X7): approval wait, per-member efficiency and computer load.
 fn Unavailable(icon: &'static str, title: &str) {
+    UnavailableH(icon, title, None);
+}
+
+fn UnavailableH(icon: &'static str, title: &str, height: Option<f32>) {
     let p = ember_theme().palette;
-    Tile(|| {
+    TileH(height, || {
         CardHead(icon, title, || {});
         Label(UNAVAILABLE, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
     });
@@ -1157,6 +1197,9 @@ pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
 
 /// 하네스별 사용량 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
 /// bars per harness, one ring per harness with its share, and a "자세히" button to 에이전트.
+/// The width of one weekday bar.
+const BAR_W: f32 = 28.0;
+
 fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
     let p = ember_theme().palette;
     let colors = [p.orange.strong, p.blue.strong, p.sky.strong];
@@ -1174,46 +1217,51 @@ fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
             Label(EMPTY_HARNESS_USAGE, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             return;
         }
-        cu::Row().spacing(SP[5]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (label, v) in [("오늘 세션", today), ("7일 합계", all)] {
-                cu::Column().content(|| {
-                    Label(label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    Label(&v.to_string(), Fs::Xl2, Weight::Regular, None, Some(1));
-                });
-            }
-        });
-        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
-                cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
-                    Dot(*color);
-                    Label(h.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-            }
-        });
-        // Stacked bars: each day's column is split by harness; the stack's height follows the day's total.
-        cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width().height(H)).content(|| {
-            for (day, total_h) in week.iter().zip(heights.iter()) {
-                cu::Column().modifier(Modifier::new().weight(1.0).height(H)).content(|| {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    let n: usize = day.counts.iter().sum();
-                    for (count, color) in day.counts.iter().zip(colors.iter()).rev() {
-                        if *count > 0 && n > 0 {
-                            let h = total_h * *count as f32 / n as f32;
-                            cu::Spacer().modifier(Modifier::new().fill_max_width().height(h).background(paint(*color)).corner_radius(CORNER_2XS));
-                        }
+        // The summary and legend at the left; the bars gather at the right, 28 px wide with
+        // rounded tops (`.hm-tbars`).
+        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+                cu::Row().spacing(SP[5]).content(|| {
+                    for (label, v) in [("오늘 세션", today), ("7일 합계", all)] {
+                        cu::Column().content(|| {
+                            Label(label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            Label(&v.to_string(), Fs::Xl2, Weight::Regular, None, Some(1));
+                        });
                     }
                 });
-            }
-        });
-        cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (i, day) in week.iter().enumerate() {
-                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0)).content(|| {
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    let today = i + 1 == week.len();
-                    Label(day.label, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
+                    cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                        Dot(*color);
+                        Label(h.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    });
+                }
+            });
+            cu::Column().spacing(SP[0]).content(|| {
+                cu::Row().spacing(SP[1]).modifier(Modifier::new().height(H)).content(|| {
+                    for (day, total_h) in week.iter().zip(heights.iter()) {
+                        cu::Column().modifier(Modifier::new().width(BAR_W).height(H)).content(|| {
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            let n: usize = day.counts.iter().sum();
+                            let top = day.counts.iter().rposition(|c| *c > 0);
+                            for (i, (count, color)) in day.counts.iter().zip(colors.iter()).enumerate().rev() {
+                                if *count > 0 && n > 0 {
+                                    let h = total_h * *count as f32 / n as f32;
+                                    let r = if Some(i) == top { BAR_W / 2.0 } else { 0.0 };
+                                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(h).background(paint(*color)).corner_radius(r.min(h / 2.0)));
+                                }
+                            }
+                        });
+                    }
                 });
-            }
+                cu::Row().spacing(SP[1]).content(|| {
+                    for (i, day) in week.iter().enumerate() {
+                        let today = i + 1 == week.len();
+                        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().width(BAR_W)).content(|| {
+                            Label(day.label, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
+                        });
+                    }
+                });
+            });
         });
         // `.hm-rings`: one 52 px ring per harness with its share of the sessions.
         // TODO(server, FR-U7): rings per account with their usage share.
@@ -1366,11 +1414,11 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                                 Label(&crate::ui::project::display_name(&t.name), Fs::Md, Weight::Semibold, None, Some(1));
-                                // `.botrow`: up to five 20 px team members in their state.
+                                // `.botrow`: up to five team members in their state, drawn at 28 dp so the body is about the 20 px the mockup shows (the drawing has margin in its box).
                                 let members = services().client.read(|s| project_members(s, &t.name, 5));
                                 cu::Row().spacing(2.0).alignment(Alignment::CenterStart).content(|| {
                                     for (agent, status, title) in members.iter() {
-                                        super::characters::Character(agent, false, 20.0, title, &t.name, super::characters::CharState::from_status(*status), None);
+                                        super::characters::Character(agent, false, 28.0, title, &t.name, super::characters::CharState::from_status(*status), None);
                                     }
                                 });
                             });
@@ -1411,12 +1459,13 @@ mod tests {
         assert_eq!(composer_width(1158.0), 720.0);
         assert_eq!(composer_width(340.0), 340.0);
         let nat = [150.0, 300.0, 120.0, 90.0];
-        let w = shrink_widths(&nat, 480.0, 56.0);
+        let w = shrink_widths(&nat, &[80.0; 4], 480.0);
         assert!(w.iter().sum::<f32>() <= 480.5, "{w:?}");
-        // Proportional: every chip keeps 480/660 of its width.
-        assert!((w[0] - 109.1).abs() < 0.2 && (w[1] - 218.2).abs() < 0.2, "{w:?}");
-        assert!((w[3] - 65.5).abs() < 0.2, "{w:?}");
-        assert_eq!(shrink_widths(&nat, 1000.0, 56.0), nat.to_vec());
+        // Proportional, but the 90 chip would fall under its 80 minimum and is held there.
+        assert!((w.iter().sum::<f32>() - 480.0).abs() < 0.5, "{w:?}");
+        assert_eq!(w[3], 80.0);
+        assert!(w[0] > 80.0 && w[1] > w[0], "{w:?}");
+        assert_eq!(shrink_widths(&nat, &[80.0; 4], 1000.0), nat.to_vec());
         let cut = fit_label("Claude Code · Opus 5.5 · High", 120.0, 13.0);
         assert!(cut.ends_with('\u{2026}') && text_px(&cut, 13.0) <= 120.0, "{cut}");
         assert_eq!(fit_label("이 서버", 120.0, 13.0), "이 서버");

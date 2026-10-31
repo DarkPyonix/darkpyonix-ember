@@ -1915,7 +1915,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 [[package]]
 name = "letify-link"
 version = "2.10.3"
-source = "git+https://github.com/DarkPyonix/letify?rev=4363cfb16fba9fccd4d4f1c995408e2ebf7ae8b7#4363cfb16fba9fccd4d4f1c995408e2ebf7ae8b7"
+source = "git+https://github.com/DarkPyonix/letify?rev=bf53d4593771510b1cabf4a66c8b3cb6df0bdefc#bf53d4593771510b1cabf4a66c8b3cb6df0bdefc"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "getrandom 0.2.17",

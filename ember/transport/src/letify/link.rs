@@ -228,6 +228,12 @@ impl PeerLink {
                 Some(r) => session.close_with_reason(r).await,
                 None => session.close().await,
             }
+            // letify-link does not wake `accept_stream` when this side closes (only when the
+            // peer does), so the demux task would wait forever: end the connections here.
+            if let Some(h) = self.demux.lock().unwrap().take() {
+                h.abort();
+            }
+            self.teardown(&session, LinkError::Closed);
         }
     }
 

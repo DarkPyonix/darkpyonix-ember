@@ -39,8 +39,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use letify_link::observe::{AddressObserver, QadObserver, QadResponder};
 use letify_link::record::{self, AddressRecord};
-use letify_link::relay::{new_token, Relay, RelayConfig as LinkRelayConfig, RelayDialer, RelayHandle};
-use letify_link::rendezvous::{self, Message, Proto, Punch, Rendezvous};
+use letify_link::relay::{new_token, Relay, RelayConfig as LinkRelayConfig, RelayDialer, RelayHandle, RelayPairing};
+use letify_link::rendezvous::{self, Message, Rendezvous};
 use letify_link::{
     Accepted, Acceptor, Candidate, Config, Identity, ManagerConfig, NodeId, PathEvent, PathKind, PathManager,
     PeerPolicy,
@@ -126,6 +126,8 @@ struct Inner {
     own_relay: Option<RelayTarget>,
     relay_handle: Option<RelayHandle>,
     signal: Mutex<Option<Arc<SignalAdapter>>>,
+    /// Devices admitted through an attached gate (canonical ids); `None` until a gate attaches.
+    admitted: Mutex<Option<std::collections::HashSet<NodeId>>>,
     pkarr: Mutex<Option<Arc<PkarrNode>>>,
     publish_direct: AtomicBool,
     observed: Mutex<Option<SocketAddr>>,
@@ -244,6 +246,7 @@ impl LetifyBackend {
             own_relay,
             relay_handle,
             signal: Mutex::new(None),
+            admitted: Mutex::new(None),
             pkarr: Mutex::new(None),
             publish_direct: AtomicBool::new(true),
             observed: Mutex::new(None),
@@ -360,6 +363,17 @@ impl Inner {
         }
     }
 
+    /// Whether to meet `sender` at `relay` (`RelayPairing`'s trust check): the relay must be
+    /// our main server, and when a gate is attached the sender must be an admitted device.
+    fn trusts(&self, sender: &NodeId, relay: &NodeId) -> bool {
+        let ours = self.relay_target().is_some_and(|t| t.node.canonical() == relay.canonical());
+        let allowed = match self.admitted.lock().unwrap().as_ref() {
+            Some(set) => set.contains(&sender.canonical()),
+            None => true,
+        };
+        ours && allowed
+    }
+
     fn set_signal(self: &Arc<Self>, channel: Arc<dyn SignalChannel>) {
         let adapter = Arc::new(SignalAdapter(channel));
         {
@@ -371,7 +385,12 @@ impl Inner {
         }
         let known: Vec<PeerId> = self.hints.lock().unwrap().keys().copied().collect();
         adapter.0.watch(&known);
-        self.bg.lock().unwrap().push(tokio::spawn(signal_loop(self.clone(), adapter)));
+        let weak = Arc::downgrade(self);
+        let pairing = RelayPairing::new(adapter.clone(), self.identity.clone(), self.acceptor.clone(), move |sender, relay, _address| {
+            weak.upgrade().is_some_and(|inner| inner.trusts(sender, relay))
+        })
+        .pair_wait(Duration::from_secs(20));
+        self.bg.lock().unwrap().push(tokio::spawn(signal_loop(self.clone(), adapter, pairing)));
     }
 
     fn start_pkarr(self: &Arc<Self>, store: Arc<dyn PkarrStore>, publish_direct: bool) {
@@ -429,7 +448,7 @@ impl Inner {
     fn on_accepted(self: &Arc<Self>, accepted: Accepted, via: Via) {
         match accepted {
             Accepted::Session(session) => {
-                let peer = match peer_of(session.peer()) {
+                let peer = match peer_of(session.peer_presented()) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!("refusing a session from an unusable peer id: {e}");
@@ -612,6 +631,9 @@ impl Inner {
 
     fn revoke(&self, peer: PeerId) {
         let node = node_of(peer);
+        if let Some(set) = self.admitted.lock().unwrap().as_mut() {
+            set.remove(&node.canonical());
+        }
         // Accepted sessions: refuse new handshakes and close live sessions with "revoked".
         self.acceptor.revoke(node);
         if let Some(h) = &self.relay_handle {
@@ -629,6 +651,7 @@ impl Inner {
 
     fn allow(&self, peer: PeerId) {
         let node = node_of(peer);
+        self.admitted.lock().unwrap().get_or_insert_with(Default::default).insert(node.canonical());
         self.acceptor.reinstate(node);
         if let Some(h) = &self.relay_handle {
             h.allow(node);
@@ -640,20 +663,15 @@ impl Inner {
 /// A path through the relay: tell the peer which token to meet at, then dial the relay.
 fn relay_candidate(identity: Identity, relay: &RelayTarget, signal: Arc<SignalAdapter>, peer: NodeId) -> Candidate {
     let dialer = RelayDialer::new(relay.addr.clone(), relay.node, identity);
+    let (relay_node, relay_addr) = (relay.node, relay.addr.clone());
     Candidate::new(format!("relay:{}", relay.addr), move || {
         let dialer = dialer.clone();
         let signal = signal.clone();
+        let relay_addr = relay_addr.clone();
         async move {
             let token = new_token();
-            // A TCP punch offer with no mappings is Ember's relay meeting request: "pair with
-            // me at the relay under this token".
-            let offer = Message::PunchOffer(Punch {
-                proto: Proto::Tcp,
-                token,
-                start_at_ms: 0,
-                until_ms: 0,
-                mappings: Vec::new(),
-            });
+            // "Meet me at this relay under this token."
+            let offer = Message::RelayOffer { token, relay: relay_node, address: relay_addr };
             rendezvous::send_message(&*signal, peer, &offer).await?;
             dialer.connect(peer, token).await
         }
@@ -717,43 +735,33 @@ async fn manage(mut pm: PathManager, mut cmds: mpsc::UnboundedReceiver<Cmd>) {
     }
 }
 
-/// Serves relay meeting requests from the rendezvous.
-async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>) {
+/// Serves relay meeting requests from the rendezvous: a `RelayOffer` from a trusted device is
+/// answered, the relay is dialed and the session on it is accepted.
+async fn signal_loop(inner: Arc<Inner>, signal: Arc<SignalAdapter>, pairing: RelayPairing<SignalAdapter>) {
     loop {
         match rendezvous::recv_message(&*signal).await {
-            Ok((from, Message::PunchOffer(p))) if p.proto == Proto::Tcp && p.mappings.is_empty() => {
+            Ok((from, Message::RelayOffer { token, relay, address })) => {
                 let Ok(permit) = inner.meetings.clone().try_acquire_owned() else {
                     tracing::debug!("too many relay meetings in progress; dropping an offer");
                     continue;
                 };
-                let inner = inner.clone();
+                let (inner, pairing) = (inner.clone(), pairing.clone());
                 tokio::spawn(async move {
-                    meet(inner, from, p.token).await;
+                    match pairing.handle(from, token, relay, &address).await {
+                        Ok(Some(accepted)) => inner.on_accepted(accepted, Via::Relay),
+                        Ok(None) => tracing::debug!("declined a relay offer"),
+                        Err(e) => tracing::debug!(error = %e, "pairing at the relay failed"),
+                    }
                     drop(permit);
                 });
             }
             Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {}
             Err(e) => {
                 tracing::debug!(error = %e, "reading the rendezvous failed");
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
-    }
-}
-
-/// Dials the relay to be paired with `from` under `token`, then accepts the session on it.
-async fn meet(inner: Arc<Inner>, from: NodeId, token: [u8; 16]) {
-    let Some(relay) = inner.relay_target() else {
-        tracing::debug!("a relay meeting was requested but no relay is registered");
-        return;
-    };
-    let dialer = RelayDialer::new(relay.addr, relay.node, inner.identity.clone()).pair_wait(Duration::from_secs(20));
-    match dialer.connect(from, token).await {
-        Ok(tcp) => match inner.acceptor.accept(tcp).await {
-            Ok(accepted) => inner.on_accepted(accepted, Via::Relay),
-            Err(e) => tracing::debug!(error = %e, "session over the relay refused"),
-        },
-        Err(e) => tracing::debug!(error = %e, "pairing at the relay failed"),
     }
 }
 

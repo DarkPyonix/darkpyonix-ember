@@ -30,7 +30,7 @@ use crate::{PeerId, PkarrStore, Result, SecretKey, SignalChannel, TransportError
 /// Largest DNS packet we publish.
 const MAX_DNS: usize = 1000;
 /// Bytes of mailbox payload kept per recipient (older messages are dropped first).
-const MAILBOX_BYTES: usize = 130;
+const MAILBOX_BYTES: usize = 200;
 /// A queued message older than this many seconds is dropped.
 const MESSAGE_TTL_S: u32 = 120;
 /// The record is re-signed and published at least this often (its max age is 10 minutes).

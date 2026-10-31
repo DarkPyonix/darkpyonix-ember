@@ -593,6 +593,10 @@ pub fn shell() {
                     super::files::FilesScreen();
                 } else if matches!(screen, Screen::Home) {
                     super::home::HomeScreen();
+                } else if let Screen::Conversation(ref id) = screen {
+                    super::session::SessionScreen(Some(id.clone()));
+                } else if matches!(screen, Screen::Placeholder(NavMenu::Sessions)) {
+                    super::session::SessionScreen(None);
                 } else {
                     let menu = match &screen {
                         Screen::Conversation(_) => NavMenu::Sessions,
@@ -728,6 +732,14 @@ pub fn launch(pref: ThemePref) {
         }
         Some("home") => {
             ui.set_menu(NavMenu::Home);
+            shell
+        }
+        Some("session") | Some("sessions") => {
+            ui.set_menu(NavMenu::Sessions);
+            shell
+        }
+        Some("conversation") => {
+            ui.open_conversation("demo-s1");
             shell
         }
         _ => shell,

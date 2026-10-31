@@ -511,7 +511,13 @@ async fn ctrl_reader(mut r: ReadHalf<Stream>, shared: Arc<ConnShared>) {
         }
         Ok(_) => CloseReason::Lost("protocol error on the control stream".into()),
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            CloseReason::Remote { code: 0, reason: "connection dropped".into() }
+            // The whole session may have been closed by the peer (a revoke): then its reason
+            // is the better answer than "dropped".
+            let from_session = shared.link.upgrade().and_then(|l| l.session()).and_then(|s| s.close_reason());
+            match from_session {
+                Some(r) => CloseReason::Remote { code: if r == "revoked" { CLOSE_REVOKED } else { 0 }, reason: r },
+                None => CloseReason::Remote { code: 0, reason: "connection dropped".into() },
+            }
         }
         Err(e) => CloseReason::Lost(e.to_string()),
     };

@@ -619,9 +619,10 @@ impl Inner {
         }
         // Sessions we started to that peer (or to an alias of its key): close, and do not redial.
         let class = node.canonical();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
         for link in self.all_links() {
             if node_of(link.peer).canonical() == class {
-                tokio::spawn(async move { link.close_local(Some("revoked")).await });
+                handle.spawn(async move { link.close_local(Some("revoked")).await });
             }
         }
     }

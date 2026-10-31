@@ -185,7 +185,8 @@ impl HttpPkarrStore {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| TransportError::Config(format!("http client: {e}")))?;
-        Ok(Self { base: base.into().trim_end_matches('/').to_string(), token: Mutex::new(token), client })
+        let base: String = base.into();
+        Ok(Self { base: base.trim_end_matches('/').to_string(), token: Mutex::new(token), client })
     }
 
     fn url(&self, key: &PeerId) -> String {

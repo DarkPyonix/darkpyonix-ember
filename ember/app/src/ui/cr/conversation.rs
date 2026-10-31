@@ -481,41 +481,43 @@ pub fn ConversationView(id: &str, embedded: bool) {
                     Modifier::new()
                         .fill_max_width()
                         .fill_max_height()
-                        .padding_role(SpaceRole::Sm),
+                        .padding(if embedded { SP[2] } else { SP[3] }),
                 )
                 .content(|| {
-                    // ---- header ----------------------------------------------------------------
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .space_role(SpaceRole::Sm)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            if compact && !embedded {
-                                let u = ui.clone();
-                                IconButton(IconRole::Back, true, move || u.go(Route::Projects));
-                            }
-                            cu::Column()
-                                .modifier(Modifier::new().weight(1.0))
-                                .content(|| {
-                                    Label(
-                                        &title,
-                                        Fs::Lg,
-                                        Weight::Semibold,
-                                        Some(paint(p.text)),
-                                        Some(1),
-                                    );
-                                    Label(
-                                        &meta,
-                                        Fs::Xs,
-                                        Weight::Regular,
-                                        Some(paint(p.muted)),
-                                        Some(1),
-                                    );
-                                });
-                            StatusIndicator(status);
-                            let more = more_menu.clone();
-                            IconButton(IconRole::More, true, move || more.set(true));
-                        });
+                    // ---- header (hidden when embedded in SessionScreen SingleView, which has its own compact topbar) ----
+                    if !embedded {
+                        cu::Row()
+                            .alignment(Alignment::CenterStart)
+                            .space_role(SpaceRole::Sm)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                if compact {
+                                    let u = ui.clone();
+                                    IconButton(IconRole::Back, true, move || u.go(Route::Projects));
+                                }
+                                cu::Column()
+                                    .modifier(Modifier::new().weight(1.0))
+                                    .content(|| {
+                                        Label(
+                                            &title,
+                                            Fs::Lg,
+                                            Weight::Semibold,
+                                            Some(paint(p.text)),
+                                            Some(1),
+                                        );
+                                        Label(
+                                            &meta,
+                                            Fs::Xs,
+                                            Weight::Regular,
+                                            Some(paint(p.muted)),
+                                            Some(1),
+                                        );
+                                    });
+                                StatusIndicator(status);
+                                let more = more_menu.clone();
+                                IconButton(IconRole::More, true, move || more.set(true));
+                            });
+                    }
 
                     if let Some(text) = ko::approve_all_banner(approve_all) {
                         Banner(text, Tone::Warning);
@@ -548,34 +550,34 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             });
                     }
 
-                    // Computer and IDE row
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .space_role(SpaceRole::Sm)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            Label(
-                                "컴퓨터",
-                                Fs::Xs,
-                                Weight::Regular,
-                                Some(paint(p.muted)),
-                                Some(1),
-                            );
-                            let cm = computer_menu.clone();
-                            AppButton(
-                                &computer_name,
-                                None,
-                                ButtonKind::Default,
-                                true,
-                                !busy,
-                                false,
-                                move || cm.set(true),
-                            );
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            if pending > 0 {
-                                Badge(&format!("승인 대기 {pending}"), Tone::Warning);
-                            }
-                            if !embedded {
+                    if !embedded {
+                        // Computer and IDE row
+                        cu::Row()
+                            .alignment(Alignment::CenterStart)
+                            .space_role(SpaceRole::Sm)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                Label(
+                                    "컴퓨터",
+                                    Fs::Xs,
+                                    Weight::Regular,
+                                    Some(paint(p.muted)),
+                                    Some(1),
+                                );
+                                let cm = computer_menu.clone();
+                                AppButton(
+                                    &computer_name,
+                                    None,
+                                    ButtonKind::Default,
+                                    true,
+                                    !busy,
+                                    false,
+                                    move || cm.set(true),
+                                );
+                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                if pending > 0 {
+                                    Badge(&format!("승인 대기 {pending}"), Tone::Warning);
+                                }
                                 let im = ide_menu.clone();
                                 AppButton(
                                     "IDE 열기",
@@ -586,12 +588,12 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     false,
                                     move || im.set(true),
                                 );
-                            }
-                        });
+                            });
+                    }
 
                     ConnectionBanner();
 
-                    if busy {
+                    if busy && !embedded {
                         cu::IndeterminateProgressIndicator()
                             .circular(false)
                             .modifier(Modifier::new().fill_max_width());
@@ -640,7 +642,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                             .modifier(
                                                 Modifier::new()
                                                     .fill_max_width()
-                                                    .padding_role(SpaceRole::Xs),
+                                                    .padding_role(SpaceRole::Sm),
                                             )
                                             .content(move || {
                                                 for item in items_row.iter() {
@@ -652,6 +654,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                         &ans_row,
                                                     );
                                                 }
+                                                cu::Spacer().modifier(Modifier::new().height(24.0));
                                             });
                                     });
                             }
@@ -782,78 +785,149 @@ pub fn ConversationView(id: &str, embedded: bool) {
                             });
                     }
 
-                    // Embedded in SessionScreen: show model & permission chips (FR-L15, FR-L16)
-                    if embedded {
-                        super::session::ComposerChips(&sid);
-                    }
-
                     // ---- composer --------------------------------------------------------------
                     let _gen = composer_generation.get();
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .space_role(SpaceRole::Xs)
-                        .modifier(
-                            Modifier::new()
-                                .fill_max_width()
-                                .background(paint(p.surface))
-                                .border(1.0, paint(p.line))
-                                .corner_radius(CORNER_XL)
-                                .padding(SP[1]),
-                        )
-                        .content(|| {
-                            let send_sub = send.clone();
-                            EmberField(FieldOptions {
-                                bare: true,
-                                weight: Some(1.0),
-                                multiline: true,
-                                placeholder: if busy {
-                                    "다음 턴에 보낼 메시지를 입력하세요".to_string()
-                                } else {
-                                    "메시지를 입력하세요 (@@로 세션 멘션)".to_string()
-                                },
-                                on_value_change: Some(Box::new(on_draft.clone())),
-                                on_submit: Some(Box::new(move |v| send_sub(v))),
-                                ..Default::default()
-                            });
-                            if busy {
-                                let sid_int = sid.clone();
-                                AppButton(
-                                    if compact { "" } else { "중단" },
-                                    Some(IconRole::Close),
-                                    ButtonKind::Default,
-                                    true,
-                                    true,
-                                    false,
-                                    move || {
-                                        if demo_blocked_cr() {
-                                            return;
-                                        }
-                                        let id_c = sid_int.clone();
-                                        run_shared(
-                                            async move {
-                                                services()
-                                                    .client
-                                                    .interrupt(&id_c)
-                                                    .await
-                                                    .map_err(|e| e.to_string())
-                                            },
-                                            |r| {
-                                                if let Err(e) = r {
-                                                    notice::post(format!(
-                                                        "중단하지 못했습니다: {e}"
-                                                    ));
-                                                }
-                                            },
-                                        );
+                    if embedded {
+                        cu::Column()
+                            .space_role(SpaceRole::Sm)
+                            .modifier(
+                                Modifier::new()
+                                    .fill_max_width()
+                                    .background(paint(p.surface))
+                                    .border(1.0, paint(p.line))
+                                    .corner_radius(CORNER_XL)
+                                    .padding(SP[2]),
+                            )
+                            .content(|| {
+                                let send_sub = send.clone();
+                                EmberField(FieldOptions {
+                                    bare: true,
+                                    fill_max_width: true,
+                                    multiline: true,
+                                    placeholder: if busy {
+                                        "다음 턴에 보낼 메시지를 입력하세요".to_string()
+                                    } else {
+                                        "무엇이든 물어보세요. @@로 세션 멘션".to_string()
                                     },
-                                );
-                            }
-                            let send_btn = send.clone();
-                            let draft_btn = draft.clone();
-                            IconButton(IconRole::Send, true, move || {
-                                send_btn(draft_btn.get_untracked());
+                                    on_value_change: Some(Box::new(on_draft.clone())),
+                                    on_submit: Some(Box::new(move |v| send_sub(v))),
+                                    ..Default::default()
+                                });
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .space_role(SpaceRole::Xs)
+                                    .modifier(Modifier::new().fill_max_width())
+                                    .content(|| {
+                                        cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                                            super::session::ComposerChips(&sid);
+                                        });
+                                        if busy {
+                                            let sid_int = sid.clone();
+                                            AppButton(
+                                                if compact { "" } else { "중단" },
+                                                Some(IconRole::Close),
+                                                ButtonKind::Default,
+                                                true,
+                                                true,
+                                                false,
+                                                move || {
+                                                    if demo_blocked_cr() {
+                                                        return;
+                                                    }
+                                                    let id_c = sid_int.clone();
+                                                    run_shared(
+                                                        async move {
+                                                            services()
+                                                                .client
+                                                                .interrupt(&id_c)
+                                                                .await
+                                                                .map_err(|e| e.to_string())
+                                                        },
+                                                        |r| {
+                                                            if let Err(e) = r {
+                                                                notice::post(format!(
+                                                                    "중단하지 못했습니다: {e}"
+                                                                ));
+                                                            }
+                                                        },
+                                                    );
+                                                },
+                                            );
+                                        }
+                                        let send_btn = send.clone();
+                                        let draft_btn = draft.clone();
+                                        IconButton(IconRole::Send, true, move || {
+                                            send_btn(draft_btn.get_untracked());
+                                        });
+                                    });
                             });
-                        });
+                    } else {
+                        cu::Row()
+                            .alignment(Alignment::CenterStart)
+                            .space_role(SpaceRole::Xs)
+                            .modifier(
+                                Modifier::new()
+                                    .fill_max_width()
+                                    .background(paint(p.surface))
+                                    .border(1.0, paint(p.line))
+                                    .corner_radius(CORNER_XL)
+                                    .padding(SP[1]),
+                            )
+                            .content(|| {
+                                let send_sub = send.clone();
+                                EmberField(FieldOptions {
+                                    bare: true,
+                                    weight: Some(1.0),
+                                    multiline: true,
+                                    placeholder: if busy {
+                                        "다음 턴에 보낼 메시지를 입력하세요".to_string()
+                                    } else {
+                                        "메시지를 입력하세요 (@@로 세션 멘션)".to_string()
+                                    },
+                                    on_value_change: Some(Box::new(on_draft.clone())),
+                                    on_submit: Some(Box::new(move |v| send_sub(v))),
+                                    ..Default::default()
+                                });
+                                if busy {
+                                    let sid_int = sid.clone();
+                                    AppButton(
+                                        if compact { "" } else { "중단" },
+                                        Some(IconRole::Close),
+                                        ButtonKind::Default,
+                                        true,
+                                        true,
+                                        false,
+                                        move || {
+                                            if demo_blocked_cr() {
+                                                return;
+                                            }
+                                            let id_c = sid_int.clone();
+                                            run_shared(
+                                                async move {
+                                                    services()
+                                                        .client
+                                                        .interrupt(&id_c)
+                                                        .await
+                                                        .map_err(|e| e.to_string())
+                                                },
+                                                |r| {
+                                                    if let Err(e) = r {
+                                                        notice::post(format!(
+                                                            "중단하지 못했습니다: {e}"
+                                                        ));
+                                                    }
+                                                },
+                                            );
+                                        },
+                                    );
+                                }
+                                let send_btn = send.clone();
+                                let draft_btn = draft.clone();
+                                IconButton(IconRole::Send, true, move || {
+                                    send_btn(draft_btn.get_untracked());
+                                });
+                            });
+                    }
                 });
 
             // ---- Popups (outside spaced Column) ------------------------------------------------

@@ -47,9 +47,21 @@ use super::components::{
     AppButton, ButtonKind, Clickable, EmberCard, EmberField, EmberSheet, FieldOptions, FilterChip,
     IconButton, Label, OptionSheet, PickChip, Pill, PillTone,
 };
-use super::conversation::{ConversationView, TranscriptRow, item_key};
+use super::conversation::{ConversationView, TranscriptRow};
 use super::notice;
+use super::shell::{ICON_CHEVRON_DOWN_SVG, ICON_CPU_SVG, ICON_USERS_SVG, NavIcon, RedBadge};
 use super::theme::*;
+
+pub const ICON_GRID_SVG: &str = include_str!("../../../assets/nav/grid.svg");
+pub const ICON_USER_SVG: &str = include_str!("../../../assets/nav/user.svg");
+pub const ICON_CHART_SVG: &str = include_str!("../../../assets/nav/chart.svg");
+pub const ICON_PC_SVG: &str = include_str!("../../../assets/nav/pc.svg");
+pub const ICON_FOLDER_SVG: &str = include_str!("../../../assets/nav/folder.svg");
+pub const ICON_GIT_SVG: &str = include_str!("../../../assets/nav/git.svg");
+pub const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
+pub const ICON_GLOBE_SVG: &str = include_str!("../../../assets/nav/globe.svg");
+pub const ICON_CHEVRON_RIGHT_SVG: &str = include_str!("../../../assets/nav/chevron-right.svg");
+pub const ICON_GRIP_SVG: &str = r#"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"/></svg>"#;
 
 const NO_PROJECT: &str = "프로젝트가 없습니다";
 const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
@@ -60,7 +72,9 @@ const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습�
 const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const PR_TITLE: &str = "PR과 CI";
-const TIMELINE_TITLE: &str = "에이전트 소통 타임라인";
+const TIMELINE_TITLE: &str = "에이전트 간 통신";
+const SUBAGENT_TITLE: &str = "서브 에이전트 스레드";
+const LOAD_TITLE: &str = "부하";
 
 const POPUP_W: f32 = 280.0;
 
@@ -341,11 +355,34 @@ pub fn IdeMenu(session: &str) {
     });
 }
 
+fn status_dot_color(s: LauncherStatus, p: &Palette) -> Color {
+    match s {
+        LauncherStatus::Running => p.blue.strong,
+        LauncherStatus::WaitingForApproval => p.orange.strong,
+        LauncherStatus::FinishedUnread => p.sky.strong,
+        LauncherStatus::Finished => p.green.strong,
+        LauncherStatus::Failed => p.red.strong,
+        _ => p.grey.strong,
+    }
+}
+
+fn StatusDot(s: LauncherStatus) {
+    let p = ember_theme().palette;
+    let col = status_dot_color(s, p);
+    cu::Box().modifier(
+        Modifier::new()
+            .size(8.0, 8.0)
+            .background(paint(col))
+            .corner_radius(4.0),
+    );
+}
+
 /// The side list: search, then a section per project (FR-L18).
 pub fn SideList(
     sections: &[Section],
     current: &str,
     active: Option<&str>,
+    is_multi: bool,
     on_query: impl FnMut(String) + 'static,
     on_open: impl Fn(String, String) + Clone + 'static,
 ) {
@@ -353,130 +390,209 @@ pub fn SideList(
     let cur_proj = current.to_string();
     let active_id = active.map(str::to_string);
     let sections_vec = sections.to_vec();
+    let closed_secs = remember(|| mutable_state_of(HashSet::<String>::new()));
 
     cu::Column()
-        .space_role(SpaceRole::Sm)
         .modifier(
             Modifier::new()
                 .fill_max_width()
                 .fill_max_height()
-                .padding_role(SpaceRole::Sm),
+                .background(paint(p.surface_2)),
         )
         .content(move || {
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "세션 검색".to_string(),
-                on_value_change: Some(Box::new(on_query)),
-                ..Default::default()
-            });
+            // .st-top header (height 60dp, bottom 1px line)
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .space_role(SpaceRole::Sm)
+                .modifier(
+                    Modifier::new()
+                        .fill_max_width()
+                        .height(SHEET_HEADER_H)
+                        .padding(SP[2]),
+                )
+                .content(|| {
+                    Label("세션", Fs::Lg, Weight::Semibold, Some(paint(p.text)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                });
+            cu::Separator(Some(paint(p.line)));
 
-            cu::ScrollColumn()
-                .modifier(Modifier::new().fill_max_width().weight(1.0))
+            cu::Column()
+                .space_role(SpaceRole::Sm)
+                .modifier(
+                    Modifier::new()
+                        .fill_max_width()
+                        .weight(1.0)
+                        .padding(SP[2]),
+                )
                 .content(move || {
-                    cu::Column()
-                        .space_role(SpaceRole::Sm)
-                        .modifier(Modifier::new().fill_max_width())
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: "세션 검색".to_string(),
+                        on_value_change: Some(Box::new(on_query)),
+                        ..Default::default()
+                    });
+
+                    if is_multi {
+                        Label(
+                            "팀원을 끌어 칸에 놓을 수 있습니다",
+                            Fs::Xs,
+                            Weight::Regular,
+                            Some(paint(p.muted)),
+                            Some(1),
+                        );
+                    }
+
+                    cu::ScrollColumn()
+                        .modifier(Modifier::new().fill_max_width().weight(1.0))
                         .content(move || {
-                            for s in sections_vec.iter() {
-                                let sec_proj = s.project.clone();
-                                let sec_name = s.name.clone();
-                                let sec_members = s.members.clone();
-                                let is_cur_proj = sec_proj == cur_proj;
-                                let active_in_sec = active_id.clone();
-                                let open_cb = on_open.clone();
+                            cu::Column()
+                                .space_role(SpaceRole::Sm)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
+                                    for s in sections_vec.iter() {
+                                        let sec_proj = s.project.clone();
+                                        let sec_name = s.name.clone();
+                                        let sec_members = s.members.clone();
+                                        let is_cur_proj = sec_proj == cur_proj;
+                                        let active_in_sec = active_id.clone();
+                                        let open_cb = on_open.clone();
+                                        let is_closed = closed_secs.get().contains(&sec_proj);
+                                        let cs_toggle = closed_secs.clone();
+                                        let sec_proj_toggle = sec_proj.clone();
+                                        let wait_in_sec = sec_members
+                                            .iter()
+                                            .filter(|m| m.status == LauncherStatus::WaitingForApproval)
+                                            .count();
+                                        let sec_len = sec_members.len();
 
-                                cu::Column()
-                                    .space_role(SpaceRole::Xs)
-                                    .modifier(Modifier::new().fill_max_width())
-                                    .content(move || {
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .space_role(SpaceRole::Sm)
+                                        cu::Column()
+                                            .space_role(SpaceRole::Xs)
                                             .modifier(Modifier::new().fill_max_width())
-                                            .content(|| {
-                                                Label(
-                                                    &sec_name,
-                                                    Fs::Sm,
-                                                    Weight::Semibold,
-                                                    Some(paint(if is_cur_proj {
-                                                        p.text
-                                                    } else {
-                                                        p.text_2
-                                                    })),
-                                                    Some(1),
-                                                );
-                                                Pill(
-                                                    &sec_members.len().to_string(),
-                                                    PillTone::Grey,
-                                                    true,
-                                                );
-                                            });
-
-                                        for m in sec_members.iter() {
-                                            let is_active = active_in_sec.as_deref()
-                                                == Some(m.session_id.as_str());
-                                            let bg = if is_active {
-                                                paint(p.sel)
-                                            } else {
-                                                paint(Color::argb(0))
-                                            };
-                                            let (proj_click, id_click) =
-                                                (sec_proj.clone(), m.session_id.clone());
-                                            let cb = open_cb.clone();
-                                            let m_agent = m.agent.clone();
-                                            let m_leader = m.leader;
-                                            let m_name = m.name.clone();
-                                            let m_acc = m.accessible_name();
-                                            let m_status = m.status;
-                                            let s_proj = sec_proj.clone();
-                                            let (pill_txt, pill_tone) = status_pill(m_status);
-
-                                            Clickable(
-                                                Modifier::new()
-                                                    .fill_max_width()
-                                                    .background(bg)
-                                                    .corner_radius(CORNER_SM)
-                                                    .padding(SP[1]),
-                                                Alignment::CenterStart,
-                                                move || cb(proj_click.clone(), id_click.clone()),
-                                                move || {
-                                                    cu::Row()
-                                                        .alignment(Alignment::CenterStart)
-                                                        .space_role(SpaceRole::Xs)
-                                                        .modifier(Modifier::new().fill_max_width())
-                                                        .content(move || {
-                                                            Character(
-                                                                &m_agent,
-                                                                m_leader,
-                                                                24.0,
-                                                                &m_name,
-                                                                &s_proj,
-                                                                CharState::from_status(m_status),
-                                                                None,
-                                                            );
-                                                            cu::Column()
-                                                                .space_role(SpaceRole::Xs)
-                                                                .modifier(Modifier::new().weight(1.0))
-                                                                .content(move || {
-                                                                    Label(
-                                                                        &m_acc,
-                                                                        Fs::Sm,
-                                                                        Weight::Medium,
-                                                                        Some(paint(p.text)),
-                                                                        Some(1),
-                                                                    );
-                                                                    Pill(
-                                                                        pill_txt,
-                                                                        pill_tone.into(),
-                                                                        true,
-                                                                    );
-                                                                });
+                                            .content(move || {
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .fill_max_width()
+                                                        .padding(SP[0]),
+                                                    Alignment::CenterStart,
+                                                    move || {
+                                                        cs_toggle.update(|set| {
+                                                            if !set.remove(&sec_proj_toggle) {
+                                                                set.insert(sec_proj_toggle.clone());
+                                                            }
                                                         });
-                                                },
-                                            );
-                                        }
-                                    });
-                            }
+                                                    },
+                                                    move || {
+                                                        cu::Row()
+                                                            .alignment(Alignment::CenterStart)
+                                                            .space_role(SpaceRole::Xs)
+                                                            .modifier(Modifier::new().fill_max_width())
+                                                            .content(|| {
+                                                                NavIcon(
+                                                                    if is_closed {
+                                                                        ICON_CHEVRON_RIGHT_SVG
+                                                                    } else {
+                                                                        ICON_CHEVRON_DOWN_SVG
+                                                                    },
+                                                                    p.muted.to_argb(),
+                                                                    12.0,
+                                                                );
+                                                                Label(
+                                                                    &sec_name,
+                                                                    Fs::Xs,
+                                                                    Weight::Semibold,
+                                                                    Some(paint(if is_cur_proj {
+                                                                        p.text
+                                                                    } else {
+                                                                        p.muted
+                                                                    })),
+                                                                    Some(1),
+                                                                );
+                                                                Label(
+                                                                    &sec_len.to_string(),
+                                                                    Fs::Xs,
+                                                                    Weight::Medium,
+                                                                    Some(paint(p.muted)),
+                                                                    Some(1),
+                                                                );
+                                                                cu::Spacer()
+                                                                    .modifier(Modifier::new().weight(1.0));
+                                                                if wait_in_sec > 0 {
+                                                                    RedBadge(wait_in_sec);
+                                                                }
+                                                            });
+                                                    },
+                                                );
+
+                                                if !is_closed {
+                                                    for m in sec_members.iter() {
+                                                        let is_active = active_in_sec.as_deref()
+                                                            == Some(m.session_id.as_str());
+                                                        let bg = if is_active {
+                                                            paint(p.sel)
+                                                        } else {
+                                                            paint(Color::argb(0))
+                                                        };
+                                                        let (proj_click, id_click) =
+                                                            (sec_proj.clone(), m.session_id.clone());
+                                                        let cb = open_cb.clone();
+                                                        let m_agent = m.agent.clone();
+                                                        let m_leader = m.leader;
+                                                        let m_name = m.name.clone();
+                                                        let m_acc = m.accessible_name();
+                                                        let m_task = m.task.clone();
+                                                        let m_status = m.status;
+                                                        let s_proj = sec_proj.clone();
+
+                                                        Clickable(
+                                                            Modifier::new()
+                                                                .fill_max_width()
+                                                                .background(bg)
+                                                                .corner_radius(CORNER_SM)
+                                                                .padding(SP[1]),
+                                                            Alignment::CenterStart,
+                                                            move || cb(proj_click.clone(), id_click.clone()),
+                                                            move || {
+                                                                cu::Row()
+                                                                    .alignment(Alignment::CenterStart)
+                                                                    .space_role(SpaceRole::Sm)
+                                                                    .modifier(Modifier::new().fill_max_width())
+                                                                    .content(move || {
+                                                                        Character(
+                                                                            &m_agent,
+                                                                            m_leader,
+                                                                            26.0,
+                                                                            &m_name,
+                                                                            &s_proj,
+                                                                            CharState::from_status(m_status),
+                                                                            None,
+                                                                        );
+                                                                        cu::Column()
+                                                                            .modifier(Modifier::new().weight(1.0))
+                                                                            .content(move || {
+                                                                                Label(
+                                                                                    &m_acc,
+                                                                                    Fs::Sm,
+                                                                                    Weight::Medium,
+                                                                                    Some(paint(p.text)),
+                                                                                    Some(1),
+                                                                                );
+                                                                                Label(
+                                                                                    &m_task,
+                                                                                    Fs::Xs,
+                                                                                    Weight::Regular,
+                                                                                    Some(paint(p.muted)),
+                                                                                    Some(1),
+                                                                                );
+                                                                            });
+                                                                        StatusDot(m_status);
+                                                                    });
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                    }
+                                });
                         });
                 });
         });
@@ -491,15 +607,11 @@ pub fn PaneTranscript(session: &str, agent: &str) {
     let expanded = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
     let answering = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<String>::new()));
 
-    let (items, keys) = {
+    let items = {
         let _ = ui.live.transcripts.get();
-        services().client.read(|st| match st.transcript(&sid) {
-            Some(t) => (
-                t.items.clone(),
-                t.items.iter().map(item_key).collect::<Vec<_>>(),
-            ),
-            None => (Vec::new(), Vec::new()),
-        })
+        services()
+            .client
+            .read(|st| st.transcript(&sid).map(|t| t.items.clone()).unwrap_or_default())
     };
     let count = items.len();
 
@@ -521,21 +633,22 @@ pub fn PaneTranscript(session: &str, agent: &str) {
                     });
             } else {
                 let items_c = items.clone();
-                let keys_c = keys.clone();
                 let sid_c = sid.clone();
                 let agent_c = agent_name.clone();
                 let exp_c = expanded.clone();
                 let ans_c = answering.clone();
-                cu::LazyColumn()
+                cu::ScrollColumn()
                     .modifier(Modifier::new().fill_max_width().fill_max_height())
-                    .content(move |scope| {
-                        scope.items_keyed(
-                            count,
-                            move |i| keys_c[i].clone(),
-                            move |i| {
-                                TranscriptRow(&sid_c, &agent_c, &items_c[i], &exp_c, &ans_c);
-                            },
-                        );
+                    .content(move || {
+                        cu::Column()
+                            .space_role(SpaceRole::Sm)
+                            .modifier(Modifier::new().fill_max_width().padding(SP[1]))
+                            .content(move || {
+                                for item in items_c.iter() {
+                                    TranscriptRow(&sid_c, &agent_c, item, &exp_c, &ans_c);
+                                }
+                                cu::Spacer().modifier(Modifier::new().height(16.0));
+                            });
                     });
             }
         });
@@ -544,10 +657,12 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 /// A pane's own composer: Enter sends, a message while the agent is busy is queued (FR-L6).
 pub fn PaneComposer(session: &str, busy: bool) {
     let ui = shared_ui().clone();
+    let window = current_window_size();
     let p = ember_theme().palette;
     let sid = session.to_string();
     let draft = remember_with_key(sid.clone(), || mutable_state_of(String::new()));
     let generation = remember_with_key(sid.clone(), || mutable_state_of(0_u64));
+    let compact_pane = window.width_dp < 1150.0;
 
     let send = {
         let sid = sid.clone();
@@ -575,26 +690,29 @@ pub fn PaneComposer(session: &str, busy: bool) {
     let _gen = generation.get();
     cu::Column()
         .space_role(SpaceRole::Xs)
-        .modifier(
-            Modifier::new()
-                .fill_max_width()
-                .padding_role(SpaceRole::Xs),
-        )
+        .modifier(Modifier::new().fill_max_width())
         .content(move || {
+            cu::Separator(Some(paint(p.line)));
             if queued > 0 {
-                Pill(&format!("{queued}개 대기 중입니다"), PillTone::Blue, true);
+                cu::Row()
+                    .modifier(Modifier::new().fill_max_width().padding(SP[0]))
+                    .content(|| {
+                        Pill(&format!("{queued}개 대기 중입니다"), PillTone::Blue, true);
+                    });
             }
-            ComposerChips(&sid);
+            if !compact_pane {
+                ComposerChips(&sid);
+            }
             cu::Row()
                 .alignment(Alignment::CenterStart)
                 .space_role(SpaceRole::Xs)
                 .modifier(
                     Modifier::new()
                         .fill_max_width()
-                        .background(paint(p.surface))
+                        .background(paint(p.surface_2))
                         .border(1.0, paint(p.line))
                         .corner_radius(CORNER_XL)
-                        .padding_role(SpaceRole::Xs),
+                        .padding(SP[0]),
                 )
                 .content(|| {
                     let draft_ch = draft.clone();
@@ -602,11 +720,11 @@ pub fn PaneComposer(session: &str, busy: bool) {
                     EmberField(FieldOptions {
                         bare: true,
                         weight: Some(1.0),
-                        multiline: true,
+                        multiline: false,
                         placeholder: if busy {
-                            "다음 턴에 보낼 메시지를 입력하세요".to_string()
+                            "대기열에 넣기".to_string()
                         } else {
-                            "메시지를 입력하세요".to_string()
+                            "메시지".to_string()
                         },
                         on_value_change: Some(Box::new(move |v| draft_ch.set(v))),
                         on_submit: Some(Box::new(move |v| send_sub(v))),
@@ -615,7 +733,7 @@ pub fn PaneComposer(session: &str, busy: bool) {
                     if busy {
                         let sid_int = sid.clone();
                         AppButton(
-                            "중단",
+                            if compact_pane { "" } else { "중단" },
                             Some(IconRole::Close),
                             ButtonKind::Default,
                             true,
@@ -649,6 +767,53 @@ pub fn PaneComposer(session: &str, busy: bool) {
         });
 }
 
+/// Compact segmented switcher inside a pane header (`.mini-seg`).
+fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .alignment(Alignment::Center)
+        .modifier(
+            Modifier::new()
+                .height(26.0)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(13.0)
+                .padding(2.0),
+        )
+        .content(move || {
+            for t in PaneToggle::ALL {
+                let selected = cur == t;
+                let (bg, fg) = if selected {
+                    (paint(p.ink), p.ink_text)
+                } else {
+                    (paint(Color::argb(0)), p.muted)
+                };
+                let cb = on_pick.clone();
+                Clickable(
+                    Modifier::new()
+                        .height(22.0)
+                        .background(bg)
+                        .corner_radius(11.0),
+                    Alignment::Center,
+                    move || cb(t),
+                    move || {
+                        cu::Row().alignment(Alignment::Center).content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(8.0));
+                            Label(
+                                t.label(),
+                                Fs::Xs,
+                                if selected { Weight::Semibold } else { Weight::Regular },
+                                Some(paint(fg)),
+                                Some(1),
+                            );
+                            cu::Spacer().modifier(Modifier::new().width(8.0));
+                        });
+                    },
+                );
+            }
+        });
+}
+
 /// One pane of the multi view: header, transcript with approvals, composer.
 pub fn Pane(
     project: &str,
@@ -658,12 +823,14 @@ pub fn Pane(
     on_enlarge: impl Fn(String) + Clone + 'static,
 ) {
     let ui = shared_ui().clone();
+    let window = current_window_size();
     let p = ember_theme().palette;
     let id = member.session_id.clone();
     let proj_owned = project.to_string();
     let member_owned = member.clone();
     let all_owned = all.to_vec();
     let order_owned = order.to_vec();
+    let narrow_pane = window.width_dp < 1150.0;
 
     let toggle = remember_with_key(id.clone(), || mutable_state_of(PaneToggle::Conversation));
     let menu = remember_with_key(id.clone(), || mutable_state_of(false));
@@ -707,19 +874,26 @@ pub fn Pane(
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
                         .corner_radius(CORNER_LG)
-                        .padding_role(SpaceRole::Sm),
+                        .padding(SP[1]),
                 )
                 .content(|| {
-                    // Header row
+                    // Header row (.pane-h)
                     cu::Row()
                         .alignment(Alignment::CenterStart)
                         .space_role(SpaceRole::Xs)
                         .modifier(Modifier::new().fill_max_width())
                         .content(|| {
+                            let m_open = menu.clone();
+                            Clickable(
+                                Modifier::new().size(18.0, 28.0),
+                                Alignment::Center,
+                                move || m_open.set(true),
+                                || NavIcon(ICON_GRIP_SVG, p.muted.to_argb(), 14.0),
+                            );
                             Character(
                                 &member_owned.agent,
                                 member_owned.leader,
-                                28.0,
+                                if narrow_pane { 24.0 } else { 28.0 },
                                 &member_owned.name,
                                 &proj_owned,
                                 CharState::from_status(member_owned.status),
@@ -735,27 +909,25 @@ pub fn Pane(
                                         None,
                                         Some(1),
                                     );
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .space_role(SpaceRole::Xs)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(|| {
-                                            Pill(label, tone.into(), true);
-                                            Label(
-                                                &member_owned.task,
-                                                Fs::Xs,
-                                                Weight::Regular,
-                                                Some(paint(p.text_2)),
-                                                Some(1),
-                                            );
-                                        });
+                                    Label(
+                                        &member_owned.task,
+                                        Fs::Xs,
+                                        Weight::Regular,
+                                        Some(paint(p.muted)),
+                                        Some(1),
+                                    );
                                 });
+                            if narrow_pane {
+                                StatusDot(member_owned.status);
+                            } else {
+                                Pill(label, tone.into(), true);
+                            }
+                            let tg_seg = toggle.clone();
+                            MiniSeg(cur_toggle, move |t| tg_seg.set(t));
+
                             let enl = on_enlarge.clone();
                             let id_enl = id.clone();
                             IconButton(IconRole::Forward, true, move || enl(id_enl.clone()));
-
-                            let m_open = menu.clone();
-                            IconButton(IconRole::More, true, move || m_open.set(true));
 
                             let ui_close = ui.clone();
                             let proj_close = proj_owned.clone();
@@ -768,19 +940,7 @@ pub fn Pane(
                                 });
                             });
                         });
-
-                    // Conversation / Terminal toggle chips
-                    cu::Row()
-                        .space_role(SpaceRole::Xs)
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            for t in PaneToggle::ALL {
-                                let tg = toggle.clone();
-                                PickChip(t.label(), None, cur_toggle == t, false, move || {
-                                    tg.set(t);
-                                });
-                            }
-                        });
+                    cu::Separator(Some(paint(p.line)));
 
                     if cur_toggle == PaneToggle::Conversation {
                         PaneTranscript(&id, &member_owned.agent);
@@ -848,7 +1008,14 @@ pub fn MultiView(
     let ui = shared_ui().clone();
     let window = current_window_size();
     let p = ember_theme().palette;
-    let layout = pane_layout(window.class);
+    let layout = if window.width_dp >= 700.0 {
+        PaneLayout {
+            per_row: 2,
+            paged: false,
+        }
+    } else {
+        pane_layout(window.class)
+    };
     let proj_owned = project.to_string();
     let members_vec = members.to_vec();
 
@@ -867,6 +1034,7 @@ pub fn MultiView(
         .collect();
     let n = vis.len();
     let cur = page.get().min(n.saturating_sub(1));
+    let show_help = window.width_dp >= 1280.0;
 
     cu::Box()
         .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -880,73 +1048,90 @@ pub fn MultiView(
                         .padding_role(SpaceRole::Sm),
                 )
                 .content(|| {
-                    // Tab strip
-                    cu::ScrollRow()
+                    // Tab strip (.stabs)
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .space_role(SpaceRole::Xs)
                         .modifier(Modifier::new().fill_max_width())
                         .content(|| {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .space_role(SpaceRole::Xs)
+                            cu::ScrollRow()
+                                .modifier(Modifier::new().weight(1.0))
                                 .content(|| {
-                                    for (i, t) in panes.tabs.iter().enumerate() {
-                                        let pg = page.clone();
-                                        let u = ui.clone();
-                                        let pr = proj_owned.clone();
-                                        PickChip(
-                                            &t.name,
-                                            None,
-                                            i == panes.active,
-                                            false,
-                                            move || {
-                                                pg.set(0);
-                                                edit_panes(&u, &pr, move |pp| pp.select(i));
-                                            },
-                                        );
-                                    }
-                                    {
-                                        let pg = page.clone();
-                                        let u = ui.clone();
-                                        let pr = proj_owned.clone();
-                                        let vis_add = vis.clone();
-                                        PickChip(
-                                            "새 탭",
-                                            Some(IconRole::Add),
-                                            false,
-                                            false,
-                                            move || {
-                                                pg.set(0);
-                                                let v = vis_add.clone();
-                                                edit_panes(&u, &pr, move |pp| pp.add_tab(&v));
-                                            },
-                                        );
-                                    }
-                                    if panes.tabs.len() > 1 {
-                                        let pg = page.clone();
-                                        let u = ui.clone();
-                                        let pr = proj_owned.clone();
-                                        let act = panes.active;
-                                        PickChip(
-                                            "탭 닫기",
-                                            Some(IconRole::Close),
-                                            false,
-                                            false,
-                                            move || {
-                                                pg.set(0);
-                                                edit_panes(&u, &pr, move |pp| pp.remove_tab(act));
-                                            },
-                                        );
-                                    }
-                                    if !hidden.is_empty() {
-                                        let am = add_menu.clone();
-                                        PickChip(
-                                            "팀원 추가",
-                                            Some(IconRole::Add),
-                                            false,
-                                            false,
-                                            move || am.set(true),
-                                        );
-                                    }
+                                    cu::Row()
+                                        .alignment(Alignment::CenterStart)
+                                        .space_role(SpaceRole::Xs)
+                                        .content(|| {
+                                            for (i, t) in panes.tabs.iter().enumerate() {
+                                                let pg = page.clone();
+                                                let u = ui.clone();
+                                                let pr = proj_owned.clone();
+                                                let tab_vis = visible_panes(t, &all);
+                                                let tab_label = format!("{} {}", t.name, tab_vis.len());
+                                                PickChip(
+                                                    &tab_label,
+                                                    None,
+                                                    i == panes.active,
+                                                    false,
+                                                    move || {
+                                                        pg.set(0);
+                                                        edit_panes(&u, &pr, move |pp| pp.select(i));
+                                                    },
+                                                );
+                                            }
+                                            {
+                                                let pg = page.clone();
+                                                let u = ui.clone();
+                                                let pr = proj_owned.clone();
+                                                let vis_add = vis.clone();
+                                                PickChip(
+                                                    "새 탭",
+                                                    Some(IconRole::Add),
+                                                    false,
+                                                    false,
+                                                    move || {
+                                                        pg.set(0);
+                                                        let v = vis_add.clone();
+                                                        edit_panes(&u, &pr, move |pp| pp.add_tab(&v));
+                                                    },
+                                                );
+                                            }
+                                            if panes.tabs.len() > 1 {
+                                                let pg = page.clone();
+                                                let u = ui.clone();
+                                                let pr = proj_owned.clone();
+                                                let act = panes.active;
+                                                PickChip(
+                                                    "탭 닫기",
+                                                    Some(IconRole::Close),
+                                                    false,
+                                                    false,
+                                                    move || {
+                                                        pg.set(0);
+                                                        edit_panes(&u, &pr, move |pp| pp.remove_tab(act));
+                                                    },
+                                                );
+                                            }
+                                            if !hidden.is_empty() {
+                                                let am = add_menu.clone();
+                                                PickChip(
+                                                    "팀원 추가",
+                                                    Some(IconRole::Add),
+                                                    false,
+                                                    false,
+                                                    move || am.set(true),
+                                                );
+                                            }
+                                        });
                                 });
+                            if show_help {
+                                Label(
+                                    "칸 머리를 끌어 옮길 수 있습니다",
+                                    Fs::Xs,
+                                    Weight::Regular,
+                                    Some(paint(p.muted)),
+                                    Some(1),
+                                );
+                            }
                         });
 
                     if n == 0 {
@@ -1098,12 +1283,22 @@ pub fn MultiView(
         });
 }
 
+fn env_row_icon(key: &str) -> &'static str {
+    match key {
+        "컴퓨터" => ICON_PC_SVG,
+        "작업 경로" => ICON_FOLDER_SVG,
+        "에이전트" | "모델" | "계정" => ICON_GIT_SVG,
+        _ => ICON_SHIELD_SVG,
+    }
+}
+
 /// The right panel of the single view (environment, context, outputs, changes).
 pub fn InfoPanel(session: &str) {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let sid = session.to_string();
     let computer = remember_with_key(sid.clone(), || mutable_state_of(None::<String>));
+    let collapsed = remember_with_key(sid.clone(), || mutable_state_of(HashSet::<usize>::new()));
 
     {
         let sid_load = sid.clone();
@@ -1152,6 +1347,7 @@ pub fn InfoPanel(session: &str) {
             Modifier::new()
                 .fill_max_width()
                 .fill_max_height()
+                .background(paint(p.bg))
                 .padding_role(SpaceRole::Sm),
         )
         .content(move || {
@@ -1159,49 +1355,92 @@ pub fn InfoPanel(session: &str) {
                 .space_role(SpaceRole::Sm)
                 .modifier(Modifier::new().fill_max_width())
                 .content(move || {
-                    for card in InfoCard::ALL {
+                    for (idx, card) in InfoCard::ALL.into_iter().enumerate() {
                         let rows_c = rows.clone();
-                        EmberCard(false, true, None, None, None, move || {
+                        let is_off = collapsed.get().contains(&idx);
+                        let col_toggle = collapsed.clone();
+                        EmberCard(false, true, None, Some(SP[2]), None, move || {
                             cu::Column()
                                 .space_role(SpaceRole::Xs)
                                 .modifier(Modifier::new().fill_max_width())
                                 .content(move || {
-                                    Label(card.label(), Fs::Md, Weight::Semibold, None, Some(1));
-                                    if card.ready() {
-                                        for (k, v) in rows_c.iter() {
+                                    Clickable(
+                                        Modifier::new().fill_max_width(),
+                                        Alignment::CenterStart,
+                                        move || {
+                                            col_toggle.update(|set| {
+                                                if !set.remove(&idx) {
+                                                    set.insert(idx);
+                                                }
+                                            });
+                                        },
+                                        move || {
                                             cu::Row()
-                                                .space_role(SpaceRole::Sm)
+                                                .alignment(Alignment::CenterStart)
+                                                .space_role(SpaceRole::Xs)
                                                 .modifier(Modifier::new().fill_max_width())
                                                 .content(|| {
                                                     Label(
-                                                        k,
+                                                        card.label(),
                                                         Fs::Sm,
-                                                        Weight::Regular,
-                                                        Some(paint(p.muted)),
+                                                        Weight::Semibold,
+                                                        None,
                                                         Some(1),
                                                     );
-                                                    cu::Column()
-                                                        .alignment(Alignment::CenterEnd)
-                                                        .modifier(Modifier::new().weight(1.0))
-                                                        .content(|| {
-                                                            Label(
-                                                                v,
-                                                                Fs::Sm,
-                                                                Weight::Regular,
-                                                                None,
-                                                                Some(2),
-                                                            );
-                                                        });
+                                                    NavIcon(
+                                                        if is_off {
+                                                            ICON_CHEVRON_RIGHT_SVG
+                                                        } else {
+                                                            ICON_CHEVRON_DOWN_SVG
+                                                        },
+                                                        p.muted.to_argb(),
+                                                        12.0,
+                                                    );
+                                                    cu::Spacer()
+                                                        .modifier(Modifier::new().weight(1.0));
                                                 });
+                                        },
+                                    );
+                                    if !is_off {
+                                        if card.ready() {
+                                            for (k, v) in rows_c.iter() {
+                                                let ico = env_row_icon(k);
+                                                cu::Row()
+                                                    .alignment(Alignment::CenterStart)
+                                                    .space_role(SpaceRole::Xs)
+                                                    .modifier(Modifier::new().fill_max_width())
+                                                    .content(move || {
+                                                        NavIcon(ico, p.muted.to_argb(), 15.0);
+                                                        Label(
+                                                            k,
+                                                            Fs::Xs,
+                                                            Weight::Regular,
+                                                            Some(paint(p.muted)),
+                                                            Some(1),
+                                                        );
+                                                        cu::Column()
+                                                            .alignment(Alignment::CenterEnd)
+                                                            .modifier(Modifier::new().weight(1.0))
+                                                            .content(|| {
+                                                                Label(
+                                                                    v,
+                                                                    Fs::Sm,
+                                                                    Weight::Regular,
+                                                                    None,
+                                                                    Some(1),
+                                                                );
+                                                            });
+                                                    });
+                                            }
+                                        } else {
+                                            Label(
+                                                SOON,
+                                                Fs::Sm,
+                                                Weight::Regular,
+                                                Some(paint(p.muted)),
+                                                None,
+                                            );
                                         }
-                                    } else {
-                                        Label(
-                                            SOON,
-                                            Fs::Sm,
-                                            Weight::Regular,
-                                            Some(paint(p.muted)),
-                                            None,
-                                        );
                                     }
                                 });
                         });
@@ -1211,16 +1450,34 @@ pub fn InfoPanel(session: &str) {
 }
 
 /// One member's conversation with the right panel (inline on expanded, a sheet elsewhere).
-pub fn SingleView(session: &str, focus: Option<String>) {
+pub fn SingleView(session: &str, focus: Option<String>, on_back: impl Fn() + Clone + 'static) {
+    let ui = shared_ui().clone();
     let window = current_window_size();
+    let p = ember_theme().palette;
     let sid = session.to_string();
     let env_info = std::env::var("EMBER_CR_SESSION_INFO").ok();
     let info_open = remember_with_key(sid.clone(), || {
         mutable_state_of(env_info.as_deref() == Some("1"))
     });
+    let panel_visible = remember_with_key(sid.clone(), || {
+        mutable_state_of(env_info.as_deref() != Some("0"))
+    });
     use_leases_cr(std::slice::from_ref(&sid), focus.as_deref());
-    let wide = window.class == compose_rust::WindowSizeClass::Expanded
-        && env_info.as_deref() != Some("0");
+    let wide = window.class == compose_rust::WindowSizeClass::Expanded;
+
+    let member_info = {
+        let _ = ui.live.launcher.get();
+        services().client.read(|s| {
+            let boxes = project_boxes(s);
+            boxes
+                .into_iter()
+                .flat_map(|b| {
+                    let pid = b.id.clone();
+                    b.members.into_iter().map(move |m| (pid.clone(), m))
+                })
+                .find(|(_, m)| m.session_id == sid)
+        })
+    };
 
     cu::Box()
         .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -1229,36 +1486,76 @@ pub fn SingleView(session: &str, focus: Option<String>) {
             let sid_p = sid.clone();
             let sid_sh = sid.clone();
             let info_btn = info_open.clone();
+            let pv_btn = panel_visible.clone();
+            let show_inline = wide && panel_visible.get();
+            let back_cb = on_back.clone();
+            let m_opt = member_info.clone();
+
             cu::Row()
                 .modifier(Modifier::new().fill_max_width().fill_max_height())
                 .content(move || {
                     cu::Column()
                         .modifier(Modifier::new().weight(1.0).fill_max_height())
                         .content(move || {
-                            if !wide {
-                                cu::Row()
-                                    .alignment(Alignment::CenterEnd)
-                                    .modifier(
-                                        Modifier::new()
-                                            .fill_max_width()
-                                            .padding_role(SpaceRole::Sm),
-                                    )
-                                    .content(move || {
-                                        let io = info_btn.clone();
-                                        AppButton(
-                                            "정보",
-                                            Some(IconRole::Sidebar),
-                                            ButtonKind::Default,
-                                            true,
-                                            true,
-                                            false,
-                                            move || io.set(true),
+                            // Compact 1-row .topbar header
+                            cu::Row()
+                                .alignment(Alignment::CenterStart)
+                                .space_role(SpaceRole::Sm)
+                                .modifier(
+                                    Modifier::new()
+                                        .fill_max_width()
+                                        .height(52.0)
+                                        .background(paint(p.surface))
+                                        .padding(SP[2]),
+                                )
+                                .content(move || {
+                                    let b_cb = back_cb.clone();
+                                    IconButton(IconRole::Back, true, move || b_cb());
+                                    if let Some((proj_id, m)) = m_opt {
+                                        let (st_txt, st_tone) = status_pill(m.status);
+                                        Character(
+                                            &m.agent,
+                                            m.leader,
+                                            24.0,
+                                            &m.name,
+                                            &proj_id,
+                                            CharState::from_status(m.status),
+                                            None,
                                         );
+                                        Label(
+                                            &m.accessible_name(),
+                                            Fs::Md,
+                                            Weight::Semibold,
+                                            Some(paint(p.text)),
+                                            Some(1),
+                                        );
+                                        Pill(st_txt, st_tone.into(), true);
+                                    }
+                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    let io = info_btn.clone();
+                                    let pv = pv_btn.clone();
+                                    IconButton(IconRole::Sidebar, true, move || {
+                                        if wide {
+                                            pv.update(|v| *v = !*v);
+                                        } else {
+                                            io.set(true);
+                                        }
                                     });
-                            }
-                            ConversationView(&sid_row, true);
+                                });
+                            cu::Separator(Some(paint(p.line)));
+                            cu::Box()
+                                .modifier(Modifier::new().weight(1.0).fill_max_width())
+                                .content(move || {
+                                    ConversationView(&sid_row, true);
+                                });
                         });
-                    if wide {
+                    if show_inline {
+                        cu::Spacer().modifier(
+                            Modifier::new()
+                                .width(1.0)
+                                .fill_max_height()
+                                .background(paint(p.line)),
+                        );
                         cu::Column()
                             .modifier(Modifier::new().width(INFO_PANEL_W).fill_max_height())
                             .content(move || {
@@ -1270,7 +1567,7 @@ pub fn SingleView(session: &str, focus: Option<String>) {
             if !wide {
                 let io_d = info_open.clone();
                 EmberSheet(
-                    "정보",
+                    "세션 정보",
                     info_open.get(),
                     move || io_d.set(false),
                     None,
@@ -1286,21 +1583,222 @@ pub fn SingleView(session: &str, focus: Option<String>) {
         });
 }
 
+fn KpiCard(title: &str, value: &str, sub: &str, tone: Option<Color>) {
+    let p = ember_theme().palette;
+    let t = title.to_string();
+    let v = value.to_string();
+    let s = sub.to_string();
+    let v_col = tone.unwrap_or(p.text);
+    EmberCard(false, false, Some(1.0), Some(SP[2]), None, move || {
+        cu::Column()
+            .space_role(SpaceRole::Xs)
+            .modifier(Modifier::new().fill_max_width())
+            .content(move || {
+                Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                Label(&v, Fs::Xl2, Weight::Regular, Some(paint(v_col)), Some(1));
+                Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+    });
+}
+
+fn KanbanColView(
+    col_lbl: &'static str,
+    ms: Vec<Member>,
+    proj: String,
+    width_opt: Option<f32>,
+    weight_opt: Option<f32>,
+    on_open: impl Fn(String) + Clone + 'static,
+) {
+    let p = ember_theme().palette;
+    let mut m = Modifier::new()
+        .background(paint(p.surface_2))
+        .border(1.0, paint(p.line))
+        .corner_radius(CORNER_LG)
+        .padding(SP[2]);
+    if let Some(w) = width_opt {
+        m = m.width(w);
+    }
+    if let Some(wg) = weight_opt {
+        m = m.weight(wg);
+    }
+    cu::Column()
+        .space_role(SpaceRole::Xs)
+        .modifier(m)
+        .content(move || {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .space_role(SpaceRole::Sm)
+                .modifier(Modifier::new().fill_max_width())
+                .content(|| {
+                    Label(
+                        col_lbl,
+                        Fs::Sm,
+                        Weight::Semibold,
+                        Some(paint(p.text_2)),
+                        Some(1),
+                    );
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Pill(&ms.len().to_string(), PillTone::Grey, true);
+                });
+            if ms.is_empty() {
+                Label(
+                    "없음",
+                    Fs::Xs,
+                    Weight::Regular,
+                    Some(paint(p.muted)),
+                    Some(1),
+                );
+            }
+            for m in ms.iter() {
+                let m_id = m.session_id.clone();
+                let m_agent = m.agent.clone();
+                let m_leader = m.leader;
+                let m_name = m.name.clone();
+                let m_acc = m.accessible_name();
+                let m_task = m.task.clone();
+                let m_status = m.status;
+                let pr_card = proj.clone();
+                let op_card = on_open.clone();
+                EmberCard(false, true, None, Some(SP[2]), None, move || {
+                    let op_click = op_card.clone();
+                    let id_click = m_id.clone();
+                    Clickable(
+                        Modifier::new().fill_max_width(),
+                        Alignment::CenterStart,
+                        move || op_click(id_click.clone()),
+                        move || {
+                            cu::Column()
+                                .space_role(SpaceRole::Xs)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
+                                    cu::Row()
+                                        .alignment(Alignment::CenterStart)
+                                        .space_role(SpaceRole::Xs)
+                                        .modifier(Modifier::new().fill_max_width())
+                                        .content(move || {
+                                            Character(
+                                                &m_agent,
+                                                m_leader,
+                                                22.0,
+                                                &m_name,
+                                                &pr_card,
+                                                CharState::from_status(m_status),
+                                                None,
+                                            );
+                                            cu::Box()
+                                                .modifier(Modifier::new().weight(1.0))
+                                                .content(move || {
+                                                    Label(
+                                                        &m_acc,
+                                                        Fs::Sm,
+                                                        Weight::Semibold,
+                                                        Some(paint(p.text)),
+                                                        Some(2),
+                                                    );
+                                                });
+                                        });
+                                    Label(
+                                        &m_task,
+                                        Fs::Xs,
+                                        Weight::Regular,
+                                        Some(paint(p.text_2)),
+                                        Some(2),
+                                    );
+                                    Label(
+                                        &m.agent,
+                                        Fs::Xs,
+                                        Weight::Regular,
+                                        Some(paint(p.muted)),
+                                        Some(1),
+                                    );
+                                });
+                        },
+                    );
+                });
+            }
+        });
+}
+
 /// The kanban of member status, with the PR list and timeline not built yet.
 pub fn StatusView(
     project: &str,
     members: &[Member],
     on_open: impl Fn(String) + Clone + 'static,
 ) {
+    let window = current_window_size();
     let p = ember_theme().palette;
     let proj_owned = project.to_string();
     let members_vec = members.to_vec();
     let columns = kanban(&members_vec);
     let count = |s: LauncherStatus| members_vec.iter().filter(|m| m.status == s).count();
     let total_cnt = members_vec.len();
+    let lead_cnt = members_vec.iter().filter(|m| m.leader).count();
+    let sub_cnt = total_cnt.saturating_sub(lead_cnt);
     let run_cnt = count(LauncherStatus::Running);
     let wait_cnt = count(LauncherStatus::WaitingForApproval);
     let fail_cnt = count(LauncherStatus::Failed);
+    let ok_pct = if total_cnt == 0 {
+        100
+    } else {
+        ((total_cnt.saturating_sub(fail_cnt)) * 100) / total_cnt
+    };
+
+    let kpis: Vec<(String, String, String, Option<Color>)> = vec![
+        (
+            "팀원".to_string(),
+            total_cnt.to_string(),
+            format!("리더 {lead_cnt} · 팀원 {sub_cnt}"),
+            None,
+        ),
+        (
+            "실행 중".to_string(),
+            run_cnt.to_string(),
+            "활발한 세션".to_string(),
+            Some(p.blue.strong),
+        ),
+        (
+            "승인 대기".to_string(),
+            wait_cnt.to_string(),
+            if wait_cnt > 0 {
+                "응답 필요".to_string()
+            } else {
+                "없음".to_string()
+            },
+            Some(p.orange.strong),
+        ),
+        (
+            "실패".to_string(),
+            fail_cnt.to_string(),
+            if fail_cnt > 0 {
+                "점검 필요".to_string()
+            } else {
+                "없음".to_string()
+            },
+            Some(p.red.strong),
+        ),
+        (
+            "오늘 토큰".to_string(),
+            "준비 중".to_string(),
+            SOON.to_string(),
+            None,
+        ),
+        (
+            "성공률".to_string(),
+            format!("{ok_pct}%"),
+            "최근 세션".to_string(),
+            Some(p.green.strong),
+        ),
+    ];
+
+    let kpi_per_row = if window.width_dp >= 1280.0 {
+        6
+    } else if window.width_dp >= 900.0 {
+        3
+    } else {
+        2
+    };
+    let wide_kanban = window.width_dp >= 1280.0;
+    let wide_grid = window.width_dp >= 900.0;
 
     cu::ScrollColumn()
         .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -1310,197 +1808,193 @@ pub fn StatusView(
                 .modifier(
                     Modifier::new()
                         .fill_max_width()
-                        .padding_role(SpaceRole::Sm),
+                        .padding(if window.width_dp <= 560.0 { SP[2] } else { SP[4] }),
                 )
                 .content(move || {
-                    // Top status summary pills
-                    cu::ScrollRow()
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .space_role(SpaceRole::Xs)
-                                .content(move || {
-                                    Pill(&format!("팀원 {total_cnt}"), PillTone::Grey, false);
-                                    Pill(&format!("실행 중 {run_cnt}"), PillTone::Blue, false);
-                                    Pill(&format!("승인 대기 {wait_cnt}"), PillTone::Orange, false);
-                                    Pill(&format!("실패 {fail_cnt}"), PillTone::Red, false);
-                                });
-                        });
+                    // 1. 6 KPI cards grid (.skpis)
+                    let kpi_rows: Vec<Vec<(String, String, String, Option<Color>)>> = kpis
+                        .chunks(kpi_per_row)
+                        .map(|c| c.to_vec())
+                        .collect();
+                    for row in kpi_rows {
+                        cu::Row()
+                            .space_role(SpaceRole::Sm)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(move || {
+                                for (t, v, s, tone) in row {
+                                    KpiCard(&t, &v, &s, tone);
+                                }
+                            });
+                    }
 
-                    // 5-column Kanban
+                    // 2. Agent-to-agent communication timeline card (.tlcard)
+                    EmberCard(false, true, None, None, None, || {
+                        cu::Column()
+                            .space_role(SpaceRole::Xs)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .space_role(SpaceRole::Sm)
+                                    .modifier(Modifier::new().fill_max_width())
+                                    .content(|| {
+                                        Label(TIMELINE_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
+                                    });
+                                Label(
+                                    SOON,
+                                    Fs::Sm,
+                                    Weight::Regular,
+                                    Some(paint(p.muted)),
+                                    None,
+                                );
+                            });
+                    });
+
+                    // 3. Outer Kanban card (.skan) with 5 columns
                     let cols_c = columns.clone();
                     let proj_k = proj_owned.clone();
                     let open_k = on_open.clone();
-                    cu::ScrollRow()
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
-                            cu::Row()
-                                .alignment(Alignment::TopStart)
-                                .space_role(SpaceRole::Sm)
-                                .content(move || {
-                                    for (col, ms) in cols_c.iter() {
-                                        let col_lbl = col.label();
-                                        let ms_c = ms.clone();
-                                        let pr_c = proj_k.clone();
-                                        let op_c = open_k.clone();
-                                        cu::Column()
-                                            .space_role(SpaceRole::Xs)
-                                            .modifier(
-                                                Modifier::new()
-                                                    .width(240.0)
-                                                    .background(paint(p.surface_2))
-                                                    .border(1.0, paint(p.line))
-                                                    .corner_radius(CORNER_LG)
-                                                    .padding(SP[2]),
-                                            )
-                                            .content(move || {
-                                                cu::Row()
-                                                    .alignment(Alignment::CenterStart)
-                                                    .space_role(SpaceRole::Sm)
-                                                    .modifier(Modifier::new().fill_max_width())
-                                                    .content(|| {
-                                                        Label(
-                                                            col_lbl,
-                                                            Fs::Sm,
-                                                            Weight::Semibold,
-                                                            Some(paint(p.text_2)),
-                                                            Some(1),
+                    EmberCard(false, true, None, None, None, move || {
+                        cu::Column()
+                            .space_role(SpaceRole::Sm)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(move || {
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .space_role(SpaceRole::Sm)
+                                    .modifier(Modifier::new().fill_max_width())
+                                    .content(|| {
+                                        NavIcon(ICON_GRID_SVG, p.text_2.to_argb(), 16.0);
+                                        Label("칸반", Fs::Md, Weight::Semibold, None, Some(1));
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                        Label(
+                                            &format!("팀원 {total_cnt}"),
+                                            Fs::Xs,
+                                            Weight::Regular,
+                                            Some(paint(p.muted)),
+                                            Some(1),
+                                        );
+                                    });
+
+                                if wide_kanban {
+                                    cu::Row()
+                                        .alignment(Alignment::TopStart)
+                                        .space_role(SpaceRole::Sm)
+                                        .modifier(Modifier::new().fill_max_width())
+                                        .content(move || {
+                                            for (col, ms) in cols_c.iter() {
+                                                KanbanColView(
+                                                    col.label(),
+                                                    ms.clone(),
+                                                    proj_k.clone(),
+                                                    None,
+                                                    Some(1.0),
+                                                    open_k.clone(),
+                                                );
+                                            }
+                                        });
+                                } else {
+                                    cu::ScrollRow()
+                                        .modifier(Modifier::new().fill_max_width())
+                                        .content(move || {
+                                            cu::Row()
+                                                .alignment(Alignment::TopStart)
+                                                .space_role(SpaceRole::Sm)
+                                                .content(move || {
+                                                    for (col, ms) in cols_c.iter() {
+                                                        KanbanColView(
+                                                            col.label(),
+                                                            ms.clone(),
+                                                            proj_k.clone(),
+                                                            Some(220.0),
+                                                            None,
+                                                            open_k.clone(),
                                                         );
-                                                        cu::Spacer()
-                                                            .modifier(Modifier::new().weight(1.0));
-                                                        Pill(
-                                                            &ms_c.len().to_string(),
-                                                            PillTone::Grey,
-                                                            true,
-                                                        );
-                                                    });
-                                                if ms_c.is_empty() {
-                                                    Label(
-                                                        "없음",
-                                                        Fs::Xs,
-                                                        Weight::Regular,
-                                                        Some(paint(p.muted)),
-                                                        Some(1),
-                                                    );
-                                                }
-                                                for m in ms_c.iter() {
-                                                    let m_id = m.session_id.clone();
-                                                    let m_agent = m.agent.clone();
-                                                    let m_leader = m.leader;
-                                                    let m_name = m.name.clone();
-                                                    let m_acc = m.accessible_name();
-                                                    let m_task = m.task.clone();
-                                                    let m_status = m.status;
-                                                    let pr_card = pr_c.clone();
-                                                    let op_card = op_c.clone();
-                                                    EmberCard(
-                                                        false,
-                                                        true,
-                                                        None,
-                                                        Some(SP[2]),
-                                                        None,
-                                                        move || {
-                                                            let op_click = op_card.clone();
-                                                            let id_click = m_id.clone();
-                                                            Clickable(
-                                                                Modifier::new().fill_max_width(),
-                                                                Alignment::CenterStart,
-                                                                move || op_click(id_click.clone()),
-                                                                move || {
-                                                                    cu::Row()
-                                                                        .alignment(
-                                                                            Alignment::CenterStart,
-                                                                        )
-                                                                        .space_role(SpaceRole::Xs)
-                                                                        .modifier(
-                                                                            Modifier::new()
-                                                                                .fill_max_width(),
-                                                                        )
-                                                                        .content(move || {
-                                                                            Character(
-                                                                                &m_agent,
-                                                                                m_leader,
-                                                                                28.0,
-                                                                                &m_name,
-                                                                                &pr_card,
-                                                                                CharState::from_status(
-                                                                                    m_status,
-                                                                                ),
-                                                                                None,
-                                                                            );
-                                                                            cu::Column()
-                                                                                .space_role(
-                                                                                    SpaceRole::Xs,
-                                                                                )
-                                                                                .modifier(
-                                                                                    Modifier::new()
-                                                                                        .weight(
-                                                                                            1.0,
-                                                                                        ),
-                                                                                )
-                                                                                .content(
-                                                                                    move || {
-                                                                                        Label(
-                                                                                            &m_acc,
-                                                                                            Fs::Sm,
-                                                                                            Weight::Semibold,
-                                                                                            Some(paint(p.text)),
-                                                                                            Some(2),
-                                                                                        );
-                                                                                        Label(
-                                                                                            &m_task,
-                                                                                            Fs::Xs,
-                                                                                            Weight::Regular,
-                                                                                            Some(paint(p.text_2)),
-                                                                                            Some(2),
-                                                                                        );
-                                                                                    },
-                                                                                );
-                                                                        });
-                                                                },
-                                                            );
-                                                        },
-                                                    );
-                                                }
-                                            });
-                                    }
+                                                    }
+                                                });
+                                        });
+                                }
+                            });
+                    });
+
+                    // 4. Bottom 3-column grid (.sgrid): PR과 CI, 서브 에이전트 스레드, 부하
+                    if wide_grid {
+                        cu::Row()
+                            .alignment(Alignment::TopStart)
+                            .space_role(SpaceRole::Sm)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                EmberCard(false, false, Some(1.0), None, None, || {
+                                    cu::Column()
+                                        .space_role(SpaceRole::Xs)
+                                        .modifier(Modifier::new().fill_max_width())
+                                        .content(|| {
+                                            cu::Row()
+                                                .alignment(Alignment::CenterStart)
+                                                .space_role(SpaceRole::Xs)
+                                                .content(|| {
+                                                    NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 16.0);
+                                                    Label(PR_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
+                                                });
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                        });
                                 });
-                        });
-
-                    // PR & CI placeholder card
-                    EmberCard(false, true, None, None, None, || {
-                        cu::Column()
-                            .space_role(SpaceRole::Xs)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                Label(PR_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
-                                Label(
-                                    SOON,
-                                    Fs::Sm,
-                                    Weight::Regular,
-                                    Some(paint(p.muted)),
-                                    None,
-                                );
+                                EmberCard(false, false, Some(1.0), None, None, || {
+                                    cu::Column()
+                                        .space_role(SpaceRole::Xs)
+                                        .modifier(Modifier::new().fill_max_width())
+                                        .content(|| {
+                                            cu::Row()
+                                                .alignment(Alignment::CenterStart)
+                                                .space_role(SpaceRole::Xs)
+                                                .content(|| {
+                                                    NavIcon(ICON_USERS_SVG, p.text_2.to_argb(), 16.0);
+                                                    Label(SUBAGENT_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
+                                                });
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                        });
+                                });
+                                EmberCard(false, false, Some(1.0), None, None, || {
+                                    cu::Column()
+                                        .space_role(SpaceRole::Xs)
+                                        .modifier(Modifier::new().fill_max_width())
+                                        .content(|| {
+                                            cu::Row()
+                                                .alignment(Alignment::CenterStart)
+                                                .space_role(SpaceRole::Xs)
+                                                .content(|| {
+                                                    NavIcon(ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
+                                                    Label(LOAD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
+                                                });
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                        });
+                                });
                             });
-                    });
-
-                    // Agent communication timeline placeholder card
-                    EmberCard(false, true, None, None, None, || {
-                        cu::Column()
-                            .space_role(SpaceRole::Xs)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                Label(TIMELINE_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
-                                Label(
-                                    SOON,
-                                    Fs::Sm,
-                                    Weight::Regular,
-                                    Some(paint(p.muted)),
-                                    None,
-                                );
+                    } else {
+                        for (ico, title) in [
+                            (ICON_GIT_SVG, PR_TITLE),
+                            (ICON_USERS_SVG, SUBAGENT_TITLE),
+                            (ICON_CPU_SVG, LOAD_TITLE),
+                        ] {
+                            EmberCard(false, true, None, None, None, move || {
+                                cu::Column()
+                                    .space_role(SpaceRole::Xs)
+                                    .modifier(Modifier::new().fill_max_width())
+                                    .content(move || {
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .space_role(SpaceRole::Xs)
+                                            .content(|| {
+                                                NavIcon(ico, p.text_2.to_argb(), 16.0);
+                                                Label(title, Fs::Md, Weight::Semibold, None, Some(1));
+                                            });
+                                        Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                    });
                             });
-                    });
+                        }
+                    }
+
+                    cu::Spacer().modifier(Modifier::new().height(24.0));
                 });
         });
 }
@@ -1644,8 +2138,33 @@ pub fn SessionScreen(focus: Option<String>) {
         }
     };
 
+    let to_multi = {
+        let set_view = set_view.clone();
+        move || {
+            set_view(SessionView::Multi);
+        }
+    };
+
     let project_name = display_name(&current);
     let view_now = view.get();
+    let total_m = members.len();
+    let wait_m = members
+        .iter()
+        .filter(|m| m.status == LauncherStatus::WaitingForApproval)
+        .count();
+    let run_m = members
+        .iter()
+        .filter(|m| m.status == LauncherStatus::Running)
+        .count();
+    let mut sub_parts = vec![format!("세션 · 팀원 {total_m}")];
+    if wait_m > 0 {
+        sub_parts.push(format!("승인 대기 {wait_m}"));
+    }
+    if run_m > 0 {
+        sub_parts.push(format!("실행 중 {run_m}"));
+    }
+    let sub_line = sub_parts.join(" · ");
+    let is_phone = window.width_dp <= 560.0;
 
     cu::Box()
         .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -1665,7 +2184,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                 Modifier::new()
                                     .width(SIDE_LIST_W)
                                     .fill_max_height()
-                                    .background(paint(p.surface)),
+                                    .background(paint(p.surface_2)),
                             )
                             .content(move || {
                                 let q_st = query_col.clone();
@@ -1673,6 +2192,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                     &sections_col,
                                     &current_col,
                                     target_col.as_deref(),
+                                    view_now == SessionView::Multi,
                                     move |q| q_st.set(q),
                                     open_col.clone(),
                                 );
@@ -1684,139 +2204,180 @@ pub fn SessionScreen(focus: Option<String>) {
                     cu::Column()
                         .modifier(Modifier::new().weight(1.0).fill_max_height())
                         .content(|| {
-                            // Top toolbar
-                            cu::ScrollRow()
+                            // Top toolbar (.sesshead)
+                            cu::Row()
+                                .alignment(Alignment::CenterStart)
+                                .space_role(SpaceRole::Xs)
                                 .modifier(
                                     Modifier::new()
                                         .fill_max_width()
-                                        .padding_role(SpaceRole::Sm),
+                                        .background(paint(p.surface))
+                                        .padding(SP[2]),
                                 )
                                 .content(|| {
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .space_role(SpaceRole::Xs)
-                                        .content(|| {
-                                            if mode == SideListMode::Drawer {
-                                                let dr = drawer.clone();
-                                                AppButton(
-                                                    "목록",
-                                                    Some(IconRole::List),
-                                                    ButtonKind::Default,
-                                                    true,
-                                                    true,
-                                                    false,
-                                                    move || dr.set(true),
-                                                );
-                                            }
-                                            let pm = project_menu.clone();
+                                    if mode == SideListMode::Drawer {
+                                        let dr = drawer.clone();
+                                        if is_phone {
+                                            IconButton(IconRole::List, true, move || dr.set(true));
+                                        } else {
                                             AppButton(
-                                                &project_name,
-                                                Some(IconRole::Library),
+                                                "목록",
+                                                Some(IconRole::List),
                                                 ButtonKind::Default,
                                                 true,
                                                 true,
                                                 false,
-                                                move || pm.set(true),
+                                                move || dr.set(true),
                                             );
-                                            if !chips_below {
-                                                for v in SessionView::ALL {
-                                                    let sv = set_view.clone();
-                                                    FilterChip(
-                                                        v.label(),
-                                                        view_now == v,
-                                                        move || sv(v),
+                                        }
+                                    }
+                                    let pm = project_menu.clone();
+                                    let p_name = project_name.clone();
+                                    let s_line = sub_line.clone();
+                                    let mut proj_mod = Modifier::new().padding(SP[0]);
+                                    if is_phone {
+                                        proj_mod = proj_mod.weight(1.0);
+                                    }
+                                    Clickable(
+                                        proj_mod,
+                                        Alignment::CenterStart,
+                                        move || pm.set(true),
+                                        move || {
+                                            cu::Column()
+                                                .content(move || {
+                                                    cu::Row()
+                                                        .alignment(Alignment::CenterStart)
+                                                        .space_role(SpaceRole::Xs)
+                                                        .content(|| {
+                                                            Label(
+                                                                &p_name,
+                                                                Fs::Lg,
+                                                                Weight::Semibold,
+                                                                Some(paint(p.text)),
+                                                                Some(1),
+                                                            );
+                                                            NavIcon(
+                                                                ICON_CHEVRON_DOWN_SVG,
+                                                                p.muted.to_argb(),
+                                                                14.0,
+                                                            );
+                                                        });
+                                                    Label(
+                                                        &s_line,
+                                                        Fs::Xs,
+                                                        Weight::Regular,
+                                                        Some(paint(p.muted)),
+                                                        Some(1),
                                                     );
-                                                }
-                                            }
-                                            if fold_level < 3 {
-                                                let u = ui.clone();
-                                                let c = current.clone();
-                                                AppButton(
-                                                    "새 팀원",
-                                                    Some(IconRole::Add),
-                                                    ButtonKind::Default,
-                                                    true,
-                                                    true,
-                                                    false,
-                                                    move || u.open_new_session(Some(c.clone())),
-                                                );
-                                            }
-                                            if fold_level < 2 {
-                                                let u = ui.clone();
-                                                let c = current.clone();
-                                                AppButton(
-                                                    "버전 관리",
-                                                    None,
-                                                    ButtonKind::Default,
-                                                    true,
-                                                    true,
-                                                    false,
-                                                    move || {
-                                                        u.set_selected_project(Some(c.clone()));
-                                                        u.set_menu(NavMenu::VersionControl);
-                                                    },
-                                                );
-                                            }
-                                            if fold_level < 1 {
-                                                AppButton(
-                                                    "웹 페이지",
-                                                    None,
-                                                    ButtonKind::Default,
-                                                    true,
-                                                    true,
-                                                    false,
-                                                    move || notice::post(WEB_SOON),
-                                                );
-                                            }
-                                            if fold_level > 0 {
-                                                let mm = more_menu.clone();
-                                                AppButton(
-                                                    "⋯",
-                                                    None,
-                                                    ButtonKind::Default,
-                                                    true,
-                                                    true,
-                                                    false,
-                                                    move || mm.set(true),
-                                                );
-                                            }
-                                            if let Some(t) = target.clone() {
-                                                IdeMenu(&t);
-                                            } else {
-                                                AppButton(
-                                                    "IDE 열기",
-                                                    Some(IconRole::Forward),
-                                                    ButtonKind::Primary,
-                                                    true,
-                                                    false,
-                                                    false,
-                                                    || {},
-                                                );
-                                            }
-                                        });
+                                                });
+                                        },
+                                    );
+                                    if !is_phone {
+                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    }
+                                    if !chips_below {
+                                        for v in SessionView::ALL {
+                                            let sv = set_view.clone();
+                                            FilterChip(
+                                                v.label(),
+                                                view_now == v,
+                                                move || sv(v),
+                                            );
+                                        }
+                                    }
+                                    if fold_level < 3 {
+                                        let u = ui.clone();
+                                        let c = current.clone();
+                                        AppButton(
+                                            "새 팀원",
+                                            Some(IconRole::Add),
+                                            ButtonKind::Default,
+                                            true,
+                                            true,
+                                            false,
+                                            move || u.open_new_session(Some(c.clone())),
+                                        );
+                                    }
+                                    if fold_level < 2 {
+                                        let u = ui.clone();
+                                        let c = current.clone();
+                                        AppButton(
+                                            "버전 관리",
+                                            None,
+                                            ButtonKind::Default,
+                                            true,
+                                            true,
+                                            false,
+                                            move || {
+                                                u.set_selected_project(Some(c.clone()));
+                                                u.set_menu(NavMenu::VersionControl);
+                                            },
+                                        );
+                                    }
+                                    if fold_level < 1 {
+                                        AppButton(
+                                            "웹 페이지",
+                                            None,
+                                            ButtonKind::Default,
+                                            true,
+                                            true,
+                                            false,
+                                            move || notice::post(WEB_SOON),
+                                        );
+                                    }
+                                    if fold_level > 0 {
+                                        let mm = more_menu.clone();
+                                        if is_phone {
+                                            IconButton(IconRole::More, true, move || mm.set(true));
+                                        } else {
+                                            AppButton(
+                                                "⋯",
+                                                None,
+                                                ButtonKind::Default,
+                                                true,
+                                                true,
+                                                false,
+                                                move || mm.set(true),
+                                            );
+                                        }
+                                    }
+                                    if let Some(t) = target.clone() {
+                                        IdeMenu(&t);
+                                    } else {
+                                        AppButton(
+                                            "IDE 열기",
+                                            Some(IconRole::Forward),
+                                            ButtonKind::Primary,
+                                            true,
+                                            false,
+                                            false,
+                                            || {},
+                                        );
+                                    }
+                                    if is_phone {
+                                        cu::Spacer().modifier(Modifier::new().width(48.0));
+                                    }
                                 });
 
                             if chips_below {
-                                cu::ScrollRow()
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .space_role(SpaceRole::Xs)
                                     .modifier(
                                         Modifier::new()
                                             .fill_max_width()
-                                            .padding_role(SpaceRole::Sm),
+                                            .background(paint(p.surface))
+                                            .padding(SP[1]),
                                     )
                                     .content(|| {
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .space_role(SpaceRole::Xs)
-                                            .content(|| {
-                                                for v in SessionView::ALL {
-                                                    let sv = set_view.clone();
-                                                    FilterChip(
-                                                        v.label(),
-                                                        view_now == v,
-                                                        move || sv(v),
-                                                    );
-                                                }
-                                            });
+                                        for v in SessionView::ALL {
+                                            let sv = set_view.clone();
+                                            FilterChip(
+                                                v.label(),
+                                                view_now == v,
+                                                move || sv(v),
+                                            );
+                                        }
                                     });
                             }
 
@@ -1835,7 +2396,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         );
                                     }
                                     SessionView::Single => match target.clone() {
-                                        Some(t) => SingleView(&t, focus.clone()),
+                                        Some(t) => SingleView(&t, focus.clone(), to_multi.clone()),
                                         None => {
                                             cu::Box()
                                                 .alignment(Alignment::Center)
@@ -1870,6 +2431,7 @@ pub fn SessionScreen(focus: Option<String>) {
                 let tgt_d = target.clone();
                 let q_d = query.clone();
                 let op_d = open_member.clone();
+                let is_m = view_now == SessionView::Multi;
                 EmberSheet(
                     "세션 목록",
                     drawer.get(),
@@ -1884,6 +2446,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                     &sec_d,
                                     &cur_d,
                                     tgt_d.as_deref(),
+                                    is_m,
                                     move |q| q_st.set(q),
                                     op_d.clone(),
                                 );

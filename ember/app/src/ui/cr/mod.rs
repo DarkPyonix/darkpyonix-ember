@@ -18,3 +18,5 @@ pub mod channels;
 pub mod home;
 pub mod project;
 pub mod files;
+pub mod conversation;
+pub mod session;

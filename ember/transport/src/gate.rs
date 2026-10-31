@@ -45,15 +45,32 @@ struct GateInner {
 #[derive(Default)]
 struct GateState {
     /// `None`: every authenticated peer is admitted (tests, explicitly open services).
-    allowed: Option<HashSet<PeerId>>,
+    allowed: Option<HashMap<Class, PeerId>>,
     /// Revoked on an open gate: refused even though the gate is open.
-    denied: HashSet<PeerId>,
-    live: HashMap<PeerId, Vec<(u64, Connection)>>,
+    denied: HashSet<Class>,
+    live: HashMap<Class, Vec<(u64, Connection)>>,
+}
+
+/// A device identity as the gate compares it: the key with the sign bit of its last byte
+/// cleared. The points A and -A convert to the same X25519 key, so a transport that derives its
+/// key exchange from the Ed25519 key (letify-link) sees one device, and the holder of the secret
+/// of A can also present -A. Comparing the exact bytes would let a revoked device return as its
+/// alias (SPEC `FR-N6`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Class([u8; 32]);
+
+impl Class {
+    fn of(peer: &PeerId) -> Self {
+        let mut bytes = *peer.as_bytes();
+        bytes[31] &= 0x7f;
+        Self(bytes)
+    }
 }
 
 impl GateState {
     fn admits(&self, peer: &PeerId) -> bool {
-        !self.denied.contains(peer) && self.allowed.as_ref().is_none_or(|a| a.contains(peer))
+        let class = Class::of(peer);
+        !self.denied.contains(&class) && self.allowed.as_ref().is_none_or(|a| a.contains_key(&class))
     }
 }
 
@@ -71,7 +88,7 @@ impl PeerGate {
     /// A gate that admits only `peers` (an empty list admits nobody).
     pub fn allow_list(peers: impl IntoIterator<Item = PeerId>) -> Self {
         let gate = Self::default();
-        gate.inner.state.lock().unwrap().allowed = Some(peers.into_iter().collect());
+        gate.inner.state.lock().unwrap().allowed = Some(peers.into_iter().map(|p| (Class::of(&p), p)).collect());
         gate
     }
 
@@ -107,7 +124,7 @@ impl PeerGate {
     pub fn allowed(&self) -> Option<Vec<PeerId>> {
         let st = self.inner.state.lock().unwrap();
         st.allowed.as_ref().map(|a| {
-            let mut v: Vec<PeerId> = a.iter().copied().collect();
+            let mut v: Vec<PeerId> = a.values().copied().collect();
             v.sort();
             v
         })
@@ -116,9 +133,9 @@ impl PeerGate {
     /// Adds `peer` to the allow-list (on an open gate: lifts an earlier revocation).
     pub fn allow(&self, peer: PeerId) {
         let mut st = self.inner.state.lock().unwrap();
-        st.denied.remove(&peer);
+        st.denied.remove(&Class::of(&peer));
         if let Some(a) = st.allowed.as_mut() {
-            a.insert(peer);
+            a.insert(Class::of(&peer), peer);
         }
         drop(st);
         self.each_transport(|t| t.allow_peer(peer));
@@ -129,15 +146,16 @@ impl PeerGate {
         let conns = {
             let mut guard = self.inner.state.lock().unwrap();
             let st = &mut *guard;
+            let class = Class::of(peer);
             match st.allowed.as_mut() {
                 Some(a) => {
-                    a.remove(peer);
+                    a.remove(&class);
                 }
                 None => {
-                    st.denied.insert(*peer);
+                    st.denied.insert(class);
                 }
             }
-            st.live.remove(peer).unwrap_or_default()
+            st.live.remove(&class).unwrap_or_default()
         };
         for (_, c) in &conns {
             c.close(CLOSE_REVOKED, "device revoked");
@@ -153,20 +171,27 @@ impl PeerGate {
     /// Replaces the allow-list (e.g. after reloading configuration). Connections of peers no
     /// longer allowed are closed. Returns how many connections were closed.
     pub fn set_allowed(&self, peers: impl IntoIterator<Item = PeerId>) -> usize {
-        let allowed: HashSet<PeerId> = peers.into_iter().collect();
+        let allowed: HashMap<Class, PeerId> = peers.into_iter().map(|p| (Class::of(&p), p)).collect();
         let (dropped, removed, added): (Vec<(u64, Connection)>, Vec<PeerId>, Vec<PeerId>) = {
             let mut guard = self.inner.state.lock().unwrap();
             let st = &mut *guard;
-            let gone: Vec<PeerId> = st.live.keys().filter(|p| !allowed.contains(p)).copied().collect();
+            let gone: Vec<Class> = st.live.keys().filter(|c| !allowed.contains_key(c)).copied().collect();
             let before = st.allowed.take().unwrap_or_default();
-            let mut removed: Vec<PeerId> = before.iter().filter(|p| !allowed.contains(p)).copied().collect();
+            let mut removed: Vec<PeerId> =
+                before.iter().filter(|(c, _)| !allowed.contains_key(c)).map(|(_, p)| *p).collect();
             // Peers that were live on an open gate but are not listed now are revoked too.
-            let extra: Vec<PeerId> = gone.iter().filter(|p| !removed.contains(p)).copied().collect();
-            removed.extend(extra);
-            let added: Vec<PeerId> = allowed.iter().filter(|p| !before.contains(p)).copied().collect();
+            for class in &gone {
+                if !before.contains_key(class) {
+                    if let Some((_, conn)) = st.live.get(class).and_then(|l| l.first()) {
+                        removed.push(conn.peer());
+                    }
+                }
+            }
+            let added: Vec<PeerId> =
+                allowed.iter().filter(|(c, _)| !before.contains_key(c)).map(|(_, p)| *p).collect();
             st.allowed = Some(allowed);
             st.denied.clear();
-            let dropped = gone.iter().flat_map(|p| st.live.remove(p).unwrap_or_default()).collect();
+            let dropped = gone.iter().flat_map(|c| st.live.remove(c).unwrap_or_default()).collect();
             (dropped, removed, added)
         };
         for (_, c) in &dropped {
@@ -193,7 +218,7 @@ impl PeerGate {
                 conn.close(CLOSE_NOT_ALLOWED, "peer not allowed");
                 return None;
             }
-            st.live.entry(peer).or_default().push((id, conn.clone()));
+            st.live.entry(Class::of(&peer)).or_default().push((id, conn.clone()));
         }
         // Drop the tracking entry once the connection ends.
         let weak = Arc::downgrade(&self.inner);
@@ -204,7 +229,8 @@ impl PeerGate {
             if let Some(inner) = weak.upgrade() {
                 let mut guard = inner.state.lock().unwrap();
                 let live = &mut guard.live;
-                let empty = match live.get_mut(&peer) {
+                let class = Class::of(&peer);
+                let empty = match live.get_mut(&class) {
                     Some(list) => {
                         list.retain(|(i, _)| *i != id);
                         list.is_empty()
@@ -212,7 +238,7 @@ impl PeerGate {
                     None => false,
                 };
                 if empty {
-                    live.remove(&peer);
+                    live.remove(&class);
                 }
             }
         });
@@ -221,6 +247,6 @@ impl PeerGate {
 
     /// Number of live admitted connections from `peer`.
     pub fn live_connections(&self, peer: &PeerId) -> usize {
-        self.inner.state.lock().unwrap().live.get(peer).map_or(0, Vec::len)
+        self.inner.state.lock().unwrap().live.get(&Class::of(peer)).map_or(0, Vec::len)
     }
 }

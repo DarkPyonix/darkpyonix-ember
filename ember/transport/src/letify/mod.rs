@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use letify_link::observe::{AddressObserver, QadObserver, QadResponder};
+use letify_link::observe::{QadObserver, QadResponder, Reachability};
 use letify_link::record::{self, AddressRecord};
 use letify_link::relay::{new_token, Relay, RelayConfig as LinkRelayConfig, RelayDialer, RelayHandle, RelayPairing};
 use letify_link::rendezvous::{self, Message, Rendezvous};
@@ -116,6 +116,8 @@ struct Inner {
     link_cfg: Config,
     services: Arc<ServiceTable>,
     acceptor: Arc<Acceptor>,
+    /// The policy the acceptor uses; sessions we start are closed when it revokes their peer.
+    policy: PeerPolicy,
     listen: SocketAddr,
     directory: Option<Arc<dyn AddressDirectory>>,
     links: Mutex<HashMap<PeerId, Vec<Arc<PeerLink>>>>,
@@ -131,6 +133,8 @@ struct Inner {
     pkarr: Mutex<Option<Arc<PkarrNode>>>,
     publish_direct: AtomicBool,
     observed: Mutex<Option<SocketAddr>>,
+    /// The address observer connected back to our TCP port: the guessed candidate is true.
+    tcp_reachable: AtomicBool,
     reobserve: Notify,
     version: Mutex<u32>,
     power: Mutex<PowerState>,
@@ -179,7 +183,8 @@ impl LetifyBackend {
         link_cfg.resume_window = cfg.resume_window;
         // Admission is the PeerGate's job (it sees the service); revocation reaches the policy
         // through `revoke_peer`.
-        let acceptor = Arc::new(Acceptor::new(identity.clone(), PeerPolicy::from_fn(|_| true), link_cfg.clone()));
+        let policy = PeerPolicy::from_fn(|_| true);
+        let acceptor = Arc::new(Acceptor::new(identity.clone(), policy.clone(), link_cfg.clone()));
 
         let mut bg: Vec<JoinHandle<()>> = Vec::new();
 
@@ -237,6 +242,7 @@ impl LetifyBackend {
             link_cfg,
             services: Arc::new(ServiceTable::default()),
             acceptor,
+            policy,
             listen,
             directory: config.directory.clone(),
             links: Mutex::new(HashMap::new()),
@@ -250,6 +256,7 @@ impl LetifyBackend {
             pkarr: Mutex::new(None),
             publish_direct: AtomicBool::new(true),
             observed: Mutex::new(None),
+            tcp_reachable: AtomicBool::new(false),
             reobserve: Notify::new(),
             version: Mutex::new(record::unix_now()),
             power: Mutex::new(PowerState::Foreground),
@@ -310,9 +317,11 @@ impl Inner {
         if !self.listen.ip().is_unspecified() {
             out.push(self.listen);
         }
-        if let Some(seen) = *self.observed.lock().unwrap() {
-            // The observed public IP with our listening port: right for a host with a public
-            // address or a forwarded port (the main server); a NAT'd host just fails to answer.
+        let seen = *self.observed.lock().unwrap();
+        if let Some(seen) = seen.filter(|_| self.tcp_reachable.load(Ordering::Relaxed)) {
+            // The observed public IP with our listening port, published only after the observer
+            // connected back to it (QAD dial-back): a host with a public address or a forwarded
+            // port (the main server). A NAT'd host is not reachable and publishes no guess.
             let guess = SocketAddr::new(seen.ip(), self.listen.port());
             if !out.contains(&guess) {
                 out.push(guess);
@@ -492,6 +501,9 @@ impl Inner {
         }
         let for_demux = pm.session().downgrade().upgrade();
         let for_watch = pm.session().downgrade().upgrade();
+        // Close the session when the policy revokes its peer (also without going through
+        // `revoke`), and do not redial.
+        pm.close_when_revoked(&self.policy);
         link.add_task(tokio::spawn(manage(pm, rx)).abort_handle());
         if let Some(s) = for_demux {
             let demux = tokio::spawn(run_demux(link.clone(), s));
@@ -777,16 +789,18 @@ async fn observe_loop(inner: Arc<Inner>, server: SocketAddr, pin: Option<PeerId>
     };
     let observer = QadObserver::new(server, pin.map(node_of));
     loop {
-        match observer.observe(&socket).await {
-            Ok(mapping) => {
+        match observer.observe_tcp(&socket, inner.listen.port()).await {
+            Ok((mapping, reach)) => {
+                let reachable = reach == Reachability::Reachable;
                 let changed = {
+                    let was_reachable = inner.tcp_reachable.swap(reachable, Ordering::Relaxed);
                     let mut seen = inner.observed.lock().unwrap();
-                    let changed = *seen != Some(mapping.mapped);
+                    let changed = *seen != Some(mapping.mapped) || was_reachable != reachable;
                     *seen = Some(mapping.mapped);
                     changed
                 };
                 if changed {
-                    tracing::info!(address = %mapping.mapped, "public address observed");
+                    tracing::info!(address = %mapping.mapped, ?reach, "public address observed");
                     inner.republish();
                 }
             }

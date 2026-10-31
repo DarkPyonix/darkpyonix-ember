@@ -1914,8 +1914,8 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "letify-link"
-version = "2.10.2"
-source = "git+https://github.com/DarkPyonix/letify?rev=4efccb2f8b70921ae3e1344ff91c40f667941ffe#4efccb2f8b70921ae3e1344ff91c40f667941ffe"
+version = "2.10.3"
+source = "git+https://github.com/DarkPyonix/letify?rev=4363cfb16fba9fccd4d4f1c995408e2ebf7ae8b7#4363cfb16fba9fccd4d4f1c995408e2ebf7ae8b7"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "getrandom 0.2.17",
@@ -3578,6 +3578,7 @@ dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 4.1.3",
  "rand_core 0.6.4",
+ "ring",
  "rustc_version",
  "sha2 0.10.9",
  "subtle",

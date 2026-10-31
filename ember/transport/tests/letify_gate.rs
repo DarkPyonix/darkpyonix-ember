@@ -172,3 +172,23 @@ async fn fr_n3_letify_revocation_does_not_disturb_other_devices() {
     tokio::time::timeout(Duration::from_secs(1), ca.closed()).await.unwrap();
     assert_eq!(echo_roundtrip(&cb, b"b is fine").await, b"b is fine");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_n3_letify_revoking_a_peer_closes_the_sessions_we_started_to_it() {
+    // The main server starts a session to a node (it is the initiator) and revokes the node:
+    // that session closes and is not redialed, which `Session::close_when_revoked` and the
+    // revoke hook both guarantee.
+    let dir = MemoryDirectory::new();
+    let (server, node) = (bind(&dir).await, bind(&dir).await);
+    common::spawn_echo(&node, "echo");
+    let conn = server.connect(node.peer_id(), "echo").await.unwrap();
+    assert_eq!(echo_roundtrip(&conn, b"up").await, b"up");
+
+    server.revoke_peer(node.peer_id());
+    tokio::time::timeout(Duration::from_secs(2), conn.closed()).await.expect("the initiator session closes");
+    // Nothing redials it: a new connection from the server needs a new session, and the node
+    // still accepts (the server revoked only its own side), so this succeeds once allowed again.
+    server.allow_peer(node.peer_id());
+    let again = server.connect(node.peer_id(), "echo").await.unwrap();
+    assert_eq!(echo_roundtrip(&again, b"back").await, b"back");
+}

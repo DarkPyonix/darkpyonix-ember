@@ -30,8 +30,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 
 iroh = { version = "1", optional = true }
-# The letify connection layer, pinned to a commit of DarkPyonix/letify (branch feat/letify-link-spec): RelayOffer messages, RelayPairing, canonical Session::peer.
-letify-link = { git = "https://github.com/DarkPyonix/letify", rev = "4363cfb16fba9fccd4d4f1c995408e2ebf7ae8b7", optional = true, features = ["relay"] }
+# The letify connection layer, pinned to a commit of DarkPyonix/letify (branch feat/letify-link-spec): RelayOffer messages, RelayPairing, canonical Session::peer, close_when_revoked, QAD TCP dial-back.
+letify-link = { git = "https://github.com/DarkPyonix/letify", rev = "bf53d4593771510b1cabf4a66c8b3cb6df0bdefc", optional = true, features = ["relay"] }
 # The hub's pkarr directory over HTTP (the same client settings as ember-hub).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 # The hub directory's pkarr URL (the type iroh's pkarr builders take).

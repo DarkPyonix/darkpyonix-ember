@@ -3,17 +3,21 @@
 //! connection. Not run by default (it moves hundreds of MiB). Run with
 //!
 //! ```text
-//! cargo test --release --features letify --test letify_perf -- --ignored --nocapture
+//! cargo test --release --features letify --test letify_perf -- --ignored --nocapture letify
+//! cargo test --release --test letify_perf -- --ignored --nocapture iroh   # the iroh backend, same measurements
 //! ```
 //!
 //! `LETIFY_PERF_MIB` sets the bulk size (default 256). The numbers are printed on stderr as
 //! `perf <name> <value> <unit>` lines to paste into the pull request and the SPEC.
-#![cfg(feature = "letify")]
+#![cfg(any(feature = "letify", feature = "iroh"))]
 
 mod common;
 
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "iroh")]
+use common::iroh_pair;
+#[cfg(feature = "letify")]
 use common::letify_pair;
 use ember_transport::{BiStream, Connection};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -141,42 +145,56 @@ fn report(name: &str, mut samples: Vec<Duration>) {
     eprintln!("perf {name} max {:.3} ms", ms(*samples.last().unwrap()));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "measurement: see the module documentation"]
-async fn nfr_n1_letify_loopback_throughput_and_small_message_latency_under_bulk() {
+/// The same measurements on any backend; `backend` prefixes every line.
+async fn measure(backend: &str, a: ember_transport::Transport, b: ember_transport::Transport) {
     let mib: u64 = std::env::var("LETIFY_PERF_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
     let bytes = mib << 20;
-    let (a, b, _dir) = letify_pair().await;
     serve(&b, "perf");
     let conn = a.connect(b.peer_id(), "perf").await.unwrap();
 
     // Warm up and baseline.
     let _ = pings(&conn, 50).await;
     let raw = raw_tcp(bytes).await;
-    eprintln!("perf raw_tcp_loopback_throughput {raw:.1} MiB/s");
+    eprintln!("perf {backend} raw_tcp_loopback_throughput {raw:.1} MiB/s");
 
     let one = bulk(&conn, bytes, true).await;
-    eprintln!("perf letify_one_stream_throughput {one:.1} MiB/s");
-    eprintln!("perf letify_vs_raw_tcp {:.1} %", one / raw * 100.0);
+    eprintln!("perf {backend} one_stream_throughput {one:.1} MiB/s");
+    eprintln!("perf {backend} vs_raw_tcp {:.1} %", one / raw * 100.0);
 
     // Four bulk streams at once.
     let started = Instant::now();
     let many = futures::future::join_all((0..4).map(|_| bulk(&conn, bytes / 4, true))).await;
     let total = bytes as f64 / (1 << 20) as f64 / started.elapsed().as_secs_f64();
-    eprintln!("perf letify_four_streams_throughput {total:.1} MiB/s (per stream {many:.1?})");
+    eprintln!("perf {backend} four_streams_throughput {total:.1} MiB/s (per stream {many:.1?})");
 
     // Small messages on an idle connection.
-    report("small_message_rtt_idle", pings(&conn, 1000).await);
+    report(&format!("{backend} small_message_rtt_idle"), pings(&conn, 1000).await);
 
     // Small messages while a bulk transfer runs on the same connection: the transfer on a
     // bulk-class stream, then on an interactive one for comparison.
-    for (label, bulk_class) in [("bulk_class", true), ("interactive_class", false)] {
+    for (class, bulk_class) in [("bulk_class", true), ("interactive_class", false)] {
         let c = conn.clone();
         let transfer = tokio::spawn(async move { bulk(&c, bytes, bulk_class).await });
         tokio::time::sleep(Duration::from_millis(300)).await;
         let samples = pings(&conn, 500).await;
-        report(&format!("small_message_rtt_under_{label}_bulk"), samples);
+        report(&format!("{backend} small_message_rtt_under_{class}_bulk"), samples);
         let rate = transfer.await.unwrap();
-        eprintln!("perf bulk_throughput_while_pinging_{label} {rate:.1} MiB/s");
+        eprintln!("perf {backend} bulk_throughput_while_pinging_{class} {rate:.1} MiB/s");
     }
+}
+
+#[cfg(feature = "letify")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement: see the module documentation"]
+async fn nfr_n1_letify_loopback_throughput_and_small_message_latency_under_bulk() {
+    let (a, b, _dir) = letify_pair().await;
+    measure("letify", a, b).await;
+}
+
+#[cfg(feature = "iroh")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement: see the module documentation"]
+async fn nfr_n1_iroh_loopback_throughput_and_small_message_latency_under_bulk() {
+    let (a, b, _dir) = iroh_pair().await;
+    measure("iroh", a, b).await;
 }

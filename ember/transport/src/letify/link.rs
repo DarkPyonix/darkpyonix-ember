@@ -228,14 +228,8 @@ impl PeerLink {
                 Some(r) => session.close_with_reason(r).await,
                 None => session.close().await,
             }
-            // letify-link does not wake `accept_stream` when this side closes (only when the
-            // peer does), so the demux task would wait forever: end the connections here.
-            // TODO(#229): remove when letify-link wakes `accept_stream` on a local close
-            // (reported to the letify session with a minimal repro).
-            if let Some(h) = self.demux.lock().unwrap().take() {
-                h.abort();
-            }
-            self.teardown(&session, LinkError::Closed);
+            // The demux task sees `accept_stream` return `Closed` (letify-link wakes it on a
+            // local close) and ends the connections with `Local`.
         }
     }
 

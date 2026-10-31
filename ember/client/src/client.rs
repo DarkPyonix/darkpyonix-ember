@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Duration;
 
+use ember_transport::PowerState;
 use futures_util::StreamExt;
 use tokio::sync::{broadcast, mpsc, watch, Notify};
 use tokio::task::JoinHandle;
@@ -157,17 +158,28 @@ impl Client {
 
     /// Drop the push connection and stay disconnected (e.g. app backgrounded on mobile).
     pub fn pause_push(&self) {
+        // The app is in the background: the transport may slow its keepalives. There is no
+        // "device saves power" signal in this crate yet; the app would pass
+        // `PowerState::PowerSave` to `Api::set_power_state` from the platform's low power mode.
+        // TODO(#229): wire the OS low power mode on Android and iOS.
+        self.inner.api.set_power_state(PowerState::Background);
         self.inner.push_mode.send_replace(PushMode::Paused);
     }
 
     /// Reconnect after [`Client::pause_push`]; catches up on everything missed meanwhile.
     pub fn resume_push(&self) {
+        // Back in the foreground: normal keepalives, and re-establish the paths at once, since a
+        // suspended app cannot tell which of its paths still reach the server.
+        self.inner.api.set_power_state(PowerState::Foreground);
+        self.inner.api.resume_transport();
         self.inner.push_mode.send_replace(PushMode::Run);
     }
 
     /// Drop the current push socket and reconnect right away (e.g. the network changed). The
     /// reconnect catches up on anything missed, like any other.
     pub fn reconnect_push(&self) {
+        // A new network may reach paths the old one did not.
+        self.inner.api.resume_transport();
         self.inner.reconnect.notify_one();
     }
 

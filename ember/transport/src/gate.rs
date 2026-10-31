@@ -9,12 +9,16 @@
 //!
 //! The gate is storage-agnostic: ember server fills it from its devices table, ember node from
 //! its configuration. It holds no backend type (`FR-N5`).
+//!
+//! A backend that enforces admission below the gate (the letify-link relay on the main server,
+//! and its handshake policy) is told about every change through [`PeerGate::attach`], so a
+//! revoked device is refused there too and its relayed pairs are cut at once.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::{Connection, PeerId};
+use crate::{Connection, PeerId, Transport};
 
 /// Close code for a connection refused at accept (peer not allowed).
 pub const CLOSE_NOT_ALLOWED: u32 = 403;
@@ -34,6 +38,8 @@ struct GateInner {
     /// concurrently with its peer's revocation is either refused or closed by the revocation).
     state: Mutex<GateState>,
     next_id: AtomicU64,
+    /// Transports told about every allow and revoke (see [`PeerGate::attach`]).
+    transports: Mutex<Vec<Transport>>,
 }
 
 #[derive(Default)]
@@ -76,6 +82,22 @@ impl PeerGate {
         Self::default()
     }
 
+    /// Tells `transport` about this gate: it is told every peer admitted now and every later
+    /// [`PeerGate::allow`], [`PeerGate::revoke`] and [`PeerGate::set_allowed`] change
+    /// ([`Transport::allow_peer`], [`Transport::revoke_peer`]). With the letify backend this wires
+    /// revocation to `PeerPolicy::revoke` (handshakes and live sessions) and to the relay.
+    pub fn attach(&self, transport: &Transport) {
+        for peer in self.allowed().unwrap_or_default() {
+            transport.allow_peer(peer);
+        }
+        self.inner.transports.lock().unwrap().push(transport.clone());
+    }
+
+    fn each_transport(&self, f: impl Fn(&Transport)) {
+        let list: Vec<Transport> = self.inner.transports.lock().unwrap().clone();
+        list.iter().for_each(f);
+    }
+
     /// Whether `peer` would be admitted now.
     pub fn is_allowed(&self, peer: &PeerId) -> bool {
         self.inner.state.lock().unwrap().admits(peer)
@@ -98,6 +120,8 @@ impl PeerGate {
         if let Some(a) = st.allowed.as_mut() {
             a.insert(peer);
         }
+        drop(st);
+        self.each_transport(|t| t.allow_peer(peer));
     }
 
     /// Removes `peer` and closes its open connections. Returns how many were closed.
@@ -118,6 +142,8 @@ impl PeerGate {
         for (_, c) in &conns {
             c.close(CLOSE_REVOKED, "device revoked");
         }
+        // After the close frames are queued, so the peer sees the code before the session ends.
+        self.each_transport(|t| t.revoke_peer(*peer));
         if !conns.is_empty() {
             tracing::info!(peer = %peer.fmt_short(), closed = conns.len(), "revoked peer disconnected");
         }
@@ -128,17 +154,25 @@ impl PeerGate {
     /// longer allowed are closed. Returns how many connections were closed.
     pub fn set_allowed(&self, peers: impl IntoIterator<Item = PeerId>) -> usize {
         let allowed: HashSet<PeerId> = peers.into_iter().collect();
-        let dropped: Vec<(u64, Connection)> = {
+        let (dropped, removed, added): (Vec<(u64, Connection)>, Vec<PeerId>, Vec<PeerId>) = {
             let mut guard = self.inner.state.lock().unwrap();
             let st = &mut *guard;
             let gone: Vec<PeerId> = st.live.keys().filter(|p| !allowed.contains(p)).copied().collect();
+            let before = st.allowed.take().unwrap_or_default();
+            let removed: Vec<PeerId> = before.iter().filter(|p| !allowed.contains(p)).copied().collect();
+            let added: Vec<PeerId> = allowed.iter().filter(|p| !before.contains(p)).copied().collect();
             st.allowed = Some(allowed);
             st.denied.clear();
-            gone.iter().flat_map(|p| st.live.remove(p).unwrap_or_default()).collect()
+            let dropped = gone.iter().flat_map(|p| st.live.remove(p).unwrap_or_default()).collect();
+            (dropped, removed, added)
         };
         for (_, c) in &dropped {
             c.close(CLOSE_REVOKED, "device no longer allowed");
         }
+        self.each_transport(|t| {
+            removed.iter().for_each(|p| t.revoke_peer(*p));
+            added.iter().for_each(|p| t.allow_peer(*p));
+        });
         dropped.len()
     }
 

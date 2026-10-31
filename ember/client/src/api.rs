@@ -141,7 +141,7 @@ impl Api {
     }
 
     /// Tells the transport the app's power state. Over the peer-to-peer transport a backend that
-    /// keeps a session alive (letify-link) slows its keepalives in the background; over plain
+    /// keeps a session alive slows its keepalives in the background; over plain
     /// HTTP this does nothing.
     pub fn set_power_state(&self, state: PowerState) {
         if let Reach::Peer { dialer, .. } = &self.reach {

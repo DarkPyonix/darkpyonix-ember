@@ -1,19 +1,17 @@
 //! Wire types for the IDE window bridge (ARCHITECTURE.md §3).
 //!
-//! Every message is one JSON object with a string `kind` and an integer `version`, the rest
-//! of its fields flattened next to them (camelCase). The webview sends it as a JSON
+//! Every message is one JSON object with a string `kind`, the rest of its fields flattened next
+//! to it (camelCase). The webview sends it as a JSON
 //! *string* through the platform message API, so every host decodes the same bytes.
 //!
 //! Rules (SPEC FR-B2, FR-B4):
-//! - Versions are per kind ([`expected_version`]). Adding an optional field does **not**
-//!   bump a version; unknown fields are ignored on decode.
-//! - A version mismatch is logged (`tracing::warn!`) and returned as
-//!   [`Inbound::VersionMismatch`] with a best-effort decode and the raw JSON, never
-//!   silently dropped.
+//! - There is no version (INTENT D15). Adding an optional field is always compatible; unknown
+//!   fields are ignored on decode, and an unknown `kind` is logged and kept as
+//!   [`Inbound::UnknownKind`], never silently dropped.
 //! - Positions are **0-based** `(line, column)`, like LSP; `detach.js` converts Monaco's
 //!   1-based values.
 //!
-//! Keep in sync with `ember/proxy/static/detach.js` (`VERSIONS`, `buildDetachMessage`,
+//! Keep in sync with `ember/proxy/static/detach.js` (`buildDetachMessage`,
 //! `buildWorkspaceQuery`). `ember/vectors/bridge/detach_vectors.json` is checked by both.
 
 use serde::{Deserialize, Serialize};
@@ -28,16 +26,6 @@ pub const HANDLER_NAME: &str = "emberBridge";
 pub const KIND_TAB_DETACH: &str = "tab_detach";
 pub const KIND_SIBLING_WINDOW_CLOSED: &str = "sibling_window_closed";
 pub const KIND_OPEN_WINDOW: &str = "open_window";
-
-/// The version this build speaks for `kind`, or `None` for a kind it does not know.
-pub fn expected_version(kind: &str) -> Option<u32> {
-    match kind {
-        KIND_TAB_DETACH => Some(1),
-        KIND_SIBLING_WINDOW_CLOSED => Some(1),
-        KIND_OPEN_WINDOW => Some(1),
-        _ => None,
-    }
-}
 
 /// 0-based line and column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +80,7 @@ pub struct TabDetach {
     pub scroll: Option<Scroll>,
     #[serde(default)]
     pub selection: Option<Range>,
-    // ---- additive fields (no version bump; FR-B4) ----
+    // ---- additive fields (FR-B4) ----
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<ScreenPoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,10 +197,6 @@ impl BridgeMessage {
         }
     }
 
-    pub fn version(&self) -> u32 {
-        expected_version(self.kind()).expect("every BridgeMessage kind has a version")
-    }
-
     fn body(&self) -> Value {
         let v = match self {
             BridgeMessage::TabDetach(m) => serde_json::to_value(m),
@@ -227,7 +211,6 @@ impl BridgeMessage {
 pub fn encode(msg: &BridgeMessage) -> String {
     let mut obj = Map::new();
     obj.insert("kind".to_owned(), Value::from(msg.kind()));
-    obj.insert("version".to_owned(), Value::from(msg.version()));
     if let Value::Object(body) = msg.body() {
         for (k, v) in body {
             obj.insert(k, v);
@@ -239,32 +222,17 @@ pub fn encode(msg: &BridgeMessage) -> String {
 /// What a received string turned out to be.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inbound {
-    /// Known kind at the expected version.
+    /// A known kind, decoded.
     Message(BridgeMessage),
-    /// Known kind, different (or missing) version. Already logged. `decoded` is the
-    /// best-effort decode with this build's types (`None` if the fields no longer fit);
-    /// `raw` is the whole message so nothing is lost.
-    VersionMismatch {
-        kind: String,
-        received: Option<u64>,
-        expected: u32,
-        decoded: Option<BridgeMessage>,
-        raw: Value,
-    },
     /// A kind this build does not know (e.g. from a newer peer). Already logged.
-    UnknownKind {
-        kind: String,
-        version: Option<u64>,
-        raw: Value,
-    },
+    UnknownKind { kind: String, raw: Value },
 }
 
 impl Inbound {
-    /// The usable message, if any, including a best-effort decode across a version skew.
+    /// The usable message, if any.
     pub fn message(&self) -> Option<&BridgeMessage> {
         match self {
             Inbound::Message(m) => Some(m),
-            Inbound::VersionMismatch { decoded, .. } => decoded.as_ref(),
             Inbound::UnknownKind { .. } => None,
         }
     }
@@ -276,10 +244,9 @@ pub enum DecodeError {
     NotJson(#[source] serde_json::Error),
     #[error("bridge message is not a JSON object with a string \"kind\"")]
     NoKind,
-    #[error("bridge message {kind} v{version} has invalid fields: {source}")]
+    #[error("bridge message {kind} has invalid fields: {source}")]
     Invalid {
         kind: String,
-        version: u64,
         #[source]
         source: serde_json::Error,
     },
@@ -295,7 +262,7 @@ fn decode_body(kind: &str, raw: &Value) -> Option<Result<BridgeMessage, serde_js
     })
 }
 
-/// Decodes one received string. Version skew is logged and returned, not dropped (FR-B2).
+/// Decodes one received string. Unknown kinds are logged and kept, not dropped (FR-B2).
 pub fn decode(text: &str) -> Result<Inbound, DecodeError> {
     let raw: Value = serde_json::from_str(text).map_err(DecodeError::NotJson)?;
     let kind = raw
@@ -303,32 +270,18 @@ pub fn decode(text: &str) -> Result<Inbound, DecodeError> {
         .and_then(Value::as_str)
         .ok_or(DecodeError::NoKind)?
         .to_owned();
-    let version = raw.get("version").and_then(Value::as_u64);
 
-    let Some(expected) = expected_version(&kind) else {
-        tracing::warn!(kind = %kind, version = ?version, "ember-bridge: unknown message kind; kept, not decoded");
-        return Ok(Inbound::UnknownKind { kind, version, raw });
-    };
-    let decoded = decode_body(&kind, &raw).expect("expected_version and decode_body agree on kinds");
-
-    if version == Some(u64::from(expected)) {
-        return match decoded {
-            Ok(m) => Ok(Inbound::Message(m)),
-            Err(source) => {
-                tracing::warn!(kind = %kind, error = %source, "ember-bridge: invalid message fields");
-                Err(DecodeError::Invalid { kind, version: u64::from(expected), source })
-            }
-        };
+    match decode_body(&kind, &raw) {
+        Some(Ok(m)) => Ok(Inbound::Message(m)),
+        Some(Err(source)) => {
+            tracing::warn!(kind = %kind, error = %source, "ember-bridge: invalid message fields");
+            Err(DecodeError::Invalid { kind, source })
+        }
+        None => {
+            tracing::warn!(kind = %kind, "ember-bridge: unknown message kind; kept, not decoded");
+            Ok(Inbound::UnknownKind { kind, raw })
+        }
     }
-
-    tracing::warn!(
-        kind = %kind,
-        received = ?version,
-        expected,
-        decodable = decoded.is_ok(),
-        "ember-bridge: version mismatch; delivering best-effort decode"
-    );
-    Ok(Inbound::VersionMismatch { kind, received: version, expected, decoded: decoded.ok(), raw })
 }
 
 #[cfg(test)]
@@ -371,7 +324,6 @@ mod tests {
     fn encodes_the_architecture_shape() {
         let v: Value = serde_json::from_str(&encode(&BridgeMessage::TabDetach(detach()))).unwrap();
         assert_eq!(v["kind"], "tab_detach");
-        assert_eq!(v["version"], 1);
         assert_eq!(v["sourceWindowId"], "win-a");
         assert_eq!(v["fileUri"], "vscode-remote://localhost:8888/Users/me/proj/src/main.rs");
         assert_eq!(v["cursor"]["line"], 41);
@@ -385,7 +337,7 @@ mod tests {
     #[test]
     fn decodes_what_detach_js_sends() {
         // Shape produced by detach.js buildDetachMessage (nulls included).
-        let text = r#"{"kind":"tab_detach","version":1,"sourceWindowId":"w","workspace":null,
+        let text = r#"{"kind":"tab_detach","sourceWindowId":"w","workspace":null,
             "fileUri":"vscode-remote://h/a.rs","cursor":null,"scroll":null,"selection":null,
             "screen":null,"label":null,"editor":"vscode-web","stateSource":"dom","sentAtMs":5.5}"#;
         match decode(text).unwrap() {
@@ -399,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn additive_fields_need_no_version_bump() {
+    fn unknown_fields_are_ignored_including_a_stale_version() {
         let text = r#"{"kind":"sibling_window_closed","version":1,"windowId":"w","reason":"user"}"#;
         assert_eq!(
             decode(text).unwrap(),
@@ -410,47 +362,11 @@ mod tests {
     }
 
     #[test]
-    fn version_mismatch_is_reported_with_a_best_effort_decode() {
-        let text = r#"{"kind":"sibling_window_closed","version":2,"windowId":"w"}"#;
-        match decode(text).unwrap() {
-            Inbound::VersionMismatch { kind, received, expected, decoded, raw } => {
-                assert_eq!(kind, "sibling_window_closed");
-                assert_eq!(received, Some(2));
-                assert_eq!(expected, 1);
-                assert!(matches!(decoded, Some(BridgeMessage::SiblingWindowClosed(_))));
-                assert_eq!(raw["windowId"], "w");
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn version_mismatch_with_unreadable_fields_keeps_the_raw_message() {
-        let text = r#"{"kind":"tab_detach","version":7,"uri":"renamed-field"}"#;
-        let inbound = decode(text).unwrap();
-        assert!(inbound.message().is_none());
-        match inbound {
-            Inbound::VersionMismatch { decoded: None, raw, .. } => assert_eq!(raw["uri"], "renamed-field"),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn missing_version_is_a_mismatch_not_a_drop() {
-        let text = r#"{"kind":"sibling_window_closed","windowId":"w"}"#;
-        assert!(matches!(
-            decode(text).unwrap(),
-            Inbound::VersionMismatch { received: None, decoded: Some(_), .. }
-        ));
-    }
-
-    #[test]
     fn unknown_kind_is_kept() {
-        let text = r#"{"kind":"from_the_future","version":3,"x":1}"#;
+        let text = r#"{"kind":"from_the_future","x":1}"#;
         match decode(text).unwrap() {
-            Inbound::UnknownKind { kind, version, raw } => {
+            Inbound::UnknownKind { kind, raw } => {
                 assert_eq!(kind, "from_the_future");
-                assert_eq!(version, Some(3));
                 assert_eq!(raw["x"], 1);
             }
             other => panic!("unexpected {other:?}"),
@@ -463,7 +379,7 @@ mod tests {
         assert!(matches!(decode("[1,2]"), Err(DecodeError::NoKind)));
         assert!(matches!(decode(r#"{"kind":5}"#), Err(DecodeError::NoKind)));
         assert!(matches!(
-            decode(r#"{"kind":"tab_detach","version":1,"sourceWindowId":"w"}"#),
+            decode(r#"{"kind":"tab_detach","sourceWindowId":"w"}"#),
             Err(DecodeError::Invalid { .. })
         ));
     }

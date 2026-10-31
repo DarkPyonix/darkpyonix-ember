@@ -15,7 +15,7 @@
 //!
 //! For a Bash-tool command the shim:
 //! 1. replaces the trailing `pwd -P >| <cwd-file>` with a marker line on stderr,
-//! 2. runs the string on the node (`/v1/exec`) as `<remote shell> -l -c <string>` in the same
+//! 2. runs the string on the node (`/exec`) as `<remote shell> -l -c <string>` in the same
 //!    absolute directory, forwarding stdin and streaming stdout/stderr back,
 //! 3. strips the marker from stderr and writes the node's final `pwd -P` to the **local**
 //!    cwd-file, so Claude's cwd tracking follows `cd` on the node,
@@ -40,7 +40,7 @@ use ember_node::proto::{CommandSpec, ExecEvent, ExecInput, ExecRequest, Program}
 pub const ENV_NODE_URL: &str = "EMBER_EXEC_NODE_URL";
 /// Node API bearer token.
 pub const ENV_NODE_TOKEN: &str = "EMBER_EXEC_NODE_TOKEN";
-/// Shell that runs the command on the node (default `bash`); set from the node's `/v1/env`.
+/// Shell that runs the command on the node (default `bash`); set from the node's `/env`.
 pub const ENV_REMOTE_SHELL: &str = "EMBER_EXEC_REMOTE_SHELL";
 /// `local` (default) or `remote`: where non-Bash-tool invocations (hooks, MCP launches) run.
 pub const ENV_NON_TOOL: &str = "EMBER_EXEC_NON_TOOL";

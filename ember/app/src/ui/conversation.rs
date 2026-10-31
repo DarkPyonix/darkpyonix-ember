@@ -29,12 +29,14 @@ use crate::ide::{open_external, plan, IdeAction, IdeKind};
 use crate::model::{self, Tone};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run, services};
+use crate::ui::components::{EmberCard, EmberField, Txt};
+use crate::ui::theme::*;
 use crate::ui::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use crate::ui::launcher::{export, patch_session, ConnectionBanner};
 use crate::ui::{use_ui, Route};
 
 /// A transcript row's stable key: its event sequence number.
-fn item_key(item: &TranscriptItem) -> String {
+pub(crate) fn item_key(item: &TranscriptItem) -> String {
     let seq = match item {
         TranscriptItem::User { seq, .. }
         | TranscriptItem::Assistant { seq, .. }
@@ -47,8 +49,24 @@ fn item_key(item: &TranscriptItem) -> String {
     seq.to_string()
 }
 
+/// Fork `id` after its completed turn `seq` (the last one when `None`) and open the new
+/// session (FR-S5).
+fn fork_from(ui: crate::ui::Ui, id: String, seq: Option<i64>) {
+    if services().demo_blocked() {
+        return;
+    }
+    run(
+        async move { services().client.fork_session(&id, seq).await.map_err(|e| e.to_string()) },
+        move |r| match r {
+            Ok(rec) => ui.open_conversation(&rec.id),
+            Err(e) => show_message(format!("Could not fork: {e}")),
+        },
+    );
+}
+
 #[component]
-pub fn ConversationView(id: String) -> Element {
+pub fn ConversationView(id: String, #[props(default)] embedded: bool) -> Element {
+    let theme = use_ember_theme();
     let ui = use_ui();
     let window = use_window_size();
     let s = services();
@@ -67,6 +85,9 @@ pub fn ConversationView(id: String) -> Element {
     let load_candidates = {
         let id = id.clone();
         move || {
+            if services().demo_blocked() {
+                return;
+            }
             let sid = id.clone();
             run(
                 async move { services().client.mention_candidates(&sid, "", Some(200)).await.map_err(|e| e.to_string()) },
@@ -99,6 +120,28 @@ pub fn ConversationView(id: String) -> Element {
                     }
                 },
             );
+            let fk = id.clone();
+            run(
+                async move { services().client.load_fork_info(&fk).await.map_err(|e| e.to_string()) },
+                |r| {
+                    if let Err(e) = r {
+                        tracing::debug!("fork info: {e}");
+                    }
+                },
+            );
+            let ap = id.clone();
+            run(
+                async move { services().client.load_approve_all(&ap).await.map(|_| ()).map_err(|e| e.to_string()) },
+                |r| {
+                    if let Err(e) = r {
+                        tracing::debug!("approve-all: {e}");
+                    }
+                },
+            );
+            // The demo has no server to ask about the computer or IDE targets (#202).
+            if services().demo.is_some() {
+                return;
+            }
             let a = id.clone();
             run(
                 async move { services().server.session_computer(&a).await.map_err(|e| e.to_string()) },
@@ -165,8 +208,8 @@ pub fn ConversationView(id: String) -> Element {
                 space_role: SpaceRole::Md,
                 alignment: Alignment::Center,
                 arrangement: Arrangement::Center,
-                Text { text: "This session is not on the main server.", type_role: TypeRole::Title }
-                Text {
+                Txt { text: "This session is not on the main server.", type_role: TypeRole::Title }
+                Txt {
                     text: "It may have been deleted, or the list has not loaded yet.",
                     type_role: TypeRole::Body,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -195,14 +238,49 @@ pub fn ConversationView(id: String) -> Element {
         s.client.read(|st| st.computers().to_vec())
     };
 
+    let approve_all = {
+        let _ = *ui.live.launcher.read();
+        s.client.read(|st| st.approve_all(&id))
+    };
+
     // ---- transcript ----------------------------------------------------------------------------
-    let (count, keys, pending) = {
+    let (count, keys, pending, has_completed_turn) = {
         let _ = *ui.live.transcripts.read();
         s.client.read(|st| match st.transcript(&id) {
-            Some(t) => (t.items.len(), t.items.iter().map(item_key).collect::<Vec<_>>(), t.pending_approvals().count()),
-            None => (0, Vec::new(), 0),
+            Some(t) => (
+                t.items.len(),
+                t.items.iter().map(item_key).collect::<Vec<_>>(),
+                t.pending_approvals().count(),
+                t.items.iter().any(|i| matches!(i, TranscriptItem::TurnEnded { outcome: TurnOutcome::Completed, .. })),
+            ),
+            None => (0, Vec::new(), 0, false),
         })
     };
+
+    // ---- fork (FR-S5) --------------------------------------------------------------------------
+    let (fork_info, fork_parent) = {
+        let _ = *ui.live.launcher.read();
+        s.client.read(|st| {
+            let info = st.fork_info(&id);
+            let parent = info
+                .origin
+                .as_ref()
+                .map(|o| (o.clone(), st.session(&o.parent_id).map(|v| v.record.title.clone())));
+            (info, parent)
+        })
+    };
+    let fork_enabled = model::fork_menu_enabled(&fork_info, has_completed_turn);
+    let fork_last = {
+        let id = id.clone();
+        move |_: ()| {
+            more_menu.set(false);
+            fork_from(ui, id.clone(), None);
+        }
+    };
+    let fork_label = fork_parent
+        .as_ref()
+        .map(|(o, title)| model::fork_origin_label(o, title.as_deref()));
+    let fork_parent_id = fork_parent.as_ref().map(|(o, _)| o.parent_id.clone()).unwrap_or_default();
 
     // ---- outbox --------------------------------------------------------------------------------
     let (queued, queue_error) = {
@@ -215,6 +293,9 @@ pub fn ConversationView(id: String) -> Element {
     let open_ide = {
         move |kind: IdeKind| {
             ui.update_prefs(|p| p.ide_target = Some(kind.key().to_string()));
+            if services().demo_blocked() {
+                return;
+            }
             let launch = ide.read().clone();
             let target = match &launch {
                 None => {
@@ -244,10 +325,9 @@ pub fn ConversationView(id: String) -> Element {
                     );
                 }
                 IdeAction::EmberPlaceholder => {
-                    // TODO(M8, editor core): open the Ember IDE window here.
-                    Message::new("The Ember IDE arrives with the editor core (M8). Use VS Code or Gateway for now.")
-                        .with_duration(MessageDuration::Long)
-                        .show();
+                    // FR-L31: the editor screen; its code area waits for the editor core (M8).
+                    let (project, folder) = IdeLaunch::editor_target(launch.as_ref());
+                    ui.open_editor(project, folder);
                 }
                 IdeAction::Unavailable(why) => {
                     Message::new(format!("{} is not available: {why}", kind.label()))
@@ -292,6 +372,9 @@ pub fn ConversationView(id: String) -> Element {
         let id = id.clone();
         let load = load.clone();
         move |computer_id: String| {
+            if services().demo_blocked() {
+                return;
+            }
             let sid = id.clone();
             let reload = load.clone();
             run(
@@ -315,12 +398,31 @@ pub fn ConversationView(id: String) -> Element {
     let interrupt = {
         let id = id.clone();
         move |_: ()| {
+            if services().demo_blocked() {
+                return;
+            }
             let sid = id.clone();
             run(
                 async move { services().client.interrupt(&sid).await.map_err(|e| e.to_string()) },
                 |r| {
                     if let Err(e) = r {
                         show_message(format!("Could not interrupt: {e}"));
+                    }
+                },
+            );
+        }
+    };
+    let toggle_approve_all = {
+        let id = id.clone();
+        move |_: ()| {
+            more_menu.set(false);
+            let sid = id.clone();
+            let enable = !approve_all;
+            run(
+                async move { services().set_approve_all(&sid, enable).await },
+                |r| {
+                    if let Err(e) = r {
+                        show_message(format!("Could not switch approve everything: {e}"));
                     }
                 },
             );
@@ -396,7 +498,7 @@ pub fn ConversationView(id: String) -> Element {
                 fill_max_width: true,
                 alignment: Alignment::CenterStart,
                 space_role: SpaceRole::Sm,
-                if compact {
+                if compact && !embedded {
                     Button {
                         text: "",
                         icon: IconRole::Back,
@@ -406,8 +508,8 @@ pub fn ConversationView(id: String) -> Element {
                 }
                 Column {
                     weight: 1.0,
-                    Text { text: title.clone(), type_role: TypeRole::Title, max_lines: 1, overflow: TextOverflow::Ellipsis }
-                    Text {
+                    Txt { text: title.clone(), type_role: TypeRole::Title, max_lines: 1, overflow: TextOverflow::Ellipsis }
+                    Txt {
                         text: meta.clone(),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -424,6 +526,35 @@ pub fn ConversationView(id: String) -> Element {
                     },
                     Button { text: if pinned { "Unpin" } else { "Pin" }, variant: ButtonVariant::Text, fill_max_width: true, on_click: pin_this }
                     Button { text: "Export", variant: ButtonVariant::Text, fill_max_width: true, on_click: export_this }
+                    Button {
+                        text: model::FORK_MENU_LABEL,
+                        variant: ButtonVariant::Text,
+                        fill_max_width: true,
+                        enabled: fork_enabled,
+                        on_click: fork_last,
+                    }
+                    Button {
+                        text: model::approve_all_menu_label(approve_all),
+                        variant: ButtonVariant::Text,
+                        fill_max_width: true,
+                        on_click: toggle_approve_all,
+                    }
+                }
+            }
+            if let Some(text) = model::approve_all_banner(approve_all) {
+                Banner { text, tone: Tone::Warning }
+            }
+            if let Some(text) = fork_label.clone() {
+                Row {
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Txt { text, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Button {
+                        text: "Open",
+                        variant: ButtonVariant::Text,
+                        on_click: { let p = fork_parent_id.clone(); move |_| ui.open_conversation(&p) },
+                    }
                 }
             }
             // Computer and IDE, a row of their own (they do not fit beside the title on a phone).
@@ -431,7 +562,7 @@ pub fn ConversationView(id: String) -> Element {
                 fill_max_width: true,
                 alignment: Alignment::CenterStart,
                 space_role: SpaceRole::Sm,
-                Text { text: "On", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                Txt { text: "On", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                 Menu {
                     expanded: computer_menu(),
                     on_dismiss: move |_| computer_menu.set(false),
@@ -444,7 +575,7 @@ pub fn ConversationView(id: String) -> Element {
                         }
                     },
                     if computers.is_empty() {
-                        Text { text: "No computers registered", type_role: TypeRole::Caption }
+                        Txt { text: "No computers registered", type_role: TypeRole::Caption }
                     }
                     for c in computers.iter().cloned() {
                         Button {
@@ -467,7 +598,9 @@ pub fn ConversationView(id: String) -> Element {
                 if pending > 0 {
                     Badge { text: format!("{pending} approval{} waiting", if pending == 1 { "" } else { "s" }), tone: Tone::Warning }
                 }
-                // FR-L7: top right of the conversation view.
+                // FR-L7: top right of the conversation view. The session screen has its own
+                // chooser in its top bar (FR-L18), so an embedded view leaves it out.
+                if !embedded {
                 Menu {
                     expanded: ide_menu(),
                     on_dismiss: move |_| ide_menu.set(false),
@@ -493,6 +626,7 @@ pub fn ConversationView(id: String) -> Element {
                             },
                         }
                     }
+                }
                 }
             }
             ConnectionBanner {}
@@ -530,7 +664,7 @@ pub fn ConversationView(id: String) -> Element {
                         fill_max_height: true,
                         alignment: Alignment::Center,
                         arrangement: Arrangement::Center,
-                        Text {
+                        Txt {
                             text: if status == LauncherStatus::Idle { "Say what to work on." } else { "Loading the conversation\u{2026}" },
                             type_role: TypeRole::Body,
                             color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -546,7 +680,7 @@ pub fn ConversationView(id: String) -> Element {
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
                     Badge { text: format!("{} queued", queued.len()), tone: Tone::Accent }
-                    Text {
+                    Txt {
                         text: format!("Sent in order when the current turn ends. Next: {}", model::one_line(&queued[0], 60)),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -569,12 +703,12 @@ pub fn ConversationView(id: String) -> Element {
 
             // ---- mention suggestions (FR-T6) ------------------------------------------------------
             if !suggestions.is_empty() {
-                Card {
+                EmberCard {
                     fill_max_width: true,
-                    padding_role: SpaceRole::Xs,
+                    padding: SP[1],
                     Column {
                         fill_max_width: true,
-                        Text {
+                        Txt {
                             text: "Mention a session",
                             type_role: TypeRole::Caption,
                             color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -599,7 +733,7 @@ pub fn ConversationView(id: String) -> Element {
                     fill_max_width: true,
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
-                    Text {
+                    Txt {
                         text: format!("Mentioning {}", picked.join(", ")),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -611,17 +745,24 @@ pub fn ConversationView(id: String) -> Element {
                 }
             }
 
+            // The session screen shows the model and mode chips (FR-L15, FR-L16).
+            if embedded {
+                crate::ui::session::ComposerChips { session: id.clone() }
+            }
             // ---- composer ----------------------------------------------------------------------
             Row {
                 fill_max_width: true,
-                material: MaterialRole::Regular,
-                shape_role: ShapeRole::Large,
-                padding_role: SpaceRole::Xs,
+                background: paint(theme.palette.surface),
+                border_width: 1.0,
+                border_color: paint(theme.palette.line),
+                corner_radius: CORNER_XL,
+                padding: SP[1],
                 space_role: SpaceRole::Xs,
                 alignment: Alignment::CenterStart,
                 for generation in [composer_generation()] {
-                    TextField {
+                    EmberField {
                         key: "composer-{generation}",
+                        bare: true,
                         weight: 1.0,
                         multiline: true,
                         placeholder: if busy { "Queue a message for the next turn" } else { "Message (@@ mentions a session)" },
@@ -654,13 +795,14 @@ pub fn ConversationView(id: String) -> Element {
 
 /// One transcript entry.
 #[component]
-fn TranscriptRow(
+pub(crate) fn TranscriptRow(
     session: String,
     agent: String,
     item: TranscriptItem,
     expanded: Signal<HashSet<String>>,
     answering: Signal<HashSet<String>>,
 ) -> Element {
+    let theme = use_ember_theme();
     match item {
         TranscriptItem::User { text, .. } => rsx! {
             dioxus_compose::Box {
@@ -670,12 +812,12 @@ fn TranscriptRow(
                 Column {
                     alignment: Alignment::CenterEnd,
                     space_role: SpaceRole::Xs,
-                    Text { text: "You", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Txt { text: "You", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                     Column {
-                        background: Paint::Role(ColorRole::PrimaryContainer),
-                        shape_role: ShapeRole::Large,
-                        padding_role: SpaceRole::Md,
-                        MessageText { text, ink: ColorRole::OnPrimaryContainer }
+                        background: paint(theme.palette.ink),
+                        corner_radius: CORNER_BUBBLE,
+                        padding: SP[2] + 4.0,
+                        MessageText { text, ink: ColorRole::OnPrimary }
                     }
                 }
             }
@@ -690,15 +832,15 @@ fn TranscriptRow(
                     Row {
                         space_role: SpaceRole::Xs,
                         alignment: Alignment::CenterStart,
-                        Text { text: agent, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                        Txt { text: agent, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                         if streaming {
                             Spinner { size: 10.0 }
                         }
                     }
                     Column {
-                        background: Paint::Role(ColorRole::SurfaceContainer),
-                        shape_role: ShapeRole::Large,
-                        padding_role: SpaceRole::Md,
+                        background: paint(theme.palette.surface_2),
+                        corner_radius: CORNER_BUBBLE,
+                        padding: SP[2] + 4.0,
                         // A reply still arriving shows a caret, so an empty one does not look dead.
                         MessageText { text: if streaming { format!("{text}\u{2589}") } else { text } }
                     }
@@ -728,9 +870,9 @@ fn TranscriptRow(
             let (out_text, out_err) = result.as_ref().map(|r| (r.output.clone(), r.is_error)).unwrap_or_default();
             let show_tail = has_result && !out_text.trim().is_empty();
             rsx! {
-                Card {
+                EmberCard {
                     fill_max_width: true,
-                    padding_role: SpaceRole::Sm,
+                    padding: SP[2],
                     Column {
                         fill_max_width: true,
                         space_role: SpaceRole::Xs,
@@ -741,8 +883,8 @@ fn TranscriptRow(
                             if !has_result {
                                 Spinner {}
                             }
-                            Text { text: name, type_role: TypeRole::BodyStrong }
-                            Text {
+                            Txt { text: name, type_role: TypeRole::BodyStrong }
+                            Txt {
                                 text: summary,
                                 type_role: TypeRole::Caption,
                                 color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -759,10 +901,10 @@ fn TranscriptRow(
                             }
                         }
                         if open {
-                            Text { text: "Input", type_role: TypeRole::Label }
+                            Txt { text: "Input", type_role: TypeRole::Label }
                             CodeText { text: model::json_pretty(&input) }
                             if has_result {
-                                Text { text: if out_err { "Error" } else { "Result" }, type_role: TypeRole::Label }
+                                Txt { text: if out_err { "Error" } else { "Result" }, type_role: TypeRole::Label }
                                 CodeText { text: out_text.clone(), error: out_err }
                             }
                         } else if show_tail {
@@ -783,7 +925,7 @@ fn TranscriptRow(
                     let (sid, aid) = (session.clone(), approval_id.clone());
                     let done = approval_id.clone();
                     run(
-                        async move { services().client.answer(&sid, &aid, decision).await.map_err(|e| e.to_string()) },
+                        async move { services().answer(&sid, &aid, decision).await },
                         move |r: Result<(), String>| {
                             let mut a = answering;
                             a.write().remove(&done);
@@ -796,15 +938,14 @@ fn TranscriptRow(
             };
             let (a1, a2, a3) = (answer.clone(), answer.clone(), answer);
             rsx! {
-                Card {
+                EmberCard {
                     fill_max_width: true,
-                    padding_role: SpaceRole::Sm,
-                    border_width: if state == ApprovalState::Pending { Some(2.0) } else { None },
-                    border_color: Paint::Role(ColorRole::Tertiary),
+                    padding: SP[2],
+                    border: if state == ApprovalState::Pending { Some(theme.palette.orange.strong) } else { None },
                     Column {
                         fill_max_width: true,
                         space_role: SpaceRole::Xs,
-                        Text { text: format!("{tool} wants approval"), type_role: TypeRole::BodyStrong }
+                        Txt { text: format!("{tool} wants approval"), type_role: TypeRole::BodyStrong }
                         CodeText { text: model::json_pretty(&input), max_lines: 12 }
                         match state {
                             ApprovalState::Pending => rsx! {
@@ -837,7 +978,7 @@ fn TranscriptRow(
                                 }
                             },
                             ApprovalState::Resolved(d) => rsx! {
-                                Text {
+                                Txt {
                                     text: match d {
                                         ApprovalDecision::AllowOnce => "Allowed once",
                                         ApprovalDecision::AllowAlways => "Always allowed",
@@ -848,7 +989,7 @@ fn TranscriptRow(
                                 }
                             },
                             ApprovalState::Abandoned => rsx! {
-                                Text {
+                                Txt {
                                     text: "Not answered before the turn ended",
                                     type_role: TypeRole::Caption,
                                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -859,7 +1000,16 @@ fn TranscriptRow(
                 }
             }
         }
-        TranscriptItem::TurnEnded { outcome, .. } => {
+        TranscriptItem::TurnEnded { seq, outcome } => {
+            let ui = use_ui();
+            let can = {
+                let _ = *ui.live.launcher.read();
+                services().client.read(|st| model::fork_turn_enabled(&st.fork_info(&session), outcome, seq))
+            };
+            let fork_here = {
+                let session = session.clone();
+                move |_: ()| fork_from(ui, session.clone(), Some(seq))
+            };
             let (text, ink) = match outcome {
                 TurnOutcome::Completed => ("Turn completed", ColorRole::OnSurfaceVariant),
                 TurnOutcome::Interrupted => ("Interrupted", ColorRole::OnSurfaceVariant),
@@ -872,7 +1022,10 @@ fn TranscriptRow(
                     space_role: SpaceRole::Sm,
                     padding_role: SpaceRole::Xs,
                     dioxus_compose::Box { weight: 1.0, Divider {} }
-                    Text { text, type_role: TypeRole::Caption, color: Paint::Role(ink) }
+                    Txt { text, type_role: TypeRole::Caption, color: Paint::Role(ink) }
+                    if outcome == TurnOutcome::Completed {
+                        Button { text: model::FORK_TURN_LABEL, variant: ButtonVariant::Text, enabled: can, on_click: fork_here }
+                    }
                     dioxus_compose::Box { weight: 1.0, Divider {} }
                 }
             }
@@ -885,7 +1038,7 @@ fn TranscriptRow(
                 fill_max_width: true,
                 alignment: Alignment::Center,
                 padding_role: SpaceRole::Xs,
-                Text {
+                Txt {
                     text,
                     type_role: TypeRole::Caption,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -918,6 +1071,9 @@ fn TeamPanel(session: String) -> Element {
         .filter(|t| !matches!(t.status, ember_client::wire::TaskStatus::Done | ember_client::wire::TaskStatus::Cancelled))
         .count();
     let end = move |team_id: String, sid: String, name: String| {
+        if services().demo_blocked() {
+            return;
+        }
         run(
             async move { services().client.end_teammate(&team_id, &sid).await.map_err(|e| e.to_string()) },
             move |r| match r {
@@ -927,9 +1083,9 @@ fn TeamPanel(session: String) -> Element {
         );
     };
     rsx! {
-        Card {
+        EmberCard {
             fill_max_width: true,
-            padding_role: SpaceRole::Sm,
+            padding: SP[2],
             Column {
                 fill_max_width: true,
                 space_role: SpaceRole::Xs,
@@ -937,7 +1093,7 @@ fn TeamPanel(session: String) -> Element {
                     fill_max_width: true,
                     alignment: Alignment::CenterStart,
                     space_role: SpaceRole::Sm,
-                    Text {
+                    Txt {
                         text: format!(
                             "Team \u{00b7} {active} teammate{} \u{00b7} {open} open task{}",
                             if active == 1 { "" } else { "s" },
@@ -960,11 +1116,11 @@ fn TeamPanel(session: String) -> Element {
                             fill_max_width: true,
                             alignment: Alignment::CenterStart,
                             space_role: SpaceRole::Sm,
-                            Text {
+                            Txt {
                                 text: if r.leader { format!("{} (leader)", r.name) } else { r.name.clone() },
                                 type_role: if r.this { TypeRole::BodyStrong } else { TypeRole::Body },
                             }
-                            Text {
+                            Txt {
                                 text: if r.ended { format!("{} \u{00b7} ended", r.agent) } else { format!("{} \u{00b7} {}", r.agent, r.status) },
                                 type_role: TypeRole::Caption,
                                 color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -999,10 +1155,10 @@ fn TeamPanel(session: String) -> Element {
                         }
                     }
                     if tasks.is_empty() {
-                        Text { text: "No tasks yet", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                        Txt { text: "No tasks yet", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                     }
                     for t in tasks.iter().cloned() {
-                        Text {
+                        Txt {
                             key: "{t.id}",
                             text: model::task_line(&t),
                             type_role: TypeRole::Caption,

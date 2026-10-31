@@ -35,7 +35,7 @@ Three problems come up every day in agentic development.
 
 1. The main screen lists your **projects**. Each project shows its **sessions** with a status:
    running, waiting for approval, finished or failed. Your **computers** are listed below, with
-   whether each is online.
+   whether each is online. Top tabs switch between **Home** (general chat, usage, harnesses), **Project** (this screen, the default) and **Channels** (per-project feed and chat with agents and people; planned, `INTENT.md` D22).
 2. You open a conversation to steer an agent. The agent runs on the main server, and its tools act
    on the session's current computer. You send messages, answer approvals, interrupt a turn, or
    move the session to another computer.
@@ -118,7 +118,7 @@ settings and what each program stores.
 
 | ID | Rule | Why |
 | -- | ---- | --- |
-| **E1** | The launcher and conversation screens never contain a webview. | The client is built natively on `dioxus-compose`; the IDE window is the one place a webview may exist. |
+| **E1** | The launcher and conversation screens never contain a webview. | The client is built natively on `compose-rust`, with only the IDE screens on `dioxus-compose`; the IDE window is the one place a webview may exist. |
 | **E2** | A wrapped agent keeps its native behaviour. Ember adds around it and never patches it. | Your agent settings, models and session IDs keep working as they do natively. |
 | **E3** | Conversations, agent processes and account credentials live on the main server. | A computer is where tools run, so a conversation is never tied to one computer. |
 | **E4** | VS Code is wrapped, never modified, and its Extension Host is never reimplemented. | Extensions then behave exactly as they do in VS Code. |
@@ -158,7 +158,7 @@ darkpyonix-ember/
 │  ├─ client/            client core: connection, sync and state below the UI
 │  ├─ transport/         peer-to-peer connections (iroh backend and an in-memory fake)
 │  ├─ hub/               darkpyonix.dev hub client: device registration and directory
-│  ├─ bridge/            IDE window bridge: versioned webview and native messages
+│  ├─ bridge/            IDE window bridge: webview and native messages
 │  ├─ editor-conn/       Rust client for a Code-OSS server
 │  ├─ editor/            editor core session layer (planned editor, #32)
 │  ├─ proxy/             the VS Code Web wrapping layer (Python, FastAPI)

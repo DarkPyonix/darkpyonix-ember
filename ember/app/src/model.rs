@@ -7,10 +7,10 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use ember_client::state::{Computer, ConnectionState, Reachability, State};
 use ember_client::transcript::{Transcript, TranscriptItem};
-use ember_client::wire::{MentionCandidate, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
+use ember_client::wire::{ForkInfo, ForkOrigin, MentionCandidate, TurnOutcome, SearchHit, SessionStatus, TaskStatus, TeamRole, TeamTask, TeamView};
 use ember_client::LauncherStatus;
 
-use crate::server::{Account, ComputerStatus};
+use crate::server::{Account, ChatGptAccount, ComputerStatus};
 
 // ---- status ------------------------------------------------------------------------------------
 
@@ -43,6 +43,43 @@ pub fn status_label(s: LauncherStatus) -> &'static str {
 /// The agent is working: a new message would be queued (FR-L6), the interrupt button shows.
 pub fn is_busy(s: LauncherStatus) -> bool {
     matches!(s, LauncherStatus::Running | LauncherStatus::WaitingForApproval)
+}
+
+/// Banner shown on a conversation while its approve-everything mode is on (FR-A5); `None` when
+/// off, so the indicator is visible exactly while the mode is active.
+pub fn approve_all_banner(on: bool) -> Option<&'static str> {
+    on.then_some("Approve everything is on: this session's tool requests are allowed without asking.")
+}
+
+/// Menu entry that flips the mode.
+pub fn approve_all_menu_label(on: bool) -> &'static str {
+    if on { "Ask before tools again" } else { "Approve everything" }
+}
+
+/// Menu entry that forks from the last completed turn (FR-S5).
+pub const FORK_MENU_LABEL: &str = "Fork from last turn";
+
+/// Button under a completed turn.
+pub const FORK_TURN_LABEL: &str = "Fork from here";
+
+/// Whether the menu entry is enabled: the server reports a completed turn, or the transcript
+/// already shows one (the fork facts are fetched when the view opens, so a turn that ended
+/// since is only in the transcript). Disabled, not failing, otherwise (FR-S5).
+pub fn fork_menu_enabled(info: &ForkInfo, transcript_has_completed_turn: bool) -> bool {
+    info.can_fork || transcript_has_completed_turn
+}
+
+/// Whether the "Fork from here" button under the turn that ended at `seq` with `outcome` is
+/// enabled. Only completed turns can be forked from; when the server listed its turns, `seq`
+/// must be one of them.
+pub fn fork_turn_enabled(info: &ForkInfo, outcome: TurnOutcome, seq: i64) -> bool {
+    outcome == TurnOutcome::Completed && (info.turns.is_empty() || info.turns.contains(&seq))
+}
+
+/// "Forked from <parent>" line of a forked session; the parent's title when known, else its id.
+pub fn fork_origin_label(origin: &ForkOrigin, parent_title: Option<&str>) -> String {
+    let name = parent_title.filter(|t| !t.is_empty()).unwrap_or(&origin.parent_id);
+    format!("Forked from {name}")
 }
 
 /// Badge tone; the UI maps it to colour roles.
@@ -202,6 +239,22 @@ pub struct SessionRow {
 /// Labels for account ids (`label (agent)`), from `GET /accounts`.
 pub fn account_labels(accounts: &[Account]) -> HashMap<String, String> {
     accounts.iter().map(|a| (a.id.clone(), a.label.clone())).collect()
+}
+
+/// One line of the usage view for a ChatGPT plan account (FR-U4): tokens today, the weekly
+/// cap (which OpenAI does not report, so the line says where it is set) and a limit notice.
+pub fn chatgpt_usage_line(a: &ChatGptAccount) -> String {
+    let mut parts = vec![format!("{} tokens today", a.tokens_today)];
+    match &a.weekly_cap {
+        Some(c) if c.known => parts.push("weekly cap known".to_string()),
+        Some(_) => parts.push("weekly cap set in ChatGPT settings, not reported to apps".to_string()),
+        None => {}
+    }
+    if a.limited {
+        let reason = a.limit_reason.as_deref().unwrap_or("limit reached");
+        parts.push(format!("limited: {reason}"));
+    }
+    parts.join(" | ")
 }
 
 /// What a session row needs from the outside world besides [`State`].
@@ -382,10 +435,6 @@ pub fn connection_banner(c: &ConnectionState) -> Option<(String, Tone)> {
         ConnectionState::Reconnecting { retry_in_ms, error, .. } => Some((
             format!("Disconnected ({error}). Retrying in {}s", retry_in_ms.div_ceil(1000)),
             Tone::Warning,
-        )),
-        ConnectionState::Incompatible { server, client } => Some((
-            format!("This app speaks push v{client}, the server v{server}. Update one of them."),
-            Tone::Error,
         )),
     }
 }
@@ -687,6 +736,27 @@ mod tests {
     }
 
     #[test]
+    fn fr_u4_usage_line_shows_the_weekly_cap() {
+        use crate::server::WeeklyCap;
+        let mut a = ChatGptAccount {
+            id: "g".into(),
+            label: "me".into(),
+            email: None,
+            status: "signed_in".into(),
+            limited: false,
+            limited_until: None,
+            limit_reason: None,
+            tokens_today: 15,
+            weekly_cap: Some(WeeklyCap { known: false, manage_url: String::new(), note: String::new() }),
+        };
+        let line = chatgpt_usage_line(&a);
+        assert!(line.contains("15 tokens today") && line.contains("weekly cap"), "{line}");
+        a.limited = true;
+        a.limit_reason = Some("subscription_sharing_usage_limit_exceeded".into());
+        assert!(chatgpt_usage_line(&a).contains("limited: subscription_sharing_usage_limit_exceeded"));
+    }
+
+    #[test]
     fn relative_times() {
         let now = 10_000_000_000;
         assert_eq!(relative_time(now, now - 1000), "just now");
@@ -934,5 +1004,45 @@ mod tests {
         assert_eq!((rows[1].open_tasks, rows[1].status), (1, "Running"));
         assert_eq!(task_line(&team.tasks[0]), "#1 [in progress] task 1 \u{b7} alice");
         assert_eq!(task_line(&team.tasks[2]), "#3 [open] task 3 \u{b7} unassigned");
+    }
+
+    #[test]
+    fn fr_a5_indicator_shows_only_while_approve_all_is_on() {
+        assert!(approve_all_banner(false).is_none());
+        assert!(approve_all_banner(true).unwrap().contains("Approve everything is on"));
+        assert_eq!(approve_all_menu_label(false), "Approve everything");
+        assert_eq!(approve_all_menu_label(true), "Ask before tools again");
+    }
+
+    #[test]
+    fn fr_a5_indicator_follows_the_client_state() {
+        let mut s = State::new();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "p", SessionStatus::Idle, 0)]));
+        assert!(approve_all_banner(s.approve_all("a")).is_none());
+        s.apply(Input::Push(Push::ApproveAll { session_id: "a".into(), enabled: true }));
+        assert!(approve_all_banner(s.approve_all("a")).is_some());
+    }
+
+    #[test]
+    fn fr_s5_fork_actions_are_disabled_not_failing() {
+        let none = ForkInfo::default();
+        assert!(!fork_menu_enabled(&none, false));
+        assert!(fork_menu_enabled(&none, true));
+        let some = ForkInfo { can_fork: true, turns: vec![3, 8], origin: None };
+        assert!(fork_menu_enabled(&some, false));
+        assert!(fork_turn_enabled(&some, TurnOutcome::Completed, 8));
+        assert!(!fork_turn_enabled(&some, TurnOutcome::Completed, 5));
+        assert!(!fork_turn_enabled(&some, TurnOutcome::Interrupted, 3));
+        assert!(!fork_turn_enabled(&some, TurnOutcome::Failed, 3));
+        // Facts not loaded yet: a completed turn in the transcript may be forked.
+        assert!(fork_turn_enabled(&none, TurnOutcome::Completed, 3));
+    }
+
+    #[test]
+    fn fr_s5_forked_session_names_its_parent() {
+        let o = ForkOrigin { parent_id: "abc".into(), turn_seq: 4, forked_at: 1 };
+        assert_eq!(fork_origin_label(&o, Some("Fix login")), "Forked from Fix login");
+        assert_eq!(fork_origin_label(&o, Some("")), "Forked from abc");
+        assert_eq!(fork_origin_label(&o, None), "Forked from abc");
     }
 }

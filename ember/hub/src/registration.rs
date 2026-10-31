@@ -200,7 +200,7 @@ impl RegistrationState {
     }
 }
 
-/// Gives `reg` a resolve token if it has none (`POST /v1/me/resolve-token` with the device
+/// Gives `reg` a resolve token if it has none (`POST /me/resolve-token` with the device
 /// token); `Ok(true)` when one was issued (the caller saves the registration). A registration
 /// that has one is left alone: issuing a new one revokes the old.
 pub async fn ensure_resolve_token(reg: &mut Registration) -> Result<bool, HubError> {
@@ -211,7 +211,7 @@ pub async fn ensure_resolve_token(reg: &mut Registration) -> Result<bool, HubErr
     Ok(true)
 }
 
-/// Asks the hub whether `client`'s token still works (`GET /v1/me`).
+/// Asks the hub whether `client`'s token still works (`GET /me`).
 pub async fn check_registration(client: &HubClient) -> RegistrationState {
     match client.me().await {
         Ok(me) => RegistrationState::Active(me),
@@ -241,7 +241,7 @@ fn publish(tx: &watch::Sender<RegistrationState>, client: &HubClient, state: Reg
     });
 }
 
-/// Checks the registration now and then every `period` (`GET /v1/me`); the receiver sees each
+/// Checks the registration now and then every `period` (`GET /me`); the receiver sees each
 /// change. Stops after a revocation is seen (it is final: removed keys are not reused) or when
 /// every receiver is dropped. See [`watch_registration_with`] for the long-poll variant.
 pub fn watch_registration(
@@ -265,9 +265,9 @@ pub fn watch_registration(
 
 /// [`watch_registration`], but when the hub advertises the device-list long-poll
 /// ([`HubInfo::supports_devices_wait`]) the token is exercised by a held
-/// `GET /v1/devices?wait=` ([`DeviceWatcher`]) instead of a `GET /v1/me` every `period`: the
+/// `GET /devices?wait=` ([`DeviceWatcher`]) instead of a `GET /me` every `period`: the
 /// hub answers the held request when the device is removed, so revocation is seen within a
-/// round trip. Without the capability (or `info` is `None`, e.g. `/v1/config` answered `404`)
+/// round trip. Without the capability (or `info` is `None`, e.g. `/config` answered `404`)
 /// this is [`watch_registration`].
 pub fn watch_registration_with(
     client: HubClient,
@@ -281,7 +281,7 @@ pub fn watch_registration_with(
     let retry = period.min(Duration::from_secs(10));
     let (tx, rx) = watch::channel(RegistrationState::Unknown);
     let task = tokio::spawn(async move {
-        // `Active` carries `/v1/me`: ask it first (and again after an error).
+        // `Active` carries `/me`: ask it first (and again after an error).
         let mut watcher = Some(watcher);
         loop {
             let state = check_registration(&client).await;
@@ -345,7 +345,7 @@ mod tests {
         let file = RegistrationFile::in_dir(&dir.path().join("state"));
         assert!(file.load().unwrap().is_none());
         let reg = Registration {
-            hub_url: "https://darkpyonix.dev".into(),
+            hub_url: "https://api.darkpyonix.dev".into(),
             device: Device {
                 endpoint_id: SecretKey::generate().peer_id(),
                 name: "mini".into(),

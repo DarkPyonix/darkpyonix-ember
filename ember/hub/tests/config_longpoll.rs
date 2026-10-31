@@ -1,4 +1,4 @@
-//! The hub additions of darkpyonix-core PR #34 against the fake hub: `GET /v1/config` discovery
+//! The hub additions of darkpyonix-core PR #34 against the fake hub: `GET /config` discovery
 //! (FR-H8) and the fallback when a hub answers `404`; the device list's weak `ETag`,
 //! `If-None-Match` and `?wait=0..25` long-poll (FR-H9); `401 device_removed` as revocation,
 //! distinct from `401 invalid_credentials`; resolve tokens (NFR-H2); self-removal, rename and
@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use ember_hub::fake::{FakeHub, FAKE_API_VERSION};
+use ember_hub::fake::FakeHub;
 use ember_hub::{
     check_registration, ensure_resolve_token, watch_registration_with, DeviceApp, DeviceWatcher, DevicesPoll,
     HubConfig, HubError, HubInfo, Registration, RegistrationState, RelaySource, Role,
@@ -18,9 +18,8 @@ async fn config_is_discovered_from_the_hub() {
     let hub = FakeHub::start().await;
     hub.set_config_relays(vec!["https://relay-a.example.net/".into(), "https://relay-b.example.net".into()]);
 
-    let info = hub.client().config().await.unwrap().expect("the fake serves /v1/config");
-    assert_eq!(info.api_version, Some(FAKE_API_VERSION));
-    assert!(info.supports_devices_wait(), "api_version 1 has the long-poll");
+    let info = hub.client().config().await.unwrap().expect("the fake serves /config");
+    assert!(info.supports_devices_wait(), "a hub that serves /config has the long-poll");
     assert_eq!(info.link_url, Some(format!("{}/link", hub.url())));
 
     // Without discovery an IP-address hub has no relay; with it, the hub's list is used.
@@ -50,7 +49,7 @@ async fn config_falls_back_to_derivation_on_404_and_when_unreachable() {
     assert_eq!(hub.client().config().await.unwrap(), None, "404 is 'no such endpoint', not an error");
 
     let cfg = HubConfig::new(hub.url()).discover().await;
-    assert_eq!(cfg, HubConfig::new(hub.url()), "nothing changes without /v1/config");
+    assert_eq!(cfg, HubConfig::new(hub.url()), "nothing changes without /config");
     assert_eq!(cfg.relay_source, RelaySource::Derived);
     assert_eq!(cfg.pkarr_url(), format!("{}/pkarr", hub.url()));
     assert!(!cfg.supports_devices_wait(), "no config: poll the device list");
@@ -60,7 +59,7 @@ async fn config_falls_back_to_derivation_on_404_and_when_unreachable() {
     drop(hub);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(HubConfig::new(&url).discover().await, HubConfig::new(&url));
-    assert_eq!(HubConfig::new("https://hub.example.net").relay_url.as_deref(), Some("https://relay.hub.example.net"));
+    assert_eq!(HubConfig::new("https://hub.example.net").relay_url.as_deref(), Some("https://relay.example.net"));
 }
 
 #[tokio::test]
@@ -159,9 +158,9 @@ async fn without_config_the_watcher_polls_and_a_hub_ignoring_wait_is_polled() {
     let polls = hub.device_list_requests() - before;
     assert!((2..=6).contains(&polls), "{polls} polls in 450 ms at a 100 ms period");
 
-    // A hub that says api_version 1 but answers `wait` at once is detected and polled.
+    // A hub that serves /config but answers `wait` at once is detected and polled.
     hub.set_honour_wait(false);
-    let v1 = HubInfo { api_version: Some(1), ..Default::default() };
+    let v1 = HubInfo::default();
     let mut w = DeviceWatcher::new(client, Some(&v1), Duration::from_millis(100));
     assert!(w.is_long_poll());
     w.next().await.unwrap();
@@ -170,13 +169,24 @@ async fn without_config_the_watcher_polls_and_a_hub_ignoring_wait_is_polled() {
 }
 
 #[tokio::test]
+async fn versioned_paths_are_404_like_the_real_hub() {
+    let hub = FakeHub::start().await;
+    let http = reqwest::Client::new();
+    for p in ["/v1/config", "/v1/devices", "/v1/me", "/v1/device-links"] {
+        let r = http.get(format!("{}{p}", hub.url())).send().await.unwrap();
+        assert_eq!(r.status(), 404, "{p}");
+    }
+    assert_eq!(http.get(format!("{}/config", hub.url())).send().await.unwrap().status(), 200);
+}
+
+#[tokio::test]
 async fn wait_out_of_range_is_400() {
     let hub = FakeHub::start().await;
     let token = hub.register(SecretKey::generate().peer_id(), "s", Role::MainServer);
     let http = reqwest::Client::new();
-    let r = http.get(format!("{}/v1/devices?wait=26", hub.url())).bearer_auth(&token).send().await.unwrap();
+    let r = http.get(format!("{}/devices?wait=26", hub.url())).bearer_auth(&token).send().await.unwrap();
     assert_eq!(r.status(), 400);
-    let r = http.get(format!("{}/v1/devices?wait=0", hub.url())).bearer_auth(&token).send().await.unwrap();
+    let r = http.get(format!("{}/devices?wait=0", hub.url())).bearer_auth(&token).send().await.unwrap();
     assert_eq!(r.status(), 200);
 }
 

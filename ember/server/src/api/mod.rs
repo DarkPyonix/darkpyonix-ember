@@ -1,6 +1,6 @@
 //! HTTP API and push channel for clients (SPEC §L via FR-S*, PR-1).
 //!
-//! All routes live under `/api/v1`. The push channel is a WebSocket at `/api/v1/push`; on connect
+//! All routes live under `/api`. The push channel is a WebSocket at `/api/push`; on connect
 //! a client sends nothing and receives every [`Push`] from then on. To catch up after a gap, it
 //! reads `/sessions/{id}/events?after=<seq>` and then relies on the stream.
 //!
@@ -11,15 +11,16 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/projects` | → `[Project]` (`{name, created_at, computers}`) |
-//! | POST   | `/api/v1/projects` | `{name}` → 201 `Project` (200 when it existed) |
-//! | GET    | `/api/v1/projects/{name}` | → `Project` |
-//! | PUT    | `/api/v1/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
-//! | DELETE | `/api/v1/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
-//! | PATCH  | `/api/v1/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
-//! | GET    | `/api/v1/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
-//! | GET    | `/api/v1/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
-//! | POST   | `/api/v1/sessions/{id}/fork` | → 501 `{error, reason}`: no agent supports forking yet |
+//! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers}`) |
+//! | POST   | `/api/projects` | `{name}` → 201 `Project` (200 when it existed) |
+//! | GET    | `/api/projects/{name}` | → `Project` |
+//! | PUT    | `/api/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
+//! | DELETE | `/api/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
+//! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
+//! | GET    | `/api/search?q=&limit=` | → `[SearchHit]` (`{session_id, seq, kind, snippet, title, project, archived}`) |
+//! | GET    | `/api/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
+//! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
+//! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
 //!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
 //! changes are pushed (`project_updated`, `session_updated`).
@@ -43,27 +44,28 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::agents::AgentKind;
 use crate::events::ApprovalDecision;
 use crate::projects::ProjectError;
-use crate::session::{NewSession, Push, SessionError, Sessions, PUSH_VERSION};
+use crate::session::{NewSession, Push, SessionError, Sessions};
 use crate::store::{now_ms, SessionPatch};
 
 pub fn router(sessions: Arc<Sessions>) -> Router {
     Router::new()
-        .route("/api/v1/health", get(|| async { Json(json!({ "ok": true, "push_version": PUSH_VERSION })) }))
-        .route("/api/v1/agents", get(agents))
-        .route("/api/v1/sessions", get(list_sessions).post(create_session))
-        .route("/api/v1/sessions/{id}", get(get_session).patch(patch_session))
-        .route("/api/v1/sessions/{id}/export", get(export_session))
-        .route("/api/v1/sessions/{id}/fork", post(fork_session))
-        .route("/api/v1/search", get(search))
-        .route("/api/v1/projects", get(list_projects).post(create_project))
-        .route("/api/v1/projects/{name}", get(get_project))
-        .route("/api/v1/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
-        .route("/api/v1/sessions/{id}/events", get(events))
-        .route("/api/v1/sessions/{id}/messages", post(send_message))
-        .route("/api/v1/sessions/{id}/approvals/{approval_id}", post(answer))
-        .route("/api/v1/sessions/{id}/interrupt", post(interrupt))
-        .route("/api/v1/sessions/{id}/lease", post(lease))
-        .route("/api/v1/push", get(push))
+        .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/api/agents", get(agents))
+        .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/{id}", get(get_session).patch(patch_session))
+        .route("/api/sessions/{id}/export", get(export_session))
+        .route("/api/sessions/{id}/fork", post(fork_session))
+        .route("/api/search", get(search))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/{name}", get(get_project))
+        .route("/api/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
+        .route("/api/sessions/{id}/events", get(events))
+        .route("/api/sessions/{id}/messages", post(send_message))
+        .route("/api/sessions/{id}/approvals/{approval_id}", post(answer))
+        .route("/api/sessions/{id}/approve-all", put(set_approve_all))
+        .route("/api/sessions/{id}/interrupt", post(interrupt))
+        .route("/api/sessions/{id}/lease", post(lease))
+        .route("/api/push", get(push))
         .with_state(sessions)
 }
 
@@ -157,8 +159,17 @@ async fn get_session(
     Path(id): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
     let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing).
-    Ok(Json(json!({ "session": rec, "live": s.is_live(&id).await, "can_fork": false })))
+    // `can_fork`: whether the fork action is offered (FR-S5: disabled, not failing). It needs a
+    // completed turn; `fork_turns` lists the sequence numbers a fork may start after.
+    let turns = crate::fork::completed_turns(&s.store().events_after(&id, 0)?);
+    Ok(Json(json!({
+        "session": rec,
+        "live": s.is_live(&id).await,
+        "can_fork": !turns.is_empty(),
+        "fork_turns": turns,
+        "fork_of": s.store().fork_origin(&id)?,
+        "approve_all": s.approve_all(&id),
+    })))
 }
 
 /// FR-L9: rename, pin, archive.
@@ -201,17 +212,29 @@ fn file_safe(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
-/// FR-S5. No wrapped agent forks yet: Claude Code has no fork-from-turn in its headless mode
-/// and Codex's `thread/fork` is not wired into the adapter (it forks a whole thread, not from a
-/// chosen turn, and needs a second app-server thread per session). Clients read `can_fork`
-/// from `GET /sessions/{id}` and disable the action; this answers 501 for anyone who calls it.
+#[derive(Deserialize, Default)]
+struct ForkBody {
+    /// Sequence number of a completed turn's `turn_ended`; the last completed turn when absent.
+    #[serde(default)]
+    turn_seq: Option<i64>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+/// FR-S5: a new session that starts after a completed turn of this one. 409 when the session has
+/// no such turn (the client reads `can_fork` and does not offer the action).
 async fn fork_session(
     State(s): State<Arc<Sessions>>,
     Path(id): Path<String>,
+    body: Option<Json<ForkBody>>,
 ) -> ApiResult<Response> {
-    let rec = s.store().session(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
-    let reason = format!("forking is not supported for {} sessions yet", rec.agent.as_str());
-    Ok((StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": reason, "reason": reason }))).into_response())
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    match s.fork(&id, b.turn_seq, b.title.as_deref()) {
+        Ok(rec) => Ok((StatusCode::CREATED, Json(rec)).into_response()),
+        Err(crate::fork::ForkError::NotFound(_)) => Err(SessionError::NotFound(id).into()),
+        Err(crate::fork::ForkError::BadTurn(m)) => Err(ApiError(StatusCode::CONFLICT, m)),
+        Err(crate::fork::ForkError::Other(e)) => Err(e.into()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -246,7 +269,7 @@ async fn create_project(
 ) -> ApiResult<impl IntoResponse> {
     let (project, created) = s.store().ensure_project(&b.name)?;
     if created {
-        s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+        s.publish(Push::ProjectUpdated { project: project.clone() });
     }
     Ok((if created { StatusCode::CREATED } else { StatusCode::OK }, Json(project)))
 }
@@ -261,7 +284,7 @@ async fn assign(
     Path((name, computer_id)): Path<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
     let project = s.store().assign_computer(&name, &computer_id)?;
-    s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    s.publish(Push::ProjectUpdated { project: project.clone() });
     Ok(Json(project))
 }
 
@@ -271,7 +294,7 @@ async fn unassign(
     Path((name, computer_id)): Path<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
     let project = s.store().unassign_computer(&name, &computer_id)?;
-    s.publish(Push::ProjectUpdated { v: PUSH_VERSION, project: project.clone() });
+    s.publish(Push::ProjectUpdated { project: project.clone() });
     Ok(Json(project))
 }
 
@@ -319,6 +342,21 @@ async fn answer(
     Ok(StatusCode::ACCEPTED)
 }
 
+#[derive(Deserialize)]
+struct ApproveAllBody {
+    enabled: bool,
+}
+
+/// FR-A5: switch a session's approve-everything mode.
+async fn set_approve_all(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+    Json(b): Json<ApproveAllBody>,
+) -> ApiResult<impl IntoResponse> {
+    s.set_approve_all(&id, b.enabled).await?;
+    Ok(Json(json!({ "approve_all": b.enabled })))
+}
+
 async fn interrupt(
     State(s): State<Arc<Sessions>>,
     Path(id): Path<String>,
@@ -350,7 +388,7 @@ async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiv
             Ok(p) => p,
             // A slow client missed messages: tell it to resync from the events endpoint.
             Err(RecvError::Lagged(n)) => {
-                let lag = json!({ "type": "lagged", "v": PUSH_VERSION, "missed": n }).to_string();
+                let lag = json!({ "type": "lagged", "missed": n }).to_string();
                 if socket.send(Message::Text(lag.into())).await.is_err() {
                     return;
                 }

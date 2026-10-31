@@ -1,0 +1,16 @@
+# Bundle metadata for the Ember client app. compose-rust's packagers read it: [application] and
+# [bundle] for the name, identifier and descriptions, [macos] for the .app name. The version
+# comes from Cargo.toml. There is no icon in the repository yet (TODO: add one and set
+# `icon` under [bundle], then pass it to the packagers).
+
+[application]
+name = "Ember"
+
+[bundle]
+identifier = "dev.darkpyonix.ember"
+publisher = "DarkPyonix"
+short_description = "Ember, a multi-provider LLM development environment."
+long_description = "Ember is a multi-provider, LLM-based development environment and remote IDE client."
+
+[macos]
+bundle_name = "Ember"

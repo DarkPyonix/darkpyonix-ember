@@ -29,8 +29,9 @@ use ember_server::store::Store;
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
 /// - `EMBER_AGY_BIN`: the Antigravity CLI (default `agy` on `PATH`). Its sessions keep a private
 ///   configuration folder each under `<data dir>/agy/`. A version other than the tested one runs
-///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=0` drops agy's `--sandbox`
+///   read-only (INTENT D14); `EMBER_AGY_SANDBOX=1` adds agy's `--sandbox` (off by default)
 /// - `EMBER_SCRIPTED_AGENT=1`: also offer the test agent (development only)
+/// - `EMBER_DEMO_DATA=1`: add a demo ChatGPT plan account with 14 days of usage (screenshots only)
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
 ///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
@@ -55,12 +56,12 @@ use ember_server::store::Store;
 ///   redirect (default: the `EMBER_LISTEN` port)
 /// - `EMBER_TRANSPORT=1`: bind the peer-to-peer transport (key in `<data dir>/transport.key`;
 ///   peer id and address printed at start). Computers can then be registered by peer, and the
-///   API is also served on transport service `ember-server/1` to allowed devices (FR-N3,
-///   `/api/v1/devices`, managed on the TCP listener only)
+///   API is also served on transport service `ember-server` to allowed devices (FR-N3,
+///   `/api/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
-/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://darkpyonix.dev`; `off` disables).
+/// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`; `off` disables).
 ///   With the transport on, the server can register to the user's GitHub account there
-///   (`POST /api/v1/hub/link`, local only), then publishes its address and resolves computers
+///   (`POST /api/hub/link`, local only), then publishes its address and resolves computers
 ///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides
 ///   the relay derived from the hub URL; `EMBER_HUB_SYNC_DEVICES=1` keeps the devices
 ///   allow-list in sync with the account's devices
@@ -78,6 +79,23 @@ async fn main() -> anyhow::Result<()> {
     });
     std::fs::create_dir_all(&data_dir)?;
     let store = Arc::new(Store::open(&data_dir.join("ember.db"))?);
+    // Agents run under per-session shims and outlive this server (FR-S8, EMBER_SESSION_SHIM=off
+    // keeps direct children). Stopping the server leaves the shims, and so the agents, running.
+    let shim_runtime = match ember_server::agents::proc::find_shim_bin() {
+        Some(bin) if ember_server::agents::proc::shim_enabled() => {
+            let dir = data_dir.join("shims");
+            std::fs::create_dir_all(&dir)?;
+            let rt = ember_server::agents::proc::ShimRuntime { bin, dir, store: store.clone() };
+            ember_server::agents::proc::install_runtime(rt.clone());
+            Some(rt)
+        }
+        _ => {
+            tracing::warn!("session shims off; agents stop with the server");
+            None
+        }
+    };
+    // Demo only (#193): off unless EMBER_DEMO_DATA=1.
+    ember_server::chatgpt::demo::seed(&store, std::env::var(ember_server::chatgpt::demo::ENV).ok().as_deref())?;
     let reset = store.reset_live_statuses()?;
     if reset > 0 {
         tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
@@ -124,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
             Some(h) if registered => h.ensure_resolve_token().await,
             _ => None,
         };
-        // The hub's relay and directory from its `/v1/config` (derived when it has none). Asked
+        // The hub's relay and directory from its `/config` (derived when it has none). Asked
         // only when the hub will be used now, so an unregistered server does not contact it.
         let hub_config = match &hub {
             Some(h) if registered || ember_hub::HubConfig::explicitly_enabled() => Some(h.discover().await),
@@ -145,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
             match (&st.device, st.revoked) {
                 (Some(d), false) => tracing::info!(hub = %st.hub_url, name = %d.name, "registered with the hub"),
                 (Some(_), true) => tracing::warn!(hub = %st.hub_url, "the hub removed this server; register again with a new key"),
-                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/v1/hub/link)"),
+                (None, _) => tracing::info!(hub = %st.hub_url, "not registered with the hub (POST /api/hub/link)"),
             }
         }
         t.wait_online(std::time::Duration::from_secs(5)).await;
@@ -163,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
+    ember_server::members::install(&sessions);
     let shim = computers::find_shim();
     if shim.is_none() {
         tracing::warn!("ember-exec not found; Claude Code sessions cannot run on other computers");
@@ -171,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         computer_registry,
         computers::connector(dialer.clone()),
         shim,
-        dialer,
+        dialer.clone(),
     );
     // Claude Code's file tools on other computers (EMBER_MOUNT=off|nfs|fuse|auto).
     // Opened like every other node client, so computers registered by peer mount too.
@@ -183,6 +202,26 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("project mount off; Claude Code file tools stay on this server");
     }
     computers.install(&sessions);
+    // The agent CLI's own API traffic leaves through the session's current computer (FR-X6).
+    // EMBER_AGENT_EGRESS=off keeps it on this server.
+    if std::env::var("EMBER_AGENT_EGRESS").map(|v| v != "off").unwrap_or(true) {
+        let (c, d) = (computers.clone(), dialer.clone());
+        let route: ember_server::egress_proxy::Route = Arc::new(move |sid| {
+            match c.registry().session_computer(sid)? {
+                Some(sc) if sc.computer_id != computers::LOCAL => {
+                    let comp = c
+                        .registry()
+                        .get(&sc.computer_id)?
+                        .ok_or_else(|| anyhow::anyhow!("computer {} is gone", sc.computer_id))?;
+                    Ok(Some(computers::node_client(&comp, d.as_ref())?))
+                }
+                _ => Ok(None),
+            }
+        });
+        let egress = ember_server::egress_proxy::SessionEgress::new(route);
+        sessions.add_start_hook(egress.clone().start_hook());
+        sessions.add_end_hook(egress.end_hook());
+    }
 
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
@@ -278,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
     } else if !addr.ip().is_loopback() && !addr.ip().is_unspecified() {
         tracing::warn!(
             "ChatGPT sign-in redirects to {}, but the server listens on {addr}; paste the final \
-             URL into POST /api/v1/chatgpt/signin/complete",
+             URL into POST /api/chatgpt/signin/complete",
             chatgpt.config().redirect_uri()
         );
     }
@@ -312,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
-        .merge(ember_server::api::ide::router(sessions, ide))
+        .merge(ember_server::api::ide::router(sessions.clone(), ide))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
@@ -344,6 +383,12 @@ async fn main() -> anyhow::Result<()> {
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
         .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
+    if let Some(rt) = &shim_runtime {
+        let rejoined = sessions.rejoin_shims(rt).await;
+        if !rejoined.is_empty() {
+            tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
+        }
+    }
     axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

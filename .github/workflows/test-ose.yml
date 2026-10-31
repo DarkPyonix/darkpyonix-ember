@@ -64,6 +64,10 @@ jobs:
             >> "$GITHUB_OUTPUT"
       - name: Apply overrides and check (Open VSX, telemetry off, no MS marketplace)
         run: ember/ose/build.sh --product-only
+      - name: Check default extensions are staged (FR-W6)
+        run: ember/ose/check-extensions.sh
+      - name: Extension regression harness self-test (NFR-W1)
+        run: ember/ose/regress.sh --self-test
       - name: Tag matches ember/ose/VERSION
         if: startsWith(github.ref, 'refs/tags/ose-v')
         run: |
@@ -134,6 +138,12 @@ jobs:
           # GitHub and is rate-limited without one (upstream passes GITHUB_TOKEN the same way).
           GITHUB_TOKEN: ${{ github.token }}
         run: ember/ose/build.sh --target ${{ matrix.target }} --smoke
+
+      - name: Extension regression (NFR-W1, install-only until a client is wired)
+        # Needs the unpacked build that --smoke just tested. Not yet a release gate: the list
+        # and expected results await the owner (#84).
+        continue-on-error: true
+        run: ember/ose/regress.sh "$(ls -d ember/ose/.work/dpx-ose-*-${{ matrix.target }} | head -1)"
 
       - uses: actions/upload-artifact@v4
         with:

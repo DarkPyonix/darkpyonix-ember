@@ -135,19 +135,19 @@ async fn node_registered_by_peer_is_reached_over_the_transport() {
 
     // Register by full PeerAddr JSON (as the node prints it) …
     let addr = serde_json::to_value(n.node_t.local_addr()).unwrap();
-    let (st, gpu) = call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "gpu", "peer": addr, "token": TOKEN }))).await;
+    let (st, gpu) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "gpu", "peer": addr, "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::CREATED, "{gpu}");
     assert!(gpu.get("token").is_none());
     assert_eq!(gpu["url"], "");
     let gpu_id = gpu["id"].as_str().unwrap().to_string();
     // … or by bare peer id; url and peer together are refused.
-    let (st, _) = call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "gpu2", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
+    let (st, _) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "gpu2", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::CREATED);
-    let (st, _) = call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "x", "url": "http://x:1", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
+    let (st, _) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "x", "url": "http://x:1", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     // Health + env through the registry's probe.
-    let (st, status) = within(call(&app, Method::GET, &format!("/api/v1/computers/{gpu_id}"), None)).await;
+    let (st, status) = within(call(&app, Method::GET, &format!("/api/computers/{gpu_id}"), None)).await;
     assert_eq!(st, StatusCode::OK, "{status}");
     assert_eq!(status["reachable"], true, "{status}");
     assert_eq!(status["peer"], n.node_t.peer_id().to_string());
@@ -240,7 +240,7 @@ async fn registering_by_peer_needs_a_transport() {
     assert!(c.register_peer("gpu", &PeerAddr::new(peer), TOKEN).is_err());
 }
 
-/// GET `/api/v1/health` over the server's transport service, as a device.
+/// GET `/api/health` over the server's transport service, as a device.
 async fn device_health(device: &Dialer, server: &Transport) -> Result<Value, String> {
     let fut = async {
         let stream = device
@@ -248,7 +248,7 @@ async fn device_health(device: &Dialer, server: &Transport) -> Result<Value, Str
             .await
             .map_err(|e| e.to_string())?;
         let mut http = http1_handshake::<Full<hyper::body::Bytes>>(stream).await.map_err(|e| e.to_string())?;
-        let req = hyper::Request::get("http://ember-server/api/v1/health").body(Full::default()).unwrap();
+        let req = hyper::Request::get("http://ember-server/api/health").body(Full::default()).unwrap();
         let resp = http.send_request(req).await.map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
             return Err(format!("status {}", resp.status()));
@@ -275,7 +275,7 @@ async fn server_api_over_the_transport_admits_only_devices() {
 
     // Added through the local devices API.
     let admin = ember_server::devices::api::router(devices.clone());
-    let (st, d) = call(&admin, Method::POST, "/api/v1/devices", Some(json!({ "peer_id": phone_t.peer_id().to_string(), "name": "phone" }))).await;
+    let (st, d) = call(&admin, Method::POST, "/api/devices", Some(json!({ "peer_id": phone_t.peer_id().to_string(), "name": "phone" }))).await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
     let h = device_health(&phone, &server_t).await.unwrap();
     assert_eq!(h["ok"], true);
@@ -285,11 +285,11 @@ async fn server_api_over_the_transport_admits_only_devices() {
 
     // Revoke: the phone's open connection is closed at once, and it cannot reconnect.
     let conn = phone.connection(&PeerAddr::new(server_t.peer_id()), SERVER_SERVICE).await.unwrap();
-    let (st, out) = call(&admin, Method::DELETE, &format!("/api/v1/devices/{}", phone_t.peer_id()), None).await;
+    let (st, out) = call(&admin, Method::DELETE, &format!("/api/devices/{}", phone_t.peer_id()), None).await;
     assert_eq!(st, StatusCode::OK, "{out}");
     assert_eq!(out["closed"], 1);
     within(conn.closed()).await;
     assert!(device_health(&phone, &server_t).await.is_err());
-    let (st, _) = call(&admin, Method::DELETE, &format!("/api/v1/devices/{}", phone_t.peer_id()), None).await;
+    let (st, _) = call(&admin, Method::DELETE, &format!("/api/devices/{}", phone_t.peer_id()), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }

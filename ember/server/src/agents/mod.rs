@@ -16,6 +16,7 @@ pub mod acp;
 pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
+pub mod proc;
 pub mod scripted;
 
 /// Which agent CLI a session runs.
@@ -181,6 +182,31 @@ pub struct StartRequest {
     /// adapters that perform the agent's tool I/O themselves: the ACP adapter serves the agent's
     /// `fs/*` and `terminal/*` requests through it ([`acp`]). `None` = this server.
     pub computer: Option<ember_node::client::NodeClient>,
+    /// Start as a native fork of another session instead of a new or resumed one (FR-S5). Set only
+    /// for a fork whose parent the agent can fork. `resume_native_id` is `None` then. An adapter
+    /// that fails to fork returns an error; the session layer falls back to the conversation copy.
+    pub fork_from: Option<ForkFrom>,
+}
+
+/// The native session a fork starts from (FR-S5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkFrom {
+    /// The parent's native session id.
+    pub native_id: String,
+    /// Completed turns of the parent to keep, oldest first. `None` = the whole session (the
+    /// parent's last completed turn is its end).
+    pub keep_turns: Option<usize>,
+}
+
+/// What an agent's own fork can do (FR-S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFork {
+    /// No native fork: the fork copies the conversation.
+    None,
+    /// Forks the whole native session: only from the parent's last completed turn.
+    Latest,
+    /// Forks through a chosen completed turn.
+    AtTurn,
 }
 
 /// A stdio MCP server handed to an agent through its documented CLI configuration (E2).
@@ -217,7 +243,7 @@ pub struct RemoteExec {
     /// Stable id for the environment inside the agent (one per computer).
     pub environment_id: String,
     /// WebSocket URL of an exec-server speaking Codex's protocol (ember server's local relay to
-    /// the node's `/v1/exec-server`).
+    /// the node's `/exec-server`).
     pub exec_server_url: String,
 }
 
@@ -235,6 +261,18 @@ pub trait AgentAdapter: Send + Sync {
 
     /// Is the agent installed on this server, and which version? Missing is not an error.
     async fn detect(&self) -> Detected;
+
+    /// What the agent's own session fork can do (FR-S5). Default: nothing, so a fork copies the
+    /// conversation.
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::None
+    }
+
+    /// Whether an agent that outlived the server under its shim can be rejoined as it runs
+    /// (FR-S8). Default: no, the session resumes natively on its next message.
+    fn rejoins_shim(&self) -> bool {
+        false
+    }
 
     /// Start (or resume) the agent. Events are sent on `events` until the process exits.
     async fn start(

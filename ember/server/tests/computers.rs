@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use ember_node::proto::{EnvInfo, Health, PROTOCOL_VERSION};
+use ember_node::proto::{EnvInfo, Health};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
 use ember_server::computers::{
@@ -50,7 +50,7 @@ struct FakeNode {
 impl NodeApi for FakeNode {
     async fn health(&self) -> anyhow::Result<Health> {
         anyhow::ensure!(self.up, "connection refused");
-        Ok(Health { ok: true, version: "test".into(), protocol: PROTOCOL_VERSION })
+        Ok(Health { ok: true, version: "test".into() })
     }
 
     async fn env(&self) -> anyhow::Result<EnvInfo> {
@@ -209,7 +209,7 @@ async fn switch_replaces_environment_and_injects_the_notice_once() {
     assert_eq!(out.previous.id, pi.id);
     assert_eq!(out.computer.id, mac.id);
     let notice = out.notice.clone().expect("notice for a session that already ran");
-    assert!(notice.contains("from \"pi\" to \"mac\""), "{notice}");
+    assert!(notice.contains("now working on \"mac\" (moved from \"pi\")"), "{notice}");
     assert!(!s.is_live(&id).await, "agent released so the next start uses the new computer");
     let cur = c.current(s, &id).unwrap();
     assert_eq!(cur.computer.id, mac.id);
@@ -248,7 +248,38 @@ async fn switch_replaces_environment_and_injects_the_notice_once() {
     // Back to this server: described too, with a notice.
     let out = c.switch(s, &id, LOCAL).await.unwrap();
     assert!(out.env_description.contains("\"this server\" (hostname server)"));
-    assert!(out.notice.unwrap().contains("from \"mac\" to \"this server\""));
+    assert!(out.notice.unwrap().contains("now working on \"this server\" (moved from \"mac\")"));
+}
+
+#[tokio::test]
+async fn chained_switches_before_a_message_keep_the_computer_the_agent_observed() {
+    let f = fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let a = c.register("alpha", "http://alpha:8741", "tok").unwrap();
+    let b = c.register("beta", "http://beta:8741", "tok").unwrap();
+    let g = c.register("gamma", "http://gamma:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.switch(s, &id, &a.id).await.unwrap();
+    turn(s, &id, "hello").await;
+
+    // A -> B -> C with no message between: the agent last observed A.
+    c.switch(s, &id, &b.id).await.unwrap();
+    let out = c.switch(s, &id, &g.id).await.unwrap();
+    let notice = out.notice.expect("notice kept");
+    assert!(notice.contains("now working on \"gamma\" (moved from \"alpha\")"), "{notice}");
+    let ev = turn(s, &id, "go").await;
+    assert_eq!(assistant_text(&ev), format!("echo: {notice}\n\ngo"));
+    let starts = f.starts.lock().unwrap();
+    let instr = starts.last().unwrap().instructions.clone().unwrap();
+    assert!(instr.contains("hostname gamma") && !instr.contains("hostname alpha"), "{instr}");
+    drop(starts);
+
+    // C -> A -> C with no message between: what it observed is valid again, no notice.
+    c.switch(s, &id, &a.id).await.unwrap();
+    assert!(c.current(s, &id).unwrap().notice_pending);
+    let out = c.switch(s, &id, &g.id).await.unwrap();
+    assert_eq!(out.notice, None);
+    assert!(!c.current(s, &id).unwrap().notice_pending);
 }
 
 #[tokio::test]
@@ -398,13 +429,13 @@ async fn http_register_list_and_switch() {
     let app = ember_server::api::router(f.sessions.clone())
         .merge(computers::api::router(f.computers.clone(), f.sessions.clone()));
 
-    let (st, pi) = call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "pi", "url": "http://pi:8741", "token": "tok" }))).await;
+    let (st, pi) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "pi", "url": "http://pi:8741", "token": "tok" }))).await;
     assert_eq!(st, StatusCode::CREATED);
     assert!(pi.get("token").is_none(), "token never returned: {pi}");
     let pi_id = pi["id"].as_str().unwrap().to_string();
-    call(&app, Method::POST, "/api/v1/computers", Some(json!({ "name": "down", "url": "http://down:1", "token": "t" }))).await;
+    call(&app, Method::POST, "/api/computers", Some(json!({ "name": "down", "url": "http://down:1", "token": "t" }))).await;
 
-    let (st, list) = call(&app, Method::GET, "/api/v1/computers", None).await;
+    let (st, list) = call(&app, Method::GET, "/api/computers", None).await;
     assert_eq!(st, StatusCode::OK);
     let list = list.as_array().unwrap();
     assert_eq!(list[0]["id"], LOCAL);
@@ -412,29 +443,165 @@ async fn http_register_list_and_switch() {
     let by_name = |n: &str| list.iter().find(|c| c["name"] == n).unwrap().clone();
     assert_eq!(by_name("pi")["reachable"], true);
     assert_eq!(by_name("down")["reachable"], false);
-    let (_, unprobed) = call(&app, Method::GET, "/api/v1/computers?probe=false", None).await;
+    let (_, unprobed) = call(&app, Method::GET, "/api/computers?probe=false", None).await;
     assert!(unprobed.as_array().unwrap().iter().all(|c| c["reachable"].is_null()));
 
-    let (st, one) = call(&app, Method::GET, &format!("/api/v1/computers/{pi_id}"), None).await;
+    let (st, one) = call(&app, Method::GET, &format!("/api/computers/{pi_id}"), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(one["env"]["hostname"], "pi");
 
     let id = new_session(&f.sessions);
-    let (st, out) = call(&app, Method::PUT, &format!("/api/v1/sessions/{id}/computer"), Some(json!({ "computer_id": pi_id }))).await;
+    let (st, out) = call(&app, Method::PUT, &format!("/api/sessions/{id}/computer"), Some(json!({ "computer_id": pi_id }))).await;
     assert_eq!(st, StatusCode::OK, "{out}");
     assert_eq!(out["computer"]["name"], "pi");
     assert_eq!(out["changed"], true);
-    let (_, cur) = call(&app, Method::GET, &format!("/api/v1/sessions/{id}/computer"), None).await;
+    let (_, cur) = call(&app, Method::GET, &format!("/api/sessions/{id}/computer"), None).await;
     assert_eq!(cur["computer"]["id"], pi_id.as_str());
     assert_eq!(cur["implicit"], false);
 
     let down_id = by_name("down")["id"].as_str().unwrap().to_string();
-    let (st, _) = call(&app, Method::PUT, &format!("/api/v1/sessions/{id}/computer"), Some(json!({ "computer_id": down_id }))).await;
+    let (st, _) = call(&app, Method::PUT, &format!("/api/sessions/{id}/computer"), Some(json!({ "computer_id": down_id }))).await;
     assert_eq!(st, StatusCode::BAD_GATEWAY);
-    let (st, _) = call(&app, Method::DELETE, &format!("/api/v1/computers/{pi_id}"), None).await;
+    let (st, _) = call(&app, Method::DELETE, &format!("/api/computers/{pi_id}"), None).await;
     assert_eq!(st, StatusCode::CONFLICT);
-    let (st, _) = call(&app, Method::DELETE, &format!("/api/v1/computers/{down_id}"), None).await;
+    let (st, _) = call(&app, Method::DELETE, &format!("/api/computers/{down_id}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
-    let (st, _) = call(&app, Method::GET, "/api/v1/sessions/nope/computer", None).await;
+    let (st, _) = call(&app, Method::GET, "/api/sessions/nope/computer", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fallback to the main server (FR-X3, FR-S7, INTENT D20)
+
+fn flaky_fixture() -> (Fixture, Arc<Mutex<Vec<String>>>) {
+    let down: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let d = down.clone();
+    let connector: Connector = Arc::new(move |c: Option<&Computer>| -> anyhow::Result<Arc<dyn NodeApi>> {
+        Ok(match c {
+            None => Arc::new(FakeNode { up: true, env: env_for("server") }),
+            Some(c) => Arc::new(FakeNode { up: !d.lock().unwrap().contains(&c.name), env: env_for(&c.name) }),
+        })
+    });
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(Capturing { starts: starts.clone() })];
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store.clone(), adapters);
+    let computers = Computers::with_shim(Registry::new(store), connector, None);
+    computers.install(&sessions);
+    computers.set_debounce(1);
+    (Fixture { sessions, computers, starts }, down)
+}
+
+#[tokio::test]
+async fn fr_x3_disconnect_moves_to_main_server_with_a_moved_notice() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    let out = c.reconcile(s, &id).await.unwrap().expect("moves onto the designated computer");
+    assert_eq!(out.computer.id, pi.id);
+    turn(s, &id, "hello").await;
+
+    down.lock().unwrap().push("pi".into());
+    let out = c.reconcile(s, &id).await.unwrap().expect("falls back");
+    assert_eq!(out.computer.id, LOCAL);
+    let notice = out.notice.expect("moved notice");
+    assert!(notice.contains("now working on \"this server\" (moved from \"pi\")"), "{notice}");
+    assert_eq!(c.current(s, &id).unwrap().computer.id, LOCAL);
+    // Stays put while the computer stays down.
+    assert!(c.reconcile(s, &id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fr_x3_reconnect_moves_back_with_a_notice() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    c.reconcile(s, &id).await.unwrap();
+    turn(s, &id, "hello").await;
+    down.lock().unwrap().push("pi".into());
+    c.reconcile(s, &id).await.unwrap().unwrap();
+    turn(s, &id, "on main").await;
+
+    down.lock().unwrap().clear();
+    let out = c.reconcile(s, &id).await.unwrap().expect("returns");
+    assert_eq!(out.computer.id, pi.id);
+    let notice = out.notice.expect("notice on return");
+    assert!(notice.contains("now working on \"pi\" (moved from \"this server\")"), "{notice}");
+    let ev = turn(s, &id, "back").await;
+    assert_eq!(assistant_text(&ev), format!("echo: {notice}\n\nback"));
+}
+
+#[tokio::test]
+async fn fr_s7_moved_notice_never_says_invalid() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    c.reconcile(s, &id).await.unwrap();
+    turn(s, &id, "hello").await;
+    down.lock().unwrap().push("pi".into());
+    let n1 = c.reconcile(s, &id).await.unwrap().unwrap().notice.unwrap();
+    down.lock().unwrap().clear();
+    turn(s, &id, "x").await;
+    let n2 = c.reconcile(s, &id).await.unwrap().unwrap().notice.unwrap();
+    for n in [n1, n2] {
+        assert!(!n.to_lowercase().contains("invalid"), "{n}");
+        assert!(n.contains("(moved"), "{n}");
+    }
+}
+
+#[tokio::test]
+async fn fr_x3_no_designated_computer_means_no_move() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    // Manually switched, never designated: losing the computer does not move the session.
+    c.switch(s, &id, &pi.id).await.unwrap();
+    down.lock().unwrap().push("pi".into());
+    assert!(c.reconcile(s, &id).await.unwrap().is_none());
+    assert_eq!(c.current(s, &id).unwrap().computer.id, pi.id);
+}
+
+#[tokio::test]
+async fn fr_x3_short_blips_do_not_flap_the_session() {
+    let (f, down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    c.set_debounce(2);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    assert!(c.reconcile(s, &id).await.unwrap().is_none(), "first sighting waits");
+    assert!(c.reconcile(s, &id).await.unwrap().is_some());
+    down.lock().unwrap().push("pi".into());
+    assert!(c.reconcile(s, &id).await.unwrap().is_none(), "one failed probe is a blip");
+    down.lock().unwrap().clear();
+    assert!(c.reconcile(s, &id).await.unwrap().is_none());
+    assert_eq!(c.current(s, &id).unwrap().computer.id, pi.id);
+    down.lock().unwrap().push("pi".into());
+    c.reconcile(s, &id).await.unwrap();
+    assert!(c.reconcile(s, &id).await.unwrap().is_some(), "two in a row fall back");
+}
+
+#[tokio::test]
+async fn fr_x3_current_computer_exposes_the_designated_computer() {
+    let (f, _down) = flaky_fixture();
+    let (s, c) = (&f.sessions, &f.computers);
+    let pi = c.register("pi", "http://pi:8741", "tok").unwrap();
+    let id = new_session(s);
+    assert_eq!(c.current(s, &id).unwrap().designated_computer_id, None);
+    c.designate(&id, Some(&pi.id)).unwrap();
+    assert_eq!(c.current(s, &id).unwrap().designated_computer_id.as_deref(), Some(pi.id.as_str()));
+}
+
+#[test]
+fn fr_x3_fallback_probes_and_interval_are_configurable() {
+    assert_eq!(computers::parse_fallback(None, None), (2, 10));
+    assert_eq!(computers::parse_fallback(Some("5"), Some("3")), (5, 3));
+    assert_eq!(computers::parse_fallback(Some("0"), Some("x")), (2, 10), "invalid values keep the defaults");
 }

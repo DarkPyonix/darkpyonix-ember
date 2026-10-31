@@ -45,8 +45,8 @@ class DiscoverTest(unittest.TestCase):
 
     def test_urls_and_auth_header(self):
         ep = node.NodeEndpoint("http://127.0.0.1:8741/", "s3cret")
-        self.assertEqual(ep.http("/v1/terms"), "http://127.0.0.1:8741/v1/terms")
-        self.assertEqual(ep.ws("/v1/terms/a/attach"), "ws://127.0.0.1:8741/v1/terms/a/attach")
+        self.assertEqual(ep.http("/terms"), "http://127.0.0.1:8741/terms")
+        self.assertEqual(ep.ws("/terms/a/attach"), "ws://127.0.0.1:8741/terms/a/attach")
         self.assertEqual(node.NodeEndpoint("https://h", "t").ws("/x"), "wss://h/x")
         self.assertEqual(ep.headers(), {"authorization": "Bearer s3cret"})
 
@@ -114,9 +114,9 @@ class RouterTest(unittest.TestCase):
             body = json.loads(request.content) if request.content else None
             self.calls.append((request.method, request.url.path, dict(request.url.params), body,
                                request.headers.get("authorization")))
-            if request.url.path == "/v1/terms" and request.method == "POST":
+            if request.url.path == "/terms" and request.method == "POST":
                 return httpx.Response(201, json={"created": True, "term": {"id": "abc"}})
-            if request.url.path == "/v1/terms/missing":
+            if request.url.path == "/terms/missing":
                 return httpx.Response(404, json={"code": "not_found", "error": "no terminal session missing"})
             return httpx.Response(200, json=[])
 
@@ -133,14 +133,14 @@ class RouterTest(unittest.TestCase):
     def test_list_forwards_filters_and_the_token(self):
         r = self.client.get("/__terms", params={"project": "/p", "running": "true", "junk": "1"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(self.calls, [("GET", "/v1/terms", {"project": "/p", "running": "true"}, None, "Bearer tok")])
+        self.assertEqual(self.calls, [("GET", "/terms", {"project": "/p", "running": "true"}, None, "Bearer tok")])
 
     def test_create_is_sanitized_and_status_passes_through(self):
         r = self.client.post("/__terms", json={"cwd": "/p", "origin": "ide-vscode", "key": "k", "extra": 1})
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.json()["term"]["id"], "abc")
         method, path, _, body, _ = self.calls[0]
-        self.assertEqual((method, path), ("POST", "/v1/terms"))
+        self.assertEqual((method, path), ("POST", "/terms"))
         self.assertEqual(body, {"cwd": "/p", "origin": "ide-vscode", "key": "k"})
         self.assertEqual(self.client.post("/__terms", json={"cwd": "/p", "origin": "agent"}).status_code, 400)
         self.assertEqual(len(self.calls), 1, "refused requests never reach the node")
@@ -154,9 +154,9 @@ class RouterTest(unittest.TestCase):
         self.client.post("/__terms/abc/kill")
         self.client.post("/__terms/abc/kill", json={"signal": 9})
         self.assertEqual([(c[0], c[1], c[3]) for c in self.calls[1:]], [
-            ("POST", "/v1/terms/abc/control", {"client": 2, "take": False}),
-            ("POST", "/v1/terms/abc/kill", {}),
-            ("POST", "/v1/terms/abc/kill", {"signal": 9}),
+            ("POST", "/terms/abc/control", {"client": 2, "take": False}),
+            ("POST", "/terms/abc/kill", {}),
+            ("POST", "/terms/abc/kill", {"signal": 9}),
         ])
 
     def test_node_not_running(self):

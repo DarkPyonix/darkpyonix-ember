@@ -7,12 +7,13 @@
 
 use dioxus_compose::prelude::*;
 
-use ember_client::state::Input;
 
 use crate::model::{self, index_of};
 use crate::prefs::LastUsed;
 use crate::server::CreateSession;
 use crate::services::{run, services};
+use crate::ui::components::{EmberField, Txt};
+use crate::ui::theme::*;
 use crate::ui::use_ui;
 
 /// Agents offered when the server has not answered `GET /agents` yet.
@@ -41,6 +42,7 @@ pub fn NewSessionDialog() -> Element {
 
 #[component]
 fn NewSessionForm(preset: String) -> Element {
+    let theme = use_ember_theme();
     let ui = use_ui();
 
     let projects: Vec<String> = {
@@ -165,10 +167,10 @@ fn NewSessionForm(preset: String) -> Element {
             run(
                 async move {
                     let s = services();
-                    let rec = s.server.create_session(&body).await.map_err(|e| e.to_string())?;
-                    s.client.apply(Input::SessionLoaded(rec.clone()));
+                    let rec = s.create_session(&body).await?;
                     let mut notice = None;
-                    if let Some(cid) = computer_id {
+                    // The demo (#199) has one computer and no node to switch.
+                    if let Some(cid) = computer_id.filter(|_| s.demo.is_none()) {
                         // A session starts on the main server; move it before the first message.
                         if let Err(e) = s.server.switch_computer(&rec.id, &cid).await {
                             notice = Some(format!("Started on the main server: could not switch computer ({e})"));
@@ -204,6 +206,8 @@ fn NewSessionForm(preset: String) -> Element {
     rsx! {
         Dialog {
             open: true,
+            background: paint(theme.palette.surface),
+            corner_radius: CORNER_XL,
             on_dismiss: move |_| close(),
             // A long form on a short window scrolls inside the dialog.
             ScrollColumn {
@@ -211,7 +215,7 @@ fn NewSessionForm(preset: String) -> Element {
                 Column {
                     space_role: SpaceRole::Md,
                     padding_role: SpaceRole::Md,
-                    Text { text: "New session", type_role: TypeRole::Title }
+                    Txt { text: "New session", type_role: TypeRole::Title }
 
                     Field { label: "Project",
                         Dropdown {
@@ -228,7 +232,7 @@ fn NewSessionForm(preset: String) -> Element {
                                 }
                             },
                             for o in project_options.iter() {
-                                Text { key: "{o}", text: o.clone() }
+                                Txt { key: "{o}", text: o.clone() }
                             }
                         }
                     }
@@ -237,7 +241,7 @@ fn NewSessionForm(preset: String) -> Element {
                         space_role: SpaceRole::Md,
                         if creating_project {
                             Field { label: "Project name",
-                                TextField {
+                                EmberField {
                                     fill_max_width: true,
                                     placeholder: "my-project",
                                     on_value_change: move |v: String| new_project.set(v),
@@ -245,21 +249,21 @@ fn NewSessionForm(preset: String) -> Element {
                             }
                         }
                         Field { label: "Folder on the computer",
-                            TextField {
+                            EmberField {
                                 fill_max_width: true,
                                 placeholder: if default_cwd.is_empty() { "/path/to/project".to_string() } else { default_cwd.clone() },
                                 on_value_change: move |v: String| cwd.set(v),
                             }
                         }
                         Field { label: "Model (optional)",
-                            TextField {
+                            EmberField {
                                 fill_max_width: true,
                                 placeholder: if default_model.is_empty() { "Agent default".to_string() } else { default_model.clone() },
                                 on_value_change: move |v: String| model_text.set(v),
                             }
                         }
                         Field { label: "Title (optional)",
-                            TextField {
+                            EmberField {
                                 fill_max_width: true,
                                 placeholder: "New conversation",
                                 on_value_change: move |v: String| title.set(v),
@@ -281,7 +285,7 @@ fn NewSessionForm(preset: String) -> Element {
                                 }
                             },
                             for a in agents.iter() {
-                                Text { key: "{a}", text: a.clone() }
+                                Txt { key: "{a}", text: a.clone() }
                             }
                         }
                     }
@@ -294,7 +298,7 @@ fn NewSessionForm(preset: String) -> Element {
                                 move |i: usize| account.set(accounts.get(i).and_then(|c| c.value.clone()))
                             },
                             for c in accounts.iter() {
-                                Text { key: "{c.label}", text: c.label.clone() }
+                                Txt { key: "{c.label}", text: c.label.clone() }
                             }
                         }
                     }
@@ -307,7 +311,7 @@ fn NewSessionForm(preset: String) -> Element {
                                 move |i: usize| computer.set(computers.get(i).and_then(|c| c.value.clone()))
                             },
                             for c in computers.iter() {
-                                Text { key: "{c.label}", text: c.label.clone() }
+                                Txt { key: "{c.label}", text: c.label.clone() }
                             }
                         }
                     }
@@ -363,7 +367,7 @@ fn Field(#[props(into)] label: String, children: Element) -> Element {
         Column {
             fill_max_width: true,
             space_role: SpaceRole::Xs,
-            Text { text: label, type_role: TypeRole::Label, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+            Txt { text: label, type_role: TypeRole::Label, color: Paint::Role(ColorRole::OnSurfaceVariant) }
             {children}
         }
     }

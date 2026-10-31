@@ -52,10 +52,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a `result` after the interrupt control request before sending SIGINT.
@@ -111,6 +112,11 @@ impl ClaudeCodeAdapter {
         if let Some(id) = &req.resume_native_id {
             // Equals form, as the SDK does, so an id can never be read as a flag.
             args.push(format!("--resume={id}"));
+        } else if let Some(fork) = &req.fork_from {
+            // FR-S5: `--fork-session` makes the resume a copy under a new session id, which the
+            // init event announces like any other.
+            args.push(format!("--resume={}", fork.native_id));
+            args.push("--fork-session".into());
         }
         // `--mcp-config <configs...>` takes JSON files or strings (claude 2.1.288 --help) and is
         // variadic: the equals form keeps it to exactly this one value. Without
@@ -204,6 +210,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
         AgentKind::ClaudeCode
     }
 
+    /// `--resume <id> --fork-session` forks the whole session (FR-S5).
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::Latest
+    }
+
+    fn rejoins_shim(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -246,34 +261,36 @@ impl AgentAdapter for ClaudeCodeAdapter {
             (true, Some(config)) => Some(PrivateConfigFile::create(&std::env::temp_dir(), &config)?),
             _ => None,
         };
-        let mut child = Command::new(&self.bin)
-            .envs(mcp_timeout_env(&req))
-            .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .args(Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)))
-            .current_dir(&req.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to start {}: {e}", self.bin.display()))?;
-        let pid = child.id();
-        let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
+        let mut env: Vec<(String, String)> = mcp_timeout_env(&req).into_iter().collect();
+        env.extend(req.env.iter().cloned());
+        let proc = spawn_agent(AgentCommand {
+            program: self.bin.clone(),
+            args: Self::args_with(&req, mcp_file.as_ref().map(PrivateConfigFile::path)),
+            env,
+            cwd: req.cwd.clone(),
+            // stream-json has no handshake state, so a running agent can be rejoined (FR-S8).
+            reattachable: true,
+        })
+        .await?;
+        let pid = proc.pid;
+        let stdin: SharedStdin = Arc::new(Mutex::new(Some(proc.stdin)));
+        let stdout = proc.stdout;
+        let stderr = proc.stderr;
         let state = Arc::new(StdMutex::new(RunState::default()));
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(target: "ember::claude", pid, "stderr: {line}");
-            }
-        });
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(target: "ember::claude", pid, "stderr: {line}");
+                }
+            });
+        }
 
         tokio::spawn(read_stdout(stdout, stdin.clone(), state.clone(), events));
 
         Ok(Box::new(ClaudeRun {
-            child: Arc::new(Mutex::new(Some(child))),
+            child: Arc::new(Mutex::new(Some(proc.handle))),
             pid,
             stdin,
             state,
@@ -298,7 +315,7 @@ struct RunState {
     shutting_down: bool,
 }
 
-type SharedStdin = Arc<Mutex<Option<ChildStdin>>>;
+type SharedStdin = Arc<Mutex<Option<AgentStdin>>>;
 
 async fn write_line(stdin: &SharedStdin, msg: &Value) -> anyhow::Result<()> {
     let mut guard = stdin.lock().await;
@@ -341,7 +358,7 @@ fn error_response(request_id: &str, error: &str) -> Value {
 
 /// Read stdout until the process closes it, translating each line.
 async fn read_stdout(
-    stdout: tokio::process::ChildStdout,
+    stdout: AgentStdout,
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
     events: mpsc::Sender<AgentEvent>,
@@ -439,7 +456,7 @@ async fn read_stdout(
 }
 
 struct ClaudeRun {
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<ProcHandle>>>,
     pid: Option<u32>,
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
@@ -534,15 +551,10 @@ impl AgentRun for ClaudeRun {
         self.state.lock().unwrap().shutting_down = true;
         // Closing stdin ends the CLI's input stream; it exits after the current work.
         self.stdin.lock().await.take();
-        if let Some(mut child) = self.child.lock().await.take() {
-            match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
-                Ok(status) => {
-                    status?;
-                }
-                Err(_) => {
-                    tracing::warn!(target: "ember::claude", "claude did not exit; killing");
-                    child.kill().await?;
-                }
+        if let Some(handle) = self.child.lock().await.take() {
+            if let Err(e) = handle.shutdown(SHUTDOWN_GRACE).await {
+                tracing::warn!(target: "ember::claude", "claude shutdown: {e:#}");
+                return Err(e);
             }
         }
         Ok(())
@@ -932,6 +944,7 @@ mod tests {
             remote: None,
             mcp_servers: Vec::new(),
             computer: None,
+            fork_from: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));
@@ -939,6 +952,20 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
         assert!(args.windows(2).any(|w| w == ["--model", "haiku"]));
         assert!(args.contains(&"--resume=abc".to_string()));
+    }
+
+    #[test]
+    fn fork_resumes_the_parent_as_a_new_session() {
+        let req = StartRequest {
+            cwd: ".".into(),
+            fork_from: Some(crate::agents::ForkFrom { native_id: "parent".into(), keep_turns: None }),
+            ..Default::default()
+        };
+        let args = ClaudeCodeAdapter::args(&req);
+        assert!(args.contains(&"--resume=parent".to_string()));
+        assert!(args.contains(&"--fork-session".to_string()));
+        let plain = ClaudeCodeAdapter::args(&StartRequest { cwd: ".".into(), ..Default::default() });
+        assert!(!plain.contains(&"--fork-session".to_string()));
     }
 
     #[test]

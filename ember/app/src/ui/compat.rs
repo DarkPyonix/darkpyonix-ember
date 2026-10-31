@@ -8,14 +8,18 @@ use dioxus_compose::prelude::*;
 use ember_client::LauncherStatus;
 
 use crate::model::{status_label, Tone};
+use crate::ui::components::Txt;
+use crate::ui::theme::*;
+use crate::ui::theme::Palette;
 
-fn tone_roles(tone: Tone) -> (ColorRole, ColorRole) {
+/// `(fill, ink)` of a tone: the strong colour on its soft pair, from the palette.
+pub fn tone_colors(tone: Tone, p: &Palette) -> (Color, Color) {
     match tone {
-        Tone::Neutral => (ColorRole::SurfaceVariant, ColorRole::OnSurfaceVariant),
-        Tone::Accent => (ColorRole::PrimaryContainer, ColorRole::OnPrimaryContainer),
-        Tone::Warning => (ColorRole::TertiaryContainer, ColorRole::OnTertiaryContainer),
-        Tone::Error => (ColorRole::Error, ColorRole::OnError),
-        Tone::Success => (ColorRole::SecondaryContainer, ColorRole::OnSecondaryContainer),
+        Tone::Neutral => (p.grey.soft, p.text_2),
+        Tone::Accent => (p.blue.soft, p.blue.strong),
+        Tone::Warning => (p.orange.soft, p.orange.strong),
+        Tone::Error => (p.red.soft, p.red.strong),
+        Tone::Success => (p.green.soft, p.green.strong),
     }
 }
 
@@ -24,17 +28,20 @@ fn tone_roles(tone: Tone) -> (ColorRole, ColorRole) {
 /// TODO(dioxus-compose M9, ~10-08): replace with the `Chip`/badge widget.
 #[component]
 pub fn Badge(#[props(into)] text: String, tone: Tone) -> Element {
-    let (fill, ink) = tone_roles(tone);
+    let theme = use_ember_theme();
+    let (fill, ink) = tone_colors(tone, theme.palette);
     rsx! {
         dioxus_compose::Box {
-            background: Paint::Role(fill),
+            background: paint(fill),
             shape_role: ShapeRole::Full,
-            padding_role: SpaceRole::Xs,
-            Text {
-                text,
-                type_role: TypeRole::Caption,
-                color: Paint::Role(ink),
-                max_lines: 1,
+            height: H_PILL,
+            padding: 0.0,
+            alignment: Alignment::Center,
+            Row {
+                alignment: Alignment::CenterStart,
+                Spacer { width: 10.0 }
+                Txt { text, type_role: TypeRole::Label, color: paint(ink), max_lines: 1 }
+                Spacer { width: 10.0 }
             }
         }
     }
@@ -45,14 +52,21 @@ pub fn Badge(#[props(into)] text: String, tone: Tone) -> Element {
 /// TODO(dioxus-compose M9, ~10-08): replace with the badge widget's dot form.
 #[component]
 pub fn Dot(tone: Tone) -> Element {
-    let (fill, _) = tone_roles(tone);
-    let fill = if tone == Tone::Accent { ColorRole::Primary } else { fill };
+    let theme = use_ember_theme();
+    let p = theme.palette;
+    let fill = match tone {
+        Tone::Neutral => p.grey.strong,
+        Tone::Accent => p.blue.strong,
+        Tone::Warning => p.orange.strong,
+        Tone::Error => p.red.strong,
+        Tone::Success => p.green.strong,
+    };
     rsx! {
         dioxus_compose::Box {
             width: 8.0,
             height: 8.0,
             shape_role: ShapeRole::Full,
-            background: Paint::Role(fill),
+            background: paint(fill),
         }
     }
 }
@@ -77,20 +91,20 @@ pub fn StatusIndicator(status: LauncherStatus) -> Element {
             match status {
                 LauncherStatus::Running => rsx! {
                     Spinner {}
-                    Text { text: label, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::Primary) }
+                    Txt { text: label, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::Primary) }
                 },
                 LauncherStatus::WaitingForApproval => rsx! {
                     Badge { text: label, tone: Tone::Warning }
                 },
                 LauncherStatus::FinishedUnread => rsx! {
                     Dot { tone: Tone::Accent }
-                    Text { text: "Unread", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::Primary) }
+                    Txt { text: "Unread", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::Primary) }
                 },
                 LauncherStatus::Failed => rsx! {
                     Badge { text: label, tone: Tone::Error }
                 },
                 _ => rsx! {
-                    Text { text: label, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Txt { text: label, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                 },
             }
         }
@@ -106,7 +120,7 @@ pub fn StatusIndicator(status: LauncherStatus) -> Element {
 #[component]
 pub fn MessageText(#[props(into)] text: String, #[props(default)] ink: Option<ColorRole>) -> Element {
     rsx! {
-        Text {
+        Txt {
             text,
             type_role: TypeRole::Body,
             color: ink.map(Paint::Role),
@@ -121,13 +135,14 @@ pub fn MessageText(#[props(into)] text: String, #[props(default)] ink: Option<Co
 /// TODO(code editor widget, FR-38): read-only editor view for large outputs.
 #[component]
 pub fn CodeText(#[props(into)] text: String, #[props(default)] max_lines: Option<u32>, #[props(default)] error: bool) -> Element {
+    let theme = use_ember_theme();
     rsx! {
         dioxus_compose::Box {
             fill_max_width: true,
-            background: Paint::Role(ColorRole::SurfaceVariant),
-            shape_role: ShapeRole::Small,
-            padding_role: SpaceRole::Sm,
-            Text {
+            background: paint(theme.palette.surface_2),
+            corner_radius: CORNER_SM,
+            padding: SP[1],
+            Txt {
                 text,
                 type_role: TypeRole::Mono,
                 max_lines,
@@ -158,14 +173,15 @@ pub fn SplitPane(start: Element, end: Element, #[props(default = 0.45)] start_we
 /// A banner across the top of a screen.
 #[component]
 pub fn Banner(#[props(into)] text: String, tone: Tone) -> Element {
-    let (fill, ink) = tone_roles(tone);
+    let theme = use_ember_theme();
+    let (fill, ink) = tone_colors(tone, theme.palette);
     rsx! {
         dioxus_compose::Box {
             fill_max_width: true,
-            background: Paint::Role(fill),
-            shape_role: ShapeRole::Medium,
-            padding_role: SpaceRole::Sm,
-            Text { text, type_role: TypeRole::Label, color: Paint::Role(ink) }
+            background: paint(fill),
+            corner_radius: CORNER_MD,
+            padding: SP[2],
+            Txt { text, type_role: TypeRole::Label, color: paint(ink) }
         }
     }
 }

@@ -78,7 +78,7 @@
     </p>
     <p>
       클라이언트가 부르는 API로도 같은 일을 할 수 있습니다:
-      <code>POST /api/v1/projects</code> 에 <code>{"name": "my-project"}</code>.
+      <code>POST /api/projects</code> 에 <code>{"name": "my-project"}</code>.
     </p>
 
     <h2 id="new-session">세션 시작</h2>
@@ -122,7 +122,7 @@
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell, 메인 서버에서</figcaption>
-<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/accounts \
+<pre><code>curl -X POST http://127.0.0.1:8740/api/accounts \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"agent": "claude-code", "label": "work"}'</span>
 <span class="c"># "login": {"login": "CLAUDE_CONFIG_DIR=... claude auth login", ...}</span></code></pre>

@@ -15,6 +15,8 @@ use ember_client::wire::SessionPatch;
 
 use crate::model::{self, ProjectCard, SessionRow, Tone};
 use crate::services::{run, services};
+use crate::ui::components::{EmberCard, Txt};
+use crate::ui::theme::*;
 use crate::ui::compat::{Badge, Banner, Dot, SplitPane, StatusIndicator};
 use crate::ui::use_ui;
 
@@ -68,6 +70,7 @@ pub fn Launcher() -> Element {
             }
             Divider {}
             ComputerList { project: selected.clone() }
+            ChatGptUsage {}
         }
     }
 }
@@ -83,8 +86,8 @@ fn EmptyState() -> Element {
             alignment: Alignment::Center,
             arrangement: Arrangement::Center,
             space_role: SpaceRole::Md,
-            Text { text: "No conversations yet", type_role: TypeRole::Headline }
-            Text {
+            Txt { text: "No conversations yet", type_role: TypeRole::Headline }
+            Txt {
                 text: "Start one in a project folder on the main server.",
                 type_role: TypeRole::Body,
                 color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -121,7 +124,7 @@ fn ProjectGrid(cards: Vec<ProjectCard>, selected: Option<String>) -> Element {
             fill_max_width: true,
             fill_max_height: true,
             space_role: SpaceRole::Sm,
-            Text { text: "Projects", type_role: TypeRole::Subtitle }
+            Txt { text: "Projects", type_role: TypeRole::Subtitle }
             LazyGrid {
                 fill_max_width: true,
                 weight: 1.0,
@@ -147,11 +150,10 @@ fn ProjectCardView(card: ProjectCard, selected: bool) -> Element {
     let count = card.summary.total;
     let when = model::relative_time(model::now_ms(), card.updated_at);
     rsx! {
-        Card {
+        EmberCard {
             fill_max_width: true,
-            padding_role: SpaceRole::Sm,
-            border_width: if selected { Some(2.0) } else { None },
-            border_color: if selected { Some(Paint::Role(ColorRole::Primary)) } else { None },
+            selected,
+            padding: SP[2],
             Column {
                 fill_max_width: true,
                 space_role: SpaceRole::Xs,
@@ -178,7 +180,7 @@ fn ProjectCardView(card: ProjectCard, selected: bool) -> Element {
                 Row {
                     fill_max_width: true,
                     alignment: Alignment::CenterStart,
-                    Text {
+                    Txt {
                         text: format!("{count} session{} \u{00b7} {when}", if count == 1 { "" } else { "s" }),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -220,8 +222,8 @@ fn SessionList(project: Option<String>) -> Element {
                 fill_max_width: true,
                 alignment: Alignment::CenterStart,
                 space_role: SpaceRole::Sm,
-                Text { text: title, type_role: TypeRole::Subtitle, weight: 1.0, max_lines: 1, overflow: TextOverflow::Ellipsis }
-                Text { text: "Archived", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                Txt { text: title, type_role: TypeRole::Subtitle, weight: 1.0, max_lines: 1, overflow: TextOverflow::Ellipsis }
+                Txt { text: "Archived", type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                 Switch {
                     checked: show_archived,
                     on_change: move |v: bool| {
@@ -237,7 +239,7 @@ fn SessionList(project: Option<String>) -> Element {
                 }
             }
             if count == 0 {
-                Text {
+                Txt {
                     text: "No sessions in this project.",
                     type_role: TypeRole::Body,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -260,6 +262,7 @@ fn SessionList(project: Option<String>) -> Element {
 /// One session row: status, title, agent, account, time, preview, and its menu (FR-L9).
 #[component]
 pub fn SessionRowView(row: SessionRow) -> Element {
+    let theme = use_ember_theme();
     let ui = use_ui();
     let mut menu_open = use_signal(|| false);
     let mut renaming = use_signal(|| false);
@@ -281,9 +284,9 @@ pub fn SessionRowView(row: SessionRow) -> Element {
     let preview = row.preview.clone().unwrap_or_default();
 
     rsx! {
-        Card {
+        EmberCard {
             fill_max_width: true,
-            padding_role: SpaceRole::Sm,
+            padding: SP[2],
             Column {
                 fill_max_width: true,
                 space_role: SpaceRole::Xs,
@@ -296,7 +299,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                         Badge { text: "Pinned", tone: Tone::Neutral }
                     }
                     Spacer { weight: 1.0 }
-                    Text { text: when, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
+                    Txt { text: when, type_role: TypeRole::Caption, color: Paint::Role(ColorRole::OnSurfaceVariant) }
                     Menu {
                         expanded: menu_open(),
                         on_dismiss: move |_| menu_open.set(false),
@@ -359,7 +362,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                     fill_max_width: true,
                     on_click: move |_| ui.open_conversation(&id_open),
                 }
-                Text {
+                Txt {
                     text: meta,
                     type_role: TypeRole::Caption,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -367,7 +370,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
                     overflow: TextOverflow::Ellipsis,
                 }
                 if !preview.is_empty() {
-                    Text {
+                    Txt {
                         text: preview,
                         type_role: TypeRole::Body,
                         max_lines: 2,
@@ -381,11 +384,13 @@ pub fn SessionRowView(row: SessionRow) -> Element {
         // keeps the title.
         Dialog {
             open: renaming(),
+            background: paint(theme.palette.surface),
+            corner_radius: CORNER_XL,
             on_dismiss: move |_| renaming.set(false),
             Column {
                 space_role: SpaceRole::Md,
                 padding_role: SpaceRole::Md,
-                Text { text: "Rename session", type_role: TypeRole::Title }
+                Txt { text: "Rename session", type_role: TypeRole::Title }
                 TextField {
                     fill_max_width: true,
                     placeholder: current_title.clone(),
@@ -416,7 +421,7 @@ pub fn SessionRowView(row: SessionRow) -> Element {
 
 /// Change a session's metadata on the main server (FR-L9); say so when it fails.
 pub fn patch_session(id: String, patch: SessionPatch) {
-    run(async move { services().client.patch_session(&id, &patch).await }, |r| {
+    run(async move { services().patch_session(&id, &patch).await }, |r| {
         if let Err(e) = r {
             Message::new(format!("Could not update the session: {e}")).with_duration(MessageDuration::Long).show();
         }
@@ -452,6 +457,9 @@ fn set_assignment(project: String, computer_id: String, assign: bool) {
 
 /// Export a session to the data directory and say where it went (FR-L9).
 pub fn export(id: String, title: String) {
+    if services().demo_blocked() {
+        return;
+    }
     let dir = services().config.export_dir();
     run(
         async move { crate::export::export_session(&services().client, dir, &id, &title).await },
@@ -484,9 +492,9 @@ fn ComputerList(project: Option<String>) -> Element {
         Column {
             fill_max_width: true,
             space_role: SpaceRole::Xs,
-            Text { text: "Computers", type_role: TypeRole::Subtitle }
+            Txt { text: "Computers", type_role: TypeRole::Subtitle }
             if computers.is_empty() {
-                Text {
+                Txt {
                     text: "No computers yet.",
                     type_role: TypeRole::Caption,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -506,14 +514,14 @@ fn ComputerList(project: Option<String>) -> Element {
                             Reachability::Unknown => Tone::Neutral,
                         },
                     }
-                    Text { text: c.name.clone(), type_role: TypeRole::BodyStrong }
-                    Text {
+                    Txt { text: c.name.clone(), type_role: TypeRole::BodyStrong }
+                    Txt {
                         text: model::reachability_label(c.reachability),
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
                     }
                     Spacer { weight: 1.0 }
-                    Text {
+                    Txt {
                         text: if c.projects.is_empty() { "No projects assigned".to_string() } else { model::join_projects(&c.projects) },
                         type_role: TypeRole::Caption,
                         color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -531,6 +539,38 @@ fn ComputerList(project: Option<String>) -> Element {
                                 },
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// ChatGPT plan usage (FR-U4): per account, tokens today and the weekly per-app cap. Hidden
+/// when no ChatGPT account exists (sign-in off or never used).
+#[component]
+fn ChatGptUsage() -> Element {
+    let ui = use_ui();
+    let accounts = ui.live.chatgpt.read().clone();
+    if accounts.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        Column {
+            fill_max_width: true,
+            space_role: SpaceRole::Xs,
+            Txt { text: "ChatGPT plan usage", type_role: TypeRole::Subtitle }
+            for a in accounts {
+                Row {
+                    key: "{a.id}",
+                    fill_max_width: true,
+                    alignment: Alignment::CenterStart,
+                    space_role: SpaceRole::Sm,
+                    Txt { text: a.label.clone(), type_role: TypeRole::BodyStrong }
+                    Txt {
+                        text: model::chatgpt_usage_line(&a),
+                        type_role: TypeRole::Caption,
+                        color: Paint::Role(ColorRole::OnSurfaceVariant),
                     }
                 }
             }

@@ -44,6 +44,7 @@
       <ul>
         <li><a href="#requirements">준비물</a></li>
         <li><a href="#checkout">코드 받기</a></li>
+        <li><a href="#release">릴리스로 설치</a></li>
         <li><a href="#server">ember server</a></li>
         <li><a href="#node">ember node</a></li>
         <li><a href="#client">클라이언트</a></li>
@@ -69,6 +70,18 @@
       <li><strong>C 컴파일러.</strong> 서버가 SQLite를 자기 안에 컴파일해 넣기 때문입니다.</li>
       <li><strong>에이전트 CLI, 메인 서버에만</strong>: <code>claude</code>, <code>codex</code>, <code>agy</code>, <code>omp</code> 를 각 제조사의 안내대로 설치하고, <code>ember-server</code> 를 실행할 사용자로 로그인해 둡니다. Ember는 <code>PATH</code> 에서 이들을 찾고, 없는 것은 오류 대신 "설치되지 않음"으로 표시합니다.</li>
     </ul>
+
+    <h2 id="release">릴리스로 설치</h2>
+    <p>태그 릴리스 <span class="pill planned">계획</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>)는 macOS arm64, Linux x86_64, Linux aarch64용 <code>ember-server</code>와 <code>ember-node</code> 압축 파일을 <code>SHA256SUMS</code>와 함께 올립니다. 워크플로는 작성되었지만 아직 태그를 낸 적이 없어서, 위 버전은 예시입니다.</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>gh release download v0.1.0 --repo DarkPyonix/darkpyonix-ember \
+  --pattern <span class="s">'ember-*-macos-arm64.tar.gz'</span> --pattern SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
+    </figure>
+    <p>각 압축 파일에는 아래에서 설명하는 프로그램(<code>ember-server</code>, <code>ember-exec</code>, <code>ember-a2a</code>와 <code>ember-node</code>, <code>ember-term</code>)이 들어 있습니다. 한 묶음은 한 디렉터리에 두십시오. macOS 바이너리와 앱은 임시(ad hoc) 서명만 되어 있고 공증은 하지 않으므로(Apple 계정 없음) Gatekeeper가 첫 실행을 막습니다. 풀어낸 파일에는 <code>xattr -d com.apple.quarantine</code>을, <code>.app</code>에는 <code>xattr -dr com.apple.quarantine Ember.app</code>을 실행해 격리 표시를 지우거나, 우클릭 후 열기를 고릅니다. Windows <code>.msix</code>는 서명되어 있지 않으므로 개발자 모드를 켜거나 신뢰하는 인증서로 다시 서명합니다.</p>
+    <p>클라이언트는 렌더러가 링크되지 않아 아직 릴리스에 없습니다. <a href="#client">클라이언트</a>에 나온 대로 소스에서 빌드하십시오.</p>
 
     <h2 id="checkout">코드 받기</h2>
     <p>
@@ -103,8 +116,8 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="복사" data-copied="복사됨">
       <figcaption>shell</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/health
-<span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+<pre><code>curl http://127.0.0.1:8740/api/health
+<span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
       <span class="label">HTTP 리스너에는 로그인이 없습니다</span>

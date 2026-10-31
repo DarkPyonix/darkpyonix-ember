@@ -1,4 +1,4 @@
-//! HTTP client for the main server's `/api/v1` (see `ember/server/src/api/mod.rs`).
+//! HTTP client for the main server's `/api` (see `ember/server/src/api/mod.rs`).
 //!
 //! An [`Api`] reaches the server one of two ways, behind the same methods:
 //!
@@ -21,12 +21,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
+    ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
+use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
-pub const SERVER_SERVICE: &str = "ember-server/1";
+pub const SERVER_SERVICE: &str = "ember-server";
 
 /// Host name used in requests over the transport (the stream already names the peer).
 const PEER_HOST: &str = "ember-server";
@@ -48,6 +49,14 @@ pub enum ApiError {
     BadUrl(String),
 }
 
+/// `POST /sessions/{id}/fork` body: `{turn_seq?}` (server `ForkBody`).
+pub(crate) fn fork_body(turn_seq: Option<i64>) -> serde_json::Value {
+    match turn_seq {
+        Some(seq) => json!({ "turn_seq": seq }),
+        None => json!({}),
+    }
+}
+
 impl ApiError {
     pub fn status(&self) -> Option<u16> {
         match self {
@@ -67,7 +76,6 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Health {
     pub ok: bool,
-    pub push_version: u32,
 }
 
 /// `POST /sessions/{id}/lease` answer.
@@ -132,22 +140,22 @@ impl Api {
         }
     }
 
-    /// The push WebSocket URL (`ws(s)://…/api/v1/push`).
+    /// The push WebSocket URL (`ws(s)://…/api/push`).
     pub fn push_url(&self) -> String {
         match &self.reach {
             Reach::Http(_) => {
                 let rest = self.base.strip_prefix("http").unwrap_or(&self.base);
-                format!("ws{rest}/api/v1/push")
+                format!("ws{rest}/api/push")
             }
-            Reach::Peer { .. } => format!("ws://{PEER_HOST}/api/v1/push"),
+            Reach::Peer { .. } => format!("ws://{PEER_HOST}/api/push"),
         }
     }
 
-    /// `path` is below `/api/v1` and may carry a query string.
+    /// `path` is below `/api` and may carry a query string.
     async fn send(&self, method: Method, path: &str, json: Option<serde_json::Value>) -> ApiResult<Raw> {
         match &self.reach {
             Reach::Http(http) => {
-                let mut req = http.request(method, format!("{}/api/v1{path}", self.base));
+                let mut req = http.request(method, format!("{}/api{path}", self.base));
                 if let Some(body) = json {
                     req = req.json(&body);
                 }
@@ -161,7 +169,7 @@ impl Api {
                     ember_transport::http::http1_handshake::<Full<Bytes>>(stream).await.map_err(peer_err)?;
                 let mut req = hyper::Request::builder()
                     .method(method)
-                    .uri(format!("http://{PEER_HOST}/api/v1{path}"))
+                    .uri(format!("http://{PEER_HOST}/api{path}"))
                     .header(header::HOST, PEER_HOST);
                 let body = match json {
                     Some(v) => {
@@ -203,7 +211,7 @@ impl Api {
         Self::check(self.send(Method::POST, path, Some(body)).await?)
     }
 
-    /// Opens the push WebSocket (`/api/v1/push`).
+    /// Opens the push WebSocket (`/api/push`).
     pub async fn open_push(&self) -> ApiResult<PushSocket> {
         let url = self.push_url();
         let io: Box<dyn PushIo> = match &self.reach {
@@ -269,6 +277,14 @@ impl Api {
         Ok(())
     }
 
+    /// Switch a session's approve-everything mode (FR-A5). The server answers the approvals
+    /// already pending, and pushes the change to every client.
+    pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {
+        let path = format!("/sessions/{}/approve-all", seg(id));
+        Self::check(self.send(Method::PUT, &path, Some(json!({ "enabled": enabled }))).await?)?;
+        Ok(())
+    }
+
     pub async fn interrupt(&self, id: &str) -> ApiResult<()> {
         self.post(&format!("/sessions/{}/interrupt", seg(id)), json!({})).await?;
         Ok(())
@@ -303,6 +319,50 @@ impl Api {
         Self::decode(self.send(Method::DELETE, &path, None).await?)
     }
 
+    // ---- schedules (FR-A8) -----------------------------------------------------------------
+
+    /// Every schedule, or one project's.
+    pub async fn schedules(&self, project: Option<&str>) -> ApiResult<Vec<Schedule>> {
+        match project {
+            Some(p) => self.get(&format!("/schedules?project={}", seg(p))).await,
+            None => self.get("/schedules").await,
+        }
+    }
+
+    pub async fn create_schedule(&self, new: &NewSchedule) -> ApiResult<Schedule> {
+        let body = serde_json::to_value(new).expect("NewSchedule serialises");
+        Self::decode(self.post("/schedules", body).await?)
+    }
+
+    pub async fn update_schedule(&self, id: &str, patch: &SchedulePatch) -> ApiResult<Schedule> {
+        let body = serde_json::to_value(patch).expect("SchedulePatch serialises");
+        Self::decode(self.send(Method::PATCH, &format!("/schedules/{}", seg(id)), Some(body)).await?)
+    }
+
+    pub async fn delete_schedule(&self, id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &format!("/schedules/{}", seg(id)), None).await?)?;
+        Ok(())
+    }
+
+    pub async fn pause_schedule(&self, id: &str) -> ApiResult<Schedule> {
+        Self::decode(self.post(&format!("/schedules/{}/pause", seg(id)), json!({})).await?)
+    }
+
+    pub async fn resume_schedule(&self, id: &str) -> ApiResult<Schedule> {
+        Self::decode(self.post(&format!("/schedules/{}/resume", seg(id)), json!({})).await?)
+    }
+
+    /// Run now; answers the run (the server answers 202).
+    pub async fn run_schedule(&self, id: &str) -> ApiResult<ScheduleRun> {
+        Self::decode(self.post(&format!("/schedules/{}/run", seg(id)), json!({})).await?)
+    }
+
+    /// The most recent runs, newest first (server default 50, at most 500).
+    pub async fn schedule_runs(&self, id: &str, limit: Option<usize>) -> ApiResult<Vec<ScheduleRun>> {
+        let q = limit.map(|n| format!("?limit={n}")).unwrap_or_default();
+        self.get(&format!("/schedules/{}/runs{q}", seg(id))).await
+    }
+
     // ---- session metadata, search, export, fork (FR-L9, FR-S4, FR-S5) -----------------------
 
     /// Rename, pin or archive a session; answers the updated record.
@@ -321,18 +381,21 @@ impl Api {
         self.get(&format!("/search?{q}")).await
     }
 
+    /// Tokens per account per UTC day for the last `days` days (FR-U7), oldest first. The server
+    /// clamps `days` to 1..=366 and defaults to 7.
+    pub async fn usage(&self, days: Option<u32>) -> ApiResult<Vec<DailyUsage>> {
+        self.get(&usage_path(days)).await
+    }
+
     /// The session as the server's self-contained export file (`format: "ember-transcript"`).
     pub async fn export_session(&self, id: &str) -> ApiResult<serde_json::Value> {
         self.get(&format!("/sessions/{}/export", seg(id))).await
     }
 
-    /// Fork a session (FR-S5). Every server so far answers 501 (`ApiError::Status`); check
-    /// [`SessionDetail::can_fork`] first.
-    pub async fn fork_session(&self, id: &str, after_seq: Option<i64>) -> ApiResult<SessionRecord> {
-        let body = match after_seq {
-            Some(seq) => json!({ "after_seq": seq }),
-            None => json!({}),
-        };
+    /// Fork a session after its completed turn `turn_seq` (the last one when `None`, FR-S5).
+    /// The server answers 409 without a completed turn; check [`SessionDetail::can_fork`] first.
+    pub async fn fork_session(&self, id: &str, turn_seq: Option<i64>) -> ApiResult<SessionRecord> {
+        let body = fork_body(turn_seq);
         Self::decode(self.post(&format!("/sessions/{}/fork", seg(id)), body).await?)
     }
 
@@ -406,15 +469,70 @@ fn seg(s: &str) -> String {
     out
 }
 
+/// Path of `GET /usage`, with `?days=` when given.
+fn usage_path(days: Option<u32>) -> String {
+    match days {
+        Some(n) => format!("/usage?days={n}"),
+        None => "/usage".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn fr_u7_usage_path_carries_days() {
+        assert_eq!(usage_path(None), "/usage");
+        assert_eq!(usage_path(Some(14)), "/usage?days=14");
+    }
+
+    #[test]
+    fn fr_u7_daily_usage_decodes_server_rows() {
+        let rows: Vec<DailyUsage> = serde_json::from_value(json!([
+            {"account_id": "gpt-1", "day": "2026-10-25", "input_tokens": 1200, "output_tokens": 34, "reports": 3},
+            {"account_id": null, "day": "2026-10-26", "input_tokens": 5, "output_tokens": 6, "reports": 1}
+        ]))
+        .unwrap();
+        assert_eq!(rows[0].account_id.as_deref(), Some("gpt-1"));
+        assert_eq!(rows[0].total_tokens(), 1234);
+        assert_eq!((rows[1].account_id.clone(), rows[1].day.as_str()), (None, "2026-10-26"));
+    }
+
+    #[test]
+    fn fr_s5_fork_body_names_turn_seq() {
+        assert_eq!(fork_body(None), json!({}));
+        assert_eq!(fork_body(Some(7)), json!({ "turn_seq": 7 }));
+    }
+
+    #[test]
+    fn fr_s5_session_detail_decodes_fork_fields() {
+        let d: SessionDetail = serde_json::from_value(json!({
+            "session": {"id":"s","project":"p","agent":"codex","cwd":"/","status":"idle","title":"t",
+                        "created_at":1,"updated_at":1,"last_seq":3},
+            "live": false, "can_fork": true, "fork_turns": [2, 5],
+            "fork_of": {"parent_id": "q", "turn_seq": 2, "forked_at": 9}
+        }))
+        .unwrap();
+        let info = crate::wire::ForkInfo::from(&d);
+        assert!(info.can_fork);
+        assert_eq!(info.turns, vec![2, 5]);
+        assert_eq!(info.origin.unwrap().parent_id, "q");
+        // Older servers omit the fields.
+        let d: SessionDetail = serde_json::from_value(json!({
+            "session": {"id":"s","project":"p","agent":"codex","cwd":"/","status":"idle","title":"t",
+                        "created_at":1,"updated_at":1,"last_seq":3},
+            "live": false
+        }))
+        .unwrap();
+        assert!(!crate::wire::ForkInfo::from(&d).can_fork);
+    }
+
+    #[test]
     fn urls() {
         let api = Api::new("http://h:1/").unwrap();
-        assert_eq!(api.push_url(), "ws://h:1/api/v1/push");
-        assert_eq!(Api::new("https://h").unwrap().push_url(), "wss://h/api/v1/push");
+        assert_eq!(api.push_url(), "ws://h:1/api/push");
+        assert_eq!(Api::new("https://h").unwrap().push_url(), "wss://h/api/push");
         assert!(Api::new("h:1").is_err());
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
         assert_eq!(authority_addr("h:1"), ("h".to_string(), 1));

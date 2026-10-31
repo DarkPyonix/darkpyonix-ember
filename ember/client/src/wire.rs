@@ -2,13 +2,9 @@
 //!
 //! Mirrored rather than shared so the client never links the server. Decoding is tolerant where
 //! the server may grow: unknown event kinds and statuses decode to `Unknown` instead of failing,
-//! so an additive server change never breaks an older client. Incompatible changes bump
-//! [`PUSH_VERSION`] and are reported (see [`crate::push`]).
+//! so an additive server change never breaks an older client..
 
 use serde::{Deserialize, Serialize};
-
-/// The push envelope version this client understands.
-pub const PUSH_VERSION: u32 = 1;
 
 /// One thing that happened in a session (server `AgentEvent`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,6 +123,29 @@ pub struct SessionPatch {
     pub archived: Option<bool>,
 }
 
+/// `GET /usage` row (FR-U7): tokens one account reported on one UTC day. The server lists the
+/// ChatGPT plan accounts (FR-U4) next to the agent accounts, keyed by account id.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DailyUsage {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Number of `usage` events (about one per turn).
+    #[serde(default)]
+    pub reports: u64,
+}
+
+impl DailyUsage {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
 /// Start of a matched term in [`SearchHit::snippet`].
 pub const SNIPPET_OPEN: char = '\u{ab}';
 /// End of a matched term in [`SearchHit::snippet`].
@@ -174,6 +193,39 @@ pub struct SessionDetail {
     /// Whether the fork action is offered (FR-S5); disabled, not failing, when `false`.
     #[serde(default)]
     pub can_fork: bool,
+    /// Sequence numbers of the completed turns a fork may start after (FR-S5), oldest first.
+    #[serde(default)]
+    pub fork_turns: Vec<i64>,
+    /// Where this session was forked from, if it is a fork (FR-S5).
+    #[serde(default)]
+    pub fork_of: Option<ForkOrigin>,
+    /// Whether the session is in approve-everything mode (FR-A5).
+    #[serde(default)]
+    pub approve_all: bool,
+}
+
+/// Where a fork came from (server `ForkOrigin`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ForkOrigin {
+    pub parent_id: String,
+    /// Sequence number, in the parent, of the `turn_ended` event the fork starts after.
+    pub turn_seq: i64,
+    #[serde(default)]
+    pub forked_at: i64,
+}
+
+/// What the client keeps of `GET /sessions/{id}` for the fork action (FR-S5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForkInfo {
+    pub can_fork: bool,
+    pub turns: Vec<i64>,
+    pub origin: Option<ForkOrigin>,
+}
+
+impl From<&SessionDetail> for ForkInfo {
+    fn from(d: &SessionDetail) -> ForkInfo {
+        ForkInfo { can_fork: d.can_fork, turns: d.fork_turns.clone(), origin: d.fork_of.clone() }
+    }
 }
 
 /// `GET /agents` entry.
@@ -211,6 +263,8 @@ pub enum Push {
     ProjectUpdated { project: Project },
     /// A team's members or tasks changed (FR-T7): the whole team.
     TeamUpdated { team: TeamView },
+    /// A session's approve-everything mode was switched (FR-A5).
+    ApproveAll { session_id: String, enabled: bool },
 }
 
 // ---- teams and mentions (FR-T6, FR-T7; server `a2a::team`, `a2a::mention`) -------------------
@@ -350,4 +404,123 @@ pub struct MentionCandidate {
     #[serde(default)]
     pub agent: String,
     pub status: SessionStatus,
+}
+
+// ---- schedules (FR-A8, server `schedules`) -----------------------------------------------
+
+/// When a schedule fires (server `ScheduleKind`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScheduleKind {
+    /// A five-field cron expression evaluated in `tz` (IANA name).
+    Cron { expr: String, tz: String },
+    /// Every `seconds`.
+    Interval { seconds: u64 },
+    /// Once, at `at` (Unix ms).
+    Once { at: i64 },
+}
+
+/// What each run does (server `ScheduleTarget`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScheduleTarget {
+    /// Send the prompt into this existing session.
+    Continue { session_id: String },
+    /// Start a new session and send the prompt there.
+    New {
+        #[serde(default)]
+        title: Option<String>,
+    },
+}
+
+/// One schedule (`GET /schedules`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    pub project: String,
+    pub agent: String,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub computer_id: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    pub prompt: String,
+    pub kind: ScheduleKind,
+    pub target: ScheduleTarget,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub catch_up: bool,
+    /// Next planned trigger (Unix ms); `None` when paused or a one-off is done.
+    #[serde(default)]
+    pub next_run_at: Option<i64>,
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// How a run ended (server `RunStatus`); a status this client does not know decodes to `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Skipped,
+    Missed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One run of a schedule (`GET /schedules/{id}/runs`, newest first).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ScheduleRun {
+    pub id: String,
+    pub schedule_id: String,
+    /// The trigger time this run belongs to (Unix ms).
+    pub scheduled_at: i64,
+    pub status: RunStatus,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<i64>,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// `POST /schedules` body. `agent` and `cwd` are required for `New` targets.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NewSchedule {
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub prompt: String,
+    pub kind: ScheduleKind,
+    pub target: ScheduleTarget,
+    pub catch_up: bool,
+    pub paused: bool,
+}
+
+/// `PATCH /schedules/{id}` body; `None` fields are left alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct SchedulePatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ScheduleKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catch_up: Option<bool>,
 }

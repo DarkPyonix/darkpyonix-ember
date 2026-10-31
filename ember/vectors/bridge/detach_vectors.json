@@ -5,7 +5,6 @@
       "name": "cursor and selection",
       "detach": {
         "kind": "tab_detach",
-        "version": 1,
         "sourceWindowId": "win-a",
         "workspace": {
           "folder": "/Users/me/work/proj"
@@ -36,7 +35,6 @@
       "name": "no cursor: plain openFile",
       "detach": {
         "kind": "tab_detach",
-        "version": 1,
         "sourceWindowId": "win-a",
         "workspace": {
           "folder": "/Users/me/My Project"
@@ -52,7 +50,6 @@
       "name": "uri with query: no line suffix",
       "detach": {
         "kind": "tab_detach",
-        "version": 1,
         "sourceWindowId": "win-a",
         "workspace": {
           "folder": "C:\\work\\proj"
@@ -71,7 +68,6 @@
       "name": "unreserved and non-ASCII folder",
       "detach": {
         "kind": "tab_detach",
-        "version": 1,
         "sourceWindowId": "win-a",
         "workspace": {
           "folder": "/Users/me/프로젝트 (old)'s!*~_.-"
@@ -93,7 +89,6 @@
       "name": "no workspace folder: no URL",
       "detach": {
         "kind": "tab_detach",
-        "version": 1,
         "sourceWindowId": "win-a",
         "workspace": null,
         "fileUri": "vscode-remote://localhost:8888/tmp/a.txt",

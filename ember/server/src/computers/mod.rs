@@ -2,7 +2,7 @@
 //!
 //! A *computer* is an ember node (`ember/node/`) this server can reach, with a bearer token, either by
 //! HTTP URL or by transport peer ([`ember_transport::PeerAddr`], SPEC `FR-N1`): a peer-addressed
-//! node is dialed through the server's transport ([`crate::transport`]) for `ember-node/1`, and
+//! node is dialed through the server's transport ([`crate::transport`]) for `ember-node`, and
 //! the node admits the server only if the server's peer id is on its allow-list (`FR-N3`). The
 //! server itself is the implicit computer [`LOCAL`]. Each session has a *current computer*; a
 //! session that was never switched has none recorded and behaves exactly as before (local, no
@@ -12,17 +12,17 @@
 //!
 //! - **Codex**: the start request carries a [`RemoteExec`]; the Codex adapter registers it with
 //!   `environment/add`. The exec-server URL is a loopback relay in this process ([`relay`]) that
-//!   forwards to the node's `/v1/exec-server`, which runs `codex exec-server --listen stdio`
+//!   forwards to the node's `/exec-server`, which runs `codex exec-server --listen stdio`
 //!   there. Shell, PTY and file changes then run on the node.
 //! - **Claude Code**: `CLAUDE_CODE_SHELL_PREFIX` points at the `ember-exec` shim ([`shim`]), so
-//!   the Bash tool runs on the node via `/v1/exec`. The shim is a separate process that speaks
+//!   the Bash tool runs on the node via `/exec`. The shim is a separate process that speaks
 //!   HTTP, so for a peer-addressed node it is given a loopback bridge in this process
 //!   ([`bridge`]) that carries each TCP connection over one transport stream. Read, Edit, Write,
 //!   Glob and Grep reach the node through the project mount ([`mount`]): the session's cwd is
 //!   mounted here at the same path before the agent starts (when a mount mechanism is enabled,
 //!   `EMBER_MOUNT`; otherwise they stay local).
 //!
-//! Switching (FR-X3) records the new computer, describes it with its `/v1/env`, and releases the
+//! Switching (FR-X3) records the new computer, describes it with its `/env`, and releases the
 //! session's agent process; the next message starts (natively resumes) it with the new computer.
 //! The description is contributed through the session's instructions hooks
 //! ([`Sessions::add_instructions_hook`]), which are evaluated at every start, so a switch
@@ -32,7 +32,7 @@
 //!
 //! A computer can also be a project browser's network egress (FR-R1): [`Computers`] runs one
 //! loopback SOCKS5 listener per such computer ([`egress`]) that forwards to the node's
-//! `/v1/egress`, and resolves `Egress::Computer` for the browser manager
+//! `/egress`, and resolves `Egress::Computer` for the browser manager
 //! ([`crate::browser::EgressResolver`]).
 
 use std::collections::HashMap;
@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ember_node::client::NodeClient;
-use ember_node::proto::{EnvInfo, Health, PROTOCOL_VERSION};
+use ember_node::proto::{EnvInfo, Health};
 use ember_transport::{Dialer, PeerAddr};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -56,6 +56,7 @@ pub mod api;
 pub mod bridge;
 pub mod egress;
 pub mod mount;
+pub mod observations;
 pub mod relay;
 pub mod schema;
 pub mod shim;
@@ -65,9 +66,9 @@ pub const LOCAL: &str = "local";
 /// Display name of [`LOCAL`].
 pub const LOCAL_NAME: &str = "this server";
 
-/// How long a reachability probe (`/v1/health`) may take.
+/// How long a reachability probe (`/health`) may take.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long `/v1/env` may take (it probes toolchain versions).
+/// How long `/env` may take (it probes toolchain versions).
 pub const ENV_TIMEOUT: Duration = Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------------------------
@@ -137,7 +138,7 @@ pub struct ComputerStatus {
 #[derive(Debug, Clone)]
 pub struct SessionComputer {
     pub computer_id: String,
-    /// The computer's `/v1/env` at the time of the switch.
+    /// The computer's `/env` at the time of the switch.
     pub env: Option<EnvInfo>,
     /// Notice still to be delivered with the next message (FR-S7 v0).
     pub notice: Option<String>,
@@ -321,6 +322,41 @@ impl Registry {
         Ok(())
     }
 
+    /// The computer the user designated for the session (FR-X3), if any.
+    pub fn designated(&self, session_id: &str) -> Result<Option<String>, ComputerError> {
+        Ok(self
+            .store
+            .conn()
+            .query_row(
+                "SELECT computer_id FROM session_designated WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Designate a computer for the session, or clear the designation with `None`.
+    pub fn set_designated(&self, session_id: &str, computer_id: Option<&str>) -> Result<(), ComputerError> {
+        let conn = self.store.conn();
+        match computer_id {
+            Some(c) => conn.execute(
+                "INSERT INTO session_designated (session_id, computer_id) VALUES (?1, ?2)
+                 ON CONFLICT(session_id) DO UPDATE SET computer_id = ?2",
+                params![session_id, c],
+            )?,
+            None => conn.execute("DELETE FROM session_designated WHERE session_id = ?1", params![session_id])?,
+        };
+        Ok(())
+    }
+
+    /// Every (session, designated computer) pair, for the watcher.
+    pub fn all_designated(&self) -> Result<Vec<(String, String)>, ComputerError> {
+        let conn = self.store.conn();
+        let mut st = conn.prepare("SELECT session_id, computer_id FROM session_designated")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Take the pending notice, if any: it is returned once.
     pub fn take_notice(&self, session_id: &str) -> Result<Option<String>, ComputerError> {
         let mut conn = self.store.conn();
@@ -347,9 +383,17 @@ impl Registry {
 fn row_to_computer(r: &rusqlite::Row<'_>) -> rusqlite::Result<Computer> {
     let peer_json: Option<String> = r.get(5)?;
     let peer = match peer_json {
-        Some(j) => Some(serde_json::from_str::<PeerAddr>(&j).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
-        })?),
+        // Every stored identity is re-validated (FR-N6): a non-canonical or small-order key
+        // written before that rule is refused and logged, and the computer loses its peer
+        // address so it cannot be dialed or matched against a revocation by an alias.
+        Some(j) => match serde_json::from_str::<PeerAddr>(&j) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let id: String = r.get(0)?;
+                tracing::warn!(computer = %id, "refusing stored peer address: {e}");
+                None
+            }
+        },
         None => None,
     };
     Ok(Computer {
@@ -370,6 +414,11 @@ fn row_to_computer(r: &rusqlite::Row<'_>) -> rusqlite::Result<Computer> {
 pub trait NodeApi: Send + Sync {
     async fn health(&self) -> anyhow::Result<Health>;
     async fn env(&self) -> anyhow::Result<EnvInfo>;
+    /// SHA-256 of the file at `path` on this computer, or [`observations::FileState::Missing`]
+    /// (FR-S7). Fakes without files keep the default, which makes the file count as changed.
+    async fn file_state(&self, _path: &str) -> anyhow::Result<observations::FileState> {
+        anyhow::bail!("file hashing is not supported")
+    }
 }
 
 #[async_trait]
@@ -381,6 +430,22 @@ impl NodeApi for NodeClient {
     async fn env(&self) -> anyhow::Result<EnvInfo> {
         Ok(NodeClient::env(self).await?)
     }
+
+    async fn file_state(&self, path: &str) -> anyhow::Result<observations::FileState> {
+        use ember_node::client::ClientError;
+        use ember_node::proto::{ErrorCode, ReadRequest};
+        let req = ReadRequest { path: path.into(), offset: 0, len: Some(0), hash: true };
+        match NodeClient::read(self, &req).await {
+            Ok(r) => r
+                .sha256
+                .map(observations::FileState::Hash)
+                .ok_or_else(|| anyhow::anyhow!("node returned no hash")),
+            Err(ClientError::Api { body, .. }) if body.code == ErrorCode::NotFound => {
+                Ok(observations::FileState::Missing)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// This server as a computer: always reachable, described the way a node describes itself.
@@ -391,11 +456,20 @@ pub struct LocalNode {
 #[async_trait]
 impl NodeApi for LocalNode {
     async fn health(&self) -> anyhow::Result<Health> {
-        Ok(Health { ok: true, version: env!("CARGO_PKG_VERSION").into(), protocol: PROTOCOL_VERSION })
+        Ok(Health { ok: true, version: env!("CARGO_PKG_VERSION").into() })
     }
 
     async fn env(&self) -> anyhow::Result<EnvInfo> {
         Ok(ember_node::envinfo::describe(self.roots.clone()).await)
+    }
+
+    async fn file_state(&self, path: &str) -> anyhow::Result<observations::FileState> {
+        let p = PathBuf::from(path);
+        match tokio::task::spawn_blocking(move || ember_node::fs::sha256_file(&p)).await? {
+            Ok(h) => Ok(observations::FileState::Hash(h)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(observations::FileState::Missing),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -493,7 +567,7 @@ pub fn env_description(name: &str, env: &EnvInfo) -> String {
 /// The one-time notice after a switch (FR-S7 v0).
 pub fn switch_notice(from: &str, to: &str) -> String {
     format!(
-        "[Ember system notice] This session's computer changed from \"{from}\" to \"{to}\". \
+        "[Ember system notice] This session is now working on \"{to}\" (moved from \"{from}\"). \
          File contents, directory listings, processes and command output you observed earlier \
          came from \"{from}\" and may differ here: re-read any file before editing it, and re-run \
          commands whose results you rely on. Use the current computer description, not the \
@@ -503,6 +577,12 @@ pub fn switch_notice(from: &str, to: &str) -> String {
 
 // ---------------------------------------------------------------------------------------------
 // The service
+
+/// The computer a [`switch_notice`] says observations came from.
+fn notice_origin(notice: &str) -> Option<String> {
+    let rest = notice.split("(moved from \"").nth(1)?;
+    Some(rest.split("\")").next()?.to_string())
+}
 
 /// Result of a switch.
 #[derive(Debug, Clone, Serialize)]
@@ -528,6 +608,8 @@ pub struct CurrentComputer {
     pub switched_at: Option<i64>,
     pub env_description: Option<String>,
     pub notice_pending: bool,
+    /// The computer the user designated for the session (FR-X3), read-only for clients.
+    pub designated_computer_id: Option<String>,
 }
 
 pub struct Computers {
@@ -543,8 +625,37 @@ pub struct Computers {
     dialer: Option<Dialer>,
     /// Loopback HTTP bridges to peer-addressed nodes (for the `ember-exec` shim), by computer id.
     bridges: Mutex<HashMap<String, bridge::NodeBridge>>,
-    /// Browser egress listeners (loopback SOCKS5 → node `/v1/egress`), by computer id.
+    /// Browser egress listeners (loopback SOCKS5 → node `/egress`), by computer id.
     egress: Mutex<HashMap<String, egress::EgressListener>>,
+    /// Consecutive probes that must disagree with a session's computer before it moves (FR-X3).
+    debounce: std::sync::atomic::AtomicU32,
+    /// Seconds between probes of designated computers (FR-X3).
+    watch_secs: std::sync::atomic::AtomicU64,
+    /// Per session: how many consecutive probes wanted a move (FR-X3 debounce).
+    flap: Mutex<HashMap<String, u32>>,
+}
+
+/// Probes in a row that must agree before a fallback or return happens (FR-X3).
+pub const DEFAULT_DEBOUNCE: u32 = 2;
+/// How often designated computers are probed.
+pub const WATCH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Fallback probe count and interval in seconds from `EMBER_FALLBACK_PROBES` and
+/// `EMBER_FALLBACK_INTERVAL_SECS` values; unset or invalid (or zero) values keep the defaults (FR-X3).
+fn fallback_env() -> (u32, u64) {
+    parse_fallback(
+        std::env::var("EMBER_FALLBACK_PROBES").ok().as_deref(),
+        std::env::var("EMBER_FALLBACK_INTERVAL_SECS").ok().as_deref(),
+    )
+}
+
+pub fn parse_fallback(probes: Option<&str>, interval_secs: Option<&str>) -> (u32, u64) {
+    let p = probes.and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| *v > 0).unwrap_or(DEFAULT_DEBOUNCE);
+    let i = interval_secs
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(WATCH_INTERVAL.as_secs());
+    (p, i)
 }
 
 impl Computers {
@@ -573,6 +684,9 @@ impl Computers {
             dialer,
             bridges: Mutex::new(HashMap::new()),
             egress: Mutex::new(HashMap::new()),
+            debounce: std::sync::atomic::AtomicU32::new(fallback_env().0),
+            watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
+            flap: Mutex::new(HashMap::new()),
         })
     }
 
@@ -649,6 +763,25 @@ impl Computers {
         sessions.add_prepare_hook(self.prepare_hook());
         sessions.add_start_config_hook(self.start_hook());
         sessions.add_message_hook(self.message_hook());
+        {
+            // FR-X3: fall back to the main server when a designated computer is lost, and return.
+            let (this, sessions) = (Arc::downgrade(self), Arc::downgrade(sessions));
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(
+                    this.upgrade().map(|c| c.fallback_settings().1).unwrap_or(WATCH_INTERVAL.as_secs()),
+                ));
+                loop {
+                    tick.tick().await;
+                    let (Some(c), Some(s)) = (this.upgrade(), sessions.upgrade()) else { break };
+                    let Ok(pairs) = c.registry.all_designated() else { continue };
+                    for (sid, _) in pairs {
+                        if let Err(e) = c.reconcile(&s, &sid).await {
+                            tracing::warn!(session = %sid, "computer fallback failed: {e:#}");
+                        }
+                    }
+                }
+            });
+        }
         if let Some(mounts) = self.mounts() {
             // Unmount projects whose sessions' agents are gone (idle release, exit, deletion).
             let (mounts, sessions) = (Arc::downgrade(mounts), Arc::downgrade(sessions));
@@ -751,7 +884,7 @@ impl Computers {
         }
     }
 
-    /// Probe one computer: `/v1/health`, and `/v1/env` when `with_env`.
+    /// Probe one computer: `/health`, and `/env` when `with_env`.
     async fn probe(&self, c: Option<&Computer>, with_env: bool) -> ComputerStatus {
         let view = c.map(ComputerView::of).unwrap_or_else(ComputerView::local);
         let api = match (self.connector)(c) {
@@ -763,11 +896,8 @@ impl Computers {
             Ok(Err(e)) => return unreachable_status(view, format!("{e:#}")),
             Err(_) => return unreachable_status(view, "health check timed out".into()),
         };
-        if !health.ok || health.protocol != PROTOCOL_VERSION {
-            return unreachable_status(
-                view,
-                format!("node protocol {} (this server speaks {PROTOCOL_VERSION})", health.protocol),
-            );
+        if !health.ok {
+            return unreachable_status(view, "node reports it is not healthy".into());
         }
         let mut status = ComputerStatus {
             computer: view,
@@ -813,6 +943,7 @@ impl Computers {
             .store()
             .session(session_id)?
             .ok_or_else(|| ComputerError::SessionNotFound(session_id.to_string()))?;
+        let designated_computer_id = self.registry.designated(&rec.id)?;
         Ok(match self.registry.session_computer(&rec.id)? {
             None => CurrentComputer {
                 session_id: rec.id,
@@ -821,6 +952,7 @@ impl Computers {
                 switched_at: None,
                 env_description: None,
                 notice_pending: false,
+                designated_computer_id,
             },
             Some(sc) => {
                 let view = self.view(&sc.computer_id);
@@ -831,6 +963,7 @@ impl Computers {
                     implicit: false,
                     switched_at: Some(sc.switched_at),
                     notice_pending: sc.notice.is_some(),
+                    designated_computer_id,
                 }
             }
         })
@@ -892,8 +1025,44 @@ impl Computers {
         let description = env_description(&target_view.name, &env);
         let moved = previous_view.id != target_view.id;
         // Only an agent that has already worked somewhere has observations to invalidate.
+        // A notice still undelivered means the agent has not looked since an earlier switch: its
+        // observations come from the computer that notice names, not from the one just left.
+        let observed = match current.as_ref().and_then(|sc| sc.notice.as_deref()) {
+            Some(pending) => notice_origin(pending),
+            None => Some(previous_view.name.clone()),
+        };
+        let pending = current.as_ref().and_then(|sc| sc.notice.as_deref()).is_some();
         let notice = (moved && rec.native_id.is_some())
-            .then(|| switch_notice(&previous_view.name, &target_view.name));
+            .then(|| observed.filter(|o| *o != target_view.name))
+            .flatten();
+        // FR-S7: hash the files the agent saw on both computers so only changed ones are flagged.
+        // Without a comparison (a notice still undelivered, no files, a computer that cannot be
+        // hashed) the v0 notice applies.
+        let comparison = match (&notice, pending) {
+            (Some(_), false) => {
+                let events = sessions.store().events_after(session_id, 0)?;
+                let paths = observations::observed_paths(&events);
+                if paths.is_empty() {
+                    None
+                } else {
+                    let prev = self.resolve(&previous_view.id).ok().and_then(|c| (self.connector)(c.as_ref()).ok());
+                    let next = (self.connector)(target.as_ref()).ok();
+                    match (prev, next) {
+                        (Some(a), Some(b)) => {
+                            let before = observations::hash_all(a.as_ref(), &paths).await;
+                            let after = observations::hash_all(b.as_ref(), &paths).await;
+                            Some(observations::compare(&paths, &before, &after))
+                        }
+                        _ => None,
+                    }
+                }
+            }
+            _ => None,
+        };
+        let notice = notice.map(|o| match &comparison {
+            Some(c) => observations::switch_notice_with(&o, &target_view.name, c),
+            None => switch_notice(&o, &target_view.name),
+        });
         self.registry.set_session_computer(session_id, &target_view.id, Some(&env), notice.as_deref())?;
         // The next message starts the agent with the new computer (and natively resumes it).
         sessions.release(session_id).await.map_err(|e| ComputerError::Other(anyhow::anyhow!("{e:#}")))?;
@@ -910,6 +1079,82 @@ impl Computers {
             notice,
             env_description: description,
         })
+    }
+
+    /// Set the seconds between probes of designated computers (FR-X3); takes effect at the next start.
+    pub fn set_watch_interval_secs(&self, secs: u64) {
+        self.watch_secs.store(secs.max(1), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Probes that must agree, and seconds between probes (FR-X3).
+    pub fn fallback_settings(&self) -> (u32, u64) {
+        (
+            self.debounce.load(std::sync::atomic::Ordering::SeqCst),
+            self.watch_secs.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    /// Set how many consecutive probes must agree before a fallback or return (FR-X3).
+    pub fn set_debounce(&self, probes: u32) {
+        self.debounce.store(probes.max(1), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Designate `computer_id` for the session, or clear it with `None` (FR-X3). The session
+    /// does not move until [`Computers::reconcile`] runs (the watcher, or the caller).
+    pub fn designate(&self, session_id: &str, computer_id: Option<&str>) -> Result<(), ComputerError> {
+        if let Some(id) = computer_id {
+            if id != LOCAL && self.registry.get(id)?.is_none() {
+                return Err(ComputerError::NotFound(id.to_string()));
+            }
+        }
+        self.flap.lock().unwrap().remove(session_id);
+        self.registry.set_designated(session_id, computer_id)
+    }
+
+    /// Move a session with a designated computer to where it belongs (FR-X3): onto the
+    /// designated computer while it answers, onto the main server while it does not. A move
+    /// needs [`Computers::set_debounce`] consecutive probes that agree, so a flapping
+    /// connection does not bounce the session. Returns the switch when one happened. A session
+    /// without a designation never moves; a mid-turn session waits for the next probe.
+    pub async fn reconcile(
+        &self,
+        sessions: &Arc<Sessions>,
+        session_id: &str,
+    ) -> Result<Option<SwitchOutcome>, ComputerError> {
+        let Some(designated) = self.registry.designated(session_id)? else {
+            return Ok(None);
+        };
+        let here = self
+            .registry
+            .session_computer(session_id)?
+            .map(|sc| sc.computer_id)
+            .unwrap_or_else(|| LOCAL.to_string());
+        let up = designated == LOCAL || {
+            let c = self.resolve(&designated)?;
+            self.probe(c.as_ref(), false).await.reachable == Some(true)
+        };
+        let want = if up { designated } else { LOCAL.to_string() };
+        if want == here {
+            self.flap.lock().unwrap().remove(session_id);
+            return Ok(None);
+        }
+        let seen = {
+            let mut f = self.flap.lock().unwrap();
+            let n = f.entry(session_id.to_string()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        if seen < self.debounce.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(None);
+        }
+        match self.switch(sessions, session_id, &want).await {
+            Ok(out) => {
+                self.flap.lock().unwrap().remove(session_id);
+                Ok(Some(out))
+            }
+            Err(ComputerError::Busy(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Environment for a Claude Code process whose Bash tool runs on `c` through `ember-exec`.
@@ -1106,6 +1351,31 @@ mod tests {
     }
 
     #[test]
+    fn fr_n6_stored_peer_json_is_revalidated_on_load() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let r = Registry::new(store.clone());
+        let good = ember_transport::SecretKey::generate().peer_id();
+        let put = |id: &str, name: &str, peer: &str| {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO computers (id, name, url, token, created_at, peer_json) VALUES (?1, ?2, '', 't', 0, ?3)",
+                    params![id, name, peer],
+                )
+                .unwrap();
+        };
+        put("a", "good", &format!(r#"{{"peer":"{}"}}"#, good.to_string().to_uppercase()));
+        put("b", "identity", r#"{"peer":"0100000000000000000000000000000000000000000000000000000000000000"}"#);
+        put("c", "negzero", r#"{"peer":"0100000000000000000000000000000000000000000000000000000000000080"}"#);
+        // A valid row loads unchanged (re-canonicalized to lowercase); invalid ones lose the
+        // identity instead of being trusted, and the rest of the list still loads.
+        assert_eq!(r.get("a").unwrap().unwrap().peer.unwrap().peer, good);
+        assert!(r.get("b").unwrap().unwrap().peer.is_none());
+        assert!(r.get("c").unwrap().unwrap().peer.is_none());
+        assert_eq!(r.list().unwrap().len(), 3);
+    }
+
+    #[test]
     fn registry_round_trip_and_unique_names() {
         let r = Registry::open_in_memory().unwrap();
         let a = r.insert("pi", "http://10.0.0.2:8741", "t1").unwrap();
@@ -1229,7 +1499,8 @@ mod tests {
     #[test]
     fn notice_names_both_computers_and_asks_to_reread() {
         let n = switch_notice("mac", "pi");
-        assert!(n.contains("from \"mac\" to \"pi\""));
+        assert!(n.contains("now working on \"pi\" (moved from \"mac\")"));
+        assert!(!n.contains("invalid"));
         assert!(n.contains("re-read any file before editing it"));
     }
 }

@@ -4,7 +4,7 @@ Status: **partial.** Server side, node egress and the agent's browser MCP are im
 #44) and tested in CI; no client renders the browser yet (FR-R5), and the acceptance runs with a
 real Chrome and a real node are not verified (#12).
 
-Code: `ember/server/src/browser/`. Stream protocol version: **1** (`browser::STREAM_VERSION`).
+Code: `ember/server/src/browser/`.
 
 ## Model
 
@@ -24,7 +24,7 @@ Code: `ember/server/src/browser/`. Stream protocol version: **1** (`browser::STR
 - Browser binary: `EMBER_CHROME_BIN`, else Google Chrome / Chromium / Chrome for Testing app bundles,
   `google-chrome`/`chromium` on `PATH`, else the newest Playwright-cached Chromium.
 
-## HTTP routes (under `/api/v1/browsers`)
+## HTTP routes (under `/api/browsers`)
 
 | Route | Body / result |
 | --- | --- |
@@ -43,21 +43,20 @@ Code: `ember/server/src/browser/`. Stream protocol version: **1** (`browser::STR
 
 `BrowserInfo = {project, profile_dir, debug_port, state: ViewState}`.
 
-## View stream (WebSocket `GET /api/v1/browsers/{project}/view`), v1
+## View stream (WebSocket `GET /api/browsers/{project}/view`), v1
 
 Connecting starts the browser if needed and registers a viewer; the screencast runs only while at
 least one viewer is connected. All viewers share one stream (one tab, one quality setting).
 
 ### Server → client
 
-> The `v` field below is decided to go (INTENT D15, #85): fields are only added, unknown fields are ignored, and there is no version negotiation.
+> There is no `v` field (INTENT D15, #85): fields are only added, unknown fields are ignored, and there is no version negotiation.
 
-- **Text** `{"type":"hello","v":1,"project":…,"state":ViewState}`: first message. A client that
-  does not know `v` must say so to the user, not guess.
-- **Text** `{"type":"state","v":1,"project":…,"state":ViewState}`: on every state change.
-- **Text** `{"type":"error","v":1,"message":…}`: an input message failed.
+- **Text** `{"type":"hello","project":…,"state":ViewState}`: first message.
+- **Text** `{"type":"state","project":…,"state":ViewState}`: on every state change.
+- **Text** `{"type":"error","message":…}`: an input message failed.
 - **Binary** frame: `[u32 big-endian header length N][N bytes UTF-8 JSON header][JPEG bytes]`.
-  Header: `{"type":"frame","v":1,"seq","format":"jpeg","target_id","metadata","agent_active","takeover"}`;
+  Header: `{"type":"frame","seq","format":"jpeg","target_id","metadata","agent_active","takeover"}`;
   `metadata` is CDP's `ScreencastFrameMetadata` (`deviceWidth`, `deviceHeight`, `pageScaleFactor`,
   `offsetTop`, `scrollOffsetX/Y`, `timestamp`). Frames may be dropped for a slow viewer; each frame
   is a full image, so the client just shows the latest.
@@ -90,7 +89,7 @@ metadata; the JPEG may be downscaled (`max_width/height`), so clients scale by
 ```text
 Chrome --proxy-server=socks5://127.0.0.1:<port>
   └─TCP─▶ ember server: loopback listener for computer X (ember/server/src/computers/egress.rs)
-            └─ one WebSocket per TCP connection: GET <node>/v1/egress (Bearer <node token>)
+            └─ one WebSocket per TCP connection: GET <node>/egress (Bearer <node token>)
                  └─▶ ember node X: SOCKS5 server (ember/node/src/egress.rs) ──TCP─▶ target
 ```
 
@@ -100,7 +99,7 @@ Chrome --proxy-server=socks5://127.0.0.1:<port>
   127.0.0.1 without authentication (Chrome cannot authenticate to SOCKS5), kept until the
   computer is removed or the server stops. Its port changes per server run, which is why the
   computer id (not the URL) is persisted.
-- `/v1/egress` stream format: a raw SOCKS5 (RFC 1928) byte stream in Binary frames. SOCKS5
+- `/egress` stream format: a raw SOCKS5 (RFC 1928) byte stream in Binary frames. SOCKS5
   auth over this route is "no authentication" (the upgrade carried the node token). `CONNECT`
   only (others → reply `0x07`); IPv4, IPv6 and domain addresses. **An empty Binary frame is a
   half-close** (TCP FIN) in that direction; a side that has both sent and received one closes
@@ -108,7 +107,7 @@ Chrome --proxy-server=socks5://127.0.0.1:<port>
 - Node policy: default allow everything (the computer's `localhost` and LAN must be reachable).
   `EMBER_NODE_EGRESS_DENY=private,link-local,loopback,<CIDR>,…` denies destinations (every
   resolved address is checked; none left → reply `0x02`); `EMBER_NODE_EGRESS=off` refuses
-  `/v1/egress` with 403.
+  `/egress` with 403.
 - Optional plain SOCKS5 on the node: `EMBER_NODE_SOCKS_LISTEN=<addr>`; loopback clients need no
   auth, others RFC 1929 username/password with the node token as password.
 - Today the node stream is a WebSocket over the node's plain HTTP; with the transport (FR-N5) it
@@ -118,7 +117,7 @@ Chrome --proxy-server=socks5://127.0.0.1:<port>
 ## Agents (FR-R3)
 
 Agents run on ember server next to the browser and get an unmodified, off-the-shelf DevTools MCP
-server pointed at the relay `ws://127.0.0.1:<port>/api/v1/browsers/<project>/cdp`:
+server pointed at the relay `ws://127.0.0.1:<port>/api/browsers/<project>/cdp`:
 
 - chrome-devtools-mcp (default): `npx -y chrome-devtools-mcp@latest --wsEndpoint=<relay>`
 - Playwright MCP: `npx -y @playwright/mcp@latest --cdp-endpoint=<relay>`
@@ -159,7 +158,7 @@ their next tool call.
 - The raw Chrome DevTools port (`debug_port`) is unauthenticated on 127.0.0.1; agents should use the
   relay. The ember API itself has no auth yet.
 - Egress through a computer has not been run with a real Chrome against a real node; the
-  pieces are tested separately (node SOCKS5 over `/v1/egress`, server listener → node → TCP echo,
+  pieces are tested separately (node SOCKS5 over `/egress`, server listener → node → TCP echo,
   persistence across a manager restart).
 - Codex sessions on another computer (`environment/add`): whether Codex starts stdio MCP servers
   locally (where the relay is reachable) or in the remote environment is unverified.

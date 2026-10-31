@@ -3,8 +3,10 @@
 #   transport-isolation  .github/scripts/checks/check-transport-isolation.sh (SPEC FR-N5), when present
 #   editor-conn-pin      ember/editor-conn/src/rpc_ids.rs + PINNED_VERSION/PINNED_COMMIT match the
 #                        Code-OSS tag in ember/ose/VERSION (regenerated with gen_rpc_ids.sh), when present
+#   vendored-css         .github/scripts/checks/check-vendored-css.sh + check-no-has-selector.sh (D23, #143)
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
+#   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each ember/<crate> dir that exists
 name: Test
@@ -54,6 +56,25 @@ jobs:
       - uses: actions/checkout@v5
       - name: Run .github/scripts/checks/check-no-em-dash.sh
         run: bash .github/scripts/checks/check-no-em-dash.sh
+
+  release-workflow:
+    name: Release workflow follows the rules (NFR-R1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash .github/scripts/checks/check-release-workflow.sh
+
+  vendored-css:
+    name: Vendored Code-OSS CSS is reproducible
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Vendored copy equals pristine plus patch (offline)
+        run: bash .github/scripts/checks/check-vendored-css.sh
+      - name: No :has( in Ember-owned CSS
+        run: bash .github/scripts/checks/check-no-has-selector.sh
 
   no-webview:
     name: No webview in the launcher (NFR-L2)
@@ -123,7 +144,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [server, node, transport, hub, client, bridge, editor-conn, editor]
+        crate: [server, node, transport, hub, client, bridge, editor-conn, editor, app]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
@@ -141,6 +162,16 @@ jobs:
         if: steps.present.outputs.yes == 'true'
         with:
           workspaces: ember/${{ matrix.crate }}
+      - name: Renderer system libraries
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
+        # The compose-rust renderer links X11, GL, fontconfig and freetype on Linux.
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxext-dev libgl1-mesa-dev libfontconfig1-dev libfreetype-dev
+      - name: Fetch every platform's crates
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'app'
+        # tests/no_webview.rs reads the whole dependency graph with `cargo metadata
+        # --offline`, which needs the crates of every platform on disk, not only Linux's.
+        working-directory: ember/app
+        run: cargo fetch --locked
       - name: cargo test
         if: steps.present.outputs.yes == 'true'
         working-directory: ember/${{ matrix.crate }}

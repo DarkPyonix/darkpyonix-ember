@@ -2,11 +2,11 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/mcp` | → `[McpEntry]` |
-//! | POST   | `/api/v1/mcp` | `{name, command, args?, env?: {NAME: value}, enabled?, scope?}` → 201 `McpEntry` |
-//! | GET    | `/api/v1/mcp/{id}` | → `McpEntry` |
-//! | PATCH  | `/api/v1/mcp/{id}` | `{name?, command?, args?, env?: {NAME: value or null}, enabled?, scope?}` → `McpEntry` |
-//! | DELETE | `/api/v1/mcp/{id}` | → 204 |
+//! | GET    | `/api/mcp` | → `[McpEntry]` |
+//! | POST   | `/api/mcp` | `{name, command, args?, env?: {NAME: value}, enabled?, scope?}` → 201 `McpEntry` |
+//! | GET    | `/api/mcp/{id}` | → `McpEntry` |
+//! | PATCH  | `/api/mcp/{id}` | `{name?, command?, args?, env?: {NAME: value or null}, enabled?, scope?}` → `McpEntry` |
+//! | DELETE | `/api/mcp/{id}` | → 204 |
 //!
 //! `McpEntry` is `{id, name, command, args, env_keys, enabled, scope, created_at, updated_at}`:
 //! environment values are write-only. `scope` is `all` (default) or `project:<name>`. Changes
@@ -26,8 +26,8 @@ use super::{McpError, McpPatch, McpRegistry, NewMcp};
 
 pub fn router(registry: Arc<McpRegistry>) -> Router {
     Router::new()
-        .route("/api/v1/mcp", get(list).post(add))
-        .route("/api/v1/mcp/{id}", get(one).patch(update).delete(remove))
+        .route("/api/mcp", get(list).post(add))
+        .route("/api/mcp/{id}", get(one).patch(update).delete(remove))
         .with_state(registry)
 }
 

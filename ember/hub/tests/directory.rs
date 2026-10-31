@@ -111,3 +111,19 @@ async fn unregistered_endpoints_are_not_published_and_tokenless_peers_resolve_no
     stranger.close().await;
     b.close().await;
 }
+
+// ---- FR-N6: a non-canonical or small-order endpoint id never loads (#235) ----
+
+#[test]
+fn fr_n6_hub_endpoint_id_json_with_a_weak_key_is_rejected() {
+    use ember_hub::LinkRequest;
+    // The identity point, and the same point with the sign bit set (x = 0).
+    for h in [
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000080",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    ] {
+        let json = format!(r#"{{"endpoint_id":"{h}","name":"x","role":"computer"}}"#);
+        assert!(serde_json::from_str::<LinkRequest>(&json).is_err(), "accepted {h}");
+    }
+}

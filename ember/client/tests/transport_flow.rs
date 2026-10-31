@@ -65,7 +65,7 @@ async fn client_syncs_over_the_transport_and_revocation_cuts_it_off() {
 
     let api = Api::over_transport(Dialer::new(device_t.clone()), server_t.peer_id());
     assert!(api.base_url().starts_with("peer:"));
-    assert_eq!(api.health().await.unwrap().push_version, wire::PUSH_VERSION);
+    assert!(api.health().await.unwrap().ok);
 
     let c = Client::with_api(config(), api).await;
     c.start();

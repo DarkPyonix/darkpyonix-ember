@@ -67,10 +67,11 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AgentKind, AgentRun, Detected, RemoteExec, StartRequest};
+use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
+use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, RemoteExec, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a response to one of our requests.
@@ -133,6 +134,11 @@ impl AgentAdapter for CodexAdapter {
         AgentKind::Codex
     }
 
+    /// `thread/fork` takes `lastTurnId`, so a fork can start after any completed turn (FR-S5).
+    fn native_fork(&self) -> NativeFork {
+        NativeFork::AtTurn
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -161,20 +167,23 @@ impl AgentAdapter for CodexAdapter {
             req.cwd.clone()
         };
         let (mcp_env, _) = mcp_process_env(&req);
-        let mut child = Command::new(&self.bin)
-            .envs(mcp_env.iter().map(|(k, v)| (k, v)))
-            .envs(req.env.iter().map(|(k, v)| (k, v)))
-            .args(app_server_args(&req))
-            .current_dir(&spawn_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("starting {} app-server", self.bin.display()))?;
-        let stdin = child.stdin.take().context("app-server stdin")?;
-        let stdout = child.stdout.take().context("app-server stdout")?;
-        let stderr = child.stderr.take().context("app-server stderr")?;
+        let mut env: Vec<(String, String)> = mcp_env.clone();
+        env.extend(req.env.iter().cloned());
+        let proc = spawn_agent(AgentCommand {
+            program: self.bin.clone(),
+            args: app_server_args(&req),
+            env,
+            cwd: spawn_dir.clone(),
+            // `initialize` has to run on a fresh app-server, so a surviving one is restarted
+            // through `thread/resume` instead of rejoined.
+            reattachable: false,
+        })
+        .await
+        .with_context(|| format!("starting {} app-server", self.bin.display()))?;
+        let stdin = proc.stdin;
+        let stdout = proc.stdout;
+        let stderr = proc.stderr;
+        let child = proc.handle;
 
         let conn = Arc::new(Conn {
             stdin: tokio::sync::Mutex::new(Some(stdin)),
@@ -184,12 +193,14 @@ impl AgentAdapter for CodexAdapter {
             closing: AtomicBool::new(false),
         });
 
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "codex", "{line}");
-            }
-        });
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "codex", "{line}");
+                }
+            });
+        }
         tokio::spawn(read_loop(conn.clone(), stdout, events.clone()));
 
         conn.request("initialize", initialize_params(req.remote.is_some()))
@@ -211,15 +222,36 @@ impl AgentAdapter for CodexAdapter {
         if let (Some(envs), None) = (&environments, &req.resume_native_id) {
             params.insert("environments".into(), envs.clone());
         }
-        let resp = match &req.resume_native_id {
-            Some(id) => {
+        let resp = match (&req.resume_native_id, &req.fork_from) {
+            (None, Some(from)) => {
+                // FR-S5: `thread/fork {threadId, lastTurnId}` copies the thread through that turn.
+                // Its params have no `environments`, so a fork on another computer is left to the
+                // conversation copy.
+                anyhow::ensure!(req.remote.is_none(), "thread/fork cannot target a remote exec-server");
+                params.insert("threadId".into(), json!(from.native_id));
+                if let Some(keep) = from.keep_turns {
+                    let list = conn
+                        .request(
+                            "thread/turns/list",
+                            json!({ "threadId": from.native_id, "sortDirection": "asc", "limit": 10_000 }),
+                        )
+                        .await
+                        .context("thread/turns/list")?;
+                    let turn = fork_turn_id(&list, keep)
+                        .with_context(|| format!("the thread has no completed turn number {keep}"))?;
+                    params.insert("lastTurnId".into(), json!(turn));
+                }
+                params.insert("excludeTurns".into(), json!(true));
+                conn.request("thread/fork", Value::Object(params)).await.context("thread/fork")?
+            }
+            (Some(id), _) => {
                 params.insert("threadId".into(), json!(id));
                 params.insert("excludeTurns".into(), json!(true));
                 conn.request("thread/resume", Value::Object(params))
                     .await
                     .context("thread/resume")?
             }
-            None => {
+            (None, None) => {
                 conn.request("thread/start", Value::Object(params)).await.context("thread/start")?
             }
         };
@@ -316,6 +348,19 @@ fn environments_param(remote: &RemoteExec, cwd: &std::path::Path) -> Value {
     json!([{ "environmentId": remote.environment_id, "cwd": cwd.to_string_lossy() }])
 }
 
+/// The id of the `keep`-th completed turn (1-based, oldest first) in a `thread/turns/list`
+/// response, the `lastTurnId` of a fork through that turn (FR-S5).
+fn fork_turn_id(list: &Value, keep: usize) -> Option<String> {
+    let turns = list.get("data")?.as_array()?;
+    turns
+        .iter()
+        .filter(|t| t.get("status").and_then(Value::as_str) == Some("completed"))
+        .nth(keep.checked_sub(1)?)?
+        .get("id")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// `result.thread.id` of a `thread/start` / `thread/resume` response.
 fn thread_id_of(result: &Value) -> Option<String> {
     result.pointer("/thread/id")?.as_str().map(str::to_string)
@@ -332,7 +377,7 @@ type Reply = Result<Value, String>;
 
 /// One app-server process's JSON-RPC connection.
 struct Conn {
-    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    stdin: tokio::sync::Mutex<Option<AgentStdin>>,
     pending: Mutex<HashMap<i64, oneshot::Sender<Reply>>>,
     next_id: AtomicI64,
     mapper: Mutex<Mapper>,
@@ -381,7 +426,7 @@ impl Conn {
 
 async fn read_loop(
     conn: Arc<Conn>,
-    stdout: tokio::process::ChildStdout,
+    stdout: AgentStdout,
     events: mpsc::Sender<AgentEvent>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -448,7 +493,7 @@ async fn read_loop(
 
 struct CodexRun {
     conn: Arc<Conn>,
-    child: Option<Child>,
+    child: Option<ProcHandle>,
     events: mpsc::Sender<AgentEvent>,
     thread_id: String,
     /// `environments` for every `turn/start` when the tools run on another computer.
@@ -529,10 +574,8 @@ impl AgentRun for CodexRun {
         self.conn.closing.store(true, Ordering::Relaxed);
         // Closing stdin makes app-server exit; the thread stays on disk for `thread/resume`.
         self.conn.stdin.lock().await.take();
-        if let Some(mut child) = self.child.take() {
-            if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
-                child.kill().await?;
-            }
+        if let Some(handle) = self.child.take() {
+            handle.shutdown(EXIT_GRACE).await?;
         }
         Ok(())
     }
@@ -956,6 +999,19 @@ fn strip_nulls(v: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fork_turn_id_picks_the_nth_completed_turn() {
+        let list = json!({ "data": [
+            { "id": "t1", "status": "completed" },
+            { "id": "t2", "status": "interrupted" },
+            { "id": "t3", "status": "completed" },
+        ] });
+        assert_eq!(fork_turn_id(&list, 1).as_deref(), Some("t1"));
+        assert_eq!(fork_turn_id(&list, 2).as_deref(), Some("t3"));
+        assert_eq!(fork_turn_id(&list, 3), None);
+        assert_eq!(fork_turn_id(&list, 0), None);
+    }
+
     use super::*;
 
     /// One fixture line: `{"dir": "in" | "out" | "note", "msg": …}`.

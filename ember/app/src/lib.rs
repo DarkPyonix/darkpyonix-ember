@@ -5,6 +5,7 @@
 //! for VS Code Web. `tests/no_webview.rs` and `.github/scripts/checks/check-no-webview.sh` enforce it.
 //!
 //! - [`config`]: server URL and data paths.
+//! - [`demo`]: the data served inside the app when no server is given (demo only, #199).
 //! - [`services`]: tokio runtime, `ember_client::Client`, extra server API, outbox.
 //! - [`bridge`]: client changes → UI signals.
 //! - [`model`]: pure view models (tested).
@@ -12,6 +13,7 @@
 
 pub mod bridge;
 pub mod config;
+pub mod demo;
 pub mod export;
 pub mod ide;
 pub mod model;
@@ -35,8 +37,9 @@ use crate::services::{install, services, Services};
 pub fn launch() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("EMBER_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ember_app=info,ember_client=info")),
+            tracing_subscriber::EnvFilter::try_from_env("EMBER_LOG").unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,ember_app=info,ember_client=info")
+            }),
         )
         .try_init();
 
@@ -56,34 +59,65 @@ pub fn launch() {
         Ok(c) => c,
         Err(e) => {
             // Only a malformed EMBER_SERVER_URL gets here.
-            eprintln!("ember-app: {e}. Set EMBER_SERVER_URL to the main server, e.g. {}", config::DEFAULT_SERVER_URL);
+            eprintln!(
+                "ember-app: {e}. Set EMBER_SERVER_URL to the main server, e.g. {}",
+                config::DEFAULT_SERVER_URL
+            );
             std::process::exit(2);
         }
     };
-    // Push connection, resync worker and cache writer (they need the runtime's context).
-    {
+    // Demo only (#199): with EMBER_DEMO_DATA=1 and no EMBER_SERVER_URL the app serves itself;
+    // the push connection and sync workers stay off so nothing waits for a server.
+    let demo = demo::active_from_env().then(|| {
+        let now = demo::now_ms();
+        let source = demo::DemoSource::new(now);
+        for input in source.inputs(now) {
+            client.apply(input);
+        }
+        tracing::info!("demo mode: serving demo data, no server contacted");
+        source
+    });
+    if demo.is_none() {
+        // Push connection, resync worker and cache writer (they need the runtime's context).
         let _guard = rt.enter();
         client.start();
     }
 
-    let initial_prefs = config.prefs_path().map(|p| prefs::load(&p)).unwrap_or_default();
+    let initial_prefs = config
+        .prefs_path()
+        .map(|p| prefs::load(&p))
+        .unwrap_or_default();
+    let shared_ui = ui::coexist::SharedUi::new(initial_prefs.clone());
     let server = ServerApi::new(&config.server_url);
     install(Services {
         config,
         rt,
         client,
         server,
+        demo,
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
+        ui: shared_ui,
         live: OnceLock::new(),
     });
 
-    launch_builder().launch(ui::app);
+    if let Some(pref) = ui::cr::shell::requested() {
+        // Phase 2 review window (#220): the compose-rust shell, no Dioxus app.
+        ui::cr::shell::launch(pref);
+    } else if let Some(pref) = ui::cr::gallery::requested() {
+        // Phase 1 review window (#220): the compose-rust components, no app.
+        ui::cr::gallery::launch(pref);
+    } else {
+        launch_builder().launch(ui::app);
+    }
 
     // The window is closed: write the cache once more and stop the background tasks.
     let s = services();
-    if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
-        tracing::warn!("final cache write failed: {e}");
+    // Demo data is never written to the cache.
+    if s.demo.is_none() {
+        if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
+            tracing::warn!("final cache write failed: {e}");
+        }
     }
     s.client.stop();
 }
@@ -91,6 +125,10 @@ pub fn launch() {
 fn launch_builder() -> LaunchBuilder {
     // Follows the host platform's design system (Material 3 where there is no native one).
     LaunchBuilder::new()
-        .with_theme(Theme::adaptive(DesignSystem::Material3))
+        // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
+        .with_theme(
+            Theme::adaptive(DesignSystem::Material3)
+                .with_color_scheme(services().initial_prefs.theme.color_scheme()),
+        )
         .with_window(Window::new().with_title("Ember"))
 }

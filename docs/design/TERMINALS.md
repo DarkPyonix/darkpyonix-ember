@@ -13,7 +13,7 @@ editor), agents and people are clients that attach and detach.
 ```
  VS Code Web tab ─ Pseudoterminal ─┐  wss /__terms/{id}/attach      ┌────────── ember node ──────────┐
  (companion web extension)         ├─ DarkPyonix proxy (same origin) ┤ session: PTY master, VT model,  │
- VS Code task ─ ember-term ────────┼──── ws://127.0.0.1 /v1/terms ───┤ clients, input order, control  │
+ VS Code task ─ ember-term ────────┼──── ws://127.0.0.1 /terms ───┤ clients, input order, control  │
  Ember editor ─────────────────────┤  (via ember server / P2P)        │      │ dup of the master fd     │
  agent tool call ──────────────────┘                                  └──────┼──────────────────────────┘
                                                                         PTY keeper (one per session,
@@ -26,7 +26,7 @@ Code: `ember/node/src/term/` (`mod.rs` registry, `session.rs` one session, `scre
 `pty.rs` PTY + keeper, `store.rs` metadata), routes in `ember/node/src/api.rs`, wire types in
 `ember/node/src/proto.rs`, typed client in `ember/node/src/client.rs`.
 
-A persistent session is separate from `/v1/exec` (whose PTY lives as long as its WebSocket) and
+A persistent session is separate from `/exec` (whose PTY lives as long as its WebSocket) and
 from jobs (pipes, no terminal). It is created by one request and runs until the program exits or
 someone kills it. Attaching and detaching never start or stop it.
 
@@ -36,13 +36,13 @@ someone kills it. Attaching and detaching never start or stop it.
 | Attach | Any number of WebSocket clients. Each gets `attached`, then a **snapshot**, then the live byte stream, which continues exactly where the snapshot ends (both happen under the session lock). |
 | VT model | `alacritty_terminal` emulator fed with every byte. Scrollback: lines that scroll off are harvested and stored SGR-encoded (≈ text size), **10,000 logical lines** (soft-wrapped rows joined), capped at 3 MB. The snapshot is `ESC c` + scrollback + screen (primary, and the alternate screen when a TUI runs) + cursor, pen, input modes (app cursor/keypad, mouse modes, bracketed paste, focus, kitty keyboard flags, cursor style) + title. Gaps: scroll region, origin mode, saved cursor, charsets, tab stops, OSC 8 links; a TUI repaints these on its next full redraw (any resize causes one). |
 | Input | All interactive clients may type. Input is queued to one writer thread under the session lock, so keystrokes from all clients reach the PTY **in arrival order**, and a program that stops reading never blocks the node. Terminal *answers* (cursor position reports, device attributes, focus events, OSC/DCS replies) are forwarded only from the client whose size the PTY follows, so the program gets exactly one answer; with no interactive client attached, the model answers. |
-| Control | `take_control` (any interactive client, also from another controller) makes everyone else read-only; their input is **refused** with a `refused` event naming the controller. Released by `release_control` or when the controller detaches. Also over HTTP (`POST /v1/terms/{id}/control`) for UIs that hold the client id. |
+| Control | `take_control` (any interactive client, also from another controller) makes everyone else read-only; their input is **refused** with a `refused` event naming the controller. Released by `release_control` or when the controller detaches. Also over HTTP (`POST /terms/{id}/control`) for UIs that hold the client id. |
 | Size | The PTY (and the model) follow the **controller**; with none, the **most recently active** client (last to type, or an attach with `active: true`); with none, the last attached client that reported a size. A passive attach (`active: false`, e.g. restoring a terminal list) never resizes. Clients whose viewport differs render the PTY's size (`resized` events) and scale it to fit. |
 | Slow clients | Each client has a 512-event queue; a client that falls further behind is dropped with `error` ("fell behind") and re-attaches for a fresh snapshot. A slow client never stalls the program or other clients. |
 | Kill | SIGHUP to the terminal's foreground process group and the shell's group (what closing a terminal does), SIGKILL after 3 s; or an explicit signal. |
 | Finished | `exit` is the last event to every client. The record stays listed (100 most recent finished); the 20 most recent keep their screen, so attaching to a finished task shows its output then `exit` (FR-P5). |
 | Metadata | `<state>/terms/<id>.json` (atomic writes, dir `0700`): id, key, origin, project, argv, cwd, tags, pid, state, exit status, size, times, keeper socket. State dir: `EMBER_NODE_STATE_DIR`, default `~/.ember/node`. |
-| Events | `term_started` / `term_finished` (with the full `TermInfo`) on `/v1/events`, next to the job events, so ember server keeps a per-computer list without polling. |
+| Events | `term_started` / `term_finished` (with the full `TermInfo`) on `/events`, next to the job events, so ember server keeps a per-computer list without polling. |
 
 ### Surviving restarts (FR-P6): best effort
 
@@ -92,17 +92,17 @@ is base64.
 
 | Method | Path | Body → Response |
 |---|---|---|
-| POST | `/v1/terms` | `TermCreateRequest` → `TermCreateResponse` (201 created; 200 when `key` matched a running session) |
-| GET | `/v1/terms?project=&origin=&running=` | → `[TermInfo]`, oldest first |
-| GET | `/v1/terms/{id}` | → `TermInfo` |
-| GET | `/v1/terms/{id}/snapshot` | → `{size, data (b64), text}` without attaching (409 when there is no screen) |
-| GET (WS) | `/v1/terms/{id}/attach` | send `TermHello`, then `TermInput`s; receive `TermEvent`s |
-| POST | `/v1/terms/{id}/control` | `{client, take}` → 204 (409 if refused) |
-| POST | `/v1/terms/{id}/kill` | `{signal?}` → 204 (default SIGHUP, then SIGKILL) |
-| DELETE | `/v1/terms/{id}` | → 204 (409 while running) |
+| POST | `/terms` | `TermCreateRequest` → `TermCreateResponse` (201 created; 200 when `key` matched a running session) |
+| GET | `/terms?project=&origin=&running=` | → `[TermInfo]`, oldest first |
+| GET | `/terms/{id}` | → `TermInfo` |
+| GET | `/terms/{id}/snapshot` | → `{size, data (b64), text}` without attaching (409 when there is no screen) |
+| GET (WS) | `/terms/{id}/attach` | send `TermHello`, then `TermInput`s; receive `TermEvent`s |
+| POST | `/terms/{id}/control` | `{client, take}` → 204 (409 if refused) |
+| POST | `/terms/{id}/kill` | `{signal?}` → 204 (default SIGHUP, then SIGKILL) |
+| DELETE | `/terms/{id}` | → 204 (409 while running) |
 
 ```jsonc
-// POST /v1/terms
+// POST /terms
 { "program": {"argv": ["/bin/zsh", "-l"]},       // or {"shell": "make -j8"}; omit: login shell
   "cwd": "/Users/me/proj", "env": {"EMBER_PROJECT": "/Users/me/proj"}, "env_clear": false,
   "size": {"rows": 40, "cols": 120},
@@ -148,7 +148,7 @@ but only the size owner's answers reach the program. Rust clients use
 `NodeClient::{term_create, terms, term, term_snapshot, term_attach, term_control, term_kill,
 term_remove}`; `TermAttachment` splits into `TermSender` / `TermReceiver`.
 
-**Ember editor checklist.** Terminal panel: `GET /v1/terms?project=<root>` (all origins, so
+**Ember editor checklist.** Terminal panel: `GET /terms?project=<root>` (all origins, so
 VS Code's and agents' sessions show with their origin badge) → attach each visible one with
 `active: false`; on focus or first keystroke the node makes it the active client. "New terminal":
 `POST` with `origin: ide-ember`, a fresh `key`, then attach `active: true`. Run actions: `program`

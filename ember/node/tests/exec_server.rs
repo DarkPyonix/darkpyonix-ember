@@ -1,4 +1,4 @@
-//! `/v1/exec-server`: the raw byte relay to `codex exec-server --listen stdio`, exercised with a
+//! `/exec-server`: the raw byte relay to `codex exec-server --listen stdio`, exercised with a
 //! fake codex (a shell script that checks its arguments and echoes stdin back).
 
 use std::os::unix::fs::PermissionsExt;

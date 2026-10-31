@@ -87,7 +87,7 @@ def _str_map(v, name: str) -> dict:
 
 
 def sanitize_create(body, home: str) -> dict:
-    """The `POST /v1/terms` body to send for a browser's request. Raises ValueError.
+    """The `POST /terms` body to send for a browser's request. Raises ValueError.
 
     Unknown keys are dropped; `origin` defaults to `ide-vscode` and must be an IDE origin;
     `cwd` defaults to the home directory of the proxy's user (the companion has no folder when

@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS events (
 );
 ";
 
+/// Acknowledged output offset per session shim (SPEC FR-S8): where a new server resumes the
+/// agent's output after a restart.
+const SHIM_OFFSETS_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS shim_offsets (
+    session_id TEXT PRIMARY KEY,
+    offset     INTEGER NOT NULL
+);
+";
+
 /// Migrations, in order: entry `i` brings `PRAGMA user_version` from `i` to `i + 1`. Each runs in
 /// its own transaction together with the version bump. Append only; never edit a shipped entry.
 const MIGRATIONS: &[&str] = &[
@@ -124,6 +133,11 @@ const MIGRATIONS: &[&str] = &[
     crate::mcp::schema::MIGRATION,
     crate::schedules::schema::MIGRATION,
     crate::a2a::team::MIGRATION,
+    crate::fork::MIGRATION,
+    crate::fork::NATIVE_MIGRATION,
+    crate::computers::schema::DESIGNATED_MIGRATION,
+    crate::members::MIGRATION,
+    SHIM_OFFSETS_MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.
@@ -356,6 +370,41 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Record how much of a session's shim output is stored (FR-S8).
+    pub fn set_shim_offset(&self, session_id: &str, offset: u64) -> anyhow::Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO shim_offsets (session_id, offset) VALUES (?1, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET offset = excluded.offset",
+            params![session_id, offset as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The stored shim output offset of a session, 0 when none.
+    pub fn shim_offset(&self, session_id: &str) -> anyhow::Result<u64> {
+        let v: Option<i64> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT offset FROM shim_offsets WHERE session_id = ?1", [session_id], |r| r.get(0))
+            .optional()?;
+        Ok(v.unwrap_or(0).max(0) as u64)
+    }
+
+    /// All stored shim offsets, for `reattach_all` at startup.
+    pub fn shim_offsets(&self) -> anyhow::Result<std::collections::HashMap<String, u64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT session_id, offset FROM shim_offsets")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Forget a session's shim offset (its agent ended).
+    pub fn clear_shim_offset(&self, session_id: &str) -> anyhow::Result<()> {
+        self.conn.lock().unwrap().execute("DELETE FROM shim_offsets WHERE session_id = ?1", [session_id])?;
+        Ok(())
     }
 
     /// After a restart, sessions that were mid-turn can no longer be: mark them idle so the next

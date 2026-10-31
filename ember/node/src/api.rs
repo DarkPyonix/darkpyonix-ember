@@ -1,52 +1,52 @@
-//! The daemon's HTTP/WebSocket API. All routes are under `/v1`; every route except
-//! `/v1/health` requires `Authorization: Bearer <EMBER_NODE_TOKEN>`.
+//! The daemon's HTTP/WebSocket API. Routes carry no version prefix; every route except
+//! `/health` requires `Authorization: Bearer <EMBER_NODE_TOKEN>`.
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET  | `/v1/health` | → [`Health`] (no auth) |
-//! | GET  | `/v1/env` | → [`EnvInfo`] |
-//! | POST | `/v1/fs/stat` | [`PathRequest`] → [`Stat`] |
-//! | POST | `/v1/fs/read` | [`ReadRequest`] → [`ReadResponse`] |
-//! | POST | `/v1/fs/write` | [`WriteRequest`] → [`WriteResponse`] (412 on precondition) |
-//! | POST | `/v1/fs/list` | [`PathRequest`] → [`ListResponse`] |
-//! | POST | `/v1/fs/lstat` | [`PathRequest`] → [`Stat`] (final symlink not followed) |
-//! | POST | `/v1/fs/readlink` | [`PathRequest`] → [`ReadlinkResponse`] |
-//! | POST | `/v1/fs/symlink` | [`SymlinkRequest`] → [`Stat`] |
-//! | POST | `/v1/fs/mkdir` | [`MkdirRequest`] → [`Stat`] |
-//! | POST | `/v1/fs/remove` | [`RemoveRequest`] → 204 |
-//! | POST | `/v1/fs/rename` | [`RenameRequest`] → 204 |
-//! | POST | `/v1/fs/setattr` | [`SetAttrRequest`] → [`Stat`] (chmod / truncate / utimes) |
-//! | POST | `/v1/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
-//! | POST | `/v1/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
-//! | POST | `/v1/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
-//! | GET (WS) | `/v1/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
-//! | GET (WS) | `/v1/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
-//! | GET (WS) | `/v1/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
-//! | POST | `/v1/jobs` | [`JobRequest`] → [`JobInfo`] |
-//! | GET  | `/v1/jobs` | → `[JobInfo]` |
-//! | GET  | `/v1/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
-//! | POST | `/v1/jobs/{id}/kill` | [`KillRequest`] → 204 |
-//! | DELETE | `/v1/jobs/{id}` | → 204 (409 while running) |
-//! | GET (WS) | `/v1/events?after=<seq>` | receive [`NodeEvent`]s |
-//! | POST | `/v1/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
-//! | GET  | `/v1/terms?project=&origin=&running=` | → `[TermInfo]` |
-//! | GET  | `/v1/terms/{id}` | → [`TermInfo`] |
-//! | GET  | `/v1/terms/{id}/snapshot` | → [`TermSnapshot`] |
-//! | GET (WS) | `/v1/terms/{id}/attach` | send [`TermHello`], then [`TermInput`]s; receive [`TermEvent`]s |
-//! | POST | `/v1/terms/{id}/control` | [`TermControlRequest`] → 204 |
-//! | POST | `/v1/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
-//! | DELETE | `/v1/terms/{id}` | → 204 (409 while running) |
+//! | GET  | `/health` | → [`Health`] (no auth) |
+//! | GET  | `/env` | → [`EnvInfo`] |
+//! | POST | `/fs/stat` | [`PathRequest`] → [`Stat`] |
+//! | POST | `/fs/read` | [`ReadRequest`] → [`ReadResponse`] |
+//! | POST | `/fs/write` | [`WriteRequest`] → [`WriteResponse`] (412 on precondition) |
+//! | POST | `/fs/list` | [`PathRequest`] → [`ListResponse`] |
+//! | POST | `/fs/lstat` | [`PathRequest`] → [`Stat`] (final symlink not followed) |
+//! | POST | `/fs/readlink` | [`PathRequest`] → [`ReadlinkResponse`] |
+//! | POST | `/fs/symlink` | [`SymlinkRequest`] → [`Stat`] |
+//! | POST | `/fs/mkdir` | [`MkdirRequest`] → [`Stat`] |
+//! | POST | `/fs/remove` | [`RemoveRequest`] → 204 |
+//! | POST | `/fs/rename` | [`RenameRequest`] → 204 |
+//! | POST | `/fs/setattr` | [`SetAttrRequest`] → [`Stat`] (chmod / truncate / utimes) |
+//! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
+//! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
+//! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
+//! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
+//! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
+//! | GET (WS) | `/egress` | one proxied TCP connection as a raw SOCKS5 byte stream ([`crate::egress`]; 403 when disabled) |
+//! | POST | `/jobs` | [`JobRequest`] → [`JobInfo`] |
+//! | GET  | `/jobs` | → `[JobInfo]` |
+//! | GET  | `/jobs/{id}?tail=<bytes>` | → [`JobDetail`] |
+//! | POST | `/jobs/{id}/kill` | [`KillRequest`] → 204 |
+//! | DELETE | `/jobs/{id}` | → 204 (409 while running) |
+//! | GET (WS) | `/events?after=<seq>` | receive [`NodeEvent`]s |
+//! | POST | `/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
+//! | GET  | `/terms?project=&origin=&running=` | → `[TermInfo]` |
+//! | GET  | `/terms/{id}` | → [`TermInfo`] |
+//! | GET  | `/terms/{id}/snapshot` | → [`TermSnapshot`] |
+//! | GET (WS) | `/terms/{id}/attach` | send [`TermHello`], then [`TermInput`]s; receive [`TermEvent`]s |
+//! | POST | `/terms/{id}/control` | [`TermControlRequest`] → 204 |
+//! | POST | `/terms/{id}/kill` | [`KillRequest`] → 204 (default SIGHUP, then SIGKILL) |
+//! | DELETE | `/terms/{id}` | → 204 (409 while running) |
 //!
-//! Closing the `/v1/exec` socket kills the command's process group; jobs are unaffected by any
-//! connection. Persistent terminal sessions (`/v1/terms`, [`crate::term`]) are owned by the
+//! Closing the `/exec` socket kills the command's process group; jobs are unaffected by any
+//! connection. Persistent terminal sessions (`/terms`, [`crate::term`]) are owned by the
 //! daemon: closing an attach socket only detaches. Errors are [`ErrorBody`] with a matching
 //! status code; file errors also carry the portable `errno` name (409 for `EEXIST` /
 //! `ENOTEMPTY`, 400 for `ENOTDIR` / `EISDIR` / `EINVAL`).
 //!
 //! The router is transport-agnostic: [`serve`] accepts any [`axum::serve::Listener`], so the same
 //! API runs over TCP and over the peer-to-peer transport ([`crate::transport`], service
-//! `ember-node/1`, peer allow-list in front). The remote browser's SOCKS5 egress (FR-R1) is the
-//! `/v1/egress` route, so it rides the same authenticated connection; an optional plain SOCKS5
+//! `ember-node`, peer allow-list in front). The remote browser's SOCKS5 egress (FR-R1) is the
+//! `/egress` route, so it rides the same authenticated connection; an optional plain SOCKS5
 //! listener is in [`crate::egress`].
 
 use std::sync::Arc;
@@ -128,37 +128,37 @@ where
 
 pub fn router(node: Node) -> Router {
     let authed = Router::new()
-        .route("/v1/env", get(env))
-        .route("/v1/fs/stat", post(stat))
-        .route("/v1/fs/read", post(read))
-        .route("/v1/fs/write", post(write))
-        .route("/v1/fs/list", post(list))
-        .route("/v1/fs/lstat", post(lstat))
-        .route("/v1/fs/readlink", post(readlink))
-        .route("/v1/fs/symlink", post(symlink))
-        .route("/v1/fs/mkdir", post(mkdir))
-        .route("/v1/fs/remove", post(remove))
-        .route("/v1/fs/rename", post(rename))
-        .route("/v1/fs/setattr", post(setattr))
-        .route("/v1/fs/pwrite", post(pwrite))
-        .route("/v1/fs/glob", post(glob))
-        .route("/v1/fs/grep", post(grep))
-        .route("/v1/exec", get(exec_ws))
-        .route("/v1/exec-server", get(crate::exec_server::ws))
-        .route("/v1/egress", get(crate::egress::ws))
-        .route("/v1/jobs", get(list_jobs).post(start_job))
-        .route("/v1/jobs/{id}", get(get_job).delete(remove_job))
-        .route("/v1/jobs/{id}/kill", post(kill_job))
-        .route("/v1/events", get(events_ws))
-        .route("/v1/terms", get(list_terms).post(create_term))
-        .route("/v1/terms/{id}", get(get_term).delete(remove_term))
-        .route("/v1/terms/{id}/snapshot", get(term_snapshot))
-        .route("/v1/terms/{id}/attach", get(term_attach_ws))
-        .route("/v1/terms/{id}/control", post(term_control))
-        .route("/v1/terms/{id}/kill", post(kill_term))
+        .route("/env", get(env))
+        .route("/fs/stat", post(stat))
+        .route("/fs/read", post(read))
+        .route("/fs/write", post(write))
+        .route("/fs/list", post(list))
+        .route("/fs/lstat", post(lstat))
+        .route("/fs/readlink", post(readlink))
+        .route("/fs/symlink", post(symlink))
+        .route("/fs/mkdir", post(mkdir))
+        .route("/fs/remove", post(remove))
+        .route("/fs/rename", post(rename))
+        .route("/fs/setattr", post(setattr))
+        .route("/fs/pwrite", post(pwrite))
+        .route("/fs/glob", post(glob))
+        .route("/fs/grep", post(grep))
+        .route("/exec", get(exec_ws))
+        .route("/exec-server", get(crate::exec_server::ws))
+        .route("/egress", get(crate::egress::ws))
+        .route("/jobs", get(list_jobs).post(start_job))
+        .route("/jobs/{id}", get(get_job).delete(remove_job))
+        .route("/jobs/{id}/kill", post(kill_job))
+        .route("/events", get(events_ws))
+        .route("/terms", get(list_terms).post(create_term))
+        .route("/terms/{id}", get(get_term).delete(remove_term))
+        .route("/terms/{id}/snapshot", get(term_snapshot))
+        .route("/terms/{id}/attach", get(term_attach_ws))
+        .route("/terms/{id}/control", post(term_control))
+        .route("/terms/{id}/kill", post(kill_term))
         .route_layer(middleware::from_fn_with_state(node.clone(), auth));
     Router::new()
-        .route("/v1/health", get(health))
+        .route("/health", get(health))
         .merge(authed)
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(node)
@@ -263,7 +263,7 @@ async fn blocking<T: Send + 'static>(
 // Handlers
 
 async fn health() -> Json<Health> {
-    Json(Health { ok: true, version: env!("CARGO_PKG_VERSION").into(), protocol: PROTOCOL_VERSION })
+    Json(Health { ok: true, version: env!("CARGO_PKG_VERSION").into() })
 }
 
 async fn env(State(n): State<Node>) -> Json<EnvInfo> {

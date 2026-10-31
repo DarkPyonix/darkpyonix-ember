@@ -1,0 +1,187 @@
+# Builds ember server and ember node for each target on a v* tag and attaches the archives and
+# SHA256SUMS to a GitHub release (SPEC NFR-R1, #72). Owner decision 2026-10-25: macOS gets ad hoc
+# signing only (no Apple account, no notarization); the client app ships in every format
+# compose-rust packages. The client job runs only when the repository variable
+# EMBER_CLIENT_RELEASE is "true" (see the TODOs on that job).
+name: Publish to GitHub release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-14, target: macos-arm64 }
+          - { os: ubuntu-24.04, target: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64 }
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ember/server
+            ember/node
+      - name: Build server and node
+        run: |
+          (cd ember/server && cargo build --release --locked)
+          (cd ember/node && cargo build --release --locked)
+      - name: Ad hoc sign macOS binaries
+        if: runner.os == 'macOS'
+        run: |
+          for b in ember/server/target/release/ember-server ember/server/target/release/ember-exec \
+                   ember/server/target/release/ember-a2a ember/node/target/release/ember-node \
+                   ember/node/target/release/ember-term; do
+            codesign --force --deep -s - "$b"
+            codesign --verify --verbose "$b"
+          done
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          pack() { # crate, program...
+            crate="$1"; shift
+            name="ember-${crate}-${TAG}-${TARGET}"
+            mkdir -p "stage/$name"
+            for p in "$@"; do cp "ember/$crate/target/release/$p" "stage/$name/"; done
+            tar -C stage -czf "dist/$name.tar.gz" "$name"
+            (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256")
+          }
+          pack server ember-server ember-exec ember-a2a
+          pack node ember-node ember-term
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpx-ember-${{ matrix.target }}
+          path: dist/*
+
+  client:
+    # TODO(dioxus-compose): ember-app (ember/app) cannot link until dioxus-compose publishes a renderer
+    # matching the pinned rev (undefined symbol dioxus_compose_host_release_batch, see test.yml).
+    # TODO(compose-rust): the packager lives in open PRs #115 (macOS .app/.dmg, tools/packager),
+    # #114 (Linux .AppImage, scripts/packager-linux) and #116 (Windows .msix, tools/msix); the
+    # Velopack formats (Setup.exe, .msi, .pkg, .deb, .rpm, Flatpak) are spec only (FR-22.6).
+    # Set COMPOSE_RUST_REF to a pinned commit and the variable EMBER_CLIENT_RELEASE to "true"
+    # once those land; adjust the packager flags then.
+    name: Client app (${{ matrix.target }})
+    if: vars.EMBER_CLIENT_RELEASE == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-14, target: macos-arm64, formats: "app dmg" }
+          - { os: windows-2022, target: windows-x86_64, formats: "zip msix" }
+          - { os: ubuntu-24.04, target: linux-x86_64, formats: "AppImage" }
+          - { os: ubuntu-24.04-arm, target: linux-aarch64, formats: "AppImage" }
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      COMPOSE_RUST_REF: develop
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/app
+      - name: Build ember-app
+        run: cd ember/app && cargo build --release --locked
+      - uses: actions/checkout@v5
+        with:
+          repository: DarkPyonix/compose-rust
+          ref: ${{ env.COMPOSE_RUST_REF }}
+          path: compose-rust
+      - name: Package the client (macOS .app and .dmg)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          python3 compose-rust/tools/packager/package-macos app \
+            --manifest-dir ember/app --executable ember/app/target/release/ember-app \
+            --updater none --out stage
+          codesign --force --deep -s - stage/*.app
+          codesign --verify --deep --verbose stage/*.app
+          python3 compose-rust/tools/packager/package-macos dmg --app stage/*.app --out "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.dmg"
+          ditto -c -k --keepParent stage/*.app "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.app.zip"
+      - name: Package the client (Windows .zip and .msix)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive ember/app/target/release/ember-app.exe "dist/ember-app-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          # MSIX stays unsigned (FR-22.6 criterion 4); the install guide explains how to trust it.
+          cargo run --release --manifest-path compose-rust/tools/msix/Cargo.toml -- --help
+          # TODO(compose-rust): call dioxus-compose-msix with the app's identity once #116 documents the flags.
+      - name: Package the client (Linux .AppImage)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          compose-rust/scripts/packager-linux/appimage.sh \
+            --dioxus-toml ember/app/Dioxus.toml --exec ember-app \
+            --payload ember/app/target/release/ember-app \
+            --version "${GITHUB_REF_NAME#v}" --out-dir dist
+          # TODO(compose-rust): the flags are read from PR #114's workflow; confirm them on merge.
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            case "$f" in *.sha256) continue;; esac
+            if command -v sha256sum >/dev/null; then sha256sum "$f"; else shasum -a 256 "$f"; fi > "$f.sha256"
+          done
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dpx-ember-app-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish the release
+    needs: [build, client]
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.client.result == 'success' || needs.client.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: dpx-ember-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and write SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum -c ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/*.tar.gz dist/*.dmg dist/*.zip dist/*.msix dist/*.AppImage dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Ember ${TAG#v}" \
+            --notes "ember-server and ember-node for macOS arm64, Linux x86_64 and Linux aarch64, and the client app when built, by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. macOS builds are ad hoc signed, not notarized: clear quarantine with xattr -dr com.apple.quarantine. The MSIX is unsigned. See the install guide."

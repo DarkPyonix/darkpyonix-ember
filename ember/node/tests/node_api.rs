@@ -45,7 +45,6 @@ async fn health_is_open_but_everything_else_needs_the_token() {
     let f = start().await;
     let h = NodeClient::new(&f.base, "wrong").unwrap().health().await.unwrap();
     assert!(h.ok);
-    assert_eq!(h.protocol, PROTOCOL_VERSION);
 
     for token in ["wrong", ""] {
         let bad = NodeClient::new(&f.base, token).unwrap();
@@ -60,7 +59,7 @@ async fn health_is_open_but_everything_else_needs_the_token() {
     }
 
     // Raw request without any Authorization header.
-    let r = reqwest::Client::new().get(format!("{}/v1/jobs", f.base)).send().await.unwrap();
+    let r = reqwest::Client::new().get(format!("{}/jobs", f.base)).send().await.unwrap();
     assert_eq!(r.status(), 401);
     assert!(f.client.stat(&f.root).await.is_ok());
 }

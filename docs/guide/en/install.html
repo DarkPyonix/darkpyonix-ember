@@ -43,6 +43,7 @@
       <h2>On this page</h2>
       <ul>
         <li><a href="#requirements">What you need</a></li>
+        <li><a href="#release">From a release</a></li>
         <li><a href="#checkout">Get the code</a></li>
         <li><a href="#server">ember server</a></li>
         <li><a href="#node">ember node</a></li>
@@ -57,8 +58,7 @@
     <h1>Build Ember from source</h1>
     <p class="lede">
       Ember is three programs: <code>ember-server</code> on the main server, <code>ember-node</code>
-      on every other computer, and the client <code>ember-app</code> wherever you sit. There are no
-      releases or installers yet <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>), so each one is built
+      on every other computer, and the client <code>ember-app</code> wherever you sit. Releases are planned (<a href="#release">below</a>); until one is tagged, each one is built
       with cargo from a checkout.
     </p>
 
@@ -69,6 +69,18 @@
       <li><strong>A C compiler</strong>, because the server compiles SQLite into itself.</li>
       <li><strong>The agent CLIs, on the main server only</strong>: <code>claude</code>, <code>codex</code>, <code>agy</code> or <code>omp</code>, installed the way each vendor documents and logged in as the user that will run <code>ember-server</code>. Ember finds them on <code>PATH</code> and lists a missing one as not installed rather than failing.</li>
     </ul>
+
+    <h2 id="release">From a release</h2>
+    <p>Tagged releases <span class="pill planned">Planned</span> (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/72">#72</a>) attach <code>ember-server</code> and <code>ember-node</code> archives for macOS arm64, Linux x86_64 and Linux aarch64, with a <code>SHA256SUMS</code> file. The workflow is written, but no tag has been released yet, so the version above is an example.</p>
+    <figure class="codeblock" data-copy="Copy" data-copied="Copied">
+      <figcaption>shell</figcaption>
+<pre><code>gh release download v0.1.0 --repo DarkPyonix/darkpyonix-ember \
+  --pattern <span class="s">'ember-*-macos-arm64.tar.gz'</span> --pattern SHA256SUMS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+tar -xzf ember-server-v0.1.0-macos-arm64.tar.gz</code></pre>
+    </figure>
+    <p>Each archive holds the programs described below (<code>ember-server</code>, <code>ember-exec</code> and <code>ember-a2a</code>; <code>ember-node</code> and <code>ember-term</code>); keep each set in one directory. macOS binaries and apps are ad hoc signed only (no Apple account, no notarization), so Gatekeeper blocks the first launch. Clear the quarantine flag with <code>xattr -d com.apple.quarantine</code> on the extracted files. For the <code>.app</code>, run <code>xattr -dr com.apple.quarantine Ember.app</code>, or right-click and choose Open. The Windows <code>.msix</code> is unsigned: enable developer mode or re-sign it with a certificate you trust.</p>
+    <p>The client is not in the release yet, because its renderer does not link; build it from source as shown in <a href="#client">The client</a>.</p>
 
     <h2 id="checkout">Get the code</h2>
     <p>
@@ -103,8 +115,8 @@ cargo build --release --locked
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/health
-<span class="c"># {"ok":true,"push_version":1}</span></code></pre>
+<pre><code>curl http://127.0.0.1:8740/api/health
+<span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
       <span class="label">The HTTP listener has no login</span>

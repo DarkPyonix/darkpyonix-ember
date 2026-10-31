@@ -1,4 +1,4 @@
-//! `/v1/egress` (FR-R1): a SOCKS5 handshake and CONNECT carried over the node's WebSocket
+//! `/egress` (FR-R1): a SOCKS5 handshake and CONNECT carried over the node's WebSocket
 //! stream to a local TCP echo server, the half-close convention, the token and the policy.
 
 use std::net::SocketAddr;
@@ -39,7 +39,7 @@ async fn echo() -> SocketAddr {
     addr
 }
 
-/// A local byte stream whose other end is bridged to a fresh `/v1/egress` stream, exactly what
+/// A local byte stream whose other end is bridged to a fresh `/egress` stream, exactly what
 /// ember server's loopback listener does for each Chrome connection.
 async fn egress_stream(client: &NodeClient) -> tokio::io::DuplexStream {
     let ws = client.egress().await.unwrap();

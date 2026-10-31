@@ -87,9 +87,7 @@
       <li><code>EMBER_BROWSER_HEADFUL=1</code> shows a real window, for debugging.</li>
     </ul>
     <p>
-      REST paths below are shown as the code serves them today. Issue
-      <a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a> drops the version, so
-      <code>/api/v1/...</code> becomes <code>/api/...</code>.
+      REST paths carry no version, so they all begin with <code>/api/</code>.
     </p>
 
     <h2 id="egress">Where traffic leaves</h2>
@@ -107,7 +105,7 @@
 
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>http: send a project's browser traffic out through a computer</figcaption>
-<pre><code><span class="k">PUT</span> /api/v1/browsers/{project}/egress
+<pre><code><span class="k">PUT</span> /api/browsers/{project}/egress
 { <span class="at">"computer"</span>: <span class="s">"&lt;computer id&gt;"</span> }
 
 <span class="c"># or a proxy URL; null goes back to direct</span>
@@ -122,7 +120,7 @@
     <p>
       For a computer, the path is a chain. Chrome uses a SOCKS5 proxy on the main server's
       loopback; the main server copies those bytes, one WebSocket per connection, to the node's
-      <code>/v1/egress</code>; the node opens the real connection.
+      <code>/egress</code>; the node opens the real connection.
     </p>
     <ul>
       <li>Host names are resolved <strong>on the computer</strong>, so its local DNS names
@@ -149,14 +147,14 @@
 
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>http</figcaption>
-<pre><code><span class="k">DELETE</span> /api/v1/browsers/{project}/data   <span class="c"># a running browser restarts empty, same egress</span>
-<span class="k">DELETE</span> /api/v1/browsers/{project}        <span class="c"># stop the browser, keep its data</span></code></pre>
+<pre><code><span class="k">DELETE</span> /api/browsers/{project}/data   <span class="c"># a running browser restarts empty, same egress</span>
+<span class="k">DELETE</span> /api/browsers/{project}        <span class="c"># stop the browser, keep its data</span></code></pre>
     </figure>
 
     <h2 id="agents">Agents in the browser <span class="pill partial">Partial</span></h2>
     <p>
       Agents run on the main server next to the browser, so they reach it through a DevTools
-      relay at <code>/api/v1/browsers/{project}/cdp</code>. Ember gives them an unmodified,
+      relay at <code>/api/browsers/{project}/cdp</code>. Ember gives them an unmodified,
       off-the-shelf DevTools MCP server pointed at that relay. This is off by default; turn it on
       on the server:
     </p>
@@ -183,7 +181,7 @@ export EMBER_BROWSER_MCP_RUNNER=npx         <span class="c"># optional: npx or b
     </ul>
     <p>
       The first run downloads the package, so Ember raises the MCP start-up timeout to 90 seconds.
-      <code>GET /api/v1/browsers/{project}/agent-config</code> returns the same configuration if
+      <code>GET /api/browsers/{project}/agent-config</code> returns the same configuration if
       you want to wire an agent by hand. An egress switch closes the relay connections; the MCP
       server reconnects on its next tool call. Antigravity's own browser tools have not been
       tested with Ember.
@@ -193,7 +191,7 @@ export EMBER_BROWSER_MCP_RUNNER=npx         <span class="c"># optional: npx or b
     <p>
       The browser is shown to you as a picture, not as a web page inside the client, because the
       launcher and conversation screens must never contain a webview. A viewer connects to
-      <code>GET /api/v1/browsers/{project}/view</code>, a WebSocket that carries JPEG frames out
+      <code>GET /api/browsers/{project}/view</code>, a WebSocket that carries JPEG frames out
       and mouse, keyboard and navigation input in. Frames are sent only while someone watches,
       and all viewers share one stream.
     </p>

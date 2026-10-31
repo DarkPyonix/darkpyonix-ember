@@ -262,12 +262,12 @@ ember-term kill &lt;id&gt;</code></pre>
       <table>
         <thead><tr><th scope="col">Route</th><th scope="col">What it does</th></tr></thead>
         <tbody>
-          <tr><td><code>POST /v1/terms</code></td><td>Create a session. A <code>key</code> makes it attach-or-create.</td></tr>
-          <tr><td><code>GET /v1/terms?project=&amp;origin=&amp;running=</code></td><td>List sessions, oldest first.</td></tr>
-          <tr><td><code>GET /v1/terms/{id}/snapshot</code></td><td>The current screen, without attaching.</td></tr>
-          <tr><td><code>GET /v1/terms/{id}/attach</code></td><td>WebSocket: a hello, then input in and events out.</td></tr>
-          <tr><td><code>POST /v1/terms/{id}/control</code></td><td>Take or release control.</td></tr>
-          <tr><td><code>POST /v1/terms/{id}/kill</code></td><td>SIGHUP, then SIGKILL after 3 seconds.</td></tr>
+          <tr><td><code>POST /terms</code></td><td>Create a session. A <code>key</code> makes it attach-or-create.</td></tr>
+          <tr><td><code>GET /terms?project=&amp;origin=&amp;running=</code></td><td>List sessions, oldest first.</td></tr>
+          <tr><td><code>GET /terms/{id}/snapshot</code></td><td>The current screen, without attaching.</td></tr>
+          <tr><td><code>GET /terms/{id}/attach</code></td><td>WebSocket: a hello, then input in and events out.</td></tr>
+          <tr><td><code>POST /terms/{id}/control</code></td><td>Take or release control.</td></tr>
+          <tr><td><code>POST /terms/{id}/kill</code></td><td>SIGHUP, then SIGKILL after 3 seconds.</td></tr>
         </tbody>
       </table>
     </div>

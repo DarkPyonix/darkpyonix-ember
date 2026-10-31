@@ -1,6 +1,6 @@
 //! Persistent terminal sessions (SPEC §P, FR-P1–FR-P6; design: `docs/design/TERMINALS.md`).
 //!
-//! Unlike `/v1/exec`, whose PTY lives exactly as long as the WebSocket that started it, a
+//! Unlike `/exec`, whose PTY lives exactly as long as the WebSocket that started it, a
 //! persistent session is owned by ember node: it is created by one request, any number of
 //! clients attach and detach over WebSockets, and the process keeps running when every client
 //! is gone. Clients are the VS Code window (through `ember-term`), the Ember editor, agents and

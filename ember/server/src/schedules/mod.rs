@@ -34,7 +34,7 @@ use tokio::sync::Notify;
 
 use crate::agents::AgentKind;
 use crate::events::{AgentEvent, SessionStatus, TurnOutcome};
-use crate::session::{NewSession, Push, SessionError, Sessions, PUSH_VERSION};
+use crate::session::{NewSession, Push, SessionError, Sessions};
 
 /// A trigger later than this is treated as missed rather than run.
 pub const GRACE_MS: i64 = 60_000;
@@ -211,7 +211,7 @@ pub struct ScheduleRun {
     pub error: Option<String>,
 }
 
-/// `POST /api/v1/schedules`.
+/// `POST /api/schedules`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewSchedule {
     pub project: String,
@@ -236,7 +236,7 @@ pub struct NewSchedule {
     pub paused: bool,
 }
 
-/// `PATCH /api/v1/schedules/{id}`: `None` leaves a field alone.
+/// `PATCH /api/schedules/{id}`: `None` leaves a field alone.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SchedulePatch {
     #[serde(default)]
@@ -524,7 +524,7 @@ impl Scheduler {
             ],
         )?;
         let schedule = self.get(&id)?;
-        self.publish(Push::ScheduleCreated { v: PUSH_VERSION, schedule: schedule.clone() });
+        self.publish(Push::ScheduleCreated { schedule: schedule.clone() });
         self.wake.notify_one();
         Ok(schedule)
     }
@@ -561,7 +561,7 @@ impl Scheduler {
 
     fn updated(&self, id: &str) -> Result<Schedule, ScheduleError> {
         let schedule = self.get(id)?;
-        self.publish(Push::ScheduleUpdated { v: PUSH_VERSION, schedule: schedule.clone() });
+        self.publish(Push::ScheduleUpdated { schedule: schedule.clone() });
         self.wake.notify_one();
         Ok(schedule)
     }
@@ -601,7 +601,7 @@ impl Scheduler {
             tx.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
             tx.commit()?;
         }
-        self.publish(Push::ScheduleDeleted { v: PUSH_VERSION, id: id.to_string(), project: s.project });
+        self.publish(Push::ScheduleDeleted { id: id.to_string(), project: s.project });
         Ok(())
     }
 
@@ -642,7 +642,7 @@ impl Scheduler {
             params![id, schedule_id, scheduled_at, status.as_str(), started_at, finished_at, error],
         )?;
         let run = self.run(&id).map_err(|e| anyhow::anyhow!("{e}"))?;
-        self.publish(Push::ScheduleRun { v: PUSH_VERSION, run: run.clone() });
+        self.publish(Push::ScheduleRun { run: run.clone() });
         Ok(run)
     }
 
@@ -654,7 +654,7 @@ impl Scheduler {
         )?;
         if n > 0 {
             if let Ok(run) = self.run(run_id) {
-                self.publish(Push::ScheduleRun { v: PUSH_VERSION, run });
+                self.publish(Push::ScheduleRun { run });
             }
         }
         Ok(())
@@ -775,7 +775,7 @@ impl Scheduler {
                     params![run.id, session_id],
                 )?;
                 if let Ok(r) = self.run(&run.id) {
-                    self.publish(Push::ScheduleRun { v: PUSH_VERSION, run: r });
+                    self.publish(Push::ScheduleRun { run: r });
                 }
                 tokio::spawn(follow_turn(Arc::downgrade(self), run.id.clone(), session_id, before, rx));
             }

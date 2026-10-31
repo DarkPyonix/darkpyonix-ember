@@ -174,7 +174,7 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     let (st, body) = call(
         &app,
         "POST",
-        "/api/v1/accounts",
+        "/api/accounts",
         Some(json!({"agent": "scripted", "label": "a"})),
     )
     .await;
@@ -184,7 +184,7 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     let (_, body) = call(
         &app,
         "POST",
-        "/api/v1/accounts",
+        "/api/accounts",
         Some(json!({"agent": "scripted", "label": "b"})),
     )
     .await;
@@ -195,7 +195,7 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     call(
         &app,
         "POST",
-        &format!("/api/v1/accounts/{a_id}/default"),
+        &format!("/api/accounts/{a_id}/default"),
         None,
     )
     .await;
@@ -207,7 +207,7 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
         )
         .unwrap();
     let new = json!({"project": "acme", "agent": "scripted", "cwd": "/tmp"});
-    let (st, body) = call(&app, "POST", "/api/v1/sessions", Some(new.clone())).await;
+    let (st, body) = call(&app, "POST", "/api/sessions", Some(new.clone())).await;
     assert_eq!(st, StatusCode::CREATED, "{body}");
     let s: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(s["account_id"], b_id);
@@ -219,7 +219,7 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     let (_, body) = call(
         &app,
         "GET",
-        &format!("/api/v1/sessions/{}", s["id"].as_str().unwrap()),
+        &format!("/api/sessions/{}", s["id"].as_str().unwrap()),
         None,
     )
     .await;
@@ -227,9 +227,9 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     assert_eq!(got["session"]["account_id"], b_id);
 
     // Preview and list show the limit.
-    let (_, body) = call(&app, "GET", "/api/v1/accounts/route?agent=scripted", None).await;
+    let (_, body) = call(&app, "GET", "/api/accounts/route?agent=scripted", None).await;
     assert!(body.contains(b_id), "{body}");
-    let (_, body) = call(&app, "GET", "/api/v1/accounts", None).await;
+    let (_, body) = call(&app, "GET", "/api/accounts", None).await;
     let list: Value = serde_json::from_str(&body).unwrap();
     let a_view = list
         .as_array()
@@ -243,7 +243,7 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     f.accounts
         .set_limit(b_id, ember_server::store::now_ms() + 60_000, "quota")
         .unwrap();
-    let (st, body) = call(&app, "POST", "/api/v1/sessions", Some(new.clone())).await;
+    let (st, body) = call(&app, "POST", "/api/sessions", Some(new.clone())).await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
     assert!(body.contains("no scripted account is available"), "{body}");
 
@@ -251,11 +251,11 @@ async fn router_skips_a_limited_account_and_the_session_shows_why() {
     let mut bad = new.clone();
     bad["account"] = json!("nope");
     assert_eq!(
-        call(&app, "POST", "/api/v1/sessions", Some(bad)).await.0,
+        call(&app, "POST", "/api/sessions", Some(bad)).await.0,
         StatusCode::CONFLICT
     );
     assert_eq!(
-        call(&app, "DELETE", &format!("/api/v1/accounts/{b_id}"), None)
+        call(&app, "DELETE", &format!("/api/accounts/{b_id}"), None)
             .await
             .0,
         StatusCode::CONFLICT
@@ -283,14 +283,14 @@ async fn usage_is_reported_per_account() {
         .unwrap();
     wait_status(&f.sessions, &s.id, SessionStatus::Finished).await;
 
-    let (st, body) = call(&app, "GET", "/api/v1/usage?days=1", None).await;
+    let (st, body) = call(&app, "GET", "/api/usage?days=1", None).await;
     assert_eq!(st, StatusCode::OK);
     let rows: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(rows.as_array().unwrap().len(), 1, "{body}");
     assert_eq!(rows[0]["account_id"], a.id.as_str());
     assert_eq!(rows[0]["input_tokens"], 10);
     assert_eq!(rows[0]["output_tokens"], 5);
-    let (_, body) = call(&app, "GET", &format!("/api/v1/accounts/{}", a.id), None).await;
+    let (_, body) = call(&app, "GET", &format!("/api/accounts/{}", a.id), None).await;
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap()["tokens_today"],
         15
@@ -305,7 +305,7 @@ async fn api_keys_never_come_back_out() {
     let (st, body) = call(
         &app,
         "POST",
-        "/api/v1/providers",
+        "/api/providers",
         Some(json!({"label": "work", "kind": "openai", "api_key": KEY})),
     )
     .await;
@@ -316,10 +316,10 @@ async fn api_keys_never_come_back_out() {
         .unwrap()
         .to_string();
     for uri in [
-        "/api/v1/providers",
-        "/api/v1/accounts",
-        "/api/v1/sessions",
-        "/api/v1/usage",
+        "/api/providers",
+        "/api/accounts",
+        "/api/sessions",
+        "/api/usage",
     ] {
         let (_, body) = call(&app, "GET", uri, None).await;
         assert!(!body.contains("MUST-NOT-LEAK"), "{uri}: {body}");
@@ -335,7 +335,7 @@ async fn api_keys_never_come_back_out() {
     assert_eq!(key.expose(), KEY);
     assert!(!format!("{key:?}").contains("MUST-NOT-LEAK"));
     assert_eq!(
-        call(&app, "DELETE", &format!("/api/v1/providers/{id}"), None)
+        call(&app, "DELETE", &format!("/api/providers/{id}"), None)
             .await
             .0,
         StatusCode::NO_CONTENT

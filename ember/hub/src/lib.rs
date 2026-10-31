@@ -2,10 +2,10 @@
 //! `darkpyonix-core/docs/api/hub.openapi.yaml` v0.3.0 with the FR-H1/H8–H11/NFR-H2 additions of
 //! darkpyonix-core PR #34, branch `feat/m4-hub-ember-gaps`).
 //!
-//! - [`HubConfig`]: which hub (`EMBER_HUB_URL`, default `https://darkpyonix.dev`), its relay and
+//! - [`HubConfig`]: which hub (`EMBER_HUB_URL`, default `https://api.darkpyonix.dev`), its relay and
 //!   its address directory, turned into a [`ember_transport::TransportConfig`].
 //! - [`HubClient`]: typed calls for the part of the hub API Ember uses (device links, link codes,
-//!   devices, addresses, `/v1/me`).
+//!   devices, addresses, `/me`).
 //! - [`DeviceLink`]: joining the user's GitHub account, OAuth-device-flow style: start a link,
 //!   show the user code and verification URL, poll until approved, keep the device token.
 //! - [`Registration`] and [`RegistrationFile`]: the stored result (ember node keeps it in a 0600
@@ -16,7 +16,7 @@
 //!   (device tokens are refused in URLs, NFR-H2).
 //! - [`DeviceWatcher`]: follow the account's device list (`ETag` + `?wait=` long-poll, or a
 //!   timed conditional poll as the fallback).
-//! - [`HubConfig::discover`]: the relay and directory from `GET /v1/config`, falling back to
+//! - [`HubConfig::discover`]: the relay and directory from `GET /config`, falling back to
 //!   `https://relay.<host>` and `<hub>/pkarr` when the hub does not serve it.
 //! - `fake` (feature `fake`): an in-process hub for tests.
 //!
@@ -27,6 +27,7 @@
 mod client;
 mod config;
 mod link;
+pub mod paths;
 mod registration;
 mod types;
 mod watch;
@@ -45,6 +46,6 @@ pub use registration::{
 };
 pub use types::{
     service_label, AddressRecord, ClaimOutcome, Device, DeviceApp, HubInfo, LinkCodeInfo, LinkInfo, LinkRequest,
-    LinkStatus, Me, PendingLink, Readmission, Role, LONG_POLL_API_VERSION,
+    LinkStatus, Me, PendingLink, Readmission, Role,
 };
 pub use watch::{DeviceWatcher, DEFAULT_WAIT};

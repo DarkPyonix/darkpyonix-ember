@@ -29,9 +29,8 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::{A2a, A2aError, Receipt, CLI_NAME};
-use crate::agents::AgentKind;
 use crate::events::{AgentEvent, SessionStatus};
-use crate::session::{NewSession, Push, SessionError, PUSH_VERSION};
+use crate::session::{NewSession, Push, SessionError};
 use crate::store::{now_ms, SessionPatch, SessionRecord, Store};
 
 /// Store migration: teams, members, tasks and mail (appended to `store::MIGRATIONS`).
@@ -246,6 +245,13 @@ pub struct SpawnRequest {
     /// Account id; default: the account router's choice (FR-U2).
     #[serde(default)]
     pub account: Option<String>,
+    /// Use the account-switching pipeline (FR-U3). Exclusive with `account`; when neither is
+    /// given the pipeline is used (the pre-FR-A9 default).
+    #[serde(default)]
+    pub pipeline: bool,
+    /// Model proxy path (FR-U6); Claude Code only.
+    #[serde(default)]
+    pub proxy: Option<crate::members::ProxySpec>,
     /// Computer id; default: the main server (`local`).
     #[serde(default)]
     pub computer: Option<String>,
@@ -708,7 +714,6 @@ impl A2a {
     pub(crate) fn publish_team(&self, team_id: &str) {
         match self.team_view(team_id) {
             Ok(Some(team)) => self.sessions.publish(Push::TeamUpdated {
-                v: PUSH_VERSION,
                 team,
             }),
             Ok(None) => {}
@@ -827,9 +832,16 @@ impl A2a {
             }
         }
         let agent = match req.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-            Some(a) => AgentKind::parse(a)
+            Some(a) => crate::members::parse_harness(a)
                 .ok_or_else(|| A2aError::BadRequest(format!("unknown agent {a}")))?,
             None => leader.agent,
+        };
+        let account = req.account.as_deref().map(str::trim).filter(|a| !a.is_empty());
+        let def = crate::members::MemberDef {
+            harness: agent.as_str().to_string(),
+            account: account.map(String::from),
+            pipeline: req.pipeline || account.is_none(),
+            proxy: req.proxy.clone(),
         };
         let title = req
             .title
@@ -840,19 +852,17 @@ impl A2a {
             .unwrap_or_else(|| format!("{name} \u{00b7} {}", leader.title));
         // Same project and directory; nothing else is inherited (model, account, computer and
         // approvals are the teammate's own).
-        let rec = self
-            .sessions
-            .create_with_account(
-                NewSession {
-                    project: leader.project.clone(),
-                    agent,
-                    cwd: leader.cwd.clone().into(),
-                    model: None,
-                    title,
-                },
-                req.account.as_deref().map(str::trim).filter(|a| !a.is_empty()),
-            )
-            .map_err(session_error)?;
+        let rec = crate::members::create_member_session(&self.sessions, &def, |agent| NewSession {
+            project: leader.project.clone(),
+            agent,
+            cwd: leader.cwd.clone().into(),
+            model: None,
+            title,
+        })
+        .map_err(|e| match e {
+            crate::members::CreateMemberError::Member(e) => A2aError::BadRequest(e.to_string()),
+            crate::members::CreateMemberError::Session(e) => session_error(e),
+        })?;
         let team_id = match existing {
             Some(id) => id,
             None => store.create_team(caller, &leader.project)?.id,
@@ -959,6 +969,7 @@ impl A2a {
         if let Err(e) = self.sessions.release(&target.session_id).await {
             tracing::warn!(session = %target.session_id, "release on team end: {e:#}");
         }
+        self.sessions.session_ended(&target.session_id);
         let notice = AgentEvent::Notice {
             message: format!(
                 "Teammate {} was ended by {by}; it has left team {team_id}.",

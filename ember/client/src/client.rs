@@ -1,8 +1,7 @@
 //! The sync engine: keeps a [`State`] in step with one main server (PR-1, FR-L1, FR-S6).
 //!
 //! - **Push**: one WebSocket, reconnected with exponential backoff. Before each connect the
-//!   server's push version is checked (`/health`), and every message's `v` is checked again; a
-//!   mismatch becomes [`ConnectionState::Incompatible`] and stops reconnecting.
+//!   server is probed (`/health`). Unknown message types and fields are skipped.
 //! - **Gap recovery**: after every (re)connect and on `lagged`, the session list is reloaded and
 //!   every open session fetches `events?after=<last applied seq>`. Transcripts drop duplicates
 //!   and hold early events by sequence number, so nothing is lost or applied twice.
@@ -27,8 +26,8 @@ use crate::cache;
 use crate::push::{self, Backoff, DecodeError};
 use crate::state::{Changes, ConnectionState, Input, State};
 use crate::wire::{
-    ApprovalDecision, DetectedAgent, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
-    SessionRecord, TeamMail, TeamMember, TeamView, PUSH_VERSION,
+    ApprovalDecision, DetectedAgent, ForkInfo, MentionCandidate, NewSession, Project, Push, SearchHit, SessionPatch,
+    SessionRecord, TeamMail, TeamMember, TeamView,
 };
 
 #[derive(Debug, Clone)]
@@ -249,6 +248,36 @@ impl Client {
         self.inner.api.answer(id, approval_id, decision).await
     }
 
+    /// Switch a session's approve-everything mode (FR-A5). The state follows at once; the
+    /// server's push tells every other client.
+    pub async fn set_approve_all(&self, id: &str, enabled: bool) -> ApiResult<()> {
+        self.inner.api.set_approve_all(id, enabled).await?;
+        self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+        Ok(())
+    }
+
+    /// Ask the server whether `id` is in approve-everything mode and take the answer.
+    pub async fn load_approve_all(&self, id: &str) -> ApiResult<bool> {
+        let enabled = self.inner.api.session(id).await?.approve_all;
+        self.inner.apply(Input::ApproveAllLoaded { session_id: id.to_string(), enabled });
+        Ok(enabled)
+    }
+
+    /// Fork `id` after its completed turn `turn_seq` (the last when `None`, FR-S5). The new
+    /// session enters the state at once; the caller opens it.
+    pub async fn fork_session(&self, id: &str, turn_seq: Option<i64>) -> ApiResult<SessionRecord> {
+        let rec = self.inner.api.fork_session(id, turn_seq).await?;
+        self.inner.apply(Input::SessionLoaded(rec.clone()));
+        Ok(rec)
+    }
+
+    /// Ask the server for `id`'s fork facts (can_fork, turns, parent) and take the answer.
+    pub async fn load_fork_info(&self, id: &str) -> ApiResult<()> {
+        let detail = self.inner.api.session(id).await?;
+        self.inner.apply(Input::ForkInfoLoaded { session_id: id.to_string(), info: ForkInfo::from(&detail) });
+        Ok(())
+    }
+
     pub async fn interrupt(&self, id: &str) -> ApiResult<()> {
         self.inner.api.interrupt(id).await
     }
@@ -448,8 +477,6 @@ async fn cache_writer(inner: Arc<Inner>) {
 }
 
 enum Ended {
-    /// Server push version differs: stop.
-    Incompatible { server: u32 },
     /// Connection lost or failed: retry.
     Lost(String),
     /// Paused by the app.
@@ -470,13 +497,6 @@ async fn push_loop(inner: Arc<Inner>) {
         inner.apply(Input::Connection(ConnectionState::Connecting { attempt: backoff.attempt() }));
         let ended = connect_and_run(&inner, &mut mode, &mut backoff).await;
         match ended {
-            Ended::Incompatible { server } => {
-                inner.apply(Input::Connection(ConnectionState::Incompatible { server, client: PUSH_VERSION }));
-                // Only an explicit pause/resume (e.g. after the user updated) retries.
-                if mode.changed().await.is_err() {
-                    return;
-                }
-            }
             Ended::Paused => {}
             Ended::Lost(error) => {
                 let delay = backoff.next_delay();
@@ -500,7 +520,6 @@ async fn connect_and_run(
     backoff: &mut Backoff,
 ) -> Ended {
     match inner.api.health().await {
-        Ok(h) if h.push_version != PUSH_VERSION => return Ended::Incompatible { server: h.push_version },
         Ok(_) => {}
         Err(e) => return Ended::Lost(e.to_string()),
     }
@@ -527,9 +546,8 @@ async fn connect_and_run(
                     Ok(p) => {
                         inner.apply(Input::Push(p));
                     }
-                    Err(DecodeError::Version { server, .. }) => break Ended::Incompatible { server },
                     Err(DecodeError::Skipped(kind)) => tracing::trace!("ignoring push {kind}"),
-                    // An unknown push type from a compatible server is additive: skip it.
+                    // An unknown push type is additive: skip it.
                     Err(e) => tracing::warn!("skipping push message: {e}"),
                 },
                 Some(Ok(Message::Close(_))) | None => break Ended::Lost("push connection closed".into()),

@@ -3,9 +3,9 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/v1/devices` | → `[Device]` |
-//! | POST   | `/api/v1/devices` | `{peer_id, name}` → 201 `Device` |
-//! | DELETE | `/api/v1/devices/{peer_id}` | → `{closed}` (connections closed); 404 if unknown |
+//! | GET    | `/api/devices` | → `[Device]` |
+//! | POST   | `/api/devices` | `{peer_id, name}` → 201 `Device` |
+//! | DELETE | `/api/devices/{peer_id}` | → `{closed}` (connections closed); 404 if unknown |
 
 use std::sync::Arc;
 
@@ -22,8 +22,8 @@ use super::{DeviceError, Devices};
 
 pub fn router(devices: Arc<Devices>) -> Router {
     Router::new()
-        .route("/api/v1/devices", get(list).post(add))
-        .route("/api/v1/devices/{peer}", delete(remove))
+        .route("/api/devices", get(list).post(add))
+        .route("/api/devices/{peer}", delete(remove))
         .with_state(devices)
 }
 

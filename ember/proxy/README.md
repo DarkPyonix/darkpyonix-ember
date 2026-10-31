@@ -364,7 +364,7 @@ Positions on the bridge are 0-based (`line`, `column`).
    `window.chrome.webview.postMessage(json)` (WebView2), looked up on the workbench iframe,
    then the wrapper (`frame.html`), then the top window. The payload is a JSON **string**.
    Native → webview: `window.__emberBridge.receive(json)` (or WebView2 `PostWebMessageAsString`);
-   it dispatches an `ember-bridge` DOM event, and a version mismatch is logged, not dropped.
+   it dispatches an `ember-bridge` DOM event.
 2. Browser fallback: `window.open` of the same workspace URL with VS Code Web's own `payload`
    query, then the source tab is closed:
 

@@ -10,7 +10,7 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:8741";
 
 #[derive(Debug, Clone)]
 pub struct NodeConfig {
-    /// Bearer token every request except `/v1/health` must carry.
+    /// Bearer token every request except `/health` must carry.
     pub token: String,
     /// Allowed roots for file operations and command working directories.
     pub roots: Vec<PathBuf>,
@@ -20,7 +20,7 @@ pub struct NodeConfig {
     /// The `ember-node` binary, started as a PTY keeper per terminal session so sessions can
     /// survive a node restart. `None` disables keepers.
     pub pty_keeper: Option<PathBuf>,
-    /// Which destinations `/v1/egress` may reach (FR-R1); default: enabled, everything allowed.
+    /// Which destinations `/egress` may reach (FR-R1); default: enabled, everything allowed.
     pub egress: crate::egress::EgressPolicy,
 }
 

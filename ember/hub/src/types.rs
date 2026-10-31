@@ -56,7 +56,7 @@ pub struct Device {
     pub app: Option<DeviceApp>,
 }
 
-/// Body of `POST /v1/device-links`.
+/// Body of `POST /device-links`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkRequest {
     pub endpoint_id: PeerId,
@@ -64,7 +64,7 @@ pub struct LinkRequest {
     pub role: Role,
 }
 
-/// `201` of `POST /v1/device-links`.
+/// `201` of `POST /device-links`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingLink {
     pub link_id: String,
@@ -80,7 +80,7 @@ pub struct PendingLink {
     pub expires_at: i64,
 }
 
-/// Result of one `POST /v1/device-links/{link_id}/token`.
+/// Result of one `POST /device-links/{link_id}/token`.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ClaimOutcome {
     /// `202`: not decided yet.
@@ -105,7 +105,7 @@ impl fmt::Debug for ClaimOutcome {
     }
 }
 
-/// `200` of `GET /v1/link-codes/{user_code}`: what approving would let in.
+/// `200` of `GET /link-codes/{user_code}`: what approving would let in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkCodeInfo {
     pub user_code: String,
@@ -115,7 +115,7 @@ pub struct LinkCodeInfo {
     pub expires_at: i64,
 }
 
-/// `200` of `GET /v1/me`.
+/// `200` of `GET /me`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Me {
     pub account_id: String,
@@ -152,56 +152,35 @@ impl AddressRecord {
     }
 }
 
-/// The first `api_version` of `GET /v1/config`. A hub that serves the endpoint (contract
-/// `hub.openapi.yaml`, `api_version: 1`, FR-H8) also serves the `ETag` / `?wait=` long-poll on
-/// `GET /v1/devices` (FR-H9). `api_version` is bumped only for breaking changes under `/v1`.
-pub const LONG_POLL_API_VERSION: u64 = 1;
-
-/// `200` of `GET /v1/config` (public, cacheable for 5 minutes, FR-H8). Fields the hub may add
+/// `200` of `GET /config` (public, cacheable for 5 minutes, FR-H8). Fields the hub may add
 /// later are ignored; every field is optional here so a partial answer still decodes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubInfo {
-    /// `1` today.
-    #[serde(default, deserialize_with = "version_number")]
-    pub api_version: Option<u64>,
     /// The hub deployment's own version (display only).
     #[serde(default)]
     pub hub_version: Option<String>,
     /// P2P relays for the transport (`https://relay.darkpyonix.dev/`).
     #[serde(default)]
     pub relay_urls: Vec<String>,
-    /// Base URL for the pkarr publisher and resolver (`https://darkpyonix.dev/pkarr`).
+    /// Base URL for the pkarr publisher and resolver (`https://api.darkpyonix.dev/pkarr`).
     #[serde(default)]
     pub pkarr_url: Option<String>,
-    /// Where a person approves user codes (`https://darkpyonix.dev/link`).
+    /// Where a person approves user codes (`https://api.darkpyonix.dev/link`).
     #[serde(default)]
     pub link_url: Option<String>,
 }
 
 impl HubInfo {
-    /// Whether `GET /v1/devices` may be long-polled: `api_version` ≥ [`LONG_POLL_API_VERSION`].
+    /// Whether `GET /devices` may be long-polled. The API only grows (core INTENT D16) and the
+    /// spec documents `wait` on `GET /devices` wherever `/config` is served, so a hub that
+    /// answered `/config` is asked; the watcher falls back to polling if `wait` is ignored.
     pub fn supports_devices_wait(&self) -> bool {
-        self.api_version.is_some_and(|v| v >= LONG_POLL_API_VERSION)
+        true
     }
-}
-
-/// `1`, or (leniently) `"1"`.
-fn version_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum V {
-        N(u64),
-        S(String),
-    }
-    Ok(match Option::<V>::deserialize(d)? {
-        None => None,
-        Some(V::N(n)) => Some(n),
-        Some(V::S(s)) => s.trim().split('.').next().and_then(|m| m.parse().ok()),
-    })
 }
 
 /// `components.schemas.DeviceApp` (FR-H10, provisional): what a device says it runs. Only the
-/// device itself may set it (`PATCH /v1/devices/{id}` with its own token).
+/// device itself may set it (`PATCH /devices/{id}` with its own token).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceApp {
     /// `^[a-z][a-z0-9-]{0,31}$`: `ember-server`, `ember-node`.
@@ -249,7 +228,7 @@ pub fn service_label(name: &str) -> String {
     out.chars().take(32).collect::<String>().trim_end_matches('-').to_string()
 }
 
-/// `status` of `GET /v1/device-links/{link_id}`.
+/// `status` of `GET /device-links/{link_id}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkStatus {
@@ -260,7 +239,7 @@ pub enum LinkStatus {
     Expired,
 }
 
-/// `200` of `GET /v1/device-links/{link_id}` (no credentials): a link's state, for a device
+/// `200` of `GET /device-links/{link_id}` (no credentials): a link's state, for a device
 /// that restarted while waiting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkInfo {
@@ -293,7 +272,7 @@ impl LinkInfo {
     }
 }
 
-/// `200` of `POST /v1/devices/{endpoint_id}/readmit` (a signed-in session only, FR-H11).
+/// `200` of `POST /devices/{endpoint_id}/readmit` (a signed-in session only, FR-H11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Readmission {
     pub endpoint_id: PeerId,
@@ -306,20 +285,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hub_info_decodes_and_detects_long_poll() {
+    fn hub_info_decodes_and_ignores_unknown_fields() {
         let i: HubInfo = serde_json::from_str(
-            r#"{"api_version":1,"hub_version":"2026.10.3","relay_urls":["https://relay.x/"],"pkarr_url":"https://x/pkarr","link_url":"https://x/link"}"#,
+            r#"{"hub_version":"2026.10.3","relay_urls":["https://relay.x/"],"pkarr_url":"https://x/pkarr","link_url":"https://x/link","extra":true}"#,
         )
         .unwrap();
         assert!(i.supports_devices_wait());
         assert_eq!(i.hub_version.as_deref(), Some("2026.10.3"));
         assert_eq!(i.link_url.as_deref(), Some("https://x/link"));
-        let i: HubInfo = serde_json::from_str(r#"{"api_version":0}"#).unwrap();
-        assert!(!i.supports_devices_wait());
         let i: HubInfo = serde_json::from_str(r#"{"relay_urls":[]}"#).unwrap();
-        assert!(!i.supports_devices_wait(), "no api_version: poll");
-        let i: HubInfo = serde_json::from_str(r#"{"api_version":"2","extra":true}"#).unwrap();
-        assert_eq!(i.api_version, Some(2));
+        assert!(i.supports_devices_wait(), "decided by /config being served, not by a version");
     }
 
     #[test]

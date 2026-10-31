@@ -26,11 +26,11 @@ use dioxus_compose::prelude::*;
 use tokio::sync::{broadcast::error::RecvError, Notify};
 
 use ember_client::state::Input;
-use ember_client::wire::DetectedAgent;
+use ember_client::wire::{DailyUsage, DetectedAgent};
 use ember_client::{Changes, LauncherStatus};
 
 use crate::model::merge_computers;
-use crate::server::Account;
+use crate::server::{Account, ChatGptAccount};
 use crate::services::{services, Services};
 
 /// How often accounts, agents and computer reachability are refreshed.
@@ -49,7 +49,11 @@ pub struct Live {
     /// Any team (members, tasks: FR-T7).
     pub teams: SyncSignal<u64>,
     pub accounts: SyncSignal<Vec<Account>>,
+    /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
+    pub chatgpt: SyncSignal<Vec<ChatGptAccount>>,
     pub agents: SyncSignal<Vec<DetectedAgent>>,
+    /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
+    pub usage: SyncSignal<Vec<DailyUsage>>,
 }
 
 impl Live {
@@ -61,7 +65,9 @@ impl Live {
             outbox: use_signal_sync(|| 0),
             teams: use_signal_sync(|| 0),
             accounts: use_signal_sync(Vec::new),
+            chatgpt: use_signal_sync(Vec::new),
             agents: use_signal_sync(Vec::new),
+            usage: use_signal_sync(Vec::new),
         }
     }
 
@@ -74,6 +80,9 @@ impl Live {
         Self::bump(self.transcripts);
         Self::bump(self.outbox);
         Self::bump(self.teams);
+        if let Some(s) = crate::services::try_services() {
+            s.ui.live.bump_all();
+        }
     }
 }
 
@@ -172,12 +181,15 @@ fn on_changes(s: &'static Services, live: Live, ch: &Changes, prints: &mut Finge
     let projects_changed = ch.projects && ch.sessions.is_empty();
     if sessions_changed || projects_changed || ch.computers || ch.connection {
         Live::bump(live.launcher);
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.launcher);
     }
     if !ch.transcripts.is_empty() {
         Live::bump(live.transcripts);
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.transcripts);
     }
     if !ch.teams.is_empty() {
         Live::bump(live.teams);
+        crate::ui::coexist::SharedLive::bump(&s.ui.live.teams);
     }
     // Turn boundaries show up as session status changes.
     for id in &ch.sessions {
@@ -208,12 +220,31 @@ async fn refresh_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
 async fn refresh_once(s: &'static Services, live: Live, first: bool, full: bool) {
     if full {
         refresh_slow(s, live, first).await;
+    } else if s.demo.is_some() {
+        // Demo only (#199): nothing to reload.
     } else if let Err(e) = s.client.load_projects().await {
         tracing::debug!("projects refresh failed: {e}");
     }
 }
 
 async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
+    // Demo only (#199): the same signals, filled from the demo source; no request is made.
+    if s.demo.is_some() {
+        let now = crate::demo::now_ms();
+        let acc = crate::demo::accounts();
+        let gpt = crate::demo::chatgpt_accounts(now);
+        let usg = crate::demo::usage(now);
+        let agt = crate::demo::agents();
+        s.ui.live.accounts.set(acc.clone());
+        s.ui.live.chatgpt.set(gpt.clone());
+        s.ui.live.usage.set(usg.clone());
+        s.ui.live.agents.set(agt.clone());
+        live.accounts.set(acc);
+        live.chatgpt.set(gpt);
+        live.usage.set(usg);
+        live.agents.set(agt);
+        return;
+    }
     // Computers: list at once without probing so the list renders before reachability is
     // known (FR-L3), then probe and update in place.
     if first {
@@ -224,14 +255,30 @@ async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
     }
     match s.server.accounts().await {
         Ok(a) => {
+            s.ui.live.accounts.set(a.clone());
             if *live.accounts.peek() != a {
                 live.accounts.set(a);
             }
         }
         Err(e) => tracing::debug!("accounts refresh failed: {e}"),
     }
+    let g = s.server.chatgpt_accounts().await.unwrap_or_default();
+    s.ui.live.chatgpt.set(g.clone());
+    if *live.chatgpt.peek() != g {
+        live.chatgpt.set(g);
+    }
+    match s.client.api().usage(Some(14)).await {
+        Ok(u) => {
+            s.ui.live.usage.set(u.clone());
+            if *live.usage.peek() != u {
+                live.usage.set(u);
+            }
+        }
+        Err(e) => tracing::debug!("usage refresh failed: {e}"),
+    }
     match s.client.agents().await {
         Ok(a) => {
+            s.ui.live.agents.set(a.clone());
             if *live.agents.peek() != a {
                 live.agents.set(a);
             }

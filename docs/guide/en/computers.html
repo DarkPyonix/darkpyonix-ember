@@ -67,9 +67,7 @@
         The client lists computers, assigns them to projects and switches sessions between them,
         but it cannot add a computer yet. Adding one goes through <code>ember-server</code>'s HTTP
         API, run on the main server with <code>curl</code>. The routes live under
-        <code>/api/v1</code> today and move to <code>/api</code>
-        <span class="pill planned">Planned</span>
-        (<a href="https://github.com/DarkPyonix/darkpyonix-ember/issues/63">#63</a>).
+        <code>/api</code> and carry no version.
       </p>
     </div>
 
@@ -87,11 +85,11 @@ EMBER_NODE_LISTEN=0.0.0.0:8741 EMBER_NODE_ROOTS=<span class="s">"$HOME/src"</spa
     <p>Then register it on the main server:</p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell, on the main server</figcaption>
-<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/computers \
+<pre><code>curl -X POST http://127.0.0.1:8740/api/computers \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"name": "linux-box", "url": "http://192.168.0.20:8741", "token": "&lt;the node token&gt;"}'</span>
 
-curl http://127.0.0.1:8740/api/v1/computers   <span class="c"># each computer, probed for reachability</span></code></pre>
+curl http://127.0.0.1:8740/api/computers   <span class="c"># each computer, probed for reachability</span></code></pre>
     </figure>
     <p>
       The token is never returned by the API. <code>EMBER_NODE_ROOTS</code> limits the folders the
@@ -129,7 +127,7 @@ EMBER_NODE_TRANSPORT=1 ./target/release/ember-node
         printed, which also carries address hints:
 <figure class="codeblock" data-copy="Copy" data-copied="Copied">
   <figcaption>shell, on the main server</figcaption>
-<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/computers \
+<pre><code>curl -X POST http://127.0.0.1:8740/api/computers \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"name": "laptop", "peer": "&lt;node peer id&gt;", "token": "&lt;the node token&gt;"}'</span></code></pre>
 </figure>
@@ -157,14 +155,14 @@ EMBER_NODE_TRANSPORT=1 ./target/release/ember-node
     <p>The hub needs the transport, so the server runs with <code>EMBER_TRANSPORT=1</code>.</p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell, on the main server</figcaption>
-<pre><code>curl -X POST http://127.0.0.1:8740/api/v1/hub/link \
+<pre><code>curl -X POST http://127.0.0.1:8740/api/hub/link \
   -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"name": "mini"}'</span>
 <span class="c"># {"user_code": "...", "verification_uri": "...", "verification_uri_complete": "...", ...}</span></code></pre>
     </figure>
     <p>
       Open <code>verification_uri_complete</code> in a browser signed in to darkpyonix.dev with
       GitHub, and approve. A main server must be approved in the browser.
-      <code>GET /api/v1/hub</code> shows the registration afterwards. If the server restarts while
+      <code>GET /api/hub</code> shows the registration afterwards. If the server restarts while
       the link waits, it resumes the same link.
     </p>
     <h3 id="hub-node">2. Register each computer</h3>
@@ -182,8 +180,8 @@ EMBER_NODE_TRANSPORT=1 ./target/release/ember-node
     </p>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell, on the main server</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt;   <span class="c"># who is asking</span>
-curl -X POST http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt; \
+<pre><code>curl http://127.0.0.1:8740/api/hub/link-codes/&lt;CODE&gt;   <span class="c"># who is asking</span>
+curl -X POST http://127.0.0.1:8740/api/hub/link-codes/&lt;CODE&gt; \
   -H <span class="s">'content-type: application/json'</span> -d <span class="s">'{"approve": true}'</span></code></pre>
     </figure>
     <p>
@@ -196,8 +194,8 @@ curl -X POST http://127.0.0.1:8740/api/v1/hub/link-codes/&lt;CODE&gt; \
     <h3 id="hub-add">3. Add it as a computer</h3>
     <figure class="codeblock" data-copy="Copy" data-copied="Copied">
       <figcaption>shell, on the main server</figcaption>
-<pre><code>curl http://127.0.0.1:8740/api/v1/hub/devices   <span class="c"># your account's devices, with endpoint_id</span>
-curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/computer \
+<pre><code>curl http://127.0.0.1:8740/api/hub/devices   <span class="c"># your account's devices, with endpoint_id</span>
+curl -X POST http://127.0.0.1:8740/api/hub/devices/&lt;endpoint_id&gt;/computer \
   -H <span class="s">'content-type: application/json'</span> \
   -d <span class="s">'{"name": "laptop", "token": "&lt;the node token&gt;"}'</span></code></pre>
     </figure>
@@ -212,7 +210,7 @@ curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/comput
       "Checking&hellip;" while it is not yet known) and the projects each serves. With a project selected, each computer has a switch,
       "Assign to <em>project</em>". A project can have many computers and a computer many
       projects. The API equivalent is
-      <code>PUT /api/v1/projects/{name}/computers/{computer_id}</code>, and <code>DELETE</code> on
+      <code>PUT /api/projects/{name}/computers/{computer_id}</code>, and <code>DELETE</code> on
       the same path to unassign.
     </p>
 
@@ -267,11 +265,11 @@ curl -X POST http://127.0.0.1:8740/api/v1/hub/devices/&lt;endpoint_id&gt;/comput
 
     <h2 id="remove">Removing a computer</h2>
     <p>
-      <code>DELETE /api/v1/computers/{id}</code> removes a computer and its project assignments.
+      <code>DELETE /api/computers/{id}</code> removes a computer and its project assignments.
       It is refused while a session is on that computer, or while a project's remote browser
       goes out through it; move those first. To leave the hub, run
       <code>ember-node hub forget</code> on a computer, or
-      <code>DELETE /api/v1/hub/registration</code> on the main server. Add
+      <code>DELETE /api/hub/registration</code> on the main server. Add
       <code>--local</code> or <code>?local=1</code> to forget the registration here only, while
       the device stays in the account.
     </p>

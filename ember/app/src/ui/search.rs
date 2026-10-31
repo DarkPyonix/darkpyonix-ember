@@ -15,6 +15,7 @@ use ember_client::wire::SearchHit;
 
 use crate::model::{self, SearchResult};
 use crate::services::{run, services};
+use crate::ui::components::{EmberField, Txt};
 use crate::ui::launcher::{ConnectionBanner, SessionRowView};
 use crate::ui::use_ui;
 
@@ -32,12 +33,21 @@ pub fn SearchScreen() -> Element {
     let mut hits_for = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let generation = use_hook(|| Arc::new(AtomicU64::new(0)));
+    // The demo says once that search is unavailable, not on every keystroke (#202).
+    let mut told = use_signal(|| false);
 
     let on_change = move |v: String| {
         query.set(v.clone());
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
         let current = generation.clone();
         let q = v.trim().to_string();
+        if !q.is_empty() && services().demo.is_some() {
+            if !*told.peek() {
+                told.set(true);
+                services().demo_blocked();
+            }
+            return;
+        }
         if q.is_empty() {
             hits.set(Vec::new());
             hits_for.set(String::new());
@@ -94,38 +104,38 @@ pub fn SearchScreen() -> Element {
             padding_role: SpaceRole::Md,
             space_role: SpaceRole::Md,
             ConnectionBanner {}
-            TextField {
+            EmberField {
                 fill_max_width: true,
                 placeholder: "Search conversations",
                 on_value_change: on_change,
             }
             if error_text.is_some() {
-                Text {
+                Txt {
                     text: format!("Message search failed: {}. Showing title matches only.", error_text.clone().unwrap_or_default()),
                     type_role: TypeRole::Caption,
                     color: Paint::Role(ColorRole::Error),
                 }
             }
             if q.trim().is_empty() {
-                Text {
+                Txt {
                     text: "Type to search every conversation's messages, and titles, projects, agents, accounts and folders.",
                     type_role: TypeRole::Body,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
                 }
             } else if count == 0 && searching {
-                Text {
+                Txt {
                     text: "Searching\u{2026}",
                     type_role: TypeRole::Body,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
                 }
             } else if count == 0 {
-                Text {
+                Txt {
                     text: "Nothing matches.",
                     type_role: TypeRole::Body,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
                 }
             } else {
-                Text {
+                Txt {
                     text: format!("{count} result{}", if count == 1 { "" } else { "s" }),
                     type_role: TypeRole::Caption,
                     color: Paint::Role(ColorRole::OnSurfaceVariant),
@@ -143,14 +153,14 @@ pub fn SearchScreen() -> Element {
                         Column {
                             fill_max_width: true,
                             space_role: SpaceRole::Xs,
-                            Text {
+                            Txt {
                                 text: r.row.project.clone(),
                                 type_role: TypeRole::Caption,
                                 color: Paint::Role(ColorRole::OnSurfaceVariant),
                             }
                             SessionRowView { row: r.row.clone() }
                             if !snippet.is_empty() {
-                                Text {
+                                Txt {
                                     text: snippet,
                                     type_role: TypeRole::Body,
                                     max_lines: 3,

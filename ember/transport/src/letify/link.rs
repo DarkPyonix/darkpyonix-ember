@@ -608,8 +608,9 @@ impl ConnectionBackend for LConn {
 
     async fn closed(&self) -> CloseReason {
         let mut rx = self.shared.close.subscribe();
-        match rx.wait_for(|state| state.is_some()).await {
-            Ok(state) => (*state).clone().unwrap_or(CloseReason::Local),
+        let done = rx.wait_for(|state| state.is_some()).await.map(|state| (*state).clone());
+        match done {
+            Ok(reason) => reason.unwrap_or(CloseReason::Local),
             Err(_) => CloseReason::Local,
         }
     }

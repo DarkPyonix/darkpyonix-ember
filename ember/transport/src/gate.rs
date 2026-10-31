@@ -161,7 +161,8 @@ impl PeerGate {
             let before = st.allowed.take().unwrap_or_default();
             let mut removed: Vec<PeerId> = before.iter().filter(|p| !allowed.contains(p)).copied().collect();
             // Peers that were live on an open gate but are not listed now are revoked too.
-            removed.extend(gone.iter().filter(|p| !removed.contains(p)).copied());
+            let extra: Vec<PeerId> = gone.iter().filter(|p| !removed.contains(p)).copied().collect();
+            removed.extend(extra);
             let added: Vec<PeerId> = allowed.iter().filter(|p| !before.contains(p)).copied().collect();
             st.allowed = Some(allowed);
             st.denied.clear();

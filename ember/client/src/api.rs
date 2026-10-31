@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use ember_transport::{Dialer, PeerAddr};
+use ember_transport::{Dialer, PeerAddr, PowerState};
 use http::{header, Method, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -137,6 +137,23 @@ impl Api {
         match &self.reach {
             Reach::Peer { addr, .. } => Some(addr),
             Reach::Http(_) => None,
+        }
+    }
+
+    /// Tells the transport the app's power state. Over the peer-to-peer transport a backend that
+    /// keeps a session alive slows its keepalives in the background; over plain
+    /// HTTP this does nothing.
+    pub fn set_power_state(&self, state: PowerState) {
+        if let Reach::Peer { dialer, .. } = &self.reach {
+            dialer.transport().set_power_state(state);
+        }
+    }
+
+    /// Re-establishes the transport's paths now (the app returned to the foreground, or the
+    /// network changed). Open connections survive. Does nothing over plain HTTP.
+    pub fn resume_transport(&self) {
+        if let Reach::Peer { dialer, .. } = &self.reach {
+            dialer.transport().resume_now();
         }
     }
 

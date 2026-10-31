@@ -38,6 +38,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[features]
+# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). The default backend is unchanged.
+letify = ["ember-transport/letify"]
+
 [dev-dependencies]
 ember-hub = { path = "../hub", features = ["fake"] }
 tempfile = "3"

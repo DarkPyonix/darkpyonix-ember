@@ -144,3 +144,33 @@ async fn stranger_is_refused_over_iroh() {
     stranger.close().await;
     server.close().await;
 }
+
+/// `FR-N6`: the points A and -A share one X25519 key, so a transport that derives its key
+/// exchange from the Ed25519 key sees one device, and the holder of the secret of A can present
+/// -A. The gate therefore compares ids modulo the sign bit: a revoked device cannot come back as
+/// its alias, and an alias of an allowed device is the same device.
+#[test]
+fn fr_n6_gate_compares_ids_modulo_the_sign_bit() {
+    use ember_transport::{PeerId, SecretKey};
+    let device = SecretKey::generate().peer_id();
+    let mut flipped = *device.as_bytes();
+    flipped[31] ^= 0x80;
+    let alias = PeerId::from_bytes(flipped).expect("the sign-flipped point is a valid key");
+    assert_ne!(alias, device);
+
+    // Allow list: the alias is the same device; revoking either removes both.
+    let gate = PeerGate::allow_list([device]);
+    assert!(gate.is_allowed(&alias));
+    assert_eq!(gate.revoke(&alias), 0);
+    assert!(!gate.is_allowed(&device) && !gate.is_allowed(&alias));
+    gate.allow(device);
+    assert!(gate.is_allowed(&alias));
+    assert_eq!(gate.allowed(), Some(vec![device]), "the stored id keeps its own encoding");
+
+    // Open gate: a revoked device stays refused under its alias until it is allowed again.
+    let open = PeerGate::open();
+    open.revoke(&device);
+    assert!(!open.is_allowed(&alias));
+    open.allow(alias);
+    assert!(open.is_allowed(&device));
+}

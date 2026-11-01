@@ -50,6 +50,8 @@ fuser = { version = "0.18", optional = true }
 # macOS: `mount-nfs`; Linux: `mount-fuse` (or `mount-nfs`, which needs root to mount there).
 mount-nfs = ["dep:nfsserve"]
 mount-fuse = ["dep:fuser"]
+# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). The default backend is unchanged.
+letify = ["ember-transport/letify"]
 
 [dev-dependencies]
 ember-hub = { path = "../hub", features = ["fake"] }

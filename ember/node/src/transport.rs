@@ -126,6 +126,8 @@ pub fn serve(
     gate: PeerGate,
 ) -> io::Result<impl Future<Output = io::Result<()>> + Send + 'static> {
     let listener = transport.listen(NODE_SERVICE).map_err(io::Error::other)?;
+    // A backend that enforces admission below the gate is told about every allow and revoke.
+    gate.attach(transport);
     Ok(api::serve(HttpListener::with_gate(listener, gate), node))
 }
 

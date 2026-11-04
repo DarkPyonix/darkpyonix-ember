@@ -333,6 +333,8 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let top = if rail { 14.0 } else { SP[4] };
     let below_brand = if rail { 10.0 } else { 20.0 };
     let bottom = if rail { 26.0 } else { 30.0 };
+    let plat_ios = remember(|| mutable_state_of(false));
+    let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
     cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
         cu::Column()
             .modifier(Modifier::new().width(width - 1.0).fill_max_height().background(paint(p.bg)))
@@ -368,6 +370,13 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                             });
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
+                            let pl = plat_ios.clone();
+                            ToolRow(ICON_CPU_SVG, plat_label, rail, move || {
+                                pl.set(!pl.get_untracked());
+                            });
+                            ToolRow(NavMenu::Routines.svg(), "데모 초기화", rail, || {
+                                super::notice::post("데모를 초기 상태로 되돌렸습니다");
+                            });
                             // `.me`: 8 margin and 12 padding above the avatar.
                             cu::Spacer().modifier(Modifier::new().height(16.0));
                             UserRow(rail);
@@ -452,12 +461,13 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
 }
 
 /// The phone's top-right tool menu (`.phonemenu`): a 32 px round button at top 10 / right 12 that
-/// opens a popover with the theme switch and settings. The mockup's demo-only rows (platform,
-/// reset) are left out.
+/// opens a popover with the theme switch, settings, platform toggle and demo reset.
 pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: impl FnMut() + Clone + 'static) {
     let p = ember_theme().palette;
     let ui = shared_ui().clone();
     let theme_svg = if ember_theme().scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+    let plat_ios = remember(|| mutable_state_of(false));
+    let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
     cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
         cu::Spacer().modifier(Modifier::new().weight(1.0));
         cu::Column().alignment(Alignment::TopEnd).content(|| {
@@ -496,6 +506,16 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                             menu_item(ICON_GEAR_SVG, "설정", move || {
                                 o.set(false);
                                 s();
+                            });
+                            let (pl, o) = (plat_ios.clone(), open.clone());
+                            menu_item(ICON_CPU_SVG, plat_label, move || {
+                                pl.set(!pl.get_untracked());
+                                o.set(false);
+                            });
+                            let o = open.clone();
+                            menu_item(NavMenu::Routines.svg(), "데모 초기화", move || {
+                                o.set(false);
+                                super::notice::post("데모를 초기 상태로 되돌렸습니다");
                             });
                         });
                     });

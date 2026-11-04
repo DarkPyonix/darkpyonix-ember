@@ -1275,23 +1275,34 @@ pub fn TranscriptRow(
                                     },
                                 );
                                 Badge(state_text, tone);
-                                AppButton(
-                                    if open { "접기" } else { "자세히" },
-                                    Some(if open {
-                                        IconRole::Collapse
-                                    } else {
-                                        IconRole::More
-                                    }),
-                                    ButtonKind::Default,
-                                    true,
-                                    true,
-                                    false,
+                                Clickable(
+                                    Modifier::new()
+                                        .height(H_PILL)
+                                        .background(paint(p.surface))
+                                        .border(1.0, paint(p.line))
+                                        .shape_role(ShapeRole::Full),
+                                    Alignment::Center,
                                     move || {
                                         exp_toggle.update(|set| {
                                             if !set.remove(&cid_toggle) {
                                                 set.insert(cid_toggle.clone());
                                             }
                                         });
+                                    },
+                                    move || {
+                                        cu::Row()
+                                            .alignment(Alignment::Center)
+                                            .content(|| {
+                                                cu::Spacer().modifier(Modifier::new().width(8.0));
+                                                Label(
+                                                    if open { "접기" } else { "자세히" },
+                                                    Fs::Xs,
+                                                    Weight::Medium,
+                                                    Some(paint(p.text_2)),
+                                                    Some(1),
+                                                );
+                                                cu::Spacer().modifier(Modifier::new().width(8.0));
+                                            });
                                     },
                                 );
                             });
@@ -1528,14 +1539,34 @@ pub fn TranscriptRow(
                     if outcome == TurnOutcome::Completed {
                         let u_fork = ui.clone();
                         let s_fork = sid.clone();
-                        AppButton(
-                            ko::FORK_TURN_LABEL,
-                            None,
-                            ButtonKind::Default,
-                            true,
-                            can,
-                            false,
-                            move || fork_from(&u_fork, s_fork.clone(), Some(seq)),
+                        let fg_fork = if can { p.text_2 } else { p.muted };
+                        Clickable(
+                            Modifier::new()
+                                .height(H_PILL)
+                                .background(paint(p.surface))
+                                .border(1.0, paint(p.line))
+                                .shape_role(ShapeRole::Full),
+                            Alignment::Center,
+                            move || {
+                                if can {
+                                    fork_from(&u_fork, s_fork.clone(), Some(seq));
+                                }
+                            },
+                            move || {
+                                cu::Row()
+                                    .alignment(Alignment::Center)
+                                    .content(|| {
+                                        cu::Spacer().modifier(Modifier::new().width(8.0));
+                                        Label(
+                                            ko::FORK_TURN_LABEL,
+                                            Fs::Xs,
+                                            Weight::Medium,
+                                            Some(paint(fg_fork)),
+                                            Some(1),
+                                        );
+                                        cu::Spacer().modifier(Modifier::new().width(8.0));
+                                    });
+                            },
                         );
                     }
                     cu::Box()

@@ -53,6 +53,11 @@ pub enum ErrorCode {
     PreconditionFailed,
     BadRequest,
     Internal,
+    /// The git API (FR-G1): the path is not a git repository (404).
+    NotARepo,
+    /// The git API (FR-G2, FR-G3): git refused the operation, e.g. an empty index or a diverged
+    /// pull (409); the message is git's own.
+    Conflict,
 }
 
 // ---------------------------------------------------------------------------------------------

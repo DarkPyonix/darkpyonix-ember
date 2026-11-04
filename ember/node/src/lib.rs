@@ -30,6 +30,7 @@ pub mod envinfo;
 pub mod exec;
 pub mod exec_server;
 pub mod fs;
+pub mod git;
 pub mod hub;
 pub mod jobs;
 pub mod policy;

@@ -5,20 +5,28 @@
 //! text, the merge gate, unified diff parsing, line, hunk and file staging, and the file tree.
 //! The components in the second half only hand them to dioxus-compose.
 //!
-//! No git data exists in the server, node or client yet. [`snapshot`] returns `None`, every data
-//! view says [`SOON`], and nothing is invented. The endpoints the screen needs are listed on
-//! issue #168.
+//! The data comes from the server's `/projects/{id}/git/...` routes (FR-G4) through
+//! `ember_client::Api::git_*`: [`fetch_snapshot`] reads it, [`build_snapshot`] maps status and
+//! unified diffs into [`FileDiff`]s, and [`plan_staging`] and [`build_patch`] turn the line
+//! staging into server calls. When the server is unreachable or the project is not a
+//! repository, the data views say [`SOON`] and nothing is invented. Sections beyond changes and
+//! branches still wait for their endpoints (#168).
 //!
 //! What the pinned toolkit cannot do yet, with the workaround used (`GAPS-WORKLIST.md`):
-//! - no clickable Row or Column: a text Button is the hit target of a row or a diff line;
-//! - no sticky column: the line check sits in the row and scrolls with it;
-//! - no SVG graph: the history is a list first (TODO: draw the graph on a `Canvas`).
+//! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (TODO(compose-rust#372): drop once Row/Column on_click is confirmed);
+//! - no sticky column: the line check sits in the row and scrolls with it (TODO(compose-rust#424));
+//! - no SVG graph: the history is a list first (TODO(compose-rust#308): draw the graph on a `Canvas`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use dioxus_compose::prelude::*;
 
-use crate::services::services;
+use ember_client::api::{ApiError, GitCommitted, GitDiff, GitOutput, GitStatus};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
+
+use crate::demo::GitError;
+use crate::services::{run, services};
 use crate::ui::components::{AppButton, ButtonKind, EmberCard, EmberField, Label, PickChip, Pill, PillTone};
 use crate::ui::home::MenuItem;
 use crate::ui::project::{display_name, is_default_project, project_boxes, ProjectBox};
@@ -871,7 +879,6 @@ pub fn build_tree(paths: &[String], folded: &BTreeSet<String>) -> Vec<TreeRow> {
 // ---------------------------------------------------------------------------------------------
 
 /// What the screen reads of a project's repository.
-/// TODO(server): nothing provides this yet; see [`snapshot`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RepoSnapshot {
     pub branch: String,
@@ -881,13 +888,341 @@ pub struct RepoSnapshot {
     pub fetched_age_secs: Option<u64>,
     pub branches: Vec<String>,
     pub changes: Vec<FileDiff>,
+    /// Paths already fully staged in the index when the snapshot was read.
+    pub staged: BTreeSet<String>,
 }
 
-/// The repository of a project, read on the project's computer through ember node.
-/// TODO(server, #168): needs git status, diff, stage, commit, log graph, branches, pull requests,
-/// stash, and push, pull and fetch. Until then this is `None` and the screen says [`SOON`].
-pub fn snapshot(_project: &str) -> Option<RepoSnapshot> {
-    None
+/// The state of the repository view of one project.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Load {
+    Loading,
+    Ready(RepoSnapshot),
+    /// The project's path is not a repository (the server answered 404).
+    NotRepo,
+    /// The server could not be reached, or it failed; the text says why.
+    Unavailable(String),
+}
+
+impl Load {
+    pub fn snapshot(&self) -> Option<&RepoSnapshot> {
+        match self {
+            Load::Ready(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The line under the bar while there is no snapshot.
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Load::Ready(_) => None,
+            Load::Loading => Some("저장소 정보를 불러오는 중입니다".to_string()),
+            Load::NotRepo => Some("이 프로젝트의 경로는 git 저장소가 아닙니다".to_string()),
+            Load::Unavailable(_) => Some(soon_line("저장소 정보")),
+        }
+    }
+}
+
+/// A server answer as a view state: 404 means not a repository, any other failure means the data
+/// is unavailable.
+pub fn load_from(result: Result<RepoSnapshot, ApiError>) -> Load {
+    match result {
+        Ok(s) => Load::Ready(s),
+        Err(e) if e.status() == Some(404) => Load::NotRepo,
+        Err(e) => Load::Unavailable(e.to_string()),
+    }
+}
+
+/// The file status shown for porcelain v2 characters (index first, then the work tree).
+pub fn status_of(index: char, worktree: char) -> FileStatus {
+    match (index, worktree) {
+        ('R', _) | (_, 'R') | ('C', _) | (_, 'C') => FileStatus::Renamed,
+        ('D', _) | (_, 'D') => FileStatus::Deleted,
+        ('A', _) | ('?', _) => FileStatus::Added,
+        _ => FileStatus::Modified,
+    }
+}
+
+/// Files by path in a unified diff.
+fn diffs_by_path(patch: &str) -> BTreeMap<String, FileDiff> {
+    parse_unified(patch)
+        .into_iter()
+        .map(|d| (d.path.clone(), d))
+        .collect()
+}
+
+/// Paths of untracked files in a status, which have no entry in `git diff`.
+pub fn untracked_paths(status: &GitStatus) -> Vec<String> {
+    status
+        .files
+        .iter()
+        .filter(|f| f.index == '?' && f.worktree == '?')
+        .map(|f| f.path.clone())
+        .collect()
+}
+
+/// Map a status and its diffs into a snapshot. A file takes its work tree diff, else its staged
+/// diff, else the diff read for an untracked file; one with none shows no hunks. The status
+/// decides the file's status letter and whether it starts staged (index changed, work tree
+/// clean).
+pub fn build_snapshot(
+    status: &GitStatus,
+    unstaged: &str,
+    staged: &str,
+    untracked: &BTreeMap<String, String>,
+) -> RepoSnapshot {
+    let work = diffs_by_path(unstaged);
+    let index = diffs_by_path(staged);
+    let mut changes = Vec::new();
+    let mut already = BTreeSet::new();
+    for f in &status.files {
+        let mut d = work
+            .get(&f.path)
+            .or_else(|| index.get(&f.path))
+            .cloned()
+            .or_else(|| {
+                untracked
+                    .get(&f.path)
+                    .and_then(|p| parse_unified(p).into_iter().next())
+            })
+            .unwrap_or_else(|| FileDiff {
+                path: f.path.clone(),
+                old_path: None,
+                status: FileStatus::Modified,
+                binary: false,
+                hunks: Vec::new(),
+            });
+        d.path = f.path.clone();
+        d.status = status_of(f.index, f.worktree);
+        if f.old_path.is_some() {
+            d.old_path = f.old_path.clone();
+        }
+        if !matches!(f.index, '.' | '?' | ' ') && f.worktree == '.' {
+            already.insert(f.path.clone());
+        }
+        changes.push(d);
+    }
+    RepoSnapshot {
+        branch: status.branch.clone(),
+        upstream: status.upstream.clone(),
+        ahead: status.ahead,
+        behind: status.behind,
+        fetched_age_secs: status.fetched_age_secs,
+        branches: status.branches.clone(),
+        changes,
+        staged: already,
+    }
+}
+
+/// A demo source answer as an API result: the status and message of its error become an
+/// [`ApiError::Status`], so the demo and the server share the same load states.
+pub fn git_result<T: DeserializeOwned>(r: Result<Value, GitError>) -> Result<T, ApiError> {
+    let v = r.map_err(|e| ApiError::Status { status: e.status, message: format!("{}: {}", e.code, e.message) })?;
+    serde_json::from_value(v).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// One git operation of a project: the demo source when the app serves itself, else the main
+/// server. `body` is the contract's body without `repo`; the answer is decoded into `T` (use
+/// `Value` for the operations that answer 204).
+pub async fn git_call<T: DeserializeOwned>(project: &str, op: &str, body: Value) -> Result<T, ApiError> {
+    let svc = services();
+    let v = match &svc.demo {
+        Some(demo) => return git_result(demo.git(project, op, &body)),
+        None => svc.client.api().git_raw(project, op, body).await?,
+    };
+    serde_json::from_value(v).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+async fn git_diff_of(project: &str, path: Option<&str>, staged: bool) -> Result<String, ApiError> {
+    let d: GitDiff = git_call(project, "diff", json!({ "path": path, "staged": staged })).await?;
+    Ok(d.patch)
+}
+
+/// Read a project's repository: status, both diffs, and the diff of each untracked file. Runs
+/// on the runtime, not the UI thread.
+pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
+    let status: GitStatus = git_call(project, "status", json!({})).await?;
+    let unstaged = git_diff_of(project, None, false).await?;
+    let staged = git_diff_of(project, None, true).await?;
+    let mut untracked = BTreeMap::new();
+    for path in untracked_paths(&status) {
+        // A file that cannot be read stays listed without hunks.
+        if let Ok(patch) = git_diff_of(project, Some(&path), false).await {
+            untracked.insert(path, patch);
+        }
+    }
+    Ok(build_snapshot(&status, &unstaged, &staged, &untracked))
+}
+
+/// One call that brings the index to the staging the user chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageOp {
+    Stage(Vec<String>),
+    Unstage(Vec<String>),
+    /// A patch of only the staged lines of one file.
+    Apply(String),
+}
+
+/// A unified patch holding only the staged lines of `diff`: an unstaged addition is left out and
+/// an unstaged deletion stays as context. `None` when no line is staged.
+pub fn build_patch(diff: &FileDiff, staging: &FileStaging) -> Option<String> {
+    let old = diff.old_path.as_deref().unwrap_or(&diff.path);
+    let mut out = format!("diff --git a/{old} b/{}\n", diff.path);
+    if diff.status == FileStatus::Added {
+        out.push_str("new file mode 100644\n--- /dev/null\n");
+    } else {
+        out.push_str(&format!("--- a/{old}\n"));
+    }
+    out.push_str(&format!("+++ b/{}\n", diff.path));
+    let mut any = false;
+    // The lines already added or removed by earlier hunks shift where a later hunk lands.
+    let mut shift: i64 = 0;
+    for (hi, h) in diff.hunks.iter().enumerate() {
+        let mut body = String::new();
+        let (mut old_len, mut new_len) = (0u32, 0u32);
+        let mut picked = false;
+        for (li, l) in h.lines.iter().enumerate() {
+            let on = staging.is_staged(hi, li);
+            match (l.kind, on) {
+                (LineKind::Context, _) | (LineKind::Del, false) => {
+                    body.push_str(&format!(" {}\n", l.text));
+                    old_len += 1;
+                    new_len += 1;
+                }
+                (LineKind::Add, true) => {
+                    body.push_str(&format!("+{}\n", l.text));
+                    new_len += 1;
+                    picked = true;
+                }
+                (LineKind::Del, true) => {
+                    body.push_str(&format!("-{}\n", l.text));
+                    old_len += 1;
+                    picked = true;
+                }
+                (LineKind::Add, false) => {}
+            }
+        }
+        if !picked {
+            continue;
+        }
+        any = true;
+        let new_start = (h.old_start as i64 + shift).max(0);
+        out.push_str(&format!("@@ -{},{} +{},{} @@\n", h.old_start, old_len, new_start, new_len));
+        out.push_str(&body);
+        shift += new_len as i64 - old_len as i64;
+    }
+    any.then_some(out)
+}
+
+/// The calls that make the index match `staging`, for the files that changed. A file fully
+/// checked is staged whole (unless the index has it already); a partly checked one goes as a
+/// patch; an unchecked one is unstaged when the index had it.
+pub fn plan_staging(snap: &RepoSnapshot, staging: &Staging) -> Vec<StageOp> {
+    let (mut stage, mut unstage, mut patches) = (Vec::new(), Vec::new(), Vec::new());
+    for d in &snap.changes {
+        let in_index = snap.staged.contains(&d.path);
+        let no_lines = d.added() + d.removed() == 0;
+        match staging.check(d) {
+            Check::On => {
+                if !in_index {
+                    stage.push(d.path.clone());
+                }
+            }
+            Check::Partial => {
+                if let Some(p) = staging.file(&d.path).and_then(|s| build_patch(d, s)) {
+                    patches.push(StageOp::Apply(p));
+                }
+            }
+            Check::Off => {
+                // A file without lines (binary, empty) has no check to uncheck: keep the index.
+                if in_index && !no_lines {
+                    unstage.push(d.path.clone());
+                }
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    if !unstage.is_empty() {
+        ops.push(StageOp::Unstage(unstage));
+    }
+    if !stage.is_empty() {
+        ops.push(StageOp::Stage(stage));
+    }
+    ops.extend(patches);
+    ops
+}
+
+/// What the commit button hands over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRequest {
+    pub ops: Vec<StageOp>,
+    pub summary: String,
+    pub amend: bool,
+}
+
+/// Staging calls in order, then the commit. Stops at the first failure.
+pub async fn run_commit(project: &str, req: CommitRequest) -> Result<String, ApiError> {
+    for op in &req.ops {
+        let (name, body) = match op {
+            StageOp::Stage(p) => ("stage", json!({ "paths": p })),
+            StageOp::Unstage(p) => ("unstage", json!({ "paths": p })),
+            StageOp::Apply(patch) => ("apply", json!({ "patch": patch, "reverse": false })),
+        };
+        git_call::<Value>(project, name, body).await?;
+    }
+    let body = json!({ "summary": req.summary, "description": null, "amend": req.amend });
+    let done: GitCommitted = git_call(project, "commit", body).await?;
+    Ok(commit_done_text(&done.sha))
+}
+
+/// "커밋했습니다 (abc1234)".
+pub fn commit_done_text(sha: &str) -> String {
+    let short: String = sha.chars().take(7).collect();
+    format!("커밋했습니다 ({short})")
+}
+
+/// Fetch, pull or push, as the remote button's action says.
+pub async fn run_remote(project: &str, action: RemoteAction) -> Result<String, ApiError> {
+    let op = match action {
+        RemoteAction::Pull(_) => "pull",
+        RemoteAction::Push(_) => "push",
+        RemoteAction::Fetch => "fetch",
+    };
+    let out: GitOutput = git_call(project, op, json!({ "remote": null })).await?;
+    Ok(remote_done_text(action, &out.output))
+}
+
+/// The notice after a remote action: the first line git printed, else a plain "done".
+pub fn remote_done_text(action: RemoteAction, output: &str) -> String {
+    let name = match action {
+        RemoteAction::Pull(_) => "Pull",
+        RemoteAction::Push(_) => "Push",
+        RemoteAction::Fetch => "Fetch",
+    };
+    match output.lines().map(str::trim).find(|l| !l.is_empty()) {
+        Some(line) => format!("{name} 완료: {line}"),
+        None => format!("{name}을 마쳤습니다"),
+    }
+}
+
+/// A name the new-branch button accepts: not empty, no spaces, and none of the characters git
+/// refuses in a ref name. The server answers 400 for anything else git rejects.
+pub fn valid_branch_name(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty()
+        && !n.starts_with('-')
+        && !n.starts_with('/')
+        && !n.ends_with('/')
+        && !n.ends_with('.')
+        && !n.contains("..")
+        && !n.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
+}
+
+/// The notice for a failed call; git's own message is kept.
+pub fn failure_text(what: &str, e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } => format!("{what}하지 못했습니다: {message}"),
+        other => format!("{what}하지 못했습니다. 서버에 닿지 않습니다: {other}"),
+    }
 }
 
 /// The count beside a section's name; `None` while the data is unavailable.
@@ -970,9 +1305,13 @@ fn RepoBar(
     snap: Option<RepoSnapshot>,
     compact: bool,
     on_pick: EventHandler<String>,
+    on_remote: EventHandler<RemoteAction>,
+    on_checkout: EventHandler<String>,
+    on_new_branch: EventHandler<String>,
 ) -> Element {
     let mut project_menu = use_signal(|| false);
     let mut branch_menu = use_signal(|| false);
+    let mut new_branch = use_signal(String::new);
     let has = snap.is_some();
     let (ahead, behind) = snap.as_ref().map_or((0, 0), |s| (s.ahead, s.behind));
     let action = remote_action(ahead, behind);
@@ -1059,15 +1398,33 @@ fn RepoBar(
                             key: "{b}",
                             text: b.clone(),
                             selected: Some(&b) == current_branch.as_ref(),
-                            // TODO(server, #168): checkout.
-                            on_click: move |()| {
-                                notice(&soon_line("브랜치 전환"));
-                                branch_menu.set(false);
+                            on_click: {
+                                let name = b.clone();
+                                let current = current_branch.clone();
+                                move |()| {
+                                    if Some(&name) != current.as_ref() {
+                                        on_checkout.call(name.clone());
+                                    }
+                                    branch_menu.set(false);
+                                }
                             },
                         }
                     }
-                    // TODO(server, #168): create a branch.
-                    AppButton { text: "새 브랜치", icon: IconRole::Add, small: true, enabled: false }
+                    EmberField {
+                        fill_max_width: true,
+                        placeholder: "새 브랜치 이름",
+                        on_value_change: move |v: String| new_branch.set(v),
+                    }
+                    AppButton {
+                        text: "새 브랜치",
+                        icon: IconRole::Add,
+                        small: true,
+                        enabled: has && valid_branch_name(&new_branch.read()),
+                        on_click: move |()| {
+                            on_new_branch.call(new_branch.read().trim().to_string());
+                            branch_menu.set(false);
+                        },
+                    }
                 }
                 SmallNote { text: upstream.clone() }
             }
@@ -1085,13 +1442,19 @@ fn RepoBar(
                     fill_max_width: true,
                     space_role: SpaceRole::Sm,
                     alignment: Alignment::CenterStart,
-                    // TODO(server, #168): pull, push and fetch run on the project's computer.
                     AppButton {
                         text: action.label(),
                         kind: ButtonKind::Primary,
                         small: true,
                         enabled: has,
-                        on_click: move |()| notice(&soon_line("원격 동작")),
+                        on_click: move |()| on_remote.call(action),
+                    }
+                    if has && action != RemoteAction::Fetch {
+                        AppButton {
+                            text: "Fetch",
+                            small: true,
+                            on_click: move |()| on_remote.call(RemoteAction::Fetch),
+                        }
                     }
                 }
                 SmallNote { text: remote_line.clone() }
@@ -1192,10 +1555,18 @@ fn ChangesPane(
     layout: PaneLayout,
     tab: Option<PaneTab>,
     on_tab: EventHandler<PaneTab>,
+    on_commit: EventHandler<CommitRequest>,
 ) -> Element {
     let p = use_ember_theme().palette;
     let diffs = snap.changes.clone();
-    let mut staging = use_signal(|| Staging::new(&diffs, false));
+    let mut staging = use_signal(|| {
+        // Files the index holds already start checked.
+        let mut st = Staging::new(&diffs, false);
+        for d in diffs.iter().filter(|d| snap.staged.contains(&d.path)) {
+            st.file_mut(&d.path).set_all(d, true);
+        }
+        st
+    });
     let mut folded = use_signal(BTreeSet::<String>::new);
     let mut selected = use_signal(|| 0usize);
     let mut summary = use_signal(String::new);
@@ -1302,14 +1673,25 @@ fn ChangesPane(
                     Switch { checked: amend(), on_change: move |v: bool| amend.set(v) }
                     Label { text: "마지막 커밋 수정 (amend)", fs: Fs::Sm }
                 }
-                // TODO(server, #168): commit only the staged lines (apply a patch built from the staging).
                 AppButton {
                     text: commit_label(&snap.branch, staged_files),
                     kind: ButtonKind::Primary,
-                    enabled: false,
-                    on_click: move |()| notice(&soon_line("커밋")),
+                    enabled: can_commit,
+                    on_click: {
+                        let snap = snap.clone();
+                        move |()| {
+                            on_commit.call(CommitRequest {
+                                ops: plan_staging(&snap, &staging.read()),
+                                summary: summary.read().trim().to_string(),
+                                amend: *amend.read(),
+                            });
+                            summary.set(String::new());
+                        }
+                    },
                 }
-                SmallNote { text: if can_commit { SOON.to_string() } else { "요약과 스테이징한 파일이 필요합니다".to_string() } }
+                if !can_commit {
+                    SmallNote { text: "요약과 스테이징한 파일이 필요합니다" }
+                }
             }
         }
     };
@@ -1413,15 +1795,164 @@ fn DiffView(file: FileDiff, staging: Signal<Staging>) -> Element {
     }
 }
 
-/// The screen wired as 버전 관리.
+/// Runs a server call, shows its result as a notice, then reloads the snapshot.
+fn act<F>(what: &'static str, work: F, reload: impl FnOnce() + 'static)
+where
+    F: std::future::Future<Output = Result<String, ApiError>> + Send + 'static,
+{
+    run(work, move |r| {
+        match r {
+            Ok(text) => notice(&text),
+            Err(e) => notice(&failure_text(what, &e)),
+        }
+        reload();
+    });
+}
+
+/// One project's repository: reads the snapshot from the server, shows it, and runs the
+/// actions. Keyed by project, so a project switch starts a fresh load.
 #[component]
-pub fn VcsScreen() -> Element {
-    let ui = use_ui();
+fn Repo(
+    project: ProjectBox,
+    projects: Vec<(String, String)>,
+    on_pick: EventHandler<String>,
+) -> Element {
     let window = use_window_size();
     let p = use_ember_theme().palette;
     let class = window.class;
     let mut section = use_signal(|| Section::Changes);
     let mut tab = use_signal(|| PaneTab::Files);
+    let mut load = use_signal(|| Load::Loading);
+    // Bumped after each reload, so the changes pane starts with fresh staging.
+    let mut rev = use_signal(|| 0u32);
+    let id = project.id.clone();
+
+    let reload = use_callback({
+        let id = id.clone();
+        move |()| {
+            let id = id.clone();
+            run(
+                async move { fetch_snapshot(&id).await },
+                move |r| {
+                    if let Err(e) = &r {
+                        tracing::warn!("reading the repository failed: {e}");
+                    }
+                    load.set(load_from(r));
+                    rev += 1;
+                },
+            );
+        }
+    });
+    use_hook(|| reload.call(()));
+
+    let on_remote = {
+        let id = id.clone();
+        move |a: RemoteAction| {
+            let id = id.clone();
+            let what = match a {
+                RemoteAction::Pull(_) => "Pull",
+                RemoteAction::Push(_) => "Push",
+                RemoteAction::Fetch => "Fetch",
+            };
+            act(what, async move { run_remote(&id, a).await }, move || reload.call(()));
+        }
+    };
+    let on_checkout = {
+        let id = id.clone();
+        move |branch: String| {
+            let id = id.clone();
+            act(
+                "브랜치를 전환",
+                async move {
+                    git_call::<Value>(&id, "checkout", json!({ "branch": branch })).await?;
+                    Ok(format!("{branch} 브랜치로 전환했습니다"))
+                },
+                move || reload.call(()),
+            );
+        }
+    };
+    let on_new_branch = {
+        let id = id.clone();
+        move |name: String| {
+            let id = id.clone();
+            act(
+                "브랜치를 만들",
+                async move {
+                    git_call::<Value>(&id, "branch", json!({ "name": name, "from": null })).await?;
+                    Ok(format!("{name} 브랜치를 만들었습니다"))
+                },
+                move || reload.call(()),
+            );
+        }
+    };
+    let on_commit = {
+        let id = id.clone();
+        move |req: CommitRequest| {
+            let id = id.clone();
+            act("커밋", async move { run_commit(&id, req).await }, move || reload.call(()));
+        }
+    };
+
+    let state = load.read().clone();
+    let snap = state.snapshot().cloned();
+    let sec = *section.read();
+    let active_tab = effective_tab(sec, *tab.read());
+    let layout = pane_layout(class);
+    let wide = section_nav(class) == SectionNav::List;
+
+    let panes = match (&snap, sec) {
+        (Some(s), Section::Changes) => rsx! {
+            ChangesPane {
+                key: "{s.branch}:{rev}",
+                snap: s.clone(),
+                layout,
+                tab: active_tab,
+                on_tab: move |t| tab.set(t),
+                on_commit,
+            }
+        },
+        _ => rsx! { Unavailable { section: sec } },
+    };
+
+    rsx! {
+        RepoBar {
+            projects,
+            project: project.clone(),
+            snap: snap.clone(),
+            compact: class == WindowSizeClass::Compact,
+            on_pick: move |id: String| on_pick.call(id),
+            on_remote,
+            on_checkout,
+            on_new_branch,
+        }
+        if let Some(text) = state.note() {
+            Label { text, fs: Fs::Sm, color: paint(p.text_2) }
+        }
+        if wide {
+            Row {
+                fill_max_width: true,
+                space_role: SpaceRole::Md,
+                SectionList { active: sec, snap: snap.clone(), on_pick: move |s| section.set(s) }
+                Column { weight: 1.0, space_role: SpaceRole::Sm, {panes} }
+            }
+        } else {
+            Column {
+                fill_max_width: true,
+                space_role: SpaceRole::Sm,
+                SectionPills { active: sec, on_pick: move |s| section.set(s) }
+                if layout == PaneLayout::Tabs && snap.is_none() && !pane_tabs(sec).is_empty() {
+                    PaneTabs { section: sec, active: active_tab, on_pick: move |t| tab.set(t) }
+                }
+                {panes}
+            }
+        }
+    }
+}
+
+/// The screen wired as 버전 관리.
+#[component]
+pub fn VcsScreen() -> Element {
+    let ui = use_ui();
 
     let boxes = {
         let _ = *ui.live.launcher.read();
@@ -1432,29 +1963,10 @@ pub fn VcsScreen() -> Element {
     let project = current
         .as_ref()
         .and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
-    let snap = current.as_deref().and_then(snapshot);
     let projects: Vec<(String, String)> = repo_projects(&boxes)
         .into_iter()
         .map(|b| (b.id.clone(), b.name.clone()))
         .collect();
-
-    let sec = *section.read();
-    let active_tab = effective_tab(sec, *tab.read());
-    let layout = pane_layout(class);
-    let wide = section_nav(class) == SectionNav::List;
-
-    let panes = match (&snap, sec) {
-        (Some(s), Section::Changes) => rsx! {
-            ChangesPane {
-                key: "{s.branch}",
-                snap: s.clone(),
-                layout,
-                tab: active_tab,
-                on_tab: move |t| tab.set(t),
-            }
-        },
-        _ => rsx! { Unavailable { section: sec } },
-    };
 
     rsx! {
         ScrollColumn {
@@ -1466,37 +1978,14 @@ pub fn VcsScreen() -> Element {
                 space_role: SpaceRole::Md,
                 Label { text: "버전 관리", fs: Fs::Xl2, weight: Weight::Semibold }
                 if let Some(project) = project {
-                    RepoBar {
+                    Repo {
                         key: "{project.id}",
-                        projects,
                         project: project.clone(),
-                        snap: snap.clone(),
-                        compact: class == WindowSizeClass::Compact,
+                        projects,
                         on_pick: move |id: String| {
                             let mut s = ui.selected_project;
                             s.set(Some(id));
                         },
-                    }
-                    if snap.is_none() {
-                        Label { text: soon_line("저장소 정보"), fs: Fs::Sm, color: paint(p.text_2) }
-                    }
-                    if wide {
-                        Row {
-                            fill_max_width: true,
-                            space_role: SpaceRole::Md,
-                            SectionList { active: sec, snap: snap.clone(), on_pick: move |s| section.set(s) }
-                            Column { weight: 1.0, space_role: SpaceRole::Sm, {panes} }
-                        }
-                    } else {
-                        Column {
-                            fill_max_width: true,
-                            space_role: SpaceRole::Sm,
-                            SectionPills { active: sec, on_pick: move |s| section.set(s) }
-                            if layout == PaneLayout::Tabs && snap.is_none() && !pane_tabs(sec).is_empty() {
-                                PaneTabs { section: sec, active: active_tab, on_pick: move |t| tab.set(t) }
-                            }
-                            {panes}
-                        }
                     }
                 } else {
                     Label { text: "저장소를 둘 수 있는 프로젝트가 없습니다" }
@@ -1974,7 +2463,6 @@ rename to new.txt
 
     #[test]
     fn no_repository_data_is_invented() {
-        assert!(snapshot("ember").is_none());
         for sec in Section::ALL {
             assert_eq!(section_count(sec, None), None);
         }
@@ -2016,5 +2504,215 @@ rename to new.txt
                 "plain ending: {t}"
             );
         }
+    }
+
+    // ---- git data (FR-G4) ----
+
+    use ember_client::api::GitFile;
+
+    fn gf(path: &str, index: char, worktree: char) -> GitFile {
+        GitFile { path: path.into(), old_path: None, index, worktree }
+    }
+
+    fn status(files: Vec<GitFile>) -> GitStatus {
+        GitStatus {
+            branch: "feat/x".into(),
+            upstream: Some("origin/feat/x".into()),
+            ahead: 2,
+            behind: 1,
+            fetched_age_secs: Some(60),
+            branches: s(&["main", "feat/x"]),
+            files,
+        }
+    }
+
+    #[test]
+    fn a_missing_repository_or_server_is_not_data() {
+        let not_repo = ApiError::Status { status: 404, message: "not_a_repo".into() };
+        assert_eq!(load_from(Err(not_repo)), Load::NotRepo);
+        let down = ApiError::Peer("refused".into());
+        assert!(matches!(load_from(Err(down)), Load::Unavailable(_)));
+        let conflict = ApiError::Status { status: 500, message: "boom".into() };
+        assert!(matches!(load_from(Err(conflict)), Load::Unavailable(_)));
+        assert!(Load::Loading.snapshot().is_none());
+        assert_eq!(Load::Unavailable("x".into()).note(), Some(soon_line("저장소 정보")));
+        assert!(Load::NotRepo.note().unwrap().contains("저장소가 아닙니다"));
+        assert_eq!(Load::Ready(RepoSnapshot::default()).note(), None);
+        assert_eq!(SOON, "준비 중입니다");
+    }
+
+    #[test]
+    fn porcelain_characters_map_to_file_statuses() {
+        assert_eq!(status_of('M', '.'), FileStatus::Modified);
+        assert_eq!(status_of('.', 'M'), FileStatus::Modified);
+        assert_eq!(status_of('A', '.'), FileStatus::Added);
+        assert_eq!(status_of('?', '?'), FileStatus::Added);
+        assert_eq!(status_of('D', '.'), FileStatus::Deleted);
+        assert_eq!(status_of('.', 'D'), FileStatus::Deleted);
+        assert_eq!(status_of('R', '.'), FileStatus::Renamed);
+    }
+
+    #[test]
+    fn the_snapshot_joins_status_with_its_diffs() {
+        let st = status(vec![
+            gf("src/a.rs", '.', 'M'),
+            gf("docs/new.md", 'A', '.'),
+            gf("notes.txt", '?', '?'),
+        ]);
+        let untracked_patch = "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hi\n";
+        let mut untracked = BTreeMap::new();
+        untracked.insert("notes.txt".to_string(), untracked_patch.to_string());
+        assert_eq!(untracked_paths(&st), s(&["notes.txt"]));
+
+        // SAMPLE holds src/a.rs (work tree) and docs/new.md (also used as the staged diff).
+        let snap = build_snapshot(&st, SAMPLE, SAMPLE, &untracked);
+        assert_eq!(snap.branch, "feat/x");
+        assert_eq!((snap.ahead, snap.behind), (2, 1));
+        assert_eq!(snap.branches, s(&["main", "feat/x"]));
+        let paths: Vec<_> = snap.changes.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, ["src/a.rs", "docs/new.md", "notes.txt"]);
+        assert_eq!(snap.changes[0].hunks.len(), 2);
+        assert_eq!(snap.changes[1].status, FileStatus::Added);
+        assert_eq!(snap.changes[2].added(), 1);
+        assert_eq!(snap.changes[2].status, FileStatus::Added);
+        // Only the file whose index changed and work tree is clean starts staged.
+        assert_eq!(snap.staged, ["docs/new.md".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn a_file_without_a_diff_stays_listed_and_a_rename_keeps_its_old_path() {
+        let mut renamed = gf("new.txt", 'R', '.');
+        renamed.old_path = Some("old.txt".into());
+        let st = status(vec![gf("gone.bin", '.', 'M'), renamed]);
+        let snap = build_snapshot(&st, "", "", &BTreeMap::new());
+        assert_eq!(snap.changes.len(), 2);
+        assert!(snap.changes[0].hunks.is_empty());
+        assert_eq!(snap.changes[1].status, FileStatus::Renamed);
+        assert_eq!(snap.changes[1].old_path.as_deref(), Some("old.txt"));
+    }
+
+    #[test]
+    fn the_patch_holds_only_the_staged_lines() {
+        let d = a_diff();
+        let mut st = FileStaging::none();
+        assert_eq!(build_patch(&d, &st), None);
+        // Only "old one" (hunk 0, line 1): the other lines turn into context or vanish.
+        st.toggle_line(&d, 0, 1);
+        assert_eq!(
+            build_patch(&d, &st).unwrap(),
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n\
+             @@ -1,4 +1,3 @@\n keep\n-old one\n - dashes\n tail\n"
+        );
+        // A second hunk lands one line earlier after the first removed a line.
+        st.toggle_line(&d, 1, 1);
+        let patch = build_patch(&d, &st).unwrap();
+        assert!(patch.ends_with("@@ -20,1 +19,2 @@\n x\n+y\n"), "{patch}");
+    }
+
+    #[test]
+    fn staging_only_the_second_hunk_skips_the_first() {
+        let d = a_diff();
+        let mut st = FileStaging::none();
+        st.toggle_hunk(&d, 1);
+        let patch = build_patch(&d, &st).unwrap();
+        assert!(!patch.contains("keep"));
+        assert!(patch.contains("@@ -20,1 +20,2 @@\n x\n+y\n"), "{patch}");
+    }
+
+    fn snap_of(files: Vec<GitFile>) -> RepoSnapshot {
+        build_snapshot(&status(files), SAMPLE, "", &BTreeMap::new())
+    }
+
+    #[test]
+    fn a_fully_checked_file_is_staged_whole() {
+        let snap = snap_of(vec![gf("src/a.rs", '.', 'M')]);
+        let mut st = Staging::new(&snap.changes, false);
+        assert_eq!(plan_staging(&snap, &st), vec![]);
+        st.toggle_file(&snap.changes[0]);
+        assert_eq!(plan_staging(&snap, &st), vec![StageOp::Stage(s(&["src/a.rs"]))]);
+    }
+
+    #[test]
+    fn a_partly_checked_file_goes_as_a_patch() {
+        let snap = snap_of(vec![gf("src/a.rs", '.', 'M')]);
+        let mut st = Staging::new(&snap.changes, false);
+        st.file_mut("src/a.rs").toggle_line(&snap.changes[0], 0, 3);
+        let ops = plan_staging(&snap, &st);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            StageOp::Apply(p) => assert!(p.contains("+new one\n") && !p.contains("+new two")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_the_index_holds_is_not_staged_again_and_is_unstaged_when_unchecked() {
+        let mut snap = snap_of(vec![gf("src/a.rs", 'M', '.')]);
+        snap.staged.insert("src/a.rs".to_string());
+        let mut st = Staging::new(&snap.changes, false);
+        st.file_mut("src/a.rs").set_all(&snap.changes[0], true);
+        assert_eq!(plan_staging(&snap, &st), vec![]);
+        st.file_mut("src/a.rs").set_all(&snap.changes[0], false);
+        assert_eq!(plan_staging(&snap, &st), vec![StageOp::Unstage(s(&["src/a.rs"]))]);
+    }
+
+    #[test]
+    fn unstaging_comes_before_staging() {
+        let mut snap = snap_of(vec![gf("src/a.rs", '.', 'M'), gf("docs/new.md", 'A', '.')]);
+        snap.staged.insert("docs/new.md".to_string());
+        let mut st = Staging::new(&snap.changes, false);
+        st.toggle_file(&snap.changes[0]);
+        let ops = plan_staging(&snap, &st);
+        assert_eq!(
+            ops,
+            vec![
+                StageOp::Unstage(s(&["docs/new.md"])),
+                StageOp::Stage(s(&["src/a.rs"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn notice_texts_are_korean_and_carry_git_s_message() {
+        assert_eq!(commit_done_text("abcdef0123"), "커밋했습니다 (abcdef0)");
+        assert_eq!(
+            remote_done_text(RemoteAction::Pull(1), "\n Already up to date.\n"),
+            "Pull 완료: Already up to date."
+        );
+        assert_eq!(remote_done_text(RemoteAction::Fetch, ""), "Fetch을 마쳤습니다");
+        let e = ApiError::Status { status: 409, message: "not fast-forward".into() };
+        assert_eq!(failure_text("Pull", &e), "Pull하지 못했습니다: not fast-forward");
+        let down = ApiError::Peer("refused".into());
+        assert!(failure_text("Push", &down).contains("서버에 닿지 않습니다"));
+    }
+
+    #[test]
+    fn a_new_branch_name_must_be_one_git_accepts() {
+        assert!(valid_branch_name("feat/git-api"));
+        assert!(valid_branch_name("  fix_1 "));
+        for bad in ["", "  ", "a b", "-x", "a..b", "a~1", "a:b", "x/", "/x", "x.", "a?b", "a[b"] {
+            assert!(!valid_branch_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_demo_answer_maps_to_the_same_load_states() {
+        let not_repo = GitError { status: 404, code: "not_a_repo".into(), message: "no".into() };
+        let r: Result<GitStatus, ApiError> = git_result(Err(not_repo));
+        let snap = r.map(|_| RepoSnapshot::default());
+        assert_eq!(load_from(snap), Load::NotRepo);
+
+        let st: GitStatus = git_result(Ok(json!({ "branch": "main", "files": [] }))).unwrap();
+        assert_eq!(st.branch, "main");
+        // A 204 operation answers null and is read as a plain value.
+        assert_eq!(git_result::<Value>(Ok(Value::Null)).unwrap(), Value::Null);
+        let c: GitCommitted = git_result(Ok(json!({ "sha": "abc" }))).unwrap();
+        assert_eq!(c.sha, "abc");
+        let bad: Result<GitStatus, _> = git_result(Ok(json!({ "nope": 1 })));
+        assert!(matches!(bad, Err(ApiError::Decode(_))));
+        let conflict = GitError { status: 409, code: "conflict".into(), message: "diverged".into() };
+        let e = git_result::<Value>(Err(conflict)).unwrap_err();
+        assert_eq!(e.status(), Some(409));
+        assert!(e.to_string().contains("diverged"));
     }
 }

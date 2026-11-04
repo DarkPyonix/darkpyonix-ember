@@ -39,6 +39,7 @@ use crate::ide::{IdeAction, IdeKind, open_external, plan};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
+use crate::ui::safe_area::{safe_area, top_bar_pad};
 use crate::ui::project::{Member, display_name, project_boxes, status_pill};
 use crate::ui::shell::NavMenu;
 

@@ -411,8 +411,10 @@ fn MockSwitch(checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 's
         .modifier(Modifier::new().size(36.0, 20.0))
         .content(|| {
             cu::Canvas(draw).modifier(Modifier::new().size(36.0, 20.0));
-            cu::Button("")
+            // The label is the screen reader name; it is drawn transparent over the track.
+            cu::Button(if checked { "끄기" } else { "켜기" })
                 .enabled(enabled)
+                .color(compose_rust::Paint::Literal(Color::argb(0)))
                 .variant(ButtonVariant::Text)
                 .modifier(Modifier::new().size(36.0, 20.0).shape_role(ShapeRole::Full))
                 .on_click(move || on_change(!checked));
@@ -437,7 +439,8 @@ fn ModelRadio(selected: bool, mut on_click: impl FnMut() + 'static) {
         .modifier(Modifier::new().size(20.0, 20.0))
         .content(|| {
             cu::Canvas(draw).modifier(Modifier::new().size(20.0, 20.0));
-            cu::Button("")
+            cu::Button("기본 모델로 선택")
+                .color(compose_rust::Paint::Literal(Color::argb(0)))
                 .variant(ButtonVariant::Text)
                 .modifier(Modifier::new().size(20.0, 20.0).shape_role(ShapeRole::Full))
                 .on_click(move || on_click());
@@ -2751,5 +2754,13 @@ mod tests {
         local_save(store.clone());
         let loaded = local_load();
         assert_eq!(loaded.settings(AgentHarness::Codex).mem_limit_mb, Some(2048));
+    }
+
+    #[test]
+    fn no_empty_button_in_agents_file() {
+        let src = include_str!("agents.rs");
+        let needle = ["cu::Button(", "\"\")"].concat();
+        let in_tests = src.split("mod tests").nth(1).unwrap_or("");
+        assert!(!src.replace(in_tests, "").contains(&needle), "an empty Button has no screen reader name");
     }
 }

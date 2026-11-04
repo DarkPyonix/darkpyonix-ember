@@ -185,6 +185,16 @@ fn SmallNote(text: &str) {
     Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
+/// An accessible invisible button overlay for a painted row or pill.
+/// Gives assistive tech the item's label and provides keyboard focus and click handling.
+fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    cu::Button(label)
+        .variant(ButtonVariant::Text)
+        .color(Paint::Literal(Color::argb(0)))
+        .modifier(Modifier::new().fill_max_size())
+        .on_click(on_click);
+}
+
 /// Card shown when a section's server data is not yet available.
 pub fn Unavailable(section: Section) {
     let p = ember_theme().palette;
@@ -205,6 +215,7 @@ pub fn Unavailable(section: Section) {
     });
 }
 
+#[allow(dead_code)]
 fn section_icon(sec: Section) -> Option<IconRole> {
     match sec {
         Section::Changes => Some(IconRole::List),
@@ -414,12 +425,6 @@ pub fn SectionList(
             let count = section_count(sec, snap);
             let mut pick = on_pick.clone();
 
-            let label_text = if let Some(n) = count {
-                format!("{}  {n}", sec.label())
-            } else {
-                sec.label().to_string()
-            };
-
             let mut m = Modifier::new()
                 .fill_max_width()
                 .height(40.0)
@@ -429,15 +434,29 @@ pub fn SectionList(
                 m = m.border(1.0, paint(p.line));
             }
 
-            let mut btn = cu::Button(label_text)
-                .variant(ButtonVariant::Text)
-                .color(paint(fg))
+            cu::Box()
                 .modifier(m)
-                .on_click(move || pick(sec));
-            if let Some(icon) = section_icon(sec) {
-                btn = btn.icon(icon);
-            }
-            drop(btn);
+                .content(move || {
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .modifier(Modifier::new().fill_max_size())
+                        .content(move || {
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            Label(sec.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            if let Some(n) = count {
+                                Label(
+                                    &n.to_string(),
+                                    Fs::Xs,
+                                    Weight::Regular,
+                                    Some(paint(if is_active { p.text } else { p.muted })),
+                                    Some(1),
+                                );
+                            }
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                        });
+                    FocusOverlay(sec.label(), move || pick(sec));
+                });
         }
     });
 }
@@ -515,21 +534,23 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
-                cu::Button("이 덩어리 전체")
-                    .variant(ButtonVariant::Text)
-                    .color(paint(p.text))
+                cu::Box()
                     .modifier(
                         Modifier::new()
-                            .width(102.0)
+                            .width(110.0)
                             .height(32.0)
                             .border(2.0, paint(p.ink))
                             .background(paint(p.surface))
                             .shape_role(ShapeRole::Full),
                     )
-                    .on_click(move || {
-                        let mut s = st_hunk.get();
-                        s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
-                        st_hunk.set(s);
+                    .alignment(Alignment::Center)
+                    .content(move || {
+                        Label("이 덩어리 전체", Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+                        FocusOverlay("이 덩어리 전체", move || {
+                            let mut s = st_hunk.get();
+                            s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
+                            st_hunk.set(s);
+                        });
                     });
             });
 
@@ -648,19 +669,38 @@ fn FilesTree(
                     TreeRow::Dir { label, path, depth, open } => {
                         let f_state = folded.clone();
                         let pth = path.clone();
-                        let chev = if open { "\u{25be} " } else { "\u{25b8} " };
-                        let indent = if depth > 0 { "  ".repeat(depth) } else { String::new() };
-                        let dir_label = format!("{indent}{chev}{label}");
-                        cu::Button(dir_label)
-                            .variant(ButtonVariant::Text)
-                            .color(paint(p.text_2))
-                            .modifier(Modifier::new().fill_max_width().height(34.0))
-                            .on_click(move || {
-                                let mut f = f_state.get();
-                                if !f.remove(&pth) {
-                                    f.insert(pth.clone());
-                                }
-                                f_state.set(f);
+                        cu::Box()
+                            .modifier(
+                                Modifier::new()
+                                    .fill_max_width()
+                                    .height(34.0)
+                                    .corner_radius(CORNER_XS),
+                            )
+                            .content(move || {
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .modifier(Modifier::new().fill_max_size())
+                                    .content(|| {
+                                        if depth > 0 {
+                                            cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
+                                        }
+                                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                                        let chev = if open { "\u{25be} " } else { "\u{25b8} " };
+                                        Label(
+                                            &format!("{chev}{label}"),
+                                            Fs::Xs,
+                                            Weight::Regular,
+                                            Some(paint(p.text_2)),
+                                            Some(1),
+                                        );
+                                    });
+                                FocusOverlay(&label, move || {
+                                    let mut f = f_state.get();
+                                    if !f.remove(&pth) {
+                                        f.insert(pth.clone());
+                                    }
+                                    f_state.set(f);
+                                });
                             });
                     }
                     TreeRow::File { index, name, depth } => {
@@ -680,33 +720,69 @@ fn FilesTree(
                         let mut on_tab_file = on_tab.clone();
                         let d_file = diff_file.clone();
 
-                        cu::Row().modifier(Modifier::new().fill_max_width().height(34.0).background(bg).corner_radius(CORNER_XS)).alignment(Alignment::CenterStart).content(move || {
-                            if depth > 0 {
-                                cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
-                            }
-                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                            cu::Checkbox(is_staged == Check::On)
-                                .modifier(Modifier::new().size(18.0, 18.0))
-                                .on_change(move |_| {
-                                    let mut s = st_file.get();
-                                    s.toggle_file(&d_file);
-                                    st_file.set(s);
-                                });
-                            cu::Spacer().modifier(Modifier::new().width(4.0));
-                            let file_btn_name = name.clone();
-                            cu::Button(file_btn_name)
-                                .variant(ButtonVariant::Text)
-                                .color(paint(p.text))
-                                .modifier(Modifier::new().weight(1.0).height(34.0))
-                                .on_click(move || {
-                                    sel_state.set(index);
-                                    on_tab_file(tab_after_select(PaneTab::Files));
-                                });
-                            cu::Box().modifier(Modifier::new().size(18.0, 18.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
-                                Label(letter, Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
+                        cu::Row()
+                            .modifier(
+                                Modifier::new()
+                                    .fill_max_width()
+                                    .height(34.0)
+                                    .background(bg)
+                                    .corner_radius(CORNER_XS),
+                            )
+                            .alignment(Alignment::CenterStart)
+                            .content(move || {
+                                if depth > 0 {
+                                    cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
+                                }
+                                cu::Spacer().modifier(Modifier::new().width(4.0));
+                                cu::Checkbox(is_staged == Check::On)
+                                    .modifier(Modifier::new().size(18.0, 18.0))
+                                    .on_change(move |_| {
+                                        let mut s = st_file.get();
+                                        s.toggle_file(&d_file);
+                                        st_file.set(s);
+                                    });
+                                cu::Spacer().modifier(Modifier::new().width(4.0));
+                                let file_name = name.clone();
+                                cu::Box()
+                                    .modifier(Modifier::new().weight(1.0).height(34.0))
+                                    .content(move || {
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .modifier(Modifier::new().fill_max_size())
+                                            .content(|| {
+                                                Label(
+                                                    &file_name,
+                                                    Fs::Sm,
+                                                    Weight::Regular,
+                                                    Some(paint(p.text)),
+                                                    Some(1),
+                                                );
+                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                cu::Box()
+                                                    .modifier(
+                                                        Modifier::new()
+                                                            .size(18.0, 18.0)
+                                                            .background(paint(tone_fill))
+                                                            .corner_radius(CORNER_XS),
+                                                    )
+                                                    .alignment(Alignment::Center)
+                                                    .content(|| {
+                                                        Label(
+                                                            letter,
+                                                            Fs::Xs2,
+                                                            Weight::Semibold,
+                                                            Some(paint(tone_text)),
+                                                            Some(1),
+                                                        );
+                                                    });
+                                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                            });
+                                        FocusOverlay(&file_name, move || {
+                                            sel_state.set(index);
+                                            on_tab_file(tab_after_select(PaneTab::Files));
+                                        });
+                                    });
                             });
-                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        });
                     }
                 }
             }
@@ -1089,8 +1165,11 @@ pub fn preview() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compose_rust::protocol::{decode_batch, HostEvent};
-    use compose_rust::{EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass};
+    use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+    use compose_rust::{
+        EventPayload, Host, PropertyKind, Recomposer, WidgetKind, WindowHeightClass,
+        WindowSizeClass,
+    };
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -1509,5 +1588,62 @@ mod tests {
         assert!(text.contains("파일"));
         assert!(text.contains("차이"));
         assert!(text.contains("커밋"));
+    }
+
+    #[test]
+    fn focus_overlay_emits_button_with_text_and_fill_max_size() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                cu::Box().content(|| {
+                    FocusOverlay("테스트 행", || {});
+                });
+            }))
+        });
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let has_button = mutations.iter().any(|m| match m {
+            Mutation::Create {
+                widget: WidgetKind::Button,
+                ..
+            } => true,
+            _ => false,
+        });
+        assert!(has_button, "expected Button widget");
+
+        let has_text = mutations.iter().any(|m| match m {
+            Mutation::SetProp {
+                property,
+                value: PropertyValue::String(s),
+                ..
+            } => *property == PropertyKind::Text && *s == "테스트 행",
+            _ => false,
+        });
+        assert!(has_text, "expected text prop matching label");
+
+        let has_fill_width = mutations.iter().any(|m| match m {
+            Mutation::SetModifier {
+                modifier: compose_rust::Modifier::FillMaxWidth,
+                ..
+            } => true,
+            _ => false,
+        });
+        let has_fill_height = mutations.iter().any(|m| match m {
+            Mutation::SetModifier {
+                modifier: compose_rust::Modifier::FillMaxHeight,
+                ..
+            } => true,
+            _ => false,
+        });
+        assert!(
+            has_fill_width && has_fill_height,
+            "expected fill_max_size modifier"
+        );
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn no_empty_button_in_vcs_file() {
+        assert!(!include_str!("vcs.rs").contains("cu::Button(\"\")"));
     }
 }

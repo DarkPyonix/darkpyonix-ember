@@ -17,7 +17,7 @@ use compose_rust::runtime::{
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole};
+use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, ShapeRole};
 
 use ember_client::api::ApiError;
 
@@ -653,6 +653,16 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
     }
 }
 
+/// An accessible invisible button overlay for a painted row or pill.
+/// Gives assistive tech the item's label and provides keyboard focus and click handling.
+fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    cu::Button(label)
+        .variant(ButtonVariant::Text)
+        .color(Paint::Literal(Color::argb(0)))
+        .modifier(Modifier::new().fill_max_size())
+        .on_click(on_click);
+}
+
 /// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, knob `surface`).
 ///
 /// TODO(compose-rust#372): the toolkit `Switch` draws 54x32 green (#2ec04f) and cannot be
@@ -666,14 +676,12 @@ fn RoutineSwitch(checked: bool, mut on_change: impl FnMut(bool) + 'static) {
         .round_rect(paint(track_color), 0.0, 0.0, 36.0, 20.0, 10.0, 0.0)
         .circle(paint(p.surface), knob_x, 10.0, 8.0, 0.0)
         .build();
+    let switch_label = if checked { "루틴 끄기" } else { "루틴 켜기" };
     cu::Box()
         .modifier(Modifier::new().size(36.0, 20.0))
         .content(move || {
             cu::Canvas(list).modifier(Modifier::new().size(36.0, 20.0));
-            cu::Button("")
-                .variant(ButtonVariant::Text)
-                .modifier(Modifier::new().size(36.0, 20.0))
-                .on_click(move || on_change(!checked));
+            FocusOverlay(switch_label, move || on_change(!checked));
         });
 }
 
@@ -686,18 +694,25 @@ fn FilterSegButton(text: &str, selected: bool, on_click: impl FnMut() + 'static)
     } else {
         (p.surface, p.line, p.text_2)
     };
-    cu::Button(text)
-        .variant(ButtonVariant::Text)
-        .color(paint(fg))
+    let advance: f32 = text
+        .chars()
+        .map(|c| if c.is_ascii() { 8.0 } else { 13.0 })
+        .sum::<f32>();
+    let width = (advance + 28.0).max(44.0);
+    cu::Box()
         .modifier(
             Modifier::new()
+                .width(width)
                 .height(H_CTL)
                 .background(paint(bg))
                 .border(1.0, paint(border))
-                .shape_role(ShapeRole::Full)
-                .padding(SP[2]),
+                .shape_role(ShapeRole::Full),
         )
-        .on_click(on_click);
+        .alignment(Alignment::Center)
+        .content(move || {
+            Label(text, Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+            FocusOverlay(text, on_click);
+        });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1009,10 +1024,7 @@ fn RoutineRow(
                 .alpha(row_alpha),
         )
         .content(move || {
-            cu::Button("")
-                .variant(ButtonVariant::Text)
-                .modifier(Modifier::new().fill_max_size())
-                .on_click(move || on_open(open_id.clone()));
+            FocusOverlay(&routine_name, move || on_open(open_id.clone()));
             cu::Column()
                 .spacing(SP[1])
                 .modifier(
@@ -1713,8 +1725,11 @@ pub fn sample_entries() -> Vec<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compose_rust::protocol::{decode_batch, HostEvent, Mutation};
-    use compose_rust::{EventPayload, Host, Recomposer, WidgetKind, WindowHeightClass, WindowSizeClass};
+    use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+    use compose_rust::{
+        EventPayload, Host, PropertyKind, Recomposer, WidgetKind, WindowHeightClass,
+        WindowSizeClass,
+    };
     use crate::ui::home::PermMode;
 
     fn at(y: i64, mo: u32, d: u32, h: u32, mi: u32) -> Minutes {
@@ -2395,5 +2410,62 @@ mod tests {
     #[test]
     fn nfr_no_em_dash_in_routines_screen() {
         assert!(!include_str!("routines.rs").contains('\u{2014}'));
+    }
+
+    #[test]
+    fn focus_overlay_emits_button_with_text_and_fill_max_size() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                cu::Box().content(|| {
+                    FocusOverlay("테스트 행", || {});
+                });
+            }))
+        });
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let has_button = mutations.iter().any(|m| match m {
+            Mutation::Create {
+                widget: WidgetKind::Button,
+                ..
+            } => true,
+            _ => false,
+        });
+        assert!(has_button, "expected Button widget");
+
+        let has_text = mutations.iter().any(|m| match m {
+            Mutation::SetProp {
+                property,
+                value: PropertyValue::String(s),
+                ..
+            } => *property == PropertyKind::Text && *s == "테스트 행",
+            _ => false,
+        });
+        assert!(has_text, "expected text prop matching label");
+
+        let has_fill_width = mutations.iter().any(|m| match m {
+            Mutation::SetModifier {
+                modifier: compose_rust::Modifier::FillMaxWidth,
+                ..
+            } => true,
+            _ => false,
+        });
+        let has_fill_height = mutations.iter().any(|m| match m {
+            Mutation::SetModifier {
+                modifier: compose_rust::Modifier::FillMaxHeight,
+                ..
+            } => true,
+            _ => false,
+        });
+        assert!(
+            has_fill_width && has_fill_height,
+            "expected fill_max_size modifier"
+        );
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn no_empty_button_in_routines_file() {
+        assert!(!include_str!("routines.rs").contains("cu::Button(\"\")"));
     }
 }

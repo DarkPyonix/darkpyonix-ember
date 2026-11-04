@@ -123,14 +123,117 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
 pub fn Clickable(
     modifier: Modifier,
     alignment: Alignment,
+    on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    press_box(modifier, None, alignment, on_click, content);
+}
+
+/// A `Clickable` with the press tint (FR-L32). The tint needs the element's exact size and
+/// corner radius, which a `Modifier` does not hand back, so the caller states them. `size` is
+/// the width and height in dp already given in `modifier`, and `radius` its `corner_radius`.
+/// TODO(compose-rust#305): the toolkit modifier knows both; then every `Clickable` tints and
+/// this variant goes.
+pub fn ClickableShaped(
+    modifier: Modifier,
+    size: (f32, f32),
+    radius: f32,
+    alignment: Alignment,
+    on_click: impl FnMut() + 'static,
+    content: impl FnOnce(),
+) {
+    press_box(modifier, Some((size, radius)), alignment, on_click, content);
+}
+
+/// Milliseconds on one monotonic clock, for the press timing.
+fn press_now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// Press feedback (FR-L32) for a `Box`: pointer down shows the pressed look, up (or cancel, or
+/// leaving) ends it after the minimum visible time. The scale is applied per composition, so it
+/// steps to 0.975 and back instead of easing over 180 and 200 ms; the tint eases with the
+/// durations. TODO(compose-rust#305): `PressFeedback` animates the scale in the Renderer.
+fn press_box(
+    modifier: Modifier,
+    tint: Option<((f32, f32), f32)>,
+    alignment: Alignment,
     mut on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
+    use super::press::*;
+    use compose_rust::runtime::{delay, launched_effect, mutable_state_of, remember};
+    use compose_rust::{AnimationSpec, GraphicsLayer, PointerKind, Timing};
+
+    let phase = remember(|| mutable_state_of(PressPhase::Idle));
+    let now_phase = phase.get();
+    // The hold timer: when the pointer went up too soon, wait out the rest, then end the press.
+    {
+        let phase = phase.clone();
+        launched_effect(now_phase, move || async move {
+            let wait = now_phase.wait_ms(press_now_ms());
+            if matches!(now_phase, PressPhase::Releasing { .. }) {
+                delay(std::time::Duration::from_millis(wait)).await;
+                phase.update(|p| *p = p.expire(press_now_ms()));
+            }
+        });
+    }
+
+    let reduced = matches!(compose_rust::reduced_motion(), compose_rust::ReducedMotion::On);
+    let scale = press_scale(now_phase, reduced);
+    let mut m = modifier;
+    if scale != 1.0 {
+        m = m.graphics_layer(GraphicsLayer {
+            scale_x: scale,
+            scale_y: scale,
+            ..GraphicsLayer::default()
+        });
+    }
+    let theme = ember_theme();
+    let handle = phase.clone();
     cu::Box()
-        .modifier(modifier)
+        .modifier(m)
         .alignment(alignment)
-        .on_pointer(PointerKinds::UP, move |_| on_click())
-        .content(content);
+        .on_pointer(
+            PointerKinds::DOWN | PointerKinds::UP | PointerKinds::CANCEL | PointerKinds::LEAVE,
+            move |e| match e.kind() {
+                PointerKind::Down => handle.update(|p| *p = p.down(press_now_ms())),
+                PointerKind::Up => {
+                    handle.update(|p| *p = p.up(press_now_ms()));
+                    on_click();
+                }
+                PointerKind::Cancel | PointerKind::Leave => {
+                    handle.update(|p| *p = p.up(press_now_ms()))
+                }
+                _ => {}
+            },
+        )
+        .content(|| {
+            content();
+            if let Some(((w, h), radius)) = tint {
+                let argb = tint_argb(theme.palette.text.to_argb(), now_phase, theme.scheme);
+                let spec = AnimationSpec::tween(
+                    scale_duration_ms(now_phase) as f32,
+                    Timing::CubicBezier {
+                        x1: PRESS_OUT_BEZIER.0,
+                        y1: PRESS_OUT_BEZIER.1,
+                        x2: PRESS_OUT_BEZIER.2,
+                        y2: PRESS_OUT_BEZIER.3,
+                    },
+                );
+                cu::Box().modifier(
+                    Modifier::new()
+                        .size(w, h)
+                        .corner_radius(radius)
+                        .animated_background(compose_rust::animate_color_as_state(
+                            paint(Color::argb(argb)),
+                            spec,
+                        )),
+                );
+            }
+        });
 }
 
 /// One row of a popup menu: 38 px high, left-aligned `--text`, the chosen row on `--sel`.
@@ -140,8 +243,10 @@ pub fn Clickable(
 pub fn MenuRow(label: &str, width: f32, chosen: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let bg = if chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
-    Clickable(
+    ClickableShaped(
         Modifier::new().width(width).height(38.0).background(bg).corner_radius(CORNER_SM),
+        (width, 38.0),
+        CORNER_SM,
         Alignment::CenterStart,
         on_click,
         || {

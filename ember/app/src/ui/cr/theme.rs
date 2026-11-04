@@ -278,13 +278,19 @@ pub const PILL: f32 = 999.0;
 /// arcs of the same fixed radius, so only the curve differs and layout is the same.
 pub const SQUIRCLE_SMOOTHING: f32 = 0.6;
 
-/// Press: scale 0.975 in 180 ms, held at least 120 ms, back in 200 ms with no overshoot.
-/// TODO(GAPS: 누름 피드백): the scale needs `PointerKinds::DOWN/UP`, which the pinned rev lacks
-/// on Box, Row and Column. Buttons get the toolkit's own press feedback until then.
+/// Press (FR-L32): scale 0.975 in 180 ms, held at least 120 ms, back in 200 ms with no
+/// overshoot, plus a tint of the text colour. Source: mockup `core.js` 233-290 and `style.css`
+/// `.ripple-clip`. These are the only copies of the values; `cr/press.rs` reads them.
+/// TODO(compose-rust#305): replaced by a `PressFeedback` modifier in the toolkit.
 pub const PRESS_SCALE: f32 = 0.975;
 pub const PRESS_IN_MS: u32 = 180;
 pub const PRESS_HOLD_MS: u32 = 120;
 pub const PRESS_OUT_MS: u32 = 200;
+/// Tint alpha over the pressed element: 0.07 in light, 0.10 in dark.
+pub const PRESS_TINT_ALPHA_LIGHT: f32 = 0.07;
+pub const PRESS_TINT_ALPHA_DARK: f32 = 0.10;
+/// The release curve, cubic-bezier(.2, 0, 0, 1). The press-in is ease-out.
+pub const PRESS_OUT_BEZIER: (f32, f32, f32, f32) = (0.2, 0.0, 0.0, 1.0);
 
 /// Elevation (dp) standing in for the card shadow, "0 1px 2px / 3 %" plus "0 1px 4px / 3 %".
 /// TODO(GAPS: 그림자 2겹): the toolkit has a single `elevation`; the nearest value is used.

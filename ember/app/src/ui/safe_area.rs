@@ -1,4 +1,4 @@
-//! Title-bar safe area (FR-L32, #213): how far the top strip of the window is covered by the
+//! Title-bar safe area (FR-L33, #213): how far the top strip of the window is covered by the
 //! operating system's window controls, so a screen can draw its own header in that strip instead
 //! of leaving an empty band above it.
 //!
@@ -112,7 +112,7 @@ mod tests {
     use crate::ui::shell::NavMenu;
 
     #[test]
-    fn fr_l32_windows_reserves_the_caption_buttons_at_the_trailing_edge() {
+    fn fr_l33_windows_reserves_the_caption_buttons_at_the_trailing_edge() {
         let a = safe_area_for(Platform::Windows, false);
         assert_eq!(a.trailing, 138.0);
         assert_eq!(a.leading, 0.0);
@@ -120,7 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l32_macos_clears_the_traffic_lights_only_in_full_size_mode() {
+    fn fr_l33_macos_clears_the_traffic_lights_only_in_full_size_mode() {
         assert_eq!(safe_area_for(Platform::MacOs, false), SafeArea::default());
         let a = safe_area_for(Platform::MacOs, true);
         assert_eq!(a.leading, MACOS_TRAFFIC_LIGHTS_LEADING_DP);
@@ -129,13 +129,13 @@ mod tests {
     }
 
     #[test]
-    fn fr_l32_linux_and_mobile_have_no_safe_area() {
+    fn fr_l33_linux_and_mobile_have_no_safe_area() {
         assert_eq!(safe_area_for(Platform::Other, true), SafeArea::default());
         assert_eq!(safe_area_for(Platform::Other, false), SafeArea::default());
     }
 
     #[test]
-    fn fr_l32_a_top_bar_clears_only_the_edge_it_touches() {
+    fn fr_l33_a_top_bar_clears_only_the_edge_it_touches() {
         let win = safe_area_for(Platform::Windows, false);
         assert_eq!(top_bar_pad(win, false, true), EdgePad { leading: 0.0, trailing: 138.0 });
         assert_eq!(top_bar_pad(win, true, false), EdgePad::default());
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l32_only_the_macos_sidebar_gets_a_top_inset() {
+    fn fr_l33_only_the_macos_sidebar_gets_a_top_inset() {
         assert_eq!(sidebar_top_inset(safe_area_for(Platform::Windows, false)), 0.0);
         assert_eq!(sidebar_top_inset(safe_area_for(Platform::Other, false)), 0.0);
         assert_eq!(
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l32_the_session_screen_owns_the_title_bar_strip() {
+    fn fr_l33_the_session_screen_owns_the_title_bar_strip() {
         assert!(screen_owns_title_bar(&Screen::Conversation("s".into())));
         assert!(screen_owns_title_bar(&Screen::Placeholder(NavMenu::Sessions)));
         assert!(!screen_owns_title_bar(&Screen::Launcher));

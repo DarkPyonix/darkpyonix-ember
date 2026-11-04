@@ -23,7 +23,7 @@ pub use crate::ui::project::{
 };
 use super::characters::{CharState, Character, StylePicker};
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberField, EmberSheet, EmberSheetSized, FieldOptions, FilterChip,
+    AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip,
     IconButton, Label, OptionSheet, Pill, PillTone, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
@@ -995,7 +995,7 @@ fn FieldRow(label: &str, content: impl FnOnce()) {
     });
 }
 
-/// The settings sheet: 760 wide, with 취소 and 저장 in the header beside the close button.
+/// The settings sheet has 취소 and 저장 in the header beside the close button.
 fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() + Clone + 'static) {
     let p = ember_theme().palette;
     let default_project = is_default_project(&b.id);
@@ -1011,7 +1011,6 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
     let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty();
     let window = compose_rust::runtime::current_window_size();
     let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 900.0);
-    let width = (window.width_dp - 32.0).clamp(280.0, 760.0);
     let mut actions = {
         let close = on_close.clone();
         move || {
@@ -1021,7 +1020,7 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
         }
     };
-    EmberSheetSized(&format!("{} 설정", b.name), true, width, on_close.clone(), Some(&mut actions), || {
+    EmberSheet(&format!("{} 설정", b.name), true, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                 // TODO(server): rename and repository need a project settings API (FR-L26); the

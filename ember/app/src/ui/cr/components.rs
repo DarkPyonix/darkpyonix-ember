@@ -708,6 +708,21 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
 // Sheet header
 // ---------------------------------------------------------------------------------------------
 
+/// The default maximum width of an Ember sheet (560 dp, #212).
+pub const SHEET_WIDTH_DEFAULT: f32 = 560.0;
+
+/// The maximum width of the computer monitor sheet (1360 dp, #212, FR-L21).
+pub const SHEET_WIDTH_MONITOR: f32 = 1360.0;
+
+/// Width of a centered sheet, leaving a 16 dp margin on each side when possible.
+pub fn sheet_width(window_width_dp: f32, max_width: f32) -> f32 {
+    if window_width_dp <= 0.0 {
+        max_width
+    } else {
+        (window_width_dp - 32.0).max(0.0).min(max_width)
+    }
+}
+
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// TODO(compose-rust#372): a pointer-up subscription; Escape and the scrim also dismiss.
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
@@ -746,8 +761,7 @@ pub fn SheetHeader(
         });
 }
 
-/// A modal with the shared header (#212). Wide windows get a centered dialog over the scrim;
-/// a compact window gets the toolkit's bottom sheet, full width.
+/// A centered modal with the shared header and a scrim (#212).
 /// TODO(compose-rust): `corner-xl` squircle corners; plain arcs for now.
 pub fn EmberSheet(
     title: &str,
@@ -756,7 +770,7 @@ pub fn EmberSheet(
     actions: Option<&mut dyn FnMut()>,
     content: impl FnOnce(),
 ) {
-    EmberSheetSized(title, open, 560.0, on_dismiss, actions, content);
+    EmberSheetSized(title, open, SHEET_WIDTH_DEFAULT, on_dismiss, actions, content);
 }
 
 /// [`EmberSheet`] with the dialog's width (`min(560px, 100%)` for most sheets, `min(1360px,
@@ -784,14 +798,11 @@ pub fn EmberSheetSized(
             content();
         });
     };
-    if compose_rust::runtime::current_window_size().is_compact() {
-        cu::Sheet(open)
-            .modifier(modifier.fill_max_width())
-            .on_dismiss(on_dismiss.clone())
-            .content(body);
-    } else {
-        cu::Dialog(open).modifier(modifier.width(width)).on_dismiss(on_dismiss).content(body);
-    }
+    let window = compose_rust::runtime::current_window_size();
+    cu::Dialog(open)
+        .modifier(modifier.width(sheet_width(window.width_dp, width)))
+        .on_dismiss(on_dismiss)
+        .content(body);
 }
 
 /// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
@@ -1003,5 +1014,17 @@ mod tests {
             })
             .collect();
         assert!(floats.contains(&14.0) && floats.contains(&22.0), "{floats:?}");
+    }
+
+    #[test]
+    fn fr_l32_sheet_width_for_each_sheet() {
+        for name in ["설정", "새 세션", "프로젝트 설정", "새 프로젝트", "새 루틴", "파일 보내기"] {
+            assert_eq!(sheet_width(1440.0, SHEET_WIDTH_DEFAULT), 560.0, "{name}");
+            assert_eq!(sheet_width(390.0, SHEET_WIDTH_DEFAULT), 358.0, "{name}");
+        }
+        assert_eq!(sheet_width(1440.0, SHEET_WIDTH_MONITOR), 1360.0);
+        assert_eq!(sheet_width(768.0, SHEET_WIDTH_MONITOR), 736.0);
+        assert_eq!(sheet_width(0.0, SHEET_WIDTH_DEFAULT), 560.0);
+        assert_eq!(sheet_width(20.0, SHEET_WIDTH_DEFAULT), 0.0);
     }
 }

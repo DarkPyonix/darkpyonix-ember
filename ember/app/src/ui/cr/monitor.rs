@@ -19,7 +19,9 @@ pub use crate::ui::monitor::{
     sort_rows, toggle_sort, ComputerMetrics, Metric, NoMetrics, ProcessRow, SortKey, SortState,
 };
 use super::characters::{Character, CharState};
-use super::components::{EmberCard, EmberSheetSized, Label, Pill, PillTone};
+use super::components::{
+    EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+};
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{display_name, reach_pill, ComputerChip, ProjectBox, SOON};
@@ -56,11 +58,6 @@ pub fn mon_columns(width_dp: f32) -> usize {
     }
 }
 
-/// The sheet's width: `min(1360px, 100%)` less the dialog's margin.
-pub fn sheet_width(window_dp: f32) -> f32 {
-    (window_dp - 32.0).clamp(280.0, 1360.0)
-}
-
 /// Column widths of the process table (dp): the name takes the rest.
 const PID_W: f32 = 72.0;
 const PWR_W: f32 = 72.0;
@@ -87,7 +84,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
         }
     };
-    EmberSheetSized(&title, true, sheet_width(window.width_dp), on_close.clone(), Some(&mut actions), || {
+    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {

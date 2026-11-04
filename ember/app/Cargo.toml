@@ -46,12 +46,5 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # OS data directory for the cache and preferences.
 dirs = "6"
 
-# Container `on_click` (compose-rust#372, FR-55) is in compose-rust and its renderer after
-# v0.0.4. dioxus-compose pins the v0.0.4 tag, so both crates are patched to this revision to keep
-# one compose-rust in the graph. Drop the patch and the pin once the next tag is out.
-[patch."https://github.com/DarkPyonix/compose-rust"]
-compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", rev = "90f68f01ec41d6d5fed9d6650da3be5add0ca1bf" }
-compose-rust-macros = { git = "https://github.com/DarkPyonix/compose-rust", rev = "90f68f01ec41d6d5fed9d6650da3be5add0ca1bf" }
-
 [dev-dependencies]
 tempfile = "3"

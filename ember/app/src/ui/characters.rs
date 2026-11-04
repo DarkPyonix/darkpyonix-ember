@@ -13,14 +13,10 @@
 
 use std::fmt::Write as _;
 
-use dioxus_compose::prelude::*;
 use ember_client::LauncherStatus;
 use serde::{Deserialize, Serialize};
 
-use crate::ui::components::{AppButton, ButtonKind, Label};
 use crate::ui::project::is_default_project;
-use crate::ui::theme::*;
-use crate::ui::use_ui;
 
 // ---------------------------------------------------------------------------------------------
 // Vocabulary
@@ -728,100 +724,6 @@ pub fn svg(spec: &CharSpec) -> String {
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\" width=\"100\" height=\"100\"><ellipse cx=\"50\" cy=\"93\" rx=\"20\" ry=\"3\" fill=\"#000000\" opacity=\"0.08\"/>{body}{face}{extra}</svg>"
     )
-}
-
-// ---------------------------------------------------------------------------------------------
-// Components
-// ---------------------------------------------------------------------------------------------
-
-/// A drawn character. `project` picks the project's style from prefs and decides the crown
-/// (never in 기본 프로젝트); an empty project means the default style.
-#[component]
-pub fn Character(
-    agent: String,
-    leader: bool,
-    size: f32,
-    name: String,
-    #[props(default)] project: String,
-    #[props(default)] state: CharState,
-    #[props(default)] role: Option<String>,
-) -> Element {
-    let theme = use_ember_theme();
-    let ui = use_ui();
-    let style = ui.prefs.read().character_style(&project);
-    let spec = CharSpec {
-        style,
-        name,
-        agent,
-        state,
-        lead: crown_shown(&project, leader),
-        role,
-        dark: theme.scheme == Scheme::Dark,
-    };
-    draw(&spec, size)
-}
-
-fn draw(spec: &CharSpec, size: f32) -> Element {
-    // The renderer draws an SVG at its own width and height, so the pixel size goes in.
-    let px = format!("{}", size.round() as i32);
-    let doc = svg(spec).replacen(
-        "width=\"100\" height=\"100\"",
-        &format!("width=\"{px}\" height=\"{px}\""),
-        1,
-    );
-    let id = dioxus_compose::asset::register_owned(AssetKind::Svg, doc.into_bytes());
-    rsx! { Image { asset_id: id, width: size, height: size } }
-}
-
-/// The 팀 캐릭터 picker of the project settings sheet: six preview cards, three rows of two, so the Korean names are not clipped.
-/// The choice is saved to prefs at once. TODO(server): save it on the project instead.
-#[component]
-pub fn StylePicker(project_id: String, seed_name: String) -> Element {
-    let theme = use_ember_theme();
-    let ui = use_ui();
-    let p = theme.palette;
-    let current = ui.prefs.read().character_style(&project_id);
-    let dark = theme.scheme == Scheme::Dark;
-    let rows: Vec<Vec<CharStyle>> = CharStyle::ALL.chunks(2).map(|c| c.to_vec()).collect();
-    rsx! {
-        Column {
-            fill_max_width: true,
-            space_role: SpaceRole::Sm,
-            for row in rows {
-                Row {
-                    fill_max_width: true,
-                    space_role: SpaceRole::Sm,
-                    for style in row {
-                        Column {
-                            key: "{style.label()}",
-                            weight: 1.0,
-                            alignment: Alignment::TopCenter,
-                            space_role: SpaceRole::Xs,
-                            {draw(&CharSpec {
-                                style,
-                                name: seed_name.clone(),
-                                agent: "claude".into(),
-                                state: CharState::Idle,
-                                lead: false,
-                                role: Some("리뷰어".into()),
-                                dark,
-                            }, 56.0)}
-                            AppButton {
-                                text: style.label(),
-                                small: true,
-                                kind: if style == current { ButtonKind::Primary } else { ButtonKind::Default },
-                                on_click: {
-                                    let pid = project_id.clone();
-                                    move |()| ui.update_prefs(|pr| pr.set_character_style(&pid, style))
-                                },
-                            }
-                            Label { text: style.blurb(), fs: Fs::Xs2, color: paint(p.text_2), max_lines: 3 }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

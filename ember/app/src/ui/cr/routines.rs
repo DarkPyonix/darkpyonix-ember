@@ -492,21 +492,41 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     if mode != PaneMode::DetailOnly {
                         let panel_new = panel.clone();
                         RoutineHeader(compact, move || {
-                            cu::Button("새 루틴")
-                                .icon(IconRole::Add)
-                                .variant(ButtonVariant::Text)
-                                .color(paint(p.ink_text))
-                                .modifier(
-                                    Modifier::new()
-                                        .width(100.0)
-                                        .height(40.0)
-                                        .background(paint(p.ink))
-                                        .border(1.0, paint(p.ink))
-                                        .shape_role(ShapeRole::Full),
-                                )
-                                .on_click(move || panel_new.set(Panel::New));
+                            if compact {
+                                cu::Box()
+                                    .modifier(
+                                        Modifier::new()
+                                            .width(52.0)
+                                            .height(40.0)
+                                            .background(paint(p.ink))
+                                            .border(1.0, paint(p.ink))
+                                            .shape_role(ShapeRole::Full),
+                                    )
+                                    .alignment(Alignment::Center)
+                                    .content(move || {
+                                        NavIcon(super::shell::ICON_PLUS_SVG, p.ink_text.to_argb(), 18.0);
+                                        FocusOverlay("새 루틴", move || panel_new.set(Panel::New));
+                                    });
+                            } else {
+                                let label = "새 루틴";
+                                let btn_w = (18.0 + 12.0 + super::home::text_px(label, Fs::Sm.size()) + 36.0)
+                                    .ceil()
+                                    .max(116.0);
+                                cu::Button(label)
+                                    .icon(IconRole::Add)
+                                    .variant(ButtonVariant::Text)
+                                    .color(paint(p.ink_text))
+                                    .modifier(
+                                        Modifier::new()
+                                            .width(btn_w)
+                                            .height(40.0)
+                                            .background(paint(p.ink))
+                                            .border(1.0, paint(p.ink))
+                                            .shape_role(ShapeRole::Full),
+                                    )
+                                    .on_click(move || panel_new.set(Panel::New));
+                            }
                         });
-                        cu::Spacer().modifier(Modifier::new().height(16.0));
                     }
                     if !cur_online {
                         Label(OFFLINE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
@@ -800,7 +820,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let ring_cmd = ring.build();
 
     let chart_w = if compact { 148.0 } else { 228.0 };
-    let chart_h = if compact { 110.0 } else { 120.0 };
+    let chart_h = if compact { 96.0 } else { 100.0 };
     let chart_gap = if compact { 6.0 } else { 10.0 };
     let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
     let mut chart = DrawList::builder().rect(paint(p.line), 0.0, chart_h, chart_w, 1.0, 0.0);
@@ -899,11 +919,11 @@ fn HeroCardContent(
                     Label("최근 7일 동안 끝난 실행이 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                 }
             });
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().width(chart_w)).content(|| {
+            cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
                 Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                cu::Spacer().modifier(Modifier::new().height(SP[0]));
                 cu::Canvas(chart_cmd.clone()).modifier(Modifier::new().size(chart_w, chart_h + 1.0));
-                cu::Row().modifier(Modifier::new().width(chart_w)).content(|| {
+                cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
                     for b in bars {
                         cu::Column().modifier(Modifier::new().weight(1.0)).alignment(Alignment::Center).content(|| {
                             Label(
@@ -996,19 +1016,23 @@ fn ListPane(
                             .height(H_BTN)
                             .background(paint(p.surface))
                             .border(1.0, paint(p.line))
-                            .corner_radius(CORNER_MD)
-                            .padding(8.0),
+                            .corner_radius(CORNER_SM),
                     )
                     .content(move || {
+                        cu::Spacer().modifier(Modifier::new().width(12.0));
                         NavIcon(ICON_SEARCH_SVG, p.muted.to_argb(), 18.0);
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
                         EmberField(FieldOptions {
                             bare: true,
+                            background: Some(Paint::Literal(Color::argb(0))),
+                            border_width: Some(0.0),
+                            height: Some(H_BTN),
                             weight: Some(1.0),
                             placeholder: "루틴 검색".to_string(),
                             on_value_change: Some(Box::new(move |v| q_set.set(v))),
                             ..Default::default()
                         });
+                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
                     });
                 if groups.is_empty() {
                     Label(

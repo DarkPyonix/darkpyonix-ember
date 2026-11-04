@@ -326,10 +326,9 @@ fn RemoteMainButton(
     cu::Box()
         .modifier(
             Modifier::new()
-                .height(32.0)
+                .size(100.0, 32.0)
                 .background(paint(btn_bg))
-                .shape_role(ShapeRole::Full)
-                .padding(SP[1]),
+                .shape_role(ShapeRole::Full),
         )
         .alignment(Alignment::Center)
         .content(move || {
@@ -338,7 +337,7 @@ fn RemoteMainButton(
                 .spacing(6.0)
                 .modifier(Modifier::new().fill_max_size())
                 .content(|| {
-                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
                     NavIcon(action_icon, btn_fg.to_argb(), 16.0);
                     Label(action_text, Fs::Sm, Weight::Medium, Some(paint(btn_fg)), Some(1));
                     if let Some(n) = action_count {
@@ -360,7 +359,7 @@ fn RemoteMainButton(
                                 );
                             });
                     }
-                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
                 });
             FocusOverlay(&label, on_click);
         });
@@ -471,7 +470,7 @@ pub fn RepoBar(
 
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
-                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
                             RemoteMainButton(action, has, move || {
                                 notice::post(soon_line("원격 동작"));
                             });
@@ -510,7 +509,7 @@ pub fn RepoBar(
 
                     cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
-                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
                             RemoteMainButton(action, has, move || {
                                 notice::post(soon_line("원격 동작"));
                             });
@@ -1916,6 +1915,154 @@ mod tests {
             has_tree_file_label,
             "expected a Button node with tree row label 'shim.rs'"
         );
+
+        // Remote action circle buttons at 1440
+        assert!(
+            button_texts.values().any(|t| t == "가져오기"),
+            "expected a Button node with label '가져오기' at 1440"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "내려받기"),
+            "expected a Button node with label '내려받기' at 1440"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "올리기"),
+            "expected a Button node with label '올리기' at 1440"
+        );
+    }
+
+    #[test]
+    fn fr_l19_runtime_buttons_have_non_empty_text_at_compact_390_for_all_tabs() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(sample_screen)));
+        let mut button_nodes = std::collections::HashSet::new();
+        let mut button_texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                        button_nodes.insert(*node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        button_texts.insert(*node_id, s.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 390.0,
+                height_dp: 844.0,
+                class: WindowSizeClass::Compact,
+                height_class: WindowHeightClass::Medium,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        scan(&decode_batch(bytes).expect("decode"));
+
+        assert!(
+            !button_nodes.is_empty(),
+            "expected at least one Button node in rendered VCS screen at 390 dp"
+        );
+
+        for id in &button_nodes {
+            let text = button_texts.get(id).map(|s| s.as_str()).unwrap_or("");
+            assert!(
+                !text.trim().is_empty(),
+                "Button node {id} has empty Text prop at 390 dp"
+            );
+        }
+
+        // Remote action circle buttons at 390
+        assert!(
+            button_texts.values().any(|t| t == "가져오기"),
+            "expected a Button node with label '가져오기' at 390"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "내려받기"),
+            "expected a Button node with label '내려받기' at 390"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "올리기"),
+            "expected a Button node with label '올리기' at 390"
+        );
+
+        // Pane tab buttons must be present at 390
+        assert!(
+            button_texts.values().any(|t| t == "파일"),
+            "expected a Button node with tab label '파일' at 390"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "차이"),
+            "expected a Button node with tab label '차이' at 390"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "커밋"),
+            "expected a Button node with tab label '커밋' at 390"
+        );
+
+        // Exercise each PaneTab (파일, 차이, 커밋) in PaneLayout::Tabs
+        let snap = sample_snapshot();
+        for tab in [PaneTab::Files, PaneTab::Diff, PaneTab::Commit] {
+            compose_rust::window::reset_window_size();
+            let snap_tab = snap.clone();
+            let mut tab_host = Host::new(move || {
+                let s = snap_tab.clone();
+                Box::new(Recomposer::new(move || {
+                    cu::Column().content(|| {
+                        ChangesPane(&s, PaneLayout::Tabs, Some(tab), |_| {});
+                    });
+                }))
+            });
+            let mut tab_nodes = std::collections::HashSet::new();
+            let mut tab_texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+            let mut tab_scan = |batch: &[Mutation<'_>]| {
+                for m in batch {
+                    match m {
+                        Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                            tab_nodes.insert(*node_id);
+                        }
+                        Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                            tab_texts.insert(*node_id, s.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            tab_scan(&decode_batch(tab_host.rebuild().expect("rebuild")).expect("decode"));
+
+            assert!(
+                !tab_nodes.is_empty(),
+                "expected Button nodes in ChangesPane for tab {tab:?}"
+            );
+
+            for id in &tab_nodes {
+                let text = tab_texts.get(id).map(|s| s.as_str()).unwrap_or("");
+                assert!(
+                    !text.trim().is_empty(),
+                    "Button node {id} has empty Text prop in ChangesPane tab {tab:?}"
+                );
+            }
+
+            assert!(
+                tab_texts.values().any(|t| t == "파일"),
+                "expected '파일' button in ChangesPane for tab {tab:?}"
+            );
+            assert!(
+                tab_texts.values().any(|t| t == "차이"),
+                "expected '차이' button in ChangesPane for tab {tab:?}"
+            );
+            assert!(
+                tab_texts.values().any(|t| t == "커밋"),
+                "expected '커밋' button in ChangesPane for tab {tab:?}"
+            );
+        }
     }
 
     #[test]

@@ -619,9 +619,9 @@ impl GitState {
                     vcs,
                     None,
                     Kind::Modified,
-                    vec![hunk("@@ -20,6 +20,7 @@ use crate::ui::{use_ui, Route, Ui};", &[" use crate::ui::theme::*;", "+use crate::ui::git::Snapshot;", " ", " /// What a view shows.", " pub const SOON: &str = \"준비 중입니다\";", " "])],
+                    vec![hunk("@@ -20,5 +20,6 @@ use crate::ui::{use_ui, Route, Ui};", &[" use crate::ui::theme::*;", "+use crate::ui::git::Snapshot;", " ", " /// What a view shows.", " pub const SOON: &str = \"준비 중입니다\";", " "])],
                     vec![
-                        hunk("@@ -88,7 +89,7 @@ pub enum Section {", &["     Changes,", "     History,", "-    Branches,", "+    Branches2,", "     PullRequests,", "     Stash,", "     Conflicts,"]),
+                        hunk("@@ -88,6 +89,6 @@ pub enum Section {", &["     Changes,", "     History,", "-    Branches,", "+    Branches2,", "     PullRequests,", "     Stash,", "     Conflicts,"]),
                         hunk("@@ -140,0 +141,3 @@ impl Section {", &["+    pub fn demo(self) -> bool {", "+        true", "+    }"]),
                     ],
                 ),
@@ -941,6 +941,24 @@ mod tests {
         assert_eq!(ch("ember/app/src/ui/diff_view.rs").0, "R");
         assert_eq!(file(&st, "ember/app/src/ui/diff_view.rs")["old_path"], "ember/app/src/ui/review.rs");
         assert_eq!(ch("ember/app/src/legacy.rs"), (".".into(), "D".into()));
+    }
+
+    #[test]
+    fn demo_hunk_line_counts_match_their_headers() {
+        let g = GitState::seed();
+        for f in &g.files {
+            for staged in [false, true] {
+                let text = f.diff(staged);
+                for file in crate::ui::vcs::parse_unified(&text) {
+                    for h in &file.hunks {
+                        let old = h.lines.iter().filter(|l| l.kind != crate::ui::vcs::LineKind::Add).count() as u32;
+                        let new = h.lines.iter().filter(|l| l.kind != crate::ui::vcs::LineKind::Del).count() as u32;
+                        assert_eq!((old, new), (h.old_len, h.new_len), "{} {}", f.path, h.header);
+                        assert!(h.lines.iter().all(|l| !l.text.starts_with("@@ ")), "{} {}", f.path, h.header);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

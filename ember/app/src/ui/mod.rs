@@ -17,12 +17,9 @@ pub mod editor;
 pub mod files;
 pub mod home;
 pub mod keymap;
-pub mod launcher;
 pub mod monitor;
-pub mod new_session;
 pub mod project;
 pub mod routines;
-pub mod search;
 pub mod session;
 pub mod shell;
 pub mod theme;
@@ -199,7 +196,7 @@ pub fn app() -> Element {
     let open = editor.read().clone();
     match open {
         Some(target) => rsx! { editor::EditorScreen { target } },
-        None => rsx! { shell::Shell {} },
+        None => rsx! {},
     }
 }
 

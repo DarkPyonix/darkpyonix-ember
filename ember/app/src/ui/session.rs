@@ -229,7 +229,7 @@ pub const SIDE_LIST_W: f32 = 264.0;
 /// A pane's height in the grid (a scroll column cannot give a list a bounded height).
 pub const PANE_H: f32 = 560.0;
 /// The right panel of the single view.
-pub const INFO_PANEL_W: f32 = 320.0;
+pub const INFO_PANEL_W: f32 = 312.0;
 
 // ---------------------------------------------------------------------------------------------
 // Side list

@@ -107,14 +107,15 @@ pub fn launch() {
         // shared host) lands.
         services().ui.editor.set(Some(target));
         launch_builder().launch(ui::app);
-    } else if let Some(pref) = ui::cr::shell::requested() {
-        // Phase 2 review window (#220): the compose-rust shell, no Dioxus app.
-        ui::cr::shell::launch(pref);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
         ui::cr::gallery::launch(pref);
     } else {
-        launch_builder().launch(ui::app);
+        // Default launch (#220 phase 8): start the background bridge and open the compose-rust
+        // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
+        bridge::start_shared();
+        let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
+        ui::cr::shell::launch(pref);
     }
 
     // The window is closed: write the cache once more and stop the background tasks.

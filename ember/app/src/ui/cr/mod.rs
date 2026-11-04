@@ -20,4 +20,7 @@ pub mod project;
 pub mod files;
 pub mod conversation;
 pub mod session;
+pub mod routines;
+pub mod agents;
+pub mod vcs;
 pub mod settings;

@@ -593,6 +593,8 @@ pub fn shell() {
                     super::files::FilesScreen();
                 } else if matches!(screen, Screen::Home) {
                     super::home::HomeScreen();
+                } else if matches!(screen, Screen::VersionControl) {
+                    super::vcs::VcsScreen();
                 } else if matches!(screen, Screen::Agents) {
                     super::agents::AgentsScreen();
                 } else if matches!(screen, Screen::Routines) {
@@ -732,6 +734,10 @@ pub fn launch(pref: ThemePref) {
         }
         Some("files") => {
             ui.set_menu(NavMenu::Files);
+            shell
+        }
+        Some("vcs") => {
+            ui.set_menu(NavMenu::VersionControl);
             shell
         }
         Some("agents") => {

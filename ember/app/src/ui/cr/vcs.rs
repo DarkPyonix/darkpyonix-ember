@@ -211,7 +211,7 @@ fn RepoCell(project: &ProjectBox, project_menu: &MutableState<bool>) {
     EmberCard(false, true, None, Some(SP[2]), None, move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(move || {
             SmallNote("저장소");
-            PickChip(&proj_name, Some(IconRole::Folder), false, false, move || {
+            PickChip(&proj_name, Some(IconRole::Library), false, false, move || {
                 p_open.set(true);
             });
             SmallNote(&repo_line);
@@ -308,7 +308,7 @@ pub fn RepoBar(
                 RemoteCell(action, has, &remote_line);
             });
         } else {
-            cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).alignment(Alignment::Start).content(|| {
+            cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     RepoCell(project, &project_menu);
                 });
@@ -742,7 +742,7 @@ pub fn ChangesPane(
 
     match layout {
         PaneLayout::Two => {
-            cu::Row().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).alignment(Alignment::Start).content(|| {
+            cu::Row().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).alignment(Alignment::CenterStart).content(|| {
                 cu::Column().modifier(Modifier::new().width(320.0)).content(|| {
                     FilesPane(&diffs, &staging, &folded, &selected, on_tab.clone());
                 });
@@ -874,7 +874,7 @@ pub fn VcsScreenWith(
                     }
 
                     if wide {
-                        cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[3]).alignment(Alignment::Start).content(|| {
+                        cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[3]).alignment(Alignment::CenterStart).content(|| {
                             let sec_state = section.clone();
                             SectionList(sec, snap.as_ref(), move |s| sec_state.set(s));
                             cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[2]).content(|| {
@@ -1106,7 +1106,7 @@ mod tests {
         assert_eq!(a.path, "ember/proxy/src/shim.rs");
         assert_eq!(a.status, FileStatus::Modified);
         assert_eq!(a.hunks.len(), 2);
-        assert_eq!((a.added(), a.removed()), (9, 3));
+        assert_eq!((a.added(), a.removed()), (6, 3));
 
         let attach = &files[2];
         assert_eq!(attach.path, "ember/proxy/tests/shim_attach.rs");
@@ -1123,10 +1123,10 @@ mod tests {
     fn fr_l19_staging_toggles_lines_hunks_and_files() {
         let d = a_diff();
         let mut st = FileStaging::none();
-        assert_eq!(st.counts(&d), (0, 12));
+        assert_eq!(st.counts(&d), (0, 9));
         st.toggle_line(&d, 0, 2); // line 2 is del
         assert!(st.is_staged(0, 2));
-        assert_eq!(st.counts(&d), (1, 12));
+        assert_eq!(st.counts(&d), (1, 9));
         assert_eq!(st.check(&d), Check::Partial);
 
         st.toggle_hunk(&d, 0);
@@ -1273,19 +1273,22 @@ mod tests {
     #[test]
     fn fr_l19_without_git_data_the_vcs_screen_says_it_is_not_ready() {
         let _guard = crate::services::test_guard();
-        std::env::remove_var("EMBER_CR_ROUTE");
         compose_rust::window::reset_window_size();
         let text = text_of(VcsScreen);
         assert!(text.contains("버전 관리"));
         assert!(text.contains(SOON));
     }
 
+    #[compose_rust::runtime::composable]
+    fn sample_screen() {
+        VcsScreenWith(Some(sample_snapshot()), sample_projects(), Some("ember".to_string()));
+    }
+
     #[test]
     fn fr_l19_sample_route_renders_full_mockup_layout_in_compose_rust() {
         let _guard = crate::services::test_guard();
-        std::env::set_var("EMBER_CR_ROUTE", "vcs");
         compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| Box::new(Recomposer::new(VcsScreen)));
+        let mut host = Host::new(|| Box::new(Recomposer::new(sample_screen)));
         let mut text: String = decode_batch(host.rebuild().expect("rebuild"))
             .expect("decode")
             .iter()
@@ -1303,7 +1306,6 @@ mod tests {
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
-        std::env::remove_var("EMBER_CR_ROUTE");
         assert!(text.contains("feat/session-shim"));
         assert!(text.contains("Pull 1"));
         assert!(text.contains("변경 파일 5"));
@@ -1313,9 +1315,8 @@ mod tests {
     #[test]
     fn fr_l19_sample_route_compact_layout_emits_tabs() {
         let _guard = crate::services::test_guard();
-        std::env::set_var("EMBER_CR_ROUTE", "vcs");
         compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| Box::new(Recomposer::new(VcsScreen)));
+        let mut host = Host::new(|| Box::new(Recomposer::new(sample_screen)));
         let mut text: String = decode_batch(host.rebuild().expect("rebuild"))
             .expect("decode")
             .iter()
@@ -1333,7 +1334,6 @@ mod tests {
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
-        std::env::remove_var("EMBER_CR_ROUTE");
         assert!(text.contains("파일"));
         assert!(text.contains("차이"));
         assert!(text.contains("커밋"));

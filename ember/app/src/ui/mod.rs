@@ -127,9 +127,9 @@ impl Ui {
     }
 
     pub fn close_editor(&self) {
-        services().ui.editor.set(None);
         let mut e = self.editor;
         e.set(None);
+        services().ui.close_editor();
     }
 
     pub fn open_new_session(&self, project: Option<String>) {

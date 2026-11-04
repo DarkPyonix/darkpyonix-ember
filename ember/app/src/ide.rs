@@ -155,6 +155,21 @@ pub fn spawn_editor_process(project: &str, folder: &str) -> std::io::Result<()> 
     spawn_editor_with(&exe, project, folder).map(|_| ())
 }
 
+/// Run `spawner(project, folder)` and format the user-facing notice string for the result.
+pub fn spawn_editor_notice(
+    project: &str,
+    folder: &str,
+    spawner: impl FnOnce(&str, &str) -> std::io::Result<()>,
+) -> String {
+    match spawner(project, folder) {
+        Ok(()) => "Ember 에디터: 새 창에서 여는 중입니다".to_string(),
+        Err(e) => {
+            tracing::warn!(project = %project, "could not spawn editor window: {e}");
+            format!("Ember 에디터: 열지 못했습니다: {e}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

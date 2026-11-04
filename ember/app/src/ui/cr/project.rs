@@ -761,20 +761,20 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
     let has_session = session.is_some();
     cu::Box().content(|| {
-        let o = open.clone();
+        let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
         AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
-            if has_session {
-                o.set(true)
+            if !has_session {
+                notice::post("세션이 없어 IDE를 열 수 없습니다");
+            } else if let Some(kind) = remembered {
+                launch_ide(&ui_btn, kind, ide_btn.get_untracked());
             } else {
-                notice::post("세션이 없어 IDE를 열 수 없습니다")
+                o.set(true);
             }
         });
         let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
         OptionSheet(open.get(), &labels, None, 220.0, move || close.set(false), move |i| {
             if let Some(c) = choices.get(i) {
-                let kind = c.kind;
-                ui2.update_prefs(|p| p.ide_target = Some(kind.key().to_string()));
-                launch_ide(&ui2, kind, ide2.get_untracked());
+                launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
         });
     });

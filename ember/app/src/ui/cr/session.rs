@@ -496,11 +496,11 @@ pub fn IdeMenu(session: &str) {
         .as_deref()
         .and_then(IdeKind::from_key);
     let choices = ide_choices(remembered);
-    let active_kind = remembered.unwrap_or(IdeKind::Ember);
-    let cur_label = ide_label(active_kind);
+    let cur_label = remembered.map(ide_label);
 
     cu::Box().content(|| {
         let o = open.clone();
+        let o_main = open.clone();
         let ui_main = ui.clone();
         let launch_main = ide.get();
         if is_phone {
@@ -510,7 +510,13 @@ pub fn IdeMenu(session: &str) {
                     .background(paint(p.ink))
                     .shape_role(ShapeRole::Full),
                 Alignment::Center,
-                move || o.set(true),
+                move || {
+                    if let Some(kind) = remembered {
+                        launch_ide_shared(&ui_main, kind, launch_main.clone());
+                    } else {
+                        o.set(true);
+                    }
+                },
                 || NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0),
             );
         } else {
@@ -527,7 +533,11 @@ pub fn IdeMenu(session: &str) {
                         Modifier::new().fill_max_height(),
                         Alignment::Center,
                         move || {
-                            launch_ide_shared(&ui_main, active_kind, launch_main.clone());
+                            if let Some(kind) = remembered {
+                                launch_ide_shared(&ui_main, kind, launch_main.clone());
+                            } else {
+                                o_main.set(true);
+                            }
                         },
                         move || {
                             cu::Row()
@@ -544,13 +554,15 @@ pub fn IdeMenu(session: &str) {
                                         Some(1),
                                     );
                                     if show_cur {
-                                        Label(
-                                            cur_label,
-                                            Fs::Xs,
-                                            Weight::Regular,
-                                            Some(paint(p.ink_text)),
-                                            Some(1),
-                                        );
+                                        if let Some(cur_label) = cur_label {
+                                            Label(
+                                                cur_label,
+                                                Fs::Xs,
+                                                Weight::Regular,
+                                                Some(paint(p.ink_text)),
+                                                Some(1),
+                                            );
+                                        }
                                     }
                                     cu::Spacer().modifier(Modifier::new().width(4.0));
                                 });
@@ -578,12 +590,11 @@ pub fn IdeMenu(session: &str) {
         OptionSheet(
             open.get(),
             &labels,
-            Some(0),
+            remembered.map(|_| 0),
             POPUP_W,
             move || o_d.set(false),
             move |idx| {
                 if let Some(c) = choices_c.get(idx) {
-                    ui_c.update_prefs(|p| p.ide_target = Some(c.kind.key().to_string()));
                     launch_ide_shared(&ui_c, c.kind, launch_now.clone());
                 }
             },

@@ -105,6 +105,7 @@ pub fn launch() {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the dioxus-compose
         // EditorScreen in its own process until dioxus-compose#152 (the `window` element on a
         // shared host) lands.
+        services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
         launch_builder().launch(ui::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {

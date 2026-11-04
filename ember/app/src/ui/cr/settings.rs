@@ -342,7 +342,8 @@ mod tests {
                 SettingsSheet(true, || {});
             }))
         });
-        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let raw = host.rebuild().expect("rebuild").to_vec();
+        let batch = decode_batch(&raw).expect("decode");
         let all = texts(&batch);
         for want in [
             "설정",
@@ -380,6 +381,134 @@ mod tests {
         assert_eq!(ui.theme_pref.get_untracked(), ThemePref::Dark);
 
         // Restore defaults for other tests.
+        ui.set_theme_pref(ThemePref::System);
+        ui.set_show_archived(false);
+        ui.update_prefs(|p| {
+            p.keymap = Keymap::VsCode;
+            p.ide_target = None;
+        });
+    }
+
+    /// Find the `Clickable` ancestor of the `Text` node carrying `label` and return its
+    /// `(node_id, handler_id)` for `PropertyKind::OnPointer`.
+    fn clickable_for_label(batch: &[Mutation<'_>], label: &str) -> (u32, u64) {
+        use compose_rust::PropertyKind;
+        use std::collections::HashMap;
+
+        let mut parent_of: HashMap<u32, u32> = HashMap::new();
+        let mut pointer_handlers: HashMap<u32, u64> = HashMap::new();
+        let mut label_node: Option<u32> = None;
+
+        for m in batch {
+            match m {
+                Mutation::Insert {
+                    parent_id, node_id, ..
+                } => {
+                    parent_of.insert(*node_id, *parent_id);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnPointer,
+                    value: PropertyValue::Integer(h),
+                } => {
+                    pointer_handlers.insert(*node_id, *h as u64);
+                }
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                } if *s == label => {
+                    label_node = Some(*node_id);
+                }
+                _ => {}
+            }
+        }
+
+        let mut cur = label_node.unwrap_or_else(|| panic!("missing label node for {label}"));
+        loop {
+            if let Some(&h) = pointer_handlers.get(&cur) {
+                return (cur, h);
+            }
+            cur = *parent_of
+                .get(&cur)
+                .unwrap_or_else(|| panic!("no Clickable ancestor for label {label}"));
+        }
+    }
+
+    fn pointer_up_event(node_id: u32, handler_id: u64) -> compose_rust::protocol::HostEvent<'static> {
+        use compose_rust::protocol::HostEvent;
+        use compose_rust::{EventPayload, PointerKind, PointerType, WheelDeltaMode};
+        HostEvent {
+            node_id,
+            handler_id,
+            payload: EventPayload::Pointer {
+                kind: PointerKind::Up,
+                pointer_id: 1,
+                pointer_type: PointerType::Mouse,
+                x: 4.0,
+                y: 4.0,
+                buttons: 0,
+                button: 0,
+                modifiers: 0,
+                click_count: 1,
+                delta_x: 0.0,
+                delta_y: 0.0,
+                delta_mode: WheelDeltaMode::Pixel,
+                timestamp_nanos: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn fr_l7_fr_l28_fr_l30_clicking_settings_chips_updates_theme_keymap_ide_and_archived() {
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.set_theme_pref(ThemePref::System);
+        ui.update_prefs(|p| {
+            p.keymap = Keymap::VsCode;
+            p.ide_target = None;
+        });
+        ui.set_show_archived(false);
+
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                SettingsSheet(true, || {});
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild").to_vec();
+        let batch = decode_batch(&raw).expect("decode");
+
+        // 1. Click "다크" theme chip -> theme_pref becomes Dark.
+        let (node, handler) = clickable_for_label(&batch, "다크");
+        host.dispatch(pointer_up_event(node, handler)).expect("click 다크");
+        assert_eq!(ui.theme_pref.get_untracked(), ThemePref::Dark);
+
+        // 2. Click "JetBrains" keymap chip -> prefs.keymap becomes JetBrains.
+        let (node, handler) = clickable_for_label(&batch, "JetBrains");
+        host.dispatch(pointer_up_event(node, handler)).expect("click JetBrains");
+        assert_eq!(ui.prefs.get_untracked().keymap, Keymap::JetBrains);
+
+        // 3. Click "VS Code" IDE target chip (note: "VS Code" appears twice, once in keymap and
+        // once in IDE choices; click "JetBrains Gateway" first, then "매번 선택").
+        let (node, handler) = clickable_for_label(&batch, "JetBrains Gateway");
+        host.dispatch(pointer_up_event(node, handler))
+            .expect("click JetBrains Gateway");
+        assert_eq!(
+            ui.prefs.get_untracked().ide_target.as_deref(),
+            Some("gateway")
+        );
+
+        let (node, handler) = clickable_for_label(&batch, "매번 선택");
+        host.dispatch(pointer_up_event(node, handler))
+            .expect("click 매번 선택");
+        assert_eq!(ui.prefs.get_untracked().ide_target, None);
+
+        // 4. Click "꺼짐" archived toggle -> show_archived becomes true.
+        let (node, handler) = clickable_for_label(&batch, "꺼짐");
+        host.dispatch(pointer_up_event(node, handler)).expect("click 꺼짐");
+        assert!(ui.show_archived.get_untracked());
+
+        // Restore defaults.
         ui.set_theme_pref(ThemePref::System);
         ui.set_show_archived(false);
         ui.update_prefs(|p| {

@@ -799,7 +799,7 @@ pub fn launch(pref: ThemePref) {
     };
     compose_rust::LaunchBuilder::new()
         .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
-        .with_window(Window::new().with_title("Ember shell (compose-rust)").with_size(w, h))
+        .with_window(Window::new().with_title("Ember").with_size(w, h))
         .launch(content);
 }
 

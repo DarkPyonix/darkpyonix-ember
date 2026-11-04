@@ -15,7 +15,8 @@ use compose_rust::runtime::{current_window_size, mutable_state_of, remember, Mut
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
-    Alignment, Color, IconRole, Paint, TextOverflow, TypeRole, WindowSizeClass,
+    Alignment, ButtonVariant, Color, IconRole, Paint, ShapeRole, TextOverflow, TypeRole,
+    WindowSizeClass,
 };
 
 pub use crate::ui::vcs::{
@@ -33,7 +34,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, Label, OptionSheet,
+    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, IconButton, Label, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -204,54 +205,19 @@ pub fn Unavailable(section: Section) {
     });
 }
 
-fn RepoCell(project: &ProjectBox, project_menu: &MutableState<bool>) {
-    let proj_name = display_name(&project.id);
-    let repo_line = project.repo_line();
-    let p_open = project_menu.clone();
-    EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(move || {
-            SmallNote("저장소");
-            PickChip(&proj_name, Some(IconRole::Library), false, false, move || {
-                p_open.set(true);
-            });
-            SmallNote(&repo_line);
-        });
-    });
+fn section_icon(sec: Section) -> Option<IconRole> {
+    match sec {
+        Section::Changes => Some(IconRole::List),
+        Section::History => Some(IconRole::History),
+        Section::Branches => Some(IconRole::Sidebar),
+        Section::PullRequests => Some(IconRole::Forward),
+        Section::Stash => Some(IconRole::Inbox),
+        Section::Conflicts => Some(IconRole::Close),
+        Section::Team => Some(IconRole::More),
+    }
 }
 
-fn BranchCell(branch_text: &str, upstream: &str, branch_menu: &MutableState<bool>) {
-    let b_open = branch_menu.clone();
-    let branch_str = branch_text.to_string();
-    let upstream_str = upstream.to_string();
-    EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(move || {
-            SmallNote("현재 브랜치");
-            PickChip(&branch_str, None, false, false, move || {
-                b_open.set(true);
-            });
-            SmallNote(&upstream_str);
-        });
-    });
-}
-
-fn RemoteCell(action: RemoteAction, has: bool, remote_line: &str) {
-    let line_str = remote_line.to_string();
-    let label = action.label();
-    EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(move || {
-            SmallNote("원격 origin");
-            cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-                // TODO(server, #168): pull, push and fetch run on the project's computer.
-                AppButton(&label, None, ButtonKind::Primary, true, has, false, move || {
-                    notice::post(soon_line("원격 동작"));
-                });
-            });
-            SmallNote(&line_str);
-        });
-    });
-}
-
-/// The bar of three: repository, current branch, remote origin.
+/// The bar of three: repository, current branch, remote origin in ONE split card.
 pub fn RepoBar(
     projects: &[(String, String)],
     project: &ProjectBox,
@@ -259,6 +225,7 @@ pub fn RepoBar(
     compact: bool,
     mut on_pick: impl FnMut(String) + Clone + 'static,
 ) {
+    let p = ember_theme().palette;
     let project_menu = remember(|| mutable_state_of(false));
     let branch_menu = remember(|| mutable_state_of(false));
 
@@ -285,6 +252,8 @@ pub fn RepoBar(
     let current_branch = snap.map(|s| s.branch.clone());
 
     let proj_id = project.id.clone();
+    let proj_name = display_name(&project.id);
+    let repo_line = project.repo_line();
     let project_opts: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
     let chosen_proj = projects.iter().position(|(id, _)| id == &proj_id);
 
@@ -301,25 +270,106 @@ pub fn RepoBar(
     let b_dismiss = branch_menu.clone();
 
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-        if compact {
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).content(|| {
-                RepoCell(project, &project_menu);
-                BranchCell(&branch_text, &upstream, &branch_menu);
-                RemoteCell(action, has, &remote_line);
-            });
-        } else {
-            cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    RepoCell(project, &project_menu);
+        let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
+        EmberCard(false, true, None, Some(0.0), None, || {
+            if compact {
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                    let p_open = project_menu_c.clone();
+                    let p_name = proj_name.clone();
+                    let r_line = repo_line.clone();
+                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
+                        SmallNote("저장소");
+                        cu::Button(format!("{p_name}  \u{25be}"))
+                            .variant(ButtonVariant::Text)
+                            .color(paint(p.text))
+                            .modifier(Modifier::new().height(36.0))
+                            .on_click(move || p_open.set(true));
+                        SmallNote(&r_line);
+                    });
+
+                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+
+                    let b_open = branch_menu_c.clone();
+                    let b_text = branch_text.clone();
+                    let u_text = upstream.clone();
+                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
+                        SmallNote("현재 브랜치");
+                        cu::Button(format!("{b_text}  \u{25be}"))
+                            .variant(ButtonVariant::Text)
+                            .color(paint(p.text))
+                            .modifier(Modifier::new().height(36.0))
+                            .on_click(move || b_open.set(true));
+                        SmallNote(&u_text);
+                    });
+
+                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+
+                    let r_line2 = remote_line.clone();
+                    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
+                        SmallNote("원격 origin");
+                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+                            AppButton(&action.label(), None, ButtonKind::Primary, true, has, false, move || {
+                                notice::post(soon_line("원격 동작"));
+                            });
+                            cu::Row().spacing(4.0).content(|| {
+                                IconButton(IconRole::History, true, || notice::post(soon_line("Fetch")));
+                                IconButton(IconRole::Back, true, || notice::post(soon_line("Pull")));
+                                IconButton(IconRole::Forward, true, || notice::post(soon_line("Push")));
+                            });
+                        });
+                        SmallNote(&r_line2);
+                    });
                 });
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    BranchCell(&branch_text, &upstream, &branch_menu);
+            } else {
+                cu::Row().modifier(Modifier::new().fill_max_width().height(114.0)).alignment(Alignment::CenterStart).content(move || {
+                    let p_open = project_menu_c.clone();
+                    let p_name = proj_name.clone();
+                    let r_line = repo_line.clone();
+                    cu::Column().modifier(Modifier::new().weight(1.1).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
+                        SmallNote("저장소");
+                        cu::Button(format!("{p_name}  \u{25be}"))
+                            .variant(ButtonVariant::Text)
+                            .color(paint(p.text))
+                            .modifier(Modifier::new().height(36.0))
+                            .on_click(move || p_open.set(true));
+                        SmallNote(&r_line);
+                    });
+
+                    cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
+
+                    let b_open = branch_menu_c.clone();
+                    let b_text = branch_text.clone();
+                    let u_text = upstream.clone();
+                    cu::Column().modifier(Modifier::new().weight(1.1).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
+                        SmallNote("현재 브랜치");
+                        cu::Button(format!("{b_text}  \u{25be}"))
+                            .variant(ButtonVariant::Text)
+                            .color(paint(p.text))
+                            .modifier(Modifier::new().height(36.0))
+                            .on_click(move || b_open.set(true));
+                        SmallNote(&u_text);
+                    });
+
+                    cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
+
+                    let r_line2 = remote_line.clone();
+                    cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
+                        SmallNote("원격 origin");
+                        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+                            AppButton(&action.label(), None, ButtonKind::Primary, true, has, false, move || {
+                                notice::post(soon_line("원격 동작"));
+                            });
+                            cu::Row().spacing(4.0).content(|| {
+                                IconButton(IconRole::History, true, || notice::post(soon_line("Fetch")));
+                                IconButton(IconRole::Back, true, || notice::post(soon_line("Pull")));
+                                IconButton(IconRole::Forward, true, || notice::post(soon_line("Push")));
+                            });
+                        });
+                        SmallNote(&r_line2);
+                    });
                 });
-                cu::Column().modifier(Modifier::new().weight(1.5)).content(|| {
-                    RemoteCell(action, has, &remote_line);
-                });
-            });
-        }
+            }
+        });
 
         // OptionSheets for project and branch dialogs
         // TODO(compose-rust#383): anchored popup placed below or beside anchor
@@ -356,35 +406,38 @@ pub fn SectionList(
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
-    cu::Column().modifier(Modifier::new().width(200.0)).spacing(SP[0]).content(|| {
+    cu::Column().modifier(Modifier::new().width(200.0)).spacing(2.0).content(|| {
         for sec in Section::ALL {
             let is_active = sec == active;
-            let bg = if is_active { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+            let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
             let fg = if is_active { p.text } else { p.muted };
             let count = section_count(sec, snap);
             let mut pick = on_pick.clone();
 
-            // TODO(compose-rust#372): Clickable container until #372 lands
-            Clickable(
-                Modifier::new()
-                    .fill_max_width()
-                    .height(H_NAV_ITEM)
-                    .background(bg)
-                    .corner_radius(H_NAV_ITEM / 2.0),
-                Alignment::CenterStart,
-                move || pick(sec),
-                move || {
-                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                        Label(sec.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        if let Some(n) = count {
-                            Label(&n.to_string(), Fs::Xs, Weight::Regular, Some(paint(if is_active { p.text } else { p.muted })), Some(1));
-                        }
-                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                    });
-                },
-            );
+            let label_text = if let Some(n) = count {
+                format!("{}  {n}", sec.label())
+            } else {
+                sec.label().to_string()
+            };
+
+            let mut m = Modifier::new()
+                .fill_max_width()
+                .height(40.0)
+                .background(bg)
+                .corner_radius(CORNER_SM);
+            if is_active {
+                m = m.border(1.0, paint(p.line));
+            }
+
+            let mut btn = cu::Button(label_text)
+                .variant(ButtonVariant::Text)
+                .color(paint(fg))
+                .modifier(m)
+                .on_click(move || pick(sec));
+            if let Some(icon) = section_icon(sec) {
+                btn = btn.icon(icon);
+            }
+            drop(btn);
         }
     });
 }
@@ -426,85 +479,236 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
         .file(&file.path)
         .map_or((0, file.added() + file.removed()), |s| s.counts(file));
 
-    cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
-        // File header row
-        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-            Label(&file.path, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+    let (tone_fill, tone_text) = match file.status {
+        FileStatus::Modified => (p.orange.soft, p.orange.strong),
+        FileStatus::Added => (p.green.soft, p.green.strong),
+        FileStatus::Deleted => (p.red.soft, p.red.strong),
+        FileStatus::Renamed => (p.blue.soft, p.blue.strong),
+    };
+
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+        // File header row (52 px)
+        cu::Row().modifier(Modifier::new().fill_max_width().height(52.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                Label(file.status.letter(), Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+            Txt(&file.path, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
             cu::Spacer().modifier(Modifier::new().weight(1.0));
-            Pill(&format!("+{}", file.added()), PillTone::Green, true);
-            Pill(&format!("-{}", file.removed()), PillTone::Red, true);
+            Label(&format!("+{}", file.added()), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
+            Label(&format!("-{}", file.removed()), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
             Pill(&format!("{on}/{total}줄 스테이징"), PillTone::Grey, true);
         });
 
+        cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+
         if file.binary {
-            Label("이진 파일은 차이를 보여 주지 않습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                Label("이진 파일은 차이를 보여 주지 않습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            });
         }
 
         for (hi, h) in file.hunks.iter().enumerate() {
-            // Hunk header row
-            cu::Row().modifier(Modifier::new().fill_max_width().height(32.0).background(paint(p.surface_2)).corner_radius(CORNER_XS).padding(SP[1])).alignment(Alignment::CenterStart).content(|| {
-                Label(&h.header, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+            // Hunk header row (45 px)
+            cu::Row().modifier(Modifier::new().fill_max_width().height(45.0).background(paint(p.surface_2)).padding(SP[2])).alignment(Alignment::CenterStart).content(|| {
+                Label(&h.header, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
-                AppButton("이 덩어리 전체", None, ButtonKind::Default, true, true, false, move || {
-                    let mut s = st_hunk.get();
-                    s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
-                    st_hunk.set(s);
-                });
+                cu::Button("이 덩어리 전체")
+                    .variant(ButtonVariant::Text)
+                    .color(paint(p.text))
+                    .modifier(
+                        Modifier::new()
+                            .width(102.0)
+                            .height(32.0)
+                            .border(2.0, paint(p.ink))
+                            .background(paint(p.surface))
+                            .shape_role(ShapeRole::Full),
+                    )
+                    .on_click(move || {
+                        let mut s = st_hunk.get();
+                        s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
+                        st_hunk.set(s);
+                    });
             });
 
-            // Hunk lines
-            for (li, l) in h.lines.iter().enumerate() {
-                let bg = match l.kind {
-                    LineKind::Add => paint(p.green.soft),
-                    LineKind::Del => paint(p.red.soft),
-                    LineKind::Context => Paint::Literal(Color::argb(0)),
-                };
-                cu::Row().modifier(Modifier::new().fill_max_width().height(22.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
-                    if l.is_change() {
-                        let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
-                        let glyph = check_glyph(if is_line_staged { Check::On } else { Check::Off });
-                        let st_line = staging.clone();
-                        let f_line = file.clone();
-                        // TODO(compose-rust#372): Clickable container until #372 lands
-                        Clickable(
-                            Modifier::new().width(24.0).height(22.0),
-                            Alignment::Center,
-                            move || {
-                                let mut s = st_line.get();
-                                s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
-                                st_line.set(s);
-                            },
-                            move || {
-                                Label(glyph, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                            },
-                        );
-                    } else {
-                        cu::Spacer().modifier(Modifier::new().width(24.0));
-                    }
+            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
-                    let line_str = format!(
-                        "{:>4} {:>4} {}{}",
-                        l.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                        l.new_no.map(|n| n.to_string()).unwrap_or_default(),
-                        match l.kind {
+            // Hunk lines (each exactly 21.0 px high, spacing 0.0)
+            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(0.0).content(|| {
+                for (li, l) in h.lines.iter().enumerate() {
+                    let bg = match l.kind {
+                        LineKind::Add => paint(p.green.soft),
+                        LineKind::Del => paint(p.red.soft),
+                        LineKind::Context => Paint::Literal(Color::argb(0)),
+                    };
+                    cu::Row().modifier(Modifier::new().fill_max_width().height(21.0).background(bg)).alignment(Alignment::CenterStart).content(|| {
+                        if l.is_change() {
+                            let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
+                            let st_line = staging.clone();
+                            let f_line = file.clone();
+                            cu::Box().modifier(Modifier::new().width(26.0).height(21.0)).alignment(Alignment::Center).content(|| {
+                                cu::Checkbox(is_line_staged)
+                                    .modifier(Modifier::new().size(14.0, 14.0))
+                                    .on_change(move |_| {
+                                        let mut s = st_line.get();
+                                        s.file_mut(&f_line.path).toggle_line(&f_line, hi, li);
+                                        st_line.set(s);
+                                    });
+                            });
+                        } else {
+                            cu::Spacer().modifier(Modifier::new().width(26.0));
+                        }
+
+                        let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                        let new_str = l.new_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
+                        let sign_str = match l.kind {
                             LineKind::Add => "+",
                             LineKind::Del => "-",
                             LineKind::Context => " ",
-                        },
-                        l.text
-                    );
-                    Txt(
-                        &line_str,
-                        TypeRole::Mono,
-                        Some(paint(p.text)),
-                        Some(1),
-                        Some(TextOverflow::Ellipsis),
-                        None,
-                        None,
-                    );
-                });
+                        };
+
+                        cu::Box().modifier(Modifier::new().width(36.0)).alignment(Alignment::CenterEnd).content(|| {
+                            Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                        cu::Box().modifier(Modifier::new().width(36.0)).alignment(Alignment::CenterEnd).content(|| {
+                            Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                        cu::Box().modifier(Modifier::new().width(16.0)).alignment(Alignment::Center).content(|| {
+                            Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                        Txt(
+                            &l.text,
+                            TypeRole::Mono,
+                            Some(paint(p.text)),
+                            Some(1),
+                            Some(TextOverflow::Ellipsis),
+                            None,
+                            None,
+                        );
+                    });
+                }
+            });
+        }
+    });
+}
+
+fn FilesHeader(
+    diffs_len: usize,
+    all_checks: &[Check],
+    staging: &MutableState<Staging>,
+    diffs: &[FileDiff],
+) {
+    let p = ember_theme().palette;
+    let st_toggle = staging.clone();
+    let d_toggle = diffs.to_vec();
+    let all_on = folder_check(all_checks) == Check::On;
+    cu::Row().modifier(Modifier::new().fill_max_width().height(48.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
+        cu::Checkbox(all_on)
+            .modifier(Modifier::new().size(18.0, 18.0))
+            .on_change(move |_| {
+                let mut s = st_toggle.get();
+                s.toggle_all(&d_toggle);
+                st_toggle.set(s);
+            });
+        cu::Spacer().modifier(Modifier::new().width(SP[0]));
+        Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
+        cu::Spacer().modifier(Modifier::new().weight(1.0));
+        IconButton(IconRole::Inbox, true, move || {
+            notice::post(soon_line("스태시"));
+        });
+    });
+}
+
+fn FilesTree(
+    diffs: &[FileDiff],
+    staging: &MutableState<Staging>,
+    folded: &MutableState<BTreeSet<String>>,
+    selected: &MutableState<usize>,
+    on_tab: impl FnMut(PaneTab) + Clone + 'static,
+) {
+    let p = ember_theme().palette;
+    let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
+    let rows = build_tree(&paths, &folded.get());
+    let sel = selected.get().min(diffs.len().saturating_sub(1));
+    let st = staging.get();
+
+    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[1])).spacing(0.0).content(move || {
+        if diffs.is_empty() {
+            cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                Label("변경 사항이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+            });
+        } else {
+            for row in rows.iter().cloned() {
+                match row {
+                    TreeRow::Dir { label, path, depth, open } => {
+                        let f_state = folded.clone();
+                        let pth = path.clone();
+                        let chev = if open { "\u{25be} " } else { "\u{25b8} " };
+                        let indent = if depth > 0 { "  ".repeat(depth) } else { String::new() };
+                        let dir_label = format!("{indent}{chev}{label}");
+                        cu::Button(dir_label)
+                            .variant(ButtonVariant::Text)
+                            .color(paint(p.text_2))
+                            .modifier(Modifier::new().fill_max_width().height(34.0))
+                            .on_click(move || {
+                                let mut f = f_state.get();
+                                if !f.remove(&pth) {
+                                    f.insert(pth.clone());
+                                }
+                                f_state.set(f);
+                            });
+                    }
+                    TreeRow::File { index, name, depth } => {
+                        let is_selected = index == sel;
+                        let diff_file = diffs[index].clone();
+                        let is_staged = st.check(&diff_file);
+                        let letter = diff_file.status.letter();
+                        let (tone_fill, tone_text) = match diff_file.status {
+                            FileStatus::Modified => (p.orange.soft, p.orange.strong),
+                            FileStatus::Added => (p.green.soft, p.green.strong),
+                            FileStatus::Deleted => (p.red.soft, p.red.strong),
+                            FileStatus::Renamed => (p.blue.soft, p.blue.strong),
+                        };
+                        let bg = if is_selected { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+                        let st_file = staging.clone();
+                        let sel_state = selected.clone();
+                        let mut on_tab_file = on_tab.clone();
+                        let d_file = diff_file.clone();
+
+                        cu::Row().modifier(Modifier::new().fill_max_width().height(34.0).background(bg).corner_radius(CORNER_XS)).alignment(Alignment::CenterStart).content(move || {
+                            if depth > 0 {
+                                cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
+                            }
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            cu::Checkbox(is_staged == Check::On)
+                                .modifier(Modifier::new().size(18.0, 18.0))
+                                .on_change(move |_| {
+                                    let mut s = st_file.get();
+                                    s.toggle_file(&d_file);
+                                    st_file.set(s);
+                                });
+                            cu::Spacer().modifier(Modifier::new().width(4.0));
+                            let file_btn_name = name.clone();
+                            cu::Button(file_btn_name)
+                                .variant(ButtonVariant::Text)
+                                .color(paint(p.text))
+                                .modifier(Modifier::new().weight(1.0).height(34.0))
+                                .on_click(move || {
+                                    sel_state.set(index);
+                                    on_tab_file(tab_after_select(PaneTab::Files));
+                                });
+                            cu::Box().modifier(Modifier::new().size(18.0, 18.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                                Label(letter, Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        });
+                    }
+                }
             }
         }
     });
@@ -517,129 +721,20 @@ fn FilesPane(
     selected: &MutableState<usize>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
-    let p = ember_theme().palette;
-    let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
-    let rows = build_tree(&paths, &folded.get());
-    let sel = selected.get().min(diffs.len().saturating_sub(1));
     let st = staging.get();
     let all_checks: Vec<Check> = diffs.iter().map(|d| st.check(d)).collect();
-    let header_glyph = check_glyph(folder_check(&all_checks));
     let diffs_len = diffs.len();
+    let d_clone = diffs.to_vec();
+    let st_clone = staging.clone();
+    let fold_clone = folded.clone();
+    let sel_clone = selected.clone();
+    let p = ember_theme().palette;
 
-    let st_toggle = staging.clone();
-    let d_toggle = diffs.to_vec();
-
-    EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(move || {
-            // Header row: toggle all
-            // TODO(compose-rust#372): Clickable container until #372 lands
-            Clickable(
-                Modifier::new().fill_max_width().height(36.0),
-                Alignment::CenterStart,
-                move || {
-                    let mut s = st_toggle.get();
-                    s.toggle_all(&d_toggle);
-                    st_toggle.set(s);
-                },
-                move || {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        Label(header_glyph, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
-                        Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
-                    });
-                },
-            );
-
-            if diffs.is_empty() {
-                Label("변경 사항이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-            } else {
-                for row in rows.iter().cloned() {
-                    match row {
-                        TreeRow::Dir { label, path, depth, open } => {
-                            let f_state = folded.clone();
-                            let pth = path.clone();
-                            // TODO(compose-rust#372): Clickable container until #372 lands
-                            Clickable(
-                                Modifier::new().fill_max_width().height(32.0),
-                                Alignment::CenterStart,
-                                move || {
-                                    let mut f = f_state.get();
-                                    if !f.remove(&pth) {
-                                        f.insert(pth.clone());
-                                    }
-                                    f_state.set(f);
-                                },
-                                move || {
-                                    cu::Row().alignment(Alignment::CenterStart).content(|| {
-                                        if depth > 0 {
-                                            cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
-                                        }
-                                        let chev = if open { "\u{25be} " } else { "\u{25b8} " };
-                                        Label(&format!("{chev}{label}"), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                                    });
-                                },
-                            );
-                        }
-                        TreeRow::File { index, name, depth } => {
-                            let is_selected = index == sel;
-                            let diff_file = diffs[index].clone();
-                            let is_staged = st.check(&diff_file);
-                            let st_glyph = check_glyph(is_staged);
-                            let letter = diff_file.status.letter();
-                            let (tone_fill, tone_text) = match diff_file.status {
-                                FileStatus::Modified => (p.orange.soft, p.orange.strong),
-                                FileStatus::Added => (p.green.soft, p.green.strong),
-                                FileStatus::Deleted => (p.red.soft, p.red.strong),
-                                FileStatus::Renamed => (p.blue.soft, p.blue.strong),
-                            };
-                            let bg = if is_selected { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
-                            let st_file = staging.clone();
-                            let sel_state = selected.clone();
-                            let mut on_tab_file = on_tab.clone();
-                            let d_file = diff_file.clone();
-
-                            cu::Row().modifier(Modifier::new().fill_max_width().background(bg).corner_radius(CORNER_XS)).alignment(Alignment::CenterStart).content(|| {
-                                if depth > 0 {
-                                    cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
-                                }
-                                // Checkbox button
-                                // TODO(compose-rust#372): Clickable container until #372 lands
-                                Clickable(
-                                    Modifier::new().width(24.0).height(32.0),
-                                    Alignment::Center,
-                                    move || {
-                                        let mut s = st_file.get();
-                                        s.toggle_file(&d_file);
-                                        st_file.set(s);
-                                    },
-                                    move || {
-                                        Label(st_glyph, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
-                                    },
-                                );
-                                // File row
-                                // TODO(compose-rust#372): Clickable container until #372 lands
-                                Clickable(
-                                    Modifier::new().weight(1.0).height(32.0),
-                                    Alignment::CenterStart,
-                                    move || {
-                                        sel_state.set(index);
-                                        on_tab_file(tab_after_select(PaneTab::Files));
-                                    },
-                                    move || {
-                                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                                            Label(&name, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
-                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                            cu::Box().modifier(Modifier::new().width(18.0).height(18.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
-                                                Label(letter, Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
-                                            });
-                                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                        });
-                                    },
-                                );
-                            });
-                        }
-                    }
-                }
-            }
+    EmberCard(false, true, None, Some(0.0), None, move || {
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+            FilesHeader(diffs_len, &all_checks, &st_clone, &d_clone);
+            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            FilesTree(&d_clone, &st_clone, &fold_clone, &sel_clone, on_tab);
         });
     });
 }
@@ -648,18 +743,20 @@ fn DiffPane(diffs: &[FileDiff], selected: usize, staging: &MutableState<Staging>
     let p = ember_theme().palette;
     let selected_file = diffs.get(selected).cloned();
     let st_diff = staging.clone();
-    EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(move || {
+    EmberCard(false, true, None, Some(0.0), None, move || {
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             if let Some(file) = selected_file {
                 DiffView(&file, &st_diff);
             } else {
-                Label("변경 사항이 없습니다. 작업 트리가 깨끗합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
+                    Label("변경 사항이 없습니다. 작업 트리가 깨끗합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                });
             }
         });
     });
 }
 
-fn CommitPane(
+fn CommitBox(
     branch: &str,
     staged_files: usize,
     summary: &MutableState<String>,
@@ -672,54 +769,54 @@ fn CommitPane(
     let branch_name = branch.to_string();
     let can_commit = commit_enabled(&summary.get(), staged_files, is_amend);
 
-    EmberCard(false, true, None, Some(SP[2]), None, move || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[2]).content(move || {
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
-                on_value_change: Some(Box::new(move |v: String| {
-                    sum_state.set(v);
-                })),
-                ..Default::default()
-            });
-
-            // Amend switch/checkbox
-            // TODO(compose-rust#372): Clickable container until #372 lands
-            let am = amend_state.clone();
-            Clickable(
-                Modifier::new().fill_max_width().height(32.0),
-                Alignment::CenterStart,
-                move || {
-                    am.set(!is_amend);
-                },
-                move || {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        let glyph = if is_amend { "\u{2611}" } else { "\u{2610}" };
-                        Label(glyph, Fs::Md, Weight::Regular, Some(paint(p.text)), Some(1));
-                        Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-                    });
-                },
-            );
-
-            AppButton(
-                &commit_label(&branch_name, staged_files),
-                Some(IconRole::Check),
-                ButtonKind::Primary,
-                false,
-                can_commit,
-                true,
-                move || {
-                    notice::post(soon_line("커밋"));
-                },
-            );
-
-            let note_text = if can_commit {
-                SOON.to_string()
-            } else {
-                "요약과 스테이징한 파일이 필요합니다".to_string()
-            };
-            Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[2]).content(move || {
+        EmberField(FieldOptions {
+            fill_max_width: true,
+            placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
+            on_value_change: Some(Box::new(move |v: String| {
+                sum_state.set(v);
+            })),
+            ..Default::default()
         });
+
+        // Amend checkbox
+        cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            let am = amend_state.clone();
+            cu::Checkbox(is_amend)
+                .modifier(Modifier::new().size(18.0, 18.0))
+                .on_change(move |v| am.set(v));
+            Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+        });
+
+        AppButton(
+            &commit_label(&branch_name, staged_files),
+            Some(IconRole::Check),
+            ButtonKind::Primary,
+            false,
+            can_commit,
+            true,
+            move || {
+                notice::post(soon_line("커밋"));
+            },
+        );
+
+        let note_text = if can_commit {
+            SOON.to_string()
+        } else {
+            "요약과 스테이징한 파일이 필요합니다".to_string()
+        };
+        Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+    });
+}
+
+fn CommitPane(
+    branch: &str,
+    staged_files: usize,
+    summary: &MutableState<String>,
+    amend: &MutableState<bool>,
+) {
+    EmberCard(false, true, None, Some(0.0), None, move || {
+        CommitBox(branch, staged_files, summary, amend);
     });
 }
 
@@ -730,6 +827,7 @@ pub fn ChangesPane(
     tab: Option<PaneTab>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
+    let p = ember_theme().palette;
     let diffs = snap.changes.clone();
     let staging = remember(|| mutable_state_of(Staging::new(&diffs, false)));
     let folded = remember(|| mutable_state_of(BTreeSet::<String>::new()));
@@ -739,38 +837,90 @@ pub fn ChangesPane(
 
     let sel = selected.get().min(diffs.len().saturating_sub(1));
     let staged_files = staging.get().staged_files(&diffs);
+    let st = staging.get();
+    let all_checks: Vec<Check> = diffs.iter().map(|d| st.check(d)).collect();
+    let diffs_len = diffs.len();
 
     match layout {
         PaneLayout::Two => {
             // The panes scroll on their own inside a bounded row. A row in an unbounded
             // scroll centres its shorter children vertically (TODO(compose-rust#389)).
-            cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).spacing(GAP_CARD).content(|| {
-                cu::ScrollColumn().modifier(Modifier::new().width(320.0).fill_max_height()).content(|| {
-                    FilesPane(&diffs, &staging, &folded, &selected, on_tab.clone());
-                });
-                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                    cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(|| {
-                        DiffPane(&diffs, sel, &staging);
-                        CommitPane(&snap.branch, staged_files, &summary, &amend);
+            let d_files = diffs.clone();
+            let st_files = staging.clone();
+            let fold_files = folded.clone();
+            let sel_files = selected.clone();
+            let on_tab_files = on_tab.clone();
+            let branch = snap.branch.clone();
+            let sum_files = summary.clone();
+            let am_files = amend.clone();
+
+            cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).spacing(GAP_CARD).content(move || {
+                // Left card: file tree + commit box
+                cu::Column().modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
+                    EmberCard(false, true, None, Some(0.0), None, move || {
+                        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(move || {
+                            FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(move || {
+                                FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
+                            });
+                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            CommitBox(&branch, staged_files, &sum_files, &am_files);
+                        });
                     });
+                });
+
+                // Right card: diff
+                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(move || {
+                    DiffPane(&diffs, sel, &staging);
                 });
             });
         }
         PaneLayout::Stacked => {
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(|| {
-                FilesPane(&diffs, &staging, &folded, &selected, on_tab.clone());
+            let d_files = diffs.clone();
+            let st_files = staging.clone();
+            let fold_files = folded.clone();
+            let sel_files = selected.clone();
+            let on_tab_files = on_tab.clone();
+            let branch = snap.branch.clone();
+            let sum_files = summary.clone();
+            let am_files = amend.clone();
+
+            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
+                EmberCard(false, true, None, Some(0.0), None, move || {
+                    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                        FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                        cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                        FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
+                        cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                        CommitBox(&branch, staged_files, &sum_files, &am_files);
+                    });
+                });
                 DiffPane(&diffs, sel, &staging);
-                CommitPane(&snap.branch, staged_files, &summary, &amend);
             });
         }
         PaneLayout::Tabs => {
             let mut on_tab_pick = on_tab.clone();
-            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(|| {
+            let d_files = diffs.clone();
+            let st_files = staging.clone();
+            let fold_files = folded.clone();
+            let sel_files = selected.clone();
+            let on_tab_files = on_tab.clone();
+
+            cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging),
                     PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &amend),
-                    _ => FilesPane(&diffs, &staging, &folded, &selected, on_tab),
+                    _ => {
+                        EmberCard(false, true, None, Some(0.0), None, move || {
+                            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                                FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
+                            });
+                        });
+                    }
                 }
             });
         }
@@ -837,7 +987,7 @@ pub fn VcsScreenWith(
     let layout = pane_layout(class);
     let wide = section_nav(class) == SectionNav::List;
     let compact = class == WindowSizeClass::Compact;
-    let pad = if compact { SP[2] } else { SP[3] };
+    let pad = if compact { SP[2] } else { 32.0 };
 
     let section = remember(|| mutable_state_of(Section::Changes));
     let tab = remember(|| mutable_state_of(PaneTab::Files));
@@ -854,7 +1004,17 @@ pub fn VcsScreenWith(
     let active_tab = effective_tab(sec, tab.get());
 
     let body = || {
-                Label("버전 관리", Fs::Xl2, Weight::Semibold, None, None);
+        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(4.0).content(|| {
+            Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
+            if let Some(ref proj) = project {
+                let repo_name = proj.repo.as_deref().unwrap_or("darkpyonix-ember");
+                let repo_short = repo_name.split('/').last().unwrap_or(repo_name);
+                let branch_name = snap.as_ref().map_or("feat/session-shim", |s| &s.branch);
+                let changes_cnt = snap.as_ref().map_or(0, |s| s.changes.len());
+                let subtitle = format!("{repo_short} \u{00b7} {branch_name} \u{00b7} 변경 {changes_cnt} \u{00b7} PR 4");
+                Label(&subtitle, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
+        });
 
         if let Some(project) = project {
                     let sel_proj = selected_proj.clone();

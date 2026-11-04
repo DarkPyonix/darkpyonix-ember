@@ -23,7 +23,7 @@ use compose_rust::runtime::{
 };
 use compose_rust::ui::{self as cu, Modifier};
 use compose_rust::{
-    Alignment, ColorRole, IconRole, Paint, SpaceRole, TextAlign, TextOverflow, TypeRole,
+    Alignment, ColorRole, IconRole, Paint, ShapeRole, SpaceRole, TextAlign, TextOverflow, TypeRole,
 };
 
 use ember_client::transcript::{ApprovalState, TranscriptItem};
@@ -43,13 +43,13 @@ use crate::ui::Route;
 
 use super::compat::{Badge, Banner, CodeText, MessageText, Spinner, StatusIndicator};
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, IconButton, Label, OptionSheet,
-    Pill, PillTone, Txt,
+    AppButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, IconButton, Label,
+    OptionSheet, Pill, PillTone, Txt,
 };
 use super::ko;
 use super::launcher::{ConnectionBanner, export, patch_session};
 use super::notice;
-use super::shell::NavIcon;
+use super::shell::{ICON_PLUS_SVG, NavIcon};
 use super::theme::*;
 
 pub const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
@@ -57,6 +57,56 @@ pub const ICON_TERMINAL_SVG: &str = include_str!("../../../assets/nav/terminal.s
 pub const ICON_SEND_SVG: &str = include_str!("../../../assets/nav/send.svg");
 
 const POPUP_W: f32 = 280.0;
+
+/// Estimate the rendered height (dp) of a single transcript item so constrained viewports
+/// can anchor to the latest messages at the bottom (workaround for compose-rust#385).
+pub fn estimate_item_height(item: &TranscriptItem, open: bool) -> f32 {
+    match item {
+        TranscriptItem::User { .. } => 48.0,
+        TranscriptItem::Assistant { .. } => 40.0,
+        TranscriptItem::ToolCall { result, .. } => {
+            if open {
+                180.0
+            } else if result.as_ref().is_some_and(|r| !r.output.trim().is_empty()) {
+                104.0
+            } else {
+                54.0
+            }
+        }
+        TranscriptItem::Approval { state, .. } => match state {
+            ApprovalState::Pending => 188.0,
+            _ => 120.0,
+        },
+        _ => 34.0,
+    }
+}
+
+/// Return the starting index of `items` so the tail slice fits within `avail_h` dp.
+pub fn tail_start_index(
+    items: &[TranscriptItem],
+    expanded: &HashSet<String>,
+    avail_h: f32,
+) -> usize {
+    if items.len() <= 1 || avail_h <= 0.0 {
+        return 0;
+    }
+    let budget = (avail_h - 16.0).max(160.0);
+    let mut used = 0.0;
+    let mut start = items.len();
+    for (idx, item) in items.iter().enumerate().rev() {
+        let open = match item {
+            TranscriptItem::ToolCall { call_id, .. } => expanded.contains(call_id),
+            _ => false,
+        };
+        let h = estimate_item_height(item, open) + 8.0;
+        if used + h > budget && start < items.len() {
+            break;
+        }
+        used += h;
+        start = idx;
+    }
+    start
+}
 
 fn demo_blocked_cr() -> bool {
     match crate::demo::unavailable(services().demo.is_some()) {
@@ -626,8 +676,17 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         );
                                     });
                             } else {
-                                let items_row = items.clone();
-                                let _keys_row = keys.clone();
+                                let avail_h = window.height_dp
+                                    - (if embedded {
+                                        60.0 + 52.0 + 110.0
+                                    } else {
+                                        150.0 + 90.0
+                                    })
+                                    - (if window.width_dp <= 560.0 { 112.0 } else { 0.0 });
+                                let exp_set = expanded.get();
+                                let start_idx = tail_start_index(&items, &exp_set, avail_h);
+                                let items_row = items[start_idx..].to_vec();
+                                let _keys_row = keys[start_idx..].to_vec();
                                 let sid_row = sid.clone();
                                 let agent_row = agent.clone();
                                 let exp_row = expanded.clone();
@@ -638,11 +697,11 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     )
                                     .content(move || {
                                         cu::Column()
-                                            .space_role(SpaceRole::Sm)
+                                            .spacing(SP[1])
                                             .modifier(
                                                 Modifier::new()
                                                     .fill_max_width()
-                                                    .padding_role(SpaceRole::Sm),
+                                                    .padding(SP[1]),
                                             )
                                             .content(move || {
                                                 for item in items_row.iter() {
@@ -654,7 +713,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                                         &ans_row,
                                                     );
                                                 }
-                                                cu::Spacer().modifier(Modifier::new().height(24.0));
+                                                cu::Spacer().modifier(Modifier::new().height(12.0));
                                             });
                                     });
                             }
@@ -788,77 +847,121 @@ pub fn ConversationView(id: &str, embedded: bool) {
                     // ---- composer --------------------------------------------------------------
                     let _gen = composer_generation.get();
                     if embedded {
-                        cu::Column()
-                            .space_role(SpaceRole::Sm)
-                            .modifier(
-                                Modifier::new()
-                                    .fill_max_width()
-                                    .background(paint(p.surface))
-                                    .border(1.0, paint(p.line))
-                                    .corner_radius(CORNER_XL)
-                                    .padding(SP[2]),
-                            )
+                        let nav_w = if window.width_dp >= 1280.0 {
+                            SIDE_W
+                        } else if window.width_dp > 560.0 {
+                            RAIL_W
+                        } else {
+                            0.0
+                        };
+                        let side_w = if window.width_dp >= 900.0 {
+                            crate::ui::session::SIDE_LIST_W
+                        } else if window.width_dp > 560.0 {
+                            64.0
+                        } else {
+                            0.0
+                        };
+                        let rpanel_w = if window.width_dp >= 840.0 {
+                            crate::ui::session::INFO_PANEL_W
+                        } else {
+                            0.0
+                        };
+                        let avail_w =
+                            (window.width_dp - nav_w - side_w - rpanel_w - 32.0).max(260.0);
+                        let comp_w = avail_w.min(740.0);
+                        let is_phone = window.width_dp <= 560.0;
+
+                        cu::Box()
+                            .alignment(Alignment::Center)
+                            .modifier(Modifier::new().fill_max_width())
                             .content(|| {
-                                let send_sub = send.clone();
-                                EmberField(FieldOptions {
-                                    bare: true,
-                                    fill_max_width: true,
-                                    multiline: true,
-                                    placeholder: if busy {
-                                        "다음 턴에 보낼 메시지를 입력하세요".to_string()
-                                    } else {
-                                        "무엇이든 물어보세요. @@로 세션 멘션".to_string()
-                                    },
-                                    on_value_change: Some(Box::new(on_draft.clone())),
-                                    on_submit: Some(Box::new(move |v| send_sub(v))),
-                                    ..Default::default()
-                                });
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .space_role(SpaceRole::Xs)
-                                    .modifier(Modifier::new().fill_max_width())
+                                cu::Column()
+                                    .spacing(SP[0])
+                                    .modifier(
+                                        Modifier::new()
+                                            .width(comp_w)
+                                            .background(paint(p.surface))
+                                            .border(1.0, paint(p.line))
+                                            .corner_radius(CORNER_XL)
+                                            .padding(SP[2]),
+                                    )
                                     .content(|| {
-                                        cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
-                                            super::session::ComposerChips(&sid);
+                                        let send_sub = send.clone();
+                                        EmberField(FieldOptions {
+                                            bare: true,
+                                            fill_max_width: true,
+                                            multiline: false,
+                                            height: Some(36.0),
+                                            placeholder: if busy {
+                                                "다음 턴에 보낼 메시지를 입력하세요".to_string()
+                                            } else if is_phone {
+                                                "무엇이든 물어보세요".to_string()
+                                            } else {
+                                                "무엇이든 물어보세요. @로 파일, /로 명령"
+                                                    .to_string()
+                                            },
+                                            on_value_change: Some(Box::new(on_draft.clone())),
+                                            on_submit: Some(Box::new(move |v| send_sub(v))),
+                                            ..Default::default()
                                         });
-                                        if busy {
-                                            let sid_int = sid.clone();
-                                            AppButton(
-                                                if compact { "" } else { "중단" },
-                                                Some(IconRole::Close),
-                                                ButtonKind::Default,
-                                                true,
-                                                true,
-                                                false,
-                                                move || {
-                                                    if demo_blocked_cr() {
-                                                        return;
-                                                    }
-                                                    let id_c = sid_int.clone();
-                                                    run_shared(
-                                                        async move {
-                                                            services()
-                                                                .client
-                                                                .interrupt(&id_c)
-                                                                .await
-                                                                .map_err(|e| e.to_string())
-                                                        },
-                                                        |r| {
-                                                            if let Err(e) = r {
-                                                                notice::post(format!(
-                                                                    "중단하지 못했습니다: {e}"
-                                                                ));
-                                                            }
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .modifier(Modifier::new().fill_max_width())
+                                            .content(|| {
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .size(30.0, 30.0)
+                                                        .background(paint(p.surface_2))
+                                                        .shape_role(ShapeRole::Full),
+                                                    Alignment::Center,
+                                                    || notice::post("파일 첨부는 준비 중입니다"),
+                                                    || {
+                                                        NavIcon(
+                                                            ICON_PLUS_SVG,
+                                                            p.text_2.to_argb(),
+                                                            16.0,
+                                                        )
+                                                    },
+                                                );
+                                                super::session::ModeChip(&sid, is_phone);
+                                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                                super::session::ModelChip(&sid, is_phone);
+                                                if busy {
+                                                    let sid_int = sid.clone();
+                                                    super::session::StopCircleButton(move || {
+                                                        if demo_blocked_cr() {
+                                                            return;
+                                                        }
+                                                        let id_c = sid_int.clone();
+                                                        run_shared(
+                                                            async move {
+                                                                services()
+                                                                    .client
+                                                                    .interrupt(&id_c)
+                                                                    .await
+                                                                    .map_err(|e| e.to_string())
+                                                            },
+                                                            |r| {
+                                                                if let Err(e) = r {
+                                                                    notice::post(format!(
+                                                                        "중단하지 못했습니다: {e}"
+                                                                    ));
+                                                                }
+                                                            },
+                                                        );
+                                                    });
+                                                } else {
+                                                    let send_btn = send.clone();
+                                                    let draft_btn = draft.clone();
+                                                    super::session::SendCircleButton(
+                                                        32.0,
+                                                        move || {
+                                                            send_btn(draft_btn.get_untracked());
                                                         },
                                                     );
-                                                },
-                                            );
-                                        }
-                                        let send_btn = send.clone();
-                                        let draft_btn = draft.clone();
-                                        IconButton(IconRole::Send, true, move || {
-                                            send_btn(draft_btn.get_untracked());
-                                        });
+                                                }
+                                            });
                                     });
                             });
                     } else {
@@ -1066,7 +1169,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
 /// One transcript entry (FR-L5..FR-L7, FR-S5).
 pub fn TranscriptRow(
     session: &str,
-    agent: &str,
+    _agent: &str,
     item: &TranscriptItem,
     expanded: &MutableState<HashSet<String>>,
     answering: &MutableState<HashSet<String>>,
@@ -1074,35 +1177,22 @@ pub fn TranscriptRow(
     let theme = ember_theme();
     let p = theme.palette;
     let sid = session.to_string();
-    let agent_name = agent.to_string();
 
     match item.clone() {
         TranscriptItem::User { text, .. } => {
             cu::Box()
                 .alignment(Alignment::CenterEnd)
-                .modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Xs))
+                .modifier(Modifier::new().fill_max_width())
                 .content(move || {
-                    cu::Column()
-                        .alignment(Alignment::CenterEnd)
-                        .space_role(SpaceRole::Xs)
+                    cu::Box()
+                        .modifier(
+                            Modifier::new()
+                                .background(paint(p.hover))
+                                .corner_radius(CORNER_BUBBLE)
+                                .padding(10.0),
+                        )
                         .content(move || {
-                            Label(
-                                "나",
-                                Fs::Xs,
-                                Weight::Regular,
-                                Some(paint(p.muted)),
-                                Some(1),
-                            );
-                            cu::Box()
-                                .modifier(
-                                    Modifier::new()
-                                        .background(paint(p.ink))
-                                        .corner_radius(CORNER_BUBBLE)
-                                        .padding(SP[2] + 4.0),
-                                )
-                                .content(move || {
-                                    MessageText(&text, Some(ColorRole::OnPrimary));
-                                });
+                            MessageText(&text, None);
                         });
                 });
         }
@@ -1111,40 +1201,22 @@ pub fn TranscriptRow(
         } => {
             cu::Box()
                 .alignment(Alignment::CenterStart)
-                .modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Xs))
+                .modifier(Modifier::new().fill_max_width().padding(2.0))
                 .content(move || {
-                    cu::Column().space_role(SpaceRole::Xs).content(move || {
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Xs)
-                            .content(move || {
-                                Label(
-                                    &agent_name,
-                                    Fs::Xs,
-                                    Weight::Regular,
-                                    Some(paint(p.muted)),
-                                    Some(1),
-                                );
-                                if streaming {
-                                    Spinner(10.0);
-                                }
-                            });
-                        cu::Box()
-                            .modifier(
-                                Modifier::new()
-                                    .background(paint(p.surface_2))
-                                    .corner_radius(CORNER_BUBBLE)
-                                    .padding(SP[2] + 4.0),
-                            )
-                            .content(move || {
-                                let shown = if streaming {
-                                    format!("{text}\u{2589}")
-                                } else {
-                                    text.clone()
-                                };
-                                MessageText(&shown, None);
-                            });
-                    });
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .spacing(SP[1])
+                        .content(move || {
+                            let shown = if streaming {
+                                format!("{text}\u{2589}")
+                            } else {
+                                text.clone()
+                            };
+                            MessageText(&shown, None);
+                            if streaming {
+                                Spinner(10.0);
+                            }
+                        });
                 });
         }
         TranscriptItem::ToolCall {
@@ -1175,20 +1247,20 @@ pub fn TranscriptRow(
                 .unwrap_or_default();
             let show_tail = has_result && !out_text.trim().is_empty();
 
-            EmberCard(false, true, None, Some(SP[2]), None, move || {
+            EmberCard(false, true, None, Some(SP[1]), None, move || {
                 cu::Column()
-                    .space_role(SpaceRole::Xs)
+                    .spacing(SP[0])
                     .modifier(Modifier::new().fill_max_width())
                     .content(move || {
                         cu::Row()
                             .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
+                            .spacing(SP[1])
                             .modifier(Modifier::new().fill_max_width())
                             .content(move || {
                                 if !has_result {
                                     Spinner(12.0);
                                 } else {
-                                    NavIcon(ICON_TERMINAL_SVG, p.muted.to_argb(), 16.0);
+                                    NavIcon(ICON_TERMINAL_SVG, p.muted.to_argb(), 15.0);
                                 }
                                 Label(&tool_name, Fs::Sm, Weight::Semibold, None, Some(1));
                                 cu::Box().modifier(Modifier::new().weight(1.0)).content(
@@ -1237,7 +1309,7 @@ pub fn TranscriptRow(
                                 CodeText(&out_text, None, out_err);
                             }
                         } else if show_tail {
-                            CodeText(&out_text, Some(3), out_err);
+                            CodeText(&out_text, Some(2), out_err);
                         }
                     });
             });
@@ -1283,12 +1355,12 @@ pub fn TranscriptRow(
             };
             EmberCard(false, true, None, Some(SP[2]), border, move || {
                 cu::Column()
-                    .space_role(SpaceRole::Xs)
+                    .spacing(SP[1])
                     .modifier(Modifier::new().fill_max_width())
                     .content(move || {
                         cu::Row()
                             .alignment(Alignment::CenterStart)
-                            .space_role(SpaceRole::Sm)
+                            .spacing(SP[1])
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 NavIcon(ICON_SHIELD_SVG, p.orange.strong.to_argb(), 16.0);
@@ -1304,47 +1376,108 @@ pub fn TranscriptRow(
                                     Pill("대기 중", PillTone::Orange, true);
                                 }
                             });
-                        CodeText(&model::json_pretty(&input), Some(12), false);
+                        CodeText(&model::json_pretty(&input), Some(4), false);
                         match state {
                             ApprovalState::Pending => {
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .space_role(SpaceRole::Sm)
+                                cu::Column()
+                                    .spacing(6.0)
                                     .modifier(Modifier::new().fill_max_width())
                                     .content(move || {
-                                        let f1 = a1.clone();
-                                        AppButton(
-                                            "한 번 허용",
-                                            None,
-                                            ButtonKind::Primary,
-                                            true,
-                                            !in_flight,
-                                            false,
-                                            move || f1(ApprovalDecision::AllowOnce),
-                                        );
-                                        let f2 = a2.clone();
-                                        AppButton(
-                                            "항상 허용",
-                                            None,
-                                            ButtonKind::Default,
-                                            true,
-                                            !in_flight,
-                                            false,
-                                            move || f2(ApprovalDecision::AllowAlways),
-                                        );
-                                        let f3 = a3.clone();
-                                        AppButton(
-                                            "거부",
-                                            None,
-                                            ButtonKind::Destructive,
-                                            true,
-                                            !in_flight,
-                                            false,
-                                            move || f3(ApprovalDecision::Deny),
-                                        );
-                                        if in_flight {
-                                            Spinner(14.0);
-                                        }
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .modifier(Modifier::new().fill_max_width())
+                                            .content(move || {
+                                                let f1 = a1.clone();
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .height(32.0)
+                                                        .background(paint(p.ink))
+                                                        .shape_role(ShapeRole::Full),
+                                                    Alignment::Center,
+                                                    move || {
+                                                        if !in_flight {
+                                                            f1(ApprovalDecision::AllowOnce);
+                                                        }
+                                                    },
+                                                    || {
+                                                        cu::Row()
+                                                            .alignment(Alignment::Center)
+                                                            .content(|| {
+                                                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                                                Label(
+                                                                    "한 번 허용",
+                                                                    Fs::Xs,
+                                                                    Weight::Semibold,
+                                                                    Some(paint(p.ink_text)),
+                                                                    Some(1),
+                                                                );
+                                                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                                            });
+                                                    },
+                                                );
+                                                let f2 = a2.clone();
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .height(32.0)
+                                                        .background(paint(p.surface))
+                                                        .border(1.0, paint(p.line))
+                                                        .shape_role(ShapeRole::Full),
+                                                    Alignment::Center,
+                                                    move || {
+                                                        if !in_flight {
+                                                            f2(ApprovalDecision::AllowAlways);
+                                                        }
+                                                    },
+                                                    || {
+                                                        cu::Row()
+                                                            .alignment(Alignment::Center)
+                                                            .content(|| {
+                                                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                                                Label(
+                                                                    "항상 허용",
+                                                                    Fs::Xs,
+                                                                    Weight::Medium,
+                                                                    Some(paint(p.text)),
+                                                                    Some(1),
+                                                                );
+                                                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                                            });
+                                                    },
+                                                );
+                                                let f3 = a3.clone();
+                                                Clickable(
+                                                    Modifier::new()
+                                                        .height(32.0)
+                                                        .background(paint(p.surface))
+                                                        .border(1.0, paint(p.red.soft))
+                                                        .shape_role(ShapeRole::Full),
+                                                    Alignment::Center,
+                                                    move || {
+                                                        if !in_flight {
+                                                            f3(ApprovalDecision::Deny);
+                                                        }
+                                                    },
+                                                    || {
+                                                        cu::Row()
+                                                            .alignment(Alignment::Center)
+                                                            .content(|| {
+                                                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                                                Label(
+                                                                    "거부",
+                                                                    Fs::Xs,
+                                                                    Weight::Medium,
+                                                                    Some(paint(p.red.strong)),
+                                                                    Some(1),
+                                                                );
+                                                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                                            });
+                                                    },
+                                                );
+                                                if in_flight {
+                                                    Spinner(14.0);
+                                                }
+                                            });
                                     });
                             }
                             ApprovalState::Resolved(d) => {

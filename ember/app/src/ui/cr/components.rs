@@ -264,7 +264,7 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
         .letter_spacing(fs.letter_spacing())
         .color(color);
     if let Some(n) = max_lines {
-        t = t.max_lines(n);
+        t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
     }
     drop(t);
 }
@@ -300,7 +300,7 @@ pub fn Txt(
         .color(color)
         .modifier(with_weight(Modifier::new(), weight));
     if let Some(n) = max_lines {
-        t = t.max_lines(n);
+        t = t.max_lines(n).overflow(TextOverflow::Ellipsis);
     }
     if let Some(o) = overflow {
         t = t.overflow(o);

@@ -475,12 +475,14 @@ impl SessionCore {
             WidgetEvent::CodeEditRejected { request_id, base_version, current_version, .. } => {
                 tracing::debug!("ember-editor: EditCode {request_id} on {key} rejected (base {base_version}, now {current_version})");
             }
-            WidgetEvent::CodeHovered { pos, phase, .. } => match phase {
-                crate::widget::HoverPhase::Rest => self.on_hover_rest(&key, pos),
+            WidgetEvent::CodeHovered { decoration, pos, phase } => match phase {
+                crate::widget::HoverPhase::Rest => self.on_hover_rest(&key, decoration, pos),
                 crate::widget::HoverPhase::Leave => self.end_hover(),
             },
             WidgetEvent::CodeSaveRequested { .. } => self.on_save(&key),
             WidgetEvent::DecorationActivated { decoration } => self.on_activated(&key, decoration),
+            WidgetEvent::SelectionChanged { active, .. } => self.on_selection_changed(&key, active),
+            WidgetEvent::VisibleRangeChanged { first_line, last_line, .. } => self.on_visible_range_changed(&key, first_line, last_line),
         }
     }
 
@@ -519,6 +521,25 @@ impl SessionCore {
         self.touched.insert(key.to_owned());
     }
 
+    fn on_selection_changed(&mut self, key: &str, active: WidgetPos) {
+        if let Some(doc) = self.docs.get_mut(key) {
+            doc.set_cursor(active);
+        }
+        if self.inline.get(key).and_then(|s| s.ghost.as_ref()).is_some_and(|g| g.pos != active) {
+            self.end_ghost(key, EndReason::Ignored { user_typing_disagreed: false });
+        }
+    }
+
+    fn on_visible_range_changed(&mut self, key: &str, first_line: u32, last_line: u32) {
+        let to_resolve = self.lenses.set_visible_range(key, first_line, last_line);
+        for (handle, serial, index, dto) in to_resolve {
+            self.rpc_with(
+                exthost::resolve_code_lens(handle, &dto),
+                Pending::CodeLensResolve { doc: key.to_owned(), handle, serial, index },
+            );
+        }
+    }
+
     fn on_trigger_inline(&mut self, uri: &UriComponents, generation: u64, pos: WidgetPos) {
         let key = uri.key();
         let Some(doc) = self.docs.get_mut(&key) else { return };
@@ -532,15 +553,32 @@ impl SessionCore {
 
     // ---- hover --------------------------------------------------------------------------------
 
-    fn on_hover_rest(&mut self, key: &str, pos: WidgetPos) {
+    fn on_hover_rest(&mut self, key: &str, decoration: u64, pos: WidgetPos) {
+        let had_anchor = self.hover.active_range(key).is_some();
         let Some(doc) = self.docs.get(key) else { return };
         let (uri, generation, version, language) = (doc.uri.clone(), doc.generation(), doc.widget_version(), doc.language_id.clone());
-        let diags = self.diagnostics.at(key, pos);
+        let lookup_pos = if decoration != 0 {
+            let dec_range = match DecorationIds::space_of(decoration) {
+                Some(IdSpace::Diagnostic) => self.diagnostics.range_of_id(key, decoration, doc.lines(), &mut self.ids),
+                Some(IdSpace::HoverAnchor) => self.hover.range_of_id(key, decoration, &mut self.ids),
+                _ => None,
+            };
+            match dec_range {
+                Some(r) if !r.contains(pos) => r.start,
+                _ => pos,
+            }
+        } else {
+            pos
+        };
+        let diags = self.diagnostics.at(key, lookup_pos);
         let handles: Vec<i64> = self.registry.matching(KindTag::Hover, &uri, &language).iter().map(|p| p.handle).collect();
-        let cancel = self.hover.begin(key, generation, version, pos, diags);
+        let cancel = self.hover.begin(key, generation, version, lookup_pos, diags);
         self.cancel(cancel);
+        if had_anchor {
+            self.touched.insert(key.to_owned());
+        }
         for (order, handle) in handles.into_iter().enumerate() {
-            let t = self.rpc_with(exthost::provide_hover(handle, &uri, pos.to_exthost()), Pending::Hover { doc: key.to_owned() });
+            let t = self.rpc_with(exthost::provide_hover(handle, &uri, lookup_pos.to_exthost()), Pending::Hover { doc: key.to_owned() });
             self.hover.add_pending(t, order);
         }
         if let Some(p) = self.hover.initial() {
@@ -549,8 +587,12 @@ impl SessionCore {
     }
 
     fn end_hover(&mut self) {
+        let had_anchor_doc = self.docs.keys().find(|k| self.hover.active_range(k).is_some()).cloned();
         let (tokens, shown) = self.hover.end();
         self.cancel(tokens);
+        if let Some(key) = had_anchor_doc {
+            self.touched.insert(key);
+        }
         if let Some(key) = shown {
             if let Some(uri) = self.uri_of(&key) {
                 self.ui(SessionUpdate::HoverHidden { uri });
@@ -979,8 +1021,12 @@ impl SessionCore {
             }
             Pending::Hover { doc } => {
                 let Some(version) = self.docs.get(&doc).map(OpenDocument::widget_version) else { return };
+                let prev_range = self.hover.active_range(&doc);
                 if let Some(p) = self.hover.reply(token, version, result.as_ref().map_err(|_| ())) {
                     self.ui(SessionUpdate::Hover(p));
+                }
+                if self.hover.active_range(&doc) != prev_range {
+                    self.touched.insert(doc);
                 }
             }
             Pending::Inline { doc } => self.on_inline_reply(token, &doc, result),
@@ -1102,6 +1148,26 @@ impl SessionCore {
             let version = doc.widget_version();
             let mut decorations = self.diagnostics.decorations(&key, version, doc.lines(), &mut self.ids);
             decorations.extend(self.lenses.decorations(&key, version, doc.lines(), &mut self.ids));
+            let mut live_hover = HashSet::new();
+            if let Some(range) = self.hover.active_range(&key) {
+                let clamped = crate::coords::clamp_range(doc.lines(), range);
+                let id = self.ids.id(
+                    IdSpace::HoverAnchor,
+                    &key,
+                    &format!("hover|{}:{}..{}:{}", range.start.line, range.start.col, range.end.line, range.end.col),
+                );
+                live_hover.insert(id.get());
+                decorations.push(Decoration {
+                    id,
+                    version,
+                    kind: DecorationKind::HoverAnchor,
+                    severity: None,
+                    color: 0,
+                    range: clamped,
+                    text: String::new(),
+                });
+            }
+            self.ids.retain(IdSpace::HoverAnchor, &key, &live_hover);
             if let Some(g) = self.inline.get(&key).and_then(|s| s.ghost.as_ref()) {
                 if !g.text.is_empty() {
                     decorations.push(Decoration {

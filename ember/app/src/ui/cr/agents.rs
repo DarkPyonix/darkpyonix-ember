@@ -408,6 +408,8 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
     }
 }
 
+// TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
+// drawn on a Canvas under a named Button until it can.
 /// A 36x20 toggle switch matching the mockup (ink track when on, track when off, 16x16 knob).
 ///
 /// TODO(compose-rust#372): toolkit Switch cannot be styled (ink track 36x20 not toolkit green 54x32),
@@ -464,6 +466,8 @@ fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static)
         });
 }
 
+// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
+// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
 /// An accessible invisible button overlay for a painted row, chip, or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -479,6 +483,8 @@ fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'sta
         .on_click(on_click);
 }
 
+// TODO(compose-rust#427): a Box in a Row takes the remaining width and squeezes its sibling text to one
+// glyph per line, so the width is estimated with `text_px` and fixed.
 /// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
 /// with a 1-line label and accessible FocusOverlay without ellipsis if it fits.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
@@ -504,6 +510,8 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
         });
 }
 
+// TODO(compose-rust#427): a Box in a Row takes the remaining width and squeezes its sibling text to one
+// glyph per line, so the width is estimated with `text_px` and fixed.
 /// A picker pill matching mockup's .pickchip: full pill shape, icon + label with available width.
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
@@ -1069,6 +1077,7 @@ fn HarnessCard(
                 "넘으면 그 세션만 종료되고 다른 세션은 계속됩니다.",
                 move || {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                        // TODO(compose-rust#428): the Slider track is nearly invisible and cannot be styled.
                         cu::Slider(cur_gb)
                             .range(1.0, 16.0)
                             .steps(15)

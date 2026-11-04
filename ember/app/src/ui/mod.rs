@@ -22,6 +22,7 @@ pub mod monitor;
 pub mod new_session;
 pub mod project;
 pub mod routines;
+pub mod safe_area;
 pub mod search;
 pub mod session;
 pub mod shell;

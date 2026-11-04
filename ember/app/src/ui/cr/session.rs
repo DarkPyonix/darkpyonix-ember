@@ -4247,6 +4247,12 @@ pub fn SessionScreen(focus: Option<String>) {
                                             || {},
                                         );
                                     }
+                                    // The header sits in the title-bar strip: keep the window
+                                    // controls clear (FR-L32, TODO(compose-rust#345)).
+                                    let pad = top_bar_pad(safe_area(), false, true);
+                                    if pad.trailing > 0.0 {
+                                        cu::Spacer().modifier(Modifier::new().width(pad.trailing));
+                                    }
                                 });
 
                             if chips_below {

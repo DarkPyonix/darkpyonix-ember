@@ -33,6 +33,7 @@ pub use crate::ui::shell::{
     NavCounts, NavMenu, Screen, ShellMode, BOTTOM_TABS, DEMO_USER, ICON_GEAR_SVG, ICON_MOON_SVG,
     ICON_MORE_SVG, ICON_SUN_SVG, MORE_MENUS, ORG_NAME, PLACEHOLDER_TEXT, WINDOWS_CAPTION_HEIGHT_DP,
 };
+use crate::ui::safe_area::{safe_area, screen_owns_title_bar, sidebar_top_inset};
 use super::components::{Clickable, EmberSheet, Label};
 use super::theme::*;
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
@@ -335,7 +336,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
     let side = if rail { 0.0 } else { SP[2] };
     // Spacers include the column's 2 px gap on either side.
-    let top = if rail { 14.0 } else { SP[4] };
+    let top = if rail { 14.0 } else { SP[4] } + sidebar_top_inset(safe_area());
     let below_brand = if rail { 10.0 } else { 20.0 };
     let bottom = if rail { 26.0 } else { 30.0 };
     let demo_tools = show_demo_tools();
@@ -611,13 +612,13 @@ pub fn shell() {
 
     let content = || {
         cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-            if cfg!(target_os = "windows") {
+            if cfg!(target_os = "windows") && !screen_owns_title_bar(&screen) {
                 // Caption strip: an empty drag region, then the width the caption buttons cover.
                 cu::Row()
                     .modifier(Modifier::new().fill_max_width().height(WINDOWS_CAPTION_HEIGHT_DP))
                     .content(|| {
                         cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
+                        cu::Spacer().modifier(Modifier::new().width(safe_area().trailing));
                     });
             }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {

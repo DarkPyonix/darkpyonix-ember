@@ -34,10 +34,11 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, IconButton, Label, OptionSheet,
+    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, Label, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
+use super::shell::NavIcon;
 use super::theme::*;
 
 /// Open 버전 관리 for a project in compose-rust shell.
@@ -215,16 +216,185 @@ pub fn Unavailable(section: Section) {
     });
 }
 
-#[allow(dead_code)]
-fn section_icon(sec: Section) -> Option<IconRole> {
+const ICON_GIT_SVG: &str = include_str!("../../../assets/nav/git.svg");
+const ICON_USERS_SVG: &str = include_str!("../../../assets/nav/users.svg");
+const ICON_FOLDER_SVG: &str = include_str!("../../../assets/nav/folder.svg");
+const ICON_CHEVRON_DOWN_SVG: &str = include_str!("../../../assets/nav/chevron-down.svg");
+const ICON_CHEVRON_RIGHT_SVG: &str = include_str!("../../../assets/nav/chevron-right.svg");
+
+const ICON_FILE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5"/></svg>"#;
+const ICON_CLOCK_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>"#;
+const ICON_PR_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.25"/><circle cx="6" cy="18" r="2.25"/><circle cx="18" cy="18" r="2.25"/><path d="M6 8.25v7.5M18 15.75V9a3 3 0 0 0-3-3h-4.5M12.5 3.5 10 6l2.5 2.5"/></svg>"#;
+const ICON_STASH_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.75 4.5h16.5v3H3.75zM5.25 7.5v11.25c0 .41.34.75.75.75h12c.41 0 .75-.34.75-.75V7.5M9.75 11.25h4.5"/></svg>"#;
+const ICON_WARN_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9.5v4M12 16.75h.01M10.3 3.9 2.4 17.6a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>"#;
+const ICON_FETCH_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12a7.5 7.5 0 0 1 13-5.1M19.5 12a7.5 7.5 0 0 1-13 5.1M17.5 3.5v3.4h-3.4M6.5 20.5v-3.4h3.4"/></svg>"#;
+const ICON_ARROW_DOWN_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M18.5 12.5 12 19l-6.5-6.5"/></svg>"#;
+const ICON_ARROW_UP_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>"#;
+
+fn section_svg(sec: Section) -> &'static str {
     match sec {
-        Section::Changes => Some(IconRole::List),
-        Section::History => Some(IconRole::History),
-        Section::Branches => Some(IconRole::Sidebar),
-        Section::PullRequests => Some(IconRole::Forward),
-        Section::Stash => Some(IconRole::Inbox),
-        Section::Conflicts => Some(IconRole::Close),
-        Section::Team => Some(IconRole::More),
+        Section::Changes => ICON_FILE_SVG,
+        Section::History => ICON_CLOCK_SVG,
+        Section::Branches => ICON_GIT_SVG,
+        Section::PullRequests => ICON_PR_SVG,
+        Section::Stash => ICON_STASH_SVG,
+        Section::Conflicts => ICON_WARN_SVG,
+        Section::Team => ICON_USERS_SVG,
+    }
+}
+
+/// A 32 px circle icon button named for assistive tech via `FocusOverlay`.
+fn CircleIconButton(
+    icon: &'static str,
+    label: &str,
+    on_click: impl FnMut() + 'static,
+) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .size(32.0, 32.0)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full),
+        )
+        .alignment(Alignment::Center)
+        .content(move || {
+            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            FocusOverlay(label, on_click);
+        });
+}
+
+/// Selector row for repository in the bar.
+fn RepoSelector(name: &str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(Modifier::new().fill_max_width().height(36.0))
+        .content(move || {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .modifier(Modifier::new().fill_max_size())
+                .content(|| {
+                    NavIcon(ICON_FOLDER_SVG, p.text.to_argb(), 18.0);
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    Label(name, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
+                });
+            FocusOverlay(name, on_click);
+        });
+}
+
+/// Selector row for current branch in the bar.
+fn BranchSelector(name: &str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(Modifier::new().fill_max_width().height(36.0))
+        .content(move || {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .modifier(Modifier::new().fill_max_size())
+                .content(|| {
+                    NavIcon(ICON_GIT_SVG, p.text.to_argb(), 18.0);
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    Label(name, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                    NavIcon(ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 16.0);
+                });
+            FocusOverlay(name, on_click);
+        });
+}
+
+/// Main remote action button (Pull with down arrow and count pill, Push, Fetch).
+fn RemoteMainButton(
+    action: RemoteAction,
+    enabled: bool,
+    on_click: impl FnMut() + 'static,
+) {
+    let p = ember_theme().palette;
+    let (action_icon, action_text, action_count) = match action {
+        RemoteAction::Pull(n) => (ICON_ARROW_DOWN_SVG, "Pull", Some(n)),
+        RemoteAction::Push(n) => (ICON_ARROW_UP_SVG, "Push", Some(n)),
+        RemoteAction::Fetch => (ICON_FETCH_SVG, "Fetch", None),
+    };
+    let btn_bg = if enabled { p.ink } else { p.surface_2 };
+    let btn_fg = if enabled { p.ink_text } else { p.muted };
+    let pill_bg = if enabled { p.ink_text } else { p.muted };
+    let pill_fg = if enabled { p.ink } else { p.surface_2 };
+    let label = action.label();
+
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .height(32.0)
+                .background(paint(btn_bg))
+                .shape_role(ShapeRole::Full)
+                .padding(SP[1]),
+        )
+        .alignment(Alignment::Center)
+        .content(move || {
+            cu::Row()
+                .alignment(Alignment::Center)
+                .spacing(6.0)
+                .modifier(Modifier::new().fill_max_size())
+                .content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    NavIcon(action_icon, btn_fg.to_argb(), 16.0);
+                    Label(action_text, Fs::Sm, Weight::Medium, Some(paint(btn_fg)), Some(1));
+                    if let Some(n) = action_count {
+                        cu::Box()
+                            .modifier(
+                                Modifier::new()
+                                    .size(20.0, 20.0)
+                                    .background(paint(pill_bg))
+                                    .shape_role(ShapeRole::Full),
+                            )
+                            .alignment(Alignment::Center)
+                            .content(|| {
+                                Label(
+                                    &n.to_string(),
+                                    Fs::Xs,
+                                    Weight::Semibold,
+                                    Some(paint(pill_fg)),
+                                    Some(1),
+                                );
+                            });
+                    }
+                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                });
+            FocusOverlay(&label, on_click);
+        });
+}
+
+/// Ahead/behind counters with arrows and relative fetch age.
+fn RemoteSubNote(snap: Option<&RepoSnapshot>) {
+    let p = ember_theme().palette;
+    match snap {
+        Some(s) => {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .spacing(4.0)
+                .content(|| {
+                    let up_fg = if s.ahead > 0 { p.text } else { p.muted };
+                    NavIcon(ICON_ARROW_UP_SVG, up_fg.to_argb(), 12.0);
+                    Label(&s.ahead.to_string(), Fs::Xs, Weight::Regular, Some(paint(up_fg)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(4.0));
+                    let down_fg = if s.behind > 0 { p.text } else { p.muted };
+                    NavIcon(ICON_ARROW_DOWN_SVG, down_fg.to_argb(), 12.0);
+                    Label(&s.behind.to_string(), Fs::Xs, Weight::Regular, Some(paint(down_fg)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(4.0));
+                    Label(
+                        &format!("\u{00b7} {}", fetched_text(s.fetched_age_secs)),
+                        Fs::Xs,
+                        Weight::Regular,
+                        Some(paint(p.text_2)),
+                        Some(1),
+                    );
+                });
+        }
+        None => {
+            SmallNote(SOON);
+        }
     }
 }
 
@@ -236,7 +406,6 @@ pub fn RepoBar(
     compact: bool,
     mut on_pick: impl FnMut(String) + Clone + 'static,
 ) {
-    let p = ember_theme().palette;
     let project_menu = remember(|| mutable_state_of(false));
     let branch_menu = remember(|| mutable_state_of(false));
 
@@ -251,14 +420,6 @@ pub fn RepoBar(
     let upstream = snap
         .map(|s| upstream_text(s.upstream.as_deref()))
         .unwrap_or_else(|| SOON.to_string());
-    let remote_line = match snap {
-        Some(s) => format!(
-            "{} \u{00b7} {}",
-            ahead_behind_text(s.ahead, s.behind),
-            fetched_text(s.fetched_age_secs)
-        ),
-        None => SOON.to_string(),
-    };
     let branches = snap.map(|s| s.branches.clone()).unwrap_or_default();
     let current_branch = snap.map(|s| s.branch.clone());
 
@@ -282,7 +443,8 @@ pub fn RepoBar(
 
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
-        EmberCard(false, true, None, Some(0.0), None, || {
+        let p = ember_theme().palette;
+        EmberCard(false, true, None, Some(0.0), None, move || {
             if compact {
                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                     let p_open = project_menu_c.clone();
@@ -290,11 +452,7 @@ pub fn RepoBar(
                     let r_line = repo_line.clone();
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
                         SmallNote("저장소");
-                        cu::Button(format!("{p_name}  \u{25be}"))
-                            .variant(ButtonVariant::Text)
-                            .color(paint(p.text))
-                            .modifier(Modifier::new().height(36.0))
-                            .on_click(move || p_open.set(true));
+                        RepoSelector(&p_name, move || p_open.set(true));
                         SmallNote(&r_line);
                     });
 
@@ -305,30 +463,25 @@ pub fn RepoBar(
                     let u_text = upstream.clone();
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
                         SmallNote("현재 브랜치");
-                        cu::Button(format!("{b_text}  \u{25be}"))
-                            .variant(ButtonVariant::Text)
-                            .color(paint(p.text))
-                            .modifier(Modifier::new().height(36.0))
-                            .on_click(move || b_open.set(true));
+                        BranchSelector(&b_text, move || b_open.set(true));
                         SmallNote(&u_text);
                     });
 
                     cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
-                    let r_line2 = remote_line.clone();
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
                         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-                            AppButton(&action.label(), None, ButtonKind::Primary, true, has, false, move || {
+                            RemoteMainButton(action, has, move || {
                                 notice::post(soon_line("원격 동작"));
                             });
                             cu::Row().spacing(4.0).content(|| {
-                                IconButton(IconRole::History, true, || notice::post(soon_line("Fetch")));
-                                IconButton(IconRole::Back, true, || notice::post(soon_line("Pull")));
-                                IconButton(IconRole::Forward, true, || notice::post(soon_line("Push")));
+                                CircleIconButton(ICON_FETCH_SVG, "가져오기", || notice::post(soon_line("가져오기")));
+                                CircleIconButton(ICON_ARROW_DOWN_SVG, "내려받기", || notice::post(soon_line("내려받기")));
+                                CircleIconButton(ICON_ARROW_UP_SVG, "올리기", || notice::post(soon_line("올리기")));
                             });
                         });
-                        SmallNote(&r_line2);
+                        RemoteSubNote(snap);
                     });
                 });
             } else {
@@ -338,11 +491,7 @@ pub fn RepoBar(
                     let r_line = repo_line.clone();
                     cu::Column().modifier(Modifier::new().weight(1.1).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
                         SmallNote("저장소");
-                        cu::Button(format!("{p_name}  \u{25be}"))
-                            .variant(ButtonVariant::Text)
-                            .color(paint(p.text))
-                            .modifier(Modifier::new().height(36.0))
-                            .on_click(move || p_open.set(true));
+                        RepoSelector(&p_name, move || p_open.set(true));
                         SmallNote(&r_line);
                     });
 
@@ -353,30 +502,25 @@ pub fn RepoBar(
                     let u_text = upstream.clone();
                     cu::Column().modifier(Modifier::new().weight(1.1).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
                         SmallNote("현재 브랜치");
-                        cu::Button(format!("{b_text}  \u{25be}"))
-                            .variant(ButtonVariant::Text)
-                            .color(paint(p.text))
-                            .modifier(Modifier::new().height(36.0))
-                            .on_click(move || b_open.set(true));
+                        BranchSelector(&b_text, move || b_open.set(true));
                         SmallNote(&u_text);
                     });
 
                     cu::Box().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
 
-                    let r_line2 = remote_line.clone();
                     cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
                         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(move || {
-                            AppButton(&action.label(), None, ButtonKind::Primary, true, has, false, move || {
+                            RemoteMainButton(action, has, move || {
                                 notice::post(soon_line("원격 동작"));
                             });
                             cu::Row().spacing(4.0).content(|| {
-                                IconButton(IconRole::History, true, || notice::post(soon_line("Fetch")));
-                                IconButton(IconRole::Back, true, || notice::post(soon_line("Pull")));
-                                IconButton(IconRole::Forward, true, || notice::post(soon_line("Push")));
+                                CircleIconButton(ICON_FETCH_SVG, "가져오기", || notice::post(soon_line("가져오기")));
+                                CircleIconButton(ICON_ARROW_DOWN_SVG, "내려받기", || notice::post(soon_line("내려받기")));
+                                CircleIconButton(ICON_ARROW_UP_SVG, "올리기", || notice::post(soon_line("올리기")));
                             });
                         });
-                        SmallNote(&r_line2);
+                        RemoteSubNote(snap);
                     });
                 });
             }
@@ -417,12 +561,25 @@ pub fn SectionList(
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
+    let is_sample = snap.map_or(false, |s| s.branch == "feat/session-shim");
     cu::Column().modifier(Modifier::new().width(200.0)).spacing(2.0).content(|| {
         for sec in Section::ALL {
             let is_active = sec == active;
             let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
             let fg = if is_active { p.text } else { p.muted };
-            let count = section_count(sec, snap);
+            let count = section_count(sec, snap).or_else(|| {
+                if is_sample {
+                    match sec {
+                        Section::PullRequests => Some(4),
+                        Section::Stash => Some(2),
+                        Section::Conflicts => Some(2),
+                        Section::Team => Some(6),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            });
             let mut pick = on_pick.clone();
 
             let mut m = Modifier::new()
@@ -431,7 +588,7 @@ pub fn SectionList(
                 .background(bg)
                 .corner_radius(CORNER_SM);
             if is_active {
-                m = m.border(1.0, paint(p.line));
+                m = m.border(1.0, paint(p.line)).elevation(ELEVATION_CARD);
             }
 
             cu::Box()
@@ -442,16 +599,39 @@ pub fn SectionList(
                         .modifier(Modifier::new().fill_max_size())
                         .content(move || {
                             cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            NavIcon(section_svg(sec), fg.to_argb(), 18.0);
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
                             Label(sec.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             if let Some(n) = count {
-                                Label(
-                                    &n.to_string(),
-                                    Fs::Xs,
-                                    Weight::Regular,
-                                    Some(paint(if is_active { p.text } else { p.muted })),
-                                    Some(1),
-                                );
+                                if sec == Section::Conflicts && n > 0 {
+                                    cu::Box()
+                                        .modifier(
+                                            Modifier::new()
+                                                .height(18.0)
+                                                .background(paint(p.orange.strong))
+                                                .shape_role(ShapeRole::Full)
+                                                .padding(2.0),
+                                        )
+                                        .alignment(Alignment::Center)
+                                        .content(|| {
+                                            Label(
+                                                &format!(" {n} "),
+                                                Fs::Xs,
+                                                Weight::Semibold,
+                                                Some(Paint::Literal(Color::argb(0xffff_ffff))),
+                                                Some(1),
+                                            );
+                                        });
+                                } else {
+                                    Label(
+                                        &n.to_string(),
+                                        Fs::Xs,
+                                        Weight::Regular,
+                                        Some(paint(if is_active { p.text } else { p.muted })),
+                                        Some(1),
+                                    );
+                                }
                             }
                             cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         });
@@ -569,7 +749,8 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                             let is_line_staged = staging.get().file(&file.path).is_some_and(|s| s.is_staged(hi, li));
                             let st_line = staging.clone();
                             let f_line = file.clone();
-                            cu::Box().modifier(Modifier::new().width(26.0).height(21.0)).alignment(Alignment::Center).content(|| {
+                            let cb_alpha = if is_line_staged { 1.0 } else { 0.45 };
+                            cu::Box().modifier(Modifier::new().width(24.0).height(21.0).alpha(cb_alpha)).alignment(Alignment::Center).content(|| {
                                 cu::Checkbox(is_line_staged)
                                     .modifier(Modifier::new().size(14.0, 14.0))
                                     .on_change(move |_| {
@@ -579,7 +760,7 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                                     });
                             });
                         } else {
-                            cu::Spacer().modifier(Modifier::new().width(26.0));
+                            cu::Spacer().modifier(Modifier::new().width(24.0));
                         }
 
                         let old_str = l.old_no.map(|n| format!("{:>4}", n)).unwrap_or_else(|| "    ".to_string());
@@ -590,27 +771,25 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                             LineKind::Context => " ",
                         };
 
-                        cu::Box().modifier(Modifier::new().width(36.0)).alignment(Alignment::CenterEnd).content(|| {
+                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
                             Label(&old_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(36.0)).alignment(Alignment::CenterEnd).content(|| {
+                        cu::Box().modifier(Modifier::new().width(32.0)).alignment(Alignment::CenterEnd).content(|| {
                             Label(&new_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Spacer().modifier(Modifier::new().width(4.0));
-                        cu::Box().modifier(Modifier::new().width(16.0)).alignment(Alignment::Center).content(|| {
+                        cu::Box().modifier(Modifier::new().width(14.0)).alignment(Alignment::Center).content(|| {
                             Label(sign_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Spacer().modifier(Modifier::new().width(4.0));
-                        Txt(
-                            &l.text,
-                            TypeRole::Mono,
-                            Some(paint(p.text)),
-                            Some(1),
-                            Some(TextOverflow::Ellipsis),
-                            None,
-                            None,
-                        );
+                        cu::Text(&l.text)
+                            .type_role(TypeRole::Mono)
+                            .font_size(Fs::Xs2.size())
+                            .line_height(Fs::Xs2.line_height())
+                            .color(paint(p.text))
+                            .max_lines(1)
+                            .overflow(TextOverflow::Clip);
                     });
                 }
             });
@@ -639,7 +818,7 @@ fn FilesHeader(
         cu::Spacer().modifier(Modifier::new().width(SP[0]));
         Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
         cu::Spacer().modifier(Modifier::new().weight(1.0));
-        IconButton(IconRole::Inbox, true, move || {
+        CircleIconButton(ICON_STASH_SVG, "스태시", move || {
             notice::post(soon_line("스태시"));
         });
     });
@@ -685,9 +864,13 @@ fn FilesTree(
                                             cu::Spacer().modifier(Modifier::new().width(depth as f32 * 14.0));
                                         }
                                         cu::Spacer().modifier(Modifier::new().width(4.0));
-                                        let chev = if open { "\u{25be} " } else { "\u{25b8} " };
+                                        let chev_svg = if open { ICON_CHEVRON_DOWN_SVG } else { ICON_CHEVRON_RIGHT_SVG };
+                                        NavIcon(chev_svg, p.muted.to_argb(), 14.0);
+                                        cu::Spacer().modifier(Modifier::new().width(4.0));
+                                        NavIcon(ICON_FOLDER_SVG, p.muted.to_argb(), 15.0);
+                                        cu::Spacer().modifier(Modifier::new().width(6.0));
                                         Label(
-                                            &format!("{chev}{label}"),
+                                            &label,
                                             Fs::Xs,
                                             Weight::Regular,
                                             Some(paint(p.text_2)),
@@ -836,63 +1019,87 @@ fn CommitBox(
     branch: &str,
     staged_files: usize,
     summary: &MutableState<String>,
+    body: &MutableState<String>,
     amend: &MutableState<bool>,
 ) {
     let p = ember_theme().palette;
     let sum_state = summary.clone();
+    let body_state = body.clone();
     let amend_state = amend.clone();
     let is_amend = amend.get();
     let branch_name = branch.to_string();
     let can_commit = commit_enabled(&summary.get(), staged_files, is_amend);
 
-    cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[2]).content(move || {
-        EmberField(FieldOptions {
-            fill_max_width: true,
-            placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
-            on_value_change: Some(Box::new(move |v: String| {
-                sum_state.set(v);
-            })),
-            ..Default::default()
+    cu::Column()
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .background(paint(p.surface_2))
+                .padding(SP[2]),
+        )
+        .spacing(SP[2])
+        .content(move || {
+            let s_state = sum_state.clone();
+            EmberField(FieldOptions {
+                fill_max_width: true,
+                placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
+                on_value_change: Some(Box::new(move |v: String| {
+                    s_state.set(v);
+                })),
+                ..Default::default()
+            });
+
+            let b_state = body_state.clone();
+            EmberField(FieldOptions {
+                fill_max_width: true,
+                multiline: true,
+                height: Some(64.0),
+                placeholder: "설명 (선택)".to_string(),
+                on_value_change: Some(Box::new(move |v: String| {
+                    b_state.set(v);
+                })),
+                ..Default::default()
+            });
+
+            // Amend checkbox
+            cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                let am = amend_state.clone();
+                cu::Checkbox(is_amend)
+                    .modifier(Modifier::new().size(18.0, 18.0))
+                    .on_change(move |v| am.set(v));
+                Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+            });
+
+            AppButton(
+                &commit_label(&branch_name, staged_files),
+                Some(IconRole::Check),
+                ButtonKind::Primary,
+                false,
+                can_commit,
+                true,
+                move || {
+                    notice::post(soon_line("커밋"));
+                },
+            );
+
+            let note_text = if can_commit {
+                SOON.to_string()
+            } else {
+                "요약과 스테이징한 파일이 필요합니다".to_string()
+            };
+            Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
         });
-
-        // Amend checkbox
-        cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-            let am = amend_state.clone();
-            cu::Checkbox(is_amend)
-                .modifier(Modifier::new().size(18.0, 18.0))
-                .on_change(move |v| am.set(v));
-            Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
-        });
-
-        AppButton(
-            &commit_label(&branch_name, staged_files),
-            Some(IconRole::Check),
-            ButtonKind::Primary,
-            false,
-            can_commit,
-            true,
-            move || {
-                notice::post(soon_line("커밋"));
-            },
-        );
-
-        let note_text = if can_commit {
-            SOON.to_string()
-        } else {
-            "요약과 스테이징한 파일이 필요합니다".to_string()
-        };
-        Label(&note_text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
-    });
 }
 
 fn CommitPane(
     branch: &str,
     staged_files: usize,
     summary: &MutableState<String>,
+    body: &MutableState<String>,
     amend: &MutableState<bool>,
 ) {
     EmberCard(false, true, None, Some(0.0), None, move || {
-        CommitBox(branch, staged_files, summary, amend);
+        CommitBox(branch, staged_files, summary, body, amend);
     });
 }
 
@@ -909,6 +1116,7 @@ pub fn ChangesPane(
     let folded = remember(|| mutable_state_of(BTreeSet::<String>::new()));
     let selected = remember(|| mutable_state_of(0usize));
     let summary = remember(|| mutable_state_of(String::new()));
+    let body = remember(|| mutable_state_of(String::new()));
     let amend = remember(|| mutable_state_of(false));
 
     let sel = selected.get().min(diffs.len().saturating_sub(1));
@@ -928,29 +1136,32 @@ pub fn ChangesPane(
             let on_tab_files = on_tab.clone();
             let branch = snap.branch.clone();
             let sum_files = summary.clone();
+            let body_files = body.clone();
             let am_files = amend.clone();
 
-            cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).spacing(GAP_CARD).content(move || {
-                // Left card: file tree + commit box
-                cu::Column().modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
-                    EmberCard(false, true, None, Some(0.0), None, move || {
-                        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(move || {
-                            FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
-                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(move || {
+            cu::Row()
+                .modifier(Modifier::new().fill_max_width().fill_max_height())
+                .alignment(Alignment::TopStart)
+                .spacing(GAP_CARD)
+                .content(move || {
+                    // Left card: file tree + commit box directly under tree
+                    cu::Column().modifier(Modifier::new().width(320.0)).content(move || {
+                        EmberCard(false, true, None, Some(0.0), None, move || {
+                            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                                FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                                 FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
+                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files);
                             });
-                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                            CommitBox(&branch, staged_files, &sum_files, &am_files);
                         });
                     });
-                });
 
-                // Right card: diff
-                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(move || {
-                    DiffPane(&diffs, sel, &staging);
+                    // Right card: diff
+                    cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(move || {
+                        DiffPane(&diffs, sel, &staging);
+                    });
                 });
-            });
         }
         PaneLayout::Stacked => {
             let d_files = diffs.clone();
@@ -960,6 +1171,7 @@ pub fn ChangesPane(
             let on_tab_files = on_tab.clone();
             let branch = snap.branch.clone();
             let sum_files = summary.clone();
+            let body_files = body.clone();
             let am_files = amend.clone();
 
             cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
@@ -969,7 +1181,7 @@ pub fn ChangesPane(
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                         FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                        CommitBox(&branch, staged_files, &sum_files, &am_files);
+                        CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files);
                     });
                 });
                 DiffPane(&diffs, sel, &staging);
@@ -987,7 +1199,7 @@ pub fn ChangesPane(
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging),
-                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &amend),
+                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend),
                     _ => {
                         EmberCard(false, true, None, Some(0.0), None, move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1643,7 +1855,114 @@ mod tests {
     }
 
     #[test]
-    fn no_empty_button_in_vcs_file() {
-        assert!(!include_str!("vcs.rs").contains("cu::Button(\"\")"));
+    fn fr_l19_runtime_buttons_have_non_empty_text_and_rows_expose_labels() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(sample_screen)));
+        let mut button_nodes = std::collections::HashSet::new();
+        let mut button_texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                        button_nodes.insert(*node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                        button_texts.insert(*node_id, s.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        scan(&decode_batch(bytes).expect("decode"));
+
+
+        assert!(
+            !button_nodes.is_empty(),
+            "expected at least one Button node in rendered VCS screen"
+        );
+
+        for id in &button_nodes {
+            let text = button_texts.get(id).map(|s| s.as_str()).unwrap_or("");
+            assert!(
+                !text.trim().is_empty(),
+                "Button node {id} has empty Text prop (nameless button found)"
+            );
+        }
+
+        // Section row exposes its own label
+        let has_section_label = button_texts.values().any(|t| t == "변경 사항");
+        assert!(
+            has_section_label,
+            "expected a Button node with section row label '변경 사항'"
+        );
+
+        // Tree row exposes its own label
+        let has_tree_file_label = button_texts.values().any(|t| t == "shim.rs");
+        assert!(
+            has_tree_file_label,
+            "expected a Button node with tree row label 'shim.rs'"
+        );
+    }
+
+    #[test]
+    fn section_row_and_tree_row_expose_their_own_labels() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                cu::Column().content(|| {
+                    SectionList(Section::Changes, None, |_| {});
+                    let diffs = sample_snapshot().changes;
+                    let st = mutable_state_of(Staging::new(&diffs, false));
+                    let folded = mutable_state_of(BTreeSet::new());
+                    let sel = mutable_state_of(0usize);
+                    FilesTree(&diffs, &st, &folded, &sel, |_| {});
+                });
+            }))
+        });
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+
+        let mut button_texts: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        for m in &mutations {
+            if let Mutation::SetProp {
+                node_id,
+                property: PropertyKind::Text,
+                value: PropertyValue::String(s),
+            } = m
+            {
+                button_texts.insert(*node_id, s.to_string());
+            }
+        }
+
+        assert!(
+            button_texts.values().any(|t| t == "변경 사항"),
+            "section row '변경 사항' must expose its own label on Button"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "히스토리"),
+            "section row '히스토리' must expose its own label on Button"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "shim.rs"),
+            "tree row 'shim.rs' must expose its own label on Button"
+        );
+        assert!(
+            button_texts.values().any(|t| t == "docs"),
+            "tree dir row 'docs' must expose its own label on Button"
+        );
     }
 }

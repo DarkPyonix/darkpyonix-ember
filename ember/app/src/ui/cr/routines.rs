@@ -35,10 +35,11 @@ use crate::ui::home::{
     model_catalog, modes_for, project_options, DEFAULT_PROJECT, Harness, Selection,
 };
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel,
+    pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel,
     FieldOptions, Label, PickChip, Pill, PillTone, SheetFooter,
 };
 use super::project::PHONE_MENU_ROOM;
+use super::shell::NavIcon;
 use super::theme::*;
 use crate::services::{run_shared, services, try_services};
 use crate::ui::cr::notice;
@@ -256,6 +257,34 @@ pub fn RoutinesScreen() {
     RoutinesScreenWith(entries, online);
 }
 
+fn project_rank(p: &str) -> usize {
+    match p {
+        "ember" => 0,
+        "core" => 1,
+        "pyx" => 2,
+        "site" => 3,
+        DEFAULT_PROJECT => 4,
+        _ => 5,
+    }
+}
+
+fn ordered_filter_projects(all: &[Routine]) -> Vec<String> {
+    let mut projects: Vec<String> = vec![
+        "ember".into(),
+        "core".into(),
+        "pyx".into(),
+        "site".into(),
+        DEFAULT_PROJECT.into(),
+    ];
+    for r in all {
+        if !projects.contains(&r.sel.project) {
+            projects.push(r.sel.project.clone());
+        }
+    }
+    projects.sort_by_key(|p| project_rank(p));
+    projects
+}
+
 /// Routines screen with explicit entries, for review captures and previews.
 pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let theme = ember_theme();
@@ -265,16 +294,16 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 
     let tick = remember(|| mutable_state_of(0_u32));
     let selected = remember(|| {
-        let preset = std::env::var("EMBER_CR_ROUTINE").ok().and_then(|v| {
-            v.parse::<usize>()
-                .ok()
-                .and_then(|i| entries.get(i))
-                .map(|e| e.routine.id.clone())
-                .or(Some(v))
-        });
-        if let (Some(d), true) = (detail_state(), preset.is_some()) {
-            d.set(true);
-        }
+        let preset = std::env::var("EMBER_CR_ROUTINE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .and_then(|v| {
+                v.parse::<usize>()
+                    .ok()
+                    .and_then(|i| entries.get(i))
+                    .map(|e| e.routine.id.clone())
+                    .or(Some(v))
+            });
         mutable_state_of(preset)
     });
     let panel = remember(|| mutable_state_of(Panel::View));
@@ -291,8 +320,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let (computers, existing_projects) = live_choices();
 
     let routines: Vec<Routine> = cur_entries.iter().map(|e| e.routine.clone()).collect();
-    let groups = group_by_project(&routines, filter.get().as_deref(), &query.get());
-    let pills = filter_projects(&routines);
+    let mut groups = group_by_project(&routines, filter.get().as_deref(), &query.get());
+    groups.sort_by_key(|g| project_rank(&g.project));
+    let pills = ordered_filter_projects(&routines);
     let cur_sel = selected.get();
     let current = cur_sel.as_ref().filter(|id| cur_entries.iter().any(|e| e.routine.id == **id));
     let shown = if compact {
@@ -310,6 +340,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         .and_then(|id| cur_entries.iter().find(|e| e.routine.id == *id))
         .cloned();
     let mode = pane_mode(compact, current.is_some());
+    if let Some(d) = detail_state() {
+        d.set(compact && current.is_some());
+    }
     let pad = if compact { SP[3] } else { SP[6] };
 
     let on_toggle = {
@@ -459,16 +492,21 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     if mode != PaneMode::DetailOnly {
                         let panel_new = panel.clone();
                         RoutineHeader(compact, move || {
-                            AppButton(
-                                "새 루틴",
-                                Some(IconRole::Add),
-                                ButtonKind::Primary,
-                                false,
-                                true,
-                                false,
-                                move || panel_new.set(Panel::New),
-                            );
+                            cu::Button("새 루틴")
+                                .icon(IconRole::Add)
+                                .variant(ButtonVariant::Text)
+                                .color(paint(p.ink_text))
+                                .modifier(
+                                    Modifier::new()
+                                        .width(100.0)
+                                        .height(40.0)
+                                        .background(paint(p.ink))
+                                        .border(1.0, paint(p.ink))
+                                        .shape_role(ShapeRole::Full),
+                                )
+                                .on_click(move || panel_new.set(Panel::New));
                         });
+                        cu::Spacer().modifier(Modifier::new().height(16.0));
                     }
                     if !cur_online {
                         Label(OFFLINE_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(3));
@@ -621,36 +659,50 @@ pub fn preview() {
 // Component helpers (Header, Switch, FilterSegButton)
 // ---------------------------------------------------------------------------------------------
 
+const ICON_CLOCK_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z\"/></svg>";
+const ICON_ZAP_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z\"/></svg>";
+const ICON_SEARCH_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z\"/></svg>";
+const ICON_EDIT_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125\"/></svg>";
+const ICON_PLAY_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z\"/></svg>";
+
+fn TriggerPill(trigger: Trigger, small: bool) {
+    let theme = ember_theme();
+    let tone = match trigger {
+        Trigger::Time => PillTone::Blue,
+        Trigger::Event => PillTone::Sky,
+    };
+    let (fg, bg) = pill_colors(tone, theme.palette);
+    let (height, fs, weight) = pill_metrics(small);
+    let icon_svg = match trigger {
+        Trigger::Time => ICON_CLOCK_SVG,
+        Trigger::Event => ICON_ZAP_SVG,
+    };
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(
+            Modifier::new()
+                .height(height)
+                .background(paint(bg))
+                .shape_role(ShapeRole::Full),
+        )
+        .content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            NavIcon(icon_svg, fg.to_argb(), if small { 12.0 } else { 14.0 });
+            cu::Spacer().modifier(Modifier::new().width(4.0));
+            Label(trigger.label(), fs, weight, Some(paint(fg)), Some(1));
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+        });
+}
+
 /// The page header for Routines: 32px regular title, Korean subtitle, and action button.
 /// On compact screens (phones), reserves room for the floating phone menu and stacks actions below.
 fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
-    let p = ember_theme().palette;
-    let titles = || {
-        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-            Label("루틴", if compact { Fs::Xl2 } else { Fs::Xl3 }, Weight::Regular, None, Some(1));
-            Label(
-                "팀원이 일정이나 이벤트에 맞춰 스스로 하는 일",
-                Fs::Sm,
-                Weight::Regular,
-                Some(paint(p.muted)),
-                Some(2),
-            );
-        });
-    };
-    if compact {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                titles();
-                cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
-            });
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(trailing);
-        });
-    } else {
-        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-            titles();
-            trailing();
-        });
-    }
+    super::project::Header(
+        "루틴",
+        "팀원이 일정이나 이벤트에 맞춰 스스로 하는 일",
+        compact,
+        trailing,
+    );
 }
 
 /// An accessible invisible button overlay for a painted row or pill.
@@ -668,7 +720,7 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
 /// TODO(compose-rust#372): the toolkit `Switch` draws 54x32 green (#2ec04f) and cannot be
 /// styled to the mockup's 36x20 ink track; built from a toolkit Button with a painted
 /// track and knob so keyboard focus and button semantics work.
-fn RoutineSwitch(checked: bool, mut on_change: impl FnMut(bool) + 'static) {
+fn RoutineSwitch(routine_name: &str, checked: bool, mut on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
     let track_color = if checked { p.ink } else { p.track };
     let knob_x = if checked { 26.0 } else { 10.0 };
@@ -676,12 +728,16 @@ fn RoutineSwitch(checked: bool, mut on_change: impl FnMut(bool) + 'static) {
         .round_rect(paint(track_color), 0.0, 0.0, 36.0, 20.0, 10.0, 0.0)
         .circle(paint(p.surface), knob_x, 10.0, 8.0, 0.0)
         .build();
-    let switch_label = if checked { "루틴 끄기" } else { "루틴 켜기" };
+    let switch_label = if checked {
+        format!("{routine_name} 루틴 끄기")
+    } else {
+        format!("{routine_name} 루틴 켜기")
+    };
     cu::Box()
         .modifier(Modifier::new().size(36.0, 20.0))
         .content(move || {
             cu::Canvas(list).modifier(Modifier::new().size(36.0, 20.0));
-            FocusOverlay(switch_label, move || on_change(!checked));
+            FocusOverlay(&switch_label, move || on_change(!checked));
         });
 }
 
@@ -763,17 +819,20 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     let busy = totals.iter().any(|t| *t > 0);
 
     let kpis_content = move || {
-        cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                RoutineKpiView(&k[0], 0);
-                RoutineKpiView(&k[1], 1);
+        cu::Column()
+            .spacing(SP[2])
+            .modifier(Modifier::new().fill_max_width().height(174.0))
+            .content(|| {
+                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                    RoutineKpiView(&k[0], 0);
+                    RoutineKpiView(&k[1], 1);
+                });
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                    RoutineKpiView(&k[2], 2);
+                    RoutineKpiView(&k[3], 3);
+                });
             });
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
-            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                RoutineKpiView(&k[2], 2);
-                RoutineKpiView(&k[3], 3);
-            });
-        });
     };
 
     let hero_content = move || {
@@ -806,7 +865,7 @@ fn HeroCardContent(
     cu::Row()
         .spacing(SP[3])
         .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width())
+        .modifier(Modifier::new().fill_max_width().height(174.0))
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
                 Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
@@ -929,16 +988,28 @@ fn ListPane(
                         }
                     });
                 let q_set = query.clone();
-                EmberField(FieldOptions {
-                    fill_max_width: true,
-                    placeholder: "루틴 검색".to_string(),
-                    background: Some(paint(p.surface)),
-                    border_width: Some(1.0),
-                    border_color: Some(paint(p.line)),
-                    corner_radius: Some(CORNER_MD),
-                    on_value_change: Some(Box::new(move |v| q_set.set(v))),
-                    ..Default::default()
-                });
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .modifier(
+                        Modifier::new()
+                            .fill_max_width()
+                            .height(H_BTN)
+                            .background(paint(p.surface))
+                            .border(1.0, paint(p.line))
+                            .corner_radius(CORNER_MD)
+                            .padding(8.0),
+                    )
+                    .content(move || {
+                        NavIcon(ICON_SEARCH_SVG, p.muted.to_argb(), 18.0);
+                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        EmberField(FieldOptions {
+                            bare: true,
+                            weight: Some(1.0),
+                            placeholder: "루틴 검색".to_string(),
+                            on_value_change: Some(Box::new(move |v| q_set.set(v))),
+                            ..Default::default()
+                        });
+                    });
                 if groups.is_empty() {
                     Label(
                         if entries.is_empty() {
@@ -998,11 +1069,6 @@ fn RoutineRow(
     let computer = computer_chip_text(routine.sel.computer.as_deref(), computers);
     let last_run = runs.first();
 
-    let tone = match routine_trigger {
-        Trigger::Time => PillTone::Blue,
-        Trigger::Event => PillTone::Sky,
-    };
-
     let vendor_color = match routine.sel.option.harness {
         Harness::ClaudeCode => p.orange.strong,
         Harness::Codex => p.blue.strong,
@@ -1041,14 +1107,14 @@ fn RoutineRow(
                             Label(&routine_name, Fs::Md, Weight::Semibold, Some(paint(p.text)), Some(1));
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             let mut toggle_fn = on_toggle;
-                            RoutineSwitch(routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
+                            RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                         });
                     cu::Row()
                         .alignment(Alignment::CenterStart)
                         .spacing(SP[2])
                         .modifier(Modifier::new().fill_max_width())
                         .content(move || {
-                            Pill(routine_trigger.label(), tone, true);
+                            TriggerPill(routine_trigger, true);
                             Label(&routine_line, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                         });
                     cu::Row()
@@ -1173,120 +1239,149 @@ fn DetailPane(
     let on_edit_c = std::sync::Arc::clone(&on_edit);
     let on_run_c = std::sync::Arc::clone(&on_run);
 
-    EmberCard(false, true, None, None, None, move || {
-        cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
+    EmberCard(false, true, None, Some(0.0), None, move || {
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             // Header: Topbar with bottom border
-            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                if compact {
-                    cu::Column()
-                        .spacing(SP[1])
-                        .modifier(Modifier::new().fill_max_width())
-                        .content(move || {
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .spacing(SP[2])
-                                .modifier(Modifier::new().fill_max_width().height(44.0))
-                                .content(move || {
-                                    AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || on_back());
-                                    Label(&routine_name_c, Fs::Xl, Weight::Semibold, None, Some(1));
-                                    let tone = if routine_trigger == Trigger::Time { PillTone::Blue } else { PillTone::Sky };
-                                    Pill(routine_trigger.label(), tone, true);
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                    let toggle_fn = on_toggle_c;
-                                    RoutineSwitch(routine_enabled, move |v| toggle_fn(toggle_id_c.clone(), v));
-                                });
-                            cu::Row()
-                                .alignment(Alignment::CenterStart)
-                                .spacing(SP[2])
-                                .modifier(Modifier::new().fill_max_width().height(36.0))
-                                .content(move || {
-                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                    let edit_fn = on_edit_c;
-                                    AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id_c.clone()));
-                                    let run_fn = on_run_c;
-                                    AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id_c.clone()));
-                                });
-                        });
-                } else {
-                    cu::Row()
-                        .alignment(Alignment::CenterStart)
-                        .spacing(SP[2])
-                        .modifier(Modifier::new().fill_max_width().height(56.0))
-                        .content(move || {
-                            Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
-                            let tone = if routine_trigger == Trigger::Time { PillTone::Blue } else { PillTone::Sky };
-                            Pill(routine_trigger.label(), tone, true);
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            let toggle_fn = on_toggle;
-                            RoutineSwitch(routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
-                            let edit_fn = on_edit;
-                            AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                            let run_fn = on_run;
-                            AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
-                        });
-                }
-                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-            });
-
-            // Schedule & Ring
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
-                    Label(&when_big, Fs::Xl4, Weight::Semibold, None, Some(1));
-                    Label(&routine_line, Fs::Sm, Weight::Medium, None, Some(1));
-                    if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
-                        Label(&routine_cron, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    }
-                    Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-                cu::Box()
-                    .modifier(Modifier::new().size(76.0, 76.0))
-                    .alignment(Alignment::Center)
-                    .content(move || {
-                        cu::Canvas(ring_cmd).modifier(Modifier::new().size(76.0, 76.0));
-                        Label(
-                            &rate.map(|v| format!("{v}%")).unwrap_or_else(|| "-".to_string()),
-                            Fs::Md,
-                            Weight::Semibold,
-                            None,
-                            None,
-                        );
-                    });
-            });
-
-            // Inset cards: 3 cards in one row on wide
             if compact {
-                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                    KeyValue("프로젝트", &project_name, "");
-                    KeyValue("에이전트", &harness_label, &model_title);
-                    KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
-                    KeyValue("권한 모드", &mode_label, "");
-                });
+                let back_cmd = DrawList::builder()
+                    .line(paint(p.text_2), 20.0, 16.0, 11.0, 16.0, 2.0)
+                    .line(paint(p.text_2), 16.0, 11.0, 11.0, 16.0, 2.0)
+                    .line(paint(p.text_2), 16.0, 21.0, 11.0, 16.0, 2.0)
+                    .build();
+                let on_back_fn = on_back;
+                let toggle_fn = on_toggle_c;
+                let edit_fn = on_edit_c;
+                let run_fn = on_run_c;
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[1])
+                    .modifier(Modifier::new().fill_max_width().height(56.0).padding(12.0))
+                    .content(move || {
+                        cu::Box()
+                            .modifier(Modifier::new().size(32.0, 32.0))
+                            .alignment(Alignment::Center)
+                            .content(move || {
+                                cu::Canvas(back_cmd).modifier(Modifier::new().size(32.0, 32.0));
+                                FocusOverlay("목록", move || on_back_fn());
+                            });
+                        cu::Column()
+                            .modifier(Modifier::new().weight(1.0))
+                            .alignment(Alignment::CenterStart)
+                            .content(|| {
+                                Label(&routine_name_c, Fs::Md, Weight::Semibold, None, Some(1));
+                            });
+                        TriggerPill(routine_trigger, true);
+                        RoutineSwitch(&routine_name_c, routine_enabled, move |v| toggle_fn(toggle_id_c.clone(), v));
+                        cu::Box()
+                            .modifier(
+                                Modifier::new()
+                                    .size(32.0, 32.0)
+                                    .background(paint(p.surface))
+                                    .border(1.0, paint(p.line))
+                                    .corner_radius(CORNER_SM),
+                            )
+                            .alignment(Alignment::Center)
+                            .content(move || {
+                                NavIcon(ICON_EDIT_SVG, p.text_2.to_argb(), 16.0);
+                                FocusOverlay("편집", move || edit_fn(edit_id_c.clone()));
+                            });
+                        cu::Box()
+                            .modifier(
+                                Modifier::new()
+                                    .size(32.0, 32.0)
+                                    .background(paint(p.ink))
+                                    .border(1.0, paint(p.ink))
+                                    .corner_radius(CORNER_SM),
+                            )
+                            .alignment(Alignment::Center)
+                            .content(move || {
+                                NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0);
+                                FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
+                            });
+                    });
             } else {
-                cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                        KeyValue("프로젝트", &project_name, "");
+                let toggle_fn = on_toggle;
+                let edit_fn = on_edit;
+                let run_fn = on_run;
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[2])
+                    .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
+                    .content(move || {
+                        Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
+                        TriggerPill(routine_trigger, true);
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
+                        AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
+                        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
                     });
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                        KeyValue("에이전트", &harness_label, &model_title);
+            }
+            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+
+            cu::Column()
+                .spacing(SP[4])
+                .modifier(Modifier::new().fill_max_width().padding(if compact { 12.0 } else { 16.0 }))
+                .content(move || {
+                    // Schedule & Ring
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
+                        cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
+                            Label(&when_big, Fs::Xl4, Weight::Semibold, None, Some(1));
+                            Label(&routine_line, Fs::Sm, Weight::Medium, None, Some(1));
+                            if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
+                                Label(&routine_cron, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                            }
+                            Label(&next, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        });
+                        cu::Box()
+                            .modifier(Modifier::new().size(76.0, 76.0))
+                            .alignment(Alignment::Center)
+                            .content(move || {
+                                cu::Canvas(ring_cmd).modifier(Modifier::new().size(76.0, 76.0));
+                                Label(
+                                    &rate.map(|v| format!("{v}%")).unwrap_or_else(|| "-".to_string()),
+                                    Fs::Md,
+                                    Weight::Semibold,
+                                    None,
+                                    None,
+                                );
+                            });
                     });
-                    cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
-                        KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
+
+                    // Inset cards: 3 cards in one row on wide
+                    if compact {
+                        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                            KeyValue("프로젝트", &project_name, "");
+                            KeyValue("에이전트", &harness_label, &model_title);
+                            KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
+                            KeyValue("권한 모드", &mode_label, "");
+                        });
+                    } else {
+                        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                KeyValue("프로젝트", &project_name, "");
+                            });
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                KeyValue("에이전트", &harness_label, &model_title);
+                            });
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                KeyValue("컴퓨터 · 프로필", &computer, "프로필은 하네스를 따릅니다");
+                            });
+                        });
+                    }
+                    InsetPanel(true, move || {
+                        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+                            Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
+                        });
                     });
+                    Label("실행 기록", Fs::Lg, Weight::Semibold, None, None);
+                    if entry.runs.is_empty() {
+                        Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    }
+                    for run in &entry.runs {
+                        RunTile(run, now);
+                    }
                 });
-            }
-            InsetPanel(true, move || {
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
-                    Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
-                });
-            });
-            Label("실행 기록", Fs::Lg, Weight::Semibold, None, None);
-            if entry.runs.is_empty() {
-                Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-            }
-            for run in &entry.runs {
-                RunTile(run, now);
-            }
         });
     });
 }
@@ -2504,8 +2599,98 @@ mod tests {
         compose_rust::window::reset_window_size();
     }
 
+    fn extract_buttons<'a>(mutations: &'a [Mutation<'a>]) -> Vec<(u32, Option<&'a str>)> {
+        use std::collections::HashMap;
+        let mut buttons: HashMap<u32, Option<&'a str>> = HashMap::new();
+        for m in mutations {
+            if let Mutation::Create { node_id, widget: WidgetKind::Button } = m {
+                buttons.insert(*node_id, None);
+            }
+        }
+        for m in mutations {
+            match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } => {
+                    if let Some(slot) = buttons.get_mut(node_id) {
+                        *slot = Some(s);
+                    }
+                }
+                Mutation::SetText { node_id, text, .. } => {
+                    if let Some(slot) = buttons.get_mut(node_id) {
+                        *slot = Some(text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        buttons.into_iter().collect()
+    }
+
+    fn check_no_empty_buttons(mutations: &[Mutation<'_>], context: &str) {
+        let buttons = extract_buttons(mutations);
+        for (node_id, text) in &buttons {
+            let label = text.unwrap_or("");
+            assert!(
+                !label.trim().is_empty(),
+                "Button node {node_id} has empty Text prop in {context}"
+            );
+        }
+    }
+
     #[test]
-    fn no_empty_button_in_routines_file() {
-        assert!(!include_str!("routines.rs").contains("cu::Button(\"\")"));
+    fn fr_l25_no_button_has_empty_text_at_wide_and_compact() {
+        let _guard = crate::services::test_guard();
+        for (w, h, class) in [
+            (1440.0, 900.0, WindowSizeClass::Expanded),
+            (390.0, 844.0, WindowSizeClass::Compact),
+        ] {
+            compose_rust::window::reset_window_size();
+            let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+            let initial = host.rebuild().expect("rebuild");
+            let first = decode_batch(initial).expect("decode");
+            check_no_empty_buttons(&first, &format!("initial width {w}"));
+
+            let event = HostEvent {
+                node_id: 0,
+                handler_id: 0,
+                payload: EventPayload::WindowSizeChanged {
+                    width_dp: w,
+                    height_dp: h,
+                    class,
+                    height_class: WindowHeightClass::Medium,
+                },
+            };
+            let (bytes, _) = host.dispatch(event).expect("dispatch");
+            let m = decode_batch(bytes).expect("decode");
+            check_no_empty_buttons(&m, &format!("width {w}"));
+        }
+
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_routine_rows_and_switches_expose_routine_names() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let entries = sample_entries();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let buttons = extract_buttons(&mutations);
+        let button_labels: Vec<&str> = buttons.iter().filter_map(|(_, t)| *t).collect();
+
+        for e in &entries {
+            let name = &e.routine.name;
+            let has_row_button = button_labels.iter().any(|lbl| *lbl == name);
+            assert!(
+                has_row_button,
+                "expected routine row button with exact name '{name}', found labels: {button_labels:?}"
+            );
+
+            let has_switch_button = button_labels.iter().any(|lbl| lbl.contains(name) && (lbl.contains("루틴 끄기") || lbl.contains("루틴 켜기")));
+            assert!(
+                has_switch_button,
+                "expected switch button containing routine name '{name}', found labels: {button_labels:?}"
+            );
+        }
+        compose_rust::window::reset_window_size();
     }
 }

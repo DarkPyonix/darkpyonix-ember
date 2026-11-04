@@ -32,12 +32,22 @@ pub use crate::ui::agents::{
     LOCAL_STORE_NOTE, MEM_STEPS_MB, THRESHOLD_MAX, THRESHOLD_MIN, THRESHOLD_STEP,
 };
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, IconButton, InsetPanel,
-    Label, PickChip, Pill, PillTone,
+    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, InsetPanel,
+    Label, Pill, PillTone,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
 use crate::ui::home::UNAVAILABLE;
+
+const ICON_USER_SVG: &str = include_str!("../../../assets/nav/user.svg");
+const ICON_GLOBE_SVG: &str = include_str!("../../../assets/nav/globe.svg");
+const ICON_CHART_SVG: &str = include_str!("../../../assets/nav/chart.svg");
+const ICON_REPEAT_SVG: &str = include_str!("../../../assets/nav/repeat.svg");
+const ICON_ARROW_UP_RIGHT_SVG: &str = include_str!("../../../assets/nav/arrow-up-right.svg");
+const ICON_CODE_SVG: &str = include_str!("../../../assets/nav/code.svg");
+const ICON_SHIELD_SVG: &str = include_str!("../../../assets/nav/shield.svg");
+const ICON_PC_SVG: &str = include_str!("../../../assets/nav/pc.svg");
+const ICON_SPARK_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z"/></svg>"#;
 
 // ---------------------------------------------------------------------------------------------
 // The local store (FR-L20, LOCAL_STORE_NOTE)
@@ -216,8 +226,9 @@ pub fn AgentsScreenWith(
     let store = remember(|| mutable_state_of(local_load()));
     let window = compose_rust::runtime::current_window_size();
     let compact = window.is_compact() || window.width_dp <= 900.0;
-    let pad = if compact { SP[3] } else { SP[5] };
+    let pad = if compact { SP[3] } else { SP[6] };
     let cur_sec = section.get();
+    let ui = crate::services::try_services().map(|s| s.ui.clone());
 
     let nav_pick = {
         let section = section.clone();
@@ -252,8 +263,8 @@ pub fn AgentsScreenWith(
                                     None,
                                 );
                             });
-                            if !compact {
-                                IconButton(IconRole::Settings, false, || {});
+                            if let (false, Some(ui)) = (compact, ui.as_ref()) {
+                                super::project::ThemeButton(ui);
                             }
                         });
 
@@ -264,7 +275,7 @@ pub fn AgentsScreenWith(
                         SectionNav(cur_sec, NavShape::Pills, nav_pick);
                         cu::Spacer().modifier(Modifier::new().height(SP[3]));
                         cu::Column()
-                            .spacing(GAP_CARD)
+                            .spacing(20.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 match cur_sec {
@@ -276,17 +287,17 @@ pub fn AgentsScreenWith(
                                 }
                             });
                     } else {
-                        // Desktop: 200px Nav on the left + 918px Body on the right (ends at 1408)
+                        // Desktop: 200px Nav on the left + 917px Body on the right (ends at 1408)
                         cu::Row()
-                            .spacing(SP[4])
+                            .spacing(25.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 cu::Column().modifier(Modifier::new().width(200.0)).content(|| {
                                     SectionNav(cur_sec, NavShape::Side, nav_pick);
                                 });
                                 cu::Column()
-                                    .spacing(GAP_CARD)
-                                    .modifier(Modifier::new().width(918.0))
+                                    .spacing(20.0)
+                                    .modifier(Modifier::new().width(917.0))
                                     .content(|| {
                                         match cur_sec {
                                             Section::Harness => HarnessSection(&store, &live, compact),
@@ -315,13 +326,13 @@ pub fn preview() {
 // Shared section components and helpers
 // ---------------------------------------------------------------------------------------------
 
-fn SectionIconRole(s: Section) -> IconRole {
+fn section_svg(s: Section) -> &'static str {
     match s {
-        Section::Harness => IconRole::Settings,
-        Section::Models => IconRole::Compose,
-        Section::Profiles => IconRole::Library,
-        Section::Network => IconRole::Sidebar,
-        Section::Usage => IconRole::List,
+        Section::Harness => super::shell::ICON_CPU_SVG,
+        Section::Models => ICON_SPARK_SVG,
+        Section::Profiles => ICON_USER_SVG,
+        Section::Network => ICON_GLOBE_SVG,
+        Section::Usage => ICON_CHART_SVG,
     }
 }
 
@@ -329,7 +340,7 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
     let p = ember_theme().palette;
     match shape {
         NavShape::Side => {
-            cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
                 for x in Section::ALL {
                     let selected = x == current;
                     let (bg, fg) = if selected {
@@ -338,10 +349,7 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                         (Color::argb(0), p.text_2)
                     };
                     let mut on_pick = on_pick.clone();
-                    cu::Button(x.label())
-                        .icon(SectionIconRole(x))
-                        .variant(ButtonVariant::Text)
-                        .color(paint(fg))
+                    cu::Box()
                         .modifier(
                             Modifier::new()
                                 .width(200.0)
@@ -349,7 +357,17 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                                 .background(paint(bg))
                                 .corner_radius(CORNER_SM),
                         )
-                        .on_click(move || on_pick(x));
+                        .alignment(Alignment::CenterStart)
+                        .content(move || {
+                            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                super::shell::NavIcon(section_svg(x), fg.to_argb(), 18.0);
+                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                                Label(x.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
+                                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            });
+                            FocusOverlay(x.label(), move || on_pick(x));
+                        });
                 }
             });
         }
@@ -364,10 +382,7 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                             (p.surface, p.text_2, p.line)
                         };
                         let mut on_pick = on_pick.clone();
-                        cu::Button(x.label())
-                            .icon(SectionIconRole(x))
-                            .variant(ButtonVariant::Text)
-                            .color(paint(fg))
+                        cu::Box()
                             .modifier(
                                 Modifier::new()
                                     .height(H_CTL)
@@ -375,7 +390,17 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
                                     .border(1.0, paint(border))
                                     .shape_role(ShapeRole::Full),
                             )
-                            .on_click(move || on_pick(x));
+                            .alignment(Alignment::Center)
+                            .content(move || {
+                                cu::Row().alignment(Alignment::CenterStart).content(|| {
+                                    cu::Spacer().modifier(Modifier::new().width(12.0));
+                                    super::shell::NavIcon(section_svg(x), fg.to_argb(), 16.0);
+                                    cu::Spacer().modifier(Modifier::new().width(6.0));
+                                    Label(x.label(), Fs::Sm, Weight::Medium, Some(paint(fg)), Some(1));
+                                    cu::Spacer().modifier(Modifier::new().width(12.0));
+                                });
+                                FocusOverlay(x.label(), move || on_pick(x));
+                            });
                     }
                 });
             });
@@ -387,7 +412,7 @@ fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + 
 ///
 /// TODO(compose-rust#372): toolkit Switch cannot be styled (ink track 36x20 not toolkit green 54x32),
 /// so it is built from a toolkit Button with painted track and knob.
-fn MockSwitch(checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 'static) {
+fn MockSwitch(label: &str, checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 'static) {
     let p = ember_theme().palette;
     let track_color = if !enabled {
         p.line
@@ -406,23 +431,18 @@ fn MockSwitch(checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 's
         list = list.round_rect(paint(p.line), 0.0, 0.0, 36.0, 20.0, 10.0, 1.0);
     }
     let draw = list.build();
+    let switch_label = format!("{label} {}", if checked { "끄기" } else { "켜기" });
 
     cu::Box()
         .modifier(Modifier::new().size(36.0, 20.0))
-        .content(|| {
+        .content(move || {
             cu::Canvas(draw).modifier(Modifier::new().size(36.0, 20.0));
-            // The label is the screen reader name; it is drawn transparent over the track.
-            cu::Button(if checked { "끄기" } else { "켜기" })
-                .enabled(enabled)
-                .color(compose_rust::Paint::Literal(Color::argb(0)))
-                .variant(ButtonVariant::Text)
-                .modifier(Modifier::new().size(36.0, 20.0).shape_role(ShapeRole::Full))
-                .on_click(move || on_change(!checked));
+            FocusOverlayEnabled(&switch_label, enabled, move || on_change(!checked));
         });
 }
 
 /// A 20x20 radio button for model selection matching the mockup.
-fn ModelRadio(selected: bool, mut on_click: impl FnMut() + 'static) {
+fn ModelRadio(label: &str, selected: bool, mut on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let mut list = DrawList::builder()
         .circle(paint(p.surface), 10.0, 10.0, 9.0, 0.0);
@@ -434,46 +454,74 @@ fn ModelRadio(selected: bool, mut on_click: impl FnMut() + 'static) {
         list = list.circle(paint(p.line), 10.0, 10.0, 9.0, 1.5);
     }
     let draw = list.build();
+    let radio_label = label.to_string();
 
     cu::Box()
         .modifier(Modifier::new().size(20.0, 20.0))
-        .content(|| {
+        .content(move || {
             cu::Canvas(draw).modifier(Modifier::new().size(20.0, 20.0));
-            cu::Button("기본 모델로 선택")
-                .color(compose_rust::Paint::Literal(Color::argb(0)))
-                .variant(ButtonVariant::Text)
-                .modifier(Modifier::new().size(20.0, 20.0).shape_role(ShapeRole::Full))
-                .on_click(move || on_click());
+            FocusOverlay(&radio_label, move || on_click());
         });
 }
 
 /// An accessible invisible button overlay for a painted row, chip, or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    FocusOverlayEnabled(label, true, on_click);
+}
+
+fn FocusOverlayEnabled(label: &str, enabled: bool, on_click: impl FnMut() + 'static) {
     cu::Button(label)
+        .enabled(enabled)
         .variant(ButtonVariant::Text)
         .color(compose_rust::Paint::Literal(Color::argb(0)))
         .modifier(Modifier::new().fill_max_size())
         .on_click(on_click);
 }
 
-/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label (min 160 px),
+/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label,
 /// with a 1-line label and accessible FocusOverlay without ellipsis if it fits.
 fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let chip_w = 160.0_f32.max(super::components::label_min_width(text, Fs::Sm.size(), false));
     cu::Box()
         .modifier(
             Modifier::new()
-                .width(chip_w)
                 .height(H_CTL)
                 .background(paint(p.surface_2))
-                .corner_radius(CORNER_BUBBLE)
-                .padding(SP[1]),
+                .shape_role(ShapeRole::Full),
         )
         .alignment(Alignment::Center)
         .content(move || {
-            Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(14.0));
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(14.0));
+            });
+            FocusOverlay(text, on_click);
+        });
+}
+
+/// A picker pill matching mockup's .pickchip: full pill shape, icon + label with available width.
+fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .height(H_CTL)
+                .background(paint(p.surface_2))
+                .shape_role(ShapeRole::Full),
+        )
+        .alignment(Alignment::Center)
+        .content(move || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(12.0));
+                if let Some(s) = svg {
+                    super::shell::NavIcon(s, p.text_2.to_argb(), 16.0);
+                    cu::Spacer().modifier(Modifier::new().width(8.0));
+                }
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(12.0));
+            });
             FocusOverlay(text, on_click);
         });
 }
@@ -503,7 +551,7 @@ fn SegGroup<T: Copy + PartialEq + 'static>(
                         .height(H_CTL)
                         .background(paint(bg))
                         .border(1.0, paint(border))
-                        .corner_radius(CORNER_SM),
+                        .shape_role(ShapeRole::Full),
                 )
                 .on_click(move || on_pick(val));
         }
@@ -568,25 +616,44 @@ fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>) {
     });
 }
 
-fn FormulaChip(icon: Option<IconRole>, text: &str, dashed: bool) {
+/// A decorative icon glyph for card headers matching mockup's .card-h .ico (30x30 bordered square).
+fn CardHeaderIcon(svg: &'static str) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .size(30.0, 30.0)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_SM),
+        )
+        .alignment(Alignment::Center)
+        .content(|| {
+            super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0);
+        });
+}
+
+fn FormulaChip(svg: Option<&'static str>, text: &str, dashed: bool) {
     let p = ember_theme().palette;
     let border_color = if dashed { p.muted } else { p.line };
     cu::Box()
         .modifier(
             Modifier::new()
-                .height(H_CTL)
+                .height(28.0)
                 .background(paint(p.surface))
                 .border(1.0, paint(border_color))
-                .shape_role(ShapeRole::Full)
-                .padding(SP[2]),
+                .shape_role(ShapeRole::Full),
         )
         .alignment(Alignment::Center)
         .content(|| {
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                if let Some(ic) = icon {
-                    IconButton(ic, true, || {});
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(10.0));
+                if let Some(s) = svg {
+                    super::shell::NavIcon(s, p.text_2.to_argb(), 16.0);
+                    cu::Spacer().modifier(Modifier::new().width(6.0));
                 }
                 Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(10.0));
             });
         });
 }
@@ -953,7 +1020,7 @@ fn HarnessCard(
                     "샌드박스 (--sandbox)",
                     hint,
                     move || {
-                        MockSwitch(on, true, move |v| {
+                        MockSwitch("샌드박스", on, true, move |v| {
                             edit(&store_sb, |s| s.settings_mut(h).sandbox = Some(v));
                             post_notice(if v {
                                 "샌드박스를 켰습니다. 셸 쓰기가 실패합니다."
@@ -971,7 +1038,7 @@ fn HarnessCard(
                 "상주 shim",
                 harness_shim_desc(h),
                 move || {
-                    MockSwitch(settings.shim && h.shim_supported(), h.shim_supported(), move |v| {
+                    MockSwitch("상주 shim", settings.shim && h.shim_supported(), h.shim_supported(), move |v| {
                         edit(&store_shim, |s| s.settings_mut(h).shim = v);
                         post_notice(if v {
                             "상주 shim을 켰습니다."
@@ -1080,7 +1147,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::Add, true, || {});
+                CardHeaderIcon(super::shell::ICON_PLUS_SVG);
                 Label("새 팀원 기본값", Fs::Lg, Weight::Semibold, None, Some(1));
             });
             Label(
@@ -1091,13 +1158,15 @@ fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
                 None,
             );
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                PickChip("Claude Code · Opus 5.5 ·", Some(IconRole::Settings), false, false, || {});
-                PickChip("ncmnd · Max", Some(IconRole::Library), false, false, || {});
+                ModelPickerPill("Claude Code · Opus 5.5", Some(ICON_SPARK_SVG), move || {
+                    post_notice("기본 하네스와 모델을 선택합니다");
+                });
+                ModelPickerPill("ncmnd · Max", Some(ICON_USER_SVG), move || {
+                    post_notice("기본 계정을 선택합니다");
+                });
             });
         });
     });
-
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
     let harnesses = [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini];
 
@@ -1106,7 +1175,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
             ModelCard(h, store, compact);
         }
     } else {
-        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().spacing(18.0).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                 ModelCard(harnesses[0], store, compact);
             });
@@ -1114,8 +1183,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
                 ModelCard(harnesses[1], store, compact);
             });
         });
-        cu::Spacer().modifier(Modifier::new().height(SP[3]));
-        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Row().spacing(18.0).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                 ModelCard(harnesses[2], store, compact);
             });
@@ -1144,18 +1212,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                 Pill(&format!("모델 {}", specs.len()), PillTone::Grey, true);
             });
 
-            // Row 1: 기본 모델
-            SettingRow(
-                "기본 모델",
-                "새 세션에서 처음 고르는 모델입니다.",
-                || {
-                    let cur_model = settings.model.as_deref().unwrap_or(specs[0].id);
-                    let cur_name = specs.iter().find(|s| s.id == cur_model).map_or(specs[0].name, |s| s.name);
-                    Pill(cur_name, PillTone::Blue, true);
-                },
-            );
-
-            // Row 2: 기본 추론 강도 (SegGroup with 낮음/보통/높음)
+            // Row 1: 기본 추론 강도 (SegGroup with 낮음/보통/높음)
             SettingRow(
                 "기본 추론 강도",
                 "새 팀원을 만들 때 처음 고른 값입니다.",
@@ -1182,13 +1239,15 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                 },
             );
 
-            // Row 3: 기본 권한 모드
+            // Row 2: 기본 권한 모드
             SettingRow(
                 "기본 권한 모드",
                 "새 팀원이 도구를 쓸 때 확인하는 방식입니다. 바이패스는 모든 명령을 묻지 않고 실행합니다.",
                 || {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        PickChip("명령마다 확인", Some(IconRole::Settings), false, false, || {});
+                        ModelPickerPill("명령마다 확인", Some(super::shell::ICON_GEAR_SVG), move || {
+                            post_notice("기본 권한 모드를 선택합니다");
+                        });
                         if settings.mode.is_bypass() {
                             Pill("주의", PillTone::Orange, true);
                         }
@@ -1220,7 +1279,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                 cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
                     cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
                         let m_id = m_id.clone();
-                        ModelRadio(is_def, move || {
+                        ModelRadio(&format!("{} 기본 모델로 선택", m.name), is_def, move || {
                             let m_id = m_id.clone();
                             edit(&store_m, |s| s.settings_mut(h).model = Some(m_id));
                             post_notice("기본 모델을 바꿨습니다");
@@ -1248,7 +1307,15 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                         });
                     });
                     cu::Box().modifier(Modifier::new().width(60.0)).alignment(Alignment::CenterEnd).content(|| {
-                        MockSwitch(true, true, |_| {});
+                        let m_name = m.name.to_string();
+                        MockSwitch(&format!("{m_name} 활성화"), true, true, move |v| {
+                            let msg = if v {
+                                format!("{m_name} 모델을 활성화했습니다")
+                            } else {
+                                format!("{m_name} 모델을 비활성화했습니다")
+                            };
+                            post_notice(&msg);
+                        });
                     });
                 });
             }
@@ -1330,26 +1397,26 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
     if compact {
         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                FormulaChip(Some(IconRole::Library), "계정 묶음", false);
+                FormulaChip(Some(ICON_USER_SVG), "계정 묶음", false);
                 Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-                FormulaChip(Some(IconRole::History), "전환 규칙", false);
+                FormulaChip(Some(ICON_REPEAT_SVG), "전환 규칙", false);
                 Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
             });
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                FormulaChip(Some(IconRole::Forward), "모델 프록시 (선택)", true);
+                FormulaChip(Some(ICON_ARROW_UP_RIGHT_SVG), "모델 프록시 (선택)", true);
                 Label("=", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-                FormulaChip(Some(IconRole::Compose), "프로필", false);
+                FormulaChip(Some(ICON_SPARK_SVG), "프로필", false);
             });
         });
     } else {
         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            FormulaChip(Some(IconRole::Library), "계정 묶음", false);
+            FormulaChip(Some(ICON_USER_SVG), "계정 묶음", false);
             Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-            FormulaChip(Some(IconRole::History), "전환 규칙", false);
+            FormulaChip(Some(ICON_REPEAT_SVG), "전환 규칙", false);
             Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-            FormulaChip(Some(IconRole::Forward), "모델 프록시 (선택)", true);
+            FormulaChip(Some(ICON_ARROW_UP_RIGHT_SVG), "모델 프록시 (선택)", true);
             Label("=", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-            FormulaChip(Some(IconRole::Compose), "프로필", false);
+            FormulaChip(Some(ICON_SPARK_SVG), "프로필", false);
         });
     }
     cu::Spacer().modifier(Modifier::new().height(SP[1]));
@@ -1360,13 +1427,12 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
         Some(paint(p.text_2)),
         None,
     );
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
     // 2. "계정" Card
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::Library, true, || {});
+                CardHeaderIcon(ICON_USER_SVG);
                 Label("계정", Fs::Lg, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 AppButton("계정 추가", Some(IconRole::Add), ButtonKind::Default, true, true, false, || {
@@ -1395,13 +1461,11 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
         });
     });
 
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
-
     // 3. "하네스별 기본 프로필" Card
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::Settings, true, || {});
+                CardHeaderIcon(super::shell::ICON_CPU_SVG);
                 Label("하네스별 기본 프로필", Fs::Lg, Weight::Semibold, None, Some(1));
             });
             for h in [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini] {
@@ -1413,14 +1477,14 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                     h.label(),
                     "이 하네스로 만든 팀원은 모두 이 프로필을 따릅니다.",
                     || {
-                        SelectChip(&p_name, || {});
+                        SelectChip(&p_name, move || {
+                            post_notice("기본 프로필을 선택합니다");
+                        });
                     },
                 );
             }
         });
     });
-
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
     // 4. Section Title & Add Profile Button
     cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1447,8 +1511,6 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
         );
     });
 
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
-
     // 5. Grid of Profile Cards
     if compact {
         for p in profiles.clone() {
@@ -1469,7 +1531,6 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                     });
                 }
             });
-            cu::Spacer().modifier(Modifier::new().height(SP[3]));
         }
     }
 }
@@ -1577,7 +1638,9 @@ fn ProfileCard(
                 "대상 하네스",
                 "",
                 || {
-                    PickChip(p.harness.label(), None, false, false, || {});
+                    SelectChip(p.harness.label(), move || {
+                        post_notice("프로필 하네스를 선택합니다");
+                    });
                 },
             );
 
@@ -1609,7 +1672,9 @@ fn ProfileCard(
                     "이 계정 하나로만 실행됩니다.",
                     || {
                         let cur_acc = p.accounts.first().map(|a| account_label(&live.accounts, a)).unwrap_or_else(|| "계정 없음".to_string());
-                        PickChip(&cur_acc, Some(IconRole::Library), false, false, || {});
+                        ModelPickerPill(&cur_acc, Some(ICON_USER_SVG), move || {
+                            post_notice("고정 계정을 선택합니다");
+                        });
                     },
                 );
             } else {
@@ -1658,7 +1723,7 @@ fn ProfileCard(
                         for a in rest {
                             let ed = ed.clone();
                             let aid = a.id.clone();
-                            PickChip(&format!("+ {}", a.label), None, false, false, move || {
+                            ModelPickerPill(&format!("+ {}", a.label), None, move || {
                                 let aid = aid.clone();
                                 ed.apply(move |p| { add_account(&mut p.accounts, &aid); });
                             });
@@ -1707,7 +1772,9 @@ fn ProfileCard(
                 "속도 제한이나 인증 오류가 나면 이렇게 처리합니다.",
                 || {
                     let cur_fail = p.on_fail.label();
-                    PickChip(cur_fail, None, false, false, || {});
+                    SelectChip(cur_fail, move || {
+                        post_notice("실패 시 동작을 선택합니다");
+                    });
                 },
             );
 
@@ -1720,7 +1787,7 @@ fn ProfileCard(
                 "하네스의 API 주소를 프록시로 돌려 다른 출처의 모델을 씁니다. 프록시 서버는 Ember에 들어 있지 않습니다.",
                 move || {
                     if is_proxy {
-                        MockSwitch(has_proxy, true, move |on| {
+                        MockSwitch("모델 프록시", has_proxy, true, move |on| {
                             ed_proxy.apply(move |p| {
                                 p.proxy = if on {
                                     Some("http://127.0.0.1:4000".to_string())
@@ -1769,24 +1836,20 @@ fn ProfileCard(
 fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
     let p = ember_theme().palette;
 
-    // Card 1: API 트래픽 내보내기 (에이전트 API 트래픽)
+    // Card 1: API 트래픽 내보내기 
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::Sidebar, true, || {});
                 Label("API 트래픽 내보내기", Fs::Lg, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                if !compact {
-                    Pill("에이전트 API 트래픽", PillTone::Blue, true);
-                }
                 Pill("검증 전 (#130)", PillTone::Orange, true);
             });
 
             SettingRow(
-                "작업 중인 컴퓨터로 내보내기 (현재 컴퓨터로 내보내기)",
+                "작업 중인 컴퓨터로 내보내기",
                 "에이전트의 API 요청이 그 세션이 일하는 컴퓨터에서 나가므로 공급자는 그 컴퓨터의 IP를 봅니다.",
                 || {
-                    MockSwitch(true, true, |_| {});
+                    MockSwitch("작업 중인 컴퓨터로 내보내기", true, true, |_| post_notice("아직 검증 전이라 켜 둔 채로만 보입니다"));
                 },
             );
 
@@ -1796,26 +1859,26 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
             if compact {
                 cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        FormulaChip(Some(IconRole::Compose), "에이전트 CLI", false);
+                        FormulaChip(None, "에이전트 CLI", false);
                         Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                        FormulaChip(Some(IconRole::Settings), "세션 프록시 (루프백)", false);
+                        FormulaChip(None, "세션 프록시 (루프백)", false);
                         Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                     });
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        FormulaChip(Some(IconRole::Library), "작업 중인 컴퓨터", false);
+                        FormulaChip(None, "작업 중인 컴퓨터", false);
                         Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                        FormulaChip(Some(IconRole::Sidebar), "모델 공급자", false);
+                        FormulaChip(None, "모델 공급자", false);
                     });
                 });
             } else {
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    FormulaChip(Some(IconRole::Compose), "에이전트 CLI", false);
+                    FormulaChip(None, "에이전트 CLI", false);
                     Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                    FormulaChip(Some(IconRole::Settings), "세션 프록시 (루프백)", false);
+                    FormulaChip(None, "세션 프록시 (루프백)", false);
                     Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                    FormulaChip(Some(IconRole::Library), "작업 중인 컴퓨터", false);
+                    FormulaChip(None, "작업 중인 컴퓨터", false);
                     Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                    FormulaChip(Some(IconRole::Sidebar), "모델 공급자", false);
+                    FormulaChip(None, "모델 공급자", false);
                 });
             }
 
@@ -1836,8 +1899,7 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::Settings, true, || {});
-                Label("컴퓨터별 상태 (컴퓨터)", Fs::Lg, Weight::Semibold, None, Some(1));
+                Label("컴퓨터별 상태", Fs::Lg, Weight::Semibold, None, Some(1));
             });
 
             if computers.is_empty() {
@@ -1895,7 +1957,6 @@ fn ComputerTile(name: &str, r: Reachability) {
     InsetPanel(true, || {
         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::Library, true, || {});
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     Label(name, Fs::Md, Weight::Semibold, None, Some(1));
                     Label(os_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -2000,7 +2061,7 @@ fn UsageSection(
     cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
     // Section Title & Accounts subscription cards
-    Label("계정별 남은 구독량 (계정)", Fs::Lg, Weight::Semibold, None, Some(1));
+    Label("계정별 남은 구독량", Fs::Lg, Weight::Semibold, None, Some(1));
     cu::Spacer().modifier(Modifier::new().height(SP[2]));
 
     EmberCard(false, true, None, None, None, || {
@@ -2027,7 +2088,6 @@ fn TokenKindsCard(compact: bool) {
     EmberCard(false, true, None, None, None, move || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::List, true, || {});
                 Label("오늘 토큰 종류", Fs::Lg, Weight::Semibold, None, Some(1));
             });
             let bar_w = if compact { 326.0 } else { 409.0 };
@@ -2073,8 +2133,7 @@ fn HarnessCostCard(bars: &[crate::ui::home::HarnessBar]) {
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                IconButton(IconRole::List, true, || {});
-                Label("하네스와 모델별 비용 (하네스별)", Fs::Lg, Weight::Semibold, None, Some(1));
+                Label("하네스와 모델별 비용", Fs::Lg, Weight::Semibold, None, Some(1));
             });
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Box().modifier(Modifier::new().size(132.0, 132.0)).alignment(Alignment::Center).content(|| {
@@ -2796,7 +2855,7 @@ mod tests {
     #[test]
     fn fr_x6_network_section_renders_computers() {
         let text = screen_text_at(1440.0, compose_rust::WindowSizeClass::Expanded, Section::Network);
-        for want in ["에이전트 API 트래픽", "현재 컴퓨터로 내보내기", "컴퓨터", "mac-mini"] {
+        for want in ["API 트래픽 내보내기", "작업 중인 컴퓨터로 내보내기", "컴퓨터별 상태", "mac-mini"] {
             assert!(text.contains(want), "missing network content {want}");
         }
     }
@@ -2804,7 +2863,7 @@ mod tests {
     #[test]
     fn fr_u7_usage_section_renders_tokens_and_bars() {
         let text = screen_text_at(1440.0, compose_rust::WindowSizeClass::Expanded, Section::Usage);
-        for want in ["오늘 토큰", "1,234,567", "하네스별", "계정"] {
+        for want in ["오늘 토큰", "1,234,567", "하네스와 모델별 비용", "계정별 남은 구독량"] {
             assert!(text.contains(want), "missing usage content {want}");
         }
     }

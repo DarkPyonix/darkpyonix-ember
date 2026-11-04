@@ -293,6 +293,23 @@ impl DemoSource {
         DemoSource { events: Mutex::new(events), created: Mutex::new(0) }
     }
 
+    /// Reset all demo transcripts, created-session counter, and client state to the initial seed.
+    pub fn reset(&self, client: &Client, now: i64) {
+        {
+            let mut ev = self.events.lock().unwrap();
+            ev.clear();
+            ev.insert("demo-s1".to_string(), script_waiting(now));
+            ev.insert("demo-s2".to_string(), script_done(now - 600_000));
+        }
+        *self.created.lock().unwrap() = 0;
+        for input in self.inputs(now) {
+            client.apply(input);
+        }
+        for id in ["demo-s1", "demo-s2"] {
+            client.apply(Input::EventsFetched { session_id: id.to_string(), events: self.events_for(id) });
+        }
+    }
+
     /// The sessions, as the server would list them.
     pub fn sessions(&self, now: i64) -> Vec<SessionRecord> {
         let ev = self.events.lock().unwrap();

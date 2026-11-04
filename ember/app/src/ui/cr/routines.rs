@@ -13,7 +13,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use compose_rust::runtime::{
-    current_window_size, launched_effect, mutable_state_of, remember, MutableState,
+    current_window_size, launched_effect, mutable_state_of, remember, remember_with_key,
+    MutableState,
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -64,6 +65,16 @@ fn store() -> &'static Mutex<LocalStore> {
 pub fn with_store<R>(f: impl FnOnce(&mut LocalStore) -> R) -> R {
     let mut guard = store().lock().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
+}
+
+/// Clears the device-local store.
+pub fn clear_local_store() {
+    with_store(|s| *s = LocalStore::default());
+}
+
+/// Whether Routines should display sample demo entries instead of querying the server.
+pub fn should_use_sample_entries(route_env: Option<&str>, demo_active: bool) -> bool {
+    route_env == Some("routines") || demo_active
 }
 
 /// What the server last answered: `online` is false until a load succeeds.
@@ -238,7 +249,11 @@ pub enum Panel {
 /// 루틴 (Routines) screen on compose-rust (FR-L25).
 pub fn RoutinesScreen() {
     let tick = remember(|| mutable_state_of(0_u32));
-    let is_demo = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("routines");
+    let _ = try_services().map(|s| s.ui.live.launcher.get());
+    let is_demo = should_use_sample_entries(
+        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
+    );
     if !is_demo {
         let tick_refresh = tick.clone();
         launched_effect((), move || async move {
@@ -247,7 +262,26 @@ pub fn RoutinesScreen() {
     }
     let _ = tick.get();
     let (entries, online) = if is_demo {
-        (sample_entries(), true)
+        let mut sample = sample_entries();
+        let local = with_store(|s| s.entries());
+        for entry in local {
+            if let Some(slot) = sample.iter_mut().find(|e| e.routine.id == entry.routine.id) {
+                let runs = if entry.runs.is_empty() {
+                    std::mem::take(&mut slot.runs)
+                } else {
+                    entry.runs
+                };
+                let next_at = entry.next_at.or(slot.next_at);
+                *slot = Entry {
+                    routine: entry.routine,
+                    runs,
+                    next_at,
+                };
+            } else {
+                sample.push(entry);
+            }
+        }
+        (sample, true)
     } else {
         let (online, mut entries) = with_remote(|r| (r.online, r.entries.clone()));
         let device = with_store(|s| s.entries());
@@ -292,25 +326,27 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let window = current_window_size();
     let compact = window.is_compact();
 
+    let launch_tick = try_services().map(|s| s.ui.live.launcher.get()).unwrap_or(0);
     let tick = remember(|| mutable_state_of(0_u32));
-    let selected = remember(|| {
+    let entries_for_preset = entries.clone();
+    let selected = remember_with_key(launch_tick, move || {
         let preset = std::env::var("EMBER_CR_ROUTINE")
             .ok()
             .filter(|v| !v.trim().is_empty())
             .and_then(|v| {
                 v.parse::<usize>()
                     .ok()
-                    .and_then(|i| entries.get(i))
+                    .and_then(|i| entries_for_preset.get(i))
                     .map(|e| e.routine.id.clone())
                     .or(Some(v))
             });
         mutable_state_of(preset)
     });
-    let panel = remember(|| mutable_state_of(Panel::View));
-    let filter = remember(|| mutable_state_of(None::<String>));
-    let query = remember(|| mutable_state_of(String::new()));
-    let entries_state = remember(|| mutable_state_of(entries));
-    let online_state = remember(|| mutable_state_of(online));
+    let panel = remember_with_key(launch_tick, || mutable_state_of(Panel::View));
+    let filter = remember_with_key(launch_tick, || mutable_state_of(None::<String>));
+    let query = remember_with_key(launch_tick, || mutable_state_of(String::new()));
+    let entries_state = remember_with_key(launch_tick, move || mutable_state_of(entries));
+    let online_state = remember_with_key(launch_tick, move || mutable_state_of(online));
 
     let _ = tick.get();
     let cur_entries = entries_state.get();
@@ -360,7 +396,13 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     Ok(None)
                 });
             } else {
-                let _ = with_store(|s| s.set_enabled(&id, on));
+                if with_store(|s| s.set_enabled(&id, on)).is_err() {
+                    if let Some(e) = entries_st.get().iter().find(|e| e.routine.id == id) {
+                        let mut r = e.routine.clone();
+                        r.enabled = on;
+                        with_store(|s| s.save(r));
+                    }
+                }
                 entries_st.update(|list| {
                     if let Some(e) = list.iter_mut().find(|e| e.routine.id == id) {
                         e.routine.enabled = on;
@@ -459,6 +501,13 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 .unwrap_or_else(|| with_store(|s| s.next_id()));
             let enabled = with_store(|s| {
                 s.entries()
+                    .iter()
+                    .find(|e| e.routine.id == id)
+                    .map(|e| e.routine.enabled)
+            })
+            .or_else(|| {
+                entries_st
+                    .get()
                     .iter()
                     .find(|e| e.routine.id == id)
                     .map(|e| e.routine.enabled)
@@ -888,7 +937,7 @@ fn HeroCardContent(
         .modifier(Modifier::new().fill_max_width().height(174.0))
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
-                Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[1]));
                 cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
                     cu::Box()
@@ -907,11 +956,11 @@ fn HeroCardContent(
                     cu::Column().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                             cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.blue.strong)).shape_role(ShapeRole::Full));
-                            Label("성공", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label("성공", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                             cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.orange.strong)).shape_role(ShapeRole::Full));
-                            Label("실패", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label("실패", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                     });
                 });
@@ -920,7 +969,7 @@ fn HeroCardContent(
                 }
             });
             cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
-                Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
                 cu::Canvas(chart_cmd.clone()).modifier(Modifier::new().size(chart_w, chart_h + 1.0));
                 cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
@@ -943,7 +992,7 @@ fn HeroCardContent(
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {
-        Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+        Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         if index < 3 {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                 Label(&kpi.value, Fs::Xl2, Weight::Semibold, None, Some(1));
@@ -2714,6 +2763,130 @@ mod tests {
                 has_switch_button,
                 "expected switch button containing routine name '{name}', found labels: {button_labels:?}"
             );
+        }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_demo_mode_uses_sample_entries_and_reset_clears_local_store() {
+        assert!(should_use_sample_entries(Some("routines"), false));
+        assert!(should_use_sample_entries(Some("routines"), true));
+        assert!(should_use_sample_entries(None, true));
+        assert!(should_use_sample_entries(Some("other"), true));
+        assert!(!should_use_sample_entries(None, false));
+        assert!(!should_use_sample_entries(Some("other"), false));
+
+        let _guard = crate::services::test_guard();
+        assert!(crate::services::test_services().demo.is_some());
+
+        let prev_route = std::env::var("EMBER_CR_ROUTE").ok();
+        unsafe {
+            std::env::remove_var("EMBER_CR_ROUTE");
+        }
+
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreen())));
+        let initial = host.rebuild().expect("rebuild");
+        let mutations = decode_batch(initial).expect("decode");
+
+        let buttons = extract_buttons(&mutations);
+        let button_labels: Vec<&str> = buttons.iter().filter_map(|(_, t)| *t).collect();
+        let has_ci = button_labels.iter().any(|lbl| *lbl == "develop CI 실패 요약")
+            || mutations.iter().any(|m| match m {
+                Mutation::SetProp {
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                    ..
+                } => *s == "develop CI 실패 요약",
+                Mutation::SetText { text, .. } => *text == "develop CI 실패 요약",
+                _ => false,
+            });
+        assert!(
+            has_ci,
+            "expected demo routine 'develop CI 실패 요약' to be rendered, buttons: {button_labels:?}"
+        );
+
+        with_store(|s| {
+            s.save(Routine {
+                id: "test-rt-local".into(),
+                name: "로컬 테스트 루틴".into(),
+                trigger: Trigger::Time,
+                cron: "0 0 * * *".into(),
+                prompt: "로컬 프롬프트".into(),
+                enabled: true,
+                sel: Selection::initial(),
+            });
+        });
+        assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local")));
+        clear_local_store();
+        assert!(with_store(|s| s.entries().is_empty()));
+
+        with_store(|s| {
+            s.save(Routine {
+                id: "test-rt-local-2".into(),
+                name: "로컬 테스트 루틴 2".into(),
+                trigger: Trigger::Time,
+                cron: "0 0 * * *".into(),
+                prompt: "로컬 프롬프트 2".into(),
+                enabled: true,
+                sel: Selection::initial(),
+            });
+        });
+        assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local-2")));
+        crate::services::services().reset_demo();
+        assert!(with_store(|s| s.entries().is_empty()));
+
+        unsafe {
+            if let Some(r) = prev_route {
+                std::env::set_var("EMBER_CR_ROUTE", r);
+            } else {
+                std::env::remove_var("EMBER_CR_ROUTE");
+            }
+        }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_kpi_labels_set_max_lines_one_against_narrow_column_wrapping() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+
+        let kpi_labels = ["켜진 루틴", "지금 실행 중", "이번 주 실행", "다음 실행"];
+        for label in kpi_labels {
+            let node_ids: Vec<u32> = mutations
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp {
+                        node_id,
+                        property: PropertyKind::Text,
+                        value: PropertyValue::String(s),
+                    } if *s == label => Some(*node_id),
+                    _ => None,
+                })
+                .collect();
+
+            assert!(
+                !node_ids.is_empty(),
+                "expected at least one node with Text '{label}'"
+            );
+
+            for node_id in node_ids {
+                let has_max_lines_one = mutations.iter().any(|m| match m {
+                    Mutation::SetProp {
+                        node_id: n,
+                        property: PropertyKind::MaxLines,
+                        value: PropertyValue::Integer(1),
+                    } if *n == node_id => true,
+                    _ => false,
+                });
+
+                assert!(
+                    has_max_lines_one,
+                    "expected node {node_id} with Text '{label}' to have PropertyKind::MaxLines set to PropertyValue::Integer(1)"
+                );
+            }
         }
         compose_rust::window::reset_window_size();
     }

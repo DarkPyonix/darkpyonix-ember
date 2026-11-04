@@ -216,6 +216,13 @@ pub fn nav_mode(width_dp: f32, collapsed: bool) -> ShellMode {
     }
 }
 
+/// The collapse choice after the toggle at `width_dp`. It exists only in the full-sidebar range
+/// (above [`RAIL_MAX_DP`]); below, the width alone decides, so the toggle changes nothing and
+/// the choice cannot leak to another breakpoint (#218).
+pub fn toggled_collapse(width_dp: f32, collapsed: bool) -> bool {
+    if width_dp > RAIL_MAX_DP { !collapsed } else { collapsed }
+}
+
 /// Live numbers for the navigation. `None` or 0 means no data feeds it yet, so nothing is drawn.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NavCounts {
@@ -721,6 +728,8 @@ pub fn Shell() -> Element {
 
     let on_choose = move |m: NavMenu| choose(ui, m);
     let theme_ctx = use_context::<ThemeCtx>();
+    let more_theme_svg = if theme.scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+    let more_theme_label = theme_ctx.pref.read().label();
     let on_theme = move |()| {
         let mut pref = theme_ctx.pref;
         let next = pref.peek().next();
@@ -818,7 +827,7 @@ pub fn Shell() -> Element {
                         on_settings: move |()| settings_open.set(true),
                         on_collapse: move |()| {
                             let now = *collapsed.peek();
-                            collapsed.set(!now);
+                            collapsed.set(toggled_collapse(window.width_dp, now));
                         },
                     }
                     {content}
@@ -849,6 +858,19 @@ pub fn Shell() -> Element {
                             }
                             Spacer { width: SP[1] }
                         }
+                    }
+                    // The mockup's mobile more sheet also lists the theme and settings (#218).
+                    Row {
+                        fill_max_width: true,
+                        Spacer { width: SP[1] }
+                        ToolRow { svg: more_theme_svg, label: format!("테마: {}", more_theme_label), rail: false, on_click: move |()| on_theme(()) }
+                        Spacer { width: SP[1] }
+                    }
+                    Row {
+                        fill_max_width: true,
+                        Spacer { width: SP[1] }
+                        ToolRow { svg: ICON_GEAR_SVG, label: "설정", rail: false, on_click: move |()| { more_open.set(false); settings_open.set(true); } }
+                        Spacer { width: SP[1] }
                     }
                 }
             }
@@ -1007,6 +1029,27 @@ mod tests {
         assert_eq!(nav_mode(560.0, false), ShellMode::BottomTabs);
         assert_eq!(nav_mode(390.0, false), ShellMode::BottomTabs);
         assert_eq!(nav_mode(390.0, true), ShellMode::BottomTabs);
+    }
+
+    #[test]
+    fn nav_mode_does_not_remember_the_previous_width() {
+        // 1440 -> 1024 -> 1440, and 768 -> 1024: the mode follows the width only.
+        let c = false;
+        assert_eq!(nav_mode(1440.0, c), ShellMode::Sidebar);
+        assert_eq!(nav_mode(1024.0, c), ShellMode::Rail);
+        assert_eq!(nav_mode(1440.0, c), ShellMode::Sidebar);
+        assert_eq!(nav_mode(768.0, c), ShellMode::Rail);
+        assert_eq!(nav_mode(1024.0, c), ShellMode::Rail);
+    }
+
+    #[test]
+    fn collapse_toggle_applies_only_in_the_sidebar_range() {
+        assert!(toggled_collapse(1440.0, false));
+        assert!(!toggled_collapse(1440.0, true));
+        // A click on the brand at 1024 or 768 must not store a choice for 1440.
+        assert!(!toggled_collapse(1024.0, false));
+        assert!(!toggled_collapse(768.0, false));
+        assert_eq!(nav_mode(1440.0, toggled_collapse(1024.0, false)), ShellMode::Sidebar);
     }
 
     #[test]

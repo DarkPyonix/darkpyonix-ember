@@ -16,7 +16,7 @@
 
 ```
                          ┌─────────────────────────────── darkpyonix.dev ───────────────────────────────┐
-                         │  hole-punch coordination + relay fallback (FR-N2) · sign-in                    │
+                         │  address directory + rendezvous (FR-N2) · sign-in                    │
                          └───────────────▲──────────────────────────▲───────────────────────────▲─────┘
                                          │                            │                             │
   ┌──────────────────────────┐   P2P    │   ┌────────────────────────┴───────────────────────┐   │   ┌──────────────────────────┐
@@ -48,7 +48,7 @@
 | **Main server** | Every agent CLI process; every transcript and the agents' native session files; accounts and credentials; projects, computers and assignments; A2A queues; schedules; browser profiles | Project source as a system of record (that lives on the computers) |
 | **Computer** | Project files; the processes tools start (builds, tests, servers); **ember node** (the execution daemon); the VS Code server for an IDE window on that computer | Agent CLIs; transcripts; credentials for agent accounts |
 | **Client** | A cache of what the main server last pushed, for instant cold start | Anything authoritative |
-| **darkpyonix.dev** | Connection coordination and relay | Conversations, files, credentials |
+| **darkpyonix.dev** | Address directory, rendezvous and sign-in (the relay is the main server from letify-link on, FR-N2; iroh-relay until then) | Conversations, files, credentials |
 
 ### 1.2 How a tool call travels
 
@@ -76,7 +76,7 @@ accounts or computer switching.
 | ---- | ---- |
 | `ember/server/` | ember server (Rust) |
 | `ember/node/` | ember node, the execution daemon (Rust) |
-| `ember/transport/` | the transport interface and its iroh backend (FR-N5); see §1.5 |
+| `ember/transport/` | the transport interface and its iroh backend, with a letify-link backend to follow (FR-N5, D36); see §1.5 |
 | `ember/client/` | the client core below the dioxus-compose UI |
 | `ember/proxy/` | the IDE window wrapping layer (Python) |
 | `ember/bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |

@@ -561,6 +561,8 @@ pub fn ProjectScreen() -> Element {
     let ui = use_ui();
     let window = use_window_size();
     let mut overlay = use_signal(Overlay::default);
+    let mut new_project = use_signal(|| false);
+    let mut new_name = use_signal(String::new);
 
     let (boxes, chips) = {
         let _ = *ui.live.launcher.read();
@@ -601,10 +603,12 @@ pub fn ProjectScreen() -> Element {
                         alignment: Alignment::CenterStart,
                         Label { text: "프로젝트", fs: Fs::Xl2, weight: Weight::Semibold }
                         Spacer { weight: 1.0 }
+                        // Enabled in the demo only: it makes a local project there (#218).
                         AppButton {
                             text: "새 프로젝트",
                             icon: IconRole::Add,
-                            enabled: false,
+                            enabled: services().demo.is_some(),
+                            on_click: move |()| new_project.set(true),
                         }
                     }
                     ComputerStrip {
@@ -620,6 +624,35 @@ pub fn ProjectScreen() -> Element {
                         on_open: move |p: String| overlay.write().full = Some(p),
                         on_settings: move |p: String| overlay.write().settings = Some(p),
                     }
+                }
+            }
+        }
+        EmberSheet {
+            title: "새 프로젝트",
+            open: *new_project.read(),
+            on_dismiss: move |()| new_project.set(false),
+            Column {
+                fill_max_width: true,
+                padding: SP[4],
+                space_role: SpaceRole::Md,
+                // TODO(dioxus-compose): TextField is uncontrolled and has no initial value.
+                EmberField {
+                    fill_max_width: true,
+                    placeholder: "프로젝트 이름",
+                    on_value_change: move |v: String| new_name.set(v),
+                }
+                AppButton {
+                    text: "만들기",
+                    kind: ButtonKind::Primary,
+                    fill_max_width: true,
+                    on_click: move |()| {
+                        let s = services();
+                        let Some(d) = &s.demo else { return };
+                        match d.create_project(&s.client, &new_name.peek()) {
+                            Ok(_) => new_project.set(false),
+                            Err(e) => show_message(e),
+                        }
+                    },
                 }
             }
         }

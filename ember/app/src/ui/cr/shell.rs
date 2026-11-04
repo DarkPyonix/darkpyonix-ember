@@ -593,6 +593,8 @@ pub fn shell() {
                     super::files::FilesScreen();
                 } else if matches!(screen, Screen::Home) {
                     super::home::HomeScreen();
+                } else if matches!(screen, Screen::Agents) {
+                    super::agents::AgentsScreen();
                 } else if matches!(screen, Screen::Routines) {
                     super::routines::RoutinesScreen();
                 } else if let Screen::Conversation(ref id) = screen {
@@ -730,6 +732,10 @@ pub fn launch(pref: ThemePref) {
         }
         Some("files") => {
             ui.set_menu(NavMenu::Files);
+            shell
+        }
+        Some("agents") => {
+            ui.set_menu(NavMenu::Agents);
             shell
         }
         Some("routines") => {

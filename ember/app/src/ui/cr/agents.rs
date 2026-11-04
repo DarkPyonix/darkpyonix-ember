@@ -485,7 +485,10 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
         .modifier(
+            // A fixed width: without one the chip takes the whole row and squeezes the hint
+            // beside it to one glyph per line.
             Modifier::new()
+                .width(200.0)
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -1672,8 +1675,12 @@ fn ProfileCard(
                     "이 계정 하나로만 실행됩니다.",
                     || {
                         let cur_acc = p.accounts.first().map(|a| account_label(&live.accounts, a)).unwrap_or_else(|| "계정 없음".to_string());
-                        ModelPickerPill(&cur_acc, Some(ICON_USER_SVG), move || {
-                            post_notice("고정 계정을 선택합니다");
+                        // A bounded width, or the pill takes the whole row and the hint beside it
+                        // wraps to one glyph per line.
+                        cu::Box().modifier(Modifier::new().width(220.0)).content(|| {
+                            ModelPickerPill(&cur_acc, Some(ICON_USER_SVG), move || {
+                                post_notice("고정 계정을 선택합니다");
+                            });
                         });
                     },
                 );

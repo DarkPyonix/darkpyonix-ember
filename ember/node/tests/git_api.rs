@@ -30,7 +30,15 @@ async fn start() -> Fixture {
     static ONCE: Once = Once::new();
     // The scratch directory sits inside this repository's work tree; stop git's upward search
     // there, so a plain directory below it is "not a repository".
-    ONCE.call_once(|| std::env::set_var("GIT_CEILING_DIRECTORIES", scratch()));
+    ONCE.call_once(|| {
+        std::env::set_var("GIT_CEILING_DIRECTORIES", scratch());
+        // Machine config must not leak in (user identity, signing), and the limits are small so
+        // the timeout and size tests are quick.
+        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        std::env::set_var("EMBER_GIT_NETWORK_TIMEOUT_SECS", "3");
+        std::env::set_var("EMBER_GIT_MAX_OUTPUT_BYTES", "1048576");
+    });
     let dir = tempfile::Builder::new().prefix("g").tempdir_in(scratch()).unwrap();
     let root = dir.path().canonicalize().unwrap();
     let node = Node::new(NodeConfig::new(TOKEN, vec![root.clone()])).unwrap();
@@ -115,7 +123,7 @@ impl Fixture {
 
     async fn diff(&self, repo: &Path, path: Option<&str>, staged: bool) -> String {
         let d: GitDiff = self
-            .ok("diff", &GitDiffRequest { repo: s(repo), path: path.map(str::to_string), staged })
+            .ok("diff", &GitDiffRequest { repo: s(repo), path: path.map(str::to_string), staged, include_untracked: false })
             .await;
         d.patch
     }
@@ -151,7 +159,7 @@ fn numbered(changes: &[(usize, &str)]) -> String {
 // FR-G1
 
 #[tokio::test]
-async fn status_of_a_clean_repo() {
+async fn fr_g1_status_of_a_clean_repo() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -168,7 +176,7 @@ async fn status_of_a_clean_repo() {
 }
 
 #[tokio::test]
-async fn status_lists_modified_added_untracked_and_renamed_files() {
+async fn fr_g1_status_lists_modified_added_untracked_and_renamed_files() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -196,7 +204,7 @@ async fn status_lists_modified_added_untracked_and_renamed_files() {
 }
 
 #[tokio::test]
-async fn a_plain_directory_is_not_a_repo() {
+async fn fr_g1_a_plain_directory_is_not_a_repo() {
     let f = start().await;
     let dir = f.root.join("plain");
     std::fs::create_dir_all(&dir).unwrap();
@@ -204,11 +212,11 @@ async fn a_plain_directory_is_not_a_repo() {
         let msg = f.err(op, &GitRepoRequest { repo: s(&dir) }, 404, "not_a_repo").await;
         assert!(!msg.is_empty());
     }
-    f.err("diff", &GitDiffRequest { repo: s(&dir), path: None, staged: false }, 404, "not_a_repo").await;
+    f.err("diff", &GitDiffRequest { repo: s(&dir), path: None, staged: false, include_untracked: false }, 404, "not_a_repo").await;
 }
 
 #[tokio::test]
-async fn repo_paths_obey_auth_and_the_root_policy() {
+async fn fr_g1_repo_paths_obey_auth_and_the_root_policy() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -228,7 +236,7 @@ async fn repo_paths_obey_auth_and_the_root_policy() {
 }
 
 #[tokio::test]
-async fn diff_of_unstaged_staged_and_untracked_changes() {
+async fn fr_g1_diff_of_unstaged_staged_and_untracked_changes() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -262,7 +270,7 @@ async fn diff_of_unstaged_staged_and_untracked_changes() {
 // FR-G2
 
 #[tokio::test]
-async fn stage_and_unstage_whole_files() {
+async fn fr_g2_stage_and_unstage_whole_files() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -288,7 +296,7 @@ async fn stage_and_unstage_whole_files() {
 }
 
 #[tokio::test]
-async fn unstage_works_before_the_first_commit() {
+async fn fr_g2_unstage_works_before_the_first_commit() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -309,7 +317,7 @@ fn first_hunk(patch: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_hunk_applied_to_the_index_leaves_the_other_hunk_unstaged() {
+async fn fr_g2_a_hunk_applied_to_the_index_leaves_the_other_hunk_unstaged() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -340,7 +348,7 @@ async fn a_hunk_applied_to_the_index_leaves_the_other_hunk_unstaged() {
 }
 
 #[tokio::test]
-async fn a_reverse_patch_unstages_a_hunk() {
+async fn fr_g2_a_reverse_patch_unstages_a_hunk() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -358,7 +366,7 @@ async fn a_reverse_patch_unstages_a_hunk() {
 }
 
 #[tokio::test]
-async fn a_patch_that_does_not_apply_is_refused() {
+async fn fr_g2_a_patch_that_does_not_apply_is_refused() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -371,7 +379,7 @@ async fn a_patch_that_does_not_apply_is_refused() {
 }
 
 #[tokio::test]
-async fn commit_needs_a_staged_change_and_supports_description_and_amend() {
+async fn fr_g2_commit_needs_a_staged_change_and_supports_description_and_amend() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -425,7 +433,7 @@ async fn commit_needs_a_staged_change_and_supports_description_and_amend() {
 // FR-G3
 
 #[tokio::test]
-async fn branches_are_created_and_switched() {
+async fn fr_g3_branches_are_created_and_switched() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -486,7 +494,7 @@ fn remote_req(repo: &Path) -> GitRemoteRequest {
 }
 
 #[tokio::test]
-async fn push_fetch_and_pull_change_ahead_and_behind() {
+async fn fr_g3_push_fetch_and_pull_change_ahead_and_behind() {
     let f = start().await;
     let r = remote_fixture(&f.root);
 
@@ -520,7 +528,7 @@ async fn push_fetch_and_pull_change_ahead_and_behind() {
 }
 
 #[tokio::test]
-async fn push_publishes_a_branch_without_upstream() {
+async fn fr_g3_push_publishes_a_branch_without_upstream() {
     let f = start().await;
     let r = remote_fixture(&f.root);
     f.no_content("branch", &GitBranchRequest { repo: s(&r.a), name: "feat/new".into(), from: None }).await;
@@ -534,7 +542,7 @@ async fn push_publishes_a_branch_without_upstream() {
 }
 
 #[tokio::test]
-async fn a_diverged_pull_answers_409_with_gits_message() {
+async fn fr_g3_a_diverged_pull_answers_409_with_a_korean_message_and_gits_text() {
     let f = start().await;
     let r = remote_fixture(&f.root);
 
@@ -561,7 +569,7 @@ async fn a_diverged_pull_answers_409_with_gits_message() {
 }
 
 #[tokio::test]
-async fn conflicts_lists_unmerged_paths() {
+async fn fr_g3_conflicts_lists_unmerged_paths() {
     let f = start().await;
     let repo = f.root.join("r");
     init_repo(&repo);
@@ -589,4 +597,306 @@ async fn conflicts_lists_unmerged_paths() {
     assert_eq!(c.paths, vec!["a.txt".to_string()]);
     let st = f.status(&repo).await;
     assert_eq!((file(&st, "a.txt").index, file(&st, "a.txt").worktree), ('U', 'U'));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Added coverage (review of #257)
+
+fn has_korean(s: &str) -> bool {
+    s.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c))
+}
+
+fn one_commit(repo: &Path) {
+    init_repo(repo);
+    write(repo, "a.txt", "one\n");
+    commit_all(repo, "first");
+}
+
+#[tokio::test]
+async fn fr_g1_unborn_branch_status() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    init_repo(&repo);
+    write(&repo, "a.txt", "one\n");
+    let st = f.status(&repo).await;
+    assert_eq!(st.branch, "main");
+    assert!(st.branches.is_empty(), "{:?}", st.branches);
+    assert_eq!((file(&st, "a.txt").index, file(&st, "a.txt").worktree), ('?', '?'));
+}
+
+#[tokio::test]
+async fn fr_g1_detached_head_status() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    git(&repo, &["checkout", "-q", "--detach"]);
+    let st = f.status(&repo).await;
+    assert_eq!(st.branch, "(detached)");
+    assert_eq!(st.upstream, None);
+}
+
+#[tokio::test]
+async fn fr_g1_a_bare_repository_is_not_answered_as_not_a_repo() {
+    let f = start().await;
+    let bare = f.root.join("bare.git");
+    std::fs::create_dir_all(&bare).unwrap();
+    git(&bare, &["init", "-q", "--bare"]);
+    let msg = f.err("status", &GitRepoRequest { repo: s(&bare) }, 409, "conflict").await;
+    assert!(has_korean(&msg) && msg.contains("bare"), "{msg}");
+}
+
+#[tokio::test]
+async fn fr_g1_a_plain_directory_gets_a_korean_not_a_repo_message() {
+    let f = start().await;
+    let dir = f.root.join("plain");
+    std::fs::create_dir_all(&dir).unwrap();
+    let msg = f.err("status", &GitRepoRequest { repo: s(&dir) }, 404, "not_a_repo").await;
+    assert!(has_korean(&msg), "{msg}");
+}
+
+#[test]
+fn fr_g1_dubious_ownership_and_known_failures_map_to_korean() {
+    let dubious = "fatal: detected dubious ownership in repository at '/x'";
+    assert!(korean_message(dubious).is_some_and(|m| m.contains("소유자")));
+    assert!(korean_message("fatal: You are not currently on a branch.").is_some_and(|m| m.contains("detached")));
+    assert!(korean_message("fatal: Not possible to fast-forward, aborting.").is_some_and(|m| m.contains("갈라졌")));
+    assert!(korean_message("Author identity unknown\n*** Please tell me who you are.").is_some());
+    assert!(korean_message("fatal: unable to connect to 127.0.0.1:1").is_some_and(|m| m.contains("원격")));
+    assert_eq!(korean_message("something unrelated"), None);
+}
+
+#[tokio::test]
+async fn fr_g1_korean_and_space_file_names_go_through_status_diff_and_stage() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    let names = ["한글 파일.txt", "with space.txt", "dir/중첩 폴더/문서.md"];
+    for n in names {
+        write(&repo, n, "내용\n");
+    }
+    let st = f.status(&repo).await;
+    for n in names {
+        assert_eq!((file(&st, n).index, file(&st, n).worktree), ('?', '?'), "{n}");
+    }
+    // The patch header names the raw path (no octal quoting).
+    let d = f.diff(&repo, Some("한글 파일.txt"), false).await;
+    assert!(d.contains("한글 파일.txt") && !d.contains("\\355"), "{d}");
+    f.stage(&repo, &names).await;
+    let st = f.status(&repo).await;
+    for n in names {
+        assert_eq!(file(&st, n).index, 'A', "{n}");
+    }
+    let staged = f.diff(&repo, Some("한글 파일.txt"), true).await;
+    assert!(staged.contains("한글 파일.txt") && staged.contains("+내용"), "{staged}");
+    // A tracked non-ASCII file modified later shows quoted-free headers in the unstaged diff.
+    git(&repo, &["commit", "-q", "-m", "names"]);
+    write(&repo, "한글 파일.txt", "바뀜\n");
+    let d = f.diff(&repo, None, false).await;
+    assert!(d.contains("a/한글 파일.txt"), "{d}");
+}
+
+#[tokio::test]
+async fn fr_g2_a_glob_named_file_stages_only_itself() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    write(&repo, "a[1].txt", "x\n");
+    write(&repo, "a1.txt", "y\n");
+    write(&repo, "b.rs", "z\n");
+    f.stage(&repo, &["a[1].txt"]).await;
+    let st = f.status(&repo).await;
+    assert_eq!(file(&st, "a[1].txt").index, 'A');
+    assert_eq!(file(&st, "a1.txt").index, '?');
+    // A glob matches nothing literal: git refuses and nothing is staged.
+    let body = GitPathsRequest { repo: s(&repo), paths: vec!["*.rs".into()] };
+    f.err("stage", &body, 409, "conflict").await;
+    assert_eq!(file(&f.status(&repo).await, "b.rs").index, '?', "a glob must not match");
+}
+
+#[tokio::test]
+async fn fr_g2_a_path_starting_with_a_dash_is_a_path() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    write(&repo, "-rf", "x\n");
+    write(&repo, "other.txt", "y\n");
+    let d = f.diff(&repo, Some("-rf"), false).await;
+    assert!(d.contains("-rf") && !d.contains("other.txt"), "{d}");
+    f.stage(&repo, &["-rf"]).await;
+    let st = f.status(&repo).await;
+    assert_eq!(file(&st, "-rf").index, 'A');
+    assert_eq!(file(&st, "other.txt").index, '?');
+}
+
+#[tokio::test]
+async fn fr_g2_include_untracked_returns_every_untracked_file_in_one_call() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    write(&repo, "a.txt", "one\nchanged\n");
+    write(&repo, "u1.txt", "u1\n");
+    write(&repo, "sub/u2.txt", "u2\n");
+    let d: GitDiff = f
+        .ok("diff", &GitDiffRequest { repo: s(&repo), path: None, staged: false, include_untracked: true })
+        .await;
+    for p in ["a/a.txt", "b/u1.txt", "b/sub/u2.txt"] {
+        assert!(d.patch.contains(p), "{p} missing in {}", d.patch);
+    }
+    // The default stays as before: tracked changes only. A body without the field still parses.
+    let plain = f.diff(&repo, None, false).await;
+    assert!(!plain.contains("u1.txt"), "{plain}");
+    let (st, _) = f.raw("diff", &serde_json::json!({ "repo": s(&repo) })).await;
+    assert_eq!(st, 200);
+}
+
+#[tokio::test]
+async fn fr_g1_a_diff_larger_than_the_cap_answers_413() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    init_repo(&repo);
+    write(&repo, "big.txt", "x\n");
+    commit_all(&repo, "first");
+    write(&repo, "big.txt", &"0123456789abcdef\n".repeat(200_000));
+    let msg = f.err("diff", &GitDiffRequest { repo: s(&repo), path: None, staged: false, include_untracked: false }, 413, "too_large").await;
+    assert!(has_korean(&msg), "{msg}");
+}
+
+#[tokio::test]
+async fn fr_g3_push_and_pull_from_a_detached_head_answer_409_in_korean() {
+    let f = start().await;
+    let r = remote_fixture(&f.root);
+    git(&r.a, &["checkout", "-q", "--detach"]);
+    for op in ["push", "pull"] {
+        let msg = f.err(op, &remote_req(&r.a), 409, "conflict").await;
+        assert!(has_korean(&msg) && msg.contains("detached"), "{op}: {msg}");
+    }
+}
+
+#[tokio::test]
+async fn fr_g3_pull_without_an_upstream_answers_409_in_korean() {
+    let f = start().await;
+    let r = remote_fixture(&f.root);
+    f.no_content("branch", &GitBranchRequest { repo: s(&r.a), name: "lonely".into(), from: None }).await;
+    let msg = f.err("pull", &remote_req(&r.a), 409, "conflict").await;
+    assert!(has_korean(&msg) && msg.contains("upstream"), "{msg}");
+}
+
+#[tokio::test]
+async fn fr_g3_a_remote_that_is_not_configured_is_a_400() {
+    let f = start().await;
+    let r = remote_fixture(&f.root);
+    for remote in ["nope", "file:///etc", "ext::sh -c id", "--upload-pack=x"] {
+        for op in ["fetch", "pull", "push"] {
+            let body = GitRemoteRequest { repo: s(&r.a), remote: Some(remote.into()) };
+            let msg = f.err(op, &body, 400, "bad_request").await;
+            assert!(has_korean(&msg), "{op} {remote}: {msg}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn fr_g3_an_unreachable_remote_ends_in_a_korean_error_quickly() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let missing = s(&f.root.join("does-not-exist.git"));
+    for url in [missing, format!("git://127.0.0.1:{closed}/x.git")] {
+        let _ = Command::new("git").args(["remote", "remove", "origin"]).current_dir(&repo).output();
+        git(&repo, &["remote", "add", "origin", &url]);
+        let t = std::time::Instant::now();
+        for op in ["fetch", "push"] {
+            let body = GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) };
+            let msg = f.err(op, &body, 409, "conflict").await;
+            assert!(has_korean(&msg) && msg.contains("원격"), "{op} {url}: {msg}");
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(30), "{url}");
+    }
+}
+
+#[tokio::test]
+async fn fr_g3_a_remote_that_never_answers_times_out_with_504() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    // Accepts connections and says nothing: git waits for the server greeting.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    git(&repo, &["remote", "add", "origin", &format!("git://127.0.0.1:{port}/x.git")]);
+    let t = std::time::Instant::now();
+    let msg = f
+        .err("fetch", &GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) }, 504, "timeout")
+        .await;
+    assert!(has_korean(&msg), "{msg}");
+    assert!(t.elapsed() < std::time::Duration::from_secs(30));
+    // The node is still responsive afterwards (nothing holds a lock).
+    assert_eq!(f.status(&repo).await.branch, "main");
+}
+
+#[tokio::test]
+async fn fr_g3_merge_conflict_shows_u_records_and_conflicts() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    init_repo(&repo);
+    write(&repo, "a.txt", "base\n");
+    commit_all(&repo, "base");
+    git(&repo, &["switch", "-q", "-c", "side"]);
+    write(&repo, "a.txt", "side\n");
+    commit_all(&repo, "side");
+    git(&repo, &["switch", "-q", "main"]);
+    write(&repo, "a.txt", "main\n");
+    commit_all(&repo, "main");
+    let m = Command::new("git").args(["merge", "side"]).current_dir(&repo).env("GIT_CEILING_DIRECTORIES", scratch()).output().unwrap();
+    assert!(!m.status.success());
+
+    let st = f.status(&repo).await;
+    let a = file(&st, "a.txt");
+    assert_eq!((a.index, a.worktree), ('U', 'U'));
+    let c: GitConflicts = f.ok("conflicts", &GitRepoRequest { repo: s(&repo) }).await;
+    assert_eq!(c.paths, vec!["a.txt".to_string()]);
+    // A commit while unmerged is refused with a Korean message.
+    let msg = f
+        .err("commit", &GitCommitRequest { repo: s(&repo), summary: "x".into(), description: None, amend: false }, 409, "conflict")
+        .await;
+    assert!(has_korean(&msg), "{msg}");
+}
+
+#[tokio::test]
+async fn fr_g2_a_commit_without_user_name_answers_409_in_korean() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.useConfigOnly", "true"]);
+    git(&repo, &["config", "commit.gpgsign", "false"]);
+    write(&repo, "a.txt", "x\n");
+    f.stage(&repo, &["a.txt"]).await;
+    let msg = f
+        .err("commit", &GitCommitRequest { repo: s(&repo), summary: "x".into(), description: None, amend: false }, 409, "conflict")
+        .await;
+    assert!(msg.contains("user.name"), "{msg}");
+}
+
+#[tokio::test]
+async fn fr_g3_a_switch_blocked_by_local_changes_answers_409_in_korean() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    git(&repo, &["switch", "-q", "-c", "other"]);
+    write(&repo, "a.txt", "other\n");
+    commit_all(&repo, "other");
+    git(&repo, &["switch", "-q", "main"]);
+    write(&repo, "a.txt", "dirty\n");
+    let msg = f.err("checkout", &GitCheckoutRequest { repo: s(&repo), branch: "other".into() }, 409, "conflict").await;
+    assert!(has_korean(&msg) && msg.contains("a.txt"), "{msg}");
+    assert_eq!(f.status(&repo).await.branch, "main");
 }

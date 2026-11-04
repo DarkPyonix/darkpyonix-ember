@@ -960,6 +960,15 @@ mod tests {
     }
 
     #[test]
+    fn git_diff_accepts_include_untracked_and_lists_the_untracked_file_once() {
+        let d = DemoSource::new(0);
+        let body = json!({"path": null, "staged": false, "include_untracked": true});
+        let all = gs(&d, "diff", body).unwrap()["patch"].as_str().unwrap().to_string();
+        // docs/GIT.md is the demo's untracked file: one header, in the one patch.
+        assert_eq!(all.matches("diff --git a/docs/GIT.md").count(), 1);
+    }
+
+    #[test]
     fn git_stage_unstage_and_apply_change_the_status() {
         let d = DemoSource::new(0);
         gs(&d, "stage", json!({"paths": ["docs/GIT.md"]})).unwrap();

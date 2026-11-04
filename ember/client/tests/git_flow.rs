@@ -93,6 +93,11 @@ async fn bodies_match_the_contract() {
     api.git_diff("ember", None, false).await.unwrap();
     assert_eq!(last(&seen).2, json!({ "path": null, "staged": false }));
 
+    // One patch for the work tree with the untracked files in it.
+    api.git_diff_untracked("ember").await.unwrap();
+    assert_eq!(last(&seen).1, "diff");
+    assert_eq!(last(&seen).2, json!({ "path": null, "staged": false, "include_untracked": true }));
+
     api.git_stage("ember", &["a.rs".to_string(), "b.rs".to_string()]).await.unwrap();
     assert_eq!(last(&seen).1, "stage");
     assert_eq!(last(&seen).2, json!({ "paths": ["a.rs", "b.rs"] }));

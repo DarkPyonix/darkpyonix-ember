@@ -134,6 +134,11 @@ pub(crate) fn git_diff_body(path: Option<&str>, staged: bool) -> serde_json::Val
     json!({ "path": path, "staged": staged })
 }
 
+/// The `diff` body for the whole work tree with the untracked files in the same patch.
+pub(crate) fn git_diff_untracked_body() -> serde_json::Value {
+    json!({ "path": null, "staged": false, "include_untracked": true })
+}
+
 /// The `POST /projects/{id}/git/commit` body.
 pub(crate) fn git_commit_body(summary: &str, description: Option<&str>, amend: bool) -> serde_json::Value {
     json!({ "summary": summary, "description": description, "amend": amend })
@@ -430,6 +435,12 @@ impl Api {
     /// The unified diff of one file (`path`) or all, staged or not.
     pub async fn git_diff(&self, project: &str, path: Option<&str>, staged: bool) -> ApiResult<GitDiff> {
         Self::decode(self.git_post(project, "diff", git_diff_body(path, staged)).await?)
+    }
+
+    /// The work tree diff of the whole repository with every untracked file in the same patch (one
+    /// call instead of one per file).
+    pub async fn git_diff_untracked(&self, project: &str) -> ApiResult<GitDiff> {
+        Self::decode(self.git_post(project, "diff", git_diff_untracked_body()).await?)
     }
 
     /// Stage whole files.

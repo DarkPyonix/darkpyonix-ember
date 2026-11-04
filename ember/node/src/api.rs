@@ -19,14 +19,14 @@
 //! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
 //! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
-//! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`) |
-//! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] |
+//! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
+//! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
 //! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
 //! | POST | `/git/apply` | [`GitApplyRequest`] → 204 (patch to the index; 409 if it does not apply) |
 //! | POST | `/git/commit` | [`GitCommitRequest`] → [`GitCommitResponse`] (409 on an empty index) |
 //! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
 //! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
-//! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with git's message; pull is fast-forward only) |
+//! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
 //! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
 //! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
@@ -277,6 +277,8 @@ impl From<GitError> for ApiError {
             GitError::Bad(m) => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m),
             GitError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, ErrorCode::Conflict, m),
             GitError::Internal(m) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, m),
+            GitError::Timeout(m) => ApiError::new(StatusCode::GATEWAY_TIMEOUT, ErrorCode::Timeout, m),
+            GitError::TooLarge(m) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge, m),
         }
     }
 }
@@ -358,7 +360,8 @@ async fn rename(State(n): State<Node>, Json(r): Json<RenameRequest>) -> Result<S
 }
 
 // Git handlers: each resolves the repository through the path policy, then runs the `git` CLI
-// ([`crate::git`]). Mutating operations take the write lock like the file writes do.
+// ([`crate::git`]). Operations that change the index or work tree take the write lock like the file writes do;
+// fetch, push and the network half of pull do not, because they can take a long time.
 
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))
@@ -408,8 +411,12 @@ async fn git_fetch(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> Ap
 }
 
 async fn git_pull(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> ApiResult<GitOutput> {
+    // The network fetch runs without the lock; only the local fast-forward takes it.
+    let f = git::pull_fetch(&n.0.policy, &r).await?;
     let _guard = n.0.write_lock.lock().await;
-    Ok(Json(git::pull(&n.0.policy, &r).await?))
+    let m = git::pull_merge(&n.0.policy, &GitRepoRequest { repo: r.repo.clone() }).await?;
+    let output = [f.output, m.output].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n");
+    Ok(Json(GitOutput { output }))
 }
 
 async fn git_push(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> ApiResult<GitOutput> {

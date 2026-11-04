@@ -1,16 +1,21 @@
 //! The git API (SPEC FR-G1 to FR-G3): repository state, staging, commits, branches and remotes,
-//! implemented by running the `git` CLI in the repository (`LC_ALL=C`, no terminal prompts).
+//! implemented by running the `git` CLI in the repository (`LC_ALL=C`, no terminal prompts, no
+//! credential or ssh prompts, literal pathspecs, unquoted non-ASCII paths).
 //!
 //! Every request names the repository by absolute path; the path must resolve inside an allowed
 //! root. A directory that is not a repository answers [`GitError::NotARepo`], a git refusal
 //! (empty index, diverged pull, patch that does not apply) answers [`GitError::Conflict`] with
-//! git's own message, and malformed input answers [`GitError::Bad`].
+//! git's own message, and malformed input answers [`GitError::Bad`]. Messages are Korean with
+//! git's text after them as detail. `fetch`, `pull` and `push` stop after
+//! [`network_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
+//! [`GitError::TooLarge`].
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::policy::{PathPolicy, PolicyError};
 
@@ -57,6 +62,10 @@ pub struct GitDiffRequest {
     pub path: Option<String>,
     #[serde(default)]
     pub staged: bool,
+    /// With no `path` and `staged` false: also include every untracked file, as new-file
+    /// patches, in the same answer (one call instead of one per file).
+    #[serde(default)]
+    pub include_untracked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -131,7 +140,7 @@ pub struct GitConflicts {
 pub enum GitError {
     #[error(transparent)]
     Policy(#[from] PolicyError),
-    #[error("not a git repository: {0}")]
+    #[error("{0}")]
     NotARepo(String),
     #[error("{0}")]
     Bad(String),
@@ -139,20 +148,87 @@ pub enum GitError {
     Conflict(String),
     #[error("{0}")]
     Internal(String),
+    /// A network operation did not finish in time (504).
+    #[error("{0}")]
+    Timeout(String),
+    /// The output exceeded [`max_output`] (413).
+    #[error("{0}")]
+    TooLarge(String),
+}
+
+/// Default deadline for `fetch`, `pull` and `push`.
+pub const NETWORK_TIMEOUT_SECS: u64 = 60;
+/// Default cap on the stdout of one git command (8 MiB).
+pub const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STDERR_BYTES: usize = 1024 * 1024;
+
+/// The network deadline: `EMBER_GIT_NETWORK_TIMEOUT_SECS` if set to a positive number (tests),
+/// else [`NETWORK_TIMEOUT_SECS`].
+pub fn network_timeout() -> Duration {
+    let secs = std::env::var("EMBER_GIT_NETWORK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(NETWORK_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// The stdout cap: `EMBER_GIT_MAX_OUTPUT_BYTES` if set to a positive number (tests), else
+/// [`MAX_OUTPUT_BYTES`].
+pub fn max_output() -> usize {
+    std::env::var("EMBER_GIT_MAX_OUTPUT_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(MAX_OUTPUT_BYTES)
+}
+
+fn too_large() -> GitError {
+    GitError::TooLarge(format!(
+        "git 출력이 너무 커서 중단했습니다 (최대 {} KiB). 파일 하나씩 확인하세요.",
+        max_output() / 1024
+    ))
 }
 
 struct Out {
     code: i32,
     stdout: String,
     stderr: String,
+    /// stdout reached [`max_output`] and git was stopped.
+    truncated: bool,
+}
+
+async fn read_capped<R: AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bool) {
+    let mut buf = Vec::new();
+    let _ = (&mut r).take(cap as u64 + 1).read_to_end(&mut buf).await;
+    let over = buf.len() > cap;
+    buf.truncate(cap);
+    (buf, over)
 }
 
 async fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
+    run_with(repo, args, stdin, None).await
+}
+
+/// Run git with a deadline (network operations).
+async fn run_net(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
+    run_with(repo, args, None, Some(network_timeout())).await
+}
+
+async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args)
+    // Non-ASCII paths stay raw (not octal-quoted), pathspecs are literal (`a[1].txt`, `*.rs`),
+    // and nothing may wait for a person: no terminal, credential or ssh prompt.
+    cmd.args(["-c", "core.quotepath=false"])
+        .args(args)
         .current_dir(repo)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_ASKPASS", "true")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env_remove("SSH_ASKPASS")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -160,27 +236,67 @@ async fn run(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, Git
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| GitError::Internal(format!("cannot run git: {e}")))?;
-    if let (Some(data), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        // A write error (git exited early) surfaces through its exit status below.
-        let _ = pipe.write_all(data.as_bytes()).await;
-        drop(pipe);
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
-    let o = child.wait_with_output().await.map_err(|e| GitError::Internal(e.to_string()))?;
-    Ok(Out {
-        code: o.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-    })
+    let mut child = cmd.spawn().map_err(|e| GitError::Internal(format!("cannot run git: {e}")))?;
+    let pipe = child.stdin.take();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let cap = max_output();
+    let work = async {
+        let write = async {
+            if let (Some(data), Some(mut p)) = (stdin, pipe) {
+                // A write error (git exited early) surfaces through its exit status below.
+                let _ = p.write_all(data.as_bytes()).await;
+            }
+        };
+        let ((out, over), (err, _), ()) =
+            tokio::join!(read_capped(stdout, cap), read_capped(stderr, MAX_STDERR_BYTES), write);
+        if over {
+            let _ = child.kill().await;
+        }
+        let status = child.wait().await.map_err(|e| GitError::Internal(e.to_string()))?;
+        Ok::<_, GitError>(Out {
+            code: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out).into_owned(),
+            stderr: String::from_utf8_lossy(&err).into_owned(),
+            truncated: over,
+        })
+    };
+    match deadline {
+        None => work.await,
+        Some(d) => match tokio::time::timeout(d, work).await {
+            Ok(r) => r,
+            Err(_) => {
+                let _ = child.kill().await;
+                Err(GitError::Timeout(format!(
+                    "원격 저장소가 {}초 안에 응답하지 않아 중단했습니다 (네트워크 연결이나 인증 대기를 확인하세요).",
+                    d.as_secs()
+                )))
+            }
+        },
+    }
 }
 
-/// Run git and require exit status 0; a failure is a [`GitError::Conflict`] with git's message.
+/// Run git and require exit status 0; a failure is a [`GitError::Conflict`] with a Korean
+/// message and git's own text as detail.
 async fn run_ok(repo: &Path, args: &[&str], stdin: Option<&str>) -> Result<Out, GitError> {
-    let o = run(repo, args, stdin).await?;
+    finish(run(repo, args, stdin).await?)
+}
+
+async fn run_net_ok(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
+    finish(run_net(repo, args).await?)
+}
+
+fn finish(o: Out) -> Result<Out, GitError> {
+    if o.truncated {
+        return Err(too_large());
+    }
     if o.code == 0 {
         Ok(o)
     } else {
-        Err(GitError::Conflict(message(&o)))
+        Err(GitError::Conflict(describe(&message(&o))))
     }
 }
 
@@ -189,20 +305,90 @@ fn message(o: &Out) -> String {
     m.trim().to_string()
 }
 
+/// The Korean text for a known git failure, or `None`.
+pub fn korean_message(git_text: &str) -> Option<&'static str> {
+    let t = git_text.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    if has(&["dubious ownership"]) {
+        Some("저장소 소유자가 현재 사용자와 달라 git이 접근을 거부했습니다 (safe.directory 설정이 필요합니다).")
+    } else if has(&["not currently on a branch"]) {
+        Some("HEAD가 브랜치에 있지 않습니다 (detached HEAD). 브랜치로 전환한 뒤 다시 시도하세요.")
+    } else if has(&["no tracking information", "no upstream", "has no upstream"]) {
+        Some("현재 브랜치에 upstream이 없습니다. 먼저 push로 원격 브랜치를 만드세요.")
+    } else if has(&["not possible to fast-forward", "diverging branches", "cannot fast-forward"]) {
+        Some("로컬과 원격 브랜치가 갈라졌습니다 (fast-forward 불가). 병합이나 rebase가 필요합니다.")
+    } else if has(&["unmerged files", "conflict (", "merge conflict", "fix conflicts"]) {
+        Some("병합 충돌이 있습니다. 충돌을 해결한 뒤 다시 시도하세요.")
+    } else if has(&[
+        "author identity unknown",
+        "please tell me who you are",
+        "unable to auto-detect",
+        "empty ident name",
+        "no email was given",
+        "no name was given",
+    ]) {
+        Some("커밋 작성자(user.name, user.email)가 설정되지 않았습니다.")
+    } else if has(&["would be overwritten", "please commit your changes or stash", "local changes"]) {
+        Some("커밋하지 않은 로컬 변경 사항 때문에 전환할 수 없습니다. 커밋하거나 stash한 뒤 다시 시도하세요.")
+    } else if has(&["[rejected]", "failed to push some refs", "non-fast-forward"]) {
+        Some("원격에 더 새로운 커밋이 있어 push가 거부되었습니다. 먼저 pull 하세요.")
+    } else if has(&[
+        "could not resolve host",
+        "unable to access",
+        "unable to connect",
+        "connection refused",
+        "connection timed out",
+        "network is unreachable",
+        "could not read from remote repository",
+        "does not appear to be a git repository",
+        "permission denied (publickey",
+        "host key verification failed",
+        "terminal prompts disabled",
+        "authentication failed",
+    ]) {
+        Some("원격 저장소에 연결하지 못했습니다 (주소, 네트워크, 인증을 확인하세요).")
+    } else if has(&["nothing staged"]) {
+        Some("커밋할 스테이지된 변경이 없습니다.")
+    } else {
+        None
+    }
+}
+
+/// `<Korean text>\n<git's text>`, or just git's text when it is not a known failure.
+fn describe(git_text: &str) -> String {
+    match korean_message(git_text) {
+        Some(k) if git_text.is_empty() => k.to_string(),
+        Some(k) => format!("{k}\n{git_text}"),
+        None if git_text.is_empty() => "git 작업이 실패했습니다.".to_string(),
+        None => format!("git 작업이 실패했습니다.\n{git_text}"),
+    }
+}
+
 /// Resolve the repository path through the policy and check it is inside a work tree.
 async fn open(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
     let dir = policy.resolve_existing(Path::new(repo))?;
     let o = run(&dir, &["rev-parse", "--is-inside-work-tree"], None).await?;
-    if o.code != 0 || o.stdout.trim() != "true" {
-        return Err(GitError::NotARepo(repo.to_string()));
+    if o.code == 0 && o.stdout.trim() == "true" {
+        return Ok(dir);
     }
-    Ok(dir)
+    let text = message(&o);
+    if o.code == 0 {
+        // `false`: a bare repository or the inside of a `.git` directory.
+        return Err(GitError::Conflict(format!(
+            "작업 트리가 없는 저장소(bare)이거나 .git 안쪽입니다: {repo}"
+        )));
+    }
+    if text.to_lowercase().contains("not a git repository") {
+        return Err(GitError::NotARepo(format!("git 저장소가 아닙니다: {repo}")));
+    }
+    // Dubious ownership and any other refusal are not "not a repository".
+    Err(GitError::Conflict(describe(&text)))
 }
 
 /// A ref, remote or branch name must not look like an option.
 fn name_arg<'a>(what: &str, v: &'a str) -> Result<&'a str, GitError> {
     if v.is_empty() || v.starts_with('-') || v.contains('\0') {
-        return Err(GitError::Bad(format!("invalid {what}: {v:?}")));
+        return Err(GitError::Bad(format!("잘못된 {what} 값입니다: {v:?}")));
     }
     Ok(v)
 }
@@ -303,20 +489,34 @@ pub async fn status(policy: &PathPolicy, r: &GitRepoRequest) -> Result<GitStatus
     Ok(st)
 }
 
+/// Patch of one untracked path against `/dev/null`; exit status 1 means "differences found".
+async fn untracked_patch(dir: &Path, p: &str) -> Result<String, GitError> {
+    let o = run(
+        dir,
+        &["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", p],
+        None,
+    )
+    .await?;
+    if o.truncated {
+        return Err(too_large());
+    }
+    if o.code > 1 {
+        return Err(GitError::Conflict(describe(&message(&o))));
+    }
+    Ok(o.stdout)
+}
+
+/// Diff of one file or all. With `include_untracked` (and no `path`, not staged) the untracked
+/// files follow the tracked changes in the same patch; the total is capped by [`max_output`].
 pub async fn diff(policy: &PathPolicy, r: &GitDiffRequest) -> Result<GitDiff, GitError> {
     let dir = open(policy, &r.repo).await?;
     if let Some(p) = r.path.as_deref().filter(|_| !r.staged) {
         let u = run_ok(&dir, &["ls-files", "--others", "--exclude-standard", "-z", "--", p], None).await?;
         if !u.stdout.is_empty() {
-            // Untracked: diff against /dev/null; exit status 1 means "differences found".
-            let o = run(&dir, &["diff", "--no-color", "--no-index", "--", "/dev/null", p], None).await?;
-            if o.code > 1 {
-                return Err(GitError::Conflict(message(&o)));
-            }
-            return Ok(GitDiff { patch: o.stdout });
+            return Ok(GitDiff { patch: untracked_patch(&dir, p).await? });
         }
     }
-    let mut args = vec!["diff", "--no-color"];
+    let mut args = vec!["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
     if r.staged {
         args.push("--cached");
     }
@@ -324,12 +524,22 @@ pub async fn diff(policy: &PathPolicy, r: &GitDiffRequest) -> Result<GitDiff, Gi
         args.push("--");
         args.push(p);
     }
-    Ok(GitDiff { patch: run_ok(&dir, &args, None).await?.stdout })
+    let mut patch = run_ok(&dir, &args, None).await?.stdout;
+    if r.include_untracked && r.path.is_none() && !r.staged {
+        let u = run_ok(&dir, &["ls-files", "--others", "--exclude-standard", "-z"], None).await?;
+        for p in u.stdout.split('\0').filter(|p| !p.is_empty()) {
+            patch.push_str(&untracked_patch(&dir, p).await?);
+            if patch.len() > max_output() {
+                return Err(too_large());
+            }
+        }
+    }
+    Ok(GitDiff { patch })
 }
 
 fn paths_of(r: &GitPathsRequest) -> Result<(), GitError> {
     if r.paths.is_empty() {
-        return Err(GitError::Bad("paths must not be empty".into()));
+        return Err(GitError::Bad("paths는 비어 있을 수 없습니다.".into()));
     }
     Ok(())
 }
@@ -357,7 +567,7 @@ pub async fn unstage(policy: &PathPolicy, r: &GitPathsRequest) -> Result<(), Git
 
 pub async fn apply(policy: &PathPolicy, r: &GitApplyRequest) -> Result<(), GitError> {
     if r.patch.trim().is_empty() {
-        return Err(GitError::Bad("patch must not be empty".into()));
+        return Err(GitError::Bad("patch가 비어 있습니다.".into()));
     }
     let dir = open(policy, &r.repo).await?;
     let mut args = vec!["apply", "--cached", "--recount"];
@@ -370,14 +580,14 @@ pub async fn apply(policy: &PathPolicy, r: &GitApplyRequest) -> Result<(), GitEr
 
 pub async fn commit(policy: &PathPolicy, r: &GitCommitRequest) -> Result<GitCommitResponse, GitError> {
     if r.summary.trim().is_empty() {
-        return Err(GitError::Bad("summary must not be empty".into()));
+        return Err(GitError::Bad("커밋 요약이 비어 있습니다.".into()));
     }
     let dir = open(policy, &r.repo).await?;
     if !r.amend {
         // `--quiet` exits 1 when the index differs from HEAD (or from the empty tree).
         let d = run(&dir, &["diff", "--cached", "--quiet"], None).await?;
         if d.code == 0 {
-            return Err(GitError::Conflict("nothing staged to commit".into()));
+            return Err(GitError::Conflict("커밋할 스테이지된 변경이 없습니다.".into()));
         }
     }
     let mut msg = r.summary.trim().to_string();
@@ -423,40 +633,99 @@ fn combined(o: &Out) -> GitOutput {
     GitOutput { output: s.trim_end().to_string() }
 }
 
-fn remote_arg(r: &GitRemoteRequest) -> Result<Option<&str>, GitError> {
-    r.remote.as_deref().map(|v| name_arg("remote", v)).transpose()
+/// The remote argument must be one of the configured `git remote` names (never a URL or a
+/// transport), so a client cannot make the node talk to an arbitrary address.
+async fn remote_arg(dir: &Path, r: &GitRemoteRequest) -> Result<Option<String>, GitError> {
+    let Some(v) = r.remote.as_deref() else { return Ok(None) };
+    let v = name_arg("원격 저장소 이름", v)?;
+    check_remote(dir, v).await?;
+    Ok(Some(v.to_string()))
 }
 
+async fn check_remote(dir: &Path, name: &str) -> Result<(), GitError> {
+    let o = run_ok(dir, &["remote"], None).await?;
+    let names: Vec<&str> = o.stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if names.contains(&name) {
+        Ok(())
+    } else {
+        Err(GitError::Bad(format!(
+            "알 수 없는 원격 저장소입니다: {name} (설정된 원격: {})",
+            if names.is_empty() { "없음".to_string() } else { names.join(", ") }
+        )))
+    }
+}
+
+fn detached() -> GitError {
+    GitError::Conflict(korean_message("not currently on a branch").unwrap_or("detached HEAD").to_string())
+}
+
+/// `push` and `pull` need a branch: refuse a detached HEAD before touching the network.
+async fn require_branch(dir: &Path) -> Result<(), GitError> {
+    if run(dir, &["symbolic-ref", "-q", "HEAD"], None).await?.code == 0 {
+        Ok(())
+    } else {
+        Err(detached())
+    }
+}
+
+async fn has_upstream(dir: &Path) -> Result<bool, GitError> {
+    Ok(run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], None).await?.code == 0)
+}
+
+/// No lock is needed: only remote-tracking refs change, and the call may take a long time.
 pub async fn fetch(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<GitOutput, GitError> {
-    let remote = remote_arg(r)?;
     let dir = open(policy, &r.repo).await?;
+    let remote = remote_arg(&dir, r).await?;
     let mut args = vec!["fetch"];
-    args.extend(remote);
-    run_ok(&dir, &args, None).await.map(|o| combined(&o))
+    args.extend(remote.as_deref());
+    run_net_ok(&dir, &args).await.map(|o| combined(&o))
 }
 
-/// Fast-forward only: a diverged branch is refused with git's message.
-pub async fn pull(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<GitOutput, GitError> {
-    let remote = remote_arg(r)?;
+/// First half of a pull: the checks and the network fetch. Needs no lock.
+pub async fn pull_fetch(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<GitOutput, GitError> {
     let dir = open(policy, &r.repo).await?;
-    let mut args = vec!["pull", "--ff-only"];
-    args.extend(remote);
-    run_ok(&dir, &args, None).await.map(|o| combined(&o))
+    let remote = remote_arg(&dir, r).await?;
+    require_branch(&dir).await?;
+    if !has_upstream(&dir).await? {
+        return Err(GitError::Conflict(korean_message("no tracking information").unwrap_or("no upstream").to_string()));
+    }
+    let mut args = vec!["fetch"];
+    args.extend(remote.as_deref());
+    run_net_ok(&dir, &args).await.map(|o| combined(&o))
+}
+
+/// Second half of a pull: fast-forward to the upstream. Local only (index and work tree), so
+/// the caller holds the write lock for this part.
+pub async fn pull_merge(policy: &PathPolicy, r: &GitRepoRequest) -> Result<GitOutput, GitError> {
+    let dir = open(policy, &r.repo).await?;
+    require_branch(&dir).await?;
+    run_ok(&dir, &["merge", "--ff-only", "@{u}"], None).await.map(|o| combined(&o))
+}
+
+/// Fast-forward only: a diverged branch is refused with a Korean message and git's text. This
+/// is `pull_fetch` then `pull_merge`; the HTTP handler calls them separately to hold the write
+/// lock only for the merge.
+pub async fn pull(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<GitOutput, GitError> {
+    let f = pull_fetch(policy, r).await?;
+    let m = pull_merge(policy, &GitRepoRequest { repo: r.repo.clone() }).await?;
+    Ok(GitOutput { output: [f.output, m.output].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n") })
 }
 
 /// Push the current branch. When it has no upstream yet, it is published and tracked
-/// (`push -u <remote|origin> HEAD`).
+/// (`push -u <remote|origin> HEAD`). Needs no lock: nothing local changes but tracking refs.
 pub async fn push(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<GitOutput, GitError> {
-    let remote = remote_arg(r)?;
     let dir = open(policy, &r.repo).await?;
-    let has_upstream = run(&dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], None).await?.code == 0;
+    let remote = remote_arg(&dir, r).await?;
+    require_branch(&dir).await?;
     let mut args = vec!["push"];
-    if has_upstream {
-        args.extend(remote);
+    if has_upstream(&dir).await? {
+        args.extend(remote.as_deref());
     } else {
-        args.extend(["-u", remote.unwrap_or("origin"), "HEAD"]);
+        let name = remote.as_deref().unwrap_or("origin");
+        check_remote(&dir, name).await?;
+        args.extend(["-u", name, "HEAD"]);
     }
-    run_ok(&dir, &args, None).await.map(|o| combined(&o))
+    run_net_ok(&dir, &args).await.map(|o| combined(&o))
 }
 
 pub async fn conflicts(policy: &PathPolicy, r: &GitRepoRequest) -> Result<GitConflicts, GitError> {

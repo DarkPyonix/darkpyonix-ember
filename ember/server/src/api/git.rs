@@ -3,7 +3,7 @@
 //! | Op | Body (without `repo`) |
 //! | -- | --------------------- |
 //! | `status`, `conflicts` | `{}` |
-//! | `diff` | `{path?, staged}` |
+//! | `diff` | `{path?, staged, include_untracked?}` |
 //! | `stage`, `unstage` | `{paths}` |
 //! | `apply` | `{patch, reverse}` |
 //! | `commit` | `{summary, description?, amend}` |

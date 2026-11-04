@@ -39,7 +39,7 @@ use crate::ide::{IdeAction, IdeKind, open_external, plan};
 use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
-use crate::ui::project::{Member, display_name, project_boxes, status_pill};
+use crate::ui::project::{Member, display_name, project_boxes, project_boxes_with_archived, status_pill};
 use crate::ui::shell::NavMenu;
 
 use super::characters::{CharState, Character};
@@ -3920,9 +3920,10 @@ pub fn SessionScreen(focus: Option<String>) {
     let more_menu = remember(|| mutable_state_of(false));
     let web_menu = remember(|| mutable_state_of(false));
 
+    let show_archived = ui.show_archived.get();
     let boxes = {
         let _ = ui.live.launcher.get();
-        services().client.read(project_boxes)
+        services().client.read(|s| project_boxes_with_archived(s, show_archived))
     };
 
     let Some(current) = resolve_project(None, project.get().as_deref(), &boxes) else {

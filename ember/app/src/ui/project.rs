@@ -292,8 +292,16 @@ pub fn member_name(team_name: Option<&str>, project: &str, agent: &str, title: &
     format!("{}-{}", display_name(project), agent)
 }
 
-fn member_of(state: &State, project: &str, id: &str, leader_seen: &mut bool) -> Option<Member> {
-    let v = state.session(id).filter(|v| !v.record.archived)?;
+fn member_of(
+    state: &State,
+    project: &str,
+    id: &str,
+    leader_seen: &mut bool,
+    show_archived: bool,
+) -> Option<Member> {
+    let v = state
+        .session(id)
+        .filter(|v| show_archived || !v.record.archived)?;
     let team: Option<&TeamView> = state.team_for_session(id);
     let is_leader = team.is_some_and(|t| t.leader == id);
     let leader = leader_badge(project, is_leader, *leader_seen);
@@ -317,8 +325,13 @@ fn member_of(state: &State, project: &str, id: &str, leader_seen: &mut bool) -> 
     })
 }
 
-/// All projects as boxes, most recently active first (like `model::project_cards`).
+/// All projects as boxes (excluding archived sessions), most recently active first (like `model::project_cards`).
 pub fn project_boxes(state: &State) -> Vec<ProjectBox> {
+    project_boxes_with_archived(state, false)
+}
+
+/// All projects as boxes, including archived sessions when `show_archived` is true (FR-L9).
+pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<ProjectBox> {
     let mut out: Vec<(i64, ProjectBox)> = state
         .projects()
         .into_iter()
@@ -327,7 +340,7 @@ pub fn project_boxes(state: &State) -> Vec<ProjectBox> {
             let mut members: Vec<Member> = p
                 .sessions
                 .iter()
-                .filter_map(|id| member_of(state, &p.name, id, &mut seen))
+                .filter_map(|id| member_of(state, &p.name, id, &mut seen, show_archived))
                 .collect();
             order_members(&mut members);
             let latest = members.iter().map(|m| m.updated_at).max().unwrap_or(0);

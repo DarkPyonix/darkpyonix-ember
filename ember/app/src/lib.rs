@@ -101,7 +101,13 @@ pub fn launch() {
         live: OnceLock::new(),
     });
 
-    if let Some(pref) = ui::cr::shell::requested() {
+    if let Some(target) = ide::parse_editor_args(std::env::args()) {
+        // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the dioxus-compose
+        // EditorScreen in its own process until dioxus-compose#152 (the `window` element on a
+        // shared host) lands.
+        services().ui.editor.set(Some(target));
+        launch_builder().launch(ui::app);
+    } else if let Some(pref) = ui::cr::shell::requested() {
         // Phase 2 review window (#220): the compose-rust shell, no Dioxus app.
         ui::cr::shell::launch(pref);
     } else if let Some(pref) = ui::cr::gallery::requested() {

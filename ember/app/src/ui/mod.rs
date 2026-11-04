@@ -182,7 +182,7 @@ pub fn app() -> Element {
     let new_session = use_signal(|| None::<String>);
     let show_archived = use_signal(|| false);
     let menu = use_signal(initial_menu);
-    let editor = use_signal(|| None::<editor::EditorTarget>);
+    let editor = use_signal(|| services().ui.editor.get_untracked());
     let theme_pref = use_signal(|| services().initial_prefs.theme);
     use_context_provider(|| ThemeCtx { pref: theme_pref });
     use_context_provider(|| Ui {

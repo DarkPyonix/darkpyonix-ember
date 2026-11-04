@@ -232,12 +232,26 @@ impl SharedUi {
         }
     }
 
-    /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
+    /// Open the Ember 에디터 for a project in its own window (FR-L7, FR-L31).
+    /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the
+    /// editor window in the same process instead of spawning `--editor <project> <folder>`.
     pub fn open_editor(&self, project: String, folder: String) {
-        let target = Some(EditorTarget { project, folder });
+        let target = Some(EditorTarget {
+            project: project.clone(),
+            folder: folder.clone(),
+        });
         self.editor.set(target.clone());
         if let Some(mut m) = self.mirrors() {
             m.editor.set(target);
+        }
+        #[cfg(not(test))]
+        if crate::services::try_services().is_some() {
+            if let Err(e) = crate::ide::spawn_editor_process(&project, &folder) {
+                tracing::warn!(project = %project, "could not spawn editor window: {e}");
+                crate::ui::cr::notice::post(format!("Ember 에디터: 열지 못했습니다: {e}"));
+            } else {
+                crate::ui::cr::notice::post("Ember 에디터: 새 창에서 여는 중입니다");
+            }
         }
     }
 

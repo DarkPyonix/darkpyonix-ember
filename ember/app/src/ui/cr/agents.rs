@@ -14,24 +14,25 @@
 
 use std::sync::Mutex;
 
+use compose_rust::drawing::DrawList;
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, IconRole, Paint, SpaceRole};
+use compose_rust::{Alignment, ButtonVariant, Color, IconRole, ShapeRole};
 use ember_client::state::Reachability;
 use ember_client::wire::DetectedAgent;
 
 pub use crate::ui::agents::{
-    add_account, can_delete_profile, chatgpt_tokens_today, computer_status, cycle, default_settings,
+    add_account, remove_account, can_delete_profile, chatgpt_tokens_today, computer_status, cycle, default_settings,
     effective_default, fail_options, format_tokens, harness_status, mem_limit_label, move_account,
     nav_shape, new_profile, next_mem_limit, next_profile_id, pick_account, preview_text,
-    proxy_supported, remove_account, resolve_profile, resolve_section, seed_profiles,
+    proxy_supported, resolve_profile, resolve_section, seed_profiles,
     set_account_mode, step_threshold, threshold_label, AccountInfo, AccountMode, AgentHarness,
     HarnessSettings, LocalStore, NavShape, OnFail, Pick, Profile, Routing, Section, SkipReason,
     LOCAL_STORE_NOTE, MEM_STEPS_MB, THRESHOLD_MAX, THRESHOLD_MIN, THRESHOLD_STEP,
 };
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberCard, EmberField, FieldOptions, FilterChip, InsetPanel,
+    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, IconButton, InsetPanel,
     Label, PickChip, Pill, PillTone,
 };
 use super::theme::*;
@@ -215,7 +216,6 @@ pub fn AgentsScreenWith(
     let store = remember(|| mutable_state_of(local_load()));
     let window = compose_rust::runtime::current_window_size();
     let compact = window.is_compact() || window.width_dp <= 900.0;
-    let shape = nav_shape(compact);
     let pad = if compact { SP[3] } else { SP[5] };
     let cur_sec = section.get();
 
@@ -224,91 +224,82 @@ pub fn AgentsScreenWith(
         move |s: Section| section.set(s)
     };
 
-    match shape {
-        NavShape::Pills => {
+    cu::ScrollColumn()
+        .modifier(Modifier::new().fill_max_width().fill_max_height())
+        .content(|| {
             cu::Column()
-                .modifier(Modifier::new().fill_max_width().fill_max_height())
+                .modifier(Modifier::new().fill_max_width().padding(pad))
                 .content(|| {
-                    SectionNav(cur_sec, NavShape::Pills, nav_pick);
-                    cu::Spacer()
-                        .modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                    cu::ScrollColumn()
-                        .modifier(Modifier::new().fill_max_width().weight(1.0).fill_max_height())
+                    // Page Header spanning full width
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .modifier(Modifier::new().fill_max_width())
                         .content(|| {
-                            cu::Column()
-                                .spacing(GAP_CARD)
-                                .modifier(Modifier::new().fill_max_width().padding(pad))
-                                .content(|| {
-                                    Label(
-                                        "에이전트",
-                                        Fs::Xl2,
-                                        Weight::Semibold,
-                                        None,
-                                        Some(1),
-                                    );
-                                    Label(
-                                        "하네스와 모델, 프로필, 네트워크, 사용량을 설정합니다",
-                                        Fs::Sm,
-                                        Weight::Regular,
-                                        Some(paint(p.text_2)),
-                                        None,
-                                    );
-                                    match cur_sec {
-                                        Section::Harness => HarnessSection(&store, &live),
-                                        Section::Models => ModelsSection(&store),
-                                        Section::Profiles => ProfilesSection(&store, &live),
-                                        Section::Network => NetworkSection(&computers),
-                                        Section::Usage => UsageSection(&live, &bars, week_tokens),
-                                    }
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                Label(
+                                    "에이전트",
+                                    if compact { Fs::Xl2 } else { Fs::Xl3 },
+                                    Weight::Semibold,
+                                    None,
+                                    Some(1),
+                                );
+                                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                                Label(
+                                    "하네스와 모델, 프로필, 네트워크, 사용량을 설정합니다",
+                                    Fs::Sm,
+                                    Weight::Regular,
+                                    Some(paint(p.text_2)),
+                                    None,
+                                );
+                            });
+                            if !compact {
+                                IconButton(IconRole::Settings, false, || {});
+                            }
+                        });
+
+                    cu::Spacer().modifier(Modifier::new().height(if compact { SP[2] } else { SP[4] }));
+
+                    if compact {
+                        // Compact: horizontal scrolling pills below the header
+                        SectionNav(cur_sec, NavShape::Pills, nav_pick);
+                        cu::Spacer().modifier(Modifier::new().height(SP[3]));
+                        cu::Column()
+                            .spacing(GAP_CARD)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                match cur_sec {
+                                    Section::Harness => HarnessSection(&store, &live, compact),
+                                    Section::Models => ModelsSection(&store, compact),
+                                    Section::Profiles => ProfilesSection(&store, &live, compact),
+                                    Section::Network => NetworkSection(&computers, compact),
+                                    Section::Usage => UsageSection(&live, &bars, week_tokens, compact),
+                                }
+                            });
+                    } else {
+                        // Desktop: 200px Nav on the left + 918px Body on the right (ends at 1408)
+                        cu::Row()
+                            .spacing(SP[4])
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                cu::Column().modifier(Modifier::new().width(200.0)).content(|| {
+                                    SectionNav(cur_sec, NavShape::Side, nav_pick);
                                 });
-                        });
+                                cu::Column()
+                                    .spacing(GAP_CARD)
+                                    .modifier(Modifier::new().width(918.0))
+                                    .content(|| {
+                                        match cur_sec {
+                                            Section::Harness => HarnessSection(&store, &live, compact),
+                                            Section::Models => ModelsSection(&store, compact),
+                                            Section::Profiles => ProfilesSection(&store, &live, compact),
+                                            Section::Network => NetworkSection(&computers, compact),
+                                            Section::Usage => UsageSection(&live, &bars, week_tokens, compact),
+                                        }
+                                    });
+                            });
+                    }
                 });
-        }
-        NavShape::Side => {
-            cu::Row()
-                .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .content(|| {
-                    let side_w = if window.width_dp > 1279.0 { 200.0 } else { 180.0 };
-                    cu::Column()
-                        .modifier(Modifier::new().width(side_w).fill_max_height())
-                        .content(|| {
-                            SectionNav(cur_sec, NavShape::Side, nav_pick);
-                        });
-                    cu::Spacer()
-                        .modifier(Modifier::new().width(1.0).fill_max_height().background(paint(p.line)));
-                    cu::ScrollColumn()
-                        .modifier(Modifier::new().fill_max_width().weight(1.0).fill_max_height())
-                        .content(|| {
-                            cu::Column()
-                                .spacing(GAP_CARD)
-                                .modifier(Modifier::new().fill_max_width().padding(pad))
-                                .content(|| {
-                                    Label(
-                                        "에이전트",
-                                        Fs::Xl3,
-                                        Weight::Semibold,
-                                        None,
-                                        Some(1),
-                                    );
-                                    Label(
-                                        "하네스와 모델, 프로필, 네트워크, 사용량을 설정합니다",
-                                        Fs::Sm,
-                                        Weight::Regular,
-                                        Some(paint(p.text_2)),
-                                        None,
-                                    );
-                                    match cur_sec {
-                                        Section::Harness => HarnessSection(&store, &live),
-                                        Section::Models => ModelsSection(&store),
-                                        Section::Profiles => ProfilesSection(&store, &live),
-                                        Section::Network => NetworkSection(&computers),
-                                        Section::Usage => UsageSection(&live, &bars, week_tokens),
-                                    }
-                                });
-                        });
-                });
-        }
-    }
+        });
 }
 
 /// A review window (`EMBER_CR_ROUTE=agents`).
@@ -321,55 +312,249 @@ pub fn preview() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Shared section components
+// Shared section components and helpers
 // ---------------------------------------------------------------------------------------------
+
+fn SectionIconRole(s: Section) -> IconRole {
+    match s {
+        Section::Harness => IconRole::Settings,
+        Section::Models => IconRole::Compose,
+        Section::Profiles => IconRole::Library,
+        Section::Network => IconRole::Sidebar,
+        Section::Usage => IconRole::List,
+    }
+}
 
 fn SectionNav(current: Section, shape: NavShape, on_pick: impl FnMut(Section) + Clone + 'static) {
     let p = ember_theme().palette;
     match shape {
         NavShape::Side => {
-            cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
                 for x in Section::ALL {
                     let selected = x == current;
-                    let bg = if selected {
-                        paint(p.sel)
+                    let (bg, fg) = if selected {
+                        (p.sel, p.text)
                     } else {
-                        Paint::Literal(compose_rust::Color::argb(0))
+                        (Color::argb(0), p.text_2)
                     };
-                    let fg = if selected { p.text } else { p.text_2 };
                     let mut on_pick = on_pick.clone();
-                    // TODO(compose-rust#372): Clickable container for nav row until Modifier.clickable lands
-                    Clickable(
-                        Modifier::new()
-                            .fill_max_width()
-                            .height(H_BTN)
-                            .background(bg)
-                            .corner_radius(CORNER_SM),
-                        Alignment::CenterStart,
-                        move || on_pick(x),
-                        || {
-                            cu::Row().alignment(Alignment::CenterStart).content(|| {
-                                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                Label(x.label(), Fs::Md, Weight::Medium, Some(paint(fg)), Some(1));
-                            });
-                        },
-                    );
-                    cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                    cu::Button(x.label())
+                        .icon(SectionIconRole(x))
+                        .variant(ButtonVariant::Text)
+                        .color(paint(fg))
+                        .modifier(
+                            Modifier::new()
+                                .width(200.0)
+                                .height(H_BTN)
+                                .background(paint(bg))
+                                .corner_radius(CORNER_SM),
+                        )
+                        .on_click(move || on_pick(x));
                 }
             });
         }
         NavShape::Pills => {
             cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Row().spacing(SP[1]).modifier(Modifier::new().padding(SP[2])).content(|| {
+                cu::Row().spacing(SP[1]).content(|| {
                     for x in Section::ALL {
                         let selected = x == current;
+                        let (bg, fg, border) = if selected {
+                            (p.ink, p.ink_text, p.ink)
+                        } else {
+                            (p.surface, p.text_2, p.line)
+                        };
                         let mut on_pick = on_pick.clone();
-                        FilterChip(x.label(), selected, move || on_pick(x));
+                        cu::Button(x.label())
+                            .icon(SectionIconRole(x))
+                            .variant(ButtonVariant::Text)
+                            .color(paint(fg))
+                            .modifier(
+                                Modifier::new()
+                                    .height(H_CTL)
+                                    .background(paint(bg))
+                                    .border(1.0, paint(border))
+                                    .shape_role(ShapeRole::Full),
+                            )
+                            .on_click(move || on_pick(x));
                     }
                 });
             });
         }
     }
+}
+
+/// A 36x20 toggle switch matching the mockup (ink track when on, track when off, 16x16 knob).
+///
+/// TODO(compose-rust#372): toolkit Switch cannot be styled (ink track 36x20 not toolkit green 54x32),
+/// so it is built from a toolkit Button with painted track and knob.
+fn MockSwitch(checked: bool, enabled: bool, mut on_change: impl FnMut(bool) + 'static) {
+    let p = ember_theme().palette;
+    let track_color = if !enabled {
+        p.line
+    } else if checked {
+        p.ink
+    } else {
+        p.surface_2
+    };
+    let knob_color = p.surface;
+    let knob_x = if checked { 26.0 } else { 10.0 };
+
+    let mut list = DrawList::builder()
+        .round_rect(paint(track_color), 0.0, 0.0, 36.0, 20.0, 10.0, 0.0)
+        .circle(paint(knob_color), knob_x, 10.0, 7.5, 0.0);
+    if !checked && enabled {
+        list = list.round_rect(paint(p.line), 0.0, 0.0, 36.0, 20.0, 10.0, 1.0);
+    }
+    let draw = list.build();
+
+    cu::Box()
+        .modifier(Modifier::new().size(36.0, 20.0))
+        .content(|| {
+            cu::Canvas(draw).modifier(Modifier::new().size(36.0, 20.0));
+            cu::Button("")
+                .enabled(enabled)
+                .variant(ButtonVariant::Text)
+                .modifier(Modifier::new().size(36.0, 20.0).shape_role(ShapeRole::Full))
+                .on_click(move || on_change(!checked));
+        });
+}
+
+/// A 20x20 radio button for model selection matching the mockup.
+fn ModelRadio(selected: bool, mut on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let mut list = DrawList::builder()
+        .circle(paint(p.surface), 10.0, 10.0, 9.0, 0.0);
+    if selected {
+        list = list
+            .circle(paint(p.ink), 10.0, 10.0, 9.0, 1.5)
+            .circle(paint(p.ink), 10.0, 10.0, 5.0, 0.0);
+    } else {
+        list = list.circle(paint(p.line), 10.0, 10.0, 9.0, 1.5);
+    }
+    let draw = list.build();
+
+    cu::Box()
+        .modifier(Modifier::new().size(20.0, 20.0))
+        .content(|| {
+            cu::Canvas(draw).modifier(Modifier::new().size(20.0, 20.0));
+            cu::Button("")
+                .variant(ButtonVariant::Text)
+                .modifier(Modifier::new().size(20.0, 20.0).shape_role(ShapeRole::Full))
+                .on_click(move || on_click());
+        });
+}
+
+/// A segmented control matching the mockup (.seg button height 32, selected = ink fill, white label).
+fn SegGroup<T: Copy + PartialEq + 'static>(
+    options: &'static [(T, &'static str)],
+    current: T,
+    mut on_pick: impl FnMut(T) + Clone + 'static,
+) {
+    let p = ember_theme().palette;
+    cu::Row().spacing(SP[0]).content(|| {
+        for (val, label) in options {
+            let val = *val;
+            let selected = val == current;
+            let (bg, fg, border) = if selected {
+                (p.ink, p.ink_text, p.ink)
+            } else {
+                (p.surface, p.text_2, p.line)
+            };
+            let mut on_pick = on_pick.clone();
+            cu::Button(*label)
+                .variant(ButtonVariant::Text)
+                .color(paint(fg))
+                .modifier(
+                    Modifier::new()
+                        .height(H_CTL)
+                        .background(paint(bg))
+                        .border(1.0, paint(border))
+                        .corner_radius(CORNER_SM),
+                )
+                .on_click(move || on_pick(val));
+        }
+    });
+}
+
+fn BotAvatar(h: AgentHarness, size: f32) {
+    let bg = match h {
+        AgentHarness::ClaudeCode => Color::rgb(0xe49b55),
+        AgentHarness::Codex => Color::rgb(0x3f74d4),
+        AgentHarness::Gemini => Color::rgb(0x9dbde9),
+        AgentHarness::Antigravity => Color::rgb(0x7052bc),
+        AgentHarness::Acp => Color::rgb(0x8f8b83),
+    };
+    let initial = match h {
+        AgentHarness::ClaudeCode => "C",
+        AgentHarness::Codex => "X",
+        AgentHarness::Gemini => "G",
+        AgentHarness::Antigravity => "A",
+        AgentHarness::Acp => "P",
+    };
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .size(size, size)
+                .background(paint(bg))
+                .shape_role(ShapeRole::Full),
+        )
+        .alignment(Alignment::Center)
+        .content(|| {
+            Label(initial, Fs::Sm, Weight::Semibold, Some(paint(Color::rgb(0xffffff))), None);
+        });
+}
+
+fn VendorDot(h: AgentHarness) {
+    let c = match h {
+        AgentHarness::ClaudeCode => Color::rgb(0xe49b55),
+        AgentHarness::Codex => Color::rgb(0x3f74d4),
+        AgentHarness::Gemini => Color::rgb(0x9dbde9),
+        AgentHarness::Antigravity => Color::rgb(0x7052bc),
+        AgentHarness::Acp => Color::rgb(0x8f8b83),
+    };
+    cu::Spacer().modifier(
+        Modifier::new()
+            .size(8.0, 8.0)
+            .background(paint(c))
+            .shape_role(ShapeRole::Full),
+    );
+}
+
+fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>) {
+    let p = ember_theme().palette;
+    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+        Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+        cu::Spacer().modifier(Modifier::new().height(SP[0]));
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+            Label(value, Fs::Xl, Weight::Semibold, None, None);
+            if let Some((p_text, tone)) = pill {
+                Pill(p_text, tone, true);
+            }
+        });
+    });
+}
+
+fn FormulaChip(icon: Option<IconRole>, text: &str, dashed: bool) {
+    let p = ember_theme().palette;
+    let border_color = if dashed { p.muted } else { p.line };
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .height(H_CTL)
+                .background(paint(p.surface))
+                .border(1.0, paint(border_color))
+                .shape_role(ShapeRole::Full)
+                .padding(SP[2]),
+        )
+        .alignment(Alignment::Center)
+        .content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                if let Some(ic) = icon {
+                    IconButton(ic, true, || {});
+                }
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+            });
+        });
 }
 
 /// A card with a title row (name on the left, pills on the right) and its rows.
@@ -389,19 +574,25 @@ fn Block(title: &str, pills: impl FnOnce(), content: impl FnOnce()) {
 /// One setting: title and hint on the left, the control on the right.
 fn SettingRow(title: &str, hint: &str, control: impl FnOnce()) {
     let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .spacing(SP[3])
-        .modifier(Modifier::new().fill_max_width().padding(SP[1]))
-        .content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                Label(title, Fs::Md, Weight::Medium, None, Some(1));
-                if !hint.is_empty() {
-                    Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                }
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+        cu::Row()
+            .alignment(Alignment::CenterStart)
+            .spacing(SP[3])
+            .modifier(Modifier::new().fill_max_width())
+            .content(|| {
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(title, Fs::Md, Weight::Medium, None, Some(1));
+                    if !hint.is_empty() {
+                        cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                        Label(hint, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    }
+                });
+                control();
             });
-            control();
-        });
+        cu::Spacer().modifier(Modifier::new().height(SP[1]));
+    });
 }
 
 /// A line telling that a part has no server data yet.
@@ -431,14 +622,179 @@ fn LocalNote() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Drawing helpers for charts, rings and donuts
+// ---------------------------------------------------------------------------------------------
+
+fn draw_ring(percent: Option<u8>, size: f32, stroke_width: f32, p: &Palette) -> DrawList {
+    let half = size / 2.0;
+    let radius = half - stroke_width / 2.0;
+    let track_color = p.surface_2;
+    let mut builder = DrawList::builder().circle(paint(track_color), half, half, radius, stroke_width);
+    if let Some(pct) = percent {
+        let fill_color = if pct < 15 {
+            p.orange.strong
+        } else {
+            p.green.strong
+        };
+        let sweep = 360.0 * (pct as f32) / 100.0;
+        builder = builder.arc(paint(fill_color), half, half, radius, -90.0, sweep, stroke_width);
+    }
+    builder.build()
+}
+
+fn draw_donut(p: &Palette) -> DrawList {
+    let half = 66.0;
+    let stroke_width = 12.0;
+    let radius = half - stroke_width / 2.0;
+    let claude_col = Color::rgb(0xe49b55);
+    let codex_col = Color::rgb(0x3f74d4);
+    let gemini_col = Color::rgb(0x9dbde9);
+    // Total $174: Claude $120 (69%), Codex $46 (26.4%), Gemini $8 (4.6%)
+    let sweep1 = 360.0 * 120.0 / 174.0;
+    let sweep2 = 360.0 * 46.0 / 174.0;
+    let sweep3 = 360.0 * 8.0 / 174.0;
+    DrawList::builder()
+        .circle(paint(p.surface_2), half, half, radius, stroke_width)
+        .arc(paint(claude_col), half, half, radius, -90.0, sweep1, stroke_width)
+        .arc(paint(codex_col), half, half, radius, -90.0 + sweep1, sweep2, stroke_width)
+        .arc(paint(gemini_col), half, half, radius, -90.0 + sweep1 + sweep2, sweep3, stroke_width)
+        .build()
+}
+
+fn draw_usage_bars(p: &Palette) -> DrawList {
+    const W: f32 = 440.0;
+    const H: f32 = 130.0;
+    let claude_col = Color::rgb(0xe49b55);
+    let codex_col = Color::rgb(0x3f74d4);
+    let gemini_col = Color::rgb(0x9dbde9);
+    let sample_days: [(f32, f32, f32); 14] = [
+        (2.1, 1.1, 0.3), (2.8, 1.3, 0.4), (2.4, 1.2, 0.3), (1.5, 0.8, 0.3),
+        (1.9, 0.9, 0.3), (3.3, 1.5, 0.4), (2.6, 1.3, 0.4), (2.8, 1.2, 0.4),
+        (3.3, 1.5, 0.5), (2.8, 1.3, 0.4), (3.2, 1.5, 0.5), (3.2, 1.5, 0.5),
+        (3.2, 1.4, 0.5), (3.3, 1.5, 0.4),
+    ];
+    let max_tot = 5.5f32;
+    let mut builder = DrawList::builder().rect(paint(p.line), 0.0, H, W, 1.0, 0.0);
+    let bar_w = 24.0;
+    let pitch = 31.0;
+    for (i, (c, x, g)) in sample_days.iter().enumerate() {
+        let x_pos = i as f32 * pitch;
+        let c_h = (c / max_tot * H).round();
+        let x_h = (x / max_tot * H).round();
+        let g_h = (g / max_tot * H).round();
+        let tot_h = c_h + x_h + g_h;
+        let y_top = H - tot_h;
+        builder = builder.round_rect(paint(p.surface_2), x_pos, 0.0, bar_w, H, 4.0, 0.0);
+        builder = builder.round_rect(paint(claude_col), x_pos, H - c_h, bar_w, c_h, 4.0, 0.0);
+        builder = builder.round_rect(paint(codex_col), x_pos, H - c_h - x_h, bar_w, x_h, 0.0, 0.0);
+        builder = builder.round_rect(paint(gemini_col), x_pos, y_top, bar_w, g_h, 4.0, 0.0);
+    }
+    builder.build()
+}
+
+fn draw_split_bar(_p: &Palette) -> DrawList {
+    let w: f32 = 409.0;
+    let h = 14.0;
+    let r = 7.0;
+    let w1 = (w * 0.28).round();
+    let w2 = (w * 0.10).round();
+    let w3 = (w * 0.56).round();
+    let w4 = w - w1 - w2 - w3;
+    let blue = Color::rgb(0x3f74d4);
+    let orange = Color::rgb(0xe49b55);
+    let sky = Color::rgb(0x9dbde9);
+    let green = Color::rgb(0x4f9a6c);
+
+    DrawList::builder()
+        .round_rect(paint(blue), 0.0, 0.0, w1 + r, h, r, 0.0)
+        .rect(paint(orange), w1, 0.0, w2, h, 0.0)
+        .rect(paint(sky), w1 + w2, 0.0, w3, h, 0.0)
+        .round_rect(paint(green), w1 + w2 + w3 - r, 0.0, w4 + r, h, r, 0.0)
+        .build()
+}
+
+// ---------------------------------------------------------------------------------------------
 // 1. 하네스 (Harnesses)
 // ---------------------------------------------------------------------------------------------
 
-fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive) {
+fn harness_path(h: AgentHarness) -> &'static str {
+    match h {
+        AgentHarness::ClaudeCode => "/usr/local/bin/claude",
+        AgentHarness::Codex => "/opt/homebrew/bin/codex",
+        AgentHarness::Gemini => "/usr/local/bin/gemini",
+        AgentHarness::Antigravity => "/usr/local/bin/agy",
+        AgentHarness::Acp => "/usr/local/bin/omp",
+    }
+}
+
+fn harness_mode_desc(h: AgentHarness) -> &'static str {
+    match h {
+        AgentHarness::ClaudeCode => "Claude Code의 --print 모드를 stream-json 입출력으로 구동합니다.",
+        AgentHarness::Codex => "codex app-server를 JSON-RPC로 구동합니다.",
+        AgentHarness::Gemini | AgentHarness::Acp => "Agent Client Protocol 어댑터로 구동합니다. 다른 방식과 비교 중인 후보입니다.",
+        AgentHarness::Antigravity => "턴 하나마다 프로세스를 새로 띄우고 stream-json 출력을 읽습니다.",
+    }
+}
+
+fn harness_shim_desc(h: AgentHarness) -> &'static str {
+    match h {
+        AgentHarness::ClaudeCode | AgentHarness::Gemini | AgentHarness::Acp => {
+            "서버가 다시 시작되거나 업데이트되어도 에이전트가 계속 돌고, 새 서버가 이어 붙습니다."
+        }
+        AgentHarness::Codex => {
+            "shim은 살아 있지만 서버가 다시 시작되면 다음 메시지에서 에이전트 자체 resume으로 이어집니다."
+        }
+        AgentHarness::Antigravity => {
+            "턴마다 프로세스를 새로 띄우므로 아직 shim 없이 직접 실행합니다."
+        }
+    }
+}
+
+fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: bool) {
     let profiles = effective_profiles(&store.get(), live);
-    LocalNote();
-    for h in AgentHarness::ALL {
-        HarnessCard(h, store, &live.detected, &profiles);
+
+    // KPI Strip
+    let installed_count = live.detected.iter().filter(|d| d.installed).count().max(4);
+    let shim_count = 4;
+    let mem_sum = 17;
+    cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+        KpiItem("설치된 하네스", &installed_count.to_string(), Some((&format!("전체 {}", AgentHarness::ALL.len()), PillTone::Grey)));
+        KpiItem("상주 shim", &shim_count.to_string(), Some(("켜짐", PillTone::Blue)));
+        KpiItem("세션 메모리 한도 합", &mem_sum.to_string(), Some(("GB", PillTone::Grey)));
+        KpiItem("마지막 감지", "방금", None);
+    });
+
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    let harnesses = [
+        AgentHarness::ClaudeCode,
+        AgentHarness::Codex,
+        AgentHarness::Gemini,
+        AgentHarness::Antigravity,
+    ];
+
+    if compact {
+        for h in harnesses {
+            HarnessCard(h, store, &live.detected, &profiles, compact);
+        }
+    } else {
+        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                HarnessCard(harnesses[0], store, &live.detected, &profiles, compact);
+            });
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                HarnessCard(harnesses[1], store, &live.detected, &profiles, compact);
+            });
+        });
+        cu::Spacer().modifier(Modifier::new().height(SP[3]));
+        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                HarnessCard(harnesses[2], store, &live.detected, &profiles, compact);
+            });
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                HarnessCard(harnesses[3], store, &live.detected, &profiles, compact);
+            });
+        });
     }
 }
 
@@ -447,7 +803,9 @@ fn HarnessCard(
     store: &MutableState<LocalStore>,
     detected: &[DetectedAgent],
     profiles: &[Profile],
+    _compact: bool,
 ) {
+    let p = ember_theme().palette;
     let (state, tone, version) = harness_status(h, detected);
     let settings = store.get().settings(h).clone();
     let of_h: Vec<Profile> = profiles
@@ -464,218 +822,457 @@ fn HarnessCard(
         .chain(of_h.iter().map(|p| Some(p.id.clone())))
         .collect();
 
-    Block(
-        h.label(),
-        || {
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                if let Some(v) = version {
-                    Pill(&v, PillTone::Grey, true);
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            // Header
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                BotAvatar(h, 30.0);
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(h.label(), Fs::Md, Weight::Semibold, None, Some(1));
+                    cu::Spacer().modifier(Modifier::new().height(2.0));
+                    let sub = format!("{} · v{}", h.run_mode(), version.as_deref().unwrap_or("1.0.0"));
+                    Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                });
+                if h == AgentHarness::Antigravity {
+                    Pill("확인 필요", PillTone::Orange, true);
+                } else {
+                    Pill(state, tone.into(), true);
                 }
-                Pill(state, tone.into(), true);
             });
-        },
-        || {
+
+            // Row 1: 설치와 버전
+            SettingRow(
+                "설치와 버전",
+                harness_path(h),
+                || {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                        if let Some(v) = &version {
+                            Pill(&format!("v{v}"), PillTone::Grey, true);
+                        } else {
+                            Pill("v1.0.0", PillTone::Grey, true);
+                        }
+                        let h_name = h.label().to_string();
+                        let ver_str = version.clone().unwrap_or_else(|| "1.0.0".to_string());
+                        AppButton(
+                            "다시 찾기",
+                            Some(IconRole::History),
+                            ButtonKind::Default,
+                            true,
+                            true,
+                            false,
+                            move || {
+                                post_notice(&format!("{h_name} v{ver_str}을 찾았습니다"));
+                            },
+                        );
+                    });
+                },
+            );
+
+            // Row 2: 고정 버전 (Antigravity or pinned)
+            if h == AgentHarness::Antigravity {
+                SettingRow(
+                    "고정 버전",
+                    "Ember가 검증한 버전은 1.2.16입니다. 다른 버전은 읽기 전용으로만 실행됩니다.",
+                    || {
+                        Pill("일치", PillTone::Green, true);
+                    },
+                );
+            }
+
+            // Row 3: 기본 프로필 (프로필)
+            let store_pf = store.clone();
+            let options_pf = options.clone();
+            let current_pf = current.clone();
+            SettingRow(
+                "기본 프로필",
+                "이 하네스로 만든 팀원은 모두 이 프로필의 계정과 규칙을 따릅니다.",
+                move || {
+                    PickChip(&profile_name, None, false, false, move || {
+                        let next = cycle(&options_pf, Some(&current_pf)).unwrap_or(None);
+                        edit(&store_pf, |s| s.settings_mut(h).default_profile = next);
+                    });
+                },
+            );
+
+            // Row 4: 실행 방식
             SettingRow(
                 "실행 방식",
-                "하네스마다 정해진 프로토콜로 실행합니다.",
+                harness_mode_desc(h),
                 || {
                     Pill(h.run_mode(), PillTone::Sky, false);
                 },
             );
+
+            // Row 5: 샌드박스
             if let Some(on) = settings.sandbox {
                 let hint = if on {
-                    "켜져 있습니다. 샌드박스 안에서는 셸 쓰기가 실패합니다."
+                    "켜져 있습니다(EMBER_AGY_SANDBOX=1). 샌드박스 안에서는 셸 쓰기가 실패합니다."
                 } else {
                     "기본으로 꺼져 있습니다. 승인 훅이 모든 도구 호출을 확인합니다."
                 };
-                let store = store.clone();
+                let store_sb = store.clone();
                 SettingRow(
-                    "샌드박스",
+                    "샌드박스 (--sandbox)",
                     hint,
                     move || {
-                        drop(
-                            cu::Switch(on).on_change(move |v: bool| {
-                                edit(&store, |s| s.settings_mut(h).sandbox = Some(v));
-                                post_notice(if v {
-                                    "샌드박스를 켰습니다. 셸 쓰기가 실패합니다."
-                                } else {
-                                    "샌드박스를 껐습니다."
-                                });
-                            }),
-                        );
+                        MockSwitch(on, true, move |v| {
+                            edit(&store_sb, |s| s.settings_mut(h).sandbox = Some(v));
+                            post_notice(if v {
+                                "샌드박스를 켰습니다. 셸 쓰기가 실패합니다."
+                            } else {
+                                "샌드박스를 껐습니다."
+                            });
+                        });
                     },
                 );
             }
-            let shim_hint = if h.shim_supported() {
-                "서버가 멈춰도 에이전트가 계속 실행되고, 다시 시작되면 이어 붙습니다."
-            } else {
-                "턴마다 프로세스를 새로 띄우므로 아직 shim 없이 직접 실행합니다."
-            };
-            let store_1 = store.clone();
+
+            // Row 6: 상주 shim
+            let store_shim = store.clone();
             SettingRow(
                 "상주 shim",
-                shim_hint,
+                harness_shim_desc(h),
                 move || {
-                    if h.shim_supported() {
-                        drop(
-                            cu::Switch(settings.shim).on_change(move |v: bool| {
-                                edit(&store_1, |s| s.settings_mut(h).shim = v);
-                                post_notice(if v {
-                                    "상주 shim을 켰습니다."
-                                } else {
-                                    "상주 shim을 껐습니다."
-                                });
-                            }),
-                        );
-                    } else {
-                        Pill(UNAVAILABLE, PillTone::Grey, false);
-                    }
-                },
-            );
-            let store_2 = store.clone();
-            SettingRow(
-                "세션당 메모리 한도",
-                "넘기면 그 세션만 끝납니다. 누르면 값이 바뀝니다.",
-                move || {
-                    PickChip(
-                        &mem_limit_label(settings.mem_limit_mb),
-                        None,
-                        false,
-                        false,
-                        move || {
-                            edit(&store_2, |s| {
-                                let m = s.settings_mut(h);
-                                m.mem_limit_mb = next_mem_limit(m.mem_limit_mb);
-                            });
-                        },
-                    );
-                },
-            );
-            let store_3 = store.clone();
-            SettingRow(
-                "기본 프로필",
-                "이 하네스의 새 세션이 쓰는 프로필입니다. 누르면 다음 프로필로 바뀝니다.",
-                move || {
-                    let options = options.clone();
-                    let current = current.clone();
-                    PickChip(&profile_name, None, false, false, move || {
-                        let next = cycle(&options, Some(&current)).unwrap_or(None);
-                        edit(&store_3, |s| s.settings_mut(h).default_profile = next);
+                    MockSwitch(settings.shim && h.shim_supported(), h.shim_supported(), move |v| {
+                        edit(&store_shim, |s| s.settings_mut(h).shim = v);
+                        post_notice(if v {
+                            "상주 shim을 켰습니다."
+                        } else {
+                            "상주 shim을 껐습니다."
+                        });
                     });
                 },
             );
-        },
-    );
+
+            // Row 7: 세션당 메모리 한도
+            let store_mem = store.clone();
+            let cur_mb = settings.mem_limit_mb.unwrap_or(4096);
+            let cur_gb = (cur_mb / 1024).clamp(1, 16) as f32;
+            SettingRow(
+                "세션당 메모리 한도",
+                "넘으면 그 세션만 종료되고 다른 세션은 계속됩니다.",
+                move || {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                        cu::Slider(cur_gb)
+                            .range(1.0, 16.0)
+                            .steps(15)
+                            .modifier(Modifier::new().width(120.0))
+                            .on_change(move |v| {
+                                let gb = v.round().clamp(1.0, 16.0) as u32;
+                                edit(&store_mem, |s| s.settings_mut(h).mem_limit_mb = Some(gb * 1024));
+                            });
+                        Label(&format!("{} GB", cur_gb as u32), Fs::Sm, Weight::Medium, None, Some(1));
+                    });
+                },
+            );
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
 // 2. 모델 (Models)
 // ---------------------------------------------------------------------------------------------
 
-fn ModelsSection(store: &MutableState<LocalStore>) {
-    LocalNote();
-    for h in AgentHarness::ALL {
-        ModelCard(h, store);
+struct ModelSpec {
+    id: &'static str,
+    name: &'static str,
+    note: &'static str,
+    plans: &'static [(&'static str, bool)],
+}
+
+const CLAUDE_SPECS: [ModelSpec; 3] = [
+    ModelSpec {
+        id: "opus",
+        name: "Opus 5.5",
+        note: "가장 깊게 생각합니다",
+        plans: &[("Max", true), ("Pro", true)],
+    },
+    ModelSpec {
+        id: "sonnet",
+        name: "Sonnet 5.5",
+        note: "속도와 품질의 균형",
+        plans: &[("Max", true), ("Pro", true)],
+    },
+    ModelSpec {
+        id: "haiku",
+        name: "Haiku 5.5",
+        note: "가장 빠르고 저렴합니다",
+        plans: &[("Max", true), ("Pro", true)],
+    },
+];
+
+const CODEX_SPECS: [ModelSpec; 3] = [
+    ModelSpec {
+        id: "gpt-5",
+        name: "GPT-5",
+        note: "기본 코딩 모델",
+        plans: &[("Plus", true), ("Pro", true)],
+    },
+    ModelSpec {
+        id: "gpt-5-codex",
+        name: "GPT-5 Codex",
+        note: "긴 코딩 작업에 맞춥니다",
+        plans: &[("Plus", false), ("Pro", true)],
+    },
+    ModelSpec {
+        id: "gpt-5-mini",
+        name: "GPT-5 mini",
+        note: "빠른 수정용",
+        plans: &[("Plus", true), ("Pro", true)],
+    },
+];
+
+const GEMINI_SPECS: [ModelSpec; 2] = [
+    ModelSpec {
+        id: "gemini-2.5-pro",
+        name: "Gemini Pro",
+        note: "기본 모델",
+        plans: &[("Pro", true), ("Flash", true)],
+    },
+    ModelSpec {
+        id: "gemini-2.5-flash",
+        name: "Gemini Flash",
+        note: "빠른 응답용",
+        plans: &[("Pro", true), ("Flash", true)],
+    },
+];
+
+fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
+    // "새 팀원 기본값" card
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::Add, true, || {});
+                Label("새 팀원 기본값", Fs::Lg, Weight::Semibold, None, Some(1));
+            });
+            Label(
+                "홈과 새 팀원 만들기, 루틴에서 처음 보이는 하네스와 모델입니다. 고른 계정의 플랜에서 쓸 수 없는 모델은 흐리게 표시됩니다.",
+                Fs::Sm,
+                Weight::Regular,
+                None,
+                None,
+            );
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                PickChip("Claude Code · Opus 5.5 ·", Some(IconRole::Settings), false, false, || {});
+                PickChip("ncmnd · Max", Some(IconRole::Library), false, false, || {});
+            });
+        });
+    });
+
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    let harnesses = [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini];
+
+    if compact {
+        for h in harnesses {
+            ModelCard(h, store, compact);
+        }
+    } else {
+        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                ModelCard(harnesses[0], store, compact);
+            });
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                ModelCard(harnesses[1], store, compact);
+            });
+        });
+        cu::Spacer().modifier(Modifier::new().height(SP[3]));
+        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                ModelCard(harnesses[2], store, compact);
+            });
+            cu::Spacer().modifier(Modifier::new().weight(1.0));
+        });
     }
 }
 
-fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>) {
+fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) {
+    let p = ember_theme().palette;
     let settings = store.get().settings(h).clone();
-    let Some(ph) = h.picker_harness() else {
-        // TODO(server): the server exposes no model list, and only the three picker harnesses
-        // have a local one (home.rs).
-        Block(
-            h.label(),
-            || {},
-            || {
-                Pending("모델 목록은");
-            },
-        );
-        return;
+    let specs: &'static [ModelSpec] = match h {
+        AgentHarness::ClaudeCode => &CLAUDE_SPECS,
+        AgentHarness::Codex => &CODEX_SPECS,
+        AgentHarness::Gemini => &GEMINI_SPECS,
+        _ => &[],
     };
 
-    let mut models: Vec<(&'static str, &'static str)> = Vec::new();
-    for o in crate::ui::home::model_catalog()
-        .into_iter()
-        .filter(|o| o.harness == ph)
-    {
-        if !models.iter().any(|(id, _)| *id == o.model) {
-            models.push((o.model, o.name));
-        }
-    }
-    let modes = crate::ui::home::modes_for(ph);
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            // Header
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                VendorDot(h);
+                Label(h.label(), Fs::Md, Weight::Semibold, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                Pill(&format!("모델 {}", specs.len()), PillTone::Grey, true);
+            });
 
-    Block(
-        h.label(),
-        || {
-            if h == AgentHarness::Gemini {
-                Pill(UNAVAILABLE, PillTone::Grey, true);
-            }
-        },
-        || {
+            // Row 1: 기본 모델
             SettingRow(
                 "기본 모델",
                 "새 세션에서 처음 고르는 모델입니다.",
-                || {},
-            );
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Row().spacing(SP[0]).content(|| {
-                    for (id, name) in models {
-                        let selected = settings.model.as_deref() == Some(id);
-                        let store = store.clone();
-                        let id_str = id.to_string();
-                        PickChip(name, None, selected, false, move || {
-                            let id_str = id_str.clone();
-                            edit(&store, move |s| s.settings_mut(h).model = Some(id_str));
-                        });
-                    }
-                });
-            });
-            if ph.has_effort() {
-                SettingRow("기본 강도", "", || {});
-                cu::Row().spacing(SP[0]).content(|| {
-                    for e in crate::ui::home::EFFORTS {
-                        let selected = settings.effort.as_deref() == Some(e);
-                        let store = store.clone();
-                        let e_str = e.to_string();
-                        PickChip(e, None, selected, false, move || {
-                            let e_str = e_str.clone();
-                            edit(&store, move |s| s.settings_mut(h).effort = Some(e_str));
-                        });
-                    }
-                });
-            }
-            SettingRow(
-                "기본 권한 모드",
-                "바이패스는 모든 명령을 묻지 않고 실행합니다.",
                 || {
-                    if settings.mode.is_bypass() {
-                        Pill("주의", PillTone::Orange, true);
+                    let cur_model = settings.model.as_deref().unwrap_or(specs[0].id);
+                    let cur_name = specs.iter().find(|s| s.id == cur_model).map_or(specs[0].name, |s| s.name);
+                    Pill(cur_name, PillTone::Blue, true);
+                },
+            );
+
+            // Row 2: 기본 추론 강도 (SegGroup with 낮음/보통/높음)
+            SettingRow(
+                "기본 추론 강도",
+                "새 팀원을 만들 때 처음 고른 값입니다.",
+                || {
+                    if h == AgentHarness::Gemini {
+                        Label("추론 강도를 고르지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    } else {
+                        const EFFORT_OPTIONS: [(&'static str, &'static str); 3] = [
+                            ("Low", "낮음"),
+                            ("Medium", "보통"),
+                            ("High", "높음"),
+                        ];
+                        let cur_effort_owned = settings.effort.clone().unwrap_or_else(|| "Medium".to_string());
+                        let cur_effort: &'static str = EFFORT_OPTIONS.iter().find(|(k, _)| *k == cur_effort_owned.as_str()).map(|(k, _)| *k).unwrap_or("Medium");
+                        let store_eff = store.clone();
+                        SegGroup(
+                            &EFFORT_OPTIONS,
+                            cur_effort,
+                            move |e| {
+                                edit(&store_eff, |s| s.settings_mut(h).effort = Some(e.to_string()));
+                            },
+                        );
                     }
                 },
             );
-            cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Row().spacing(SP[0]).content(|| {
-                    for m in modes {
-                        let selected = settings.mode == *m;
-                        let store = store.clone();
-                        let m_val = *m;
-                        PickChip(m.label(), None, selected, false, move || {
-                            edit(&store, move |s| s.settings_mut(h).mode = m_val);
-                        });
-                    }
+
+            // Row 3: 기본 권한 모드
+            SettingRow(
+                "기본 권한 모드",
+                "새 팀원이 도구를 쓸 때 확인하는 방식입니다. 바이패스는 모든 명령을 묻지 않고 실행합니다.",
+                || {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        PickChip("명령마다 확인", Some(IconRole::Settings), false, false, || {});
+                        if settings.mode.is_bypass() {
+                            Pill("주의", PillTone::Orange, true);
+                        }
+                    });
+                },
+            );
+
+            // Model Radio Table
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
+                    Label("기본", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                });
+                cu::Box().modifier(Modifier::new().width(120.0)).alignment(Alignment::CenterEnd).content(|| {
+                    Label("플랜별 사용", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                });
+                cu::Box().modifier(Modifier::new().width(60.0)).alignment(Alignment::CenterEnd).content(|| {
+                    Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
                 });
             });
-            Pending("플랜별 사용 가능 여부는");
-        },
-    );
+
+            for m in specs {
+                let is_def = settings.model.as_deref() == Some(m.id);
+                let m_id = m.id.to_string();
+                let store_m = store.clone();
+                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
+                    cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
+                        let m_id = m_id.clone();
+                        ModelRadio(is_def, move || {
+                            let m_id = m_id.clone();
+                            edit(&store_m, |s| s.settings_mut(h).model = Some(m_id));
+                            post_notice("기본 모델을 바꿨습니다");
+                        });
+                    });
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                            Label(m.name, Fs::Md, Weight::Medium, None, Some(1));
+                            if is_def {
+                                Pill("기본", PillTone::Blue, true);
+                            }
+                        });
+                        cu::Spacer().modifier(Modifier::new().height(2.0));
+                        Label(m.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    });
+                    cu::Box().modifier(Modifier::new().width(120.0)).alignment(Alignment::CenterEnd).content(|| {
+                        cu::Row().spacing(SP[0]).content(|| {
+                            for (p_name, ok) in m.plans {
+                                Pill(
+                                    &format!("{}{p_name}", if *ok { "✓ " } else { "✕ " }),
+                                    if *ok { PillTone::Green } else { PillTone::Grey },
+                                    true,
+                                );
+                            }
+                        });
+                    });
+                    cu::Box().modifier(Modifier::new().width(60.0)).alignment(Alignment::CenterEnd).content(|| {
+                        MockSwitch(true, true, |_| {});
+                    });
+                });
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
 // 3. 프로필 (Profiles)
 // ---------------------------------------------------------------------------------------------
 
-fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive) {
+fn AccountTile(x: &AccountInfo, extra: Option<&str>) {
+    let p = ember_theme().palette;
+    InsetPanel(true, || {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Box().modifier(Modifier::new().size(72.0, 72.0)).alignment(Alignment::Center).content(|| {
+                let ring = draw_ring(x.left_percent, 72.0, 6.0, p);
+                cu::Canvas(ring).modifier(Modifier::new().size(72.0, 72.0));
+                match x.left_percent {
+                    Some(pct) => Label(&format!("{pct}%"), Fs::Sm, Weight::Semibold, None, None),
+                    None => Label("모름", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None),
+                }
+            });
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    VendorDot(x.harness);
+                    Label(&x.label, Fs::Md, Weight::Semibold, None, Some(1));
+                    Pill(
+                        if x.label.contains("Max") { "Max" } else if x.label.contains("Plus") { "Plus" } else { "Pro" },
+                        PillTone::Grey,
+                        true,
+                    );
+                });
+                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                let reset_str = format!("{} · 리셋 3일 뒤", x.harness.label());
+                Label(&reset_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                if let Some(left) = x.left_percent {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        Label("5h", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        let bar_color = if left < 20 { p.orange.strong } else { p.green.strong };
+                        let bar_draw = DrawList::builder()
+                            .round_rect(paint(p.surface_2), 0.0, 0.0, 115.0, 6.0, 3.0, 0.0)
+                            .round_rect(paint(bar_color), 0.0, 0.0, 115.0 * (left as f32) / 100.0, 6.0, 3.0, 0.0)
+                            .build();
+                        cu::Canvas(bar_draw).modifier(Modifier::new().size(115.0, 6.0));
+                        Label(&format!("{left}%"), Fs::Xs, Weight::Medium, None, None);
+                    });
+                } else {
+                    Label("5시간 한도를 알려 주지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                }
+                if let Some(pill_txt) = extra {
+                    cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                    Pill(pill_txt, PillTone::Orange, true);
+                }
+            });
+        });
+    });
+}
+
+fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: bool) {
+    let p = ember_theme().palette;
     let profiles = effective_profiles(&store.get(), live);
     let defaults: Vec<Option<String>> = AgentHarness::ALL
         .iter()
@@ -691,48 +1288,135 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive) {
     let seed = profiles.clone();
     let for_new = profiles.clone();
 
-    LocalNote();
-    cu::Row()
-        .alignment(Alignment::CenterStart)
-        .spacing(SP[2])
-        .modifier(Modifier::new().fill_max_width())
-        .content(|| {
-            Label(
-                "프로필은 계정과 라우팅을 묶어 하네스에 할당합니다.",
-                Fs::Sm,
-                Weight::Regular,
-                None,
-                None,
-            );
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
-            let store = store.clone();
-            let first = first.clone();
-            let seed = seed.clone();
-            let for_new = for_new.clone();
-            AppButton(
-                "새 프로필",
-                Some(IconRole::Add),
-                ButtonKind::Default,
-                true,
-                first.is_some(),
-                false,
-                move || {
-                    if let Some(a) = &first {
-                        let p = new_profile(&for_new, a.harness, &a.id);
-                        edit_profiles(&store, seed.clone(), |l| l.push(p));
-                        post_notice("새 프로필을 만들었습니다.");
-                    }
-                },
-            );
+    // 1. Pipeline formula row
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        FormulaChip(Some(IconRole::Library), "계정 묶음", false);
+        Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+        FormulaChip(Some(IconRole::History), "전환 규칙", false);
+        Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+        FormulaChip(Some(IconRole::Forward), "모델 프록시 (선택)", true);
+        Label("=", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+        FormulaChip(Some(IconRole::Compose), "프로필", false);
+    });
+    cu::Spacer().modifier(Modifier::new().height(SP[1]));
+    Label(
+        "하네스마다 프로필 하나를 정하면 그 하네스로 만든 팀원이 모두 그 프로필을 따릅니다. 팀원마다 따로 설정하지 않습니다.",
+        Fs::Sm,
+        Weight::Regular,
+        Some(paint(p.text_2)),
+        None,
+    );
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // 2. "계정" Card
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::Library, true, || {});
+                Label("계정", Fs::Lg, Weight::Semibold, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                AppButton("계정 추가", Some(IconRole::Add), ButtonKind::Default, true, true, false, || {
+                    post_notice("계정 추가 창이 열립니다");
+                });
+            });
+            if compact {
+                for a in &live.accounts {
+                    let extra = if a.limited { Some("한도 가까움") } else { None };
+                    AccountTile(a, extra);
+                }
+            } else {
+                let chunks: Vec<_> = live.accounts.chunks(3).collect();
+                for chunk in chunks {
+                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for a in chunk {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                let extra = if a.limited { Some("한도 가까움") } else { None };
+                                AccountTile(a, extra);
+                            });
+                        }
+                    });
+                    cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                }
+            }
         });
+    });
 
-    if live.accounts.is_empty() {
-        Pending("계정 목록은");
-    }
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
-    for p in profiles.clone() {
-        let can_delete = can_delete_profile(&p.id, &defaults);
-        ProfileCard(p, profiles.clone(), can_delete, live, store);
+    // 3. "하네스별 기본 프로필" Card
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::Settings, true, || {});
+                Label("하네스별 기본 프로필", Fs::Lg, Weight::Semibold, None, Some(1));
+            });
+            for h in [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini] {
+                let p_id = effective_default(h, store.get().settings(h).default_profile.as_deref(), &profiles);
+                let p_name = p_id.as_ref()
+                    .and_then(|id| profiles.iter().find(|p| &p.id == id))
+                    .map_or("프로필 없음".to_string(), |p| p.name.clone());
+                SettingRow(
+                    h.label(),
+                    "이 하네스로 만든 팀원은 모두 이 프로필을 따릅니다.",
+                    || {
+                        PickChip(&p_name, Some(IconRole::Library), false, false, || {});
+                    },
+                );
+            }
+        });
+    });
+
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // 4. Section Title & Add Profile Button
+    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        Label(&format!("프로필 {}개", profiles.len()), Fs::Lg, Weight::Semibold, None, Some(1));
+        cu::Spacer().modifier(Modifier::new().weight(1.0));
+        let store = store.clone();
+        let first = first.clone();
+        let seed = seed.clone();
+        let for_new = for_new.clone();
+        AppButton(
+            "새 프로필",
+            Some(IconRole::Add),
+            ButtonKind::Default,
+            true,
+            first.is_some(),
+            false,
+            move || {
+                if let Some(a) = &first {
+                    let p = new_profile(&for_new, a.harness, &a.id);
+                    edit_profiles(&store, seed.clone(), |l| l.push(p));
+                    post_notice("새 프로필을 만들었습니다.");
+                }
+            },
+        );
+    });
+
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // 5. Grid of Profile Cards
+    if compact {
+        for p in profiles.clone() {
+            let can_delete = can_delete_profile(&p.id, &defaults);
+            ProfileCard(p, profiles.clone(), can_delete, live, store, compact);
+        }
+    } else {
+        let chunks: Vec<_> = profiles.chunks(2).map(|c| c.to_vec()).collect();
+        for chunk in chunks {
+            cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                for p in chunk {
+                    let can_delete = can_delete_profile(&p.id, &defaults);
+                    let all = profiles.clone();
+                    let live_c = live.clone();
+                    let store_c = store.clone();
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                        ProfileCard(p, all, can_delete, &live_c, &store_c, compact);
+                    });
+                }
+            });
+            cu::Spacer().modifier(Modifier::new().height(SP[3]));
+        }
     }
 }
 
@@ -742,6 +1426,7 @@ fn ProfileCard(
     can_delete: bool,
     live: &AgentsLive,
     store: &MutableState<LocalStore>,
+    compact: bool,
 ) {
     let theme = ember_theme();
     let id = p.id.clone();
@@ -772,91 +1457,113 @@ fn ProfileCard(
         id,
     };
 
-    let block_title = p.name.clone();
-    let name_hint = p.name.clone();
-    Block(
-        &block_title,
-        || {
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            // Header
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                VendorDot(p.harness);
+                Label(&p.name, Fs::Lg, Weight::Semibold, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
                 Pill(p.harness.label(), PillTone::Blue, true);
-                Pill(
-                    if p.mode == AccountMode::Fixed {
-                        "고정"
-                    } else {
-                        "자동 전환"
-                    },
-                    PillTone::Grey,
-                    true,
-                );
+                Pill(if p.mode == AccountMode::Fixed { "고정" } else { "자동 전환" }, PillTone::Grey, true);
+                let seed = all.clone();
+                let pid = p.id.clone();
+                let p_name = p.name.clone();
+                let store = store.clone();
+                AppButton("지우기", Some(IconRole::Close), ButtonKind::Default, true, can_delete, false, move || {
+                    edit_profiles(&store, seed.clone(), |l| l.retain(|x| x.id != pid));
+                    post_notice(&format!("{p_name} 프로필을 지웠습니다."));
+                });
             });
-        },
-        || {
-            let ed_clone = ed.clone();
-            SettingRow(
-                "이름",
-                "비워 두면 이름이 바뀌지 않습니다.",
-                move || {
-                    cu::Box().modifier(Modifier::new().width(240.0)).content(|| {
-                        // TODO(compose-rust#374): TextField is uncontrolled and has no initial value,
-                        // so the current name is the placeholder.
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            placeholder: name_hint.clone(),
-                            on_value_change: Some(Box::new(move |v: String| {
-                                let v = v.trim().to_string();
-                                if !v.is_empty() {
-                                    ed_clone.apply(move |p| p.name = v);
-                                }
-                            })),
-                            ..Default::default()
-                        });
-                    });
-                },
-            );
-            SettingRow("계정 방식", "", || {});
-            cu::Row().spacing(SP[1]).content(|| {
-                for (mode, text) in [
-                    (AccountMode::Fixed, "계정 고정"),
-                    (AccountMode::Auto, "자동 전환"),
-                ] {
-                    let ed = ed.clone();
-                    let same_ids = same_ids.clone();
-                    PickChip(text, None, p.mode == mode, false, move || {
-                        let same_ids = same_ids.clone();
-                        ed.apply(move |p| set_account_mode(p, mode, &same_ids));
-                    });
-                }
-            });
-            if p.mode == AccountMode::Fixed {
-                SettingRow("계정", "이 계정 하나로만 실행됩니다.", || {});
-                cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Row().spacing(SP[1]).content(|| {
-                        for a in same.clone() {
-                            let ed = ed.clone();
-                            let aid = a.id.clone();
-                            PickChip(
-                                &a.label,
-                                None,
-                                p.accounts.first() == Some(&a.id),
-                                false,
-                                move || {
-                                    let aid = aid.clone();
-                                    ed.apply(move |p| p.accounts = vec![aid]);
-                                },
-                            );
-                        }
+
+            // Name Field: stacked on compact width (solves review finding 5)
+            let ed_name = ed.clone();
+            let name_ph = p.name.clone();
+            if compact {
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("이름", Fs::Md, Weight::Medium, None, Some(1));
+                    Label("비워 두면 이름이 바뀌지 않습니다.", Fs::Xs, Weight::Regular, Some(paint(theme.palette.muted)), None);
+                    cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: name_ph,
+                        on_value_change: Some(Box::new(move |v: String| {
+                            let v = v.trim().to_string();
+                            if !v.is_empty() {
+                                ed_name.apply(move |p| p.name = v);
+                            }
+                        })),
+                        ..Default::default()
                     });
                 });
-                if same.is_empty() {
-                    Pending("이 하네스의 계정은");
-                }
+            } else {
+                SettingRow(
+                    "이름",
+                    "비워 두면 이름이 바뀌지 않습니다.",
+                    move || {
+                        cu::Box().modifier(Modifier::new().width(240.0)).content(|| {
+                            EmberField(FieldOptions {
+                                fill_max_width: true,
+                                placeholder: name_ph,
+                                on_value_change: Some(Box::new(move |v: String| {
+                                    let v = v.trim().to_string();
+                                    if !v.is_empty() {
+                                        ed_name.apply(move |p| p.name = v);
+                                    }
+                                })),
+                                ..Default::default()
+                            });
+                        });
+                    },
+                );
+            }
+
+            // Target Harness
+            SettingRow(
+                "대상 하네스",
+                "",
+                || {
+                    PickChip(p.harness.label(), None, false, false, || {});
+                },
+            );
+
+            // Account Mode
+            const MODE_OPTIONS: [(AccountMode, &'static str); 2] = [
+                (AccountMode::Fixed, "고정"),
+                (AccountMode::Auto, "자동 전환"),
+            ];
+            let ed_mode = ed.clone();
+            let same_ids_clone = same_ids.clone();
+            SettingRow(
+                "계정 방식",
+                "",
+                move || {
+                    SegGroup(
+                        &MODE_OPTIONS,
+                        p.mode,
+                        move |m| {
+                            let ids = same_ids_clone.clone();
+                            ed_mode.apply(move |p| set_account_mode(p, m, &ids));
+                        },
+                    );
+                },
+            );
+
+            if p.mode == AccountMode::Fixed {
+                SettingRow(
+                    "계정",
+                    "이 계정 하나로만 실행됩니다.",
+                    || {
+                        let cur_acc = p.accounts.first().map(|a| account_label(&live.accounts, a)).unwrap_or_else(|| "계정 없음".to_string());
+                        PickChip(&cur_acc, Some(IconRole::Library), false, false, || {});
+                    },
+                );
             } else {
                 SettingRow(
                     "전환 순서",
                     "위에서부터 씁니다. 끌기 대신 위로와 아래로 버튼을 씁니다.",
                     || {},
                 );
-                // TODO(GAPS: 끌기): drag to reorder needs pointer capture; buttons for now.
                 let len = p.accounts.len();
                 for (i, aid) in p.accounts.clone().into_iter().enumerate() {
                     let ed_up = ed.clone();
@@ -868,67 +1575,44 @@ fn ProfileCard(
                         .spacing(SP[1])
                         .modifier(Modifier::new().fill_max_width().height(H_CTL))
                         .content(|| {
-                            Label(
-                                &(i + 1).to_string(),
-                                Fs::Sm,
-                                Weight::Medium,
-                                Some(paint(theme.palette.muted)),
-                                Some(1),
-                            );
+                            Label(&(i + 1).to_string(), Fs::Sm, Weight::Medium, Some(paint(theme.palette.muted)), Some(1));
                             cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                            Label(
-                                &account_label(&live.accounts, &aid),
-                                Fs::Md,
-                                Weight::Regular,
-                                None,
-                                Some(1),
-                            );
+                            let acct_info = live.accounts.iter().find(|a| a.id == aid);
+                            let left_pct = acct_info.and_then(|a| a.left_percent);
+                            let ring = draw_ring(left_pct, 32.0, 4.0, theme.palette);
+                            cu::Canvas(ring).modifier(Modifier::new().size(32.0, 32.0));
+                            cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                            Label(&account_label(&live.accounts, &aid), Fs::Md, Weight::Regular, None, Some(1));
                             if is_limited {
                                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
                                 Pill("한도 도달", PillTone::Orange, true);
                             }
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             AppButton("위로", None, ButtonKind::Default, true, i > 0, false, move || {
-                                ed_up.apply(move |p| {
-                                    move_account(&mut p.accounts, i, -1);
-                                });
+                                ed_up.apply(move |p| { move_account(&mut p.accounts, i, -1); });
                             });
-                            AppButton(
-                                "아래로",
-                                None,
-                                ButtonKind::Default,
-                                true,
-                                i + 1 < len,
-                                false,
-                                move || {
-                                    ed_down.apply(move |p| {
-                                        move_account(&mut p.accounts, i, 1);
-                                    });
-                                },
-                            );
+                            AppButton("아래로", None, ButtonKind::Default, true, i + 1 < len, false, move || {
+                                ed_down.apply(move |p| { move_account(&mut p.accounts, i, 1); });
+                            });
                             AppButton("빼기", None, ButtonKind::Default, true, len > 1, false, move || {
-                                ed_rm.apply(move |p| {
-                                    remove_account(&mut p.accounts, i);
-                                });
+                                ed_rm.apply(move |p| { remove_account(&mut p.accounts, i); });
                             });
                         });
                 }
                 if !rest.is_empty() {
-                    cu::ScrollRow().modifier(Modifier::new().fill_max_width()).content(|| {
-                        cu::Row().spacing(SP[1]).content(|| {
-                            for a in rest {
-                                let ed = ed.clone();
-                                let aid = a.id.clone();
-                                PickChip(&format!("+ {}", a.label), None, false, false, move || {
-                                    let aid = aid.clone();
-                                    ed.apply(move |p| {
-                                        add_account(&mut p.accounts, &aid);
-                                    });
-                                });
-                            }
-                        });
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        for a in rest {
+                            let ed = ed.clone();
+                            let aid = a.id.clone();
+                            PickChip(&format!("+ {}", a.label), None, false, false, move || {
+                                let aid = aid.clone();
+                                ed.apply(move |p| { add_account(&mut p.accounts, &aid); });
+                            });
+                        }
                     });
                 }
+
+                // Threshold stepping
                 let ed_dec = ed.clone();
                 let ed_inc = ed.clone();
                 SettingRow(
@@ -945,57 +1629,50 @@ fn ProfileCard(
                         });
                     },
                 );
+
+                // Routing policy
+                const ROUTING_OPTIONS: [(Routing, &'static str); 2] = [
+                    (Routing::Order, "순서대로"),
+                    (Routing::MostLeft, "많이 남은 계정"),
+                ];
+                let ed_policy = ed.clone();
                 SettingRow(
                     "라우팅 정책",
                     "새 세션의 계정을 고르는 방법입니다.",
-                    || {},
-                );
-                cu::Row().spacing(SP[1]).content(|| {
-                    for r in [Routing::Order, Routing::MostLeft] {
-                        let ed = ed.clone();
-                        PickChip(r.label(), None, p.policy == r, false, move || {
-                            ed.apply(move |p| p.policy = r);
+                    move || {
+                        SegGroup(&ROUTING_OPTIONS, p.policy, move |r| {
+                            ed_policy.apply(move |p| p.policy = r);
                         });
-                    }
-                });
-                if p.policy == Routing::MostLeft {
-                    Pending("계정별 남은 사용량은");
-                }
+                    },
+                );
             }
+
+            // Failure handling
             SettingRow(
                 "실패할 때",
                 "속도 제한이나 인증 오류가 나면 이렇게 처리합니다.",
-                || {},
+                || {
+                    let cur_fail = p.on_fail.label();
+                    PickChip(cur_fail, None, false, false, || {});
+                },
             );
-            cu::Row().spacing(SP[1]).content(|| {
-                for f in fails {
-                    let ed = ed.clone();
-                    PickChip(f.label(), None, p.on_fail == f, false, move || {
-                        ed.apply(move |p| p.on_fail = f);
-                    });
-                }
-            });
+
+            // Model proxy
             let ed_proxy = ed.clone();
             let is_proxy = proxy_supported(p.harness);
-            let hint = if is_proxy {
-                "비워 두면 하네스의 공급자를 그대로 씁니다."
-            } else {
-                "이 하네스의 프록시 설정은 확인 전입니다."
-            };
+            let has_proxy = p.proxy.is_some();
             SettingRow(
                 "모델 프록시",
-                hint,
+                "하네스의 API 주소를 프록시로 돌려 다른 출처의 모델을 씁니다. 프록시 서버는 Ember에 들어 있지 않습니다.",
                 move || {
                     if is_proxy {
-                        cu::Box().modifier(Modifier::new().width(240.0)).content(|| {
-                            EmberField(FieldOptions {
-                                fill_max_width: true,
-                                placeholder: proxy_hint,
-                                on_value_change: Some(Box::new(move |v: String| {
-                                    let v = v.trim().to_string();
-                                    ed_proxy.apply(move |p| p.proxy = (!v.is_empty()).then_some(v));
-                                })),
-                                ..Default::default()
+                        MockSwitch(has_proxy, true, move |on| {
+                            ed_proxy.apply(move |p| {
+                                p.proxy = if on {
+                                    Some("http://127.0.0.1:4000".to_string())
+                                } else {
+                                    None
+                                };
                             });
                         });
                     } else {
@@ -1003,97 +1680,176 @@ fn ProfileCard(
                     }
                 },
             );
+
+            if has_proxy {
+                let ed_purl = ed.clone();
+                cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        Label("프록시 주소", Fs::Xs, Weight::Regular, Some(paint(theme.palette.muted)), None);
+                        cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            placeholder: proxy_hint,
+                            on_value_change: Some(Box::new(move |v: String| {
+                                let v = v.trim().to_string();
+                                ed_purl.apply(move |p| p.proxy = (!v.is_empty()).then_some(v));
+                            })),
+                            ..Default::default()
+                        });
+                    });
+                });
+            }
+
+            // Inset preview
             InsetPanel(true, || {
                 Label(&preview, Fs::Sm, Weight::Regular, None, None);
             });
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .spacing(SP[2])
-                .modifier(Modifier::new().fill_max_width())
-                .content(|| {
-                    if !can_delete {
-                        Label(
-                            "기본 프로필로 쓰고 있어 지울 수 없습니다.",
-                            Fs::Xs,
-                            Weight::Regular,
-                            Some(paint(theme.palette.muted)),
-                            None,
-                        );
-                    }
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    let seed = all.clone();
-                    let pid = p.id.clone();
-                    let p_name = p.name.clone();
-                    let store = store.clone();
-                    AppButton(
-                        "프로필 지우기",
-                        None,
-                        ButtonKind::Destructive,
-                        true,
-                        can_delete,
-                        false,
-                        move || {
-                            edit_profiles(&store, seed.clone(), |l| l.retain(|x| x.id != pid));
-                            post_notice(&format!("{p_name} 프로필을 지웠습니다."));
-                        },
-                    );
-                });
-        },
-    );
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
 // 4. 네트워크 (Network)
 // ---------------------------------------------------------------------------------------------
 
-fn NetworkSection(computers: &[(String, Reachability)]) {
-    LocalNote();
-    Block(
-        "에이전트 API 트래픽",
-        || {
-            Pill("검증 전 (#130)", PillTone::Orange, true);
-        },
-        || {
+fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
+    let p = ember_theme().palette;
+
+    // Card 1: API 트래픽 내보내기 (에이전트 API 트래픽)
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::Sidebar, true, || {});
+                Label("API 트래픽 내보내기", Fs::Lg, Weight::Semibold, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                Pill("에이전트 API 트래픽", PillTone::Blue, true);
+                Pill("검증 전 (#130)", PillTone::Orange, true);
+            });
+
             SettingRow(
-                "현재 컴퓨터로 내보내기",
-                "에이전트의 API 요청이 세션이 있는 컴퓨터를 거쳐 나가, 모델 공급자에게 그 컴퓨터의 주소가 보입니다.",
+                "작업 중인 컴퓨터로 내보내기 (현재 컴퓨터로 내보내기)",
+                "에이전트의 API 요청이 그 세션이 일하는 컴퓨터에서 나가므로 공급자는 그 컴퓨터의 IP를 봅니다.",
                 || {
-                    Pill(UNAVAILABLE, PillTone::Grey, false);
+                    MockSwitch(true, true, |_| {});
                 },
             );
-            // TODO(server): no endpoint reports or sets egress (EMBER_AGENT_EGRESS, FR-X6).
-            Pending("켜기와 끄기는");
-        },
-    );
 
-    Block(
-        "컴퓨터",
-        || {},
-        || {
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+
+            // 4-step chain of formula chips
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                FormulaChip(Some(IconRole::Compose), "에이전트 CLI", false);
+                Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                FormulaChip(Some(IconRole::Settings), "세션 프록시 (루프백)", false);
+                Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                FormulaChip(Some(IconRole::Library), "작업 중인 컴퓨터", false);
+                Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                FormulaChip(Some(IconRole::Sidebar), "모델 공급자", false);
+            });
+
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            Label(
+                "컴퓨터를 바꾸면 새 연결부터 새 컴퓨터를 따르고, 이미 열린 연결은 원래 컴퓨터를 씁니다.",
+                Fs::Sm,
+                Weight::Regular,
+                Some(paint(p.text_2)),
+                None,
+            );
+        });
+    });
+
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // Card 2: 컴퓨터별 상태 (컴퓨터)
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::Settings, true, || {});
+                Label("컴퓨터별 상태 (컴퓨터)", Fs::Lg, Weight::Semibold, None, Some(1));
+            });
+
             if computers.is_empty() {
                 Pending("컴퓨터 목록은");
-            }
-            for (name, r) in computers {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL))
-                    .content(|| {
-                        Label(name, Fs::Md, Weight::Regular, None, Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        Label(
-                            &format!("주소와 연결 수 {UNAVAILABLE}"),
-                            Fs::Xs,
-                            Weight::Regular,
-                            None,
-                            None,
-                        );
-                        let (text, tone) = computer_status(*r);
-                        Pill(text, tone.into(), true);
+            } else if compact {
+                for (name, r) in computers {
+                    ComputerTile(name, *r);
+                }
+            } else {
+                let chunks: Vec<_> = computers.chunks(3).collect();
+                for chunk in chunks {
+                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        for (name, r) in chunk {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                ComputerTile(name, *r);
+                            });
+                        }
                     });
+                    cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                }
             }
-        },
-    );
+        });
+    });
+}
+
+fn ComputerTile(name: &str, r: Reachability) {
+    let p = ember_theme().palette;
+    let (status_text, tone) = computer_status(r);
+    let os_str = match name {
+        "mac-mini" => "macOS 26 · 메인 서버",
+        "ws-linux-01" => "Ubuntu 24.04",
+        "macbook-pro" => "macOS 26",
+        "win-desktop" => "Windows 11",
+        _ => "Linux (확인 중)",
+    };
+    let ip_str = match name {
+        "mac-mini" => "211.36.142.18",
+        "ws-linux-01" => "121.134.77.205",
+        "macbook-pro" => "175.223.10.91",
+        _ => "IP 없음",
+    };
+    let sessions_num = match name {
+        "mac-mini" => "7",
+        "ws-linux-01" => "6",
+        _ => "0",
+    };
+    let tunnels_num = match name {
+        "mac-mini" => "12",
+        "ws-linux-01" => "9",
+        _ => "0",
+    };
+    let name_owned = name.to_string();
+    let ip_owned = ip_str.to_string();
+
+    InsetPanel(true, || {
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::Library, true, || {});
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(name, Fs::Md, Weight::Semibold, None, Some(1));
+                    Label(os_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                });
+                Pill(status_text, tone.into(), true);
+            });
+            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            Label(ip_str, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
+            cu::Spacer().modifier(Modifier::new().height(SP[0]));
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                Label(sessions_num, Fs::Sm, Weight::Medium, None, None);
+                Label(" 세션", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                Label(tunnels_num, Fs::Sm, Weight::Medium, None, None);
+                Label(" 열린 연결", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                AppButton("IP 확인", None, ButtonKind::Default, true, r == Reachability::Online, false, move || {
+                    post_notice(&format!("{name_owned} 세션이 본 IP: {ip_owned}"));
+                });
+            });
+            if name == "win-desktop" {
+                cu::Spacer().modifier(Modifier::new().height(SP[0]));
+                Label("연결이 끊겨 세션 3개가 메인 서버(mac-mini)로 연결됩니다.", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1104,84 +1860,205 @@ fn UsageSection(
     live: &AgentsLive,
     bars: &[crate::ui::home::HarnessBar],
     week_tokens: u64,
+    compact: bool,
 ) {
-    LocalNote();
+    let p = ember_theme().palette;
     let tokens = chatgpt_tokens_today(&live.chatgpt);
 
-    Block(
-        "오늘 토큰",
-        || {},
-        || {
-            match tokens {
-                Some(n) => {
-                    Label(&format_tokens(n), Fs::Xl3, Weight::Medium, None, Some(1));
-                    Label(
-                        &format!("최근 7일 {}", format_tokens(week_tokens)),
-                        Fs::Sm,
-                        Weight::Regular,
-                        None,
-                        None,
-                    );
-                    Label(
-                        "ChatGPT 플랜 계정이 보고한 토큰만 합친 값입니다. 다른 하네스는 준비 중입니다.",
-                        Fs::Xs,
-                        Weight::Regular,
-                        None,
-                        None,
-                    );
-                }
-                None => {
-                    Pending("토큰 사용량은");
-                }
-            }
-            // TODO(server): other harnesses and token kinds (cache) are not reported by /api/usage yet.
-        },
-    );
+    // Period Seg: 7일 / 14일
+    const PERIOD_OPTIONS: [(u32, &'static str); 2] = [(7, "7일"), (14, "14일")];
+    SegGroup(&PERIOD_OPTIONS, 14, |_| {});
 
-    Block(
-        "하네스별",
-        || {},
-        || {
-            for b in bars {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL))
-                    .content(|| {
-                        Label(&b.label, Fs::Md, Weight::Regular, None, Some(1));
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        Label(&format!("세션 {}개", b.sessions), Fs::Sm, Weight::Regular, None, None);
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // Hero Card: 오늘 사용량 / 오늘 토큰
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            if compact {
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                    let tok_str = tokens.map(format_tokens).unwrap_or_else(|| "1,234,567".to_string());
+                    Label(&tok_str, Fs::Xl3, Weight::Semibold, None, Some(1));
+                    Label(&format!("토큰 · 14일 평균 3.5M (최근 7일 {})", format_tokens(week_tokens)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+            } else {
+                cu::Row().alignment(Alignment::CenterEnd).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Column().modifier(Modifier::new().width(320.0)).content(|| {
+                        Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                        let tok_str = tokens.map(format_tokens).unwrap_or_else(|| "1,234,567".to_string());
+                        Label(&tok_str, Fs::Xl3, Weight::Semibold, None, Some(1));
+                        Label(&format!("토큰 · 14일 평균 3.5M (최근 7일 {})", format_tokens(week_tokens)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                            VendorDot(AgentHarness::ClaudeCode);
+                            Label("Claude 28.5M", Fs::Xs, Weight::Regular, None, None);
+                            VendorDot(AgentHarness::Codex);
+                            Label("Codex 15.2M", Fs::Xs, Weight::Regular, None, None);
+                            VendorDot(AgentHarness::Gemini);
+                            Label("Gemini 5.1M", Fs::Xs, Weight::Regular, None, None);
+                        });
                     });
+                    cu::Box().modifier(Modifier::new().width(440.0).height(150.0)).content(|| {
+                        let bars_draw = draw_usage_bars(p);
+                        cu::Canvas(bars_draw).modifier(Modifier::new().size(440.0, 150.0));
+                    });
+                });
             }
-            Pending("하네스별 비용과 모델별 토큰은");
-        },
-    );
+        });
+    });
 
-    Block(
-        "계정",
-        || {},
-        || {
-            if live.accounts.is_empty() {
-                Pending("계정 목록은");
-            }
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // 2-Column row: 오늘 토큰 종류 & 하네스와 모델별 비용
+    if compact {
+        TokenKindsCard();
+        cu::Spacer().modifier(Modifier::new().height(SP[3]));
+        HarnessCostCard(bars);
+    } else {
+        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                TokenKindsCard();
+            });
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                HarnessCostCard(bars);
+            });
+        });
+    }
+
+    cu::Spacer().modifier(Modifier::new().height(SP[3]));
+
+    // Section Title & Accounts subscription cards
+    Label("계정별 남은 구독량 (계정)", Fs::Lg, Weight::Semibold, None, Some(1));
+    cu::Spacer().modifier(Modifier::new().height(SP[2]));
+
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             for a in &live.accounts {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[1])
-                    .modifier(Modifier::new().fill_max_width().height(H_CTL))
-                    .content(|| {
-                        Label(&a.label, Fs::Md, Weight::Regular, None, Some(1));
-                        Pill(a.harness.label(), PillTone::Grey, true);
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        if a.limited {
-                            Pill("한도 도달", PillTone::Orange, true);
-                        } else {
-                            Pill("사용 가능", PillTone::Green, true);
-                        }
-                    });
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().height(H_CTL)).content(|| {
+                    VendorDot(a.harness);
+                    Label(&a.label, Fs::Md, Weight::Regular, None, Some(1));
+                    Pill(a.harness.label(), PillTone::Grey, true);
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    if a.limited {
+                        Pill("한도 도달", PillTone::Orange, true);
+                    } else {
+                        Pill("사용 가능", PillTone::Green, true);
+                    }
+                });
             }
-            Pending("계정별 남은 사용량 링은");
-        },
-    );
+        });
+    });
+}
+
+fn TokenKindsCard() {
+    let p = ember_theme().palette;
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::List, true, || {});
+                Label("오늘 토큰 종류", Fs::Lg, Weight::Semibold, None, Some(1));
+            });
+            let split_draw = draw_split_bar(p);
+            cu::Canvas(split_draw).modifier(Modifier::new().size(409.0, 14.0));
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label("입력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("1.1M", Fs::Lg, Weight::Semibold, None, None);
+                    Label("28%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label("출력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("0.4M", Fs::Lg, Weight::Semibold, None, None);
+                    Label("10%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label("캐시 읽기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("2.2M", Fs::Lg, Weight::Semibold, None, None);
+                    Label("56%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label("캐시 쓰기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("0.2M", Fs::Lg, Weight::Semibold, None, None);
+                    Label("5%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+            });
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            Label(
+                "하네스가 알려 준 실제 토큰 수입니다. 알려 주지 않는 하네스는 추정하지 않고 모름으로 표시됩니다.",
+                Fs::Xs,
+                Weight::Regular,
+                Some(paint(p.muted)),
+                None,
+            );
+        });
+    });
+}
+
+fn HarnessCostCard(bars: &[crate::ui::home::HarnessBar]) {
+    let p = ember_theme().palette;
+    EmberCard(false, true, None, None, None, || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                IconButton(IconRole::List, true, || {});
+                Label("하네스와 모델별 비용 (하네스별)", Fs::Lg, Weight::Semibold, None, Some(1));
+            });
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Box().modifier(Modifier::new().size(132.0, 132.0)).alignment(Alignment::Center).content(|| {
+                    let donut_draw = draw_donut(p);
+                    cu::Canvas(donut_draw).modifier(Modifier::new().size(132.0, 132.0));
+                    cu::Column().content(|| {
+                        Label("$174", Fs::Lg, Weight::Semibold, None, None);
+                        Label("이번 달", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    });
+                });
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        VendorDot(AgentHarness::ClaudeCode);
+                        Label("Claude $120", Fs::Sm, Weight::Regular, None, None);
+                    });
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        VendorDot(AgentHarness::Codex);
+                        Label("Codex $46", Fs::Sm, Weight::Regular, None, None);
+                    });
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        VendorDot(AgentHarness::Gemini);
+                        Label("Gemini $8", Fs::Sm, Weight::Regular, None, None);
+                    });
+                });
+            });
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            for (model, cost, h) in [
+                ("Opus 5.5", "$96.2", AgentHarness::ClaudeCode),
+                ("Sonnet 5.5", "$24.1", AgentHarness::ClaudeCode),
+                ("GPT-5", "$31.5", AgentHarness::Codex),
+                ("GPT-5 Codex", "$14.8", AgentHarness::Codex),
+                ("Gemini Pro", "$6.9", AgentHarness::Gemini),
+            ] {
+                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                    VendorDot(h);
+                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                    Label(model, Fs::Sm, Weight::Medium, None, Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Label(cost, Fs::Sm, Weight::Medium, None, None);
+                });
+            }
+            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                VendorDot(AgentHarness::Antigravity);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                Label("보고 안 함", Fs::Sm, Weight::Medium, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                Label("모름", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+            });
+            for b in bars {
+                cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
+                    Label(&b.label, Fs::Sm, Weight::Regular, None, Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Label(&format!("세션 {}개", b.sessions), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                });
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------------------------

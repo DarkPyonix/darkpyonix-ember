@@ -178,6 +178,29 @@ impl Services {
         }
     }
 
+    /// Reset the demo state, outbox, and session pane prefs to the initial seed. Returns `true`
+    /// when demo mode is active.
+    pub fn reset_demo(&self) -> bool {
+        let Some(d) = &self.demo else {
+            return false;
+        };
+        d.reset(&self.client, crate::demo::now_ms());
+        *self.outbox.lock().unwrap() = Outbox::default();
+        self.ui.update_prefs(|p| {
+            p.panes.clear();
+        });
+        self.ui.live.bump_all();
+        if let Some(live) = self.live.get() {
+            let mut l = live.launcher;
+            *l.write() += 1;
+            let mut t = live.transcripts;
+            *t.write() += 1;
+            let mut o = live.outbox;
+            *o.write() += 1;
+        }
+        true
+    }
+
     /// Tell the UI the outbox changed (queued-message indicator).
     pub fn bump_outbox(&self) {
         crate::ui::coexist::SharedLive::bump(&self.ui.live.outbox);

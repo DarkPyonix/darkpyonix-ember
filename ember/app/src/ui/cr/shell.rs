@@ -320,6 +320,11 @@ pub fn UserRow(rail: bool) {
         });
 }
 
+/// Whether the demo-only sidebar/phone-menu rows (`플랫폼: 기타`, `데모 초기화`) are shown.
+pub fn show_demo_tools() -> bool {
+    crate::demo::active_from_env()
+}
+
 /// The sidebar, or the rail when `rail`. `.side`: 20 12 padding (16 0 in the rail), 2 gap.
 pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl FnMut() + 'static, on_settings: impl FnMut() + 'static) {
     let ui = shared_ui().clone();
@@ -333,6 +338,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let top = if rail { 14.0 } else { SP[4] };
     let below_brand = if rail { 10.0 } else { 20.0 };
     let bottom = if rail { 26.0 } else { 30.0 };
+    let demo_tools = show_demo_tools();
     let plat_ios = remember(|| mutable_state_of(false));
     let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
     cu::Row().modifier(Modifier::new().fill_max_height()).content(|| {
@@ -370,13 +376,19 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                             });
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
-                            let pl = plat_ios.clone();
-                            ToolRow(ICON_CPU_SVG, plat_label, rail, move || {
-                                pl.set(!pl.get_untracked());
-                            });
-                            ToolRow(NavMenu::Routines.svg(), "데모 초기화", rail, || {
-                                super::notice::post("데모를 초기 상태로 되돌렸습니다");
-                            });
+                            if demo_tools {
+                                let pl = plat_ios.clone();
+                                ToolRow(ICON_CPU_SVG, plat_label, rail, move || {
+                                    pl.set(!pl.get_untracked());
+                                });
+                                ToolRow(NavMenu::Routines.svg(), "데모 초기화", rail, || {
+                                    if let Some(s) = crate::services::try_services() {
+                                        if s.reset_demo() {
+                                            super::notice::post("데모를 초기 상태로 되돌렸습니다");
+                                        }
+                                    }
+                                });
+                            }
                             // `.me`: 8 margin and 12 padding above the avatar.
                             cu::Spacer().modifier(Modifier::new().height(16.0));
                             UserRow(rail);
@@ -461,11 +473,12 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
 }
 
 /// The phone's top-right tool menu (`.phonemenu`): a 32 px round button at top 10 / right 12 that
-/// opens a popover with the theme switch, settings, platform toggle and demo reset.
+/// opens a popover with the theme switch, settings, and (in demo mode) platform toggle and demo reset.
 pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: impl FnMut() + Clone + 'static) {
     let p = ember_theme().palette;
     let ui = shared_ui().clone();
     let theme_svg = if ember_theme().scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
+    let demo_tools = show_demo_tools();
     let plat_ios = remember(|| mutable_state_of(false));
     let plat_label = if plat_ios.get() { "플랫폼: iOS" } else { "플랫폼: 기타" };
     cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).content(|| {
@@ -507,16 +520,22 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                                 o.set(false);
                                 s();
                             });
-                            let (pl, o) = (plat_ios.clone(), open.clone());
-                            menu_item(ICON_CPU_SVG, plat_label, move || {
-                                pl.set(!pl.get_untracked());
-                                o.set(false);
-                            });
-                            let o = open.clone();
-                            menu_item(NavMenu::Routines.svg(), "데모 초기화", move || {
-                                o.set(false);
-                                super::notice::post("데모를 초기 상태로 되돌렸습니다");
-                            });
+                            if demo_tools {
+                                let (pl, o) = (plat_ios.clone(), open.clone());
+                                menu_item(ICON_CPU_SVG, plat_label, move || {
+                                    pl.set(!pl.get_untracked());
+                                    o.set(false);
+                                });
+                                let o = open.clone();
+                                menu_item(NavMenu::Routines.svg(), "데모 초기화", move || {
+                                    o.set(false);
+                                    if let Some(s) = crate::services::try_services() {
+                                        if s.reset_demo() {
+                                            super::notice::post("데모를 초기 상태로 되돌렸습니다");
+                                        }
+                                    }
+                                });
+                            }
                         });
                     });
             }
@@ -834,5 +853,49 @@ mod tests {
         assert!(report(1024.0, WindowSizeClass::Medium).contains("Rail"));
         assert!(report(390.0, WindowSizeClass::Compact).contains("BottomTabs"));
         compose_rust::window::reset_window_size();
+    }
+
+    #[composable]
+    fn sidebar_probe() {
+        Sidebar(false, NavMenu::Sessions, NavCounts::default(), || {}, || {});
+    }
+
+    #[composable]
+    fn phone_menu_probe() {
+        let open = remember(|| mutable_state_of(true));
+        PhoneMenu(open, || {});
+    }
+
+    #[test]
+    fn fr_l28_demo_sidebar_tools_are_hidden_outside_demo_mode_and_reset_works() {
+        use compose_rust::protocol::decode_batch;
+        use compose_rust::{Host, Recomposer};
+
+        let _guard = crate::services::test_guard();
+        // Outside demo mode (when EMBER_DEMO_DATA is not "1"), neither Sidebar nor PhoneMenu
+        // renders the demo-only rows ("플랫폼: 기타", "데모 초기화").
+        if std::env::var(crate::demo::DEMO_ENV).ok().as_deref() != Some("1") {
+            assert!(!show_demo_tools());
+            let mut host_s = Host::new(|| Box::new(Recomposer::new(sidebar_probe)));
+            let batch_s = decode_batch(host_s.rebuild().expect("rebuild")).expect("decode");
+            assert!(has_text(&batch_s, "설정"));
+            assert!(!has_text(&batch_s, "플랫폼: 기타"));
+            assert!(!has_text(&batch_s, "데모 초기화"));
+
+            let mut host_p = Host::new(|| Box::new(Recomposer::new(phone_menu_probe)));
+            let batch_p = decode_batch(host_p.rebuild().expect("rebuild")).expect("decode");
+            assert!(has_text(&batch_p, "설정"));
+            assert!(!has_text(&batch_p, "플랫폼: 기타"));
+            assert!(!has_text(&batch_p, "데모 초기화"));
+        }
+
+        // Verify `services().reset_demo()` genuinely restores demo state after a mutation.
+        let s = crate::services::services();
+        let d = s.demo.as_ref().expect("test_services installs DemoSource");
+        d.send_message(&s.client, "demo-s1", "mutated message");
+        let len_after_send = d.events_for("demo-s1").len();
+        assert!(len_after_send > 6);
+        assert!(s.reset_demo());
+        assert_eq!(d.events_for("demo-s1").len(), 6);
     }
 }

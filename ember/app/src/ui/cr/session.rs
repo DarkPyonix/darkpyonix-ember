@@ -2442,10 +2442,10 @@ const DEMO_TL_LANES: [TlLane; 5] = [
         segs: &[
             (2.2, TlSegKind::Think),
             (1.6, TlSegKind::Tool),
-            (2.8, TlSegKind::Gap),
+            (2.8, TlSegKind::Wait),
             (2.0, TlSegKind::Think),
             (1.4, TlSegKind::Tool),
-            (3.4, TlSegKind::Gap),
+            (3.4, TlSegKind::Wait),
             (2.0, TlSegKind::Think),
             (1.0, TlSegKind::Tool),
         ],
@@ -2885,7 +2885,7 @@ fn TimelineCard(project: &str) {
                         });
                     cu::Separator(Some(paint(p.line)));
 
-                    // 3. Footer (.tl-foot: ~60dp high): play (40x40), restart (32x32), speed 1x/2x, time, legend
+                    // 3. Footer (.tl-foot: ~72dp high): play (40x40), restart (32x32), speed 1x/2x, time, legend
                     let cur_spd = speed.get();
                     let spd_st = speed.clone();
                     cu::Row()
@@ -2894,9 +2894,9 @@ fn TimelineCard(project: &str) {
                         .modifier(
                             Modifier::new()
                                 .fill_max_width()
-                                .height(60.0)
+                                .height(72.0)
                                 .background(paint(p.surface_2))
-                                .padding(SP[2]),
+                                .padding(SP[3]),
                         )
                         .content(move || {
                             Clickable(
@@ -3567,7 +3567,7 @@ fn NewMemberSheet(
                 // Header (.sheet-h): title + project name on the left, close button on the right
                 cu::Row()
                     .alignment(Alignment::CenterStart)
-                    .modifier(Modifier::new().fill_max_width().height(54.0))
+                    .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H))
                     .content(move || {
                         cu::Spacer().modifier(Modifier::new().width(SP[4]));
                         Label("새 팀원", Fs::Xl, Weight::Semibold, None, Some(1));
@@ -3586,12 +3586,12 @@ fn NewMemberSheet(
                 cu::Separator(Some(paint(p.line)));
 
                 cu::Column()
-                    .spacing(12.0)
+                    .spacing(16.0)
                     .modifier(Modifier::new().fill_max_width().padding(SP[4]))
                     .content(|| {
                         // 1. 역할 이름 (.field: 40dp, 1px line border, surface fill)
                         cu::Column()
-                            .spacing(6.0)
+                            .spacing(8.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 Label(
@@ -3634,9 +3634,9 @@ fn NewMemberSheet(
                                     });
                             });
 
-                        // 2. 첫 지시 (선택) (textarea.field: 110dp, 1px line border, surface fill)
+                        // 2. 첫 지시 (선택) (textarea.field: 118dp, 1px line border, surface fill)
                         cu::Column()
-                            .spacing(6.0)
+                            .spacing(8.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 Label(
@@ -3652,7 +3652,7 @@ fn NewMemberSheet(
                                     .modifier(
                                         Modifier::new()
                                             .fill_max_width()
-                                            .height(110.0)
+                                            .height(118.0)
                                             .background(paint(p.surface))
                                             .border(1.0, paint(p.line))
                                             .corner_radius(CORNER_SM)
@@ -3681,7 +3681,7 @@ fn NewMemberSheet(
 
                         // 3. 하네스, 모델, 권한 모드 (.snew-picks: 40dp height, CORNER_SM)
                         cu::Column()
-                            .spacing(6.0)
+                            .spacing(8.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 Label(
@@ -3783,7 +3783,7 @@ fn NewMemberSheet(
 
                         // 4. 컴퓨터
                         cu::Column()
-                            .spacing(6.0)
+                            .spacing(8.0)
                             .modifier(Modifier::new().fill_max_width())
                             .content(|| {
                                 Label(

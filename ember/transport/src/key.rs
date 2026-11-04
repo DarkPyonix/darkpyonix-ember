@@ -19,10 +19,21 @@ use crate::TransportError;
 pub struct PeerId([u8; 32]);
 
 impl PeerId {
-    /// Builds a `PeerId` from raw public key bytes, checking they are a valid Ed25519 point.
+    /// Builds a `PeerId` from raw public key bytes (SPEC `FR-N6`).
+    ///
+    /// The bytes must be the canonical compressed encoding of an Ed25519 point of large order:
+    /// `y >= p` aliases, `x = 0` points with the sign bit set and small-order ("weak") points are
+    /// refused, so one device has exactly one `PeerId` and a revocation by it cannot be dodged by
+    /// re-encoding the key.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, TransportError> {
-        VerifyingKey::from_bytes(&bytes)
+        let key = VerifyingKey::from_bytes(&bytes)
             .map_err(|_| TransportError::InvalidKey("not a valid Ed25519 public key".into()))?;
+        if !is_canonical(&bytes) {
+            return Err(TransportError::InvalidKey("non-canonical Ed25519 public key".into()));
+        }
+        if key.is_weak() {
+            return Err(TransportError::InvalidKey("weak (small-order) Ed25519 public key".into()));
+        }
         Ok(Self(bytes))
     }
 
@@ -45,6 +56,22 @@ impl PeerId {
     }
 }
 
+/// Whether `bytes` is what compressing the decoded point gives back: the 255-bit y is below
+/// `p = 2^255 - 19`, and a zero x (y = 1 or y = p - 1) does not carry the sign bit.
+fn is_canonical(bytes: &[u8; 32]) -> bool {
+    let mut y = *bytes;
+    let sign = y[31] & 0x80 != 0;
+    y[31] &= 0x7f;
+    // y >= p  <=>  y[31] == 0x7f, y[1..31] all 0xff, y[0] >= 0xed.
+    if y[31] == 0x7f && y[1..31].iter().all(|b| *b == 0xff) && y[0] >= 0xed {
+        return false;
+    }
+    // x = 0 exactly when y = 1 or y = p - 1; the sign bit must then be clear.
+    let y_is_one = y[0] == 1 && y[1..].iter().all(|b| *b == 0);
+    let y_is_p_minus_1 = y[0] == 0xec && y[1..31].iter().all(|b| *b == 0xff) && y[31] == 0x7f;
+    !(sign && (y_is_one || y_is_p_minus_1))
+}
+
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex::encode(self.0))
@@ -61,7 +88,7 @@ impl FromStr for PeerId {
     type Err = TransportError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes = hex::decode(s.trim())
+        let bytes = hex::decode(s.trim().to_ascii_lowercase())
             .map_err(|_| TransportError::InvalidKey("peer id is not hex".into()))?;
         let bytes: [u8; 32] = bytes
             .try_into()

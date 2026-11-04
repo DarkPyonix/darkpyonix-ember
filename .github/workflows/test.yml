@@ -177,3 +177,9 @@ jobs:
         working-directory: ember/${{ matrix.crate }}
         run: |
           if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi
+      - name: cargo test (letify-link backend)
+        # SPEC FR-N5: the same transport suite passes against the letify-link backend (feature
+        # `letify`, off by default). Includes the relay, revocation and canonical id cases.
+        if: steps.present.outputs.yes == 'true' && matrix.crate == 'transport'
+        working-directory: ember/transport
+        run: cargo test --locked --features letify

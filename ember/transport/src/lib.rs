@@ -10,9 +10,11 @@
 //! - [`PeerGate`] admits only allowed peers and closes a revoked peer's connections (`FR-N3`);
 //!   [`Dialer`] caches one outgoing connection per (peer, service) for many streams.
 //!
-//! Backends: `iroh` (feature `iroh`, default; [`Transport::bind`]) and an always-available
-//! in-memory fake ([`mem::MemNetwork`]) for other crates' tests. **No backend type appears in
-//! this crate's public API**, so replacing iroh touches only this crate.
+//! Backends: `iroh` (feature `iroh`, default; [`Transport::bind`]), `letify-link` (feature
+//! `letify`, chosen with [`TransportConfig::backend`] or `EMBER_TRANSPORT_BACKEND=letify`;
+//! SPEC `FR-N5`, `INTENT.md` D36) and an always-available in-memory fake ([`mem::MemNetwork`])
+//! for other crates' tests. **No backend type appears in this crate's public API**, so replacing
+//! a backend touches only this crate.
 
 mod addr;
 mod config;
@@ -20,11 +22,14 @@ mod dialer;
 pub mod gate;
 mod key;
 pub mod mem;
+mod signal;
 
 #[cfg(feature = "http")]
 pub mod http;
 #[cfg(feature = "iroh")]
 mod iroh_backend;
+#[cfg(feature = "letify")]
+mod letify;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -40,10 +45,19 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, watch};
 
 pub use addr::{AddressDirectory, MemoryDirectory, PeerAddr};
-pub use config::{HubDirectory, RelayConfig, TransportConfig, RELAY_URL_ENV};
+pub use config::{
+    BackendKind, HubDirectory, LetifyConfig, ObserverAddr, RelayConfig, TransportConfig, BACKEND_ENV,
+    RELAY_URL_ENV,
+};
 pub use dialer::Dialer;
 pub use gate::PeerGate;
 pub use key::{PeerId, SecretKey};
+pub use signal::{
+    pkarr_signable, verify_pkarr_payload, MemoryPkarrStore, MemorySignal, MemorySignalHub, PkarrStore,
+    SignalChannel, SIGNAL_MAX,
+};
+#[cfg(feature = "letify")]
+pub use letify::{HttpPkarrStore, LETIFY_TRANSPORT_ID};
 
 /// Errors from the transport. Backend errors are carried as text so no backend type leaks.
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +81,19 @@ pub enum TransportError {
 }
 
 pub type Result<T, E = TransportError> = std::result::Result<T, E>;
+
+/// What the application tells the transport about the device, so a backend can spend less on
+/// keepalives while the app is in the background (SPEC `FR-N5`, `NFR-N1` mobile line). The iroh
+/// and in-memory backends ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PowerState {
+    /// The app is in use.
+    Foreground,
+    /// The app is in the background: slower keepalives.
+    Background,
+    /// The device saves power: no keepalives; connections rely on resuming when the app returns.
+    PowerSave,
+}
 
 /// Which network path a connection is currently using.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,12 +243,28 @@ pub(crate) trait TransportBackend: Send + Sync + 'static {
     async fn set_relays(&self, _relays: RelayConfig) -> Result<()> {
         Ok(())
     }
+    /// `peer` was admitted by a gate: a backend that enforces admission below the gate (the
+    /// letify relay) admits it too. No-op where unsupported.
+    fn allow_peer(&self, _peer: PeerId) {}
+    /// `peer` was revoked: refuse its handshakes, close its sessions and relayed pairs now.
+    /// No-op where unsupported.
+    fn revoke_peer(&self, _peer: PeerId) {}
+    /// The app's power state changed. No-op where unsupported.
+    fn set_power_state(&self, _state: PowerState) {}
+    /// The app returned to the foreground or the network changed: re-establish paths now.
+    /// No-op where unsupported.
+    fn resume_now(&self) {}
     async fn close(&self);
 }
 
 #[async_trait]
 pub(crate) trait ConnectionBackend: Send + Sync + 'static {
     async fn open_bi(&self) -> Result<BiStream>;
+    /// A stream for bulk data (file transfers): served after interactive streams where the
+    /// backend can tell them apart. Same as [`ConnectionBackend::open_bi`] otherwise.
+    async fn open_bi_bulk(&self) -> Result<BiStream> {
+        self.open_bi().await
+    }
     async fn accept_bi(&self) -> Result<BiStream>;
     fn path_state(&self) -> PathState;
     fn watch_path(&self) -> watch::Receiver<PathState>;
@@ -293,11 +336,26 @@ impl Transport {
         Self { inner }
     }
 
-    /// Binds the real peer-to-peer transport (iroh backend).
-    #[cfg(feature = "iroh")]
+    /// Binds the real peer-to-peer transport: the backend [`TransportConfig::backend`] names
+    /// (iroh by default; letify-link with the `letify` feature).
+    #[cfg(any(feature = "iroh", feature = "letify"))]
     pub async fn bind(config: TransportConfig) -> Result<Self> {
-        let backend = iroh_backend::IrohBackend::bind(config).await?;
-        Ok(Self::from_backend(backend))
+        match config.backend {
+            #[cfg(feature = "iroh")]
+            BackendKind::Iroh => {
+                let backend = iroh_backend::IrohBackend::bind(config).await?;
+                Ok(Self::from_backend(backend))
+            }
+            #[cfg(feature = "letify")]
+            BackendKind::Letify => {
+                let backend = letify::LetifyBackend::bind(config).await?;
+                Ok(Self::from_backend(backend))
+            }
+            #[allow(unreachable_patterns)]
+            other => Err(TransportError::Config(format!(
+                "the {other} backend is not compiled into this build"
+            ))),
+        }
     }
 
     /// This endpoint's identity.
@@ -345,6 +403,33 @@ impl Transport {
     /// registration). The in-memory backend ignores it.
     pub async fn set_relays(&self, relays: RelayConfig) -> Result<()> {
         self.inner.set_relays(relays).await
+    }
+
+    /// Tells the backend that `peer` is admitted, so a backend that enforces admission below the
+    /// gate (the letify relay on the main server) admits it too. [`PeerGate::attach`] does this
+    /// for a whole gate. The iroh and in-memory backends ignore it.
+    pub fn allow_peer(&self, peer: PeerId) {
+        self.inner.allow_peer(peer)
+    }
+
+    /// Revokes `peer` at the backend: new handshakes from it are refused and its sessions and
+    /// relayed pairs are closed at once (SPEC `FR-N3`). [`PeerGate::revoke`] calls this for every
+    /// attached transport. The iroh and in-memory backends ignore it.
+    pub fn revoke_peer(&self, peer: PeerId) {
+        self.inner.revoke_peer(peer)
+    }
+
+    /// Tells the transport the device's power state (an app in the background, or a device that
+    /// saves power).
+    pub fn set_power_state(&self, state: PowerState) {
+        self.inner.set_power_state(state)
+    }
+
+    /// Re-establishes paths now, e.g. when the app returns to the foreground or the network
+    /// changed (Wi-Fi to LTE). Open connections survive; undelivered data is sent again on the
+    /// new path.
+    pub fn resume_now(&self) {
+        self.inner.resume_now()
     }
 
     /// Waits until the endpoint is connected to its home relay. Returns `false` on timeout or
@@ -430,6 +515,14 @@ impl Connection {
     /// stream once the opener writes to it, so protocols should have the opener speak first.
     pub async fn open_bi(&self) -> Result<BiStream> {
         self.inner.open_bi().await
+    }
+
+    /// Opens a new bidirectional stream for bulk data, such as a file transfer. With the
+    /// letify-link backend its frames are served only while no interactive stream has one queued,
+    /// so a transfer does not delay small messages on other streams of the same connection.
+    /// Other backends treat it like [`Connection::open_bi`].
+    pub async fn open_bi_bulk(&self) -> Result<BiStream> {
+        self.inner.open_bi_bulk().await
     }
 
     /// Waits for the peer to open a stream. Fails with [`TransportError::Closed`] once the

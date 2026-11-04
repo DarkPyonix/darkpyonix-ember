@@ -86,5 +86,8 @@ pub fn serve(
     gate: PeerGate,
 ) -> io::Result<impl Future<Output = io::Result<()>> + Send + 'static> {
     let listener = transport.listen(SERVER_SERVICE).map_err(io::Error::other)?;
+    // A backend that enforces admission below the gate (the relay role of the main server) is
+    // told about every allow and revoke (FR-N2, FR-N3).
+    gate.attach(transport);
     Ok(async move { axum::serve(HttpListener::with_gate(listener, gate), app).await })
 }

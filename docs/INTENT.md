@@ -78,7 +78,7 @@ boundary, agreed with the darkpyonix leader]
 
 | ID | Constraint | Source |
 | -- | ---------- | ------ |
-| **E1** | The client's launcher and conversation screens never contain a webview, under any circumstance. They are built on `dioxus-compose`. The IDE window is the one place a webview may exist. | [user, 2026-10-03] |
+| **E1** | The client's launcher and conversation screens never contain a webview, under any circumstance. They are built on `compose-rust` directly; only the IDE screens use `dioxus-compose` (D9). The IDE window is the one place a webview may exist. | [user, 2026-10-03; toolkit split: user, 2026-10-26] |
 | **E2** | A wrapped agent CLI (Claude Code, Codex, Antigravity, OMP (oh-my-pi), …) keeps its native behaviour. Ember adds around it (A2A, computer switching, browser) and never patches or reimplements the agent itself. | [user]: "본연의 동작을 보존해주면서 에이전트간 소통 기능만 추가" |
 | **E3** | All conversations, all agent processes and all account credentials live on the main server. A computer is a place where tools run; it is never the system of record for a conversation. | [user] |
 | **E4** | VS Code is wrapped, never modified: Ember does not patch VS Code's source and never reimplements the Extension Host. Which extension marketplace applies follows the chosen VS Code runtime (Open VSX for OSE, the Microsoft Marketplace for the official build). | [provisional, narrowed from the 09-22 "official marketplace required"; see D10] |
@@ -194,14 +194,38 @@ tunnel implemented in Rust or an existing mesh product (the brief named "tailcat
 allowed **iroh** conditionally; see Q7 and SPEC `NFR-N1`). The DarkPyonix central server, `darkpyonix.dev`, relays NAT hole punching
 so that, as with Paseo, users do not have to think about connectivity.
 
+**Update (2026-10-30).** The relay part of this decision is superseded by D36: the main server is the relay and the transport moves to letify-link once it ships. `darkpyonix.dev` keeps the address directory and sign-in.
+
 **Consequence.** This also settles the HTTPS problem `ember/proxy/` has had for phones and tablets
 (`ember/proxy/docs/BACKGROUND.md` §7-1), whichever transport is chosen [provisional].
 
-### D9: The client is native (dioxus-compose); the IDE window is wrapped VS Code Web
+### D9: The client is native (compose-rust, the IDE on dioxus-compose); the IDE window is wrapped VS Code Web
 
-**Decision.** [user, 2026-10-03] The launcher and the conversation screens are built on
-`dioxus-compose` with no webview (E1). The IDE window is a webview running VS Code Web through
-Ember's wrapping layer, whose current implementation is `ember/proxy/` (merged in #1).
+**Decision.** [user, 2026-10-03] The client has no webview (E1). The IDE window is a webview
+running VS Code Web through Ember's wrapping layer, whose current implementation is
+`ember/proxy/` (merged in #1).
+
+[user, 2026-10-26: "dioxus-compose를 쓰고 있는데 왜 위젯을 쓰고 있어? 그럴거면 compose-rust로 기본
+UI 구현하고 IDE 부분만 dioxus-compose로 해야지"] The base UI (launcher, shell, 홈, 프로젝트, 세션,
+conversation, 채널, 루틴, 버전 관리, 에이전트, 파일, the computer monitor, characters, settings and
+search) is built on `compose-rust` directly. Only the IDE part is built on `dioxus-compose`: the
+Ember 에디터 screen and the workbench chrome drawn with Code-OSS CSS (D9a, D23). Both run in one
+app, with no webview.
+
+**Previous wording.** Until 2026-10-26 this decision read "The launcher and the conversation
+screens are built on `dioxus-compose`", and the client was written that way: about 21k lines of
+`ember/app/src/ui/` use dioxus-compose's typed Compose widgets (`Column`, `Row`, `Button`,
+`Card`, ...) with Dioxus hooks and signals, and almost no HTML or CSS.
+
+**Why it changed.** dioxus-compose exists for the editor core (D9a): it lays out HTML and CSS so
+that the Code-OSS workbench can be drawn with Code-OSS's own CSS. A screen that only places
+Compose widgets does not need that layer; it adds a second runtime (a Dioxus `VirtualDom`) and a
+second copy of every widget change (a feature reaches the base UI only after compose-rust and then
+dioxus-compose ship it). The owner's point is that a widget screen should be written against the
+toolkit that owns the widgets.
+
+**Status.** Not migrated. The plan (API mapping, gaps, how the two coexist in one window, order)
+is #220; until it lands the base UI stays on dioxus-compose's widget path.
 
 **Tauri.** [user, 2026-10-03] The Tauri scaffold has been deleted ("Tauri 스캐폴드가 왜 필요해?
 지워."). The Tauri parts of `docs/design/INTEGRATION.md` are marked obsolete; its VS Code runtime
@@ -480,7 +504,7 @@ Rejected: messages as the only channel between sessions.
 
 **How it relates to earlier decisions.**
 
-- D9: the tabs are native `dioxus-compose` screens, with no webview (`NFR-L2`).
+- D9: the tabs are native `compose-rust` screens (dioxus-compose until #220 lands), with no webview (`NFR-L2`).
 - D7: Home shows usage already recorded for accounts (`FR-U3`, `FR-U4`); it adds a view, not a new meter.
 - D5: a channel mention reaches an agent through the same A2A delivery as a composer mention (`FR-T6`, `FR-T3`). The agents' requests and reports in the feed reuse the idle and completion reports (`FR-T8`). The new rule is the mention gate: no mention, no delivery to agents.
 - Teams (`FR-T7`, D18): a channel's agent subset is a selection of sessions; it does not create a team, and the team messaging rule still applies to team members.
@@ -510,7 +534,7 @@ Rejected: messages as the only channel between sessions.
 | **Q4** | How are a transcript's computer-specific observations invalidated on a move? Proposal: split the transcript into a computer-independent part (intent, decisions, plans, conclusions) and a computer-specific part (file contents, command output, paths, environment, background jobs); record each file observation as (path, content hash, computer, time) and re-hash on the new computer so only changed files are flagged; keep the environment description in one replaceable block instead of appending; scope "read before edit" to a computer. | [provisional] proposal. v0 (a system notice on a switch) is implemented (#34, SPEC `FR-S7`); the hash comparison is written from the tool-call log (SPEC `FR-S7`, #79); a separate recorded (path, hash, computer, time) table was not built, since the log already names the files |
 | **Q5** | A job started on computer A when the session moves to B: kill it, keep it and notify on completion, or block the move? Proposal: keep it running and notify. | [provisional]; built as proposed in ember node (`FR-X4`, `ember/node/src/jobs.rs`) |
 | **Q6** | For each wrapped CLI, where exactly is the interception point (shell, PTY, filesystem or tool protocol) that keeps its native behaviour intact? Candidates per agent: the vendor's own headless protocol, or the Agent Client Protocol (ACP), which OMP exposes natively and Claude Code / Codex / Gemini reach through adapters. | **Decided per agent:** Antigravity [user] (D14, implemented #64); Claude Code and Codex [provisional], implemented (#14); OMP and other ACP agents [provisional], implemented (#61), real OMP not run (#53); Gemini open. Details: **Claude Code:** `--print` stream-json with `--permission-prompt-tool stdio` (#14). **Codex:** `codex app-server` directly (#14); the maintained ACP adapter (`agentclientprotocol/codex-acp`) is itself a translation layer over app-server, so it can only lose detail (approval choices, turn steering, thread ids, usage), and the older one compiles Codex internals pinned to an old release, breaking FR-A1. **Antigravity**, decided in D14 [user]: `agy -p … --output-format stream-json`, one process per turn, `--conversation=<id>` for native resume (agy 1.2.10, recorded in `ember/server/tests/fixtures/agy/`). Print mode cannot ask for a permission: it soft-denies the tool, and a `PreToolUse` hook answering `allow` (even with `permissionOverrides`) did not lift that (recorded). So Ember runs agy with `--dangerously-skip-permissions` and makes its own `PreToolUse` hook the only gate: the hook (`curl` to a local route holding a per-run secret) blocks until the user answers, `deny` hard-blocks, an unreachable server denies, and before every turn `agy -p /hooks --output-format json` must list the hook or the turn is refused (D14; tested on 1.2.16 in SPEC §A). The hook, a rules file (instructions) and `mcp_config.json` live in a per-session folder passed with `--add-dir`, agy's own customization root (`.agents/`); nothing in agy or in the user's `~/.gemini` or project is changed. Costs: the folder shows up to the model as an extra, first-listed workspace (the rules file tells it to stay out), the stream carried no tool output on 1.2.10 (1.2.16 has it), and agy has no config-dir variable, so Antigravity accounts (D7) are not possible yet. Rejected: hooks in `~/.gemini/config/hooks.json` (shared by every agy run and cannot hold per-session MCP servers), hooks in the project's `.agents/` (writes into the user's repository), `--input-format stream-json` (one process per session, but its input schema is undocumented). **OMP and other ACP agents** *[provisional]*: the agent's own ACP server over stdio, through one generic ACP client (#53, ACP protocol v1); OMP's is `omp acp` (oh-my-pi v18.5.0, read from source, not yet run). Ember is the ACP client, so file reads/writes and shell commands that the agent routes through `fs/*` and `terminal/*` are executed by Ember itself, which is the interception point: they run on the session's computer through its node, with no shim. Tools the agent does not route through ACP (search, LSP, …) still read the main server's filesystem, which the project mount covers. Rejected: OMP's own `--mode rpc` NDJSON protocol (OMP-specific; ACP serves every ACP agent with one adapter). Claude Code / Codex through ACP adapters stays rejected as above. Others (Gemini): open. |
-| **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. Implemented in `ember/transport` (#23); `NFR-N1` not yet measured on real networks (#10). tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). |
+| **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. Implemented in `ember/transport` (#23); `NFR-N1` not yet measured on real networks (#10). tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). **Update [user, 2026-10-30]:** the move to letify-link with the main server as relay is D36 (`FR-N5`); iroh stays until it ships. |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed: deleted** [user, 2026-10-03] |
 | **Q9** | `ember/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `ember/proxy/docs/BACKGROUND.md` §7-3. | Open; HTTPS over P2P is #10 |
 | **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Open remainder:** the authentication mechanism of the invite |
@@ -750,3 +774,20 @@ silhouette rounder. It is not scheduled; it starts only when the owner asks agai
 
 **Rejected.** The first four candidates (ring, drop, ember coal, E) ("여전히 처참한거 같아. ... 내가
 넣어준 임시 로고가 훨배 나아."); a new symbol unrelated to DarkPyonix.
+
+### D36: The main server is the relay; the transport moves to letify-link
+
+**Decision.** [user, 2026-10-30, answering "채택, SPEC에 반영"; the opinion was relayed from the letify side] "Ember에 relay가 필요하면 main server가 그 역할을 하면 됩니다. main server는 관리하는 기기이고, 위치가 바뀌지 않습니다. 각 기기는 main server와 홀펀칭으로 연결합니다. 기기끼리 직결이 안 될 때는 main server가 중계합니다. 그래서 relay.darkpyonix.dev 같은 별도 relay VPS를 운영할 필요가 없어집니다." The transport moves from iroh (QUIC) to **letify-link**, a Rust/tokio crate: Noise IK sessions over TCP subflows and UDP, TCP hole punching, path migration between TCP and UDP, its own stream multiplexing, ed25519 node keys reusable from the iroh NodeId, version negotiation, rendezvous as a trait, relay as a role any node can run, and relay-to-direct promotion with hysteresis. Spec draft: DarkPyonix/letify#76. **Until letify-link ships, Ember keeps iroh** (D8, Q7).
+
+**Previous design.** D8 and `FR-N2`: `darkpyonix.dev` ran an iroh-relay (`relay.darkpyonix.dev`) and an address directory, and iroh's QUIC hole punching fell back to that relay.
+
+**Why.** No relay VPS has to be run, paid for or defended. TCP is tried first, so the transport works on networks that block UDP, where iroh can only reach the relay.
+
+**Consequences.**
+- Relayed throughput is capped by the uplink of the main server.
+- The main server must be reachable by every device: a public IP, or port forwarding, UPnP or PCP. It also does public-address discovery (the STUN or QAD role) for the devices.
+- A device pair that cannot connect directly and cannot reach the main server has no path. There is no public fallback relay.
+- The `darkpyonix.dev` hub keeps browser ash sharing and the pkarr rendezvous (account directory); it no longer relays Ember traffic once the swap is done.
+- Switching is staged: both transports exist behind `FR-N5`, and the swap uses version negotiation so devices on either side keep working during the rollout.
+
+**Rejected.** Running `relay.darkpyonix.dev` as a separate relay VPS (the previous design).

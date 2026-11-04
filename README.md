@@ -118,7 +118,7 @@ settings and what each program stores.
 
 | ID | Rule | Why |
 | -- | ---- | --- |
-| **E1** | The launcher and conversation screens never contain a webview. | The client is built natively on `dioxus-compose`; the IDE window is the one place a webview may exist. |
+| **E1** | The launcher and conversation screens never contain a webview. | The client is built natively on `compose-rust`, with only the IDE screens on `dioxus-compose`; the IDE window is the one place a webview may exist. |
 | **E2** | A wrapped agent keeps its native behaviour. Ember adds around it and never patches it. | Your agent settings, models and session IDs keep working as they do natively. |
 | **E3** | Conversations, agent processes and account credentials live on the main server. | A computer is where tools run, so a conversation is never tied to one computer. |
 | **E4** | VS Code is wrapped, never modified, and its Extension Host is never reimplemented. | Extensions then behave exactly as they do in VS Code. |

@@ -87,6 +87,7 @@ pub fn launch() {
         .prefs_path()
         .map(|p| prefs::load(&p))
         .unwrap_or_default();
+    let shared_ui = ui::coexist::SharedUi::new(initial_prefs.clone());
     let server = ServerApi::new(&config.server_url);
     install(Services {
         config,
@@ -96,10 +97,19 @@ pub fn launch() {
         demo,
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
+        ui: shared_ui,
         live: OnceLock::new(),
     });
 
-    launch_builder().launch(ui::app);
+    if let Some(pref) = ui::cr::shell::requested() {
+        // Phase 2 review window (#220): the compose-rust shell, no Dioxus app.
+        ui::cr::shell::launch(pref);
+    } else if let Some(pref) = ui::cr::gallery::requested() {
+        // Phase 1 review window (#220): the compose-rust components, no app.
+        ui::cr::gallery::launch(pref);
+    } else {
+        launch_builder().launch(ui::app);
+    }
 
     // The window is closed: write the cache once more and stop the background tasks.
     let s = services();

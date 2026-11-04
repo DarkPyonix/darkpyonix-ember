@@ -30,7 +30,7 @@ pub const UNAVAILABLE: &str = "준비 중입니다";
 /// The built-in project that holds Home chats by default (FR-L13).
 pub const DEFAULT_PROJECT: &str = "기본 프로젝트";
 
-pub const GREETING: &str = "무엇을 도와드릴까요?";
+pub const GREETING: &str = "무엇을 도와줄까요?";
 pub const COMPOSER_PLACEHOLDER: &str =
     "무엇이든 물어보세요. 새 대화는 고른 프로젝트의 팀원이 됩니다.";
 
@@ -373,9 +373,9 @@ pub fn computer_chip_text(selected: Option<&str>, computers: &[(String, String)]
 
 /// A suggestion chip fills the composer with its text, replacing a draft.
 pub const SUGGESTIONS: [&str; 3] = [
-    "develop CI 실패를 요약해 주세요",
-    "열린 PR을 리뷰해 주세요",
-    "이번 주 사용량을 정리해 주세요",
+    "develop CI 실패 요약해줘",
+    "열린 PR 리뷰해줘",
+    "이번 주 사용량 정리해줘",
 ];
 
 pub fn apply_suggestion(_draft: &str, suggestion: &str) -> String {
@@ -601,7 +601,7 @@ pub fn harness_usage(state: &State) -> Vec<HarnessBar> {
 }
 
 /// Days since 1970-01-01 of a `YYYY-MM-DD` date (proleptic Gregorian), `None` if malformed.
-fn day_number(ymd: &str) -> Option<i64> {
+pub fn day_number(ymd: &str) -> Option<i64> {
     let mut it = ymd.split('-');
     let y: i64 = it.next()?.parse().ok()?;
     let m: i64 = it.next()?.parse().ok()?;
@@ -1343,16 +1343,16 @@ fn ModelRow(
 // ---------------------------------------------------------------------------------------------
 
 /// Everything the dashboard reads from the client in one pass.
-struct Dash {
-    counts: StatusCounts,
-    online: usize,
-    computers: usize,
-    harness: Vec<HarnessBar>,
-    crew: Vec<CrewMember>,
-    projects: Vec<ProjectTile>,
+pub struct Dash {
+    pub counts: StatusCounts,
+    pub online: usize,
+    pub computers: usize,
+    pub harness: Vec<HarnessBar>,
+    pub crew: Vec<CrewMember>,
+    pub projects: Vec<ProjectTile>,
 }
 
-fn read_dash(state: &State) -> Dash {
+pub fn read_dash(state: &State) -> Dash {
     let (online, computers) = computers_online(state);
     Dash {
         counts: status_counts(state),

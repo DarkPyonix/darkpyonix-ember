@@ -742,13 +742,17 @@ pub fn ChangesPane(
 
     match layout {
         PaneLayout::Two => {
-            cu::Row().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).alignment(Alignment::CenterStart).content(|| {
-                cu::Column().modifier(Modifier::new().width(320.0)).content(|| {
+            // The panes scroll on their own inside a bounded row. A row in an unbounded
+            // scroll centres its shorter children vertically (TODO(compose-rust#389)).
+            cu::Row().modifier(Modifier::new().fill_max_width().fill_max_height()).spacing(GAP_CARD).content(|| {
+                cu::ScrollColumn().modifier(Modifier::new().width(320.0).fill_max_height()).content(|| {
                     FilesPane(&diffs, &staging, &folded, &selected, on_tab.clone());
                 });
-                cu::Column().modifier(Modifier::new().weight(1.0)).spacing(GAP_CARD).content(|| {
-                    DiffPane(&diffs, sel, &staging);
-                    CommitPane(&snap.branch, staged_files, &summary, &amend);
+                cu::ScrollColumn().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
+                    cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(|| {
+                        DiffPane(&diffs, sel, &staging);
+                        CommitPane(&snap.branch, staged_files, &summary, &amend);
+                    });
                 });
             });
         }
@@ -849,12 +853,10 @@ pub fn VcsScreenWith(
     let sec = section.get();
     let active_tab = effective_tab(sec, tab.get());
 
-    cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-            cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(|| {
+    let body = || {
                 Label("버전 관리", Fs::Xl2, Weight::Semibold, None, None);
 
-                if let Some(project) = project {
+        if let Some(project) = project {
                     let sel_proj = selected_proj.clone();
                     RepoBar(
                         &projects,
@@ -874,10 +876,12 @@ pub fn VcsScreenWith(
                     }
 
                     if wide {
-                        cu::Row().modifier(Modifier::new().fill_max_width()).spacing(SP[3]).alignment(Alignment::CenterStart).content(|| {
+                        cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
-                            SectionList(sec, snap.as_ref(), move |s| sec_state.set(s));
-                            cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[2]).content(|| {
+                            cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
+                                SectionList(sec, snap.as_ref(), move |s| sec_state.set(s));
+                            });
+                            cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
                                 SectionContent(snap.as_ref(), sec, layout, active_tab, &tab);
                             });
                         });
@@ -896,9 +900,17 @@ pub fn VcsScreenWith(
                     Label("저장소를 둘 수 있는 프로젝트가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
                     Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
+    };
+    if wide {
+        // Wide: a bounded page, so the section list and the panes can fill its height.
+        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().padding(pad)).spacing(SP[3]).content(body);
+    } else {
+        cu::Box().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
+                cu::Column().modifier(Modifier::new().fill_max_width().padding(pad)).spacing(SP[3]).content(body);
             });
         });
-    });
+    }
 }
 
 /// A review window (`EMBER_CR_ROUTE=vcs`): sample repository view in compose-rust.

@@ -447,6 +447,37 @@ fn ModelRadio(selected: bool, mut on_click: impl FnMut() + 'static) {
         });
 }
 
+/// An accessible invisible button overlay for a painted row, chip, or pill.
+/// Gives assistive tech the item's label and provides keyboard focus and click handling.
+fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
+    cu::Button(label)
+        .variant(ButtonVariant::Text)
+        .color(compose_rust::Paint::Literal(Color::argb(0)))
+        .modifier(Modifier::new().fill_max_size())
+        .on_click(on_click);
+}
+
+/// A selectable chip matching the mockup's .field.ag-sel: wide enough for the label (min 160 px),
+/// with a 1-line label and accessible FocusOverlay without ellipsis if it fits.
+fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let chip_w = 160.0_f32.max(super::components::label_min_width(text, Fs::Sm.size(), false));
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .width(chip_w)
+                .height(H_CTL)
+                .background(paint(p.surface_2))
+                .corner_radius(CORNER_BUBBLE)
+                .padding(SP[1]),
+        )
+        .alignment(Alignment::Center)
+        .content(move || {
+            Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+            FocusOverlay(text, on_click);
+        });
+}
+
 /// A segmented control matching the mockup (.seg button height 32, selected = ink fill, white label).
 fn SegGroup<T: Copy + PartialEq + 'static>(
     options: &'static [(T, &'static str)],
@@ -695,8 +726,7 @@ fn draw_usage_bars(p: &Palette) -> DrawList {
     builder.build()
 }
 
-fn draw_split_bar(_p: &Palette) -> DrawList {
-    let w: f32 = 409.0;
+fn draw_split_bar(_p: &Palette, w: f32) -> DrawList {
     let h = 14.0;
     let r = 7.0;
     let w1 = (w * 0.28).round();
@@ -767,8 +797,6 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
         KpiItem("마지막 감지", "방금", None);
     });
 
-    cu::Spacer().modifier(Modifier::new().height(SP[3]));
-
     let harnesses = [
         AgentHarness::ClaudeCode,
         AgentHarness::Codex,
@@ -781,23 +809,30 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
             HarnessCard(h, store, &live.detected, &profiles, compact);
         }
     } else {
-        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                HarnessCard(harnesses[0], store, &live.detected, &profiles, compact);
+        cu::Row()
+            .alignment(Alignment::TopStart)
+            .spacing(SP[3])
+            .modifier(Modifier::new().fill_max_width())
+            .content(|| {
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    HarnessCard(harnesses[0], store, &live.detected, &profiles, compact);
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    HarnessCard(harnesses[1], store, &live.detected, &profiles, compact);
+                });
             });
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                HarnessCard(harnesses[1], store, &live.detected, &profiles, compact);
+        cu::Row()
+            .alignment(Alignment::TopStart)
+            .spacing(SP[3])
+            .modifier(Modifier::new().fill_max_width())
+            .content(|| {
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    HarnessCard(harnesses[2], store, &live.detected, &profiles, compact);
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    HarnessCard(harnesses[3], store, &live.detected, &profiles, compact);
+                });
             });
-        });
-        cu::Spacer().modifier(Modifier::new().height(SP[3]));
-        cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                HarnessCard(harnesses[2], store, &live.detected, &profiles, compact);
-            });
-            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                HarnessCard(harnesses[3], store, &live.detected, &profiles, compact);
-            });
-        });
     }
 }
 
@@ -890,7 +925,7 @@ fn HarnessCard(
                 "기본 프로필",
                 "이 하네스로 만든 팀원은 모두 이 프로필의 계정과 규칙을 따릅니다.",
                 move || {
-                    PickChip(&profile_name, None, false, false, move || {
+                    SelectChip(&profile_name, move || {
                         let next = cycle(&options_pf, Some(&current_pf)).unwrap_or(None);
                         edit(&store_pf, |s| s.settings_mut(h).default_profile = next);
                     });
@@ -1292,15 +1327,31 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
     let for_new = profiles.clone();
 
     // 1. Pipeline formula row
-    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-        FormulaChip(Some(IconRole::Library), "계정 묶음", false);
-        Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-        FormulaChip(Some(IconRole::History), "전환 규칙", false);
-        Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-        FormulaChip(Some(IconRole::Forward), "모델 프록시 (선택)", true);
-        Label("=", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
-        FormulaChip(Some(IconRole::Compose), "프로필", false);
-    });
+    if compact {
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                FormulaChip(Some(IconRole::Library), "계정 묶음", false);
+                Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+                FormulaChip(Some(IconRole::History), "전환 규칙", false);
+                Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+            });
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                FormulaChip(Some(IconRole::Forward), "모델 프록시 (선택)", true);
+                Label("=", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+                FormulaChip(Some(IconRole::Compose), "프로필", false);
+            });
+        });
+    } else {
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            FormulaChip(Some(IconRole::Library), "계정 묶음", false);
+            Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+            FormulaChip(Some(IconRole::History), "전환 규칙", false);
+            Label("+", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+            FormulaChip(Some(IconRole::Forward), "모델 프록시 (선택)", true);
+            Label("=", Fs::Lg, Weight::Regular, Some(paint(p.muted)), None);
+            FormulaChip(Some(IconRole::Compose), "프로필", false);
+        });
+    }
     cu::Spacer().modifier(Modifier::new().height(SP[1]));
     Label(
         "하네스마다 프로필 하나를 정하면 그 하네스로 만든 팀원이 모두 그 프로필을 따릅니다. 팀원마다 따로 설정하지 않습니다.",
@@ -1362,7 +1413,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                     h.label(),
                     "이 하네스로 만든 팀원은 모두 이 프로필을 따릅니다.",
                     || {
-                        PickChip(&p_name, Some(IconRole::Library), false, false, || {});
+                        SelectChip(&p_name, || {});
                     },
                 );
             }
@@ -1725,7 +1776,9 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
                 IconButton(IconRole::Sidebar, true, || {});
                 Label("API 트래픽 내보내기", Fs::Lg, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                Pill("에이전트 API 트래픽", PillTone::Blue, true);
+                if !compact {
+                    Pill("에이전트 API 트래픽", PillTone::Blue, true);
+                }
                 Pill("검증 전 (#130)", PillTone::Orange, true);
             });
 
@@ -1740,15 +1793,31 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
 
             // 4-step chain of formula chips
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                FormulaChip(Some(IconRole::Compose), "에이전트 CLI", false);
-                Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                FormulaChip(Some(IconRole::Settings), "세션 프록시 (루프백)", false);
-                Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                FormulaChip(Some(IconRole::Library), "작업 중인 컴퓨터", false);
-                Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-                FormulaChip(Some(IconRole::Sidebar), "모델 공급자", false);
-            });
+            if compact {
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        FormulaChip(Some(IconRole::Compose), "에이전트 CLI", false);
+                        Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                        FormulaChip(Some(IconRole::Settings), "세션 프록시 (루프백)", false);
+                        Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    });
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        FormulaChip(Some(IconRole::Library), "작업 중인 컴퓨터", false);
+                        Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                        FormulaChip(Some(IconRole::Sidebar), "모델 공급자", false);
+                    });
+                });
+            } else {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    FormulaChip(Some(IconRole::Compose), "에이전트 CLI", false);
+                    Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    FormulaChip(Some(IconRole::Settings), "세션 프록시 (루프백)", false);
+                    Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    FormulaChip(Some(IconRole::Library), "작업 중인 컴퓨터", false);
+                    Label("→", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                    FormulaChip(Some(IconRole::Sidebar), "모델 공급자", false);
+                });
+            }
 
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
             Label(
@@ -1914,13 +1983,13 @@ fn UsageSection(
 
     // 2-Column row: 오늘 토큰 종류 & 하네스와 모델별 비용
     if compact {
-        TokenKindsCard();
+        TokenKindsCard(compact);
         cu::Spacer().modifier(Modifier::new().height(SP[3]));
         HarnessCostCard(bars);
     } else {
         cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                TokenKindsCard();
+                TokenKindsCard(compact);
             });
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                 HarnessCostCard(bars);
@@ -1953,16 +2022,17 @@ fn UsageSection(
     });
 }
 
-fn TokenKindsCard() {
+fn TokenKindsCard(compact: bool) {
     let p = ember_theme().palette;
-    EmberCard(false, true, None, None, None, || {
-        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+    EmberCard(false, true, None, None, None, move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                 IconButton(IconRole::List, true, || {});
                 Label("오늘 토큰 종류", Fs::Lg, Weight::Semibold, None, Some(1));
             });
-            let split_draw = draw_split_bar(p);
-            cu::Canvas(split_draw).modifier(Modifier::new().size(409.0, 14.0));
+            let bar_w = if compact { 326.0 } else { 409.0 };
+            let split_draw = draw_split_bar(p, bar_w);
+            cu::Canvas(split_draw).modifier(Modifier::new().size(bar_w, 14.0));
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {

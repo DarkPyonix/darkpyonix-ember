@@ -1162,29 +1162,69 @@ fn DetailPane(
     }
     let ring_cmd = l.build();
 
+    let on_toggle = std::sync::Arc::new(on_toggle);
+    let on_edit = std::sync::Arc::new(on_edit);
+    let on_run = std::sync::Arc::new(on_run);
+    let routine_name_c = routine_name.clone();
+    let toggle_id_c = toggle_id.clone();
+    let edit_id_c = edit_id.clone();
+    let run_id_c = run_id.clone();
+    let on_toggle_c = std::sync::Arc::clone(&on_toggle);
+    let on_edit_c = std::sync::Arc::clone(&on_edit);
+    let on_run_c = std::sync::Arc::clone(&on_run);
+
     EmberCard(false, true, None, None, None, move || {
         cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
             // Header: Topbar with bottom border
             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .spacing(SP[2])
-                    .modifier(Modifier::new().fill_max_width().height(56.0))
-                    .content(move || {
-                        if compact {
-                            AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || on_back());
-                        }
-                        Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
-                        let tone = if routine_trigger == Trigger::Time { PillTone::Blue } else { PillTone::Sky };
-                        Pill(routine_trigger.label(), tone, true);
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        let mut toggle_fn = on_toggle;
-                        RoutineSwitch(routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
-                        let mut edit_fn = on_edit;
-                        AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
-                        let mut run_fn = on_run;
-                        AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
-                    });
+                if compact {
+                    cu::Column()
+                        .spacing(SP[1])
+                        .modifier(Modifier::new().fill_max_width())
+                        .content(move || {
+                            cu::Row()
+                                .alignment(Alignment::CenterStart)
+                                .spacing(SP[2])
+                                .modifier(Modifier::new().fill_max_width().height(44.0))
+                                .content(move || {
+                                    AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, move || on_back());
+                                    Label(&routine_name_c, Fs::Xl, Weight::Semibold, None, Some(1));
+                                    let tone = if routine_trigger == Trigger::Time { PillTone::Blue } else { PillTone::Sky };
+                                    Pill(routine_trigger.label(), tone, true);
+                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    let toggle_fn = on_toggle_c;
+                                    RoutineSwitch(routine_enabled, move |v| toggle_fn(toggle_id_c.clone(), v));
+                                });
+                            cu::Row()
+                                .alignment(Alignment::CenterStart)
+                                .spacing(SP[2])
+                                .modifier(Modifier::new().fill_max_width().height(36.0))
+                                .content(move || {
+                                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                    let edit_fn = on_edit_c;
+                                    AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id_c.clone()));
+                                    let run_fn = on_run_c;
+                                    AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id_c.clone()));
+                                });
+                        });
+                } else {
+                    cu::Row()
+                        .alignment(Alignment::CenterStart)
+                        .spacing(SP[2])
+                        .modifier(Modifier::new().fill_max_width().height(56.0))
+                        .content(move || {
+                            Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
+                            let tone = if routine_trigger == Trigger::Time { PillTone::Blue } else { PillTone::Sky };
+                            Pill(routine_trigger.label(), tone, true);
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            let toggle_fn = on_toggle;
+                            RoutineSwitch(routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
+                            let edit_fn = on_edit;
+                            AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
+                            let run_fn = on_run;
+                            AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                        });
+                }
                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
             });
 

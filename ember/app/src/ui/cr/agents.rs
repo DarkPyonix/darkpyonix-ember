@@ -507,9 +507,17 @@ fn SelectChip(text: &str, on_click: impl FnMut() + 'static) {
 /// A picker pill matching mockup's .pickchip: full pill shape, icon + label with available width.
 fn ModelPickerPill(text: &str, svg: Option<&'static str>, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
+    // Sized to its content: a pill without a width takes the rest of a row and squeezes the
+    // hint beside it to one glyph per line.
+    let width = 12.0
+        + if svg.is_some() { 16.0 + 8.0 } else { 0.0 }
+        + super::home::text_px(text, Fs::Sm.size())
+        + 12.0
+        + 8.0;
     cu::Box()
         .modifier(
             Modifier::new()
+                .width(width.max(72.0))
                 .height(H_CTL)
                 .background(paint(p.surface_2))
                 .shape_role(ShapeRole::Full),
@@ -1677,10 +1685,8 @@ fn ProfileCard(
                         let cur_acc = p.accounts.first().map(|a| account_label(&live.accounts, a)).unwrap_or_else(|| "계정 없음".to_string());
                         // A bounded width, or the pill takes the whole row and the hint beside it
                         // wraps to one glyph per line.
-                        cu::Box().modifier(Modifier::new().width(220.0)).content(|| {
-                            ModelPickerPill(&cur_acc, Some(ICON_USER_SVG), move || {
-                                post_notice("고정 계정을 선택합니다");
-                            });
+                        ModelPickerPill(&cur_acc, Some(ICON_USER_SVG), move || {
+                            post_notice("고정 계정을 선택합니다");
                         });
                     },
                 );
@@ -2898,5 +2904,79 @@ mod tests {
         let needle = ["cu::Button(", "\"\")"].concat();
         let in_tests = src.split("mod tests").nth(1).unwrap_or("");
         assert!(!src.replace(in_tests, "").contains(&needle), "an empty Button has no screen reader name");
+    }
+
+    /// `(node, text)` of every Button in the first frame and after the width report.
+    fn button_texts_at(width: f32, class: compose_rust::WindowSizeClass, section: Section) -> Vec<(u32, String)> {
+        use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+        use compose_rust::{EventPayload, PropertyKind, WidgetKind, WindowHeightClass};
+        use std::collections::{HashMap, HashSet};
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(move || {
+            Box::new(Recomposer::new(move || {
+                AgentsScreenWith(sample_live(), sample_computers(), sample_bars(), 12_345_678, section)
+            }))
+        });
+        let mut nodes: HashSet<u32> = HashSet::new();
+        let mut texts: HashMap<u32, String> = HashMap::new();
+        let mut scan = |batch: &[Mutation<'_>]| {
+            for m in batch {
+                match m {
+                    Mutation::Create { node_id, widget: WidgetKind::Button } => {
+                        nodes.insert(*node_id);
+                    }
+                    Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(t) } => {
+                        texts.insert(*node_id, t.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        };
+        scan(&decode_batch(host.rebuild().expect("rebuild")).expect("decode"));
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: width,
+                height_dp: 900.0,
+                class,
+                height_class: WindowHeightClass::Medium,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        scan(&decode_batch(bytes).expect("decode"));
+        compose_rust::window::reset_window_size();
+        nodes.into_iter().map(|n| (n, texts.get(&n).cloned().unwrap_or_default())).collect()
+    }
+
+    #[test]
+    fn fr_l20_no_button_has_an_empty_name_in_any_section_at_1440_and_390() {
+        use compose_rust::WindowSizeClass as W;
+        for (w, class) in [(1440.0, W::Expanded), (390.0, W::Compact)] {
+            for section in Section::ALL {
+                let buttons = button_texts_at(w, class, section);
+                for (node, text) in &buttons {
+                    assert!(
+                        !text.trim().is_empty(),
+                        "Button {node} has no name in {section:?} at {w} dp"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l16_models_controls_expose_their_own_labels_and_the_account_select_stays() {
+        use compose_rust::WindowSizeClass as W;
+        for (w, class) in [(1440.0, W::Expanded), (390.0, W::Compact)] {
+            let names: Vec<String> =
+                button_texts_at(w, class, Section::Models).into_iter().map(|(_, t)| t).collect();
+            for want in ["명령마다 확인", "ncmnd · Max"] {
+                assert!(names.iter().any(|n| n == want), "missing button {want} at {w} dp: {names:?}");
+            }
+            // A radio and a switch name their model.
+            assert!(names.iter().any(|n| n.ends_with(" 기본 모델로 선택") && n.len() > " 기본 모델로 선택".len()));
+            assert!(names.iter().any(|n| n.contains("활성화") && n.len() > "활성화 끄기".len()));
+        }
     }
 }

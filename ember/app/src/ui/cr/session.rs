@@ -21,7 +21,7 @@ use compose_rust::runtime::{
     current_window_size, launched_effect, mutable_state_of, remember, remember_with_key,
 };
 use compose_rust::ui::{self as cu, Modifier};
-use compose_rust::{Alignment, Color, IconRole, ShapeRole, SpaceRole};
+use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
 
 use ember_client::LauncherStatus;
 
@@ -45,14 +45,14 @@ use crate::ui::shell::NavMenu;
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberCard, EmberField, EmberSheet, FieldOptions,
-    IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
+    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberField, EmberSheet,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
 use super::notice;
 use super::shell::{
     ICON_CHEVRON_DOWN_SVG, ICON_CLOSE_SVG, ICON_CPU_SVG, ICON_PLUS_SVG, ICON_USERS_SVG, NavIcon,
-    RedBadge,
+    RedBadge, leak_doc,
 };
 use super::theme::*;
 
@@ -100,6 +100,21 @@ fn ide_label(kind: IdeKind) -> &'static str {
     }
 }
 
+fn default_panes_for(project: &str) -> ProjectPanes {
+    if services().demo.is_some() {
+        ProjectPanes {
+            tabs: vec![
+                PaneTab::all("탭 1"),
+                PaneTab::all("리더와 검토"),
+            ],
+            active: 0,
+        }
+    } else {
+        let _ = project;
+        ProjectPanes::default()
+    }
+}
+
 /// Change the saved panes of a project in [`SharedUi`].
 fn edit_panes(ui: &SharedUi, project: &str, f: impl FnOnce(&mut ProjectPanes)) {
     let project = project.to_string();
@@ -108,7 +123,7 @@ fn edit_panes(ui: &SharedUi, project: &str, f: impl FnOnce(&mut ProjectPanes)) {
             .panes
             .get(&project)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_else(|| default_panes_for(&project))
             .normalized();
         f(&mut cur);
         p.panes.insert(project, cur);
@@ -121,7 +136,7 @@ fn panes_of(ui: &SharedUi, project: &str) -> ProjectPanes {
         .panes
         .get(project)
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_else(|| default_panes_for(project))
         .normalized()
 }
 
@@ -1924,12 +1939,13 @@ pub fn InfoPanel(session: &str) {
                                         },
                                     );
                                     if !is_off {
+                                        cu::Spacer().modifier(Modifier::new().height(2.0));
                                         match card {
                                             InfoCard::Environment if is_demo => {
                                                 cu::Row()
                                                     .alignment(Alignment::CenterStart)
                                                     .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                     .content(move || {
                                                         NavIcon(ICON_PC_SVG, p.muted.to_argb(), 16.0);
                                                         Label(&comp_c, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
@@ -1940,7 +1956,7 @@ pub fn InfoPanel(session: &str) {
                                                 cu::Row()
                                                     .alignment(Alignment::CenterStart)
                                                     .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                     .content(|| {
                                                         NavIcon(ICON_FOLDER_SVG, p.muted.to_argb(), 16.0);
                                                         Label("DarkPyonix/darkpyonix-ember", Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
@@ -1948,7 +1964,7 @@ pub fn InfoPanel(session: &str) {
                                                 cu::Row()
                                                     .alignment(Alignment::CenterStart)
                                                     .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                     .content(|| {
                                                         NavIcon(ICON_GIT_SVG, p.muted.to_argb(), 16.0);
                                                         Label("feat/shim-wiring", Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
@@ -1958,7 +1974,7 @@ pub fn InfoPanel(session: &str) {
                                                 cu::Row()
                                                     .alignment(Alignment::CenterStart)
                                                     .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                     .content(move || {
                                                         Character(&ag_c, false, 18.0, "에이전트", "demo", CharState::Run, None);
                                                         Label(&md_c, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
@@ -1966,7 +1982,7 @@ pub fn InfoPanel(session: &str) {
                                                 cu::Row()
                                                     .alignment(Alignment::CenterStart)
                                                     .spacing(SP[1])
-                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                    .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                     .content(move || {
                                                         NavIcon(ICON_SHIELD_SVG, p.muted.to_argb(), 16.0);
                                                         Label(&format!("{mode_str} · Claude 개인"), Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
@@ -1978,7 +1994,7 @@ pub fn InfoPanel(session: &str) {
                                                     cu::Row()
                                                         .alignment(Alignment::CenterStart)
                                                         .spacing(SP[1])
-                                                        .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                        .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                         .content(move || {
                                                             NavIcon(ico, p.muted.to_argb(), 16.0);
                                                             Label(
@@ -2037,9 +2053,9 @@ pub fn InfoPanel(session: &str) {
                                                     cu::Row()
                                                         .alignment(Alignment::CenterStart)
                                                         .spacing(6.0)
-                                                        .modifier(Modifier::new().fill_max_width())
+                                                        .modifier(Modifier::new().fill_max_width().padding(2.0))
                                                         .content(move || {
-                                                            cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(col)).corner_radius(2.0));
+                                                            cu::Box().modifier(Modifier::new().size(10.0, 10.0).background(paint(col)).corner_radius(3.0));
                                                             Label(lbl, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
                                                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                                                             Label(tok, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -2055,7 +2071,7 @@ pub fn InfoPanel(session: &str) {
                                                     cu::Row()
                                                         .alignment(Alignment::CenterStart)
                                                         .spacing(SP[1])
-                                                        .modifier(Modifier::new().fill_max_width().padding(2.0))
+                                                        .modifier(Modifier::new().fill_max_width().padding(4.0))
                                                         .content(move || {
                                                             NavIcon(ico, p.muted.to_argb(), 15.0);
                                                             cu::Box().modifier(Modifier::new().weight(1.0)).content(move || {
@@ -2069,7 +2085,7 @@ pub fn InfoPanel(session: &str) {
                                                 cu::Row()
                                                     .alignment(Alignment::CenterStart)
                                                     .spacing(6.0)
-                                                    .modifier(Modifier::new().fill_max_width())
+                                                    .modifier(Modifier::new().fill_max_width().padding(2.0))
                                                     .content(|| {
                                                         NavIcon(ICON_EDIT_SVG, p.muted.to_argb(), 15.0);
                                                         Label("+23", Fs::Sm, Weight::Medium, Some(paint(p.green.strong)), Some(1));
@@ -2086,7 +2102,7 @@ pub fn InfoPanel(session: &str) {
                                                     cu::Row()
                                                         .alignment(Alignment::CenterStart)
                                                         .spacing(6.0)
-                                                        .modifier(Modifier::new().fill_max_width().padding(1.0))
+                                                        .modifier(Modifier::new().fill_max_width().padding(2.0))
                                                         .content(move || {
                                                             cu::Box().modifier(Modifier::new().weight(1.0)).content(move || {
                                                                 Label(f_path, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
@@ -2426,10 +2442,10 @@ const DEMO_TL_LANES: [TlLane; 5] = [
         segs: &[
             (2.2, TlSegKind::Think),
             (1.6, TlSegKind::Tool),
-            (2.8, TlSegKind::Gap),
+            (2.8, TlSegKind::Wait),
             (2.0, TlSegKind::Think),
             (1.4, TlSegKind::Tool),
-            (3.4, TlSegKind::Gap),
+            (3.4, TlSegKind::Wait),
             (2.0, TlSegKind::Think),
             (1.0, TlSegKind::Tool),
         ],
@@ -2497,6 +2513,134 @@ const DEMO_TL_LANES: [TlLane; 5] = [
     },
 ];
 
+fn hex_rgb(c: Color) -> String {
+    format!("#{:06x}", c.to_argb() & 0x00ff_ffff)
+}
+
+fn tl_plot_svg(w: f32, p: &Palette) -> String {
+    let pw = w.max(200.0).round() as i32;
+    let ph = 280;
+    let t_max = 16.4_f32;
+    let x_of = |t: f32| -> f32 { (t / t_max) * (pw as f32) };
+
+    let surf = hex_rgb(p.surface);
+    let line = hex_rgb(p.line);
+    let red_s = hex_rgb(p.red.strong);
+    let red_bg = hex_rgb(p.red.soft);
+
+    let mut s = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{pw}" height="{ph}" viewBox="0 0 {pw} {ph}" fill="none">"#
+    );
+
+    // Hatched diagonal patterns per lane color
+    s.push_str("<defs>");
+    for (idx, lane) in DEMO_TL_LANES.iter().enumerate() {
+        let (st, _) = (lane.tone)(p);
+        let col = hex_rgb(st);
+        s.push_str(&format!(
+            r#"<pattern id="hw{idx}" width="6" height="6" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="6" stroke="{col}" stroke-width="1.8" stroke-opacity="0.55"/></pattern>"#
+        ));
+    }
+    s.push_str("</defs>");
+
+    // Vertical dashed grid lines at 0s, 5s, 10s, 15s
+    for tick_t in [0.0_f32, 5.0, 10.0, 15.0] {
+        let tx = x_of(tick_t).clamp(0.5, (pw as f32) - 0.5);
+        s.push_str(&format!(
+            r#"<line x1="{tx:.1}" y1="0" x2="{tx:.1}" y2="{ph}" stroke="{line}" stroke-width="1" stroke-dasharray="3 3"/>"#
+        ));
+    }
+
+    // Horizontal row dividers between lanes
+    for row in 1..5 {
+        let ry = row * 56;
+        s.push_str(&format!(
+            r#"<line x1="0" y1="{ry}" x2="{pw}" y2="{ry}" stroke="{line}" stroke-width="1"/>"#
+        ));
+    }
+
+    // Segments per lane
+    for (idx, lane) in DEMO_TL_LANES.iter().enumerate() {
+        let (st_col, sf_col) = (lane.tone)(p);
+        let st_hex = hex_rgb(st_col);
+        let sf_hex = hex_rgb(sf_col);
+        let y_top = (idx as i32) * 56 + 17;
+        let mut cur_t = 0.0_f32;
+        for &(dur, kind) in lane.segs.iter() {
+            let x0 = x_of(cur_t) + 1.0;
+            let seg_w = (x_of(cur_t + dur) - x0 - 1.0).max(4.0);
+            cur_t += dur;
+            match kind {
+                TlSegKind::Gap => {}
+                TlSegKind::Think => {
+                    s.push_str(&format!(
+                        r#"<rect x="{x0:.1}" y="{y_top}" width="{seg_w:.1}" height="22" rx="7" fill="{sf_hex}" stroke="{st_hex}" stroke-width="1"/>"#
+                    ));
+                }
+                TlSegKind::Tool => {
+                    s.push_str(&format!(
+                        r#"<rect x="{x0:.1}" y="{y_top}" width="{seg_w:.1}" height="22" rx="7" fill="{st_hex}"/>"#
+                    ));
+                }
+                TlSegKind::Wait => {
+                    s.push_str(&format!(
+                        r#"<rect x="{x0:.1}" y="{y_top}" width="{seg_w:.1}" height="22" rx="7" fill="url(#hw{idx})" stroke="{st_hex}" stroke-width="1" stroke-opacity="0.65"/>"#
+                    ));
+                }
+                TlSegKind::Fail => {
+                    let cx = x0 + seg_w * 0.5;
+                    let cy = (y_top as f32) + 11.0;
+                    s.push_str(&format!(
+                        r#"<rect x="{x0:.1}" y="{y_top}" width="{seg_w:.1}" height="22" rx="7" fill="{red_bg}" stroke="{red_s}" stroke-width="1"/>"#
+                    ));
+                    s.push_str(&format!(
+                        r#"<path d="M{:.1} {:.1}L{:.1} {:.1}M{:.1} {:.1}L{:.1} {:.1}" stroke="{red_s}" stroke-width="1.8" stroke-linecap="round"/>"#,
+                        cx - 3.5,
+                        cy - 3.5,
+                        cx + 3.5,
+                        cy + 3.5,
+                        cx + 3.5,
+                        cy - 3.5,
+                        cx - 3.5,
+                        cy + 3.5
+                    ));
+                }
+            }
+        }
+    }
+
+    // Handoff connector lines between leader (lane 0) and member lanes (1..=4)
+    let handoffs: [(usize, f32); 8] = [
+        (1, 2.4),
+        (2, 2.8),
+        (3, 3.8),
+        (4, 6.8),
+        (1, 10.2),
+        (2, 13.6),
+        (4, 13.6),
+        (3, 16.2),
+    ];
+    for (target_lane, t_sec) in handoffs {
+        let hx = x_of(t_sec).clamp(4.0, (pw as f32) - 4.0);
+        let y0 = 28.0 + 9.0;
+        let y1 = (target_lane as f32) * 56.0 + 28.0 - 9.0;
+        let (st_col, _) = (DEMO_TL_LANES[target_lane].tone)(p);
+        let col = hex_rgb(st_col);
+        s.push_str(&format!(
+            r#"<line x1="{hx:.1}" y1="{y0:.1}" x2="{hx:.1}" y2="{y1:.1}" stroke="{col}" stroke-width="1.5"/>"#
+        ));
+        s.push_str(&format!(
+            r#"<circle cx="{hx:.1}" cy="{y0:.1}" r="3.5" fill="{col}" stroke="{surf}" stroke-width="1.5"/>"#
+        ));
+        s.push_str(&format!(
+            r#"<circle cx="{hx:.1}" cy="{y1:.1}" r="3.5" fill="{col}" stroke="{surf}" stroke-width="1.5"/>"#
+        ));
+    }
+
+    s.push_str("</svg>");
+    s
+}
+
 /// Deterministic agent-to-agent communication Gantt chart (`.tlcard` in mockup).
 fn TimelineCard(project: &str) {
     let window = current_window_size();
@@ -2511,6 +2655,31 @@ fn TimelineCard(project: &str) {
     } else {
         220.0
     };
+    let outer_w = if is_phone {
+        window.width_dp - 24.0
+    } else if window.width_dp <= 900.0 {
+        window.width_dp - 64.0 - 40.0
+    } else if window.width_dp < 1280.0 {
+        window.width_dp - 72.0 - 280.0 - 40.0
+    } else {
+        window.width_dp - 234.0 - 280.0 - 40.0
+    };
+    let plot_w = (outer_w - label_w - 24.0).max(220.0);
+    let plot_svg = tl_plot_svg(plot_w, p);
+    let plot_id = compose_rust::asset(AssetKind::Svg, leak_doc(plot_svg));
+
+    let wait_swatch_svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="18" height="10" viewBox="0 0 18 10" fill="none"><defs><pattern id="ws" width="5" height="5" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse"><line x1="0" y1="0" x2="0" y2="5" stroke="{}" stroke-width="1.5" stroke-opacity="0.6"/></pattern></defs><rect x="0.5" y="0.5" width="17" height="9" rx="2.5" fill="url(#ws)" stroke="{}" stroke-width="1" stroke-opacity="0.65"/></svg>"#,
+        hex_rgb(p.blue.strong),
+        hex_rgb(p.blue.strong)
+    );
+    let wait_swatch_id = compose_rust::asset(AssetKind::Svg, leak_doc(wait_swatch_svg));
+
+    let hand_swatch_svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1.5 1V6.5C1.5 7.6 2.4 8.5 3.5 8.5H9" stroke="{}" stroke-width="1.5" stroke-linecap="round"/></svg>"#,
+        hex_rgb(p.text_2)
+    );
+    let hand_swatch_id = compose_rust::asset(AssetKind::Svg, leak_doc(hand_swatch_svg));
 
     cu::Box()
         .modifier(
@@ -2524,14 +2693,14 @@ fn TimelineCard(project: &str) {
             cu::Column()
                 .modifier(Modifier::new().fill_max_width())
                 .content(move || {
-                    // 1. Header (.tl-head)
+                    // 1. Header (.tl-head: ~73dp high)
                     cu::Row()
                         .alignment(Alignment::CenterStart)
                         .spacing(SP[2])
-                        .modifier(Modifier::new().fill_max_width().padding(SP[3]))
+                        .modifier(Modifier::new().fill_max_width().height(72.0).padding(SP[3]))
                         .content(|| {
                             cu::Column()
-                                .spacing(2.0)
+                                .spacing(4.0)
                                 .modifier(Modifier::new().weight(1.0))
                                 .content(|| {
                                     Label(
@@ -2545,9 +2714,9 @@ fn TimelineCard(project: &str) {
                                         .alignment(Alignment::CenterStart)
                                         .spacing(6.0)
                                         .content(|| {
-                                            NavIcon(ICON_CHECK_SVG, p.green.strong.to_argb(), 14.0);
+                                            NavIcon(ICON_CHECK_SVG, p.green.strong.to_argb(), 15.0);
                                             Label(
-                                                "5명 · 16.4s · 순차 실행보다 2.4배 빠름",
+                                                "5명 · 16.4s · 순차 실행보다 2.4배 빠름 · $0.24",
                                                 Fs::Xs,
                                                 Weight::Regular,
                                                 Some(paint(p.muted)),
@@ -2558,154 +2727,117 @@ fn TimelineCard(project: &str) {
                         });
                     cu::Separator(Some(paint(p.line)));
 
-                    // 2. Body (.tl-body): lanes + bottom time axis
+                    // 2. Body (.tl-body): left labels column + right SVG Gantt plot + time axis
                     cu::Column()
                         .modifier(Modifier::new().fill_max_width())
-                        .content(|| {
-                            for (lane_idx, lane) in DEMO_TL_LANES.iter().enumerate() {
-                                let pr_l = proj_owned.clone();
-                                let (strong_col, soft_col) = (lane.tone)(p);
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .modifier(Modifier::new().fill_max_width().height(54.0))
-                                    .content(move || {
-                                        // Left label cell (.tl-label)
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(8.0)
-                                            .modifier(
-                                                Modifier::new()
-                                                    .width(label_w)
-                                                    .fill_max_height()
-                                                    .padding(SP[1]),
-                                            )
-                                            .content(move || {
-                                                Character(
-                                                    lane.agent,
-                                                    lane.leader,
-                                                    28.0,
-                                                    lane.name,
-                                                    &pr_l,
-                                                    CharState::from_status(lane.status),
-                                                    None,
-                                                );
-                                                if !is_phone {
-                                                    cu::Column()
-                                                        .spacing(2.0)
-                                                        .modifier(Modifier::new().weight(1.0))
-                                                        .content(move || {
-                                                            cu::Row()
-                                                                .alignment(Alignment::CenterStart)
-                                                                .spacing(5.0)
+                        .content(move || {
+                            cu::Row()
+                                .alignment(Alignment::TopStart)
+                                .modifier(Modifier::new().fill_max_width().height(280.0))
+                                .content(move || {
+                                    // Left labels column (.tl-labs)
+                                    cu::Column()
+                                        .modifier(Modifier::new().width(label_w).fill_max_height())
+                                        .content(move || {
+                                            for (lane_idx, lane) in DEMO_TL_LANES.iter().enumerate()
+                                            {
+                                                let pr_l = proj_owned.clone();
+                                                let (strong_col, _) = (lane.tone)(p);
+                                                cu::Row()
+                                                    .alignment(Alignment::CenterStart)
+                                                    .spacing(8.0)
+                                                    .modifier(
+                                                        Modifier::new()
+                                                            .fill_max_width()
+                                                            .height(55.0)
+                                                            .padding(SP[1]),
+                                                    )
+                                                    .content(move || {
+                                                        Character(
+                                                            lane.agent,
+                                                            lane.leader,
+                                                            28.0,
+                                                            lane.name,
+                                                            &pr_l,
+                                                            CharState::from_status(lane.status),
+                                                            None,
+                                                        );
+                                                        if !is_phone {
+                                                            cu::Column()
+                                                                .spacing(2.0)
+                                                                .modifier(
+                                                                    Modifier::new().weight(1.0),
+                                                                )
                                                                 .content(move || {
-                                                                    cu::Box().modifier(
-                                                                        Modifier::new()
-                                                                            .size(8.0, 8.0)
-                                                                            .background(paint(
-                                                                                strong_col,
-                                                                            ))
-                                                                            .corner_radius(4.0),
-                                                                    );
+                                                                    cu::Row()
+                                                                        .alignment(
+                                                                            Alignment::CenterStart,
+                                                                        )
+                                                                        .spacing(5.0)
+                                                                        .content(move || {
+                                                                            cu::Box().modifier(
+                                                                                Modifier::new()
+                                                                                    .size(8.0, 8.0)
+                                                                                    .background(
+                                                                                        paint(
+                                                                                            strong_col,
+                                                                                        ),
+                                                                                    )
+                                                                                    .corner_radius(
+                                                                                        4.0,
+                                                                                    ),
+                                                                            );
+                                                                            Label(
+                                                                                lane.name,
+                                                                                Fs::Sm,
+                                                                                Weight::Semibold,
+                                                                                Some(paint(p.text)),
+                                                                                Some(1),
+                                                                            );
+                                                                            if lane.leader {
+                                                                                Pill(
+                                                                                    "오케스트레이터",
+                                                                                    PillTone::Grey,
+                                                                                    true,
+                                                                                );
+                                                                            }
+                                                                        });
                                                                     Label(
-                                                                        lane.name,
-                                                                        Fs::Sm,
-                                                                        Weight::Semibold,
-                                                                        Some(paint(p.text)),
+                                                                        lane.sub,
+                                                                        Fs::Xs,
+                                                                        Weight::Regular,
+                                                                        Some(paint(p.muted)),
                                                                         Some(1),
                                                                     );
-                                                                    if lane.leader {
-                                                                        Pill(
-                                                                            "오케스트레이터",
-                                                                            PillTone::Grey,
-                                                                            true,
-                                                                        );
-                                                                    }
                                                                 });
-                                                            Label(
-                                                                lane.sub,
-                                                                Fs::Xs,
-                                                                Weight::Regular,
-                                                                Some(paint(p.muted)),
-                                                                Some(1),
-                                                            );
-                                                        });
+                                                        }
+                                                    });
+                                                if lane_idx + 1 < DEMO_TL_LANES.len() {
+                                                    cu::Separator(Some(paint(p.line)));
                                                 }
-                                            });
-                                        // Vertical separator between label and plot
-                                        cu::Box().modifier(
+                                            }
+                                        });
+                                    // Vertical separator between label and plot
+                                    cu::Box().modifier(
+                                        Modifier::new()
+                                            .width(1.0)
+                                            .fill_max_height()
+                                            .background(paint(p.line)),
+                                    );
+                                    // Right Gantt plot area (.tl-lanes + .tl-h + .tl-grid)
+                                    cu::Box()
+                                        .alignment(Alignment::CenterStart)
+                                        .modifier(
                                             Modifier::new()
-                                                .width(1.0)
+                                                .weight(1.0)
                                                 .fill_max_height()
-                                                .background(paint(p.line)),
-                                        );
-                                        // Right track (.tl-lane)
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(2.0)
-                                            .modifier(
-                                                Modifier::new()
-                                                    .weight(1.0)
-                                                    .fill_max_height()
-                                                    .padding(SP[1]),
-                                            )
-                                            .content(move || {
-                                                for &(w, kind) in lane.segs.iter() {
-                                                    match kind {
-                                                        TlSegKind::Gap => {
-                                                            cu::Spacer().modifier(
-                                                                Modifier::new().weight(w),
-                                                            );
-                                                        }
-                                                        TlSegKind::Think => {
-                                                            cu::Box().modifier(
-                                                                Modifier::new()
-                                                                    .weight(w)
-                                                                    .height(14.0)
-                                                                    .background(paint(soft_col))
-                                                                    .border(1.0, paint(strong_col))
-                                                                    .corner_radius(4.0),
-                                                            );
-                                                        }
-                                                        TlSegKind::Tool => {
-                                                            cu::Box().modifier(
-                                                                Modifier::new()
-                                                                    .weight(w)
-                                                                    .height(18.0)
-                                                                    .background(paint(strong_col))
-                                                                    .corner_radius(4.0),
-                                                            );
-                                                        }
-                                                        TlSegKind::Wait => {
-                                                            cu::Box().modifier(
-                                                                Modifier::new()
-                                                                    .weight(w)
-                                                                    .height(14.0)
-                                                                    .background(paint(p.surface_2))
-                                                                    .border(1.0, paint(p.muted))
-                                                                    .corner_radius(4.0),
-                                                            );
-                                                        }
-                                                        TlSegKind::Fail => {
-                                                            cu::Box().modifier(
-                                                                Modifier::new()
-                                                                    .weight(w)
-                                                                    .height(16.0)
-                                                                    .background(paint(p.red.soft))
-                                                                    .border(
-                                                                        1.0,
-                                                                        paint(p.red.strong),
-                                                                    )
-                                                                    .corner_radius(4.0),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                    });
-                                if lane_idx + 1 < DEMO_TL_LANES.len() {
-                                    cu::Separator(Some(paint(p.line)));
-                                }
-                            }
+                                                .padding(SP[0]),
+                                        )
+                                        .content(move || {
+                                            cu::Image(plot_id)
+                                                .modifier(Modifier::new().size(plot_w, 280.0));
+                                        });
+                                });
                             cu::Separator(Some(paint(p.line)));
                             // Time axis row (.tl-axis)
                             cu::Row()
@@ -2753,37 +2885,38 @@ fn TimelineCard(project: &str) {
                         });
                     cu::Separator(Some(paint(p.line)));
 
-                    // 3. Footer (.tl-foot): play, restart, speed 1x/2x, time, legend
+                    // 3. Footer (.tl-foot: ~72dp high): play (40x40), restart (32x32), speed 1x/2x, time, legend
                     let cur_spd = speed.get();
                     let spd_st = speed.clone();
                     cu::Row()
                         .alignment(Alignment::CenterStart)
-                        .spacing(SP[1])
+                        .spacing(SP[2])
                         .modifier(
                             Modifier::new()
                                 .fill_max_width()
+                                .height(72.0)
                                 .background(paint(p.surface_2))
-                                .padding(SP[2]),
+                                .padding(SP[3]),
                         )
                         .content(move || {
                             Clickable(
                                 Modifier::new()
-                                    .size(36.0, 36.0)
+                                    .size(40.0, 40.0)
                                     .background(paint(p.ink))
                                     .shape_role(ShapeRole::Full),
                                 Alignment::Center,
                                 || notice::post("타임라인 재생 데모입니다"),
-                                || NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 15.0),
+                                || NavIcon(ICON_PLAY_SVG, p.ink_text.to_argb(), 16.0),
                             );
                             Clickable(
                                 Modifier::new()
-                                    .size(30.0, 30.0)
+                                    .size(32.0, 32.0)
                                     .background(paint(p.surface))
                                     .border(1.0, paint(p.line))
                                     .shape_role(ShapeRole::Full),
                                 Alignment::Center,
                                 || notice::post("처음으로 되돌렸습니다"),
-                                || NavIcon(ICON_REPEAT_SVG, p.text_2.to_argb(), 14.0),
+                                || NavIcon(ICON_REPEAT_SVG, p.text_2.to_argb(), 15.0),
                             );
                             // 1x / 2x mini segmented control
                             cu::Row()
@@ -2817,16 +2950,16 @@ fn TimelineCard(project: &str) {
                                                     .alignment(Alignment::Center)
                                                     .content(|| {
                                                         cu::Spacer()
-                                                            .modifier(Modifier::new().width(7.0));
+                                                            .modifier(Modifier::new().width(8.0));
                                                         Label(
                                                             s_lbl,
-                                                            Fs::Xs2,
+                                                            Fs::Xs,
                                                             Weight::Semibold,
                                                             Some(paint(fg)),
                                                             Some(1),
                                                         );
                                                         cu::Spacer()
-                                                            .modifier(Modifier::new().width(7.0));
+                                                            .modifier(Modifier::new().width(8.0));
                                                     });
                                             },
                                         );
@@ -2842,33 +2975,100 @@ fn TimelineCard(project: &str) {
                             cu::Spacer().modifier(Modifier::new().weight(1.0));
                             if !is_phone {
                                 // 5-item legend (.tl-legend)
-                                for (lbl, fill_c, border_c, h_box) in [
-                                    ("생각", p.blue.soft, p.blue.strong, 10.0),
-                                    ("도구 호출", p.blue.strong, p.blue.strong, 10.0),
-                                    ("대기", p.surface, p.muted, 10.0),
-                                    ("핸드오프", p.text_2, p.text_2, 2.0),
-                                    ("실패", p.red.soft, p.red.strong, 10.0),
-                                ] {
-                                    cu::Row()
-                                        .alignment(Alignment::CenterStart)
-                                        .spacing(5.0)
-                                        .content(move || {
-                                            cu::Box().modifier(
-                                                Modifier::new()
-                                                    .size(12.0, h_box)
-                                                    .background(paint(fill_c))
-                                                    .border(1.0, paint(border_c))
-                                                    .corner_radius(2.0),
-                                            );
-                                            Label(
-                                                lbl,
-                                                Fs::Xs,
-                                                Weight::Regular,
-                                                Some(paint(p.text_2)),
-                                                Some(1),
-                                            );
-                                        });
-                                }
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .spacing(SP[3])
+                                    .content(move || {
+                                        // 1. 생각
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .content(|| {
+                                                cu::Box().modifier(
+                                                    Modifier::new()
+                                                        .size(18.0, 10.0)
+                                                        .background(paint(p.blue.soft))
+                                                        .border(1.0, paint(p.blue.strong))
+                                                        .corner_radius(3.0),
+                                                );
+                                                Label(
+                                                    "생각",
+                                                    Fs::Xs,
+                                                    Weight::Regular,
+                                                    Some(paint(p.text_2)),
+                                                    Some(1),
+                                                );
+                                            });
+                                        // 2. 도구 호출
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .content(|| {
+                                                cu::Box().modifier(
+                                                    Modifier::new()
+                                                        .size(18.0, 10.0)
+                                                        .background(paint(p.blue.strong))
+                                                        .corner_radius(3.0),
+                                                );
+                                                Label(
+                                                    "도구 호출",
+                                                    Fs::Xs,
+                                                    Weight::Regular,
+                                                    Some(paint(p.text_2)),
+                                                    Some(1),
+                                                );
+                                            });
+                                        // 3. 대기 (hatched)
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .content(move || {
+                                                cu::Image(wait_swatch_id)
+                                                    .modifier(Modifier::new().size(18.0, 10.0));
+                                                Label(
+                                                    "대기",
+                                                    Fs::Xs,
+                                                    Weight::Regular,
+                                                    Some(paint(p.text_2)),
+                                                    Some(1),
+                                                );
+                                            });
+                                        // 4. 핸드오프 (L-shaped)
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .content(move || {
+                                                cu::Image(hand_swatch_id)
+                                                    .modifier(Modifier::new().size(10.0, 10.0));
+                                                Label(
+                                                    "핸드오프",
+                                                    Fs::Xs,
+                                                    Weight::Regular,
+                                                    Some(paint(p.text_2)),
+                                                    Some(1),
+                                                );
+                                            });
+                                        // 5. 실패 (12x12 circle)
+                                        cu::Row()
+                                            .alignment(Alignment::CenterStart)
+                                            .spacing(6.0)
+                                            .content(|| {
+                                                cu::Box().modifier(
+                                                    Modifier::new()
+                                                        .size(12.0, 12.0)
+                                                        .background(paint(p.red.soft))
+                                                        .border(1.0, paint(p.red.strong))
+                                                        .corner_radius(6.0),
+                                                );
+                                                Label(
+                                                    "실패",
+                                                    Fs::Xs,
+                                                    Weight::Regular,
+                                                    Some(paint(p.text_2)),
+                                                    Some(1),
+                                                );
+                                            });
+                                    });
                             }
                         });
                 });
@@ -3297,6 +3497,7 @@ fn NewMemberSheet(
     let comp_opts = vec!["mac-mini".to_string(), "mac-studio".to_string(), "이 컴퓨터".to_string()];
     let c_idx = comp_idx.get();
 
+    let close_hdr = on_close.clone();
     let close_f = on_close.clone();
     let create_cb = {
         let ui = ui.clone();
@@ -3353,205 +3554,321 @@ fn NewMemberSheet(
         }
     };
 
-    let mut head_act = || {
-        Label(
-            &proj_disp,
-            Fs::Sm,
-            Weight::Regular,
-            Some(paint(p.muted)),
-            Some(1),
-        );
-        cu::Spacer().modifier(Modifier::new().width(SP[2]));
-    };
-
-    EmberSheet("새 팀원", true, on_close, Some(&mut head_act), move || {
+    let modifier = Modifier::new()
+        .background(paint(p.surface))
+        .border(1.0, paint(p.line))
+        .corner_radius(CORNER_XL);
+    let is_compact = current_window_size().is_compact();
+    let body = move || {
+        let mut cl_h = close_hdr.clone();
         cu::Column()
-            .spacing(SP[3])
-            .modifier(Modifier::new().fill_max_width().padding(SP[4]))
+            .modifier(Modifier::new().fill_max_width())
             .content(|| {
-                // 1. 역할 이름
-                cu::Column()
-                    .spacing(6.0)
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
+                // Header (.sheet-h): title + project name on the left, close button on the right
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H))
+                    .content(move || {
+                        cu::Spacer().modifier(Modifier::new().width(SP[4]));
+                        Label("새 팀원", Fs::Xl, Weight::Semibold, None, Some(1));
+                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
                         Label(
-                            "역할 이름",
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(p.text_2)),
-                            Some(1),
-                        );
-                        let rn = role_name.clone();
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            placeholder: "예: 구현, 리뷰, 문서".to_string(),
-                            on_value_change: Some(Box::new(move |v| rn.set(v))),
-                            ..Default::default()
-                        });
-                    });
-
-                // 2. 첫 지시 (선택)
-                cu::Column()
-                    .spacing(6.0)
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
-                        Label(
-                            "첫 지시 (선택)",
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(p.text_2)),
-                            Some(1),
-                        );
-                        let pt = prompt_txt.clone();
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            multiline: true,
-                            height: Some(72.0),
-                            placeholder: "이 팀원이 할 일을 적으세요".to_string(),
-                            on_value_change: Some(Box::new(move |v| pt.set(v))),
-                            ..Default::default()
-                        });
-                    });
-
-                // 3. 하네스, 모델, 권한 모드
-                cu::Column()
-                    .spacing(6.0)
-                    .modifier(Modifier::new().fill_max_width())
-                    .content(|| {
-                        Label(
-                            "하네스, 모델, 권한 모드",
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(p.text_2)),
-                            Some(1),
-                        );
-                        cu::Row()
-                            .alignment(Alignment::CenterStart)
-                            .spacing(SP[1])
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                Clickable(
-                                    Modifier::new()
-                                        .height(38.0)
-                                        .background(paint(p.surface_2))
-                                        .border(1.0, paint(p.line))
-                                        .shape_role(ShapeRole::Full),
-                                    Alignment::Center,
-                                    || notice::post("데모에서는 기본 모델을 사용합니다"),
-                                    || {
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(|| {
-                                                cu::Spacer().modifier(Modifier::new().width(8.0));
-                                                cu::Box().modifier(
-                                                    Modifier::new()
-                                                        .size(8.0, 8.0)
-                                                        .background(paint(p.orange.strong))
-                                                        .corner_radius(4.0),
-                                                );
-                                                Label(
-                                                    "Claude Code · Opus 5.5 · 높음",
-                                                    Fs::Sm,
-                                                    Weight::Medium,
-                                                    Some(paint(p.text)),
-                                                    Some(1),
-                                                );
-                                                NavIcon(
-                                                    ICON_CHEVRON_DOWN_SVG,
-                                                    p.muted.to_argb(),
-                                                    12.0,
-                                                );
-                                                cu::Spacer().modifier(Modifier::new().width(8.0));
-                                            });
-                                    },
-                                );
-                                Clickable(
-                                    Modifier::new()
-                                        .height(38.0)
-                                        .background(paint(p.surface_2))
-                                        .border(1.0, paint(p.line))
-                                        .shape_role(ShapeRole::Full),
-                                    Alignment::Center,
-                                    || notice::post("권한 모드는 세션에서도 바꿀 수 있습니다"),
-                                    || {
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .spacing(6.0)
-                                            .content(|| {
-                                                cu::Spacer().modifier(Modifier::new().width(8.0));
-                                                NavIcon(ICON_SHIELD_SVG, p.text_2.to_argb(), 14.0);
-                                                Label(
-                                                    "명령마다 확인",
-                                                    Fs::Sm,
-                                                    Weight::Medium,
-                                                    Some(paint(p.text)),
-                                                    Some(1),
-                                                );
-                                                NavIcon(
-                                                    ICON_CHEVRON_DOWN_SVG,
-                                                    p.muted.to_argb(),
-                                                    12.0,
-                                                );
-                                                cu::Spacer().modifier(Modifier::new().width(8.0));
-                                            });
-                                    },
-                                );
-                            });
-                        Label(
-                            "프로필 Claude 개인",
-                            Fs::Xs,
+                            &proj_disp,
+                            Fs::Md,
                             Weight::Regular,
                             Some(paint(p.muted)),
                             Some(1),
                         );
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        CloseButton(move || cl_h());
+                        cu::Spacer().modifier(Modifier::new().width(SP[4]));
                     });
+                cu::Separator(Some(paint(p.line)));
 
-                // 4. 컴퓨터
                 cu::Column()
-                    .spacing(6.0)
-                    .modifier(Modifier::new().fill_max_width())
+                    .spacing(16.0)
+                    .modifier(Modifier::new().fill_max_width().padding(SP[4]))
                     .content(|| {
-                        Label(
-                            "컴퓨터",
-                            Fs::Xs,
-                            Weight::Medium,
-                            Some(paint(p.text_2)),
-                            Some(1),
-                        );
-                        let ci = comp_idx.clone();
-                        Select(
-                            &comp_opts[c_idx.min(comp_opts.len() - 1)],
-                            &comp_opts,
-                            c_idx,
-                            440.0,
-                            move |i| ci.set(i),
-                        );
+                        // 1. 역할 이름 (.field: 40dp, 1px line border, surface fill)
+                        cu::Column()
+                            .spacing(8.0)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                Label(
+                                    "역할 이름",
+                                    Fs::Sm,
+                                    Weight::Regular,
+                                    Some(paint(p.text_2)),
+                                    Some(1),
+                                );
+                                let val_r = role_name.get();
+                                cu::Box()
+                                    .alignment(Alignment::CenterStart)
+                                    .modifier(
+                                        Modifier::new()
+                                            .fill_max_width()
+                                            .height(H_BTN)
+                                            .background(paint(p.surface))
+                                            .border(1.0, paint(p.line))
+                                            .corner_radius(CORNER_SM)
+                                            .padding(SP[2]),
+                                    )
+                                    .content(move || {
+                                        if val_r.is_empty() {
+                                            Label(
+                                                "예: 구현, 리뷰, 문서",
+                                                Fs::Md,
+                                                Weight::Regular,
+                                                Some(paint(p.muted)),
+                                                Some(1),
+                                            );
+                                        } else {
+                                            Label(
+                                                &val_r,
+                                                Fs::Md,
+                                                Weight::Regular,
+                                                Some(paint(p.text)),
+                                                Some(1),
+                                            );
+                                        }
+                                    });
+                            });
+
+                        // 2. 첫 지시 (선택) (textarea.field: 118dp, 1px line border, surface fill)
+                        cu::Column()
+                            .spacing(8.0)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                Label(
+                                    "첫 지시 (선택)",
+                                    Fs::Sm,
+                                    Weight::Regular,
+                                    Some(paint(p.text_2)),
+                                    Some(1),
+                                );
+                                let val_p = prompt_txt.get();
+                                cu::Box()
+                                    .alignment(Alignment::TopStart)
+                                    .modifier(
+                                        Modifier::new()
+                                            .fill_max_width()
+                                            .height(118.0)
+                                            .background(paint(p.surface))
+                                            .border(1.0, paint(p.line))
+                                            .corner_radius(CORNER_SM)
+                                            .padding(SP[2]),
+                                    )
+                                    .content(move || {
+                                        if val_p.is_empty() {
+                                            Label(
+                                                "이 팀원이 할 일을 적으세요",
+                                                Fs::Md,
+                                                Weight::Regular,
+                                                Some(paint(p.muted)),
+                                                Some(3),
+                                            );
+                                        } else {
+                                            Label(
+                                                &val_p,
+                                                Fs::Md,
+                                                Weight::Regular,
+                                                Some(paint(p.text)),
+                                                Some(4),
+                                            );
+                                        }
+                                    });
+                            });
+
+                        // 3. 하네스, 모델, 권한 모드 (.snew-picks: 40dp height, CORNER_SM)
+                        cu::Column()
+                            .spacing(8.0)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                Label(
+                                    "하네스, 모델, 권한 모드",
+                                    Fs::Sm,
+                                    Weight::Regular,
+                                    Some(paint(p.text_2)),
+                                    Some(1),
+                                );
+                                cu::Row()
+                                    .alignment(Alignment::CenterStart)
+                                    .spacing(SP[1])
+                                    .modifier(Modifier::new().fill_max_width())
+                                    .content(|| {
+                                        Clickable(
+                                            Modifier::new()
+                                                .height(H_BTN)
+                                                .background(paint(p.surface_2))
+                                                .border(1.0, paint(p.line))
+                                                .corner_radius(CORNER_SM),
+                                            Alignment::CenterStart,
+                                            || notice::post("데모에서는 기본 모델을 사용합니다"),
+                                            || {
+                                                cu::Row()
+                                                    .alignment(Alignment::CenterStart)
+                                                    .spacing(6.0)
+                                                    .content(|| {
+                                                        cu::Spacer()
+                                                            .modifier(Modifier::new().width(10.0));
+                                                        cu::Box().modifier(
+                                                            Modifier::new()
+                                                                .size(8.0, 8.0)
+                                                                .background(paint(p.orange.strong))
+                                                                .corner_radius(4.0),
+                                                        );
+                                                        Label(
+                                                            "Claude Code · Opus 5.5 · 높음",
+                                                            Fs::Sm,
+                                                            Weight::Medium,
+                                                            Some(paint(p.text)),
+                                                            Some(1),
+                                                        );
+                                                        NavIcon(
+                                                            ICON_CHEVRON_DOWN_SVG,
+                                                            p.muted.to_argb(),
+                                                            12.0,
+                                                        );
+                                                        cu::Spacer()
+                                                            .modifier(Modifier::new().width(10.0));
+                                                    });
+                                            },
+                                        );
+                                        Clickable(
+                                            Modifier::new()
+                                                .height(H_BTN)
+                                                .background(paint(p.surface_2))
+                                                .border(1.0, paint(p.line))
+                                                .corner_radius(CORNER_SM),
+                                            Alignment::CenterStart,
+                                            || notice::post("권한 모드는 세션에서도 바꿀 수 있습니다"),
+                                            || {
+                                                cu::Row()
+                                                    .alignment(Alignment::CenterStart)
+                                                    .spacing(6.0)
+                                                    .content(|| {
+                                                        cu::Spacer()
+                                                            .modifier(Modifier::new().width(10.0));
+                                                        NavIcon(
+                                                            ICON_SHIELD_SVG,
+                                                            p.text_2.to_argb(),
+                                                            14.0,
+                                                        );
+                                                        Label(
+                                                            "명령마다 확인",
+                                                            Fs::Sm,
+                                                            Weight::Medium,
+                                                            Some(paint(p.text)),
+                                                            Some(1),
+                                                        );
+                                                        NavIcon(
+                                                            ICON_CHEVRON_DOWN_SVG,
+                                                            p.muted.to_argb(),
+                                                            12.0,
+                                                        );
+                                                        cu::Spacer()
+                                                            .modifier(Modifier::new().width(10.0));
+                                                    });
+                                            },
+                                        );
+                                    });
+                                Label(
+                                    "프로필 Claude 개인",
+                                    Fs::Xs,
+                                    Weight::Regular,
+                                    Some(paint(p.muted)),
+                                    Some(1),
+                                );
+                            });
+
+                        // 4. 컴퓨터
+                        cu::Column()
+                            .spacing(8.0)
+                            .modifier(Modifier::new().fill_max_width())
+                            .content(|| {
+                                Label(
+                                    "컴퓨터",
+                                    Fs::Sm,
+                                    Weight::Regular,
+                                    Some(paint(p.text_2)),
+                                    Some(1),
+                                );
+                                let ci = comp_idx.clone();
+                                Select(
+                                    &comp_opts[c_idx.min(comp_opts.len() - 1)],
+                                    &comp_opts,
+                                    c_idx,
+                                    440.0,
+                                    move |i| ci.set(i),
+                                );
+                            });
                     });
+                SheetFooter(move || {
+                    let mut cl = close_f.clone();
+                    Clickable(
+                        Modifier::new()
+                            .height(H_CTL)
+                            .background(paint(p.surface))
+                            .border(1.0, paint(p.line))
+                            .shape_role(ShapeRole::Full),
+                        Alignment::Center,
+                        move || cl(),
+                        || {
+                            cu::Row().alignment(Alignment::Center).content(|| {
+                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                Label(
+                                    "취소",
+                                    Fs::Sm,
+                                    Weight::Medium,
+                                    Some(paint(p.text)),
+                                    Some(1),
+                                );
+                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                            });
+                        },
+                    );
+                    let mut cr = create_cb.clone();
+                    let en = !busy.get();
+                    Clickable(
+                        Modifier::new()
+                            .height(H_CTL)
+                            .background(paint(p.ink))
+                            .shape_role(ShapeRole::Full),
+                        Alignment::Center,
+                        move || {
+                            if en {
+                                cr();
+                            }
+                        },
+                        || {
+                            cu::Row().alignment(Alignment::Center).content(|| {
+                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                                Label(
+                                    "만들기",
+                                    Fs::Sm,
+                                    Weight::Medium,
+                                    Some(paint(p.ink_text)),
+                                    Some(1),
+                                );
+                                cu::Spacer().modifier(Modifier::new().width(12.0));
+                            });
+                        },
+                    );
+                });
             });
-        SheetFooter(move || {
-            let mut cl = close_f.clone();
-            AppButton(
-                "취소",
-                None,
-                ButtonKind::Default,
-                false,
-                true,
-                false,
-                move || cl(),
-            );
-            let mut cr = create_cb.clone();
-            AppButton(
-                "만들기",
-                None,
-                ButtonKind::Primary,
-                false,
-                !busy.get(),
-                false,
-                move || cr(),
-            );
-        });
-    });
+    };
+
+    if is_compact {
+        cu::Sheet(true)
+            .modifier(modifier.fill_max_width())
+            .on_dismiss(on_close)
+            .content(body);
+    } else {
+        cu::Dialog(true)
+            .modifier(modifier.width(758.0))
+            .on_dismiss(on_close)
+            .content(body);
+    }
 }
 
 /// The 세션 screen (`Screen::Conversation(focus)` and `Screen::Placeholder(NavMenu::Sessions)`).

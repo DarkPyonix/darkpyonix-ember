@@ -3214,7 +3214,7 @@ fn EmptyText(text: &str) {
 }
 
 /// `.list-row`: the 36 px git tile, `#num title` over `member · branch`, and the CI pill over
-/// the review state. TODO(compose-rust): the row divider is inside the card padding, and the
+/// the review state. TODO(compose-rust#464): the row divider is inside the card padding, and the
 /// right column is not right-aligned (no column cross-axis alignment in the pinned toolkit).
 fn PrRowView(row: PrRow, first: bool) {
     let p = ember_theme().palette;
@@ -3249,7 +3249,7 @@ fn PrRowView(row: PrRow, first: bool) {
 }
 
 /// `.tnode`: an avatar for a member, a spinner or a status dot for a thread, then name and task.
-/// Children are indented. TODO(compose-rust): the 1 px guide line (a left border) needs a
+/// Children are indented. TODO(compose-rust#464): the 1 px guide line (a left border) needs a
 /// one-sided border or a stretching child; indentation alone for now.
 fn TreeNodeView(node: SubNode, project: String) {
     let p = ember_theme().palette;
@@ -3400,7 +3400,7 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
 /// (the third card below), one under that. Every card fills its share of the page width
 /// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
 /// content shrank the cards to about 308 dp at 390 dp.
-/// TODO(compose-rust): the cards of a row keep their own heights; the mockup stretches them to the
+/// TODO(compose-rust#464): the cards of a row keep their own heights; the mockup stretches them to the
 /// tallest. The pinned toolkit has no intrinsic-size measurement (`IntrinsicSize.Max`), and
 /// `fill_max_height` in a row of unbounded height collapses, so no fixed heights are faked.
 fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {

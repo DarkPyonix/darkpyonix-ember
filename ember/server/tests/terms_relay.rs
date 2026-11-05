@@ -155,6 +155,35 @@ async fn type_line(ws: &mut Ws, line: &str) {
     ws.send(Message::text(serde_json::to_string(&input).unwrap())).await.unwrap();
 }
 
+/// Type `line` and read until `needle` shows up. A shell that is still starting can drop what is
+/// typed before it reads (a line-editor start flushes pending input), so the line is typed again
+/// every 3 s until the output arrives (#345).
+async fn type_until(ws: &mut Ws, line: &str, needle: &str) -> String {
+    step(&format!("type {line:?} until {needle:?}"), async {
+        let mut out = String::new();
+        loop {
+            type_line(ws, line).await;
+            let round = tokio::time::Instant::now() + Duration::from_secs(3);
+            while !out.contains(needle) {
+                match tokio::time::timeout_at(round, event(ws)).await {
+                    Err(_) => break,
+                    Ok(Some(TermEvent::Output { data })) | Ok(Some(TermEvent::Snapshot { data, .. })) => {
+                        out.push_str(&String::from_utf8_lossy(&data))
+                    }
+                    Ok(Some(TermEvent::Exit { .. })) | Ok(Some(TermEvent::Error { .. })) | Ok(None) => {
+                        panic!("ended waiting for {needle:?}; output {out:?}")
+                    }
+                    Ok(Some(_)) => {}
+                }
+            }
+            if out.contains(needle) {
+                return out;
+            }
+        }
+    })
+    .await
+}
+
 async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(60), f).await.expect("timed out")
 }
@@ -205,8 +234,7 @@ async fn fr_p3_create_list_attach_type_and_read_through_the_server() {
             Some(TermEvent::Attached { term, .. }) => assert_eq!(term.id, tid),
             other => panic!("expected attached, got {other:?}"),
         }
-        type_line(&mut ws, "echo relay-$((40+2))\n").await;
-        read_until(&mut ws, "relay-42").await;
+        type_until(&mut ws, "echo relay-$((40+2))\n", "relay-42").await;
 
         // The plain snapshot route and the single-session route.
         let snap: TermSnapshot =
@@ -242,8 +270,7 @@ async fn fr_p6_the_session_keeps_running_when_the_server_connection_drops() {
 
         let mut ws = attach(&s, &cid, &tid, "laptop").await;
         event(&mut ws).await;
-        type_line(&mut ws, "echo before-drop\n").await;
-        read_until(&mut ws, "before-drop").await;
+        type_until(&mut ws, "echo before-drop\n", "before-drop").await;
         // Abrupt drop, no detach message.
         drop(ws);
         // The node sees the client leave, and the session is still running.
@@ -286,8 +313,7 @@ async fn fr_p6_a_restarted_server_lists_and_attaches_again() {
         }
         let mut ws = attach(&first, &cid, &ids[0], "laptop").await;
         event(&mut ws).await;
-        step("type kept line", type_line(&mut ws, "echo kept-$((6*7))\n")).await;
-        read_until(&mut ws, "kept-42").await;
+        type_until(&mut ws, "echo kept-$((6*7))\n", "kept-42").await;
 
         // The server goes away: its listener and every connection with it.
         first.task.abort();

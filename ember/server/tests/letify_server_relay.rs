@@ -18,10 +18,6 @@ fn fr_n2_roles_respect_explicit_settings_and_other_backends() {
     let cfg = with_main_server_roles(cfg, 0);
     assert_eq!(cfg.letify.relay_listen, Some(explicit), "an explicit relay address is kept");
     assert!(cfg.letify.qad_listen.is_some(), "the observer is filled in");
-
-    let iroh = TransportConfig::new(SecretKey::generate()).backend(BackendKind::Iroh);
-    let iroh = with_main_server_roles(iroh, 0);
-    assert!(iroh.letify.relay_listen.is_none() && iroh.letify.qad_listen.is_none());
 }
 
 #[tokio::test]

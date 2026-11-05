@@ -311,7 +311,9 @@ async fn fr_p6_a_restarted_server_lists_and_attaches_again() {
             let t: TermCreateResponse = step(&format!("read create response {key}"), r.json()).await.unwrap();
             ids.push(t.term.id);
         }
-        let mut ws = attach(&first, &cid, &ids[0], "laptop").await;
+        // `ids` is sorted below, so keep the id of the session that gets the typed line.
+        let typed_id = ids[0].clone();
+        let mut ws = attach(&first, &cid, &typed_id, "laptop").await;
         event(&mut ws).await;
         type_until(&mut ws, "echo kept-$((6*7))\n", "kept-42").await;
 
@@ -338,7 +340,7 @@ async fn fr_p6_a_restarted_server_lists_and_attaches_again() {
             let mut ws = attach(&second, &cid, id, "after-restart").await;
             assert!(matches!(event(&mut ws).await, Some(TermEvent::Attached { .. })));
         }
-        let mut ws = attach(&second, &cid, &ids[0], "after-restart-2").await;
+        let mut ws = attach(&second, &cid, &typed_id, "after-restart-2").await;
         event(&mut ws).await;
         read_until(&mut ws, "kept-42").await;
         step("type again line", type_line(&mut ws, "echo again-$((1+1))\n")).await;

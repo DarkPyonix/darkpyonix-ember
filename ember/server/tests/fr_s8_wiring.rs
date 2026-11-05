@@ -454,7 +454,7 @@ async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() 
         events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
         "{events:?}"
     );
-    assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Idle);
+    assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
     wait_for("the surviving app-server to be stopped", || !pid_alive(pid)).await;
     clear_runtime();
 }

@@ -1596,13 +1596,13 @@ pub fn MultiView(
                                     .alignment(Alignment::Center)
                                     .space_role(SpaceRole::Sm)
                                     .content(|| {
-                                        Label(NO_MEMBERS, Fs::Lg, Weight::Medium, None, None);
+                                        Label(NO_MEMBERS, Fs::Lg, Weight::Medium, None, Some(1));
                                         Label(
                                             PICK_FROM_LIST,
                                             Fs::Md,
                                             Weight::Regular,
                                             Some(paint(p.muted)),
-                                            None,
+                                            Some(1),
                                         );
                                     });
                             });
@@ -3280,7 +3280,7 @@ pub fn StatusView(
                                                     NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 16.0);
                                                     Label(PR_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                                                 });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                         });
                                 });
                                 EmberCard(false, false, Some(1.0), None, None, || {
@@ -3295,7 +3295,7 @@ pub fn StatusView(
                                                     NavIcon(ICON_USERS_SVG, p.text_2.to_argb(), 16.0);
                                                     Label(SUBAGENT_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                                                 });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                         });
                                 });
                                 EmberCard(false, false, Some(1.0), None, None, || {
@@ -3310,7 +3310,7 @@ pub fn StatusView(
                                                     NavIcon(ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
                                                     Label(LOAD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                                                 });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                         });
                                 });
                             });
@@ -3332,7 +3332,7 @@ pub fn StatusView(
                                                 NavIcon(ico, p.text_2.to_argb(), 16.0);
                                                 Label(title, Fs::Md, Weight::Semibold, None, Some(1));
                                             });
-                                        Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                        Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                     });
                             });
                         }
@@ -3934,7 +3934,7 @@ pub fn SessionScreen(focus: Option<String>) {
                     .alignment(Alignment::Center)
                     .space_role(SpaceRole::Sm)
                     .content(|| {
-                        Label(NO_PROJECT, Fs::Xl, Weight::Medium, None, None);
+                        Label(NO_PROJECT, Fs::Xl, Weight::Medium, None, Some(1));
                         let u = ui.clone();
                         AppButton(
                             "새 세션",

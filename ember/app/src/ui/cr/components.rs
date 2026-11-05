@@ -7,9 +7,6 @@
 //!
 //! Gaps in the pinned compose-rust, each with its issue:
 //! - #372: no container click, so nothing here is clickable except `Button`;
-//! - #373: `Button` has no `max_lines`, so the width estimate `label_min_width` stays (#208);
-//! - #374: `Text` and `TextField` have no `font` or `word_break`, so no bundled font and no
-//!   Korean word-keep yet (#216, #208);
 //! - #375: no `Modifier.shadow`, so one `elevation` stands in for the layered shadow (#214).
 
 #![allow(non_snake_case)]
@@ -19,7 +16,7 @@ use compose_rust::ui::Modifier;
 use compose_rust::PointerKinds;
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
-    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
+    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
 };
 
 use super::theme::*;
@@ -258,6 +255,7 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
     let mut t = cu::Text(text)
+        .word_break(WordBreak::KeepAll)
         .font_size(fs.size())
         .line_height(fs.line_height())
         .font_weight(weight.value())
@@ -287,7 +285,7 @@ pub fn Txt(
         None if type_role == TypeRole::Caption => paint(theme.palette.muted),
         None => paint(theme.palette.text),
     };
-    let mut t = cu::Text(text);
+    let mut t = cu::Text(text).word_break(WordBreak::KeepAll);
     if mono {
         // The theme's monospace face; the bundled font stack lands with compose-rust#374.
         t = t.type_role(TypeRole::Mono);
@@ -507,27 +505,6 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
-/// Workaround until compose-rust#373 (`Button` `max_lines` / `overflow`): Button and Chip labels
-/// are measured too narrow, so a short Korean label such as "보내기" wraps to two lines. The
-/// button gets a width that fits its label: an estimate of the label's advance (a wide glyph is
-/// one em, a narrow one about 0.55 em), the 24 dp side padding of the toolkit button on both sides (measured: 16 dp left only
-/// one glyph and an ellipsis), and room for the icon. Remove this once #373 is in.
-pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
-    let advance: f32 = text
-        .chars()
-        .map(|c| if c.is_ascii() { 0.55 } else { 1.0 })
-        .sum::<f32>()
-        * font_px;
-    let icon = if has_icon { 20.0 + 8.0 } else { 0.0 };
-    advance + icon + 2.0 * 24.0 + 4.0
-}
-
-// A Box with a pointer-up subscription would give the mockup's label sizes and no width
-// estimate, but it has no keyboard focus or activation, no button role for screen readers and
-// no hover or press feedback (only the toolkit `Button` and `Chip` carry those), so every
-// control here is the toolkit's. The differences from the mockup (label size, side padding,
-// the 16 px close glyph in the small icon button) are compose-rust#373 and #372.
-
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 pub fn AppButton(
     text: &str,
@@ -540,13 +517,6 @@ pub fn AppButton(
 ) {
     let theme = ember_theme();
     let s = button_style(kind, small, theme.palette);
-    // TODO(compose-rust#373): the toolkit label size and padding stand in for the mockup's,
-    // and `label_min_width` keeps Korean labels on one line until `max_lines` exists.
-    let width = if fill_max_width || text.is_empty() {
-        None
-    } else {
-        Some(label_min_width(text, s.fs.size(), icon.is_some()))
-    };
     let mut b = cu::Button(text)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
@@ -554,7 +524,6 @@ pub fn AppButton(
         .modifier(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
-                .width_if(width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
@@ -608,18 +577,11 @@ pub fn PickChip(
     let theme = ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
     let text = if icon_only && icon.is_some() { "" } else { text };
-    // TODO(compose-rust#373): label size and padding are the toolkit's, see AppButton.
-    let width = if text.is_empty() {
-        None
-    } else {
-        Some(label_min_width(text, Fs::Sm.size(), icon.is_some()))
-    };
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)
         .color(paint(theme.palette.text_2))
         .modifier(
             Modifier::new()
-                .width_if(width)
                 .height(height)
                 .background(paint(fill))
                 .shape_role(ShapeRole::Full),
@@ -884,16 +846,6 @@ mod tests {
     }
 
     #[test]
-    fn label_min_width_grows_with_the_label_and_the_icon() {
-        // Three Hangul glyphs at 14 px, no icon: 42 + 48 padding + 4 slack.
-        assert_eq!(label_min_width("보내기", 14.0, false), 94.0);
-        assert_eq!(label_min_width("보내기", 14.0, true), 122.0);
-        assert!(label_min_width("명령마다 확인", 13.0, false) > label_min_width("확인", 13.0, false));
-        // Latin letters are narrower than Hangul.
-        assert!(label_min_width("abc", 14.0, false) < label_min_width("가나다", 14.0, false));
-    }
-
-    #[test]
     fn button_sizes_and_kinds() {
         let d = button_style(ButtonKind::Default, false, &LIGHT);
         assert_eq!((d.height, d.fs), (40.0, Fs::Md));
@@ -1004,4 +956,64 @@ mod tests {
             .collect();
         assert!(floats.contains(&14.0) && floats.contains(&22.0), "{floats:?}");
     }
+
+    #[test]
+    fn fr_l10_chips_and_pills_emit_single_line_max_lines() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyKind, PropertyValue};
+        use compose_rust::{Host, Recomposer};
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                Pill("브랜치", PillTone::Blue, false);
+                FilterChip("전체", false, || {});
+                MenuRow("새 세션", 120.0, false, || {});
+                SheetHeader("IDE 열기", || {}, None);
+                Label("보내기", Fs::Md, Weight::Medium, None, Some(1));
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        for label in ["브랜치", "전체", "새 세션", "IDE 열기", "보내기"] {
+            let mut target_nodes = Vec::new();
+            for m in &batch {
+                if let Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } = m {
+                    if *s == label {
+                        target_nodes.push(*node_id);
+                    }
+                }
+            }
+            let mut found = false;
+            for nid in target_nodes {
+                for m in &batch {
+                    if let Mutation::SetProp { node_id, property: PropertyKind::MaxLines, value: PropertyValue::Integer(1) } = m {
+                        if *node_id == nid {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            assert!(found, "expected text '{label}' to emit MaxLines(1)");
+        }
+    }
+
+    #[test]
+    fn fr_l10_1_cr_screens_use_safe_label_builders() {
+        use std::fs;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
+        for entry in fs::read_dir(dir).expect("cr sources") {
+            let path = entry.expect("source entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") { continue; }
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let source = fs::read_to_string(&path).expect("source text");
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(!production.contains("WordBreak::BreakAll"), "{name} enables word breaking");
+            if name != "components.rs" && name != "vcs.rs" {
+                assert!(!production.contains("cu::Text("), "{name} bypasses the shared text builder");
+            }
+            // Button and Chip use the toolkit's one-line default. No screen overrides it.
+            assert!(!production.contains(".max_lines(2)"), "{name} overrides a label's line limit");
+        }
+        let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
+        assert_eq!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count(), 2);
+    }
+
 }

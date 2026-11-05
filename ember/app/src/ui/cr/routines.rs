@@ -888,7 +888,7 @@ fn HeroCardContent(
         .modifier(Modifier::new().fill_max_width().height(174.0))
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
-                Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[1]));
                 cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).content(|| {
                     cu::Box()
@@ -901,26 +901,26 @@ fn HeroCardContent(
                                 Fs::Md,
                                 Weight::Semibold,
                                 None,
-                                None,
+                                Some(1),
                             );
                         });
                     cu::Column().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                             cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.blue.strong)).shape_role(ShapeRole::Full));
-                            Label("성공", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label("성공", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                             cu::Box().modifier(Modifier::new().size(8.0, 8.0).background(paint(p.orange.strong)).shape_role(ShapeRole::Full));
-                            Label("실패", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label("실패", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                     });
                 });
                 if !busy {
-                    Label("최근 7일 동안 끝난 실행이 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("최근 7일 동안 끝난 실행이 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }
             });
             cu::Column().spacing(SP[0]).modifier(Modifier::new().width(chart_w)).content(|| {
-                Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label("요일별 실행", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
                 cu::Canvas(chart_cmd.clone()).modifier(Modifier::new().size(chart_w, chart_h + 1.0));
                 cu::Row().modifier(Modifier::new().width(chart_w).height(24.0)).content(|| {
@@ -931,7 +931,7 @@ fn HeroCardContent(
                                 Fs::Xs,
                                 if b.today { Weight::Semibold } else { Weight::Regular },
                                 Some(paint(if b.today { p.text } else { p.muted })),
-                                None,
+                                Some(1),
                             );
                         });
                     }
@@ -943,7 +943,7 @@ fn HeroCardContent(
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {
-        Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+        Label(kpi.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         if index < 3 {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                 Label(&kpi.value, Fs::Xl2, Weight::Semibold, None, Some(1));
@@ -1049,7 +1049,7 @@ fn ListPane(
                 }
                 for g in groups {
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
-                        Label(&g.title(), Fs::Xs, Weight::Semibold, Some(paint(p.muted)), None);
+                        Label(&g.title(), Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
                         for r in &g.routines {
                             let runs = entries
                                 .iter()
@@ -1394,13 +1394,13 @@ fn DetailPane(
                     }
                     InsetPanel(true, move || {
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
-                            Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            Label("프롬프트", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                             Label(&prompt_text, Fs::Sm, Weight::Regular, None, None);
                         });
                     });
-                    Label("실행 기록", Fs::Lg, Weight::Semibold, None, None);
+                    Label("실행 기록", Fs::Lg, Weight::Semibold, None, Some(1));
                     if entry.runs.is_empty() {
-                        Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                        Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                     }
                     for run in &entry.runs {
                         RunTile(run, now);
@@ -1420,8 +1420,8 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
             .spacing(SP[0])
             .modifier(Modifier::new().fill_max_width().padding(SP[2]))
             .content(move || {
-                Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                Label(&v, Fs::Sm, Weight::Medium, None, None);
+                Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&v, Fs::Sm, Weight::Medium, None, Some(1));
                 if !s.is_empty() {
                     Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 }
@@ -1442,7 +1442,7 @@ fn RunTile(run: &Run, now: Minutes) {
             .modifier(Modifier::new().fill_max_width().padding(SP[2]))
             .content(move || {
                 Pill(status_lbl, tone, true);
-                Label(&ago_lbl, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                Label(&ago_lbl, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 if let Some(id) = session {
                     AppButton("세션 열기", None, ButtonKind::Default, true, true, false, move || {
@@ -1676,7 +1676,7 @@ fn RoutineForm(
 
 fn FormLabel(text: &str) {
     let p = ember_theme().palette;
-    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), None);
+    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
 }
 
 // ---------------------------------------------------------------------------------------------

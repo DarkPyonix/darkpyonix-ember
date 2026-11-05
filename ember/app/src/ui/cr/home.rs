@@ -149,10 +149,9 @@ pub fn chip_floor(text: &str, natural: f32) -> f32 {
     }
 }
 
-/// A composer chip's natural width: the toolkit button's own padding and icon slot around the
-/// text (`label_min_width`), at the 13 px chip size.
+/// A budget for distributing the composer row across its four controls.
 pub fn chip_natural(text: &str) -> f32 {
-    super::components::label_min_width(text, Fs::Sm.size(), true)
+    text_px(text, Fs::Sm.size()) + 80.0
 }
 
 /// The text a chip of width `w` can show.
@@ -753,7 +752,7 @@ fn Hero(c: &Composer, ui: &SharedUi, width_dp: f32, height_dp: f32, content_w: f
         ComposerCard(c, ui, composer_width(content_w), l);
         Suggestions(c, width_dp);
         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
-            Label("오늘의 팀", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+            Label("오늘의 팀", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 14.0);
         });
     });
@@ -801,7 +800,7 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, w: f32, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
-    let (shown, width) = if icon_only { (String::new(), H_CTL) } else { (chip_text(text, w), w) };
+    let (shown, width) = if icon_only { (String::new(), H_CTL) } else { (text.to_string(), w) };
     cu::Button(shown)
         .variant(ButtonVariant::Text)
         .color(paint(p.text_2))
@@ -946,9 +945,9 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
     cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
         if skip.show(EST_HEAD) {
             cu::Column().content(|| {
-                Label("오늘의 팀", if l.compact { Fs::Xl } else { Fs::Xl2 }, Weight::Semibold, None, None);
+                Label("오늘의 팀", if l.compact { Fs::Xl } else { Fs::Xl2 }, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().height(10.0));
-                Label(&format!("{} · 서버 기준", date_line(&crate::ui::home::today_utc())), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label(&format!("{} · 서버 기준", date_line(&crate::ui::home::today_utc())), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(12.0));
             });
             KpiStrip(&k, &d.counts, l);
@@ -1341,7 +1340,7 @@ fn SuccessTile(c: &StatusCounts) {
                 cu::Column().alignment(Alignment::Center).content(|| {
                     let text = pct.map(|v| format!("{v}%")).unwrap_or_else(|| "집계 전".to_string());
                     Label(&text, Fs::Xl2, Weight::Regular, None, Some(1));
-                    Label(&format!("{ended}건"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label(&format!("{ended}건"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
             });
             cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
@@ -1381,7 +1380,7 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
     let p = ember_theme().palette;
     Tile(|| {
         cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(32.0)).content(|| {
-            Label("프로젝트", Fs::Lg, Weight::Semibold, None, None);
+            Label("프로젝트", Fs::Lg, Weight::Semibold, None, Some(1));
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             let u = ui.clone();
             AppButton("모두 보기", None, ButtonKind::Default, true, true, false, move || {

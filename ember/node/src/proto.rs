@@ -103,6 +103,97 @@ pub struct Toolchain {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Computer metrics (FR-X7)
+
+/// One sample of the computer's status, for the monitor sheet (FR-L21). A value the OS does not
+/// expose is `None` or an empty list, never an estimate. Network counters are cumulative since
+/// boot: the client derives rates from two samples.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricsSample {
+    /// Wall clock of the sample, milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    pub cpu: CpuMetrics,
+    pub memory: Option<MemoryMetrics>,
+    pub disks: Vec<DiskMetrics>,
+    pub network: Vec<NetMetrics>,
+    /// Sensors the OS exposes; empty when none (many macOS and VM hosts).
+    pub temperatures: Vec<TempMetrics>,
+    pub gpu: GpuReport,
+    /// The top processes, busiest first (CPU, then memory).
+    pub processes: Vec<ProcessMetrics>,
+    /// How many processes the computer runs in all (the list above is cut to the top).
+    pub process_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuMetrics {
+    /// Mean over all cores, 0 to 100.
+    pub total_percent: Option<f32>,
+    /// Per logical core, 0 to 100.
+    pub cores: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryMetrics {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub swap_total_bytes: u64,
+    pub swap_used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiskMetrics {
+    pub name: String,
+    pub mount: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetMetrics {
+    pub interface: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TempMetrics {
+    pub label: String,
+    pub celsius: f32,
+}
+
+/// GPU status. `devices` is empty with a `reason` when the node has no verified way to read it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuReport {
+    pub devices: Vec<GpuMetrics>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GpuMetrics {
+    pub name: String,
+    pub utilization_percent: Option<f32>,
+    pub memory_total_bytes: Option<u64>,
+    pub memory_used_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProcessMetrics {
+    pub pid: u32,
+    pub name: String,
+    /// Percent of one core (a busy multi-thread process can exceed 100).
+    pub cpu_percent: f32,
+    /// Resident memory.
+    pub memory_bytes: u64,
+}
+
+/// `GET /metrics?top=<n>`: how many processes to list (default 20, at most 200).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricsQuery {
+    pub top: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Files
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

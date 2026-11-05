@@ -355,7 +355,7 @@ impl Skip {
         let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
             Some("bottom") => (total_est - window_h).max(0.0),
             // Named starts: the first block in view. `status` shows the 팀원 상태 card with its
-            // legend at the top, `usage` the 하네스별 세션 and 지금 일하는 팀원 row.
+            // legend at the top, `usage` the 하네스별 사용량 and 지금 일하는 팀원 row.
             Some("status") => EST_HERO + EST_HEAD,
             Some("usage") => EST_HERO + EST_HEAD + EST_TREND,
             Some("efficiency") => EST_HERO + EST_HEAD + EST_TREND + EST_USAGE,
@@ -901,9 +901,10 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
                 (4.0, Box::new(|| StatusTile(&d.counts, ui, if l.wide { (content_w - GAP_CARD) * 4.0 / 12.0 } else { content_w }, l.compact))),
             ]);
         }
+        let usage_w = if l.wide { (content_w - GAP_CARD) * 7.0 / 12.0 - 2.0 * PAD_CARD_H } else { content_w - 2.0 * PAD_CARD_H }.max(200.0);
         if skip.show(EST_USAGE) {
             Weighted(stacked, GAP_CARD, vec![
-                (7.0, Box::new(|| HarnessTile(&d.harness, &week, ui))),
+                (7.0, Box::new(|| HarnessTile(&d.harness, &week, ui, usage_w))),
                 (5.0, Box::new(|| CrewTile(&d.crew, d.online, d.computers, ui, content_w * 5.0 / 12.0))),
             ]);
         }
@@ -1137,90 +1138,115 @@ pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
     days
 }
 
-/// 하네스별 세션 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
-/// bars per harness, one ring per harness with its share, and a "자세히" button to 에이전트.
-/// The width of one weekday bar.
-const BAR_W: f32 = 28.0;
+/// Greedy rows of legend entries: the indices of `widths` (dp, each entry with its dot) that fit
+/// `max_w` per row with `gap` between. An entry wider than the row gets a row of its own.
+pub fn legend_rows(widths: &[f32], max_w: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0f32;
+    for (i, w) in widths.iter().enumerate() {
+        match rows.last_mut() {
+            Some(row) if used + gap + w <= max_w => {
+                row.push(i);
+                used += gap + w;
+            }
+            _ => {
+                rows.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    rows
+}
 
-fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
+fn vendor_color(v: usage::Vendor, p: &Palette) -> compose_rust::Color {
+    match v {
+        usage::Vendor::Claude => p.orange.strong,
+        usage::Vendor::Codex => p.blue.strong,
+        usage::Vendor::Gemini => p.sky.strong,
+        usage::Vendor::Other => p.grey.strong,
+    }
+}
+
+/// 하네스별 사용량 (`.hm-usage`, FR-L23, #360): today's tokens, a 7-day stacked chart of the
+/// tokens each harness reported (`days[].by_agent`) with the average as a dashed line, a legend
+/// that wraps, and the session counts underneath. Unreported harnesses are not drawn.
+/// `chart_w` is the card's inner width.
+fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi, chart_w: f32) {
     let p = ember_theme().palette;
-    let colors = [p.orange.strong, p.blue.strong, p.sky.strong];
-    let totals: Vec<u64> = week.iter().map(|d| d.counts.iter().sum::<usize>() as u64).collect();
-    let today = totals.last().copied().unwrap_or(0);
-    let all: u64 = totals.iter().sum();
+    let _requested = remember(|| {
+        crate::bridge::request_usage_summary();
+        0u8
+    });
+    let load = ui.live.usage_summary.get();
+    let model = usage::home_stack(&load, 7);
+    let sessions_today = week.last().map(|d| d.counts.iter().sum::<usize>()).unwrap_or(0);
+    let sessions_week: usize = week.iter().map(|d| d.counts.iter().sum::<usize>()).sum();
     const H: f32 = 100.0;
-    let heights = bar_heights(&totals, H);
+    const GAP: f32 = 6.0;
+    let totals: Vec<usize> = model.days.iter().map(|d| d.total as usize).collect();
+    let rects = crate::ui::home::bar_rects(&totals, chart_w, H, GAP);
+    let max = totals.iter().copied().max().unwrap_or(0);
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
+    for (day, (x, y, w, h)) in model.days.iter().zip(rects.iter().copied()) {
+        let mut top = y + h;
+        for seg in &day.segs {
+            let sh = h * seg.fraction;
+            top -= sh;
+            list = list.rect(paint(vendor_color(seg.vendor, &p)), x, top, w, sh, 0.0);
+        }
+    }
+    if max > 0 {
+        // The average as a dashed line across the chart.
+        let ay = H - H * (model.average_tokens as f32 / max as f32);
+        let mut x = 0.0;
+        while x < chart_w {
+            list = list.rect(paint(p.text), x, ay, 4.0f32.min(chart_w - x), 1.0, 0.0);
+            x += 8.0;
+        }
+    }
+    let commands = list.build();
+    let bar_w = rects.first().map(|r| r.2).unwrap_or(0.0);
+    let widths: Vec<f32> = model.legend.iter().map(|e| 8.0 + 4.0 + text_px(&e.label, 12.0)).collect();
+    let rows = legend_rows(&widths, chart_w, 16.0);
     Tile(|| {
-        CardHead(ICON_CHART, "하네스별 세션", || {
+        CardHead(ICON_CHART, "하네스별 사용량", || {
             let u = ui.clone();
             AppButton("자세히", None, ButtonKind::Default, true, true, false, move || shell::choose(&u, NavMenu::Agents));
         });
-        if bars.is_empty() {
-            Label(EMPTY_HARNESS_USAGE, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-            return;
-        }
-        // The summary and legend at the left; the bars gather at the right, 28 px wide with
-        // rounded tops (`.hm-tbars`).
-        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
-                cu::Row().spacing(SP[5]).content(|| {
-                    for (label, v) in [("오늘 세션", today), ("7일 합계", all)] {
-                        cu::Column().content(|| {
-                            Label(label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            Label(&v.to_string(), Fs::Xl2, Weight::Regular, None, Some(1));
-                        });
-                    }
-                });
-                for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
-                    cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
-                        Dot(*color);
-                        Label(h.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        Label(&model.today, Fs::Xl2, Weight::Regular, None, Some(1));
+        if let Some(notice) = &model.notice {
+            Label(notice, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+        } else {
+            Label(&model.average, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
+            cu::Row().spacing(GAP).modifier(Modifier::new().fill_max_width()).content(|| {
+                for (i, day) in model.days.iter().enumerate() {
+                    let today = i + 1 == model.days.len();
+                    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().width(bar_w)).content(|| {
+                        Label(day.weekday, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
                     });
                 }
             });
-            cu::Column().spacing(SP[0]).content(|| {
-                cu::Row().spacing(SP[1]).modifier(Modifier::new().height(H)).content(|| {
-                    for (day, total_h) in week.iter().zip(heights.iter()) {
-                        cu::Column().modifier(Modifier::new().width(BAR_W).height(H)).content(|| {
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            let n: usize = day.counts.iter().sum();
-                            let top = day.counts.iter().rposition(|c| *c > 0);
-                            for (i, (count, color)) in day.counts.iter().zip(colors.iter()).enumerate().rev() {
-                                if *count > 0 && n > 0 {
-                                    let h = total_h * *count as f32 / n as f32;
-                                    let r = if Some(i) == top { BAR_W / 2.0 } else { 0.0 };
-                                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(h).background(paint(*color)).corner_radius(r.min(h / 2.0)));
-                                }
-                            }
+            for row in &rows {
+                cu::Row().spacing(16.0).content(|| {
+                    for &i in row {
+                        let e = &model.legend[i];
+                        cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                            Dot(vendor_color(e.vendor, &p));
+                            Label(&e.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                     }
-                });
-                cu::Row().spacing(SP[1]).content(|| {
-                    for (i, day) in week.iter().enumerate() {
-                        let today = i + 1 == week.len();
-                        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().width(BAR_W)).content(|| {
-                            Label(day.label, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
-                        });
-                    }
-                });
-            });
-        });
-        // `.hm-rings`: one 52 px ring per harness with its share of the sessions.
-        // TODO(server, FR-U7): rings per account with their usage share.
-        let total: usize = bars.iter().map(|b| b.sessions).sum::<usize>().max(1);
-        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
-                let n = bars.iter().find(|b| b.label == h.label()).map(|b| b.sessions).unwrap_or(0);
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0)).content(|| {
-                    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(52.0, 52.0)).content(|| {
-                        ring_image(52.0, 6.0, &[(color.to_argb(), n as f32 / total as f32)]);
-                        Label(&n.to_string(), Fs::Sm, Weight::Semibold, None, None);
-                    });
-                    Label(h.label(), Fs::Xs, Weight::Medium, None, Some(1));
                 });
             }
-        });
+        }
+        Label(usage::COST_UNKNOWN, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+        // The session counts stay, below the chart.
+        let total: usize = bars.iter().map(|b| b.sessions).sum();
+        if bars.is_empty() {
+            Label(EMPTY_HARNESS_USAGE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        } else {
+            Label(&format!("오늘 세션 {sessions_today} · 7일 세션 {sessions_week} · 전체 {total}"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        }
     });
 }
 
@@ -1450,6 +1476,14 @@ mod tests {
         let svg = hero_bot_svg("codex", "run", 40.0, &LIGHT);
         assert!(svg.contains("#3f74d4") && svg.contains("width=\"40\""));
         assert!(hero_bot_svg("gemini", "wait", 32.0, &DARK).contains("#8fb1df"));
+    }
+
+    #[test]
+    fn fr_l23_legend_rows_wrap_at_the_card_width() {
+        assert_eq!(legend_rows(&[80.0, 80.0, 80.0], 390.0, 16.0), vec![vec![0, 1, 2]]);
+        assert_eq!(legend_rows(&[100.0, 100.0, 100.0], 230.0, 16.0), vec![vec![0, 1], vec![2]]);
+        assert_eq!(legend_rows(&[300.0, 50.0], 200.0, 16.0), vec![vec![0], vec![1]]);
+        assert!(legend_rows(&[], 200.0, 16.0).is_empty());
     }
 
     #[test]

@@ -5,14 +5,15 @@
 //! channels are created with a chosen subset of the project's sessions. The signed-in person is
 //! a member of every channel as the person `user`. Messages are an append-only log per channel
 //! in the main store (SQLite), and human messages are also appended to a per-channel JSONL file
-//! ([`jsonl`], FR-T16); mentions (FR-T12, FR-T13) and invites (FR-T14, FR-T15, FR-T17) are not
-//! built. Read tracking is one cursor per channel for the person `user` ([`READS_MIGRATION`]).
-//! Tables: [`MIGRATION`]. The agent feed (FR-T11) is derived from session events: [`feed`].
-//! Routes: [`api`].
+//! ([`jsonl`], FR-T16); mentions are parsed and gated ([`mention`], FR-T12, FR-T13) but not yet
+//! delivered to agents; invites (FR-T14, FR-T15, FR-T17) are not built. Read tracking is one
+//! cursor per channel for the person `user` ([`READS_MIGRATION`]). Tables: [`MIGRATION`]. The
+//! agent feed (FR-T11) is derived from session events: [`feed`]. Routes: [`api`].
 
 pub mod api;
 pub mod feed;
 pub mod jsonl;
+pub mod mention;
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -57,6 +58,12 @@ CREATE TABLE channel_reads (
 );
 ";
 
+/// Store migration (appended last): the session ids a message mentions, as a JSON array
+/// (FR-T12), so delivery can read them later. Empty for human conversation.
+pub const MENTIONS_MIGRATION: &str = "
+ALTER TABLE channel_messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]';
+";
+
 /// The person every channel includes.
 pub const USER: &str = "user";
 /// The name a default channel gets.
@@ -72,6 +79,9 @@ pub enum ChannelError {
     BadRequest(String),
     #[error("{0}")]
     Forbidden(String),
+    /// A mention names no member agent (FR-T13); carries the names.
+    #[error("not a member of this channel: {}", .0.join(", "))]
+    NotAMember(Vec<String>),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -104,6 +114,9 @@ pub struct Message {
     pub text: String,
     pub at: i64,
     pub unread: u32,
+    /// Session ids of the member agents this message mentions (FR-T12); empty for human
+    /// conversation.
+    pub mentions: Vec<String>,
 }
 
 /// A channel as the list and detail routes return it. `messages` is empty in a list.
@@ -136,9 +149,9 @@ struct Row {
     default: bool,
 }
 
-fn msg(seq: i64, author: String, body: String, at_ms: i64, last_seq: i64) -> Message {
+fn msg(seq: i64, author: String, body: String, at_ms: i64, last_seq: i64, mentions: &str) -> Message {
     let unread = u32::from(seq > last_seq && author != USER);
-    Message { id: seq.to_string(), seq, from: author, text: body, at: at_ms / 1000, unread }
+    Message { id: seq.to_string(), seq, from: author, text: body, at: at_ms / 1000, unread, mentions: serde_json::from_str(mentions).unwrap_or_default() }
 }
 
 impl Store {
@@ -235,9 +248,9 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT seq, author, body, at FROM channel_messages WHERE channel_id = ?1 ORDER BY seq DESC LIMIT 1",
+                "SELECT seq, author, body, at, mentions FROM channel_messages WHERE channel_id = ?1 ORDER BY seq DESC LIMIT 1",
                 params![channel],
-                |r| Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last)),
+                |r| Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last, &r.get::<_, String>(4)?)),
             )
             .optional()?)
     }
@@ -342,14 +355,26 @@ impl Store {
         if !self.members_of(&row)?.iter().any(|m| m.id == from) {
             return Err(ChannelError::Forbidden(format!("{from} is not a member of channel {channel}")));
         }
+        // Only the person's `@name` is gated and resolved for now (FR-T12, FR-T13); an agent's
+        // message is stored as written.
+        let mentions: Vec<String> = if from == USER {
+            let found = mention::parse_mentions(text, &self.members_of(&row)?);
+            if !found.unknown.is_empty() {
+                return Err(ChannelError::NotAMember(found.unknown));
+            }
+            found.mentioned.into_iter().map(|m| m.id).collect()
+        } else {
+            Vec::new()
+        };
+        let mentions = serde_json::to_string(&mentions).map_err(anyhow::Error::from)?;
         let at = now_ms();
         let last = self.read_cursor(channel)?;
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO channel_messages (channel_id, author, body, at) VALUES (?1, ?2, ?3, ?4)",
-            params![channel, from, text, at],
+            "INSERT INTO channel_messages (channel_id, author, body, at, mentions) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![channel, from, text, at, mentions],
         )?;
-        Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last))
+        Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last, &mentions))
     }
 
     /// Remove one message row. Used only to undo a post whose JSONL append failed (FR-T16).
@@ -369,13 +394,13 @@ impl Store {
         let last = self.read_cursor(channel)?;
         let conn = self.conn();
         let sql = format!(
-            "SELECT seq, author, body, at FROM channel_messages WHERE channel_id = ?1 AND seq > ?2 ORDER BY seq {} LIMIT ?3",
+            "SELECT seq, author, body, at, mentions FROM channel_messages WHERE channel_id = ?1 AND seq > ?2 ORDER BY seq {} LIMIT ?3",
             if newest { "DESC" } else { "ASC" }
         );
         let mut stmt = conn.prepare(&sql)?;
         let v = stmt
             .query_map(params![channel, after, limit.unwrap_or(-1)], |r| {
-                Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last))
+                Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last, &r.get::<_, String>(4)?))
             })?
             .collect::<Result<_, _>>()?;
         Ok(v)
@@ -385,5 +410,11 @@ impl Store {
     pub fn read_channel_messages(&self, channel: &str, after: i64) -> Result<Vec<Message>, ChannelError> {
         self.channel_row(channel)?;
         self.channel_messages_after(channel, after, None, false)
+    }
+
+    /// Which agents `text` would reach and which names match none (FR-T12). Stores nothing.
+    pub fn preview_channel_mentions(&self, channel: &str, text: &str) -> Result<mention::Mentions, ChannelError> {
+        let row = self.channel_row(channel)?;
+        Ok(mention::parse_mentions(text, &self.members_of(&row)?))
     }
 }

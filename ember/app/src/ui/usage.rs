@@ -306,7 +306,17 @@ pub struct HomeStack {
     pub average_tokens: u64,
     pub days: Vec<StackDay>,
     pub legend: Vec<LegendEntry>,
+    /// Shown under the weekday axis: the days are UTC days.
+    pub axis_caption: &'static str,
+    /// The legend text of the dashed average line.
+    pub average_legend: &'static str,
+    /// A 다시 시도 button is shown (the load failed).
+    pub retry: bool,
 }
+
+pub const UTC_CAPTION: &str = "(UTC 기준)";
+pub const AVERAGE_LEGEND: &str = "7일 평균";
+pub const RETRY: &str = "다시 시도";
 
 /// Mon..Sun name of a `YYYY-MM-DD` UTC day, "" when it is not a date.
 pub fn weekday_name(day: &str) -> &'static str {
@@ -340,10 +350,13 @@ pub fn home_stack(load: &Load<UsageSummary>, window: usize) -> HomeStack {
         average_tokens: 0,
         days: Vec::new(),
         legend: Vec::new(),
+        axis_caption: UTC_CAPTION,
+        average_legend: AVERAGE_LEGEND,
+        retry: false,
     };
     let s = match load {
         Load::Loading => return blank(LOADING),
-        Load::Failed(_) => return blank(FAILED),
+        Load::Failed(_) => return HomeStack { retry: true, ..blank(FAILED) },
         Load::Ready(s) => s,
     };
     let start = s.days.len().saturating_sub(window.max(1));
@@ -391,6 +404,9 @@ pub fn home_stack(load: &Load<UsageSummary>, window: usize) -> HomeStack {
             .into_iter()
             .map(|k| LegendEntry { label: agent_label(&k), vendor: Vendor::of(&k), agent: k })
             .collect(),
+        axis_caption: UTC_CAPTION,
+        average_legend: AVERAGE_LEGEND,
+        retry: false,
     }
 }
 
@@ -576,6 +592,9 @@ mod tests {
     fn fr_l23_stack_states_loading_failed_empty() {
         assert_eq!(home_stack(&Load::Loading, 7).notice.as_deref(), Some(LOADING));
         assert_eq!(home_stack(&Load::Failed("x".into()), 7).notice.as_deref(), Some(FAILED));
+        assert!(home_stack(&Load::Failed("x".into()), 7).retry);
+        assert!(!home_stack(&Load::Loading, 7).retry);
+        assert!(!home_stack(&summary(vec![day("2026-11-06", 1, 1, 1)]), 7).retry);
         let e = home_stack(&summary(vec![]), 7);
         assert_eq!(e.notice.as_deref(), Some(NO_REPORT));
         assert!(e.days.is_empty() && e.legend.is_empty());
@@ -589,6 +608,14 @@ mod tests {
         assert_eq!(m.days.len(), 7);
         assert_eq!(m.average, "7일 평균 4.0K");
         assert_eq!(m.days[0].day, "2026-11-03");
+    }
+
+    #[test]
+    fn fr_l23_stack_captions_name_utc_and_average() {
+        let m = home_stack(&summary(vec![day("2026-11-06", 1, 1, 1)]), 7);
+        assert_eq!(m.axis_caption, "(UTC 기준)");
+        assert_eq!(m.average_legend, "7일 평균");
+        assert_eq!(RETRY, "다시 시도");
     }
 
     #[test]

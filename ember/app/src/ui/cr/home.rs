@@ -1216,6 +1216,9 @@ fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi, chart_w: f3
         Label(&model.today, Fs::Xl2, Weight::Regular, None, Some(1));
         if let Some(notice) = &model.notice {
             Label(notice, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+            if model.retry {
+                AppButton(usage::RETRY, None, ButtonKind::Default, true, true, false, crate::bridge::request_usage_summary);
+            }
         } else {
             Label(&model.average, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
             cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
@@ -1227,6 +1230,7 @@ fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi, chart_w: f3
                     });
                 }
             });
+            Label(model.axis_caption, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
             for row in &rows {
                 cu::Row().spacing(16.0).content(|| {
                     for &i in row {
@@ -1238,6 +1242,11 @@ fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi, chart_w: f3
                     }
                 });
             }
+            // The dashed average line has its own legend entry.
+            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                cu::Canvas(DrawList::builder().rect(paint(p.text), 0.0, 0.0, 3.0, 1.0, 0.0).rect(paint(p.text), 6.0, 0.0, 3.0, 1.0, 0.0).rect(paint(p.text), 12.0, 0.0, 3.0, 1.0, 0.0).build()).modifier(Modifier::new().size(15.0, 1.0));
+                Label(model.average_legend, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
         }
         Label(usage::COST_UNKNOWN, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         // The session counts stay, below the chart.

@@ -40,7 +40,7 @@ async fn fr_g6_push_list_and_pop_restore_changes() {
     std::fs::write(repo.join("new"), "untracked\n").unwrap();
     let body = json!({"repo": repo, "message": "save: work", "include_untracked": true});
     assert_eq!(call(&client, &base, "push", body).await.0, 204);
-    assert!(git(&repo, &["status", "--porcelain"]).is_empty());
+    let st = git(&repo, &["status", "--porcelain"]); assert!(st.is_empty(), "status: {st:?}");
     let (status, text) = call(&client, &base, "list", json!({"repo": repo})).await;
     assert_eq!(status, 200, "{text}");
     let entries: Value = serde_json::from_str(&text).unwrap();

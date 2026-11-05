@@ -230,7 +230,6 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         .current_dir(repo)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_LITERAL_PATHSPECS", "1")
         .env("GCM_INTERACTIVE", "never")
         .env("GIT_ASKPASS", "true")
         .env("SSH_ASKPASS_REQUIRE", "never")
@@ -242,6 +241,11 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // `git stash push --include-untracked` silently skips untracked files under literal
+    // pathspecs (git 2.43), and the stash push here never takes a pathspec, so it opts out.
+    if !args.starts_with(&["stash", "push"]) {
+        cmd.env("GIT_LITERAL_PATHSPECS", "1");
+    }
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
@@ -397,8 +401,7 @@ async fn open(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
 pub(crate) async fn worktree_root(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
     let dir = open(policy, repo).await?;
     let out = run_ok(&dir, &["rev-parse", "--show-toplevel"], None).await?;
-    let root = out.stdout.strip_suffix('
-').unwrap_or(&out.stdout);
+    let root = out.stdout.strip_suffix('\n').unwrap_or(&out.stdout);
     Ok(policy.resolve_existing(Path::new(root))?)
 }
 

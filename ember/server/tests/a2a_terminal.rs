@@ -224,3 +224,51 @@ async fn fr_t9_interrupt_stops_a_running_turn() {
     .await;
     assert!(notices(&w.sessions, &target).iter().any(|n| n.contains("interrupted")));
 }
+
+#[tokio::test]
+async fn fr_t9_cli_terminal_commands_and_permissions() {
+    let w = world();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = w.app.clone();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let reader = started(&w, "reader").await;
+    let target = started(&w, "target").await;
+    let token = w.agents.token(&reader);
+    async fn cli(url: &str, token: &str, args: &[&str]) -> std::process::Output {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_ember-a2a"))
+            .args(args).env("EMBER_URL", url).env("EMBER_RUNTIME_TOKEN", token)
+            .stdin(std::process::Stdio::null()).output().await.unwrap()
+    }
+    let denied = cli(&url, &token, &["terminal", "read", &target]).await;
+    assert_eq!(denied.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("no terminal permission"));
+    grant(&w, &reader, &target, true).await;
+    let read = cli(&url, &token, &["terminal", "read", &target, "--lines", "2", "--json"]).await;
+    assert!(read.status.success(), "{}", String::from_utf8_lossy(&read.stderr));
+    let data: Value = serde_json::from_slice(&read.stdout).unwrap();
+    assert_eq!(data["lines"].as_array().unwrap().len(), 2);
+    let seq = data["last_seq"].as_i64().unwrap().to_string();
+    let follow = cli(&url, &token, &["terminal", "read", &target, "--since", &seq, "--wait-ms", "1", "--json"]).await;
+    assert!(follow.status.success());
+    assert!(serde_json::from_slice::<Value>(&follow.stdout).unwrap()["lines"].as_array().unwrap().is_empty());
+    let sent = cli(&url, &token, &["terminal", "send-text", &target, "hello", "target"]).await;
+    assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
+    wait_for("CLI text", || w.sessions.store().events_after(&target, 0).unwrap().iter().any(
+        |e| matches!(&e.event, AgentEvent::UserMessage { text } if text == "hello target")
+    )).await;
+    wait_status(&w.sessions, &target, SessionStatus::WaitingForApproval).await;
+    w.sessions.answer(&target, "approval-2", ApprovalDecision::AllowOnce).await.unwrap();
+    wait_status(&w.sessions, &target, SessionStatus::Finished).await;
+    w.sessions.send(&target, "slow task").await.unwrap();
+    wait_status(&w.sessions, &target, SessionStatus::Running).await;
+    let interrupted = cli(&url, &token, &["terminal", "interrupt", &target]).await;
+    assert!(interrupted.status.success(), "{}", String::from_utf8_lossy(&interrupted.stderr));
+    wait_for("CLI interrupt", || w.sessions.store().events_after(&target, 0).unwrap().iter().any(
+        |e| matches!(e.event, AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted })
+    )).await;
+    let invalid = cli(&url, &token, &["terminal", "read", &target, "--since", "bad"]).await;
+    assert_eq!(invalid.status.code(), Some(2));
+    let instructions = w.agents.0.lock().unwrap().get(&reader).unwrap().instructions.clone().unwrap();
+    assert!(instructions.contains("terminal read") && instructions.contains("terminal send-text") && instructions.contains("terminal interrupt"));
+}

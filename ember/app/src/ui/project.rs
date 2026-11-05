@@ -24,6 +24,7 @@ use ember_client::wire::{MemberDefaults, Project, ProjectPatch, TeamView};
 use ember_client::{LauncherStatus, State};
 
 use crate::model::status_rank;
+use crate::ui::characters::CharStyle;
 use crate::ui::components::PillTone;
 
 
@@ -523,6 +524,56 @@ pub fn build_patch(server: &Project, d: &SettingsDraft) -> ProjectPatch {
     patch
 }
 
+/// The project the UI shows as selected after `old` was renamed to `new` (FR-L26): the new name
+/// when `old` was selected, otherwise what was selected.
+pub fn follow_rename(selected: Option<&str>, old: &str, new: &str) -> Option<String> {
+    selected.map(|s| if s == old { new.to_string() } else { s.to_string() })
+}
+
+/// The character style to show: the server's value when it is a known id, else the one this
+/// device remembers, else the default (FR-L26). One source of truth is the server.
+pub fn effective_style(server: Option<&str>, device: Option<CharStyle>) -> CharStyle {
+    server.and_then(CharStyle::from_id).or(device).unwrap_or_default()
+}
+
+/// What closing the settings sheet does (FR-L26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseAction {
+    /// Ignored: a save is in flight.
+    Ignore,
+    /// Ask first: the draft differs from the loaded project.
+    Confirm,
+    Close,
+}
+
+/// The unsaved-changes guard of the settings sheet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SettingsGuard {
+    pub saving: bool,
+    pub dirty: bool,
+}
+
+impl SettingsGuard {
+    /// `dirty` when the patch the draft would send is not empty.
+    pub fn new(saving: bool, patch_is_empty: bool) -> SettingsGuard {
+        SettingsGuard { saving, dirty: !patch_is_empty }
+    }
+
+    /// What 취소, X and the backdrop do.
+    pub fn on_close(self) -> CloseAction {
+        if self.saving {
+            CloseAction::Ignore
+        } else if self.dirty {
+            CloseAction::Confirm
+        } else {
+            CloseAction::Close
+        }
+    }
+}
+
+/// The question of the unsaved-changes confirm.
+pub const DISCARD_QUESTION: &str = "저장하지 않은 변경이 있습니다. 닫을까요?";
+
 /// The harness choices of the new member defaults: server kind and label. The first is "none".
 /// Gemini is left out because the server has no Gemini kind (see `Harness::kind`).
 pub fn agent_options() -> Vec<(&'static str, &'static str)> {
@@ -1001,5 +1052,33 @@ mod tests {
         b.repo = Some("github.com/x/y".into());
         b.branch = Some("develop".into());
         assert_eq!(b.repo_line(), "github.com/x/y \u{00b7} develop");
+    }
+
+    #[test]
+    fn fr_l26_rename_updates_selection() {
+        assert_eq!(follow_rename(Some("old"), "old", "new").as_deref(), Some("new"));
+        assert_eq!(follow_rename(Some("other"), "old", "new").as_deref(), Some("other"));
+        assert_eq!(follow_rename(None, "old", "new"), None);
+    }
+
+    #[test]
+    fn fr_l26_style_prefers_server_value() {
+        assert_eq!(effective_style(Some("crew"), Some(CharStyle::Cream)), CharStyle::Crew);
+        assert_eq!(effective_style(None, Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some(""), Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some("neon"), Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some("neon"), None), CharStyle::default());
+    }
+
+    #[test]
+    fn fr_l26_guard_blocks_close_while_saving() {
+        assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
+        assert_eq!(SettingsGuard::new(true, true).on_close(), CloseAction::Ignore);
+    }
+
+    #[test]
+    fn fr_l26_guard_asks_when_dirty() {
+        assert_eq!(SettingsGuard::new(false, false).on_close(), CloseAction::Confirm);
+        assert_eq!(SettingsGuard::new(false, true).on_close(), CloseAction::Close);
     }
 }

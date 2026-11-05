@@ -318,6 +318,10 @@ impl Client {
     /// every other client.
     pub async fn patch_project(&self, name: &str, patch: &crate::wire::ProjectPatch) -> Result<Project, crate::api::ProjectPatchError> {
         let p = self.inner.api.patch_project(name, patch).await?;
+        // The rename first, so the answer (already under the new name) lands on the moved record.
+        if let Some(new) = &patch.name {
+            self.inner.apply(Input::ProjectRenamed { old: name.to_string(), new: new.clone() });
+        }
         self.inner.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
         if patch.name.is_some() {
             let _ = self.load_projects().await;

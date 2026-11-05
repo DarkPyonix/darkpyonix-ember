@@ -48,7 +48,10 @@ pub fn Character(
     role: Option<&str>,
 ) {
     let theme = ember_theme();
-    let style = shared_ui().prefs.get().character_style(project);
+    // The server's value first, this device's choice only as a fallback (FR-L26).
+    let server = crate::services::try_services()
+        .and_then(|s| s.client.read(|st| st.project(project).and_then(|p| p.character_style.clone())));
+    let style = crate::ui::project::effective_style(server.as_deref(), shared_ui().prefs.get().saved_character_style(project));
     let spec = CharSpec {
         style,
         name: name.to_string(),

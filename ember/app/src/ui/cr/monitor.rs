@@ -200,6 +200,7 @@ fn MonCard(icon: &'static str, label: &str, body: impl FnOnce()) {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().height(168.0)).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
+                // TODO(compose-rust#443): no overflow_wrap on Text, so a long label clips with an ellipsis.
                 Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
             });
             body();

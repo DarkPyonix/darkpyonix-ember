@@ -814,7 +814,8 @@ pub fn EmberSheetSized(
         });
     };
     let window = compose_rust::runtime::current_window_size();
-    if sheet_presentation(window.width_dp, monitor) == SheetPresentation::Bottom {
+    let presentation = sheet_presentation(window.width_dp, monitor);
+    if presentation == SheetPresentation::Bottom {
         // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap
         // their content instead of occupying the full 85 percent height.
         cu::Sheet(open)
@@ -822,7 +823,7 @@ pub fn EmberSheetSized(
                 .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
             .on_dismiss(on_dismiss)
             .content(body);
-    } else if sheet_presentation(window.width_dp, monitor) == SheetPresentation::FullScreen {
+    } else if presentation == SheetPresentation::FullScreen {
         cu::Dialog(open)
             .modifier(modifier.width(window.width_dp).height(window.height_dp))
             .on_dismiss(on_dismiss)

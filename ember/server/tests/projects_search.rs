@@ -76,7 +76,10 @@ async fn fr_l4_assign_and_unassign_computers_is_persisted_and_pushed() {
 
     let (st, list) = call(&f.app, Method::GET, "/api/projects", None).await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(list, json!([{ "name": "alpha", "created_at": list[0]["created_at"], "computers": [] }]));
+    // FR-L26 added settings fields to the project JSON; this test is about the computers list.
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["name"], "alpha");
+    assert_eq!(list[0]["computers"], json!([]));
 
     // A project with no sessions yet; names are percent-encoded path segments.
     let (st, p) = call(&f.app, Method::POST, "/api/projects", Some(json!({ "name": "web/app" }))).await;

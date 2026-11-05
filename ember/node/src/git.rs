@@ -10,6 +10,9 @@
 //! [`network_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
 //! [`GitError::TooLarge`].
 
+#[path = "git_stash.rs"]
+pub mod git_stash;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;

@@ -10,6 +10,12 @@
 //! [`network_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
 //! [`GitError::TooLarge`].
 
+
+#[path = "git_log.rs"]
+pub mod git_log;
+#[path = "git_stash.rs"]
+pub mod git_stash;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -224,7 +230,6 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         .current_dir(repo)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_LITERAL_PATHSPECS", "1")
         .env("GCM_INTERACTIVE", "never")
         .env("GIT_ASKPASS", "true")
         .env("SSH_ASKPASS_REQUIRE", "never")
@@ -236,6 +241,11 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // `git stash push --include-untracked` silently skips untracked files under literal
+    // pathspecs (git 2.43), and the stash push here never takes a pathspec, so it opts out.
+    if !args.starts_with(&["stash", "push"]) {
+        cmd.env("GIT_LITERAL_PATHSPECS", "1");
+    }
     if std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
@@ -311,6 +321,8 @@ pub fn korean_message(git_text: &str) -> Option<&'static str> {
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
     if has(&["dubious ownership"]) {
         Some("저장소 소유자가 현재 사용자와 달라 git이 접근을 거부했습니다 (safe.directory 설정이 필요합니다).")
+    } else if has(&["bad revision", "unknown revision or path not in the working tree"]) {
+        Some("브랜치를 찾을 수 없습니다. 브랜치 이름을 확인하세요.")
     } else if has(&["not currently on a branch"]) {
         Some("HEAD가 브랜치에 있지 않습니다 (detached HEAD). 브랜치로 전환한 뒤 다시 시도하세요.")
     } else if has(&["no tracking information", "no upstream", "has no upstream"]) {
@@ -383,6 +395,14 @@ async fn open(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
     }
     // Dubious ownership and any other refusal are not "not a repository".
     Err(GitError::Conflict(describe(&text)))
+}
+
+/// Resolve the worktree root so root-relative git paths work from any subdirectory.
+pub(crate) async fn worktree_root(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
+    let dir = open(policy, repo).await?;
+    let out = run_ok(&dir, &["rev-parse", "--show-toplevel"], None).await?;
+    let root = out.stdout.strip_suffix('\n').unwrap_or(&out.stdout);
+    Ok(policy.resolve_existing(Path::new(root))?)
 }
 
 /// A ref, remote or branch name must not look like an option.

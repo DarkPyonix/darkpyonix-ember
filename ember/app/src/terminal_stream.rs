@@ -29,41 +29,6 @@ pub enum ClientError {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Server token
-
-/// The token the server requires from apps on the same computer: `env_token` when set and
-/// non-empty, else the first line of `<data_dir>/server-token`, else `<home>/.ember/server-token`.
-pub fn server_token(env_token: Option<&str>, data_dir: Option<&std::path::Path>, home: Option<&std::path::Path>) -> Option<String> {
-    let clean = |s: &str| {
-        let s = s.trim();
-        (!s.is_empty()).then(|| s.to_owned())
-    };
-    if let Some(token) = env_token.and_then(clean) {
-        return Some(token);
-    }
-    let file = match (data_dir, home) {
-        (Some(dir), _) => dir.join("server-token"),
-        (None, Some(home)) => home.join(".ember").join("server-token"),
-        (None, None) => return None,
-    };
-    std::fs::read_to_string(file).ok().and_then(|s| clean(&s))
-}
-
-/// [`server_token`] over the process environment (`EMBER_SERVER_TOKEN`, `EMBER_DATA_DIR`, `HOME`).
-fn server_token_from_env() -> Option<String> {
-    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    let env_token = std::env::var("EMBER_SERVER_TOKEN").ok();
-    let data_dir = var("EMBER_DATA_DIR").map(std::path::PathBuf::from);
-    let home = var("HOME").map(std::path::PathBuf::from);
-    server_token(env_token.as_deref(), data_dir.as_deref(), home.as_deref())
-}
-
-/// The `Authorization` header value for `token`.
-pub fn bearer_header(token: &str) -> String {
-    format!("Bearer {token}")
-}
-
-// ---------------------------------------------------------------------------------------------
 // Relay URLs
 
 fn encode_segment(segment: &str) -> String {
@@ -738,7 +703,10 @@ async fn run(
         tags: Default::default(),
     };
     // TODO(#333): TLS. The client speaks plain http and ws only.
-    let token = server_token_from_env();
+    // The shared loader; the token goes only to a server this machine may trust with it.
+    let token = ember_client::token::token_allowed_for(base)
+        .then(ember_client::token::server_token_from_env)
+        .flatten();
     let mut post = reqwest::Client::new().post(terms_url(base, computer)).json(&request);
     if let Some(token) = &token {
         post = post.bearer_auth(token);
@@ -761,7 +729,7 @@ async fn run(
     // TODO(#333): TLS. Plain ws only; wss is not configured.
     let mut upgrade = attach_url(base, computer, &created.term.id).into_client_request()?;
     if let Some(token) = &token {
-        let value = HeaderValue::from_str(&bearer_header(token))
+        let value = HeaderValue::from_str(&ember_client::token::bearer_header(token))
             .map_err(|_| ClientError::Protocol("the server token is not a valid header value".into()))?;
         upgrade.headers_mut().insert("Authorization", value);
     }
@@ -807,38 +775,6 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fr_s9_env_token_wins_over_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("server-token"), "from-file\n").unwrap();
-        assert_eq!(server_token(Some(" from-env "), Some(dir.path()), None).as_deref(), Some("from-env"));
-    }
-
-    #[test]
-    fn fr_s9_file_token_is_read_and_trimmed() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("server-token"), "  abc123\n").unwrap();
-        assert_eq!(server_token(Some(""), Some(dir.path()), None).as_deref(), Some("abc123"));
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join(".ember")).unwrap();
-        std::fs::write(home.path().join(".ember").join("server-token"), "h\n").unwrap();
-        assert_eq!(server_token(None, None, Some(home.path())).as_deref(), Some("h"));
-    }
-
-    #[test]
-    fn fr_s9_missing_or_empty_file_gives_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(server_token(None, Some(dir.path()), None), None);
-        std::fs::write(dir.path().join("server-token"), " \n").unwrap();
-        assert_eq!(server_token(None, Some(dir.path()), None), None);
-        assert_eq!(server_token(None, None, None), None);
-    }
-
-    #[test]
-    fn fr_s9_bearer_header_format() {
-        assert_eq!(bearer_header("tok"), "Bearer tok");
-    }
 
     #[test]
     fn fr_l31_terminal_starts_disconnected_with_korean_message() {

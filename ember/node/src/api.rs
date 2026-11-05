@@ -19,6 +19,7 @@
 //! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
 //! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
+//! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
 //! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
 //! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
@@ -27,6 +28,8 @@
 //! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
 //! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
 //! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
+//! | POST | `/git/stash/{list,push,apply,pop,drop}` | FR-G6 stash list and operations (409 on conflicts) |
+//! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
 //! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
 //! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
@@ -75,6 +78,8 @@ use crate::config::NodeConfig;
 use crate::exec::{self, kill_group};
 use crate::fs::{self, FsError};
 use crate::git::{self, *};
+use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
+use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
@@ -153,6 +158,9 @@ pub fn router(node: Node) -> Router {
         .route("/fs/pwrite", post(pwrite))
         .route("/fs/glob", post(glob))
         .route("/fs/grep", post(grep))
+        // FR-G5: history route.
+        .route("/git/log", post(git_log_handler))
+        // End FR-G5.
         .route("/git/status", post(git_status))
         .route("/git/diff", post(git_diff))
         .route("/git/stage", post(git_stage))
@@ -165,6 +173,17 @@ pub fn router(node: Node) -> Router {
         .route("/git/pull", post(git_pull))
         .route("/git/push", post(git_push))
         .route("/git/conflicts", post(git_conflicts))
+        // FR-G6 stash routes.
+        .route("/git/stash/list", post(git_stash_list))
+        .route("/git/stash/push", post(git_stash_push))
+        .route("/git/stash/apply", post(git_stash_apply))
+        .route("/git/stash/pop", post(git_stash_pop))
+        .route("/git/stash/drop", post(git_stash_drop))
+        // End FR-G6 stash routes.
+        // FR-G7 routes begin.
+        .route("/git/conflict", post(git_conflict))
+        .route("/git/resolve", post(git_resolve))
+        // FR-G7 routes end.
         .route("/exec", get(exec_ws))
         .route("/exec-server", get(crate::exec_server::ws))
         .route("/egress", get(crate::egress::ws))
@@ -363,6 +382,12 @@ async fn rename(State(n): State<Node>, Json(r): Json<RenameRequest>) -> Result<S
 // ([`crate::git`]). Operations that change the index or work tree take the write lock like the file writes do;
 // fetch, push and the network half of pull do not, because they can take a long time.
 
+// FR-G5: history handler.
+async fn git_log_handler(State(n): State<Node>, Json(r): Json<git_log::GitLogRequest>) -> ApiResult<git_log::GitLogResponse> {
+    Ok(Json(git_log::log(&n.0.policy, &r).await?))
+}
+// End FR-G5.
+
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))
 }
@@ -425,6 +450,47 @@ async fn git_push(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> Api
 
 async fn git_conflicts(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitConflicts> {
     Ok(Json(git::conflicts(&n.0.policy, &r).await?))
+}
+
+// FR-G6 stash handlers.
+async fn git_stash_list(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<Vec<GitStashEntry>> {
+    Ok(Json(git_stash::list(&n.0.policy, &r).await?))
+}
+
+async fn git_stash_push(State(n): State<Node>, Json(r): Json<GitStashPushRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::push(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_apply(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Apply).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_pop(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Pop).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_drop(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Drop).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+// End FR-G6 stash handlers.
+
+// FR-G7 handlers.
+async fn git_conflict(State(n): State<Node>, Json(r): Json<GitConflictRequest>) -> ApiResult<GitConflict> {
+    Ok(Json(git_conflict::conflict(&n.0.policy, &r).await?))
+}
+
+async fn git_resolve(State(n): State<Node>, Json(r): Json<GitResolveRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_conflict::resolve(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn setattr(State(n): State<Node>, Json(r): Json<SetAttrRequest>) -> ApiResult<Stat> {

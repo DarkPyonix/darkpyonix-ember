@@ -38,6 +38,10 @@ async fn handle(
         "commit" => (StatusCode::OK, Json(json!({ "sha": "abc123" }))),
         "fetch" | "pull" | "push" => (StatusCode::OK, Json(json!({ "output": format!("{op} ok") }))),
         "conflicts" => (StatusCode::OK, Json(json!({ "paths": ["c.rs"] }))),
+        "log" => (StatusCode::OK, Json(json!({"commits": [{"sha":"abc", "parents":["def"], "author":"A", "email":"a@example.com", "time":123, "subject":"subject", "refs":[{"name":"HEAD", "kind":"head"}]}]}))),
+        "stash/list" => (StatusCode::OK, Json(json!([{"index":0, "message":"work", "branch":"main", "time":"2026-01-01"}]))),
+        "conflict" => (StatusCode::OK, Json(json!({"blocks":[{"kind":"common", "text":"before"}, {"kind":"conflict", "ours":"a", "theirs":"b", "ours_label":"HEAD", "theirs_label":"other"}]}))),
+        "stash/push" | "stash/apply" | "stash/pop" | "stash/drop" | "resolve" => (StatusCode::NO_CONTENT, Json(Value::Null)),
         "stage" | "unstage" | "apply" | "checkout" | "branch" => (StatusCode::NO_CONTENT, Json(Value::Null)),
         _ => (StatusCode::NOT_FOUND, Json(json!({ "error": "unknown" }))),
     }
@@ -46,7 +50,7 @@ async fn handle(
 async fn start() -> (Api, Seen) {
     let seen: Seen = Arc::default();
     let app = Router::new()
-        .route("/api/projects/{id}/git/{op}", post(handle))
+        .route("/api/projects/{id}/git/{*op}", post(handle))
         .with_state(seen.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -125,4 +129,31 @@ async fn remote_operations_return_git_output() {
     assert_eq!(last(&seen).2, json!({ "remote": "origin" }));
     assert_eq!(api.git_push("ember", None).await.unwrap().output, "push ok");
     assert_eq!(api.git_conflicts("ember").await.unwrap().paths, vec!["c.rs"]);
+}
+
+#[tokio::test]
+async fn fr_g4_history_stash_and_conflict_calls_match_node_contract() {
+    use ember_client::api::{GitConflictBlock, GitLogRefKind};
+    let (api, seen) = start().await;
+    let log = api.git_log("ember", 25, 3, Some("main")).await.unwrap();
+    assert_eq!(last(&seen).2, json!({"limit":25, "skip":3, "branch":"main"}));
+    assert_eq!(log.commits[0].parents, vec!["def"]);
+    assert_eq!(log.commits[0].refs[0].kind, GitLogRefKind::Head);
+    let stash = api.git_stash_list("ember").await.unwrap();
+    assert_eq!(last(&seen).1, "stash/list");
+    assert_eq!((stash[0].index, stash[0].message.as_str(), stash[0].branch.as_str(), stash[0].time.as_str()), (0, "work", "main", "2026-01-01"));
+    api.git_stash_push("ember", Some("save"), true).await.unwrap();
+    assert_eq!(last(&seen).2, json!({"message":"save", "include_untracked":true}));
+    api.git_stash_apply("ember", 2).await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("stash/apply".into(), json!({"index":2})));
+    api.git_stash_pop("ember", 1).await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("stash/pop".into(), json!({"index":1})));
+    api.git_stash_drop("ember", 0).await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("stash/drop".into(), json!({"index":0})));
+    let conflict = api.git_conflict("ember", "a.txt").await.unwrap();
+    assert_eq!(last(&seen).2, json!({"path":"a.txt"}));
+    assert!(matches!(&conflict.blocks[0], GitConflictBlock::Common { text } if text == "before"));
+    assert!(matches!(&conflict.blocks[1], GitConflictBlock::Conflict { ours, theirs, ours_label, theirs_label } if ours == "a" && theirs == "b" && ours_label == "HEAD" && theirs_label == "other"));
+    api.git_resolve("ember", "a.txt", "resolved").await.unwrap();
+    assert_eq!(last(&seen).2, json!({"path":"a.txt", "content":"resolved"}));
 }

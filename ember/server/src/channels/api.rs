@@ -50,7 +50,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -106,6 +106,8 @@ fn build(ctx: ChannelsCtx) -> Router {
         .route("/api/channels/{id}/mentions/preview", post(preview))
         .route("/api/channels/{id}/feed", get(feed))
         .route("/api/channels/{id}/feed/{approval_id}/answer", post(answer_feed))
+        .route("/api/channels/{id}/invites", get(list_invites).post(create_invite))
+        .route("/api/channels/{id}/invites/{invite_id}", delete(revoke_invite))
         .with_state(ctx)
 }
 
@@ -313,5 +315,41 @@ async fn answer_feed(
         .answer(&item.session_id, &approval_id, b.decision)
         .await
         .map_err(|e| ChannelError::Other(anyhow::anyhow!("{e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, Default)]
+struct InviteBody {
+    ttl_hours: Option<i64>,
+}
+
+/// FR-T14: the owner creates an invite; the token is in this answer only.
+async fn create_invite(
+    State(c): State<ChannelsCtx>,
+    Path(id): Path<String>,
+    body: Option<Json<InviteBody>>,
+) -> ApiResult<impl IntoResponse> {
+    let ttl = body.and_then(|Json(b)| b.ttl_hours);
+    let (invite, token) = c.store.create_invite(&id, USER, ttl)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": invite.id,
+            "token": token,
+            "link": format!("/join#{token}"),
+            "expires_at": invite.expires_at,
+        })),
+    ))
+}
+
+async fn list_invites(State(c): State<ChannelsCtx>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(c.store.list_invites(&id)?))
+}
+
+async fn revoke_invite(
+    State(c): State<ChannelsCtx>,
+    Path((id, invite_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    c.store.revoke_invite(&id, &invite_id)?;
     Ok(StatusCode::NO_CONTENT)
 }

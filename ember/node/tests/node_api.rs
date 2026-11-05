@@ -574,3 +574,21 @@ async fn namespace_operations_for_the_mount() {
     assert_eq!(e.code(), Some(ErrorCode::ForbiddenPath));
     assert!(f.outside.join("secret").exists());
 }
+
+#[tokio::test]
+async fn fr_x7_metrics_sample_over_the_api_and_needs_the_token() {
+    let f = start().await;
+    let s = within(f.client.metrics(Some(3))).await.unwrap();
+    assert!(!s.cpu.cores.is_empty());
+    assert!(s.memory.as_ref().is_some_and(|m| m.total_bytes > 0));
+    assert!(s.processes.len() <= 3);
+    assert!(s.gpu.devices.is_empty() && s.gpu.reason.is_some());
+    // The default list length applies without `top`, and `top` is capped.
+    let d = within(f.client.metrics(None)).await.unwrap();
+    assert!(d.processes.len() <= 20);
+    let big = within(f.client.metrics(Some(100_000))).await.unwrap();
+    assert!(big.processes.len() <= 200);
+
+    let e = NodeClient::new(&f.base, "wrong").unwrap().metrics(None).await.unwrap_err();
+    assert!(matches!(&e, ClientError::Api { status: 401, .. }), "{e:?}");
+}

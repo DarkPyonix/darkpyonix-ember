@@ -13,7 +13,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use compose_rust::runtime::{
-    current_window_size, launched_effect, mutable_state_of, remember, MutableState,
+    current_window_size, launched_effect, mutable_state_of, remember, remember_with_key,
+    MutableState,
 };
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -66,6 +67,23 @@ pub fn with_store<R>(f: impl FnOnce(&mut LocalStore) -> R) -> R {
     f(&mut guard)
 }
 
+/// Clears the device-local store.
+pub fn clear_local_store() {
+    with_store(|s| *s = LocalStore::default());
+}
+
+/// Whether Routines should display sample demo entries instead of querying the server.
+pub fn should_use_sample_entries(route_env: Option<&str>, demo_active: bool) -> bool {
+    route_env == Some("routines") || demo_active
+}
+
+fn sample_mode() -> bool {
+    should_use_sample_entries(
+        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
+    )
+}
+
 /// What the server last answered: `online` is false until a load succeeds.
 #[derive(Default)]
 pub struct Remote {
@@ -83,9 +101,13 @@ pub fn with_remote<R>(f: impl FnOnce(&mut Remote) -> R) -> R {
     f(&mut guard)
 }
 
+fn remote_schedule_allowed(sample: bool, online: bool) -> bool {
+    !sample && online
+}
+
 /// Whether `id` is a server schedule (else it is on this device).
 pub fn is_remote(id: &str) -> bool {
-    with_remote(|r| r.online && r.entries.iter().any(|e| e.routine.id == id))
+    with_remote(|r| remote_schedule_allowed(sample_mode(), r.online) && r.entries.iter().any(|e| e.routine.id == id))
 }
 
 /// The server's schedules with their recent runs.
@@ -212,6 +234,23 @@ fn detail_state() -> Option<MutableState<bool>> {
     try_services().map(|s| s.ui.detail_open.clone())
 }
 
+/// The room a phone keeps below the content so the floating tab bar (`TABBAR_H` plus its
+/// `TABBAR_BOTTOM_GAP`, `shell.rs`) never covers the last row: the bar, its gap and one `SP[3]`.
+pub fn compact_bottom_clearance() -> f32 {
+    TABBAR_H + TABBAR_BOTTOM_GAP + SP[3]
+}
+
+/// The search field's width in the list pane, from the layout rules in `ListPane`: the screen
+/// content (window minus the page padding twice) minus the list box's padding and border twice,
+/// minus the search row's fixed parts (12 leading, 18 icon, `SP[1]` after the icon and `SP[1]`
+/// trailing). The field is laid out by weight, so this is the share it receives, not a width it
+/// is given.
+pub fn search_field_width(width_dp: f32, compact: bool) -> f32 {
+    let page_pad = if compact { SP[3] } else { SP[6] };
+    let pane = if compact { width_dp - 2.0 * page_pad } else { list_pane_width(width_dp) };
+    (pane - 2.0 * (13.0 + 1.0) - (12.0 + 18.0 + SP[1] + SP[1])).max(0.0)
+}
+
 /// The list panel's width: 400 above 1279 dp, 320 up to 1279, 300 up to 900.
 pub fn list_pane_width(width_dp: f32) -> f32 {
     if width_dp > 1279.0 {
@@ -238,7 +277,8 @@ pub enum Panel {
 /// 루틴 (Routines) screen on compose-rust (FR-L25).
 pub fn RoutinesScreen() {
     let tick = remember(|| mutable_state_of(0_u32));
-    let is_demo = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("routines");
+    let _ = try_services().map(|s| s.ui.live.launcher.get());
+    let is_demo = sample_mode();
     if !is_demo {
         let tick_refresh = tick.clone();
         launched_effect((), move || async move {
@@ -247,7 +287,26 @@ pub fn RoutinesScreen() {
     }
     let _ = tick.get();
     let (entries, online) = if is_demo {
-        (sample_entries(), true)
+        let mut sample = sample_entries();
+        let local = with_store(|s| s.entries());
+        for entry in local {
+            if let Some(slot) = sample.iter_mut().find(|e| e.routine.id == entry.routine.id) {
+                let runs = if entry.runs.is_empty() {
+                    std::mem::take(&mut slot.runs)
+                } else {
+                    entry.runs
+                };
+                let next_at = entry.next_at.or(slot.next_at);
+                *slot = Entry {
+                    routine: entry.routine,
+                    runs,
+                    next_at,
+                };
+            } else {
+                sample.push(entry);
+            }
+        }
+        (sample, true)
     } else {
         let (online, mut entries) = with_remote(|r| (r.online, r.entries.clone()));
         let device = with_store(|s| s.entries());
@@ -292,25 +351,27 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let window = current_window_size();
     let compact = window.is_compact();
 
+    let launch_tick = try_services().map(|s| s.ui.live.launcher.get()).unwrap_or(0);
     let tick = remember(|| mutable_state_of(0_u32));
-    let selected = remember(|| {
+    let entries_for_preset = entries.clone();
+    let selected = remember_with_key(launch_tick, move || {
         let preset = std::env::var("EMBER_CR_ROUTINE")
             .ok()
             .filter(|v| !v.trim().is_empty())
             .and_then(|v| {
                 v.parse::<usize>()
                     .ok()
-                    .and_then(|i| entries.get(i))
+                    .and_then(|i| entries_for_preset.get(i))
                     .map(|e| e.routine.id.clone())
                     .or(Some(v))
             });
         mutable_state_of(preset)
     });
-    let panel = remember(|| mutable_state_of(Panel::View));
-    let filter = remember(|| mutable_state_of(None::<String>));
-    let query = remember(|| mutable_state_of(String::new()));
-    let entries_state = remember(|| mutable_state_of(entries));
-    let online_state = remember(|| mutable_state_of(online));
+    let panel = remember_with_key(launch_tick, || mutable_state_of(Panel::View));
+    let filter = remember_with_key(launch_tick, || mutable_state_of(None::<String>));
+    let query = remember_with_key(launch_tick, || mutable_state_of(String::new()));
+    let entries_state = remember_with_key(launch_tick, move || mutable_state_of(entries));
+    let online_state = remember_with_key(launch_tick, move || mutable_state_of(online));
 
     let _ = tick.get();
     let cur_entries = entries_state.get();
@@ -360,7 +421,13 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     Ok(None)
                 });
             } else {
-                let _ = with_store(|s| s.set_enabled(&id, on));
+                if with_store(|s| s.set_enabled(&id, on)).is_err() {
+                    if let Some(e) = entries_st.get().iter().find(|e| e.routine.id == id) {
+                        let mut r = e.routine.clone();
+                        r.enabled = on;
+                        with_store(|s| s.save(r));
+                    }
+                }
                 entries_st.update(|list| {
                     if let Some(e) = list.iter_mut().find(|e| e.routine.id == id) {
                         e.routine.enabled = on;
@@ -379,6 +446,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                     let run = services().client.api().run_schedule(&id).await?;
                     Ok(run.error.map(|e| format!("실행하지 못했습니다: {e}")))
                 });
+                return;
+            }
+            if sample_mode() && sample_entries().iter().any(|e| e.routine.id == id) {
+                notice::post(RUN_NOTICE);
                 return;
             }
             match with_store(|s| s.run_now(&id)) {
@@ -412,7 +483,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 panel_ref.set(Panel::View);
                 return;
             }
-            if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| r.online) {
+            if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| remote_schedule_allowed(sample_mode(), r.online)) {
                 let cwd = try_services().and_then(|svc| {
                     svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
                 });
@@ -459,6 +530,13 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 .unwrap_or_else(|| with_store(|s| s.next_id()));
             let enabled = with_store(|s| {
                 s.entries()
+                    .iter()
+                    .find(|e| e.routine.id == id)
+                    .map(|e| e.routine.enabled)
+            })
+            .or_else(|| {
+                entries_st
+                    .get()
                     .iter()
                     .find(|e| e.routine.id == id)
                     .map(|e| e.routine.enabled)
@@ -633,6 +711,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                 on_toggle.clone(),
                             );
                         }
+                    }
+                    if compact {
+                        cu::Spacer().modifier(Modifier::new().height(compact_bottom_clearance()));
                     }
                 });
         });
@@ -944,6 +1025,8 @@ fn HeroCardContent(
         });
 }
 
+// TODO(compose-rust#443): `Text` has no `overflow_wrap`, so a KPI label stays on one line with
+// `max_lines(Some(1))` instead of being allowed to wrap in a narrow column.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {
@@ -997,6 +1080,7 @@ fn ListPane(
         )
         .content(|| {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                // TODO(compose-rust#328): chip widths are measured too narrow, so the sixth filter chip clips at 1440 (it is reachable by scrolling).
                 cu::ScrollRow()
                     .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                     .content(|| {
@@ -1026,15 +1110,20 @@ fn ListPane(
                         cu::Spacer().modifier(Modifier::new().width(12.0));
                         NavIcon(ICON_SEARCH_SVG, p.muted.to_argb(), 18.0);
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        EmberField(FieldOptions {
-                            bare: true,
-                            background: Some(Paint::Literal(Color::argb(0))),
-                            border_width: Some(0.0),
-                            height: Some(H_BTN),
-                            weight: Some(1.0),
-                            placeholder: "루틴 검색".to_string(),
-                            on_value_change: Some(Box::new(move |v| q_set.set(v))),
-                            ..Default::default()
+                        // The field takes the row's remaining width by weight (a box with
+                        // `weight(1.0)`, the field filling it), so it shrinks with the row and
+                        // never carries a width estimate that can overrun the 390 dp content.
+                        cu::Box().modifier(Modifier::new().weight(1.0).height(H_BTN)).content(move || {
+                            EmberField(FieldOptions {
+                                bare: true,
+                                background: Some(Paint::Literal(Color::argb(0))),
+                                border_width: Some(0.0),
+                                height: Some(H_BTN),
+                                fill_max_width: true,
+                                placeholder: "루틴 검색".to_string(),
+                                on_value_change: Some(Box::new(move |v| q_set.set(v))),
+                                ..Default::default()
+                            });
                         });
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
                     });
@@ -1933,6 +2022,17 @@ mod tests {
     // ---- calendar ---------------------------------------------------------------------------
 
     #[test]
+    fn fr_l25_search_field_fits_the_content_width_at_390() {
+        let content = 390.0 - 2.0 * SP[3];
+        let w = search_field_width(390.0, true);
+        assert!(w > 0.0 && w <= content, "search field {w} exceeds content {content}");
+        for width in [320.0, 360.0, 390.0, 430.0] {
+            assert!(search_field_width(width, true) <= width - 2.0 * SP[3]);
+        }
+        assert!(compact_bottom_clearance() >= TABBAR_H + TABBAR_BOTTOM_GAP);
+    }
+
+    #[test]
     fn fr_l25_calendar_round_trips_and_knows_the_weekday() {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         let d = days_from_civil(2026, 10, 25);
@@ -2718,6 +2818,138 @@ mod tests {
                 has_switch_button,
                 "expected switch button containing routine name '{name}', found labels: {button_labels:?}"
             );
+        }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_demo_routines_do_not_use_stale_remote_state() {
+        assert!(!remote_schedule_allowed(true, true));
+        assert!(!remote_schedule_allowed(true, false));
+        assert!(remote_schedule_allowed(false, true));
+        assert!(!remote_schedule_allowed(false, false));
+    }
+
+    #[test]
+    fn fr_l25_demo_mode_uses_sample_entries_and_reset_clears_local_store() {
+        assert!(should_use_sample_entries(Some("routines"), false));
+        assert!(should_use_sample_entries(Some("routines"), true));
+        assert!(should_use_sample_entries(None, true));
+        assert!(should_use_sample_entries(Some("other"), true));
+        assert!(!should_use_sample_entries(None, false));
+        assert!(!should_use_sample_entries(Some("other"), false));
+
+        let _guard = crate::services::test_guard();
+        assert!(crate::services::test_services().demo.is_some());
+
+        let prev_route = std::env::var("EMBER_CR_ROUTE").ok();
+        unsafe {
+            std::env::remove_var("EMBER_CR_ROUTE");
+        }
+
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreen())));
+        let initial = host.rebuild().expect("rebuild");
+        let mutations = decode_batch(initial).expect("decode");
+
+        let buttons = extract_buttons(&mutations);
+        let button_labels: Vec<&str> = buttons.iter().filter_map(|(_, t)| *t).collect();
+        let has_ci = button_labels.iter().any(|lbl| *lbl == "develop CI 실패 요약")
+            || mutations.iter().any(|m| match m {
+                Mutation::SetProp {
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String(s),
+                    ..
+                } => *s == "develop CI 실패 요약",
+                Mutation::SetText { text, .. } => *text == "develop CI 실패 요약",
+                _ => false,
+            });
+        assert!(
+            has_ci,
+            "expected demo routine 'develop CI 실패 요약' to be rendered, buttons: {button_labels:?}"
+        );
+
+        with_store(|s| {
+            s.save(Routine {
+                id: "test-rt-local".into(),
+                name: "로컬 테스트 루틴".into(),
+                trigger: Trigger::Time,
+                cron: "0 0 * * *".into(),
+                prompt: "로컬 프롬프트".into(),
+                enabled: true,
+                sel: Selection::initial(),
+            });
+        });
+        assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local")));
+        clear_local_store();
+        assert!(with_store(|s| s.entries().is_empty()));
+
+        with_store(|s| {
+            s.save(Routine {
+                id: "test-rt-local-2".into(),
+                name: "로컬 테스트 루틴 2".into(),
+                trigger: Trigger::Time,
+                cron: "0 0 * * *".into(),
+                prompt: "로컬 프롬프트 2".into(),
+                enabled: true,
+                sel: Selection::initial(),
+            });
+        });
+        assert!(with_store(|s| s.entries().iter().any(|e| e.routine.id == "test-rt-local-2")));
+        crate::services::services().reset_demo();
+        assert!(with_store(|s| s.entries().is_empty()));
+
+        unsafe {
+            if let Some(r) = prev_route {
+                std::env::set_var("EMBER_CR_ROUTE", r);
+            } else {
+                std::env::remove_var("EMBER_CR_ROUTE");
+            }
+        }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_kpi_labels_set_max_lines_one_against_narrow_column_wrapping() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| RoutinesScreenWith(sample_entries(), true))));
+        let mutations = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+
+        let kpi_labels = ["켜진 루틴", "지금 실행 중", "이번 주 실행", "다음 실행"];
+        for label in kpi_labels {
+            let node_ids: Vec<u32> = mutations
+                .iter()
+                .filter_map(|m| match m {
+                    Mutation::SetProp {
+                        node_id,
+                        property: PropertyKind::Text,
+                        value: PropertyValue::String(s),
+                    } if *s == label => Some(*node_id),
+                    _ => None,
+                })
+                .collect();
+
+            assert!(
+                !node_ids.is_empty(),
+                "expected at least one node with Text '{label}'"
+            );
+
+            for node_id in node_ids {
+                let has_max_lines_one = mutations.iter().any(|m| match m {
+                    Mutation::SetProp {
+                        node_id: n,
+                        property: PropertyKind::MaxLines,
+                        value: PropertyValue::Integer(1),
+                    } if *n == node_id => true,
+                    _ => false,
+                });
+
+                assert!(
+                    has_max_lines_one,
+                    "expected node {node_id} with Text '{label}' to have PropertyKind::MaxLines set to PropertyValue::Integer(1)"
+                );
+            }
         }
         compose_rust::window::reset_window_size();
     }

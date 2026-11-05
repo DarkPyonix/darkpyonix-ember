@@ -357,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
+        .merge(computers::metrics::router(computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::ide::router(sessions.clone(), ide))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))

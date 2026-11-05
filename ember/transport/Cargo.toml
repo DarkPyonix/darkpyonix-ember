@@ -6,17 +6,18 @@ description = "Ember transport: peer-to-peer connections behind one interface (S
 license = "Apache-2.0"
 
 [features]
-default = ["iroh", "http"]
-# Real P2P backend (SPEC FR-N1). The only place iroh may be referenced (FR-N5).
+default = ["letify", "http"]
+# Legacy P2P backend (SPEC FR-N1), no longer a default; kept for one release after letify became
+# the default (removal tracked in a follow-up issue). The only place iroh may be referenced (FR-N5).
 iroh = ["dep:iroh", "dep:url"]
 # letify-link backend (SPEC FR-N5, INTENT D36): a Noise session over TCP paths, the main server as
-# relay. Selected at run time with EMBER_TRANSPORT_BACKEND=letify. The only other place, besides
+# relay. The default backend (INTENT D36); EMBER_TRANSPORT_BACKEND=iroh selects the legacy one. The only other place, besides
 # the iroh backend, where a transport library may be referenced.
 letify = ["dep:letify-link", "dep:reqwest"]
 # Serve / dial HTTP (axum, hyper) over transport streams.
 http = ["dep:axum", "dep:hyper", "dep:hyper-util"]
 # The NFR-N1 measurement binary.
-bench = ["iroh", "dep:serde_json"]
+bench = ["dep:serde_json"]
 
 [dependencies]
 async-trait = "0.1"

@@ -16,8 +16,17 @@
 //!
 //! A guest posts as author `guest:<guest_id>` in the log, forced by the server: the body is `{text}` and a
 //! `from` in it is ignored. `@name` mentions go through the member gate (an unknown name is 400)
-//! and are stored, but no delivery runs here (the allowance, FR-T17, is not built), so a guest's
-//! mention reaches no agent. Text is 1..=8192 bytes after trimming for the emptiness check.
+//! and are stored. Text is 1..=8192 bytes after trimming for the emptiness check.
+//!
+//! Delivery (FR-T15, FR-T17): a guest's mention reaches a member agent only while the owner's
+//! allowance is in force, checked against the database at delivery time ([`deliver_guest_mentions_at`]):
+//! the guest is not revoked and `allow_until > now`, so expiry needs no owner action. Without an
+//! allowance nothing is sent, no `a2a_messages` row is made, and one `system` note is posted for
+//! the message (`guest @x's mention to @a, @b was not delivered (no active allowance)`; stored
+//! and pushed, not in the JSONL). With one, each mentioned agent gets the text once through
+//! [`crate::a2a::A2a::send_from_guest`], inside an untrusted block ([`crate::a2a::channel::guest_message_text`]).
+//! A router built without A2A ([`guest_router`], [`guest_router_with_dir`]) delivers nothing and
+//! posts no note.
 //!
 //! A guest sees the channel's whole history, including what was said before it joined (the
 //! Discord and Slack model) [provisional]. Other guests appear as `author: "guest"` with their
@@ -182,6 +191,8 @@ struct Ctx {
     posts: Arc<std::sync::Mutex<HashMap<String, VecDeque<Instant>>>>,
     /// The human-message JSONL file (FR-T16); a guest is a human, so its posts are written too.
     jsonl: Option<Arc<super::jsonl::JsonlLog>>,
+    /// Delivers a guest's mentions under an allowance (FR-T17); `None` delivers nothing.
+    a2a: Option<Arc<crate::a2a::A2a>>,
 }
 
 impl Ctx {
@@ -205,17 +216,33 @@ impl Ctx {
 /// The guest router: `accept` without a credential, the channel routes behind the guest check.
 /// Separate from the owner router; the caller decides where it is served.
 pub fn guest_router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
-    build(store, sessions, None)
+    build(store, sessions, None, None)
 }
 
 /// As [`guest_router`], and a guest's posts are also appended under `<data_dir>/channels/`
 /// (FR-T16), with the same insert-append-rollback as the owner route.
 pub fn guest_router_with_dir(store: Arc<Store>, sessions: Arc<Sessions>, data_dir: &std::path::Path) -> Router {
-    build(store, sessions, Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))))
+    build(store, sessions, Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))), None)
 }
 
-fn build(store: Arc<Store>, sessions: Arc<Sessions>, jsonl: Option<Arc<super::jsonl::JsonlLog>>) -> Router {
-    let ctx = Ctx { store: store.clone(), sessions, posts: Arc::default(), jsonl };
+/// As [`guest_router_with_dir`], and a guest's `@name` mentions are delivered to the mentioned
+/// agents through `a2a` while the owner's allowance is in force (FR-T15, FR-T17).
+pub fn guest_router_with_a2a(
+    store: Arc<Store>,
+    sessions: Arc<Sessions>,
+    data_dir: &std::path::Path,
+    a2a: Arc<crate::a2a::A2a>,
+) -> Router {
+    build(store, sessions, Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))), Some(a2a))
+}
+
+fn build(
+    store: Arc<Store>,
+    sessions: Arc<Sessions>,
+    jsonl: Option<Arc<super::jsonl::JsonlLog>>,
+    a2a: Option<Arc<crate::a2a::A2a>>,
+) -> Router {
+    let ctx = Ctx { store: store.clone(), sessions, posts: Arc::default(), jsonl, a2a };
     let protected = Router::new()
         .route("/api/guest/channels/{id}", get(summary))
         .route("/api/guest/channels/{id}/messages", get(messages).post(post_message))
@@ -362,13 +389,17 @@ async fn post_message(
         Err(e) => return fail(e),
     }
     // Row, JSONL line and push as for the owner route (FR-T16, FR-L12); a failed append rolls the
-    // row back and is 500. No delivery to agents runs (FR-T15, FR-T17).
+    // row back and is 500. Delivery to agents runs after, only under an allowance (FR-T17).
     let message = match super::api::persist_and_publish(&c.store, &c.sessions, c.jsonl.as_deref(), &guest.channel_id, || {
         c.store.post_guest_message(&guest, &b.text)
     }) {
         Ok(m) => m,
         Err(e) => return fail(e),
     };
+    if let Some(a2a) = c.a2a.clone().filter(|_| !message.mentions.is_empty()) {
+        let (store, sessions, guest_id, msg) = (c.store.clone(), c.sessions.clone(), guest.id.clone(), message.clone());
+        tokio::spawn(async move { deliver_guest_mentions(&store, &sessions, &a2a, &guest_id, &msg).await });
+    }
     let view = c
         .store
         .channel_members(&guest.channel_id)
@@ -376,5 +407,95 @@ async fn post_message(
     match view {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => fail(e),
+    }
+}
+
+/// Deliver a guest's stored `message` to each mentioned agent, if the guest's allowance is in
+/// force now (FR-T17). See [`deliver_guest_mentions_at`].
+pub async fn deliver_guest_mentions(
+    store: &Store,
+    sessions: &Sessions,
+    a2a: &Arc<crate::a2a::A2a>,
+    guest_id: &str,
+    message: &super::Message,
+) {
+    deliver_guest_mentions_at(store, sessions, a2a, guest_id, message, now_ms()).await
+}
+
+/// As [`deliver_guest_mentions`] with the clock given. The allowance is read from the database
+/// here, at delivery time, so an expiry or a revocation after the post counts. With none in
+/// force nothing is stored in the A2A log and one `system` note names the mentioned agents. With
+/// one, each mentioned agent gets the text once, in a task of its own, through the same switches
+/// as a person's mention; a refusal is posted as `@<agent> not reached: <reason>`. A mention of a
+/// session that is not a member agent of the channel is skipped (the post route already refuses
+/// one; this keeps delivery safe on its own).
+pub async fn deliver_guest_mentions_at(
+    store: &Store,
+    sessions: &Sessions,
+    a2a: &Arc<crate::a2a::A2a>,
+    guest_id: &str,
+    message: &super::Message,
+    now: i64,
+) {
+    if message.mentions.is_empty() || message.from != format!("{AUTHOR_PREFIX}{guest_id}") {
+        return;
+    }
+    let Some(channel) = store.guest_channel_of(guest_id) else { return };
+    let members = store.channel_members(&channel).unwrap_or_default();
+    let targets: Vec<(String, String)> = message
+        .mentions
+        .iter()
+        .filter_map(|id| members.iter().find(|m| m.is_agent && &m.id == id))
+        .map(|m| (m.id.clone(), m.name.clone()))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let guest_name = store.guest_name(guest_id).unwrap_or_else(|| "guest".into());
+    let Some(until) = store.guest_allowance_at(guest_id, now) else {
+        let names: Vec<String> = targets.iter().map(|(_, n)| format!("@{n}")).collect();
+        let note = format!(
+            "guest @{guest_name}'s mention to {} was not delivered (no active allowance)",
+            names.join(", ")
+        );
+        post_note(store, sessions, &channel, &note);
+        return;
+    };
+    let mut tasks = tokio::task::JoinSet::new();
+    for (session_id, name) in targets {
+        let (a2a, channel, guest_name, text) = (a2a.clone(), channel.clone(), guest_name.clone(), message.text.clone());
+        tasks.spawn(async move {
+            let sent = a2a.send_from_guest(&channel, &guest_name, until, &session_id, &text).await;
+            (name, sent.err())
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        if let Ok((name, Some(e))) = done {
+            post_note(store, sessions, &channel, &format!("@{name} not reached: {e}"));
+        }
+    }
+}
+
+/// Post a `system` note into the channel and push it (not written to the JSONL, FR-T16).
+fn post_note(store: &Store, sessions: &Sessions, channel: &str, note: &str) {
+    match store.post_channel_system_message(channel, note) {
+        Ok(m) => sessions.publish(crate::session::Push::ChannelMessage { channel_id: channel.to_string(), message: m }),
+        Err(err) => tracing::warn!(channel = %channel, "recording a guest delivery note failed: {err:#}"),
+    }
+}
+
+impl Store {
+    /// The channel a guest belongs to.
+    fn guest_channel_of(&self, guest_id: &str) -> Option<String> {
+        self.conn()
+            .query_row("SELECT channel_id FROM channel_guests WHERE id = ?1", params![guest_id], |r| r.get(0))
+            .ok()
+    }
+
+    /// A guest's display name.
+    fn guest_name(&self, guest_id: &str) -> Option<String> {
+        self.conn()
+            .query_row("SELECT name FROM channel_guests WHERE id = ?1", params![guest_id], |r| r.get(0))
+            .ok()
     }
 }

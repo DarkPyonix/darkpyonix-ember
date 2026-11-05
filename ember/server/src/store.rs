@@ -140,6 +140,7 @@ const MIGRATIONS: &[&str] = &[
     SHIM_OFFSETS_MIGRATION,
     crate::channels::MIGRATION,
     crate::channels::READS_MIGRATION,
+    crate::channels::MENTIONS_MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.

@@ -27,6 +27,7 @@
 //! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
 //! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
 //! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
+//! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
 //! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
 //! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
@@ -75,6 +76,7 @@ use crate::config::NodeConfig;
 use crate::exec::{self, kill_group};
 use crate::fs::{self, FsError};
 use crate::git::{self, *};
+use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
@@ -165,6 +167,10 @@ pub fn router(node: Node) -> Router {
         .route("/git/pull", post(git_pull))
         .route("/git/push", post(git_push))
         .route("/git/conflicts", post(git_conflicts))
+        // FR-G7 routes begin.
+        .route("/git/conflict", post(git_conflict))
+        .route("/git/resolve", post(git_resolve))
+        // FR-G7 routes end.
         .route("/exec", get(exec_ws))
         .route("/exec-server", get(crate::exec_server::ws))
         .route("/egress", get(crate::egress::ws))
@@ -425,6 +431,17 @@ async fn git_push(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> Api
 
 async fn git_conflicts(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitConflicts> {
     Ok(Json(git::conflicts(&n.0.policy, &r).await?))
+}
+
+// FR-G7 handlers.
+async fn git_conflict(State(n): State<Node>, Json(r): Json<GitConflictRequest>) -> ApiResult<GitConflict> {
+    Ok(Json(git_conflict::conflict(&n.0.policy, &r).await?))
+}
+
+async fn git_resolve(State(n): State<Node>, Json(r): Json<GitResolveRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_conflict::resolve(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn setattr(State(n): State<Node>, Json(r): Json<SetAttrRequest>) -> ApiResult<Stat> {

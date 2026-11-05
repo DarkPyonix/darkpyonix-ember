@@ -9,6 +9,10 @@
 //! ("Open in VS Code") instead of the Ember editor. Other errors (network, auth) are not a reason
 //! to switch targets and are reported as they are.
 
+use tokio::sync::mpsc;
+
+use crate::engine::SessionUpdate;
+use crate::session::EditorSession;
 use crate::Error;
 
 /// Why the Ember editor cannot be used with this server.
@@ -31,6 +35,73 @@ impl Fallback {
                 "This computer's editor server version is unknown; Ember's editor supports Code-OSS {}. Opening in VS Code instead.",
                 ember_editor_conn::PINNED_VERSION
             ),
+        }
+    }
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters (and `/` when `keep_slash` is
+/// `true`), matching `ember_server::api::ide::percent_encode`.
+fn percent_encode(s: &str, keep_slash: bool) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'.' | b'_' | b'~')
+            || (keep_slash && b == b'/');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Constructs the VS Code Web fallback URL (`<base>/?folder=<workspace_path>`), or returns
+/// `vscode_base_url` as-is when it already contains `?folder=`.
+pub fn vscode_fallback_url(vscode_base_url: &str, workspace_path: &str) -> String {
+    if vscode_base_url.contains("?folder=") || vscode_base_url.contains("&folder=") {
+        vscode_base_url.to_owned()
+    } else {
+        format!("{}/?folder={}", vscode_base_url.trim_end_matches('/'), percent_encode(workspace_path, true))
+    }
+}
+
+/// The resolved fallback action when `EditorSession::connect_or_fallback` switches from the Ember
+/// editor to the VS Code target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackTarget {
+    pub fallback: Fallback,
+    /// The VS Code target URL (`<ide_url>/?folder=<workspace_path>`) when a VS Code base URL is configured.
+    pub vscode_url: Option<String>,
+}
+
+impl FallbackTarget {
+    pub fn from_error(err: &Error, vscode_base_url: Option<&str>, workspace_path: &str) -> Option<Self> {
+        let fallback = fallback_for(err)?;
+        let vscode_url = vscode_base_url
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(|base| vscode_fallback_url(base, workspace_path));
+        Some(Self { fallback, vscode_url })
+    }
+}
+
+/// Outcome of connecting to a server with connect-time version check and VS Code fallback.
+pub enum ConnectOutcome {
+    Connected {
+        session: EditorSession,
+        updates: mpsc::UnboundedReceiver<SessionUpdate>,
+    },
+    Fallback(FallbackTarget),
+}
+
+impl std::fmt::Debug for ConnectOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connected { session, .. } => {
+                f.debug_struct("Connected").field("authority", &session.authority()).finish()
+            }
+            Self::Fallback(target) => f.debug_tuple("Fallback").field(target).finish(),
         }
     }
 }
@@ -77,5 +148,25 @@ mod tests {
         assert_eq!(fallback_for(&Error::Refused("x".into())), None);
         assert_eq!(fallback_for(&Error::Conn(ConnError::Timeout("handshake"))), None);
         assert_eq!(fallback_for(&Error::Conn(ConnError::Refused("auth mismatch".into()))), None);
+    }
+
+    #[test]
+    fn fallback_target_constructs_vscode_url() {
+        let e = Error::Conn(ConnError::UnsupportedServerVersion { server: Some("deadbeef".into()) });
+        let t = FallbackTarget::from_error(&e, Some("http://127.0.0.1:8890/"), "/Users/me/my app").unwrap();
+        assert_eq!(
+            t,
+            FallbackTarget {
+                fallback: Fallback::OpenInVsCode { server_commit: Some("deadbeef".into()) },
+                vscode_url: Some("http://127.0.0.1:8890/?folder=/Users/me/my%20app".into()),
+            }
+        );
+        let already = FallbackTarget::from_error(
+            &e,
+            Some("http://127.0.0.1:8890/?folder=/Users/me/my%20app"),
+            "/Users/me/my app",
+        )
+        .unwrap();
+        assert_eq!(already.vscode_url.as_deref(), Some("http://127.0.0.1:8890/?folder=/Users/me/my%20app"));
     }
 }

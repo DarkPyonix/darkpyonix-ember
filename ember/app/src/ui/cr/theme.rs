@@ -154,7 +154,7 @@ impl EmberTheme {
         }
     }
 
-    /// `--shadow-lg`: popovers, sheets and toasts.
+    /// `--shadow-lg`: composer, popovers and toasts.
     pub fn shadow_lg(&self) -> Vec<Shadow> {
         match self.scheme {
             Scheme::Light => SHADOW_LG_LIGHT.to_vec(),
@@ -314,8 +314,8 @@ pub const PRESS_OUT_MS: u32 = 200;
 /// The shadow tokens of the mockup, two layers where it has two. Each is a list in CSS order
 /// (the first layer is on top). The toolkit draws its first layer at the bottom.
 ///
-/// `sm` is the mockup's `--shadow` (cards, the composer), `lg` is `--shadow-lg` (popovers,
-/// sheets, toasts) and `md` is the floating tab bar's shadow, which the mockup writes inline.
+/// `sm` is the mockup's `--shadow` (cards and sheets), `lg` is `--shadow-lg` (composer,
+/// popovers and toasts) and `md` is the floating tab bar's shadow, which the mockup writes inline.
 /// Colour is black or the warm ink at the alpha the mockup gives, rounded to 8 bits.
 pub const SHADOW_SM_LIGHT: [Shadow; 2] = [
     Shadow::new(0.0, 1.0, 2.0, 0.0, Paint::Literal(Color::argb(0x08_1c1b19))),
@@ -621,9 +621,11 @@ mod tests {
         assert_eq!(rows(dark.shadow_md()), [(0.0, 10.0, 30.0, 0.0, 0x80_000000)]);
         assert_eq!(rows(light.shadow_lg()), [(0.0, 10.0, 32.0, 0.0, 0x1a_1c1b19)]);
         assert_eq!(rows(dark.shadow_lg()), [(0.0, 10.0, 32.0, 0.0, 0x73_000000)]);
-        for layers in [light.shadow_sm(), dark.shadow_sm(), light.shadow_md(), dark.shadow_md(), light.shadow_lg(), dark.shadow_lg()] {
-            let expected = layers.iter().rev().fold(Modifier::new(), |m, layer| m.shadow(*layer));
-            assert_eq!(with_shadows(Modifier::new(), layers), expected);
-        }
+        // Modifier::shadow stores layers in insertion order, with the first at the bottom.
+        // CSS puts its first layer on top, so the second CSS layer must be inserted first.
+        let css = light.shadow_sm();
+        let expected = Modifier::new().shadow(css[1]).shadow(css[0]);
+        assert_eq!(with_shadows(Modifier::new(), css.clone()), expected);
+        assert_ne!(expected, Modifier::new().shadow(css[0]).shadow(css[1]));
     }
 }

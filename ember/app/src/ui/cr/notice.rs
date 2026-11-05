@@ -27,6 +27,7 @@ pub fn NoticeHost() {
     let key = latest.as_ref().map(|(id, _)| *id);
     launched_effect(key, move || async move {
         if let Some((_, text)) = latest {
+            // TODO(compose-rust): Message has no Modifier for the mockup toast shadow.
             Message::new(text).with_duration(MessageDuration::Long).show();
         }
     });

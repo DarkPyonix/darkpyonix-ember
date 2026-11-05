@@ -11,7 +11,6 @@
 //! - #373: `Button` has no `max_lines`, so the width estimate `label_min_width` stays (#208);
 //! - #374: `Text` and `TextField` have no `font` or `word_break`, so no bundled font and no
 //!   Korean word-keep yet (#216, #208);
-//! - #375: no `Modifier.shadow`, so one `elevation` stands in for the layered shadow (#214).
 
 #![allow(non_snake_case)]
 
@@ -162,10 +161,11 @@ pub fn OptionSheet(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    let p = ember_theme().palette;
+    let theme = ember_theme();
+    let p = theme.palette;
     cu::Dialog(open)
         .modifier(
-            Modifier::new()
+            with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(width + 2.0 * SP[0])
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
@@ -764,7 +764,7 @@ pub fn EmberSheetSized(
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    let modifier = with_shadows(Modifier::new(), theme.shadow_lg())
+    let modifier = with_shadows(Modifier::new(), theme.shadow_sm())
         .background(paint(theme.palette.surface))
         .corner_radius(CORNER_XL);
     let dismiss = on_dismiss.clone();

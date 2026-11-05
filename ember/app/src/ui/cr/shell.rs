@@ -474,7 +474,8 @@ pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(Botto
 /// The phone's top-right tool menu (`.phonemenu`): a 32 px round button at top 10 / right 12 that
 /// opens a popover with the theme switch, settings, and (in demo mode) platform toggle and demo reset.
 pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: impl FnMut() + Clone + 'static) {
-    let p = ember_theme().palette;
+    let theme = ember_theme();
+    let p = theme.palette;
     let ui = shared_ui().clone();
     let theme_svg = if ember_theme().scheme == Scheme::Dark { ICON_MOON_SVG } else { ICON_SUN_SVG };
     let demo_tools = show_demo_tools();
@@ -486,12 +487,11 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
             cu::Spacer().modifier(Modifier::new().height(10.0));
             let o = open.clone();
             Clickable(
-                Modifier::new()
+                with_shadows(Modifier::new(), theme.shadow_sm())
                     .size(H_CTL, H_CTL)
                     .background(paint(p.surface))
                     .border(1.0, paint(p.line))
                     .shape_role(compose_rust::ShapeRole::Full),
-                // TODO(compose-rust#375): the button's and popover's shadows.
                 Alignment::Center,
                 move || o.set(!o.get_untracked()),
                 || NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0),
@@ -500,7 +500,7 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                 cu::Spacer().modifier(Modifier::new().height(4.0));
                 cu::Box()
                     .modifier(
-                        Modifier::new()
+                        with_shadows(Modifier::new(), theme.shadow_lg())
                             .width(168.0)
                             .background(paint(p.surface))
                             .border(1.0, paint(p.line))

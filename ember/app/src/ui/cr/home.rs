@@ -872,7 +872,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     // `.bigcomposer`: surface, 1 px line, the xl radius, 16 / 16 / 12 padding.
     cu::Box()
         .modifier(
-            with_shadows(Modifier::new(), theme.shadow_sm())
+            with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(w)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))

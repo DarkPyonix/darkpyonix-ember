@@ -586,7 +586,7 @@ pub fn SectionList(
                 .background(bg)
                 .corner_radius(CORNER_SM);
             if is_active {
-                m = m.border(1.0, paint(p.line)).elevation(1.0);
+                m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
 
             cu::Box()

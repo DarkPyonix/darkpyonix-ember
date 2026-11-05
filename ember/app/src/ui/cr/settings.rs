@@ -408,7 +408,7 @@ mod tests {
                 }
                 Mutation::SetProp {
                     node_id,
-                    property: PropertyKind::OnPointer,
+                    property: PropertyKind::OnClick,
                     value: PropertyValue::Integer(h),
                 } => {
                     pointer_handlers.insert(*node_id, *h as u64);
@@ -435,28 +435,11 @@ mod tests {
         }
     }
 
+    /// The renderer fires `OnClick` for a container `on_click` (compose-rust#372).
     fn pointer_up_event(node_id: u32, handler_id: u64) -> compose_rust::protocol::HostEvent<'static> {
         use compose_rust::protocol::HostEvent;
-        use compose_rust::{EventPayload, PointerKind, PointerType, WheelDeltaMode};
-        HostEvent {
-            node_id,
-            handler_id,
-            payload: EventPayload::Pointer {
-                kind: PointerKind::Up,
-                pointer_id: 1,
-                pointer_type: PointerType::Mouse,
-                x: 4.0,
-                y: 4.0,
-                buttons: 0,
-                button: 0,
-                modifiers: 0,
-                click_count: 1,
-                delta_x: 0.0,
-                delta_y: 0.0,
-                delta_mode: WheelDeltaMode::Pixel,
-                timestamp_nanos: 0,
-            },
-        }
+        use compose_rust::EventPayload;
+        HostEvent { node_id, handler_id, payload: EventPayload::Clicked }
     }
 
     #[test]

@@ -792,6 +792,170 @@ fn usage_path(days: Option<u32>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Computer metrics (FR-X7, FR-L21)
+// ---------------------------------------------------------------------------------------------
+
+/// `GET /api/computers/{id}/metrics` answer: one sample of a computer's status. Decoded
+/// tolerantly: a field an older node leaves out becomes its empty value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct MetricsSample {
+    /// Wall clock of the sample, milliseconds since the Unix epoch.
+    #[serde(default)]
+    pub at_ms: u64,
+    #[serde(default)]
+    pub cpu: CpuMetrics,
+    #[serde(default)]
+    pub memory: Option<MemoryMetrics>,
+    #[serde(default)]
+    pub disks: Vec<DiskMetrics>,
+    /// Cumulative byte counters per interface; rates come from two samples.
+    #[serde(default)]
+    pub network: Vec<NetMetrics>,
+    #[serde(default)]
+    pub temperatures: Vec<TempMetrics>,
+    #[serde(default)]
+    pub gpu: GpuReport,
+    #[serde(default)]
+    pub processes: Vec<ProcessMetrics>,
+    #[serde(default)]
+    pub process_count: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CpuMetrics {
+    #[serde(default)]
+    pub total_percent: Option<f32>,
+    #[serde(default)]
+    pub cores: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct MemoryMetrics {
+    #[serde(default)]
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub used_bytes: u64,
+    #[serde(default)]
+    pub swap_total_bytes: u64,
+    #[serde(default)]
+    pub swap_used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiskMetrics {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mount: String,
+    #[serde(default)]
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct NetMetrics {
+    #[serde(default)]
+    pub interface: String,
+    #[serde(default)]
+    pub rx_bytes: u64,
+    #[serde(default)]
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TempMetrics {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub celsius: f32,
+}
+
+/// GPU status; `devices` is empty with a `reason` when the node cannot read it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct GpuReport {
+    #[serde(default)]
+    pub devices: Vec<GpuMetrics>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct GpuMetrics {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub utilization_percent: Option<f32>,
+    #[serde(default)]
+    pub memory_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub memory_used_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ProcessMetrics {
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub cpu_percent: f32,
+    #[serde(default)]
+    pub memory_bytes: u64,
+}
+
+impl Api {
+    /// One metrics sample of a computer, with at most `top` processes (FR-X7).
+    pub async fn metrics(&self, computer_id: &str, top: u32) -> ApiResult<MetricsSample> {
+        self.get(&metrics_path(computer_id, top)).await
+    }
+}
+
+fn metrics_path(computer_id: &str, top: u32) -> String {
+    format!("/computers/{}/metrics?top={top}", seg(computer_id))
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+
+    #[test]
+    fn fr_x7_the_metrics_path_escapes_the_computer_id() {
+        assert_eq!(metrics_path("a b", 20), "/computers/a%20b/metrics?top=20");
+    }
+
+    #[test]
+    fn fr_x7_a_full_sample_decodes() {
+        let s: MetricsSample = serde_json::from_value(json!({
+            "at_ms": 5,
+            "cpu": {"total_percent": 12.5, "cores": [10.0, 15.0]},
+            "memory": {"total_bytes": 16, "used_bytes": 8, "swap_total_bytes": 4, "swap_used_bytes": 1},
+            "disks": [{"name": "d", "mount": "/", "total_bytes": 100, "available_bytes": 40}],
+            "network": [{"interface": "en0", "rx_bytes": 7, "tx_bytes": 9}],
+            "temperatures": [{"label": "cpu", "celsius": 51.5}],
+            "gpu": {"devices": [], "reason": "not readable"},
+            "processes": [{"pid": 1, "name": "init", "cpu_percent": 0.5, "memory_bytes": 1024}],
+            "process_count": 300
+        }))
+        .unwrap();
+        assert_eq!(s.cpu.cores.len(), 2);
+        assert_eq!(s.memory.as_ref().unwrap().used_bytes, 8);
+        assert_eq!(s.gpu.reason.as_deref(), Some("not readable"));
+        assert_eq!(s.processes[0].pid, 1);
+        assert_eq!(s.process_count, 300);
+    }
+
+    #[test]
+    fn fr_x7_a_sample_with_missing_fields_decodes_to_empty_values() {
+        let s: MetricsSample = serde_json::from_value(json!({"at_ms": 1, "cpu": {"total_percent": null}})).unwrap();
+        assert_eq!(s.cpu.total_percent, None);
+        assert!(s.memory.is_none() && s.disks.is_empty() && s.processes.is_empty());
+        let s: MetricsSample = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(s, MetricsSample::default());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

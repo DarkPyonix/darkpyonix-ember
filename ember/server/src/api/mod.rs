@@ -29,6 +29,7 @@
 
 pub mod git;
 pub mod ide;
+pub mod origin;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -379,10 +380,15 @@ async fn lease(
     Ok(Json(json!({ "ttl_secs": LEASE_TTL.as_secs() })))
 }
 
-async fn push(State(s): State<Arc<Sessions>>, ws: WebSocketUpgrade) -> impl IntoResponse {
+async fn push(
+    State(s): State<Arc<Sessions>>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<impl IntoResponse, StatusCode> {
+    origin::check_origin(&headers)?;
     // Subscribe before the upgrade response goes out, so an event stored in between is not lost.
     let rx = s.subscribe();
-    ws.on_upgrade(move |socket| push_loop(socket, rx))
+    Ok(ws.on_upgrade(move |socket| push_loop(socket, rx)))
 }
 
 async fn push_loop(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Push>) {

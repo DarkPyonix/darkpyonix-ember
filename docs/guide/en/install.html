@@ -130,6 +130,13 @@ cargo build --release --locked
         The owner has decided to close this: remote devices keep their device key, and the app and
         tools on the same computer will send a local token (issue #338). It is in progress, not yet built.
       </p>
+      <p>
+        <span class="pill partial">Partial</span> WebSocket routes (terminal attach, the push channel, the browser view and
+        DevTools relay) refuse a request whose browser <code>Origin</code> is neither the server's own host nor
+        loopback, so a web page you open cannot attach to a shell cross-site. Native clients send no
+        <code>Origin</code> and are unaffected. This is not a login: who may attach beyond the loopback trust is
+        open (FR-P3).
+      </p>
     </div>
 
     <h3 id="mount-build">Building with the project mount</h3>

@@ -141,8 +141,11 @@ async fn remove(State(c): S, Path((id, tid)): Path<(String, String)>) -> R<Statu
 async fn attach(
     State(c): S,
     Path((id, tid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> R<impl IntoResponse> {
+    // Refuse a cross-site browser page before anything reaches the node (FR-P3).
+    crate::api::origin::check_origin(&headers).map_err(|c| plain(c, "origin not allowed".into()))?;
     // Resolve the computer before upgrading, so an unknown one is a plain 404.
     let node = node(&c, &id)?;
     Ok(ws.on_upgrade(move |socket| relay(socket, node, tid)))

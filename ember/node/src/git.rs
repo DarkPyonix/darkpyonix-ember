@@ -13,6 +13,8 @@
 
 #[path = "git_log.rs"]
 pub mod git_log;
+#[path = "git_prs.rs"]
+pub mod git_prs;
 #[path = "git_stash.rs"]
 pub mod git_stash;
 
@@ -271,7 +273,20 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
     if deadline.is_some() && std::env::var_os("GIT_SSH_COMMAND").is_none() {
         cmd.env("GIT_SSH_COMMAND", batch_ssh_command(configured_ssh_command(repo).await.as_deref()));
     }
-    let mut child = cmd.spawn().map_err(|e| GitError::Internal(format!("cannot run git: {e}")))?;
+    exec_cmd(cmd, "git", stdin, deadline).await
+}
+
+/// Spawn a prepared command with piped output, the stdout cap and an optional deadline. Shared
+/// by git and the `gh` runner of FR-G8.
+async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound && what != "git" {
+            // A companion program (`gh`) that is not installed is a state the person can fix.
+            GitError::Conflict(format!("{what} 명령을 찾을 수 없습니다. 설치되어 있는지 확인하세요.\n{e}"))
+        } else {
+            GitError::Internal(format!("cannot run {what}: {e}"))
+        }
+    })?;
     let pipe = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");

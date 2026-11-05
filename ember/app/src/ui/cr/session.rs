@@ -27,7 +27,11 @@ use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
 use ember_client::LauncherStatus;
 
 pub use crate::ui::session::{
-    INFO_PANEL_W, IdeChoice, StatusCard, status_cards, token_tile, InfoCard, KanbanColumn, PANE_H, PaneLayout, PaneMove, PaneTab,
+    INFO_PANEL_W, IdeChoice, status_card_width, status_grid_columns, status_page_pad, token_tile, ComputerRow, NodeStatus, PrRow, StatusTone, SubNode, TokenRow,
+    COMPUTERS_CAPTION, COMPUTERS_EMPTY, LOAD_CARD_TITLE, PR_CARD_TITLE, PR_EMPTY, SUBAGENT_CARD_TITLE,
+    SUBAGENT_EMPTY, TOKENS_CAPTION, TOKENS_EMPTY, computer_fill_pct, computer_rows, computer_value_text,
+    cpu_fill_tone, pr_count_text, pr_rows, session_count_rows, subagent_tree, token_rows,
+    token_value_text, token_width_pct, vendor_accent, InfoCard, KanbanColumn, PANE_H, PaneLayout, PaneMove, PaneTab,
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
@@ -45,8 +49,9 @@ use crate::ui::shell::NavMenu;
 
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
+use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberField, EmberSheet,
+    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
@@ -3136,28 +3141,304 @@ fn TimelineCard(project: &str) {
         });
 }
 
-/// One card of the status grid: a title row, then the rows or the empty state.
-fn StatusCardBody(ico: &'static str, card: StatusCard) {
+fn tone_pill(t: StatusTone) -> PillTone {
+    match t {
+        StatusTone::Green => PillTone::Green,
+        StatusTone::Red => PillTone::Red,
+        StatusTone::Blue => PillTone::Blue,
+        StatusTone::Orange => PillTone::Orange,
+        StatusTone::Sky => PillTone::Sky,
+    }
+}
+
+fn tone_color(t: StatusTone, p: &Palette) -> Color {
+    match t {
+        StatusTone::Green => p.green.strong,
+        StatusTone::Red => p.red.strong,
+        StatusTone::Blue => p.blue.strong,
+        StatusTone::Orange => p.orange.strong,
+        StatusTone::Sky => p.sky.strong,
+    }
+}
+
+/// Everything the three bottom cards draw, from the pure model.
+#[derive(Clone)]
+struct StatusCardsData {
+    project: String,
+    prs: Vec<PrRow>,
+    tree: Vec<SubNode>,
+    tokens: Vec<TokenRow>,
+    computers: Vec<ComputerRow>,
+    counts: Vec<String>,
+    compact: bool,
+}
+
+/// `.card` with a `.card-h` (icon tile, title, trailing, 1 px divider) and a padded body.
+/// `weighted` is true inside a row, where the card takes an equal share.
+fn StatusCardShell(
+    weighted: bool,
+    ico: &'static str,
+    title: &str,
+    trailing: impl FnOnce(),
+    body: impl FnOnce(),
+) {
     let p = ember_theme().palette;
-    cu::Column()
-        .space_role(SpaceRole::Xs)
-        .modifier(Modifier::new().fill_max_width())
-        .content(move || {
-            cu::Row()
-                .alignment(Alignment::CenterStart)
-                .space_role(SpaceRole::Xs)
-                .content(|| {
-                    NavIcon(ico, p.text_2.to_argb(), 16.0);
-                    Label(card.title, Fs::Md, Weight::Semibold, None, Some(1));
+    let title = title.to_string();
+    let (fill, weight) = if weighted { (false, Some(1.0)) } else { (true, None) };
+    EmberCard(false, fill, weight, Some(0.0), None, move || {
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+            cu::Spacer().modifier(Modifier::new().height(13.0));
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Spacer().modifier(Modifier::new().width(SP[4]));
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(move || {
+                    CardHead(ico, &title, trailing);
                 });
-            if card.rows.is_empty() {
-                Label(card.empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-            } else {
-                for r in card.rows.iter() {
-                    Label(r, Fs::Sm, Weight::Regular, None, Some(1));
-                }
+                cu::Spacer().modifier(Modifier::new().width(SP[4]));
+            });
+            cu::Spacer().modifier(Modifier::new().height(13.0));
+            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            cu::Spacer().modifier(Modifier::new().height(SP[3]));
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Spacer().modifier(Modifier::new().width(SP[4]));
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(body);
+                cu::Spacer().modifier(Modifier::new().width(SP[4]));
+            });
+            cu::Spacer().modifier(Modifier::new().height(SP[3]));
+        });
+    });
+}
+
+fn EmptyText(text: &str) {
+    let p = ember_theme().palette;
+    Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+}
+
+/// `.list-row`: the 36 px git tile, `#num title` over `member · branch`, and the CI pill over
+/// the review state. TODO(compose-rust#464): the row divider is inside the card padding, and the
+/// right column is not right-aligned (no column cross-axis alignment in the pinned toolkit).
+fn PrRowView(row: PrRow, first: bool) {
+    let p = ember_theme().palette;
+    // The divider sits between rows with 12 dp above and below, clear of the right column.
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+        if !first {
+            cu::Spacer().modifier(Modifier::new().height(SP[2]));
+            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            cu::Spacer().modifier(Modifier::new().height(SP[2]));
+        }
+        cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(move || {
+            cu::Box()
+                .alignment(Alignment::Center)
+                .modifier(
+                    Modifier::new()
+                        .size(36.0, 36.0)
+                        .background(paint(p.surface_2))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_SM),
+                )
+                .content(|| NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 18.0));
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(&row.headline(), Fs::Md, Weight::Medium, None, Some(1));
+                Label(&row.sub_line(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+            cu::Column().spacing(SP[0]).content(|| {
+                Pill(row.ci.label(), tone_pill(row.ci.tone()), false);
+                Label(&row.review, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        });
+    });
+}
+
+/// `.tnode`: an avatar for a member, a spinner or a status dot for a thread, then name and task.
+/// Children are indented. TODO(compose-rust#464): the 1 px guide line (a left border) needs a
+/// one-sided border or a stretching child; indentation alone for now.
+fn TreeNodeView(node: SubNode, project: String) {
+    let p = ember_theme().palette;
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+        cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+            match &node.member {
+                Some(m) => Character(
+                    &m.agent,
+                    m.leader,
+                    22.0,
+                    &m.name,
+                    &project,
+                    CharState::from_status(m.status),
+                    None,
+                ),
+                None => match node.status {
+                    NodeStatus::Run => Spinner(12.0),
+                    NodeStatus::Unknown => HomeDot(p.grey.strong),
+                    st => HomeDot(tone_color(st.dot_tone().unwrap_or(StatusTone::Blue), p)),
+                },
+            }
+            Label(&node.name, Fs::Sm, Weight::Semibold, None, Some(1));
+            // The status as text too, so it does not rest on the marker's colour alone.
+            if !node.status.label().is_empty() {
+                Label(node.status.label(), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+            }
+            Label(&node.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        });
+        if !node.children.is_empty() {
+            cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[3] + 2.0));
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    for c in node.children.iter() {
+                        TreeNodeView(c.clone(), project.clone());
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// `.sl-row`: a lead, a fixed-width name, a track and a value.
+fn UsageRow(lead: impl FnOnce(), name: &str, name_w: f32, pct: f32, fill: Color, value: &str) {
+    let p = ember_theme().palette;
+    cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        lead();
+        cu::Box().modifier(Modifier::new().width(name_w)).content(|| {
+            Label(name, Fs::Sm, Weight::Regular, None, Some(1));
+        });
+        cu::Box().modifier(Modifier::new().weight(1.0)).content(|| TrackBar(pct, 6.0, fill));
+        Label(value, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+    });
+}
+
+fn PrCard(weighted: bool, d: StatusCardsData) {
+    let count = pr_count_text(&d.prs);
+    StatusCardShell(
+        weighted,
+        ICON_GIT_SVG,
+        PR_CARD_TITLE,
+        move || Pill(&count, PillTone::Grey, false),
+        move || {
+            if d.prs.is_empty() {
+                EmptyText(PR_EMPTY);
+            }
+            for (i, r) in d.prs.iter().enumerate() {
+                PrRowView(r.clone(), i == 0);
+            }
+        },
+    );
+}
+
+fn SubagentCard(weighted: bool, d: StatusCardsData) {
+    StatusCardShell(weighted, ICON_USERS_SVG, SUBAGENT_CARD_TITLE, || {}, move || {
+        if d.tree.is_empty() {
+            EmptyText(SUBAGENT_EMPTY);
+        }
+        for n in d.tree.iter() {
+            TreeNodeView(n.clone(), d.project.clone());
+        }
+    });
+}
+
+fn LoadCard(weighted: bool, d: StatusCardsData) {
+    let p = ember_theme().palette;
+    let name_w = if d.compact { 90.0 } else { 118.0 };
+    StatusCardShell(weighted, ICON_CPU_SVG, LOAD_CARD_TITLE, || {}, move || {
+        cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+            Label(TOKENS_CAPTION, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            if d.tokens.is_empty() {
+                EmptyText(TOKENS_EMPTY);
+            }
+            let max = d.tokens.iter().map(|t| t.k).max().unwrap_or(0);
+            for t in d.tokens.iter() {
+                let m = t.member.clone();
+                let project = d.project.clone();
+                UsageRow(
+                    move || {
+                        Character(
+                            &m.agent,
+                            m.leader,
+                            22.0,
+                            &m.name,
+                            &project,
+                            CharState::from_status(m.status),
+                            None,
+                        )
+                    },
+                    &t.member.name,
+                    name_w,
+                    token_width_pct(t.k, max),
+                    tone_color(vendor_accent(&t.member.agent), p),
+                    &token_value_text(t.k),
+                );
+            }
+            cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            Label(COMPUTERS_CAPTION, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            if d.computers.is_empty() {
+                EmptyText(COMPUTERS_EMPTY);
+            }
+            for c in d.computers.iter() {
+                let fill = tone_color(cpu_fill_tone(c.cpu.unwrap_or(0)), p);
+                let name = match &c.ip {
+                    Some(ip) => format!("{} \u{00b7} {ip}", c.name),
+                    None => c.name.clone(),
+                };
+                UsageRow(
+                    || NavIcon(ICON_CPU_SVG, p.muted.to_argb(), 18.0),
+                    &name,
+                    name_w,
+                    computer_fill_pct(c),
+                    fill,
+                    &computer_value_text(c),
+                );
+            }
+            // The real session counts, not in the mockup, kept under the computers.
+            if !d.counts.is_empty() {
+                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+            }
+            for r in d.counts.iter() {
+                Label(r, Fs::Sm, Weight::Regular, None, Some(1));
             }
         });
+    });
+}
+
+/// The bottom grid (`.grid.g3.sgrid`), gap 20: three columns from 1280 dp, two from 900 dp
+/// (the third card below), one under that. Every card fills its share of the page width
+/// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
+/// content shrank the cards to about 308 dp at 390 dp.
+/// TODO(compose-rust#464): the cards of a row keep their own heights; the mockup stretches them to the
+/// tallest. The pinned toolkit has no intrinsic-size measurement (`IntrinsicSize.Max`), and
+/// `fill_max_height` in a row of unbounded height collapses, so no fixed heights are faked.
+fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
+    let (d1, d2, d3) = (d.clone(), d.clone(), d);
+    match status_grid_columns(width_dp) {
+        3 => {
+            cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                PrCard(true, d1);
+                SubagentCard(true, d2);
+                LoadCard(true, d3);
+            });
+        }
+        2 => {
+            cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                    PrCard(true, d1);
+                    SubagentCard(true, d2);
+                });
+                LoadCard(false, d3);
+            });
+        }
+        _ => {
+            let w = status_card_width(width_dp, 1, SP[4]);
+            cu::Column().spacing(SP[4]).modifier(Modifier::new().width(w)).content(move || {
+                PrCard(false, d1);
+                SubagentCard(false, d2);
+                LoadCard(false, d3);
+            });
+        }
+    }
+}
+
+/// Whether the stat tiles, the timeline card and the kanban card are drawn above the status cards.
+/// `EMBER_CR_SCROLL=cards` hides them for review captures: the toolkit cannot scroll a column from
+/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out are left out and the
+/// cards (PR과 CI, 서브 에이전트 스레드, 부하) start at the top at 390 dp.
+fn status_blocks_above_cards(scroll: Option<&str>) -> bool {
+    scroll != Some("cards")
 }
 
 /// The kanban of member status, with the cards fed by the view-model (#324).
@@ -3240,7 +3521,6 @@ pub fn StatusView(
         2
     };
     let wide_kanban = window.width_dp >= 1280.0;
-    let wide_grid = window.width_dp >= 900.0;
 
     cu::ScrollColumn()
         .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -3250,119 +3530,114 @@ pub fn StatusView(
                 .modifier(
                     Modifier::new()
                         .fill_max_width()
-                        .padding(if window.width_dp <= 560.0 { SP[2] } else { SP[4] }),
+                        .padding(status_page_pad(window.width_dp)),
                 )
                 .content(move || {
-                    // 1. 6 KPI cards grid (.skpis)
-                    let kpi_rows: Vec<Vec<(String, String, String, Option<Color>)>> = kpis
-                        .chunks(kpi_per_row)
-                        .map(|c| c.to_vec())
-                        .collect();
-                    for row in kpi_rows {
-                        cu::Row()
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
-                                for (t, v, s, tone) in row {
-                                    KpiCard(&t, &v, &s, tone);
-                                }
-                            });
-                    }
+                    // Review captures: `EMBER_CR_SCROLL=cards` leaves out the blocks above the cards.
+                    if status_blocks_above_cards(std::env::var("EMBER_CR_SCROLL").ok().as_deref()) {
+                        // 1. 6 KPI cards grid (.skpis)
+                        let kpi_rows: Vec<Vec<(String, String, String, Option<Color>)>> = kpis
+                            .chunks(kpi_per_row)
+                            .map(|c| c.to_vec())
+                            .collect();
+                        for row in kpi_rows {
+                            cu::Row()
+                                .space_role(SpaceRole::Sm)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
+                                    for (t, v, s, tone) in row {
+                                        KpiCard(&t, &v, &s, tone);
+                                    }
+                                });
+                        }
 
-                    // 2. Agent-to-agent communication timeline card (.tlcard)
-                    TimelineCard(&proj_owned);
+                        // 2. Agent-to-agent communication timeline card (.tlcard)
+                        TimelineCard(&proj_owned);
 
-                    // 3. Outer Kanban card (.skan) with 5 columns
-                    let cols_c = columns.clone();
-                    let proj_k = proj_owned.clone();
-                    let open_k = on_open.clone();
-                    EmberCard(false, true, None, None, None, move || {
-                        cu::Column()
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .space_role(SpaceRole::Sm)
-                                    .modifier(Modifier::new().fill_max_width())
-                                    .content(|| {
-                                        NavIcon(ICON_GRID_SVG, p.text_2.to_argb(), 16.0);
-                                        Label("칸반", Fs::Md, Weight::Semibold, None, Some(1));
-                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                        Label(
-                                            &format!("팀원 {total_cnt}"),
-                                            Fs::Xs,
-                                            Weight::Regular,
-                                            Some(paint(p.muted)),
-                                            Some(1),
-                                        );
-                                    });
-
-                                if wide_kanban {
+                        // 3. Outer Kanban card (.skan) with 5 columns
+                        let cols_c = columns.clone();
+                        let proj_k = proj_owned.clone();
+                        let open_k = on_open.clone();
+                        EmberCard(false, true, None, None, None, move || {
+                            cu::Column()
+                                .space_role(SpaceRole::Sm)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
                                     cu::Row()
-                                        .alignment(Alignment::TopStart)
+                                        .alignment(Alignment::CenterStart)
                                         .space_role(SpaceRole::Sm)
                                         .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
-                                            for (col, ms) in cols_c.iter() {
-                                                KanbanColView(
-                                                    col.label(),
-                                                    ms.clone(),
-                                                    proj_k.clone(),
-                                                    None,
-                                                    Some(1.0),
-                                                    open_k.clone(),
-                                                );
-                                            }
+                                        .content(|| {
+                                            NavIcon(ICON_GRID_SVG, p.text_2.to_argb(), 16.0);
+                                            Label("칸반", Fs::Md, Weight::Semibold, None, Some(1));
+                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                            Label(
+                                                &format!("팀원 {total_cnt}"),
+                                                Fs::Xs,
+                                                Weight::Regular,
+                                                Some(paint(p.muted)),
+                                                Some(1),
+                                            );
                                         });
-                                } else {
-                                    cu::ScrollRow()
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
-                                            cu::Row()
-                                                .alignment(Alignment::TopStart)
-                                                .space_role(SpaceRole::Sm)
-                                                .content(move || {
-                                                    for (col, ms) in cols_c.iter() {
-                                                        KanbanColView(
-                                                            col.label(),
-                                                            ms.clone(),
-                                                            proj_k.clone(),
-                                                            Some(220.0),
-                                                            None,
-                                                            open_k.clone(),
-                                                        );
-                                                    }
-                                                });
-                                        });
-                                }
-                            });
-                    });
+
+                                    if wide_kanban {
+                                        cu::Row()
+                                            .alignment(Alignment::TopStart)
+                                            .space_role(SpaceRole::Sm)
+                                            .modifier(Modifier::new().fill_max_width())
+                                            .content(move || {
+                                                for (col, ms) in cols_c.iter() {
+                                                    KanbanColView(
+                                                        col.label(),
+                                                        ms.clone(),
+                                                        proj_k.clone(),
+                                                        None,
+                                                        Some(1.0),
+                                                        open_k.clone(),
+                                                    );
+                                                }
+                                            });
+                                    } else {
+                                        cu::ScrollRow()
+                                            .modifier(Modifier::new().fill_max_width())
+                                            .content(move || {
+                                                cu::Row()
+                                                    .alignment(Alignment::TopStart)
+                                                    .space_role(SpaceRole::Sm)
+                                                    .content(move || {
+                                                        for (col, ms) in cols_c.iter() {
+                                                            KanbanColView(
+                                                                col.label(),
+                                                                ms.clone(),
+                                                                proj_k.clone(),
+                                                                Some(220.0),
+                                                                None,
+                                                                open_k.clone(),
+                                                            );
+                                                        }
+                                                    });
+                                            });
+                                    }
+                                });
+                        });
+                    }
 
                     // 4. Bottom 3-column grid (.sgrid): PR과 CI, 서브 에이전트 스레드, 부하
                     // Rows come from the pure view-model; no data shows an honest empty state (#324).
                     let demo_cards = services().demo.is_some();
-                    let cards = status_cards(demo_cards, &members_for_cards);
-                    let icons = [ICON_GIT_SVG, ICON_USERS_SVG, ICON_CPU_SVG];
-                    if wide_grid {
-                        cu::Row()
-                            .alignment(Alignment::TopStart)
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
-                                for (card, ico) in cards.clone().into_iter().zip(icons) {
-                                    EmberCard(false, false, Some(1.0), None, None, move || {
-                                        StatusCardBody(ico, card.clone());
-                                    });
-                                }
-                            });
-                    } else {
-                        for (card, ico) in cards.into_iter().zip(icons) {
-                            EmberCard(false, true, None, None, None, move || {
-                                StatusCardBody(ico, card.clone());
-                            });
-                        }
-                    }
+                    let computers = services().client.read(|st| st.computers().to_vec());
+                    StatusCardsGrid(
+                        window.width_dp,
+                        StatusCardsData {
+                            project: proj_owned.clone(),
+                            prs: pr_rows(demo_cards),
+                            tree: subagent_tree(demo_cards, &members_for_cards),
+                            tokens: token_rows(demo_cards, &members_for_cards),
+                            computers: computer_rows(&computers, &proj_owned, demo_cards),
+                            counts: session_count_rows(&members_for_cards),
+                            compact: window.width_dp <= 560.0,
+                        },
+                    );
 
                     cu::Spacer().modifier(Modifier::new().height(24.0));
                 });
@@ -4450,6 +4725,13 @@ pub fn SessionScreen(focus: Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_status_capture_scroll_cards_hides_the_blocks_above() {
+        assert!(super::status_blocks_above_cards(None));
+        assert!(!super::status_blocks_above_cards(Some("cards")));
+        assert!(super::status_blocks_above_cards(Some("other")));
+    }
+
     use super::*;
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{

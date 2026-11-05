@@ -422,3 +422,71 @@ async fn fr_s10_cdp_nonce_route_still_checks_origin_and_host() {
     let (st, _) = call(&f.app, Method::GET, &path, &h).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 }
+
+// Discovery through `/json/version` (FR-S9). A tool given an HTTP endpoint instead of a ws URL
+// reads `<endpoint>/json/version` and connects to its `webSocketDebuggerUrl`. It sends no header,
+// so both the document and the URL in it must open without the server token.
+
+/// The layer in front of a router that answers 200 on every path, so only the middleware's verdict
+/// shows (the real handlers would start a browser).
+fn gate_only() -> Router {
+    let dir = tempfile::tempdir().unwrap();
+    let token = auth::load_or_create_token(dir.path()).unwrap();
+    let a = ServerAuth::new(token, LISTEN.parse().unwrap(), []);
+    auth::protect(Router::new().fallback(|| async { "ok" }), a)
+}
+
+#[test]
+fn fr_s9_cdp_version_document_points_at_the_nonce_url() {
+    use ember_server::browser::agent::{agent_cdp_ws_url, cdp_version_doc};
+    let doc = cdp_version_doc("http://127.0.0.1:8740", "acme");
+    let url = doc["webSocketDebuggerUrl"].as_str().unwrap();
+    assert_eq!(url, agent_cdp_ws_url("http://127.0.0.1:8740", "acme"));
+    assert!(url.ends_with(auth::agent_cdp_nonce()), "{url}");
+}
+
+#[test]
+fn fr_s9_the_url_in_the_discovery_document_passes_the_token_layer() {
+    use ember_server::browser::agent::cdp_version_doc;
+    let doc = cdp_version_doc("http://127.0.0.1:8740", "acme");
+    let url = doc["webSocketDebuggerUrl"].as_str().unwrap();
+    let path = url.strip_prefix("ws://127.0.0.1:8740").unwrap();
+    assert!(auth::agent_cdp_path_ok(path), "{path}");
+}
+
+#[tokio::test]
+async fn fr_s9_cdp_version_under_the_nonce_needs_no_token() {
+    let app = gate_only();
+    let ok = format!("/api/browsers/acme/cdp/{}/json/version", auth::agent_cdp_nonce());
+    let (st, _) = call(&app, Method::GET, &ok, &[]).await;
+    assert_eq!(st, StatusCode::OK, "{ok}");
+}
+
+#[tokio::test]
+async fn fr_s9_cdp_version_without_the_nonce_or_with_a_wrong_one_is_401() {
+    let app = gate_only();
+    let n = auth::agent_cdp_nonce();
+    for p in [
+        "/api/browsers/acme/cdp/json/version".to_string(),
+        "/api/browsers/acme/cdp/wrong/json/version".to_string(),
+        format!("/api/browsers/acme/cdp/{n}/json/other"),
+        format!("/api/browsers/acme/cdp/{n}/json/version/more"),
+        format!("/api/browsers/acme/cdp/{n}/json"),
+        "/api/browsers/acme/agent-config".to_string(),
+    ] {
+        let (st, _) = call(&app, Method::GET, &p, &[]).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}");
+    }
+    let (st, _) = call(&app, Method::POST, &format!("/api/browsers/acme/cdp/{n}/json/version"), &[]).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "the nonce opens GET only");
+}
+
+#[tokio::test]
+async fn fr_s10_cdp_version_under_the_nonce_still_checks_origin_and_host() {
+    let app = gate_only();
+    let p = format!("/api/browsers/acme/cdp/{}/json/version", auth::agent_cdp_nonce());
+    let (st, _) = call(&app, Method::GET, &p, &[("origin", "https://evil.example")]).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = call(&app, Method::GET, &p, &[("host", "evil.example")]).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}

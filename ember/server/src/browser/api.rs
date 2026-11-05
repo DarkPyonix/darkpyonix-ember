@@ -12,7 +12,8 @@
 //! | `POST /{project}/input` | one input event (same JSON as on the view socket) |
 //! | `GET /{project}/view` (WebSocket) | screencast frames out, input in |
 //! | `GET /{project}/cdp` (WebSocket) | DevTools relay for agents |
-//! | `GET /{project}/cdp/json/version` | DevTools discovery document pointing at the relay |
+//! | `GET /{project}/cdp/json/version` | DevTools discovery document pointing at the relay (the nonce URL) |
+//! | `GET /{project}/cdp/{nonce}/json/version` | the same document, reachable without the server token (agent tools) |
 //! | `GET /{project}/agent-config?mcp=` | MCP config for Claude Code and Codex |
 
 use std::sync::Arc;
@@ -44,6 +45,7 @@ pub fn router(browsers: Arc<BrowserManager>) -> Router {
         .route("/api/browsers/{project}/cdp/json/version", get(cdp_version))
         // The agent form: the nonce is checked by the server auth layer (FR-S9), not here.
         .route("/api/browsers/{project}/cdp/{nonce}", get(cdp_agent))
+        .route("/api/browsers/{project}/cdp/{nonce}/json/version", get(cdp_version_agent))
         .route("/api/browsers/{project}/agent-config", get(agent_config))
         .with_state(browsers)
 }
@@ -336,11 +338,17 @@ async fn cdp_version(
     headers: HeaderMap,
 ) -> ApiResult<impl IntoResponse> {
     instance(&m, &project).await?;
-    Ok(Json(json!({
-        "Browser": "ember-remote-browser",
-        "Protocol-Version": "1.3",
-        "webSocketDebuggerUrl": agent::cdp_ws_url(&base_url(&headers), &project),
-    })))
+    Ok(Json(agent::cdp_version_doc(&base_url(&headers), &project)))
+}
+
+/// The discovery document under the nonce path, which the token layer lets through without a
+/// header (FR-S9); the nonce is checked there, not here.
+async fn cdp_version_agent(
+    State(m): S,
+    Path((project, _nonce)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    cdp_version(State(m), Path(project), headers).await
 }
 
 #[derive(Deserialize)]

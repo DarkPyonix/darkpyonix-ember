@@ -311,7 +311,11 @@ async fn agent_relay_activity_and_takeover() {
     )
     .unwrap();
     let ws_url = ver["webSocketDebuggerUrl"].as_str().unwrap().to_string();
-    assert_eq!(ws_url, format!("ws://{api_addr}/api/browsers/agent/cdp"));
+    // FR-S9: the document leads to the nonce URL, which opens without the server token.
+    assert_eq!(
+        ws_url,
+        format!("ws://{api_addr}/api/browsers/agent/cdp/{}", ember_server::auth::agent_cdp_nonce())
+    );
 
     let (mut agent, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
     let b = m.get("agent").await.unwrap();
@@ -355,8 +359,7 @@ async fn agent_relay_activity_and_takeover() {
     // FR-S9: the agent config carries the per-run nonce path, so the token middleware lets the
     // agent's MCP server connect without a header.
     let cdp_ws = cfg["cdp_ws"].as_str().unwrap();
-    assert!(cdp_ws.starts_with(&format!("{ws_url}/")), "{cdp_ws}");
-    assert!(cdp_ws.len() > ws_url.len() + 16, "a nonce follows the route: {cdp_ws}");
+    assert_eq!(cdp_ws, ws_url, "the config and the discovery document name the same nonce URL");
     b.stop().await;
 }
 

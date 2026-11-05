@@ -87,6 +87,7 @@ const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습�
 const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
+use crate::ui::session::timeline_summary;
 
 const POPUP_W: f32 = 280.0;
 
@@ -2776,7 +2777,7 @@ fn TimelineCard(project: &str) {
                                         .content(|| {
                                             NavIcon(ICON_CHECK_SVG, p.green.strong.to_argb(), 15.0);
                                             Label(
-                                                "5명 · 16.4s · 순차 실행보다 2.4배 빠름 · $0.24",
+                                                timeline_summary(services().demo.is_some()),
                                                 Fs::Xs,
                                                 Weight::Regular,
                                                 Some(paint(p.muted)),
@@ -3218,7 +3219,9 @@ pub fn StatusView(
             Some(p.red.strong),
         ),
         {
-            let (value, sub) = token_tile(services().demo.is_some());
+            crate::bridge::request_project_day(&proj_owned);
+            let load = services().ui.live.project_day.get().get(&proj_owned).cloned().unwrap_or_default();
+            let (value, sub) = token_tile(&load, &crate::ui::home::today_utc());
             ("오늘 토큰".to_string(), value, sub, None)
         },
         (

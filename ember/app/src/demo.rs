@@ -207,6 +207,51 @@ pub fn usage(now: i64) -> Vec<DailyUsage> {
         .collect()
 }
 
+/// The 14-day token summary of `GET /api/usage/summary` for the demo, oldest day first, with
+/// sample numbers. The cost stays unknown, as on the server.
+pub fn usage_summary(now: i64) -> ember_client::api::UsageSummary {
+    use ember_client::api::{AgentUsageRow, UsageDayRow, UsageSummary};
+    let row = |agent: &str, input: u64, output: u64, turns: u64| AgentUsageRow {
+        agent: agent.into(),
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: input + output,
+        turns,
+        cost_usd: None,
+    };
+    let mut days: Vec<UsageDayRow> = usage(now)
+        .into_iter()
+        .map(|u| {
+            let codex = row("codex", u.input_tokens, u.output_tokens, u.reports);
+            let claude = row("claude-code", u.input_tokens * 2, u.output_tokens * 2, u.reports + 1);
+            UsageDayRow {
+                day: u.day,
+                input_tokens: codex.input_tokens + claude.input_tokens,
+                output_tokens: codex.output_tokens + claude.output_tokens,
+                total_tokens: codex.total_tokens + claude.total_tokens,
+                turns: codex.turns + claude.turns,
+                cost_usd: None,
+                sessions: 2,
+                by_agent: vec![claude, codex],
+            }
+        })
+        .collect();
+    days.reverse();
+    let sum = |f: fn(&UsageDayRow) -> u64| days.iter().map(f).sum::<u64>();
+    UsageSummary {
+        from: days.first().map(|d| d.day.clone()).unwrap_or_default(),
+        to: days.last().map(|d| d.day.clone()).unwrap_or_default(),
+        input_tokens: sum(|d| d.input_tokens),
+        output_tokens: sum(|d| d.output_tokens),
+        total_tokens: sum(|d| d.total_tokens),
+        turns: sum(|d| d.turns),
+        cost_usd: None,
+        by_agent: Vec::new(),
+        cost_note: Some("no price table".into()),
+        days,
+    }
+}
+
 pub fn projects() -> Vec<Project> {
     vec![
         Project {

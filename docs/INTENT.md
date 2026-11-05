@@ -520,6 +520,15 @@ Rejected: messages as the only channel between sessions.
 - Q12: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" (tentative wording; `FR-T16`)
 - Q13: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. 한 채널은 한 프로젝트에 속한거야. 때문에 채널 페이지에 들어가면 프로젝트별로 분류된 섹션의 하위에 채널들이 하나씩 놓여있는 형태인거지. 한 프로젝트는 기본적으로 하나의 채널을 가지고, 추가 채널을 생성할 수 있는 형태인거야." (`FR-L10`, `FR-L12`, `FR-T10`)
 
+**Channel details, 2026-11-06 [provisional, relayed by the supervisor, not user-confirmed].**
+
+- Mention syntax: in a channel a mention is `@<agent>`. The session composer keeps `@@` (`FR-T6`). Rejected: one syntax for both, because a channel is Slack style and a single `@` is what people type there (`FR-T12`).
+- Agent reply: an agent replies into a channel through a dedicated tool named `channel_post` (`FR-T12`). Rejected: scraping the agent's transcript for its answer, because it ties the channel to each agent's session format (rule 4).
+- Storage: SQLite stays the read index and the message store. Human messages are also appended to the per-channel JSONL file (`FR-T16`) in parallel. Rejected: JSONL as the only store (no index for `after=` and unread counts) and SQLite as the only store (`FR-T16` asks for the file).
+- Allowance: whole hours, capped at 168 h (`FR-T17`). Rejected: free-form minutes and open-ended allowances, because an allowance spends the owner's tokens.
+- Guest: an invited person sees the message log only and has no right to answer approvals (`FR-T14`). Rejected: guests answering an agent's approval request, because that steers the owner's session.
+- Invite authentication (`FR-T14`, `FR-T15`, `FR-T17`) is still an owner decision (Q10, remaining part). The supervisor recommends (a) a channel-scoped invite token. Nothing is built on it until the owner chooses.
+
 **Later (2026-10-25).** D26 fills the open tab set with eight entries; D28 renames Unsorted to 기본 프로젝트.
 
 **Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: how an invited person authenticates (Q10, remaining part) and the exact JSONL layout of `FR-T16`.
@@ -806,6 +815,6 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Why.** The server API trusted whoever reached `EMBER_LISTEN`, so any local process, any web page that opens a WebSocket to loopback (browsers apply no CORS to WebSockets) and, on a non-loopback address, the whole LAN could use every route, including agent exec, session input and terminal input.
 
-**Consequence and owner decision [user, 2026-11-06, relayed by the supervisor: "지금은 전체 권한, 범위는 나중에" (full authority for now, scope later)].** A device admitted by the gate is trusted with the server user's full authority in v1. It can create a session and run an agent shell as the server user; that shell can read `<data dir>/server-token` and use the local door, including `/api/devices`; it can also reach `POST /api/computers`, the MCP registry and `/api/accounts`. The trust model is that of an SSH key: every admitted device is assumed to be the owner's own. So the split between the local door and the remote door guards against browsers, other local processes without the token and unadmitted peers, not against an admitted device. A per-device scope (for example read-only or chat only) is a later step, tracked in #366. Found by the P3 review of #338.
+**Consequence and owner decision [user, 2026-11-06, relayed by the supervisor: "지금은 전체 권한, 범위는 나중에" (full authority for now, scope later)].** A device admitted by the gate is trusted with the server user's full authority in v1. It can create a session and run an agent shell as the server user; that shell can read `<data dir>/server-token` and use the local door, including `/api/devices`; it can also reach `POST /api/computers`, the MCP registry and `/api/accounts`. The trust model is that of an SSH key: every admitted device is assumed to be the owner's own. So the split between the local door and the remote door guards against browsers, other local processes without the token and unadmitted peers, not against an admitted device. A per-device scope (for example read-only or chat only) is a later step, tracked in #366. Revoking a device closes its connections and refuses new ones, but sessions it created keep running (v1 allowed: there is no `created_by` column and the sessions belong to the server user; follow-up #369). Found by the P3 review of #338.
 
 **Rejected.** Loopback trust alone, which is today's model and is documented in `docs/guide/en/install.html` as "anyone who can reach `EMBER_LISTEN` can use every route"; a per-process secret; session tokens only. The issue lists the last two as options and gives no reason against them, so none is recorded here.

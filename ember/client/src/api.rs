@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn fr_s11_401_maps_to_the_auth_error() {
         let raw = Raw { status: StatusCode::UNAUTHORIZED, body: Bytes::from_static(br#"{"error":"unauthorized"}"#) };
-        let err = Api::check(raw).unwrap_err();
+        let err = Api::check(raw).err().expect("401 is an error");
         assert!(matches!(&err, ApiError::Unauthorized(m) if m == "unauthorized"));
         assert_eq!(err.status(), Some(401));
         let other = Raw { status: StatusCode::FORBIDDEN, body: Bytes::from_static(b"no") };

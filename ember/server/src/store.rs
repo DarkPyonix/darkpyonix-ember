@@ -141,6 +141,7 @@ const MIGRATIONS: &[&str] = &[
     crate::channels::MIGRATION,
     crate::channels::READS_MIGRATION,
     crate::channels::MENTIONS_MIGRATION,
+    crate::projects::schema::SETTINGS_MIGRATION,
     crate::channels::invites::MIGRATION,
 ];
 
@@ -516,6 +517,36 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
         assert_eq!(store.sessions(None).unwrap().len(), 2);
+    }
+
+    /// FR-L26: a database from before the project settings columns gains them in place, with
+    /// empty values, and keeps its projects.
+    #[test]
+    fn fr_l26_old_database_gains_project_settings_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        // The database stops just before the settings migration, wherever it sits in the list.
+        let before = MIGRATIONS.iter().position(|m| *m == crate::projects::schema::SETTINGS_MIGRATION).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().enumerate().take(before) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.execute_batch("INSERT INTO projects (name, created_at) VALUES ('alpha', 5), ('기본 프로젝트', 6);")
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let projects = store.projects().unwrap();
+        assert_eq!(projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["alpha", "기본 프로젝트"]);
+        for p in &projects {
+            assert_eq!((p.repository.as_deref(), p.default_branch.as_deref()), (None, None));
+            assert!(p.member_defaults == Default::default() && p.character_style.is_none() && !p.archived);
+        }
+        assert_eq!(projects[0].created_at, 5);
     }
 
     /// A database at schema 7 (before projects, session metadata and search) gains them in

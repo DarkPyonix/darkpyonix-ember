@@ -1080,6 +1080,7 @@ fn ListPane(
         )
         .content(|| {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                // TODO(compose-rust#328): chip widths are measured too narrow, so the sixth filter chip clips at 1440 (it is reachable by scrolling).
                 cu::ScrollRow()
                     .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                     .content(|| {

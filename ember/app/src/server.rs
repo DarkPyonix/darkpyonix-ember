@@ -279,16 +279,26 @@ pub struct ServerApi {
 impl ServerApi {
     /// Reads the server token once from the environment (FR-S11, `ember_client::token`).
     pub fn new(base_url: &str) -> ServerApi {
-        ServerApi::with_token(base_url, ember_client::token::server_token_from_env())
+        // A server that is not local gets no token and none is read (FR-S11).
+        let token = ember_client::token::token_allowed_for(base_url)
+            .then(ember_client::token::server_token_from_env)
+            .flatten();
+        ServerApi::with_token(base_url, token)
     }
 
-    /// Like [`ServerApi::new`] with the token given; `None` sends no `Authorization` header.
+    /// Like [`ServerApi::new`] with the token given; `None` sends no `Authorization` header, and
+    /// so does a base URL that is not loopback or listed in `EMBER_TOKEN_HOSTS`. Panics if the
+    /// HTTP client cannot be built, rather than continuing without the header.
     pub fn with_token(base_url: &str, token: Option<String>) -> ServerApi {
+        let auth = token
+            .filter(|_| ember_client::token::token_allowed_for(base_url))
+            .as_deref()
+            .and_then(ember_client::token::auth_headers);
         let mut builder = reqwest::Client::builder();
-        if let Some(headers) = token.as_deref().and_then(auth_headers) {
+        if let Some(headers) = auth {
             builder = builder.default_headers(headers);
         }
-        let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
+        let http = builder.build().expect("cannot build the HTTP client for the server API (TLS backend failed to initialise)");
         ServerApi { http, base: base_url.trim_end_matches('/').to_string() }
     }
 
@@ -347,17 +357,6 @@ impl ServerApi {
     }
 }
 
-/// Default headers holding `Authorization: Bearer <token>`, marked sensitive. `None` when the
-/// token cannot be a header value.
-fn auth_headers(token: &str) -> Option<reqwest::header::HeaderMap> {
-    use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-    let mut value = HeaderValue::from_str(&ember_client::token::bearer_header(token)).ok()?;
-    value.set_sensitive(true);
-    let mut headers = HeaderMap::new();
-    headers.insert(AUTHORIZATION, value);
-    Some(headers)
-}
-
 /// The error for a non-success answer: 401 is [`ServerError::Unauthorized`], the rest carry the
 /// server's `error` text (or the raw body).
 fn status_error(status: u16, body: String) -> ServerError {
@@ -391,11 +390,17 @@ mod tests {
 
     #[test]
     fn fr_s11_server_api_default_headers_carry_a_sensitive_bearer() {
-        let h = auth_headers("tok").unwrap();
+        let h = ember_client::token::auth_headers("tok").unwrap();
         let v = h.get(reqwest::header::AUTHORIZATION).unwrap();
         assert_eq!(v, "Bearer tok");
         assert!(v.is_sensitive());
-        assert!(auth_headers("bad\ntoken").is_none());
+        assert!(ember_client::token::auth_headers("bad\ntoken").is_none());
+    }
+
+    #[test]
+    fn fr_s11_server_api_debug_output_never_holds_the_token() {
+        let api = ServerApi::with_token("http://127.0.0.1:1", Some("secret".into()));
+        assert!(!format!("{api:?}").contains("secret"));
     }
 
     #[test]

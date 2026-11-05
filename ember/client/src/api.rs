@@ -232,19 +232,10 @@ pub struct Api {
     reach: Reach,
     /// e.g. `http://127.0.0.1:8740`, no trailing slash; `peer:<id>` over the transport.
     base: String,
-    /// The server token, sent on the plain HTTP reach only; the transport authenticates by device
-    /// key (FR-N3).
-    token: Option<String>,
-}
-
-/// Default headers holding `Authorization: Bearer <token>`, marked sensitive so it stays out of
-/// debug output. `None` when the token cannot be a header value.
-fn auth_headers(token: &str) -> Option<header::HeaderMap> {
-    let mut value = header::HeaderValue::from_str(&crate::token::bearer_header(token)).ok()?;
-    value.set_sensitive(true);
-    let mut headers = header::HeaderMap::new();
-    headers.insert(header::AUTHORIZATION, value);
-    Some(headers)
+    /// The `Authorization` header, sent on the plain HTTP reach only (the transport authenticates
+    /// by device key, FR-N3). The value is marked sensitive, so `{:?}` prints `Sensitive`, never
+    /// the token; the plaintext is not kept.
+    auth: Option<header::HeaderMap>,
 }
 
 /// A status and a fully read body.
@@ -255,7 +246,9 @@ struct Raw {
 
 impl Api {
     pub fn new(base_url: &str) -> ApiResult<Api> {
-        Api::with_token(base_url, crate::token::server_token_from_env())
+        // A server that is not local gets no token and none is read (FR-S11).
+        let token = crate::token::token_allowed_for(base_url).then(crate::token::server_token_from_env).flatten();
+        Api::with_token(base_url, token)
     }
 
     /// Like [`Api::new`] with the server token given (`None` sends no `Authorization` header, as
@@ -265,18 +258,24 @@ impl Api {
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(ApiError::BadUrl(base_url.to_string()));
         }
+        // The token goes only to a loopback or listed host (FR-S11).
+        let auth = token
+            .filter(|_| crate::token::token_allowed_for(&base))
+            .as_deref()
+            .and_then(crate::token::auth_headers);
         let mut builder = reqwest::Client::builder();
-        if let Some(headers) = token.as_deref().and_then(auth_headers) {
+        if let Some(headers) = auth.clone() {
             builder = builder.default_headers(headers);
         }
-        Ok(Api { reach: Reach::Http(builder.build()?), base, token })
+        // A build failure is returned, never answered with a client that lacks the header.
+        Ok(Api { reach: Reach::Http(builder.build()?), base, auth })
     }
 
     /// The server reached over the transport at `addr` (dialed through `dialer`, which holds
     /// this device's identity).
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>) -> Api {
         let addr = addr.into();
-        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, token: None }
+        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: None }
     }
 
     /// The base URL, or `peer:<id>` over the transport.
@@ -411,8 +410,8 @@ impl Api {
     fn push_request(&self, url: &str) -> ApiResult<http::Request<()>> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = url.into_client_request().map_err(|e| ApiError::Push(e.to_string()))?;
-        if let (Reach::Http(_), Some(headers)) = (&self.reach, self.token.as_deref().and_then(auth_headers)) {
-            request.headers_mut().extend(headers);
+        if let (Reach::Http(_), Some(headers)) = (&self.reach, &self.auth) {
+            request.headers_mut().extend(headers.clone());
         }
         Ok(request)
     }
@@ -809,13 +808,15 @@ mod tests {
     }
 
     #[test]
-    fn fr_s11_default_headers_carry_a_sensitive_bearer() {
-        let headers = auth_headers("abc").unwrap();
-        let v = headers.get(header::AUTHORIZATION).unwrap();
-        assert_eq!(v, "Bearer abc");
-        assert!(v.is_sensitive());
-        // A token with a newline cannot be a header value: no header rather than a panic.
-        assert!(auth_headers("bad\ntoken").is_none());
+    fn fr_s11_debug_output_never_holds_the_token() {
+        let api = Api::with_token("http://127.0.0.1:1", Some("secret".into())).unwrap();
+        assert!(!format!("{api:?}").contains("secret"));
+    }
+
+    #[test]
+    fn fr_s11_no_token_is_sent_to_a_remote_host() {
+        let api = Api::with_token("https://example.com", Some("secret".into())).unwrap();
+        assert!(api.push_request(&api.push_url()).unwrap().headers().get(header::AUTHORIZATION).is_none());
     }
 
     #[test]

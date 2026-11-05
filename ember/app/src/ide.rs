@@ -116,10 +116,18 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    parse_editor_args_with_token(args, std::env::var("EMBER_EDITOR_TOKEN").unwrap_or_default())
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    parse_editor_args_with_env(args, var(EDITOR_TOKEN_ENV), var(EDITOR_SERVER_ENV), var(EDITOR_COMPUTER_ENV))
 }
 
-fn parse_editor_args_with_token<I, S>(args: I, token: String) -> Option<EditorTarget>
+/// Environment variable carrying the editor connection token (never argv).
+pub const EDITOR_TOKEN_ENV: &str = "EMBER_EDITOR_TOKEN";
+/// Environment variable carrying the ember server's base URL.
+pub const EDITOR_SERVER_ENV: &str = "EMBER_EDITOR_SERVER";
+/// Environment variable carrying the computer id for the terminal relay.
+pub const EDITOR_COMPUTER_ENV: &str = "EMBER_EDITOR_COMPUTER";
+
+fn parse_editor_args_with_env<I, S>(args: I, token: String, server_url: String, computer: String) -> Option<EditorTarget>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -133,7 +141,7 @@ where
                 .map(|s| s.as_ref().to_string())
                 .unwrap_or_default();
             let endpoint = it.next().map(|s| s.as_ref().to_string()).unwrap_or_default();
-            return Some(EditorTarget { project, folder, endpoint, token });
+            return Some(EditorTarget { project, folder, endpoint, token, server_url, computer });
         }
     }
     None
@@ -161,7 +169,12 @@ pub fn spawn_editor_with(exe: &Path, project: &str, folder: &str) -> std::io::Re
 /// Spawn an editor with the token in the child environment, never in argv.
 pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result<std::process::Child> {
     let (bin, args) = editor_command(exe, &target.project, &target.folder, &target.endpoint);
-    Command::new(bin).args(args).env("EMBER_EDITOR_TOKEN", &target.token).spawn()
+    Command::new(bin)
+        .args(args)
+        .env(EDITOR_TOKEN_ENV, &target.token)
+        .env(EDITOR_SERVER_ENV, &target.server_url)
+        .env(EDITOR_COMPUTER_ENV, &target.computer)
+        .spawn()
 }
 
 /// Spawn a new Ember process in `--editor <project> <folder>` mode (FR-L31).
@@ -275,8 +288,17 @@ mod tests {
     fn fr_l31_editor_connection_arguments_round_trip() {
         let (_, args) = editor_command(Path::new("ember"), "project", "/work", "localhost:8000");
         assert!(!args.iter().any(|arg| arg == "secret"));
-        let target = parse_editor_args_with_token(std::iter::once("ember".to_owned()).chain(args), "secret".into()).unwrap();
+        assert!(!args.iter().any(|arg| arg == "http://srv:1" || arg == "node-a"));
+        let target = parse_editor_args_with_env(
+            std::iter::once("ember".to_owned()).chain(args),
+            "secret".into(),
+            "http://srv:1".into(),
+            "node-a".into(),
+        )
+        .unwrap();
         assert_eq!(target.endpoint, "localhost:8000");
         assert_eq!(target.token, "secret");
+        assert_eq!(target.server_url, "http://srv:1");
+        assert_eq!(target.computer, "node-a");
     }
 }

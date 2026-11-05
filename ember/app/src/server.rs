@@ -175,15 +175,21 @@ impl IdeLaunch {
         let Some(Ok(l)) = launch else {
             return EditorConnection::default();
         };
-        let ose = l
-            .target("ember")
-            .and_then(|t| t.launch.as_ref())
-            .and_then(|e| e.ose.as_ref());
+        let ember = l.target("ember").and_then(|t| t.launch.as_ref());
+        let ose = ember.and_then(|e| e.ose.as_ref());
         EditorConnection {
             project: l.project.clone(),
             folder: l.folder.clone(),
             endpoint: ose.map(|o| host_port(&o.endpoint)),
             token: ose.map(|o| o.connection_token.clone()),
+            computer: ember
+                .map(|e| e.computer.clone())
+                .filter(|c| !c.is_empty())
+                .or_else(|| Some(l.computer.name.clone()).filter(|c| !c.is_empty())),
+            server_url: ember
+                .and_then(|e| e.server_url.clone())
+                .filter(|u| !u.is_empty())
+                .or_else(|| crate::services::try_services().map(|s| s.config.server_url.clone()).filter(|u| !u.is_empty())),
         }
     }
 }
@@ -195,6 +201,10 @@ pub struct EditorConnection {
     pub folder: String,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    /// The computer's id for the terminal relay.
+    pub computer: Option<String>,
+    /// The ember server's base URL for the terminal relay.
+    pub server_url: Option<String>,
 }
 
 /// `http://127.0.0.1:9000/` becomes `127.0.0.1:9000`; a bare `host:port` is kept.
@@ -223,7 +233,7 @@ mod editor_connection_tests {
                     project: "p".into(),
                     computer: "c".into(),
                     folder: "/w".into(),
-                    server_url: None,
+                    server_url: Some("http://srv:7".into()),
                     ose: ose.map(|(e, t)| ember_client::wire::EmberOseConnection {
                         endpoint: e.into(),
                         connection_token: t.into(),
@@ -240,6 +250,17 @@ mod editor_connection_tests {
         assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
         assert_eq!(c.token.as_deref(), Some("tok"));
         assert_eq!((c.project.as_str(), c.folder.as_str()), ("p", "/w"));
+        assert_eq!(c.computer.as_deref(), Some("c"));
+        assert_eq!(c.server_url.as_deref(), Some("http://srv:7"));
+    }
+
+    #[test]
+    fn fr_l31_editor_connection_computer_falls_back_to_the_ide_computer() {
+        let mut l = launch(None).unwrap();
+        l.targets[0].launch.as_mut().unwrap().computer = String::new();
+        l.computer.name = "fallback".into();
+        let c = IdeLaunch::editor_connection(Some(&Ok(l)));
+        assert_eq!(c.computer.as_deref(), Some("fallback"));
     }
 
     #[test]

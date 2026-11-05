@@ -123,7 +123,7 @@ impl Ui {
     /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
     pub fn open_editor(&self, project: String, folder: String) {
         // No launch data here, so no connection: the editor window shows its own error.
-        self.open_editor_connection(project, folder, None, None);
+        self.open_editor_connection(project, folder, None, None, None, None);
     }
 
     /// Open the editor with the OSE endpoint and token when the server started a runtime.
@@ -133,12 +133,16 @@ impl Ui {
         folder: String,
         endpoint: Option<String>,
         token: Option<String>,
+        server_url: Option<String>,
+        computer: Option<String>,
     ) {
         let target = Some(editor::EditorTarget {
             project,
             folder,
             endpoint: endpoint.unwrap_or_default(),
             token: token.unwrap_or_default(),
+            server_url: server_url.unwrap_or_default(),
+            computer: computer.unwrap_or_default(),
         });
         services().ui.editor.set(target.clone());
         let mut e = self.editor;

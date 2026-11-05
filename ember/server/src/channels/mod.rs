@@ -5,11 +5,13 @@
 //! channels are created with a chosen subset of the project's sessions. The signed-in person is
 //! a member of every channel as the person `user`. Messages are an append-only log per channel
 //! in the main store (SQLite), and human messages are also appended to a per-channel JSONL file
-//! ([`jsonl`], FR-T16); mentions (FR-T12, FR-T13),
-//! the agent feed (FR-T11) and invites (FR-T14, FR-T15, FR-T17) are not built. Read tracking is
-//! one cursor per channel for the person `user` ([`READS_MIGRATION`]). Tables: [`MIGRATION`]. Routes: [`api`].
+//! ([`jsonl`], FR-T16); mentions (FR-T12, FR-T13) and invites (FR-T14, FR-T15, FR-T17) are not
+//! built. Read tracking is one cursor per channel for the person `user` ([`READS_MIGRATION`]).
+//! Tables: [`MIGRATION`]. The agent feed (FR-T11) is derived from session events: [`feed`].
+//! Routes: [`api`].
 
 pub mod api;
+pub mod feed;
 pub mod jsonl;
 
 use rusqlite::{params, OptionalExtension};

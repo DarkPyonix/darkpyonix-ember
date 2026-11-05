@@ -30,6 +30,9 @@ pub struct ChannelMessage {
     pub at: i64,
     #[serde(default)]
     pub unread: u32,
+    /// Session ids of the agents the message mentions (FR-T12); absent on an older server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<String>,
 }
 
 /// A channel as the list and detail routes return it. `messages` is empty in a list.
@@ -131,6 +134,34 @@ pub enum FeedDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedAnswer {
     pub decision: FeedDecision,
+}
+
+/// Body of `POST /api/channels/{id}/mentions/preview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionPreviewRequest {
+    pub text: String,
+}
+
+/// A member agent a message would reach.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionTarget {
+    pub id: String,
+    pub name: String,
+}
+
+/// Answer of the mention preview (FR-T12, FR-T13): the agents the text reaches and the
+/// `@names` that are not members of the channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionPreview {
+    #[serde(default)]
+    pub reaches: Vec<MentionTarget>,
+    #[serde(default)]
+    pub unknown: Vec<String>,
+}
+
+/// Path of `POST /channels/{id}/mentions/preview`.
+pub(crate) fn mentions_preview_path(id: &str) -> String {
+    format!("/channels/{}/mentions/preview", crate::api::seg(id))
 }
 
 /// Path of `GET /channels/{id}/feed`.
@@ -279,5 +310,33 @@ mod tests {
         assert_eq!(feed_path("a/b"), "/channels/a%2Fb/feed");
         assert_eq!(feed_answer_path("c1", "approval-1"), "/channels/c1/feed/approval-1/answer");
         assert_eq!(feed_answer_path("c/1", "a b"), "/channels/c%2F1/feed/a%20b/answer");
+    }
+
+    #[test]
+    fn fr_t10_client_mentions_default_when_absent() {
+        let m: ChannelMessage = serde_json::from_value(json!({"id":"1","seq":1,"from":"user","text":"hi","at":1})).unwrap();
+        assert!(m.mentions.is_empty());
+        let m: ChannelMessage =
+            serde_json::from_value(json!({"id":"2","seq":2,"from":"user","text":"@a hi","at":1,"mentions":["s1"],"extra":1})).unwrap();
+        assert_eq!(m.mentions, vec!["s1".to_string()]);
+        assert_eq!(serde_json::to_value(&m).unwrap()["mentions"], json!(["s1"]));
+    }
+
+    #[test]
+    fn fr_t10_client_mention_preview_roundtrip() {
+        let j = json!({"reaches":[{"id":"s1","name":"alpha"}],"unknown":["ghost"]});
+        let p: MentionPreview = serde_json::from_value(j.clone()).unwrap();
+        assert_eq!(p.reaches, vec![MentionTarget { id: "s1".into(), name: "alpha".into() }]);
+        assert_eq!(p.unknown, vec!["ghost".to_string()]);
+        assert_eq!(serde_json::to_value(&p).unwrap(), j);
+        let empty: MentionPreview = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.reaches.is_empty() && empty.unknown.is_empty());
+        assert_eq!(serde_json::to_value(MentionPreviewRequest { text: "@alpha go".into() }).unwrap(), json!({"text":"@alpha go"}));
+    }
+
+    #[test]
+    fn fr_t10_client_mentions_paths() {
+        assert_eq!(mentions_preview_path("c1"), "/channels/c1/mentions/preview");
+        assert_eq!(mentions_preview_path("a/b"), "/channels/a%2Fb/mentions/preview");
     }
 }

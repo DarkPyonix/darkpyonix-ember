@@ -24,7 +24,7 @@ use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
-use crate::channels::{Channel, ChannelMessage, FeedAnswer, FeedDecision, FeedItem, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
+use crate::channels::{Channel, ChannelMessage, FeedAnswer, FeedDecision, FeedItem, MentionPreview, MentionPreviewRequest, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
@@ -46,6 +46,10 @@ pub enum ApiError {
     /// on this, because the same token would be refused again.
     #[error("authentication failed: the server refused the token ({0})")]
     Unauthorized(String),
+    /// The server answered 400 `not_a_member` (FR-T13): the message mentions names that are not
+    /// members of the channel. Nothing was stored. `unknown` lists those names.
+    #[error("server answered 400: {message}")]
+    NotAMember { message: String, unknown: Vec<String> },
     #[error("invalid response: {0}")]
     Decode(String),
     #[error("push connection failed: {0}")]
@@ -67,6 +71,7 @@ impl ApiError {
         match self {
             ApiError::Status { status, .. } => Some(*status),
             ApiError::Unauthorized(_) => Some(401),
+            ApiError::NotAMember { .. } => Some(400),
             _ => None,
         }
     }
@@ -368,7 +373,26 @@ impl Api {
         if raw.status == StatusCode::UNAUTHORIZED {
             return Err(ApiError::Unauthorized(message));
         }
+        if raw.status == StatusCode::BAD_REQUEST {
+            if let Some(unknown) = Self::not_a_member(&body) {
+                return Err(ApiError::NotAMember { message, unknown });
+            }
+        }
         Err(ApiError::Status { status: raw.status.as_u16(), message })
+    }
+
+    /// The `unknown` names of a `not_a_member` error body, or `None` for any other body.
+    fn not_a_member(body: &str) -> Option<Vec<String>> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        if v.get("code")?.as_str()? != "not_a_member" {
+            return None;
+        }
+        Some(
+            v.get("unknown")
+                .and_then(|u| u.as_array())
+                .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+        )
     }
 
     fn decode<T: DeserializeOwned>(raw: Raw) -> ApiResult<T> {
@@ -661,6 +685,12 @@ impl Api {
     pub async fn post_channel_message(&self, id: &str, new: &NewChannelMessage) -> ApiResult<ChannelMessage> {
         let body = serde_json::to_value(new).expect("NewChannelMessage serialises");
         Self::decode(self.post(&format!("/channels/{}/messages", seg(id)), body).await?)
+    }
+
+    /// Which member agents `text` would reach and which `@names` are not members (FR-T12, FR-T13).
+    pub async fn preview_channel_mentions(&self, id: &str, text: &str) -> ApiResult<MentionPreview> {
+        let body = serde_json::to_value(MentionPreviewRequest { text: text.to_string() }).expect("MentionPreviewRequest serialises");
+        Self::decode(self.post(&crate::channels::mentions_preview_path(id), body).await?)
     }
 
     /// Mark everything up to `upto` (default the latest) as read; the cursor only moves forward.
@@ -1039,6 +1069,27 @@ mod tests {
         assert_eq!(err.status(), Some(401));
         let other = Raw { status: StatusCode::FORBIDDEN, body: Bytes::from_static(b"no") };
         assert!(matches!(Api::check(other), Err(ApiError::Status { status: 403, .. })));
+    }
+
+    #[test]
+    fn fr_t10_client_not_a_member_maps_to_its_error() {
+        let body = br#"{"error":"not a member: ghost","code":"not_a_member","reason":"not_a_member","unknown":["ghost","zed"]}"#;
+        let raw = Raw { status: StatusCode::BAD_REQUEST, body: Bytes::from_static(body) };
+        let err = Api::check(raw).err().expect("400 is an error");
+        assert_eq!(err.status(), Some(400));
+        assert!(err.to_string().contains("not a member: ghost"));
+        match err {
+            ApiError::NotAMember { message, unknown } => {
+                assert_eq!(message, "not a member: ghost");
+                assert_eq!(unknown, vec!["ghost".to_string(), "zed".to_string()]);
+            }
+            other => panic!("expected NotAMember, got {other:?}"),
+        }
+        // Another 400, with or without a code, stays a plain status error.
+        for b in [&br#"{"error":"bad","code":"invalid"}"#[..], b"nope"] {
+            let raw = Raw { status: StatusCode::BAD_REQUEST, body: Bytes::copy_from_slice(b) };
+            assert!(matches!(Api::check(raw), Err(ApiError::Status { status: 400, .. })));
+        }
     }
 
     #[test]

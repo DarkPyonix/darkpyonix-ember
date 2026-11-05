@@ -354,10 +354,13 @@ impl Sessions {
             hook(&rec, &mut req)?;
         }
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(256);
+        // The shim output of this session is acknowledged only once the pump below has stored
+        // the events it produced (FR-S8).
+        let gate = crate::agents::proc::require_commit(id);
         // A fork whose agent forks natively (FR-S5): fork instead of starting fresh. If the
         // agent cannot after all, start fresh and put the copied conversation in front of it.
         let native_fork = if rec.native_id.is_none() { self.store.pending_native_fork(id)? } else { None };
-        let run = match native_fork {
+        let mut run = match native_fork {
             Some(from) => {
                 let mut forked = req.clone();
                 forked.fork_from = Some(from);
@@ -381,6 +384,11 @@ impl Sessions {
             }
             None => adapter.start(req, tx.clone()).await?,
         };
+        // A rejoined agent may wait on a prompt the previous server stored (FR-S8).
+        let pending = self.pending_approvals(id)?;
+        if !pending.is_empty() {
+            run.restore_pending_approvals(pending).await;
+        }
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let run = LiveRun { run: Arc::new(Mutex::new(run)), events: tx, generation };
         live.insert(id.to_string(), run.clone());
@@ -389,7 +397,18 @@ impl Sessions {
         let this = self.clone();
         let sid = id.to_string();
         tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
+            loop {
+                // Everything sent so far is stored when nothing waits in the channel and no
+                // event is being handled: that is when the agent's output may be acknowledged.
+                gate.commit_if_idle(|| rx.is_empty());
+                let event = tokio::select! {
+                    ev = rx.recv() => match ev {
+                        Some(ev) => ev,
+                        None => break,
+                    },
+                    // The agent's reader moved on, with the channel already drained.
+                    _ = gate.notified() => continue,
+                };
                 // A resumed agent re-announces the native id we already have; skip the duplicate.
                 if let AgentEvent::NativeSession { native_id } = &event {
                     if this.store.session(&sid).ok().flatten().and_then(|s| s.native_id).as_ref()
@@ -400,6 +419,7 @@ impl Sessions {
                 }
                 if let Err(e) = this.record(&sid, &event) {
                     tracing::error!(session = %sid, "failed to store event: {e:#}");
+                    gate.store_failed();
                 }
                 // Approve-everything mode answers a new request itself (FR-A5). Spawned: the
                 // answer goes back through this very channel.
@@ -414,12 +434,34 @@ impl Sessions {
                     }
                 }
             }
+            // The channel is closed and drained: all of it is stored.
+            gate.commit_ready();
+            crate::agents::proc::release_commit_of(&sid, &gate);
             let mut live = this.live.lock().await;
             if live.get(&sid).is_some_and(|l| l.generation == generation) {
                 live.remove(&sid);
             }
         });
         Ok(run)
+    }
+
+    /// Prompts of `id` that were asked and not answered or withdrawn by a turn end: `(approval id,
+    /// tool, input)` (FR-S8).
+    fn pending_approvals(&self, id: &str) -> anyhow::Result<Vec<(String, String, serde_json::Value)>> {
+        let mut pending: Vec<(String, String, serde_json::Value)> = Vec::new();
+        for e in self.store.events_after(id, 0)? {
+            match e.event {
+                AgentEvent::ApprovalRequested { approval_id, tool, input } => {
+                    pending.push((approval_id, tool, input))
+                }
+                AgentEvent::ApprovalResolved { approval_id, .. } => {
+                    pending.retain(|(p, _, _)| *p != approval_id)
+                }
+                AgentEvent::TurnEnded { .. } => pending.clear(),
+                _ => {}
+            }
+        }
+        Ok(pending)
     }
 
     fn touch(&self, id: &str) {
@@ -622,24 +664,61 @@ impl Sessions {
                 return Vec::new();
             }
         };
-        let mut rejoined = Vec::new();
-        for id in ids {
-            let rejoin = self
-                .store
-                .session(&id)
-                .ok()
-                .flatten()
-                .and_then(|rec| self.adapters.get(&rec.agent).map(|a| a.rejoins_shim()))
-                .unwrap_or(false);
-            if !rejoin {
-                continue;
-            }
-            match self.ensure_live(&id).await {
-                Ok(_) => rejoined.push(id),
-                Err(e) => tracing::warn!(session = %id, "could not rejoin its agent: {e}"),
+        // All sessions at once: an update with many running sessions must not attach them one
+        // after the other.
+        let results = futures::future::join_all(ids.into_iter().map(|id| self.rejoin_one(rt, id))).await;
+        results.into_iter().flatten().collect()
+    }
+
+    /// [`Sessions::rejoin_shims`] for one session: `Some(id)` when its agent was rejoined.
+    async fn rejoin_one(self: &Arc<Self>, rt: &crate::agents::proc::ShimRuntime, id: String) -> Option<String> {
+        let rec = self.store.session(&id).ok().flatten()?;
+        let adapter = self.adapters.get(&rec.agent)?.clone();
+        if adapter.rejoins_shim() {
+            return match self.ensure_live(&id).await {
+                Ok(_) => Some(id),
+                Err(e) => {
+                    tracing::warn!(session = %id, "could not rejoin its agent: {e}");
+                    None
+                }
+            };
+        }
+        // Not rejoinable: a turn that was running is read back from the surviving agent, which
+        // is then stopped; the session resumes natively on its next message.
+        if adapter.drains_shim()
+            && matches!(rec.status, SessionStatus::Running | SessionStatus::WaitingForApproval)
+        {
+            if let Err(e) = self.drain_turn(rt, &id, adapter.as_ref()).await {
+                tracing::warn!(session = %id, "could not drain the surviving turn: {e:#}");
             }
         }
-        rejoined
+        None
+    }
+
+    /// FR-S8: store what a surviving agent wrote while no server was attached, then stop it.
+    async fn drain_turn(
+        self: &Arc<Self>,
+        rt: &crate::agents::proc::ShimRuntime,
+        id: &str,
+        adapter: &dyn AgentAdapter,
+    ) -> anyhow::Result<()> {
+        let max = Duration::from_secs(
+            std::env::var("EMBER_SHIM_DRAIN_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(600),
+        );
+        let lines = crate::agents::proc::drain_surviving_lines(rt, id, max, |l| adapter.drain_turn_end(l)).await?;
+        for event in adapter.translate_drained(&lines) {
+            self.record(id, &event)?;
+        }
+        // A turn that did not finish cannot continue: end it, so the session is not stuck running.
+        let status = self.store.session(id)?.map(|s| s.status);
+        if matches!(status, Some(SessionStatus::Running | SessionStatus::WaitingForApproval)) {
+            self.record(
+                id,
+                &AgentEvent::Error { message: "the agent was stopped while the server restarted".into() },
+            )?;
+            self.record(id, &AgentEvent::TurnEnded { outcome: crate::events::TurnOutcome::Failed })?;
+        }
+        Ok(())
     }
 
     pub async fn is_live(&self, id: &str) -> bool {

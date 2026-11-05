@@ -22,6 +22,14 @@ Usage:
   ember-a2a show <message-id>
       A message you sent or received, with its delivery time.
 
+Terminal access (FR-T9):
+  ember-a2a terminal read <session-id> [--lines <n>] [--since <seq>] [--wait-ms <ms>] [--json]
+      Read recent output or follow after a sequence. JSON includes last_seq.
+  ember-a2a terminal send-text <session-id> <text...>
+      Send input; use `-` (or no text) to read from stdin.
+  ember-a2a terminal interrupt <session-id>
+      Interrupt the target turn. These commands require terminal permission.
+
 Teams (FR-T7):
   ember-a2a team list [--json]
       Your team: members (name, session, agent, status) and tasks.
@@ -155,6 +163,23 @@ impl Client {
 
     pub fn show(&self, id: &str) -> anyhow::Result<Value> {
         self.ok("GET", &format!("/api/a2a/messages/{id}"), None)
+    }
+
+    pub fn terminal_read(&self, target: &str, lines: Option<usize>, since: Option<i64>, wait_ms: Option<u64>) -> anyhow::Result<Value> {
+        let mut query = Vec::new();
+        if let Some(n) = lines { query.push(format!("lines={n}")); }
+        if let Some(n) = since { query.push(format!("since={n}")); }
+        if let Some(n) = wait_ms { query.push(format!("wait_ms={n}")); }
+        let suffix = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+        self.ok("GET", &format!("/api/a2a/terminal/{}{suffix}", path_seg(target)), None)
+    }
+
+    pub fn terminal_text(&self, target: &str, text: &str) -> anyhow::Result<Value> {
+        self.ok("POST", &format!("/api/a2a/terminal/{}/text", path_seg(target)), Some(&json!({ "text": text })))
+    }
+
+    pub fn terminal_interrupt(&self, target: &str) -> anyhow::Result<Value> {
+        self.ok("POST", &format!("/api/a2a/terminal/{}/interrupt", path_seg(target)), None)
     }
 
     pub fn team(&self) -> anyhow::Result<Value> {
@@ -449,6 +474,7 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
                 ),
             })
         }
+        "terminal" => run_terminal(&args[1..]),
         "team" => run_team(&args[1..]),
         "task" => run_task(&args[1..]),
         "mail" => run_mail(&args[1..]),
@@ -461,6 +487,42 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
         }
         "schedule" => run_schedule(&args[1..]),
         other => Err(CliError::Usage(format!("unknown command {other}"))),
+    }
+}
+
+fn run_terminal(args: &[String]) -> Result<String, CliError> {
+    let sub = args.first().ok_or_else(|| CliError::Usage("missing terminal command (read, send-text, interrupt)".into()))?;
+    let rest = &args[1..];
+    match sub.as_str() {
+        "read" => {
+            let a = parse_args(rest, &["lines", "since", "wait-ms"], &["json"])?;
+            if a.positional.len() != 1 { return Err(CliError::Usage("give one <session-id>".into())); }
+            let number = |key: &str| -> Result<Option<u64>, CliError> {
+                a.flags.get(key).map(|s| s.parse().map_err(|_| CliError::Usage(format!("bad --{key} {s}")))).transpose()
+            };
+            let lines = number("lines")?.map(|n| usize::try_from(n).map_err(|_| CliError::Usage("bad --lines".into()))).transpose()?;
+            let since = number("since")?.map(|n| i64::try_from(n).map_err(|_| CliError::Usage("bad --since".into()))).transpose()?;
+            let v = Client::from_env()?.terminal_read(&a.positional[0], lines, since, number("wait-ms")?)?;
+            if a.switches.iter().any(|s| s == "json") { return Ok(pretty(&v)); }
+            let mut out = v["lines"].as_array().into_iter().flatten().map(|line| format!("{}: {}", line["seq"], line["text"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n");
+            if !out.is_empty() { out.push('\n'); }
+            out.push_str(&format!("last_seq: {}", v["last_seq"]));
+            Ok(out)
+        }
+        "send-text" => {
+            let a = parse_args(rest, &[], &[])?;
+            let (target, words) = a.positional.split_first().ok_or_else(|| CliError::Usage("missing <session-id>".into()))?;
+            let text = text_or_stdin(words)?;
+            Client::from_env()?.terminal_text(target, &text)?;
+            Ok(format!("Sent text to {target}."))
+        }
+        "interrupt" => {
+            let a = parse_args(rest, &[], &[])?;
+            if a.positional.len() != 1 { return Err(CliError::Usage("give one <session-id>".into())); }
+            Client::from_env()?.terminal_interrupt(&a.positional[0])?;
+            Ok(format!("Interrupted {}.", a.positional[0]))
+        }
+        other => Err(CliError::Usage(format!("unknown terminal command {other}"))),
     }
 }
 

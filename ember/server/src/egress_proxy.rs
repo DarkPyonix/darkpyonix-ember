@@ -11,7 +11,7 @@
 //! One loopback HTTP CONNECT proxy runs per session, with its own random credential (any other
 //! local process lacks it). The route is asked **on every CONNECT**, so after a computer switch
 //! new connections follow the new computer; a tunnel already open stays on the computer it was
-//! opened through until it closes. The node side is the existing `/egress` route
+//! opened through until it closes or the session ends. The node side is the existing `/egress` route
 //! ([`ember_node::egress`]), so no new node API is needed. Plain `http://` proxying (absolute-URI
 //! requests) is not supported: model providers speak HTTPS.
 
@@ -46,11 +46,14 @@ struct Proxy {
     addr: SocketAddr,
     password: String,
     task: tokio::task::JoinHandle<()>,
+    /// Set when the session ends: open tunnels of the session close with it.
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 impl Drop for Proxy {
     fn drop(&mut self) {
         self.task.abort();
+        let _ = self.shutdown.send(true);
     }
 }
 
@@ -88,6 +91,7 @@ impl SessionEgress {
             TcpListener::from_std(std_listener)?
         };
         let password = uuid::Uuid::new_v4().simple().to_string();
+        let (shutdown, stop) = tokio::sync::watch::channel(false);
         let (route, sid, pw) = (self.route.clone(), session_id.to_string(), password.clone());
         let task = handle.spawn(async move {
             loop {
@@ -97,19 +101,26 @@ impl SessionEgress {
                 };
                 let _ = stream.set_nodelay(true);
                 let (route, sid, pw) = (route.clone(), sid.clone(), pw.clone());
+                let mut stop = stop.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve(stream, &sid, &pw, &route).await {
-                        tracing::debug!(session = %sid, "egress proxy connection ended: {e:#}");
+                    // Dropping `serve` on shutdown closes both ends of the tunnel.
+                    tokio::select! {
+                        r = serve(stream, &sid, &pw, &route) => {
+                            if let Err(e) = r {
+                                tracing::debug!(session = %sid, "egress proxy connection ended: {e:#}");
+                            }
+                        }
+                        _ = stop.wait_for(|down| *down) => {}
                     }
                 });
             }
         });
         let url = format!("http://ember:{password}@{addr}");
-        proxies.insert(session_id.to_string(), Proxy { addr, password, task });
+        proxies.insert(session_id.to_string(), Proxy { addr, password, task, shutdown });
         Ok(url)
     }
 
-    /// Stop the session's proxy (open tunnels finish on their own).
+    /// Stop the session's proxy: its listener closes and its open tunnels are torn down.
     pub fn stop(&self, session_id: &str) {
         self.proxies.lock().unwrap().remove(session_id);
     }

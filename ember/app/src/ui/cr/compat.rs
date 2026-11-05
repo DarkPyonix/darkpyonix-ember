@@ -132,7 +132,7 @@ pub fn StatusPill(status: LauncherStatus) {
 ///
 /// TODO(markdown): render with a markdown component (and its stream form for streaming
 /// replies) once compose-rust has one. Plain text until then.
-/// TODO(compose-rust): wrap in `SelectionContainer` so text can be selected and copied.
+/// TODO(compose-rust#5): wrap in `SelectionContainer` so text can be selected and copied.
 pub fn MessageText(text: &str, ink: Option<ColorRole>) {
     Txt(text, TypeRole::Body, ink.map(Paint::Role), None, None, None, None);
 }
@@ -170,7 +170,7 @@ pub fn CodeText(text: &str, max_lines: Option<u32>, error: bool) {
 
 /// Two panes side by side, the first taking `start_weight` of the width.
 ///
-/// TODO(compose-rust): replace with `SplitPane` (draggable divider) once it matches the mockup.
+/// TODO(compose-rust#27): replace with `SplitPane` (draggable divider) once it matches the mockup.
 pub fn SplitPane(start_weight: f32, start: impl FnOnce(), end: impl FnOnce()) {
     cu::Row()
         .space_role(SpaceRole::Md)

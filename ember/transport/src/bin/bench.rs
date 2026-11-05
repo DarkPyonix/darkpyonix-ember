@@ -316,7 +316,15 @@ async fn dial(args: &mut Args) {
         }
     };
 
+    let rtt = rtt_summary(rtts);
+    let path_history = changes.lock().unwrap().clone();
     let report = json!({
+        "setup_ms": ms(first_byte),
+        "rtt_p50_ms": rtt["p50_ms"],
+        "rtt_p95_ms": rtt["p95_ms"],
+        "throughput_mib_s": tput["bytes"].as_u64().unwrap() as f64
+            / tput["seconds"].as_f64().unwrap() / (1024.0 * 1024.0),
+        "path_history": path_history,
         "local_peer": transport.peer_id().to_string(),
         "remote_peer": peer_addr.peer.to_string(),
         "connect_ms": ms(connected),
@@ -324,9 +332,9 @@ async fn dial(args: &mut Args) {
         "initial_path": initial_path.to_string(),
         "time_to_direct_ms": time_to_direct.map(ms),
         "path_during_pings": path_during_pings.to_string(),
-        "rtt": rtt_summary(rtts),
+        "rtt": rtt,
         "throughput": tput,
-        "path_changes": changes.lock().unwrap().clone(),
+        "path_changes": path_history,
         "tcp_baseline": tcp,
         "note": "single run; NFR-N1 needs 20 runs per network pair",
     });

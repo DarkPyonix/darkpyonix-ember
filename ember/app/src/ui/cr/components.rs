@@ -741,7 +741,7 @@ pub fn SheetHeader(
 
 /// A modal with the shared header (#212). Wide windows get a centered dialog over the scrim;
 /// a compact window gets the toolkit's bottom sheet, full width.
-/// TODO(compose-rust): `corner-xl` squircle corners; plain arcs for now.
+/// TODO(compose-rust#294): `corner-xl` squircle corners; plain arcs for now.
 pub fn EmberSheet(
     title: &str,
     open: bool,

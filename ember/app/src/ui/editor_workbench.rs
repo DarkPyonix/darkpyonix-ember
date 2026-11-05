@@ -391,8 +391,6 @@ pub mod page {
     thread_local! {
         /// The editor's terminal session. Started on first show and kept while the panel is hidden.
         static TERMINAL: std::cell::RefCell<Option<TerminalHandle>> = const { std::cell::RefCell::new(None) };
-        /// True once this client asked for control after another client took it.
-        static CONTROL_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// The terminal handle, started on first use. `None` when the editor was not given a server
@@ -440,9 +438,16 @@ pub mod page {
         terminal_stream::key_bytes(name, terminal_stream::Modifiers { ctrl, alt, shift })
     }
 
-    /// True when typing should first take control: another client holds it and it has not been asked for.
-    pub(super) fn should_take_control(state: &TerminalState, already_asked: bool) -> bool {
-        state.controlled_by_other() && !already_asked
+    /// True when the panel offers the take-control button: another client holds control.
+    /// Control changes hands only through that button, never through typing.
+    pub(super) fn offers_take_control(state: &TerminalState) -> bool {
+        state.controlled_by_other()
+    }
+
+    /// True when keystrokes are sent to the node. While another client controls, the node
+    /// would refuse them, so they are dropped here.
+    pub(super) fn sends_input(state: &TerminalState) -> bool {
+        !state.controlled_by_other()
     }
 
     fn terminal_body(s: &Shared) -> Element {
@@ -451,8 +456,13 @@ pub mod page {
         };
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
+        let control_handle = handle.clone();
+        let offer_control = offers_take_control(&handle.snapshot());
+        let offer_reconnect = handle.snapshot().needs_reconnect();
+        let revision = s.revision;
         rsx! {
             div { tabindex: "0", style: "flex:1; min-height:0; overflow:auto; outline:none; padding:8px 12px; background:#1e1e1e; color:#cccccc;",
+                // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let name = key_name(&event.key());
@@ -460,18 +470,18 @@ pub mod page {
                     let Some(bytes) = bytes else { return };
                     event.stop_propagation();
                     event.prevent_default();
-                    let state = key_handle.snapshot();
-                    if !state.controlled_by_other() {
-                        CONTROL_ASKED.with(|c| c.set(false));
+                    if sends_input(&key_handle.snapshot()) {
+                        key_handle.send_input(&bytes);
                     }
-                    if should_take_control(&state, CONTROL_ASKED.with(|c| c.get())) {
-                        CONTROL_ASKED.with(|c| c.set(true));
-                        key_handle.take_control();
-                    }
-                    key_handle.send_input(&bytes);
                 },
                 if let Some(banner) = view.banner {
-                    div { style: "padding:4px 8px; margin-bottom:6px; background:#4d3b00; color:#ffd479; border-radius:4px;", "{banner}" }
+                    div { style: "display:flex; align-items:center; gap:8px; padding:4px 8px; margin-bottom:6px; background:#4d3b00; color:#ffd479; border-radius:4px;",
+                        div { style: "flex:1;", "{banner}" }
+                        if offer_control {
+                            div { style: "padding:2px 10px; border-radius:4px; background:#ffd479; color:#4d3b00; cursor:pointer; font-size:12px;",
+                                onclick: move |_| control_handle.take_control(), "제어권 가져오기" }
+                        }
+                    }
                 }
                 div { style: "white-space:pre; font-family:monospace; font-size:12px;",
                     for (i, line) in view.lines.iter().enumerate() {
@@ -480,6 +490,14 @@ pub mod page {
                 }
                 if let Some(notice) = view.notice {
                     div { style: "padding-top:6px; color:#9d9d9d;", "{notice}" }
+                }
+                if offer_reconnect {
+                    div { style: "display:inline-block; margin-top:6px; padding:2px 10px; border-radius:4px; background:#333333; color:#cccccc; cursor:pointer; font-size:12px;",
+                        onclick: move |_| {
+                            TERMINAL.with(|t| *t.borrow_mut() = None);
+                            let mut revision = revision;
+                            *revision.write() += 1;
+                        }, "다시 연결" }
                 }
             }
         }
@@ -576,14 +594,18 @@ mod tests {
         assert_eq!(page::terminal_input("c", true, false, false, false), Some(vec![3]));
         assert_eq!(page::terminal_input("c", false, false, false, true), None);
     }
-    #[test] fn fr_l31_terminal_takes_control_once_when_another_client_holds_it() {
+    #[test] fn fr_p4_take_control_is_offered_and_input_held_while_another_client_controls() {
         use crate::terminal_stream::{TermClient, TerminalState};
         let mut state = TerminalState::default();
-        assert!(!page::should_take_control(&state, false));
+        assert!(!page::offers_take_control(&state));
+        assert!(page::sends_input(&state));
         state.client = Some(1);
         state.controller = Some(TermClient { client: 2, device: "d".into(), kind: None, read_only: false });
-        assert!(page::should_take_control(&state, false));
-        assert!(!page::should_take_control(&state, true));
+        assert!(page::offers_take_control(&state));
+        assert!(!page::sends_input(&state));
+        state.controller = Some(TermClient { client: 1, device: "me".into(), kind: None, read_only: false });
+        assert!(!page::offers_take_control(&state));
+        assert!(page::sends_input(&state));
     }
     #[test] fn fr_l31_status_position() { assert_eq!(position_text(2, 3), "2행 3열"); }
 }

@@ -394,6 +394,11 @@ impl TerminalState {
         }
     }
 
+    /// True when the panel should offer a reconnect: the connection is gone or failed.
+    pub fn needs_reconnect(&self) -> bool {
+        self.status == TerminalStatus::Disconnected || self.error.is_some()
+    }
+
     /// True when another client holds control, so input from this one would be refused.
     pub fn controlled_by_other(&self) -> bool {
         self.controller.as_ref().is_some_and(|c| Some(c.client) != self.client)
@@ -646,6 +651,7 @@ pub fn start(
     let shared = Arc::new(Shared {
         session: Mutex::new(TerminalSession::new()),
         revision: AtomicU64::new(0),
+        // TODO(#334): PTY resize. The panel never calls resize, so the session stays 80x24.
         size: Mutex::new((80, 24)),
         tx,
         on_change,
@@ -694,6 +700,7 @@ async fn run(
         key: Some(session_key(project, folder)),
         tags: Default::default(),
     };
+    // TODO(#333): TLS. The client speaks plain http and ws only.
     let created: TermCreateResponse = reqwest::Client::new()
         .post(terms_url(base, computer))
         .json(&request)
@@ -711,6 +718,7 @@ async fn run(
         read_only: false,
         snapshot: true,
     };
+    // TODO(#333): TLS. Plain ws only; wss is not configured.
     let (mut ws, _) = tokio_tungstenite::connect_async(attach_url(base, computer, &created.term.id)).await?;
     let hello = serde_json::to_string(&hello).map_err(|e| ClientError::Protocol(e.to_string()))?;
     ws.send(Message::Text(hello.into())).await?;
@@ -719,7 +727,15 @@ async fn run(
             incoming = ws.next() => match incoming {
                 None | Some(Ok(Message::Close(_))) => break,
                 Some(Ok(Message::Text(text))) => {
-                    let Ok(event) = serde_json::from_str::<TermEvent>(&text) else { continue };
+                    // TODO(#336): reconnect and visible protocol errors. An unparsable frame is
+                    // only logged; the panel shows nothing about it.
+                    let event = match serde_json::from_str::<TermEvent>(&text) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::warn!("skipping an unparsable terminal frame: {e}");
+                            continue;
+                        }
+                    };
                     let last = matches!(event, TermEvent::Exit { .. } | TermEvent::Error { .. });
                     live()?.update(|s| s.apply_event(event));
                     if last {
@@ -882,6 +898,31 @@ mod tests {
         session.apply_event(TermEvent::Resized { size: PtySize { rows: 10, cols: 50 } });
         assert_eq!(session.state.size, (50, 10));
         assert_eq!(session.state.status, TerminalStatus::Connected);
+    }
+
+    #[test]
+    fn fr_p6_term_list_response_decodes() {
+        let list: Vec<TermInfo> = serde_json::from_str(
+            r#"[{"id":"t1","key":"p:/w","title":"zsh","origin":"ide-ember","project":"p","argv":["/bin/zsh"],"cwd":"/w","pid":42,"state":"running","exit_code":null,"signal":null,"size":{"rows":24,"cols":80},"created_ms":1,"finished_ms":null,"last_activity_ms":2,"tags":{},"clients":[],"controller":null,"survives_node_restart":false,"adopted":false,"has_screen":true}]"#,
+        )
+        .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].id.as_str(), list[0].title.as_str()), ("t1", "zsh"));
+        assert_eq!((list[0].size.cols, list[0].size.rows), (80, 24));
+    }
+
+    #[test]
+    fn fr_p6_reconnect_is_offered_when_disconnected_or_failed() {
+        let mut session = TerminalSession::new();
+        assert!(session.state.needs_reconnect());
+        session.connecting();
+        assert!(!session.state.needs_reconnect());
+        session.fail("boom");
+        assert!(session.state.needs_reconnect());
+        session.state.status = TerminalStatus::Connected;
+        assert!(session.state.needs_reconnect());
+        session.state.error = None;
+        assert!(!session.state.needs_reconnect());
     }
 
     #[test]

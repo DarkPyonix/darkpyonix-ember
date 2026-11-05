@@ -1428,13 +1428,13 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout) {
         // TODO(compose-rust#308): lane graph (a `Canvas` column of dots and edges) goes left of the text.
         Txt(&e.subject, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            if e.is_merge {
-                Pill("병합", PillTone::Sky, true);
-            }
             Txt(&history_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
         });
-        if !e.refs.is_empty() {
+        if e.is_merge || !e.refs.is_empty() {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                if e.is_merge {
+                    Pill("병합", PillTone::Sky, true);
+                }
                 for r in e.refs.iter().take(limit) {
                     Pill(&chip_text(&r.label), ref_tone(r), true);
                 }
@@ -1446,7 +1446,8 @@ fn HistoryRow(e: &HistoryEntry, layout: PaneLayout) {
     });
 }
 
-/// Commits for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+/// Commits for the review captures (`EMBER_CR_ROUTE=vcs`): the only path that reaches `HistoryPane`
+/// without actions, because a screen without services has no snapshot and shows 준비 중입니다.
 fn sample_history() -> HistoryLoad {
     let e = |short: &str, subject: &str, author: &str, time: &str, merge: bool, refs: &[(&str, ember_client::api::GitLogRefKind)]| HistoryEntry {
         sha: format!("{short}0000000000000000000000000000000000"),
@@ -1484,6 +1485,8 @@ fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
                 st.set(HistoryLoad::Loading);
                 let now = crate::demo::now_ms() / 1000;
                 crate::services::run_shared(async move { history_from(fetch_history(&name, 0).await, now) }, move |result| st.set(result));
+            } else {
+                st.set(HistoryLoad::Failed("서버에 연결되어 있지 않아 히스토리를 불러올 수 없습니다.".to_string()));
             }
         });
     }

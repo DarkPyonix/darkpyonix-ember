@@ -8,7 +8,7 @@
 //! toolkit draws the caption buttons and Ember reserves their width itself. Elsewhere there is
 //! nothing to clear. Everything but [`safe_area`] is pure.
 
-use crate::ui::shell::{caption_reserved_width, WINDOWS_CAPTION_HEIGHT_DP};
+use crate::ui::shell::{caption_reserved_width, ShellMode, WINDOWS_CAPTION_HEIGHT_DP};
 
 /// The window controls' footprint along the top edge, in dp. `top` is the height of the strip
 /// they occupy, `leading` the width at the left (macOS traffic lights), `trailing` the width at
@@ -81,6 +81,25 @@ pub fn sidebar_top_inset(area: SafeArea) -> f32 {
     if area.leading > 0.0 { area.top } else { 0.0 }
 }
 
+/// What each layout reserves at the top for the traffic lights.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TopReservation {
+    /// Added above the first sidebar or rail row.
+    pub sidebar_inset: f32,
+    /// A strip above the content column, when it touches the window's left edge.
+    pub content_strip: f32,
+}
+
+/// The reservation for `mode`: with a sidebar or rail the lights float over it and the content
+/// starts at the top; with bottom tabs the whole content column starts below the lights.
+pub fn top_reservation(area: SafeArea, mode: ShellMode) -> TopReservation {
+    let bottom_tabs = mode == ShellMode::BottomTabs;
+    TopReservation {
+        sidebar_inset: if bottom_tabs { 0.0 } else { sidebar_top_inset(area) },
+        content_strip: title_strip_height(area, bottom_tabs),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +136,17 @@ mod tests {
         assert_eq!(sidebar_top_inset(safe_area_for(Platform::Windows, LIGHTS)), 0.0);
         assert_eq!(sidebar_top_inset(safe_area_for(Platform::Other, LIGHTS)), 0.0);
         assert_eq!(sidebar_top_inset(safe_area_for(Platform::MacOs, LIGHTS)), 28.0);
+    }
+
+    #[test]
+    fn fr_l33_each_layout_reserves_the_top_where_the_lights_are() {
+        let sidebar = top_reservation(LIGHTS, ShellMode::Sidebar);
+        assert_eq!(sidebar, TopReservation { sidebar_inset: 28.0, content_strip: 0.0 });
+        assert_eq!(top_reservation(LIGHTS, ShellMode::Rail), sidebar);
+        let tabs = top_reservation(LIGHTS, ShellMode::BottomTabs);
+        assert_eq!(tabs, TopReservation { sidebar_inset: 0.0, content_strip: 28.0 });
+        let win = safe_area_for(Platform::Windows, LIGHTS);
+        assert_eq!(top_reservation(win, ShellMode::BottomTabs), TopReservation::default());
+        assert_eq!(top_reservation(win, ShellMode::Sidebar), TopReservation::default());
     }
 }

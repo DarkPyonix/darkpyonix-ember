@@ -601,6 +601,7 @@ pub fn shell() {
     let active = active_menu(&route, ui.menu.get());
     let screen = screen_for(&route, active);
     let mode = current_mode(collapsed.get());
+    let strip = crate::ui::safe_area::top_reservation(crate::ui::safe_area::safe_area(), mode).content_strip;
     let counts = ui.with_rows_no_previews(|st, _| {
         let cards = model::project_cards(st);
         NavCounts {
@@ -622,11 +623,9 @@ pub fn shell() {
                     });
             }
             // macOS without a sidebar or rail (bottom tabs): the content touches the left edge,
-            // where the traffic lights float, so it starts below them (FR-L33).
-            let strip = crate::ui::safe_area::title_strip_height(
-                crate::ui::safe_area::safe_area(),
-                mode == ShellMode::BottomTabs,
-            );
+            // where the traffic lights float, so every screen starts below them (FR-L33). The
+            // reservation is computed in `shell`, beside `mode`, so one read of the window size
+            // drives both.
             if strip > 0.0 {
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(strip));
             }

@@ -95,7 +95,13 @@ pub fn launch() {
         .map(|p| prefs::load(&p))
         .unwrap_or_default();
     let shared_ui = ui::coexist::SharedUi::new(initial_prefs.clone());
-    let server = ServerApi::new(&config.server_url);
+    let server = match ServerApi::new(&config.server_url) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ember-app: {e}");
+            std::process::exit(2);
+        }
+    };
     install(Services {
         config,
         rt,

@@ -720,18 +720,8 @@ pub fn environment_rows(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Status view cards (FR-L18, #324)
+// Status view cards (FR-L18, #324, #349)
 // ---------------------------------------------------------------------------------------------
-
-/// One card of the status view's bottom grid, or the 오늘 토큰 tile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatusCard {
-    pub title: &'static str,
-    /// Rows to draw; empty means the card shows `empty`.
-    pub rows: Vec<String>,
-    /// The honest empty state.
-    pub empty: &'static str,
-}
 
 /// The 오늘 토큰 tile: (value, sub line), today's tokens of the project on the UTC day (FR-U7,
 /// #332). Loading, failed and nothing-reported each say so; the cost is unknown, so no dollar
@@ -741,52 +731,358 @@ pub fn token_tile(load: &crate::ui::usage::Load<ember_client::api::UsageSummary>
     (t.value, t.sub)
 }
 
-/// PR과 CI. No PR API exists yet (TODO(server): PR list with CI state, #324), so only the demo
+/// Card titles and empty states, in grid order.
+pub const PR_CARD_TITLE: &str = PR_TITLE;
+pub const SUBAGENT_CARD_TITLE: &str = SUBAGENT_TITLE;
+pub const LOAD_CARD_TITLE: &str = LOAD_TITLE;
+pub const PR_EMPTY: &str = WAIT_SERVER;
+pub const SUBAGENT_EMPTY: &str = "서브 에이전트가 없습니다";
+pub const TOKENS_CAPTION: &str = "팀원별 오늘 토큰";
+pub const COMPUTERS_CAPTION: &str = "컴퓨터";
+pub const TOKENS_EMPTY: &str = NONE_YET;
+pub const COMPUTERS_EMPTY: &str = "컴퓨터가 없습니다";
+
+/// The CI state of a pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+    Pass,
+    Fail,
+    Run,
+}
+
+/// The colour family of a pill, without the toolkit type so the model stays pure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusTone {
+    Green,
+    Red,
+    Blue,
+    Orange,
+    Sky,
+}
+
+impl CiState {
+    pub fn label(self) -> &'static str {
+        match self {
+            CiState::Pass => "CI 통과",
+            CiState::Fail => "CI 실패",
+            CiState::Run => "CI 실행 중",
+        }
+    }
+
+    pub fn tone(self) -> StatusTone {
+        match self {
+            CiState::Pass => StatusTone::Green,
+            CiState::Fail => StatusTone::Red,
+            CiState::Run => StatusTone::Blue,
+        }
+    }
+}
+
+/// One pull request row of the PR과 CI card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrRow {
+    pub num: u32,
+    pub title: String,
+    pub member: Option<String>,
+    pub branch: String,
+    pub ci: CiState,
+    pub review: String,
+}
+
+impl PrRow {
+    /// `#num title`.
+    pub fn headline(&self) -> String {
+        format!("#{} {}", self.num, self.title)
+    }
+
+    /// `<member> · <branch>`, or the branch alone.
+    pub fn sub_line(&self) -> String {
+        match &self.member {
+            Some(m) => format!("{m} \u{00b7} {}", self.branch),
+            None => self.branch.clone(),
+        }
+    }
+}
+
+/// PR rows. No PR API exists yet (TODO(server): PR list with CI state, #324), so only the demo
 /// shows sample rows.
-pub fn pr_card(demo: bool) -> StatusCard {
-    let rows = if demo {
-        vec![
-            "#212 센터 시트와 스크림 · CI 통과".to_string(),
-            "#273 모니터 폭 1360 dp · CI 진행 중".to_string(),
-        ]
-    } else {
-        Vec::new()
-    };
-    StatusCard { title: PR_TITLE, rows, empty: WAIT_SERVER }
-}
-
-/// 서브 에이전트 스레드. The server does not report sub-agent threads yet (TODO(server): FR-U7,
-/// #324); team members are not threads, so nothing is derived from them.
-pub fn subagent_card(demo: bool) -> StatusCard {
-    let rows = if demo {
-        vec![
-            "리더 > 구현 · 파일 검색".to_string(),
-            "리더 > 리뷰 · 테스트 읽기".to_string(),
-        ]
-    } else {
-        Vec::new()
-    };
-    StatusCard { title: SUBAGENT_TITLE, rows, empty: NONE_YET }
-}
-
-/// 부하. Session counts come from the members; CPU and memory need a server metric
-/// (TODO(server): host load, #324) and show only in demo mode.
-pub fn load_card(demo: bool, members: &[Member]) -> StatusCard {
-    let mut rows = Vec::new();
-    if !members.is_empty() {
-        let n = |s: LauncherStatus| members.iter().filter(|m| m.status == s).count();
-        rows.push(format!("실행 중 세션 {}개", n(LauncherStatus::Running)));
-        rows.push(format!("승인 대기 세션 {}개", n(LauncherStatus::WaitingForApproval)));
+pub fn pr_rows(demo: bool) -> Vec<PrRow> {
+    if !demo {
+        return Vec::new();
     }
-    if demo {
-        rows.push("CPU 38% · 메모리 5.1 GB".to_string());
-    }
-    StatusCard { title: LOAD_TITLE, rows, empty: NONE_YET }
+    vec![
+        PrRow {
+            num: 212,
+            title: "센터 시트와 스크림".into(),
+            member: Some("구현".into()),
+            branch: "feat/sheets".into(),
+            ci: CiState::Pass,
+            review: "승인".into(),
+        },
+        PrRow {
+            num: 273,
+            title: "모니터 폭 1360 dp".into(),
+            member: Some("리뷰".into()),
+            branch: "feat/monitor-width".into(),
+            ci: CiState::Run,
+            review: "리뷰 대기".into(),
+        },
+    ]
 }
 
-/// The three cards in grid order.
-pub fn status_cards(demo: bool, members: &[Member]) -> [StatusCard; 3] {
-    [pr_card(demo), subagent_card(demo), load_card(demo, members)]
+/// The count pill text of the PR card header.
+pub fn pr_count_text(rows: &[PrRow]) -> String {
+    rows.len().to_string()
+}
+
+/// The state of a sub-agent thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    Run,
+    Wait,
+    Done,
+    Fail,
+    Unknown,
+}
+
+impl NodeStatus {
+    /// The colour of the status marker.
+    pub fn dot_tone(self) -> Option<StatusTone> {
+        match self {
+            NodeStatus::Run => Some(StatusTone::Blue),
+            NodeStatus::Wait => Some(StatusTone::Orange),
+            NodeStatus::Done => Some(StatusTone::Green),
+            NodeStatus::Fail => Some(StatusTone::Red),
+            NodeStatus::Unknown => None,
+        }
+    }
+
+    /// The status as text, so the marker's colour is not the only carrier (FR-L18).
+    pub fn label(self) -> &'static str {
+        match self {
+            NodeStatus::Run => "실행 중",
+            NodeStatus::Wait => "대기",
+            NodeStatus::Done => "완료",
+            NodeStatus::Fail => "실패",
+            NodeStatus::Unknown => "",
+        }
+    }
+}
+
+/// Side padding of the status page: 12 dp up to 560 dp, 20 dp above.
+pub fn status_page_pad(width_dp: f32) -> f32 {
+    if width_dp <= 560.0 { 12.0 } else { 20.0 }
+}
+
+/// Columns of the status cards grid: three from 1280 dp, two from 900 dp, one below.
+pub fn status_grid_columns(width_dp: f32) -> usize {
+    if width_dp >= 1280.0 {
+        3
+    } else if width_dp >= 900.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Width of one status card when the grid has `columns` columns and `gap` between them: the
+/// whole page row (window minus both paddings) shared equally, as the stat tiles do.
+pub fn status_card_width(window_dp: f32, columns: usize, gap: f32) -> f32 {
+    let row = window_dp - 2.0 * status_page_pad(window_dp);
+    let n = columns.max(1) as f32;
+    (row - gap * (n - 1.0)) / n
+}
+
+/// One node of the sub-agent tree: a team member that has threads (`member` set), or a thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubNode {
+    pub name: String,
+    pub task: String,
+    pub status: NodeStatus,
+    pub member: Option<Member>,
+    pub children: Vec<SubNode>,
+}
+
+impl SubNode {
+    pub fn depth(&self) -> usize {
+        1 + self.children.iter().map(SubNode::depth).max().unwrap_or(0)
+    }
+}
+
+fn thread(name: &str, task: &str, status: NodeStatus, children: Vec<SubNode>) -> SubNode {
+    SubNode { name: name.into(), task: task.into(), status, member: None, children }
+}
+
+/// The sub-agent tree. The server reports no sub-agent threads yet (TODO(server): FR-U7, #324);
+/// members are not threads, so outside the demo the tree is empty and nothing is derived.
+pub fn subagent_tree(demo: bool, members: &[Member]) -> Vec<SubNode> {
+    if !demo || members.is_empty() {
+        return Vec::new();
+    }
+    let root = |m: &Member, children: Vec<SubNode>| SubNode {
+        name: m.name.clone(),
+        task: m.task.clone(),
+        status: NodeStatus::Run,
+        member: Some(m.clone()),
+        children,
+    };
+    let lead = members.iter().find(|m| m.leader).unwrap_or(&members[0]);
+    let mut out = vec![root(
+        lead,
+        vec![
+            thread("Explore", "proxy router", NodeStatus::Done, Vec::new()),
+            thread("Test runner", "단위 테스트", NodeStatus::Wait, Vec::new()),
+        ],
+    )];
+    if let Some(m) = members.iter().find(|m| m.session_id != lead.session_id) {
+        out.push(root(
+            m,
+            vec![thread(
+                "CSS scanner",
+                "스타일 검색",
+                NodeStatus::Run,
+                vec![
+                    thread(":has() rewrite", "셀렉터 변환", NodeStatus::Run, Vec::new()),
+                    thread("Snapshot diff", "캡처 비교", NodeStatus::Done, Vec::new()),
+                ],
+            )],
+        ));
+    }
+    out
+}
+
+/// The vendor of a harness, as the mockup's `vendorOf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    Claude,
+    Codex,
+    Gemini,
+}
+
+pub fn vendor_of(agent: &str) -> Vendor {
+    let a = agent.to_lowercase();
+    if a.contains("codex") {
+        Vendor::Codex
+    } else if a.contains("gemini") {
+        Vendor::Gemini
+    } else {
+        Vendor::Claude
+    }
+}
+
+/// The bar colour of a vendor: claude orange, codex blue, gemini sky (`--v-*`).
+pub fn vendor_accent(agent: &str) -> StatusTone {
+    match vendor_of(agent) {
+        Vendor::Claude => StatusTone::Orange,
+        Vendor::Codex => StatusTone::Blue,
+        Vendor::Gemini => StatusTone::Sky,
+    }
+}
+
+/// One member row of the token block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenRow {
+    pub member: Member,
+    /// Thousands of tokens today.
+    pub k: u32,
+}
+
+/// Token rows, biggest first. The server sends no per-member usage yet (TODO(server): FR-U7), so
+/// outside the demo there are none.
+pub fn token_rows(demo: bool, members: &[Member]) -> Vec<TokenRow> {
+    if !demo {
+        return Vec::new();
+    }
+    const SAMPLE: [u32; 4] = [360, 210, 90, 40];
+    let mut rows: Vec<TokenRow> = members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| TokenRow { member: m.clone(), k: SAMPLE[i % SAMPLE.len()] })
+        .collect();
+    rows.sort_by(|a, b| b.k.cmp(&a.k));
+    rows
+}
+
+/// The bar fill width in percent, relative to the biggest value; 0 when there is none.
+pub fn token_width_pct(k: u32, max: u32) -> f32 {
+    if max == 0 { 0.0 } else { (k.min(max) as f32 / max as f32) * 100.0 }
+}
+
+/// The text at the right of a token row.
+pub fn token_value_text(k: u32) -> String {
+    format!("{k}k")
+}
+
+/// One computer row of the 컴퓨터 block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerRow {
+    pub name: String,
+    pub ip: Option<String>,
+    pub online: bool,
+    /// CPU load in percent; `None` without a metric (TODO(server): FR-X7 monitor metrics).
+    pub cpu: Option<u8>,
+    /// Running sessions on it; `None` when the session record does not say.
+    pub running: Option<u32>,
+}
+
+/// The computers assigned to `project`. CPU and run counts exist only in the demo.
+pub fn computer_rows(
+    computers: &[ember_client::state::Computer],
+    project: &str,
+    demo: bool,
+) -> Vec<ComputerRow> {
+    use ember_client::state::Reachability;
+    computers
+        .iter()
+        .filter(|c| c.projects.iter().any(|p| p == project))
+        .map(|c| {
+            let online = c.reachability == Reachability::Online;
+            ComputerRow {
+                name: c.name.clone(),
+                ip: None,
+                online,
+                cpu: if demo && online { Some(62) } else { None },
+                running: if demo && online { Some(2) } else { None },
+            }
+        })
+        .collect()
+}
+
+/// The fill colour of a computer's bar: orange above 75 percent, else green.
+pub fn cpu_fill_tone(cpu: u8) -> StatusTone {
+    if cpu > 75 { StatusTone::Orange } else { StatusTone::Green }
+}
+
+/// The bar fill in percent: 0 when offline or without a metric.
+pub fn computer_fill_pct(c: &ComputerRow) -> f32 {
+    match (c.online, c.cpu) {
+        (true, Some(p)) => p.min(100) as f32,
+        _ => 0.0,
+    }
+}
+
+/// The text at the right of a computer row. Never a number without a metric.
+pub fn computer_value_text(c: &ComputerRow) -> String {
+    if !c.online {
+        return "오프라인".to_string();
+    }
+    match (c.cpu, c.running) {
+        (Some(p), Some(n)) => format!("{p}% \u{00b7} {n}실행"),
+        (Some(p), None) => format!("{p}%"),
+        _ => "온라인".to_string(),
+    }
+}
+
+/// The real session counts of the 부하 card (not in the mockup, kept because they are real).
+pub fn session_count_rows(members: &[Member]) -> Vec<String> {
+    if members.is_empty() {
+        return Vec::new();
+    }
+    let n = |s: LauncherStatus| members.iter().filter(|m| m.status == s).count();
+    vec![
+        format!("실행 중 세션 {}개", n(LauncherStatus::Running)),
+        format!("승인 대기 세션 {}개", n(LauncherStatus::WaitingForApproval)),
+    ]
 }
 
 #[cfg(test)]
@@ -1346,6 +1642,24 @@ mod tests {
         assert!(UI_STRINGS.contains(&"준비 중입니다"));
     }
 
+    use ember_client::state::{Computer, Reachability};
+
+    fn comp(name: &str, projects: &[&str], r: Reachability) -> Computer {
+        Computer {
+            id: name.into(),
+            name: name.into(),
+            reachability: r,
+            projects: projects.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn two_members() -> Vec<Member> {
+        vec![
+            member("a", LauncherStatus::Running, true, 1),
+            member("b", LauncherStatus::WaitingForApproval, false, 2),
+        ]
+    }
+
     #[test]
     fn fr_u7_timeline_cost_is_demo_only() {
         assert!(timeline_summary(true).contains("$0.24"));
@@ -1360,20 +1674,18 @@ mod tests {
             member("b", LauncherStatus::WaitingForApproval, false, 2),
             member("c", LauncherStatus::Running, false, 3),
         ];
-        let load = load_card(false, &ms);
-        assert_eq!(load.rows, vec!["실행 중 세션 2개", "승인 대기 세션 1개"]);
-        assert!(!load.rows.iter().any(|r| r.contains("CPU")));
+        assert_eq!(session_count_rows(&ms), vec!["실행 중 세션 2개", "승인 대기 세션 1개"]);
+        assert!(session_count_rows(&[]).is_empty());
     }
 
     #[test]
     fn fr_l18_status_no_data_is_honest() {
-        let cards = status_cards(false, &[]);
-        for c in &cards {
-            assert!(c.rows.is_empty(), "{} must not invent rows", c.title);
-        }
-        assert_eq!(cards[0].empty, "서버 데이터를 기다리고 있습니다");
-        assert_eq!(cards[1].empty, "아직 없습니다");
-        assert_eq!(cards[2].empty, "아직 없습니다");
+        let ms = two_members();
+        assert!(pr_rows(false).is_empty());
+        assert!(subagent_tree(false, &ms).is_empty());
+        assert!(token_rows(false, &ms).is_empty());
+        assert_eq!(PR_EMPTY, "서버 데이터를 기다리고 있습니다");
+        assert_eq!(TOKENS_EMPTY, "아직 없습니다");
         use crate::ui::usage::Load;
         assert_eq!(token_tile(&Load::Loading, "2026-11-06"), ("-".to_string(), "불러오는 중입니다".to_string()));
         assert_eq!(token_tile(&Load::Failed("x".into()), "2026-11-06").1, "불러오지 못했습니다");
@@ -1383,9 +1695,10 @@ mod tests {
 
     #[test]
     fn fr_l18_status_demo_mode_shows_samples() {
-        let cards = status_cards(true, &[]);
-        assert!(cards[0].rows.len() >= 1 && cards[1].rows.len() >= 1);
-        assert_eq!(cards[2].rows, vec!["CPU 38% · 메모리 5.1 GB"]);
+        let ms = two_members();
+        assert!(pr_rows(true).len() >= 2);
+        assert!(!subagent_tree(true, &ms).is_empty());
+        assert!(!token_rows(true, &ms).is_empty());
         let now = crate::demo::now_ms();
         let mut sample = crate::demo::usage_summary(now);
         let today = crate::demo::day_string(now);
@@ -1393,5 +1706,174 @@ mod tests {
         let (value, sub) = token_tile(&crate::ui::usage::Load::Ready(sample), &today);
         assert_ne!(value, "-");
         assert!(sub.contains("UTC 기준") && !sub.contains('$'));
+    }
+
+    #[test]
+    fn fr_l18_status_ci_pill_label_and_tone() {
+        assert_eq!(CiState::Pass.label(), "CI 통과");
+        assert_eq!(CiState::Fail.label(), "CI 실패");
+        assert_eq!(CiState::Run.label(), "CI 실행 중");
+        assert_eq!(CiState::Pass.tone(), StatusTone::Green);
+        assert_eq!(CiState::Fail.tone(), StatusTone::Red);
+        assert_eq!(CiState::Run.tone(), StatusTone::Blue);
+    }
+
+    #[test]
+    fn fr_l18_status_pr_rows_empty_without_demo() {
+        assert!(pr_rows(false).is_empty());
+        let rows = pr_rows(true);
+        assert_eq!(pr_count_text(&rows), "2");
+        assert_eq!(rows[0].headline(), "#212 센터 시트와 스크림");
+        assert!(rows[0].sub_line().contains("feat/sheets"));
+    }
+
+    #[test]
+    fn fr_l18_status_subagent_tree_empty_without_demo() {
+        assert!(subagent_tree(false, &two_members()).is_empty());
+        assert!(subagent_tree(true, &[]).is_empty());
+    }
+
+    #[test]
+    fn fr_l18_status_subagent_tree_nests_children() {
+        let tree = subagent_tree(true, &two_members());
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[1].depth(), 3);
+        assert_eq!(NodeStatus::Run.dot_tone(), Some(StatusTone::Blue));
+        assert_eq!(NodeStatus::Wait.dot_tone(), Some(StatusTone::Orange));
+        assert_eq!(NodeStatus::Done.dot_tone(), Some(StatusTone::Green));
+        assert_eq!(NodeStatus::Fail.dot_tone(), Some(StatusTone::Red));
+        assert_eq!(NodeStatus::Unknown.dot_tone(), None);
+    }
+
+    #[test]
+    fn fr_l18_status_never_lists_members_as_threads() {
+        let ms = two_members();
+        let tree = subagent_tree(true, &ms);
+        fn walk(n: &SubNode, out: &mut Vec<(String, bool)>) {
+            out.push((n.name.clone(), n.member.is_some()));
+            for c in &n.children {
+                walk(c, out);
+            }
+        }
+        let mut all = Vec::new();
+        for n in &tree {
+            walk(n, &mut all);
+            assert!(n.member.is_some(), "roots are members that have threads");
+            assert!(!n.children.is_empty(), "a member without threads is not listed");
+            for c in &n.children {
+                assert!(c.member.is_none(), "threads are not members");
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l18_status_vendor_of_harness_name() {
+        assert_eq!(vendor_of("claude-code"), Vendor::Claude);
+        assert_eq!(vendor_of("Codex"), Vendor::Codex);
+        assert_eq!(vendor_of("gemini-cli"), Vendor::Gemini);
+        assert_eq!(vendor_of("other"), Vendor::Claude);
+    }
+
+    #[test]
+    fn fr_l18_status_vendor_colours_claude_orange_codex_blue_gemini_sky() {
+        assert_eq!(vendor_accent("claude-code"), StatusTone::Orange);
+        assert_eq!(vendor_accent("codex"), StatusTone::Blue);
+        assert_eq!(vendor_accent("gemini"), StatusTone::Sky);
+    }
+
+    #[test]
+    fn fr_l18_status_token_rows_sorted_descending() {
+        let mut ms = two_members();
+        ms.push(member("c", LauncherStatus::Idle, false, 3));
+        let rows = token_rows(true, &ms);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.windows(2).all(|w| w[0].k >= w[1].k));
+    }
+
+    #[test]
+    fn fr_l18_status_token_bar_width_is_relative_to_max() {
+        assert_eq!(token_width_pct(50, 100), 50.0);
+        assert_eq!(token_width_pct(100, 100), 100.0);
+        assert_eq!(token_width_pct(5, 0), 0.0);
+        assert_eq!(token_value_text(360), "360k");
+    }
+
+    #[test]
+    fn fr_l18_status_token_rows_empty_without_demo() {
+        assert!(token_rows(false, &two_members()).is_empty());
+    }
+
+    #[test]
+    fn fr_l18_status_computer_rows_only_project_computers() {
+        let cs = vec![
+            comp("a", &["p1"], Reachability::Online),
+            comp("b", &["p2"], Reachability::Online),
+        ];
+        let rows = computer_rows(&cs, "p1", false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "a");
+    }
+
+    #[test]
+    fn fr_l18_status_cpu_over_75_is_orange() {
+        assert_eq!(cpu_fill_tone(75), StatusTone::Green);
+        assert_eq!(cpu_fill_tone(76), StatusTone::Orange);
+    }
+
+    #[test]
+    fn fr_l18_status_computer_without_metrics_shows_no_percent() {
+        let cs = vec![comp("a", &["p1"], Reachability::Online)];
+        let r = &computer_rows(&cs, "p1", false)[0];
+        assert_eq!(r.cpu, None);
+        assert_eq!(computer_value_text(r), "온라인");
+        assert_eq!(computer_fill_pct(r), 0.0);
+        let d = &computer_rows(&cs, "p1", true)[0];
+        assert_eq!(computer_value_text(d), "62% \u{00b7} 2실행");
+    }
+
+    #[test]
+    fn fr_l18_status_offline_computer_has_empty_bar() {
+        let cs = vec![comp("a", &["p1"], Reachability::Offline)];
+        let r = &computer_rows(&cs, "p1", true)[0];
+        assert_eq!(computer_value_text(r), "오프라인");
+        assert_eq!(computer_fill_pct(r), 0.0);
+    }
+
+    #[test]
+    fn fr_l18_status_texts_have_no_plain_da_endings() {
+        for t in [PR_EMPTY, SUBAGENT_EMPTY, TOKENS_EMPTY, COMPUTERS_EMPTY, TOKENS_CAPTION] {
+            assert!(
+                !t.ends_with('다')
+                    || t.ends_with("입니다")
+                    || t.ends_with("합니다")
+                    || t.ends_with("습니다")
+                    || t.ends_with("됩니다")
+                    || t.ends_with("없다"),
+                "{t}"
+            );
+            assert!(!t.contains('\u{2014}'), "no em-dash: {t}");
+        }
+    }
+
+    #[test]
+    fn fr_l18_status_cards_fill_the_page_width_per_column_count() {
+        assert_eq!(status_grid_columns(390.0), 1);
+        assert_eq!(status_grid_columns(900.0), 2);
+        assert_eq!(status_grid_columns(1440.0), 3);
+        // 390 dp: one card as wide as the stat tiles row, window minus both paddings.
+        assert_eq!(status_card_width(390.0, 1, 20.0), 390.0 - 2.0 * status_page_pad(390.0));
+        // 1440 dp: three cards and two gaps fill the row exactly.
+        let w = status_card_width(1440.0, 3, 20.0);
+        assert!((3.0 * w + 40.0 - (1440.0 - 40.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn fr_l18_tree_status_has_a_text_label_besides_the_colour() {
+        assert_eq!(NodeStatus::Run.label(), "실행 중");
+        assert_eq!(NodeStatus::Wait.label(), "대기");
+        assert_eq!(NodeStatus::Done.label(), "완료");
+        assert_eq!(NodeStatus::Fail.label(), "실패");
+        assert_eq!(NodeStatus::Unknown.label(), "");
     }
 }

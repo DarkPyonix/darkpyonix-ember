@@ -389,6 +389,14 @@ impl NodeClient {
         self.get("/env").await
     }
 
+    /// One metrics sample (FR-X7); `top` limits the process list.
+    pub async fn metrics(&self, top: Option<usize>) -> Result<MetricsSample> {
+        match top {
+            Some(n) => self.get(&format!("/metrics?top={n}")).await,
+            None => self.get("/metrics").await,
+        }
+    }
+
     pub async fn stat(&self, path: impl AsRef<Path>) -> Result<Stat> {
         self.post("/fs/stat", &PathRequest { path: path.as_ref().into() }).await
     }

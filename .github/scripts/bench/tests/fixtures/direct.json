@@ -1,0 +1,15 @@
+{
+  "setup_ms": 400.0,
+  "setup_first_byte_ms": 400.0,
+  "initial_path": "direct 192.0.2.10:7443 rtt=20ms",
+  "time_to_direct_ms": 400.0,
+  "path_during_pings": "direct 192.0.2.10:7443 rtt=20ms",
+  "rtt": {"n": 200, "min_ms": 19.0, "p50_ms": 20.0, "p95_ms": 25.0, "max_ms": 30.0},
+  "throughput": {"bytes": 33554432, "seconds": 3.0, "mbit_per_s": 90.0},
+  "tcp_baseline": {
+    "target": "192.0.2.10:9000",
+    "setup_first_byte_ms": 40.0,
+    "rtt": {"n": 200, "min_ms": 17.0, "p50_ms": 18.0, "p95_ms": 22.0, "max_ms": 28.0},
+    "throughput": {"bytes": 33554432, "seconds": 2.7, "mbit_per_s": 100.0}
+  }
+}

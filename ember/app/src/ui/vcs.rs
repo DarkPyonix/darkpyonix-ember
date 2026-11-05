@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitCommitted, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStatus,
+    ApiError, GitCommitted, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -1307,6 +1307,151 @@ pub fn history_append(state: HistoryLoad, result: Result<GitLog, ApiError>, now:
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Stash (FR-G6)
+// ---------------------------------------------------------------------------------------------
+
+/// One row of the stash list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashEntry {
+    pub index: u32,
+    /// "stash@{N}".
+    pub label: String,
+    pub message: String,
+    pub branch: String,
+    pub time_text: String,
+}
+
+/// The state of the stash list of one project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StashLoad {
+    Loading,
+    Ready(Vec<StashEntry>),
+    /// The Korean line with the node's message (shown with a retry button).
+    Failed(String),
+}
+
+/// What a stash button asks the node to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StashAction {
+    Apply,
+    Pop,
+    Drop,
+}
+
+impl StashAction {
+    fn op(self) -> &'static str {
+        match self {
+            StashAction::Apply => "stash/apply",
+            StashAction::Pop => "stash/pop",
+            StashAction::Drop => "stash/drop",
+        }
+    }
+
+    /// The start of the failure line, to which `failure_text` adds "하지 못했습니다".
+    fn what(self) -> &'static str {
+        match self {
+            StashAction::Apply => "스태시를 적용",
+            StashAction::Pop => "스태시 꺼내기를 ",
+            StashAction::Drop => "스태시를 삭제",
+        }
+    }
+}
+
+/// Unix seconds of an ISO 8601 time as `git stash list` prints it (`2026-11-06T12:30:00+09:00`,
+/// `Z` or an offset). `None` when the text is not that shape.
+pub fn iso_to_unix(text: &str) -> Option<i64> {
+    let (date, rest) = text.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    if d.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let split_at = rest.find(['+', '-', 'Z']).unwrap_or(rest.len());
+    let (clock, zone) = rest.split_at(split_at);
+    let mut c = clock.split(':');
+    let (hh, mm, ss): (i64, i64, i64) = (c.next()?.parse().ok()?, c.next()?.parse().ok()?, c.next().unwrap_or("0").split('.').next()?.parse().ok()?);
+    let offset = match zone {
+        "" | "Z" => 0,
+        z => {
+            let sign = if z.starts_with('-') { -1 } else { 1 };
+            let (oh, om) = z[1..].split_once(':')?;
+            sign * (oh.parse::<i64>().ok()? * 3_600 + om.parse::<i64>().ok()? * 60)
+        }
+    };
+    // Days since 1970-01-01 from a civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3_600 + mm * 60 + ss - offset)
+}
+
+/// The row of one stash. A time that cannot be read shows as the node sent it.
+pub fn stash_entry(e: &GitStashEntry, now: i64) -> StashEntry {
+    StashEntry {
+        index: e.index,
+        label: format!("stash@{{{}}}", e.index),
+        message: if e.message.trim().is_empty() { "(메시지 없음)".to_string() } else { e.message.clone() },
+        branch: e.branch.clone(),
+        time_text: iso_to_unix(&e.time).map(|t| history_time_text(now, t)).unwrap_or_else(|| e.time.clone()),
+    }
+}
+
+/// The list as a view state. An empty list is a ready, empty state, not an error.
+pub fn stash_from(result: Result<Vec<GitStashEntry>, ApiError>, now: i64) -> StashLoad {
+    match result {
+        Ok(list) => StashLoad::Ready(list.iter().map(|e| stash_entry(e, now)).collect()),
+        Err(e) => StashLoad::Failed(failure_text("스태시 목록을 확인", &e)),
+    }
+}
+
+/// The `stash/push` body: a blank message is sent as `null` (git writes its own).
+pub fn stash_push_body(message: &str, include_untracked: bool) -> Value {
+    let message = message.trim();
+    json!({ "message": if message.is_empty() { Value::Null } else { Value::String(message.to_string()) }, "include_untracked": include_untracked })
+}
+
+/// Read a project's stashes. Runs on the runtime, not the UI thread.
+pub async fn fetch_stashes(project: &str) -> Result<Vec<GitStashEntry>, ApiError> {
+    git_call(project, "stash/list", json!({})).await
+}
+
+/// Make a stash. `Err` is the Korean line to show (the node's message when it sent one).
+pub async fn run_stash_push(project: &str, message: &str, include_untracked: bool) -> Result<(), String> {
+    git_call::<Value>(project, "stash/push", stash_push_body(message, include_untracked))
+        .await
+        .map(|_| ())
+        .map_err(|e| failure_text("스태시 만들기를 ", &e))
+}
+
+/// Apply, pop or drop one stash. `Err` is the Korean line to show; a conflicting pop answers 409
+/// with the node's message and keeps the entry.
+pub async fn run_stash_action(project: &str, action: StashAction, index: u32) -> Result<(), String> {
+    git_call::<Value>(project, action.op(), json!({ "index": index }))
+        .await
+        .map(|_| ())
+        .map_err(|e| failure_text(action.what(), &e))
+}
+
+/// The list after an action came back: a failure keeps the list as it was, a success reads the
+/// list again (the caller does that), so this only decides what to say.
+pub fn stash_action_notice(action: StashAction, result: &Result<(), String>) -> String {
+    match (action, result) {
+        (_, Err(line)) => line.clone(),
+        (StashAction::Apply, Ok(())) => "스태시를 적용했습니다".to_string(),
+        (StashAction::Pop, Ok(())) => "스태시를 꺼냈습니다".to_string(),
+        (StashAction::Drop, Ok(())) => "스태시를 삭제했습니다".to_string(),
+    }
+}
+
+/// A failed action leaves the shown list alone; a success replaces it with the fresh read.
+pub fn stash_after_action(shown: StashLoad, result: &Result<(), String>, fresh: StashLoad) -> StashLoad {
+    if result.is_ok() { fresh } else { shown }
+}
+
 /// One call that brings the index to the staging the user chose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageOp {
@@ -1514,6 +1659,15 @@ pub fn section_count(section: Section, snap: Option<&RepoSnapshot>) -> Option<us
         Section::Conflicts => Some(s.conflicts.len()),
         _ => None,
     }
+}
+
+/// The count beside a section's name, with the stash count read by the stash section (`None`
+/// until it has been read). The stash count does not need the repository snapshot.
+pub fn section_count_with_stash(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>) -> Option<usize> {
+    if section == Section::Stash {
+        return stash;
+    }
+    section_count(section, snap)
 }
 
 /// Projects that can have a repository: every project except 기본 프로젝트.
@@ -2021,7 +2175,8 @@ rename to new.txt
         };
         assert_eq!(section_count(Section::Changes, Some(&snap)), Some(1));
         assert_eq!(section_count(Section::Branches, Some(&snap)), Some(2));
-        assert_eq!(section_count(Section::Stash, Some(&snap)), None);
+        assert_eq!(section_count(Section::Stash, Some(&snap)), None, "no stash read yet");
+        assert_eq!(section_count_with_stash(Section::Stash, Some(&snap), Some(2)), Some(2));
         assert_eq!(SOON, "준비 중입니다");
     }
 
@@ -2509,5 +2664,74 @@ rename to new.txt
     #[test]
     fn fr_g5_the_log_body_pages_with_skip() {
         assert_eq!(log_body(60), json!({ "limit": HISTORY_PAGE, "skip": 60, "branch": null }));
+    }
+
+    // ---- FR-G6: stash ----
+
+    fn stash(index: u32, message: &str, time: &str) -> GitStashEntry {
+        GitStashEntry { index, message: message.into(), branch: "main".into(), time: time.into() }
+    }
+
+    #[test]
+    fn fr_g6_iso_times_parse_with_offsets() {
+        assert_eq!(iso_to_unix("1970-01-01T00:00:00+00:00"), Some(0));
+        assert_eq!(iso_to_unix("1970-01-01T09:00:00+09:00"), Some(0));
+        assert_eq!(iso_to_unix("1970-01-02T00:00:00Z"), Some(86_400));
+        assert_eq!(iso_to_unix("2026-08-29T10:40:00+00:00"), Some(1_788_000_000));
+        assert_eq!(iso_to_unix("2026-08-29T05:40:00-05:00"), Some(1_788_000_000));
+        assert_eq!(iso_to_unix("not a time"), None);
+        assert_eq!(iso_to_unix("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn fr_g6_an_entry_has_the_stash_label_message_branch_and_relative_time() {
+        let e = stash_entry(&stash(2, "작업 중", "2026-08-29T10:40:00+00:00"), 1_788_000_000 + 7_200);
+        assert_eq!(e.label, "stash@{2}");
+        assert_eq!(e.message, "작업 중");
+        assert_eq!(e.branch, "main");
+        assert_eq!(e.time_text, "2시간 전");
+    }
+
+    #[test]
+    fn fr_g6_a_blank_message_and_an_unreadable_time_still_show() {
+        let e = stash_entry(&stash(0, "  ", "yesterday"), 0);
+        assert_eq!(e.message, "(메시지 없음)");
+        assert_eq!(e.time_text, "yesterday");
+    }
+
+    #[test]
+    fn fr_g6_an_empty_list_is_an_empty_ready_state() {
+        assert_eq!(stash_from(Ok(Vec::new()), 0), StashLoad::Ready(Vec::new()));
+    }
+
+    #[test]
+    fn fr_g6_a_failed_list_shows_the_nodes_message() {
+        let e = ApiError::Status { status: 500, message: "스태시를 읽지 못했습니다".into() };
+        assert_eq!(stash_from(Err(e), 0), StashLoad::Failed("스태시를 읽지 못했습니다".into()));
+    }
+
+    #[test]
+    fn fr_g6_the_push_body_sends_null_for_a_blank_message() {
+        assert_eq!(stash_push_body("   ", true), json!({ "message": null, "include_untracked": true }));
+        assert_eq!(stash_push_body(" 내 작업 ", false), json!({ "message": "내 작업", "include_untracked": false }));
+    }
+
+    #[test]
+    fn fr_g6_a_failed_pop_keeps_the_list_and_says_why() {
+        let shown = stash_from(Ok(vec![stash(0, "a", "2026-08-29T10:40:00Z")]), 0);
+        let down = ApiError::Status { status: 409, message: "충돌 때문에 꺼낼 수 없습니다. 스태시는 그대로 남아 있습니다.".into() };
+        let result: Result<(), String> = Err(failure_text(StashAction::Pop.what(), &down));
+        let after = stash_after_action(shown.clone(), &result, StashLoad::Ready(Vec::new()));
+        assert_eq!(after, shown);
+        assert!(stash_action_notice(StashAction::Pop, &result).contains("스태시는 그대로"));
+        let ok: Result<(), String> = Ok(());
+        assert_eq!(stash_after_action(shown, &ok, StashLoad::Ready(Vec::new())), StashLoad::Ready(Vec::new()));
+        assert_eq!(stash_action_notice(StashAction::Drop, &ok), "스태시를 삭제했습니다");
+    }
+
+    #[test]
+    fn fr_g6_a_non_korean_failure_gets_a_korean_prefix() {
+        let e = ApiError::Status { status: 500, message: "boom".into() };
+        assert_eq!(failure_text(StashAction::Apply.what(), &e), "스태시를 적용하지 못했습니다: boom");
     }
 }

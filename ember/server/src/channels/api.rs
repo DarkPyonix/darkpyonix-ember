@@ -121,6 +121,14 @@ impl IntoResponse for ChannelError {
                 let body = json!({ "error": format!("{self:#}"), "code": "not_a_member", "reason": "not_a_member", "unknown": names });
                 return (StatusCode::BAD_REQUEST, Json(body)).into_response();
             }
+            ChannelError::Coded(code, _) => {
+                let status = if matches!(*code, "rate_limited" | "quota_exceeded") {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                (status, *code)
+            }
             ChannelError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (status, Json(json!({ "error": format!("{self:#}"), "code": code }))).into_response()

@@ -14,10 +14,18 @@
 //! id is 404. There is no route for the feed, approvals, sessions or any other part of the
 //! server, so those paths are 404 here by absence.
 //!
-//! A guest posts as author `guest:<guest_id>`, forced by the server: the body is `{text}` and a
+//! A guest posts as author `guest:<guest_id>` in the log, forced by the server: the body is `{text}` and a
 //! `from` in it is ignored. `@name` mentions go through the member gate (an unknown name is 400)
 //! and are stored, but no delivery runs here (the allowance, FR-T17, is not built), so a guest's
 //! mention reaches no agent. Text is 1..=8192 bytes after trimming for the emptiness check.
+//!
+//! A guest sees the channel's whole history, including what was said before it joined (the
+//! Discord and Slack model) [provisional]. Other guests appear as `author: "guest"` with their
+//! display name, never their id; the caller's own messages carry `you: true`.
+//!
+//! Limits [provisional]: 10 posts per minute per guest (429 `rate_limited`, in memory) and 500
+//! messages per guest per channel (429 `quota_exceeded`). The accept attempt limit per remote
+//! address belongs to the guest listener (PR 5), which knows the address.
 //!
 //! A guest sees names only: the channel name, member and agent names, and per message a kind, the
 //! author's display name and the mentioned names. Session ids, harnesses and the project's
@@ -26,7 +34,9 @@
 //! [`guest_router`] is built apart from the owner router and is not merged into any listener yet
 //! (the guest listener `EMBER_GUEST_LISTEN` is a later step), so nothing here is reachable.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
@@ -53,14 +63,23 @@ const READ_LIMIT: i64 = 500;
 /// Author prefix of a guest's messages.
 pub const AUTHOR_PREFIX: &str = "guest:";
 
-/// A message as a guest sees it. `author` is `user`, `system`, `agent` (the id is withheld) or
-/// `guest:<guest_id>`; `name` is the display name.
+/// Posts one guest may make per minute (FR-T14) [provisional].
+pub const POSTS_PER_MINUTE: usize = 10;
+/// Messages one guest may have in one channel (FR-T14) [provisional].
+pub const MESSAGE_CAP: i64 = 500;
+const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A message as a guest sees it. `author` is `user`, `system`, `agent` or `guest`: an id is never
+/// shown, neither an agent's nor another guest's; `name` is the display name and `you` is true
+/// for the caller's own messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuestMessage {
     pub id: String,
     pub seq: i64,
     pub author: String,
     pub name: String,
+    /// True when the caller wrote it.
+    pub you: bool,
     /// `person`, `agent`, `guest` or `system`.
     pub kind: String,
     pub text: String,
@@ -86,12 +105,13 @@ impl Store {
         let row = self.channel_row(&guest.channel_id)?;
         let members = self.members_of(&row)?;
         let raw = self.channel_messages_after(&guest.channel_id, after, Some(READ_LIMIT), false)?;
-        raw.into_iter().map(|m| self.guest_view(&guest.channel_id, &members, m)).collect()
+        raw.into_iter().map(|m| self.guest_view(guest, &members, m)).collect()
     }
 
-    fn guest_view(&self, channel: &str, members: &[super::Member], m: super::Message) -> Result<GuestMessage, ChannelError> {
+    fn guest_view(&self, viewer: &Guest, members: &[super::Member], m: super::Message) -> Result<GuestMessage, ChannelError> {
         let name_of = |id: &str| members.iter().find(|x| x.id == id).map(|x| x.name.clone());
         let mentions = m.mentions.iter().filter_map(|id| name_of(id)).collect();
+        let mut you = false;
         let (author, name, kind) = if m.from == USER {
             (USER.to_string(), USER_LABEL.to_string(), "person")
         } else if m.from == SYSTEM {
@@ -101,15 +121,25 @@ impl Store {
                 .conn()
                 .query_row(
                     "SELECT name FROM channel_guests WHERE id = ?1 AND channel_id = ?2",
-                    params![gid, channel],
+                    params![gid, viewer.channel_id],
                     |r| r.get(0),
                 )
                 .ok();
-            (m.from.clone(), name.unwrap_or_else(|| "guest".into()), "guest")
+            you = gid == viewer.id;
+            ("guest".to_string(), name.unwrap_or_else(|| "guest".into()), "guest")
         } else {
             ("agent".to_string(), name_of(&m.from).unwrap_or_else(|| "agent".into()), "agent")
         };
-        Ok(GuestMessage { id: m.id, seq: m.seq, author, name, kind: kind.into(), text: m.text, at: m.at, mentions })
+        Ok(GuestMessage { id: m.id, seq: m.seq, author, name, you, kind: kind.into(), text: m.text, at: m.at, mentions })
+    }
+
+    /// How many messages `guest` has in its channel.
+    pub fn guest_message_count(&self, guest: &Guest) -> Result<i64, ChannelError> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM channel_messages WHERE channel_id = ?1 AND author = ?2",
+            params![guest.channel_id, format!("{AUTHOR_PREFIX}{}", guest.id)],
+            |r| r.get(0),
+        )?)
     }
 
     /// Store a guest's message under `guest:<id>`. Mentions go through the member gate (FR-T13)
@@ -143,12 +173,32 @@ impl Store {
 struct Ctx {
     store: Arc<Store>,
     sessions: Arc<Sessions>,
+    /// Recent post times per guest id, for the rate limit (in memory, like the A2A channel post).
+    posts: Arc<std::sync::Mutex<HashMap<String, VecDeque<Instant>>>>,
+}
+
+impl Ctx {
+    /// Record a post attempt by `guest`; an error when it is the 11th within a minute.
+    fn rate_check(&self, guest: &str) -> Result<(), ChannelError> {
+        let now = Instant::now();
+        let mut all = self.posts.lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|_, q| q.back().is_some_and(|t| now.duration_since(*t) < RATE_WINDOW));
+        let q = all.entry(guest.to_string()).or_default();
+        while q.front().is_some_and(|t| now.duration_since(*t) >= RATE_WINDOW) {
+            q.pop_front();
+        }
+        if q.len() >= POSTS_PER_MINUTE {
+            return Err(ChannelError::Coded("rate_limited", format!("at most {POSTS_PER_MINUTE} posts per minute")));
+        }
+        q.push_back(now);
+        Ok(())
+    }
 }
 
 /// The guest router: `accept` without a credential, the channel routes behind the guest check.
 /// Separate from the owner router; the caller decides where it is served.
 pub fn guest_router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
-    let ctx = Ctx { store: store.clone(), sessions };
+    let ctx = Ctx { store: store.clone(), sessions, posts: Arc::default() };
     let protected = Router::new()
         .route("/api/guest/channels/{id}", get(summary))
         .route("/api/guest/channels/{id}/messages", get(messages).post(post_message))
@@ -281,6 +331,19 @@ async fn post_message(
     if let Err(r) = own_channel(&guest, &id) {
         return r;
     }
+    if let Err(e) = c.rate_check(&guest.id) {
+        return fail(e);
+    }
+    match c.store.guest_message_count(&guest) {
+        Ok(n) if n >= MESSAGE_CAP => {
+            return fail(ChannelError::Coded(
+                "quota_exceeded",
+                format!("a guest may post at most {MESSAGE_CAP} messages in a channel"),
+            ))
+        }
+        Ok(_) => {}
+        Err(e) => return fail(e),
+    }
     let message = match c.store.post_guest_message(&guest, &b.text) {
         Ok(m) => m,
         Err(e) => return fail(e),
@@ -290,7 +353,7 @@ async fn post_message(
     let view = c
         .store
         .channel_members(&guest.channel_id)
-        .and_then(|m| c.store.guest_view(&guest.channel_id, &m, message));
+        .and_then(|m| c.store.guest_view(&guest, &m, message));
     match view {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => fail(e),

@@ -4,7 +4,7 @@ use dioxus_compose::prelude::*;
 use ember_editor::{BridgeAction, WidgetBridge, WidgetPos, WidgetRange};
 use ember_editor::widget::HoverPhase as EditorHoverPhase;
 use crate::editor_host::{EditorHost, HostCommand};
-use super::{editor::{EditorTarget, EditorTabs, base_name, position_text}, use_ui, workbench};
+use super::{editor::{EditorTarget, EditorTabs, base_name, position_text}, workbench};
 
 #[derive(Clone)]
 struct Shared {
@@ -15,7 +15,6 @@ struct Shared {
     directory: Signal<String>,
     position: Signal<(usize, usize)>,
     folder: String,
-    ui: super::Ui,
     uris: Rc<RefCell<HashMap<String, ember_editor_conn::uri::UriComponents>>>,
 }
 
@@ -24,22 +23,28 @@ struct Shared {
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
-pub fn screen(target: EditorTarget) -> Element {
-    let ui = use_ui();
-    let revision = use_signal_sync(|| 0_u64);
+/// Sets up the shared state for the page. Called first by the root page.
+fn init(target: EditorTarget) {
+    // Signals live in the root scope: the page and the editor pane are separate trees that read them.
+    let root = dioxus_compose::html::prelude::dioxus_core::ScopeId::ROOT;
+    let revision = use_hook(|| SyncSignal::<u64>::new_maybe_sync_in_scope(0, root));
     let host = use_hook(|| EditorHost::start(target.clone(), revision));
-    let tabs = use_signal(EditorTabs::default);
-    let directory = use_signal(|| target.folder.clone());
-    let position = use_signal(|| (1, 1));
+    let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
+    let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
+    let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, position, folder: target.folder, ui, uris }));
-    rsx! { HtmlView { app: page::workbench_page, config: Some(workbench::config as fn() -> dioxus_compose::html::HtmlConfig), fill_max_width: true, fill_max_height: true } }
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, position, folder: target.folder, uris }));
 }
 
 fn join_path(dir: &str, name: &str) -> String {
     if dir == "/" { format!("/{name}") } else if dir.is_empty() { name.to_string() } else { format!("{}/{name}", dir.trim_end_matches('/')) }
 }
+
+// Fixed pane size until WidgetView can fill a flex-assigned box (dioxus-compose
+// issue 160); a CodeEditor measured with unbounded height aborts the renderer.
+const EDITOR_W: f32 = 980.0;
+const EDITOR_H: f32 = 700.0;
 
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
 fn send(s: &Shared, event: Option<(ember_editor_conn::uri::UriComponents, u64, ember_editor::WidgetEvent)>) {
@@ -59,7 +64,7 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
     rsx! { CodeEditor {
-        key: "{generation}", fill_max_width: true, fill_max_height: true,
+        key: "{generation}", width: Some(EDITOR_W), height: Some(EDITOR_H),
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), tab_width: Some(doc.tab_width),
         on_change: move |e: compose_rust::code::CodeChange| { let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
         on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
@@ -69,12 +74,18 @@ fn editor_pane() -> Element {
     } }
 }
 
-mod page {
+pub mod page {
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
     use super::{editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand};
 
-pub fn workbench_page() -> Element {
+pub fn app() -> Element {
+        let target = crate::services::services().ui.editor.get_untracked().expect("editor target");
+        super::init(target);
+        workbench_page()
+    }
+
+    fn workbench_page() -> Element {
     let s = shared();
     let _ = *s.revision.read();
     let (entries, error, updates) = {
@@ -100,14 +111,13 @@ pub fn workbench_page() -> Element {
     drop(uris);
     drop(bridge);
     let (line, col) = *s.position.read();
-    let ui = s.ui;
-    let status = position_text(line, col);
+        let status = position_text(line, col);
     let folder = s.folder.clone();
     let dir = directory.read().clone();
     rsx! {
-        div { class: "monaco-workbench", style: "display:flex; flex-direction:column; width:100%; height:100%; background:#1e1e1e; color:#cccccc;",
+        div { class: "monaco-workbench", style: "width:100vw; height:100vh; display:flex; flex-direction:column; background:#1e1e1e; color:#cccccc; font-size:13px;",
             if let Some(error) = error {
-                div { style: "padding:20px;", "{error}" button { onclick: move |_| ui.close_editor(), "닫기" } }
+                div { style: "padding:20px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
             } else {
                 div { style: "display:flex; flex:1; min-height:0;",
                     div { class: "customview-tree", style: "width:260px; flex-shrink:0; overflow:auto; background:#252526;",
@@ -142,7 +152,7 @@ pub fn workbench_page() -> Element {
                                 }
                             }
                         }
-                        if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%" } }
+                        if active.is_some() { WidgetView { app: editor_pane, style: "width:980px; height:700px; flex-shrink:0;" } }
                         else { div { style: "padding:20px;", "열린 파일이 없습니다" } }
                     }
                 }

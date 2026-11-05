@@ -109,7 +109,10 @@ pub fn launch() {
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
-        launch_builder().with_window(Window::new().with_title(title).with_size(1280, 820)).launch(ui::app);
+        launch_builder()
+            .with_html(ui::workbench::config)
+            .with_window(Window::new().with_title(title).with_size(1280, 820))
+            .launch(ui::editor_workbench::page::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
         ui::cr::gallery::launch(pref);

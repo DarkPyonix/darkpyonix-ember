@@ -91,6 +91,9 @@ impl EditorTabs {
 
 #[component]
 pub fn EditorScreen(target: EditorTarget) -> Element {
-    super::editor_workbench::screen(target)
+    // The editor runs as its own HTML-mode window (`editor_workbench::page::app`); this screen
+    // is only reached when a Compose root asks for it, and draws nothing.
+    let _ = target;
+    rsx! {}
 }
 

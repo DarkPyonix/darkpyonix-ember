@@ -74,7 +74,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = compose_rust::runtime::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 1200.0);
+    let body_height = if window.width_dp > 0.0 && window.width_dp <= 560.0 {
+        (window.height_dp - 60.0).max(0.0)
+    } else {
+        (window.height_dp - 32.0 - 60.0).clamp(240.0, 1200.0)
+    };
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -84,7 +88,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
         }
     };
-    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, on_close.clone(), Some(&mut actions), || {
+    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {

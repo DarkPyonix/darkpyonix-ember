@@ -273,6 +273,13 @@ impl A2a {
              - `{CLI_NAME} send <session-id> --reply-to <message-id> \"reply\"` answers a \
              message you received.\n\
              \n\
+             Terminal access is separate from messaging. Use `{CLI_NAME} terminal read <session-id> \
+             [--lines <n>] [--since <seq>] [--wait-ms <ms>] [--json]` to inspect output; \
+             use the returned last_seq with --since to follow new output. Use `{CLI_NAME} terminal \
+             send-text <session-id> \"<text>\"` to send input and `{CLI_NAME} terminal interrupt \
+             <session-id>` to interrupt a turn. Access requires a user grant, or an active team \
+             leader accessing its own teammate; each use is recorded in the target transcript.\n\
+             \n\
              Teams (only when the work splits into independent parts; each teammate is a full \
              agent session in this project):\n\
              \n\

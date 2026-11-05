@@ -15,6 +15,11 @@
 //! - `GET /api/browsers/<project>/cdp/<nonce>` and `.../cdp/<nonce>/json/version` with the per-run
 //!   nonce from [`agent_cdp_nonce`], the agent browser relay and its discovery document (agent MCP
 //!   servers send no header);
+//! - `/api/guest/*`, the channel guest routes (FR-T14): they take a guest credential (`dpg_...`),
+//!   never the server token, and check it themselves (`channels::guest`). The guest router is not
+//!   part of the router this layer wraps today; the exemption only keeps the server-token check
+//!   from answering for a family that has its own. A guest credential on any other path is not the
+//!   server token, so it is 401 here;
 //! - `GET /auth/callback`, the browser redirect of Sign in with ChatGPT, which cannot carry a
 //!   header (the `state` value in it is checked by the handler).
 //!
@@ -205,6 +210,9 @@ fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::POST && agent_channel_post_path(path) {
         return true;
     }
+    if path.starts_with("/api/guest/") {
+        return true;
+    }
     (path.starts_with("/api/a2a/") && path != "/api/a2a/settings")
         || path == crate::agents::antigravity::HOOK_ROUTE
 }
@@ -288,6 +296,18 @@ mod tests {
         assert!(!token_exempt(&Method::GET, "/api/channels/c1/post"));
         for p in ["/api/channels", "/api/channels/c1", "/api/channels/c1/messages", "/api/channels//post",
             "/api/channels/c1/post/x", "/api/channels/c1/x/post", "/api/channels/post"] {
+            assert!(!token_exempt(&Method::POST, p), "{p}");
+        }
+    }
+
+    #[test]
+    fn fr_t14_only_the_guest_family_is_exempt_for_guests() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST] {
+            assert!(token_exempt(&m, "/api/guest/accept"));
+            assert!(token_exempt(&m, "/api/guest/channels/c1/messages"));
+        }
+        for p in ["/api/guest", "/api/guestx/accept", "/api/channels/c1", "/api/sessions", "/guest/accept"] {
             assert!(!token_exempt(&Method::POST, p), "{p}");
         }
     }

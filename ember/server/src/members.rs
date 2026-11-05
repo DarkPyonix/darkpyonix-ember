@@ -3,9 +3,10 @@
 //! A member is defined by a harness plus exactly one account choice: a fixed account id, or the
 //! automatic account-switching pipeline (the account router, FR-U3). Optionally a model proxy
 //! path (opencodex style) sits on top: the harness is pointed at a proxy endpoint so it runs a
-//! model from another source. Claude Code (`ANTHROPIC_BASE_URL`) and Codex (a custom model provider set by `-c`, see
-//! `agents::codex::proxy_config_args`) support the proxy path today; the other harnesses are rejected with an error rather than guessed at,
-//! because their proxy behaviour is not verified (AGENTS.md rule 4).
+//! model from another source. Claude Code (`ANTHROPIC_BASE_URL`), Codex (a custom model provider set by `-c`, see
+//! `agents::codex::proxy_config_args`) and Antigravity (`agy`: `GOOGLE_GEMINI_BASE_URL` plus `GEMINI_API_KEY`, with
+//! `modelProvider: "gemini"` set by the adapter) support the proxy path today; the other harnesses are rejected with an
+//! error rather than guessed at, because their proxy behaviour is not verified (AGENTS.md rule 4).
 //!
 //! The proxy server itself is not part of Ember; the member only names its endpoint. The
 //! endpoint is stored per session; the key is never stored, it is read from the server
@@ -153,9 +154,23 @@ pub fn proxy_env(
                 (crate::agents::codex::PROXY_KEY_ENV.into(), key),
             ])
         }
+        AgentKind::Antigravity => {
+            // agy talks to the Gemini API (`<base>/v1beta/models/<m>:streamGenerateContent`) with
+            // the key in `x-goog-api-key`, so the proxy must speak that wire format. The adapter
+            // adds `--settings {"modelProvider":"gemini"}` when it sees the base URL variable.
+            let key = proxy
+                .key_env
+                .as_deref()
+                .and_then(&lookup)
+                .unwrap_or_else(|| PLACEHOLDER_KEY.to_string());
+            Ok(vec![
+                (crate::agents::antigravity::PROXY_BASE_ENV.into(), endpoint.to_string()),
+                (crate::agents::antigravity::PROXY_KEY_ENV.into(), key),
+            ])
+        }
         other => Err(MemberError::Unsupported(format!(
-            "the model proxy path is supported for claude-code and codex only; {} has no verified proxy \
-             setting",
+            "the model proxy path is supported for claude-code, codex and agy only; {} has no verified \
+             proxy setting",
             other.as_str()
         ))),
     }
@@ -261,10 +276,10 @@ mod tests {
     #[test]
     fn fr_u6_unsupported_harness_with_proxy_errors() {
         let p = ProxySpec { endpoint: "http://x".into(), key_env: None };
-        let e = proxy_env(AgentKind::Antigravity, &p, |_| None).unwrap_err();
+        let e = proxy_env(AgentKind::Scripted, &p, |_| None).unwrap_err();
         assert!(matches!(e, MemberError::Unsupported(_)));
         let mut d = def(None, true);
-        d.harness = "agy".into();
+        d.harness = "scripted".into();
         d.proxy = Some(p);
         assert!(d.resolve().is_err());
     }
@@ -275,5 +290,13 @@ mod tests {
         let env = proxy_env(AgentKind::Codex, &p, |k| (k == "K").then(|| "sekret".into())).unwrap();
         assert!(env.contains(&("EMBER_CODEX_PROXY_BASE_URL".into(), "http://127.0.0.1:9000".into())));
         assert!(env.contains(&("EMBER_CODEX_PROXY_KEY".into(), "sekret".into())));
+    }
+
+    #[test]
+    fn fr_u6_agy_proxy_sets_gemini_base_and_key() {
+        let p = ProxySpec { endpoint: "http://127.0.0.1:9000".into(), key_env: Some("K".into()) };
+        let env = proxy_env(AgentKind::Antigravity, &p, |k| (k == "K").then(|| "sekret".into())).unwrap();
+        assert!(env.contains(&("GOOGLE_GEMINI_BASE_URL".into(), "http://127.0.0.1:9000".into())));
+        assert!(env.contains(&("GEMINI_API_KEY".into(), "sekret".into())));
     }
 }

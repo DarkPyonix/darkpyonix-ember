@@ -182,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_registry = Registry::new(store.clone());
     let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let store_for_mcp = store.clone();
+    let store_for_channels = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
@@ -361,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
+        .merge(ember_server::channels::api::router(store_for_channels))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))

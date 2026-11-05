@@ -185,8 +185,10 @@ async fn input(
 async fn view(
     State(m): S,
     Path(project): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> ApiResult<impl IntoResponse> {
+    crate::api::origin::check_origin(&headers).map_err(|c| ApiError(c, "origin not allowed".into()))?;
     let b = instance(&m, &project).await?;
     Ok(ws.on_upgrade(move |socket| view_loop(socket, b)))
 }
@@ -252,8 +254,10 @@ async fn view_loop(socket: WebSocket, b: Arc<BrowserInstance>) {
 async fn cdp(
     State(m): S,
     Path(project): Path<String>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> ApiResult<impl IntoResponse> {
+    crate::api::origin::check_origin(&headers).map_err(|c| ApiError(c, "origin not allowed".into()))?;
     let b = instance(&m, &project).await?;
     let upstream = b.devtools_ws().await?;
     Ok(ws.on_upgrade(move |socket| relay(socket, b, upstream)))

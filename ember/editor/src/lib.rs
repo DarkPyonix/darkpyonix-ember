@@ -20,12 +20,15 @@
 //! | [`languages`] | file → language id from `contributes.languages` |
 //! | [`ids`] | stable, non-zero, session-unique decoration ids |
 //! | [`coords`] | widget (0-based) ↔ extension host (1-based) positions, UTF-16 helpers, ranges through edits |
+//! | [`widget`] | the FR-38 `CodeEditor` wire contract (44-byte decoration records, events, commands) |
+//! | [`bridge`] | [`WidgetBridge`]: `SessionUpdate` → per-document widget state and encoded `Decorations` bytes |
 //! | [`fallback`] | connect-time version check outcome: when to offer "Open in VS Code" instead |
 //! | [`replies`] | answers for the extension host's other requests |
 //!
 //! **Status: written without compiling** (no cargo was run for this change). See
 //! `docs/design/EDITOR-SESSION.md` §7 for the APIs that are uncertain.
 
+pub mod bridge;
 pub mod codelens;
 pub mod coords;
 pub mod engine;
@@ -42,11 +45,15 @@ pub mod selector;
 pub mod session;
 pub mod widget;
 
-pub use crate::fallback::{fallback_for, Fallback};
+pub use crate::bridge::{BridgeAction, DocumentWidgetState, WidgetBridge};
+pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
 pub use crate::session::{EditorSession, SessionConfig};
-pub use crate::widget::{Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent};
+pub use crate::widget::{
+    Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
+    DECORATION_RECORD_LEN,
+};
 
 /// Errors from connecting or talking to a session.
 #[derive(Debug, thiserror::Error)]

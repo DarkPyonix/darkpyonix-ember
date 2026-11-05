@@ -45,6 +45,8 @@ pub struct HoverDiagnostic {
 pub struct Diagnostics {
     /// uri key → owner → markers
     by_doc: HashMap<String, BTreeMap<String, Vec<TrackedMarker>>>,
+    /// decoration id → (doc key, clamped range) from the latest `decorations` call
+    by_id: HashMap<u64, (String, WidgetRange)>,
 }
 
 fn code_string(code: &Option<Value>) -> Option<String> {
@@ -134,11 +136,13 @@ impl Diagnostics {
 
     /// Underline decorations for a document at widget `version`. Ranges are clamped to the text;
     /// an empty range is widened to one character, like Monaco does for zero-width markers.
-    pub fn decorations(&self, doc: &str, version: u32, lines: &[String], ids: &mut DecorationIds) -> Vec<Decoration> {
+    pub fn decorations(&mut self, doc: &str, version: u32, lines: &[String], ids: &mut DecorationIds) -> Vec<Decoration> {
         let mut out = Vec::new();
         let mut seen: HashMap<String, u32> = HashMap::new();
         let mut live = HashSet::new();
-        for (owner, t) in self.markers(doc) {
+        self.by_id.retain(|_, (d, _)| d.as_str() != doc);
+        let markers: Vec<(String, TrackedMarker)> = self.markers(doc).map(|(o, t)| (o.to_owned(), t.clone())).collect();
+        for (owner, t) in markers {
             let m = &t.marker;
             let base = format!(
                 "{owner}|{}|{}|{}|{}",
@@ -168,6 +172,7 @@ impl Diagnostics {
                     }
                 }
             }
+            self.by_id.insert(id.get(), (doc.to_owned(), range));
             out.push(Decoration {
                 id,
                 version,
@@ -181,6 +186,33 @@ impl Diagnostics {
         ids.retain(IdSpace::Diagnostic, doc, &live);
         out.sort_by(|a, b| a.range.cmp(&b.range).then(a.id.cmp(&b.id)));
         out
+    }
+
+    /// Look up the range of a diagnostic decoration by its id in `doc`.
+    pub fn range_of_id(&self, doc: &str, id: u64, lines: &[String], ids: &mut DecorationIds) -> Option<WidgetRange> {
+        if let Some((d, r)) = self.by_id.get(&id) {
+            if d == doc {
+                return Some(*r);
+            }
+        }
+        let mut seen: HashMap<String, u32> = HashMap::new();
+        for (owner, t) in self.markers(doc) {
+            let m = &t.marker;
+            let base = format!(
+                "{owner}|{}|{}|{}|{}",
+                m.severity,
+                m.source.as_deref().unwrap_or(""),
+                code_string(&m.code).unwrap_or_default(),
+                m.message
+            );
+            let n = seen.entry(base.clone()).or_insert(0);
+            let key = format!("{base}|{n}");
+            *n += 1;
+            if ids.id(IdSpace::Diagnostic, doc, &key).get() == id {
+                return Some(clamp_range(lines, t.range));
+            }
+        }
+        None
     }
 
     /// Diagnostics under a position, most severe first (what a hover shows above provider content).

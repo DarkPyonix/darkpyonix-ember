@@ -117,6 +117,28 @@ impl HoverState {
         }
     }
 
+    /// The active provider hover range on `doc`, if any.
+    pub fn active_range(&self, doc: &str) -> Option<WidgetRange> {
+        let a = self.active.as_ref()?;
+        if a.doc != doc {
+            return None;
+        }
+        let mut results: Vec<&(usize, Option<WidgetRange>, Vec<MarkdownString>)> = a.results.iter().collect();
+        results.sort_by_key(|r| r.0);
+        results.into_iter().find_map(|r| r.1)
+    }
+
+    /// Look up the active hover anchor range by decoration id in `doc`.
+    pub fn range_of_id(&self, doc: &str, id: u64, ids: &mut crate::ids::DecorationIds) -> Option<WidgetRange> {
+        let range = self.active_range(doc)?;
+        let anchor_id = ids.id(
+            crate::ids::IdSpace::HoverAnchor,
+            doc,
+            &format!("hover|{}:{}..{}:{}", range.start.line, range.start.col, range.end.line, range.end.col),
+        );
+        (anchor_id.get() == id).then_some(range)
+    }
+
     /// The popup as it stands, if there is anything to show.
     pub fn popup(&self) -> Option<HoverPopup> {
         let a = self.active.as_ref()?;

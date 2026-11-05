@@ -1,16 +1,16 @@
-//! The 버전 관리 screen (FR-L19, INTENT D34, `docs/DESIGN.md` section 6.6).
+//! Data and action logic for 버전 관리 (FR-L19, INTENT D34, `docs/DESIGN.md` section 6.6).
 //!
 //! The decisions are plain functions and types in the first half of this file, unit-tested
 //! without a renderer: section routing, the compact tabs, the remote action and ahead/behind
 //! text, the merge gate, unified diff parsing, line, hunk and file staging, and the file tree.
-//! The components in the second half only hand them to dioxus-compose.
+//! The dioxus-compose screen lives in `ui/cr/vcs.rs`.
 //!
-//! The data comes from the server's `/projects/{id}/git/...` routes (FR-G4) through
+//! The data comes from the server's `/api/projects/{name}/git/{op}` routes (FR-G4) through
 //! `ember_client::Api::git_*`: [`fetch_snapshot`] reads it, [`build_snapshot`] maps status and
 //! unified diffs into [`FileDiff`]s, and [`plan_staging`] and [`build_patch`] turn the line
-//! staging into server calls. When the server is unreachable or the project is not a
-//! repository, the data views say [`SOON`] and nothing is invented. Sections beyond changes and
-//! branches still wait for their endpoints (#168).
+//! staging into server calls. The data views say [`SOON`] when the server is unreachable or a
+//! section is not built. A project that is not a repository shows "이 프로젝트의 경로는 git
+//! 저장소가 아닙니다". Sections beyond changes and branches still wait for their endpoints (#168).
 //!
 //! What the pinned toolkit cannot do yet, with the workaround used (`GAPS-WORKLIST.md`):
 //! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (TODO(compose-rust#372): drop once Row/Column on_click is confirmed);

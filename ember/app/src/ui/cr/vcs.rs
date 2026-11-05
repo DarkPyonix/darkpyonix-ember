@@ -3,7 +3,7 @@
 //! Pure decisions (sections, tabs, ahead/behind text, diff parsing, line/hunk/file staging,
 //! file tree, commit validation, merge gate) are re-exported from `crate::ui::vcs`.
 //!
-//! When `snapshot()` returns None (no server git data exists yet), views show `SOON` ("준비 중입니다").
+//! The repository view loads the selected project's server or demo data asynchronously.
 //! When `std::env::var("EMBER_CR_ROUTE") == Ok("vcs")`, sample data from mockup v8 is used
 //! so review captures show the full layout.
 
@@ -11,7 +11,9 @@
 
 use std::collections::BTreeSet;
 
-use compose_rust::runtime::{current_window_size, mutable_state_of, remember, MutableState};
+use compose_rust::runtime::{current_window_size, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
+use crate::ui::vcs::{fetch_snapshot, load_from, Load, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
@@ -45,6 +47,45 @@ pub fn open_for_project_cr(ui: &SharedUi, project: &str) {
     ui.set_selected_project(Some(project.to_string()));
     ui.go(Route::Projects);
     ui.set_menu(NavMenu::VersionControl);
+}
+
+#[derive(Clone)]
+struct Actions {
+    project: String,
+    reload: MutableState<u64>,
+}
+
+impl Actions {
+    fn finish(&self, what: &'static str, task: impl std::future::Future<Output = Result<String, ember_client::api::ApiError>> + Send + 'static) {
+        let reload = self.reload.clone();
+        crate::services::run_shared(task, move |result| {
+            notice::post(match result { Ok(text) => text, Err(e) => failure_text(what, &e) });
+            reload.set(reload.get() + 1);
+        });
+    }
+
+    fn remote(&self, action: RemoteAction) {
+        let project = self.project.clone();
+        self.finish("원격 작업을 ", async move { run_remote(&project, action).await });
+    }
+
+    fn branch(&self, name: String, create: bool) {
+        let project = self.project.clone();
+        self.finish("브랜치를 ", async move {
+            let (op, body) = if create { ("branch", json!({"name": name})) } else { ("checkout", json!({"branch": name})) };
+            git_call::<Value>(&project, op, body).await?;
+            Ok(if create { "새 브랜치를 만들었습니다" } else { "브랜치를 전환했습니다" }.to_string())
+        });
+    }
+}
+
+fn branch_input(name: &str) -> Option<String> {
+    let name = name.trim();
+    valid_branch_name(name).then(|| name.to_string())
+}
+
+fn commit_request(snap: &RepoSnapshot, staging: &Staging, summary: &str, description: &str, amend: bool) -> CommitRequest {
+    CommitRequest { ops: plan_staging(snap, staging), summary: summary.to_string(), description: description.to_string(), amend }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -312,6 +353,7 @@ fn RemoteMainButton(
     enabled: bool,
     on_click: impl FnMut() + 'static,
 ) {
+    // TODO(compose-rust#328): keep button labels visible when the available width is narrow.
     let p = ember_theme().palette;
     let (action_icon, action_text, action_count) = match action {
         RemoteAction::Pull(n) => (ICON_ARROW_DOWN_SVG, "Pull", Some(n)),
@@ -406,8 +448,16 @@ pub fn RepoBar(
     compact: bool,
     mut on_pick: impl FnMut(String) + Clone + 'static,
 ) {
+    RepoBarWithActions(projects, project, snap, compact, on_pick, None);
+}
+
+fn RepoBarWithActions(
+    projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, compact: bool,
+    mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
+) {
     let project_menu = remember(|| mutable_state_of(false));
     let branch_menu = remember(|| mutable_state_of(false));
+    let new_branch = remember(|| mutable_state_of(String::new()));
 
     let has = snap.is_some();
     let (ahead, behind) = snap.map_or((0, 0), |s| (s.ahead, s.behind));
@@ -444,6 +494,7 @@ pub fn RepoBar(
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
+        let remote_actions = actions.clone();
         EmberCard(false, true, None, Some(0.0), None, move || {
             if compact {
                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -472,14 +523,7 @@ pub fn RepoBar(
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
                         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
-                            RemoteMainButton(action, has, move || {
-                                notice::post(soon_line("원격 동작"));
-                            });
-                            cu::Row().spacing(4.0).content(|| {
-                                CircleIconButton(ICON_FETCH_SVG, "가져오기", || notice::post(soon_line("가져오기")));
-                                CircleIconButton(ICON_ARROW_DOWN_SVG, "내려받기", || notice::post(soon_line("내려받기")));
-                                CircleIconButton(ICON_ARROW_UP_SVG, "올리기", || notice::post(soon_line("올리기")));
-                            });
+                            RemoteControls(action, has, remote_actions.clone());
                         });
                         RemoteSubNote(snap);
                     });
@@ -511,14 +555,7 @@ pub fn RepoBar(
                     cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
                         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
-                            RemoteMainButton(action, has, move || {
-                                notice::post(soon_line("원격 동작"));
-                            });
-                            cu::Row().spacing(4.0).content(|| {
-                                CircleIconButton(ICON_FETCH_SVG, "가져오기", || notice::post(soon_line("가져오기")));
-                                CircleIconButton(ICON_ARROW_DOWN_SVG, "내려받기", || notice::post(soon_line("내려받기")));
-                                CircleIconButton(ICON_ARROW_UP_SVG, "올리기", || notice::post(soon_line("올리기")));
-                            });
+                            RemoteControls(action, has, remote_actions.clone());
                         });
                         RemoteSubNote(snap);
                     });
@@ -541,16 +578,43 @@ pub fn RepoBar(
             },
         );
 
+        let create_actions = actions.clone();
+        let branch_value = new_branch.clone();
+        EmberField(FieldOptions {
+            fill_max_width: true,
+            placeholder: "새 브랜치 이름".to_string(),
+            on_value_change: Some(Box::new(move |v| branch_value.set(v))),
+            ..Default::default()
+        });
+        let create_value = new_branch.clone();
+        AppButton("새 브랜치", None, ButtonKind::Primary, false, has && branch_input(&new_branch.get()).is_some(), true, move || {
+            if let (Some(actions), Some(name)) = (create_actions.as_ref(), branch_input(&create_value.get())) {
+                actions.branch(name, true);
+            }
+        });
         OptionSheet(
             branch_menu.get(),
             &branch_opts,
             chosen_br,
             240.0,
             move || b_dismiss.set(false),
-            move |_| {
-                notice::post(soon_line("브랜치 전환"));
+            move |idx| {
+                if let (Some(actions), Some(name)) = (actions.as_ref(), branches.get(idx)) {
+                    actions.branch(name.clone(), false);
+                }
             },
         );
+    });
+}
+
+fn RemoteControls(action: RemoteAction, enabled: bool, actions: Option<Actions>) {
+    let main = actions.clone();
+    RemoteMainButton(action, enabled, move || { if let Some(a) = &main { a.remote(action); } });
+    cu::Row().spacing(4.0).content(move || {
+        for (icon, label, action) in [(ICON_FETCH_SVG, "가져오기", RemoteAction::Fetch), (ICON_ARROW_DOWN_SVG, "내려받기", RemoteAction::Pull(0)), (ICON_ARROW_UP_SVG, "올리기", RemoteAction::Push(0))] {
+            let a = actions.clone();
+            CircleIconButton(icon, label, move || { if let Some(a) = &a { a.remote(action); } });
+        }
     });
 }
 
@@ -1021,6 +1085,7 @@ fn CommitBox(
     summary: &MutableState<String>,
     body: &MutableState<String>,
     amend: &MutableState<bool>,
+    commit: Option<(Actions, RepoSnapshot, MutableState<Staging>)>,
 ) {
     let p = ember_theme().palette;
     let sum_state = summary.clone();
@@ -1078,12 +1143,16 @@ fn CommitBox(
                 can_commit,
                 true,
                 move || {
-                    notice::post(soon_line("커밋"));
+                    if let Some((actions, snap, staging)) = &commit {
+                        let req = commit_request(snap, &staging.get(), &sum_state.get(), &body_state.get(), amend_state.get());
+                        let project = actions.project.clone();
+                        actions.finish("커밋을 ", async move { run_commit(&project, req).await });
+                    }
                 },
             );
 
             let note_text = if can_commit {
-                SOON.to_string()
+                "선택한 변경 사항을 커밋합니다".to_string()
             } else {
                 "요약과 스테이징한 파일이 필요합니다".to_string()
             };
@@ -1097,9 +1166,10 @@ fn CommitPane(
     summary: &MutableState<String>,
     body: &MutableState<String>,
     amend: &MutableState<bool>,
+    commit: Option<(Actions, RepoSnapshot, MutableState<Staging>)>,
 ) {
     EmberCard(false, true, None, Some(0.0), None, move || {
-        CommitBox(branch, staged_files, summary, body, amend);
+        CommitBox(branch, staged_files, summary, body, amend, commit);
     });
 }
 
@@ -1110,9 +1180,19 @@ pub fn ChangesPane(
     tab: Option<PaneTab>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
+    ChangesPaneWithActions(snap, layout, tab, on_tab, None);
+}
+
+fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>) {
     let p = ember_theme().palette;
     let diffs = snap.changes.clone();
-    let staging = remember(|| mutable_state_of(Staging::new(&diffs, false)));
+    let staging_key = (actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), snap.branch.clone(), snap.staged.clone(), diffs.clone());
+    let staging = remember_with_key(staging_key, || {
+        let mut state = Staging::new(&diffs, false);
+        for diff in &diffs { if snap.staged.contains(&diff.path) { state.toggle_file(diff); } }
+        mutable_state_of(state)
+    });
+    let commit = actions.map(|a| (a, snap.clone(), staging.clone()));
     let folded = remember(|| mutable_state_of(BTreeSet::<String>::new()));
     let selected = remember(|| mutable_state_of(0usize));
     let summary = remember(|| mutable_state_of(String::new()));
@@ -1152,7 +1232,7 @@ pub fn ChangesPane(
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                                 FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files);
+                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
                             });
                         });
                     });
@@ -1181,7 +1261,7 @@ pub fn ChangesPane(
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                         FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                        CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files);
+                        CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
                     });
                 });
                 DiffPane(&diffs, sel, &staging);
@@ -1199,7 +1279,7 @@ pub fn ChangesPane(
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging),
-                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend),
+                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone()),
                     _ => {
                         EmberCard(false, true, None, Some(0.0), None, move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -1221,16 +1301,29 @@ fn SectionContent(
     layout: PaneLayout,
     active_tab: Option<PaneTab>,
     tab: &MutableState<PaneTab>,
+    actions: Option<Actions>,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
             let tab_state = tab.clone();
-            ChangesPane(
+            ChangesPaneWithActions(
                 s,
                 layout,
                 active_tab,
                 move |t| tab_state.set(t),
+                actions,
             );
+        }
+        (Some(s), Section::Conflicts) => {
+            EmberCard(false, true, None, Some(SP[3]), None, || {
+                Label("충돌", Fs::Lg, Weight::Semibold, None, None);
+                if s.conflicts.is_empty() {
+                    Label("충돌이 없습니다", Fs::Sm, Weight::Regular, None, None);
+                }
+                for path in &s.conflicts {
+                    Label(path, Fs::Sm, Weight::Regular, None, None);
+                }
+            });
         }
         _ => Unavailable(sec),
     }
@@ -1255,12 +1348,23 @@ pub fn VcsScreen() {
         None
     };
     let current = pick_project(selected.as_deref(), &boxes);
-    let snap = if is_sample_route {
-        Some(sample_snapshot())
-    } else {
-        None::<RepoSnapshot> // TODO(#249): wired by the Codex port
-    };
-    VcsScreenWith(snap, boxes, current);
+    if is_sample_route {
+        VcsScreenWith(Some(sample_snapshot()), boxes, current);
+        return;
+    }
+    let load = remember_with_key(current.clone(), || mutable_state_of(Load::Loading));
+    let reload = remember_with_key(current.clone(), || mutable_state_of(0_u64));
+    let key = (current.clone(), reload.get());
+    let load_effect = load.clone();
+    let project_effect = current.clone();
+    launched_effect(key, move || async move {
+        if let (Some(project), Some(_)) = (project_effect, crate::services::try_services()) {
+            load_effect.set(Load::Loading);
+            crate::services::run_shared(async move { load_from(fetch_snapshot(&project).await) }, move |result| load_effect.set(result));
+        }
+    });
+    let state = load.get();
+    VcsScreenWithLoad(state, boxes, current, reload);
 }
 
 /// VCS screen with explicit snapshot and projects.
@@ -1269,6 +1373,18 @@ pub fn VcsScreenWith(
     boxes: Vec<ProjectBox>,
     current_id: Option<String>,
 ) {
+    let state = snap.map(Load::Ready).unwrap_or_else(|| Load::Unavailable(String::new()));
+    let reload = remember(|| mutable_state_of(0_u64));
+    VcsScreenWithLoad(state, boxes, current_id, reload);
+}
+
+fn VcsScreenWithLoad(
+    load: Load,
+    boxes: Vec<ProjectBox>,
+    current_id: Option<String>,
+    reload: MutableState<u64>,
+) {
+    let snap = load.snapshot().cloned();
     let p = ember_theme().palette;
     let window = current_window_size();
     let class = window.class;
@@ -1306,7 +1422,8 @@ pub fn VcsScreenWith(
 
         if let Some(project) = project {
                     let sel_proj = selected_proj.clone();
-                    RepoBar(
+                    let actions = crate::services::try_services().map(|_| Actions { project: project.id.clone(), reload: reload.clone() });
+                    RepoBarWithActions(
                         &projects,
                         &project,
                         snap.as_ref(),
@@ -1317,10 +1434,15 @@ pub fn VcsScreenWith(
                                 s.ui.set_selected_project(Some(id));
                             }
                         },
+                        actions.clone(),
                     );
 
-                    if snap.is_none() {
-                        Label(&soon_line("저장소 정보"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    if let Some(note) = load.note() {
+                        Label(&note, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        if matches!(load, Load::Failed(_)) {
+                            let retry = reload.clone();
+                            AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                        }
                     }
 
                     if wide {
@@ -1330,7 +1452,7 @@ pub fn VcsScreenWith(
                                 SectionList(sec, snap.as_ref(), move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab);
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone());
                             });
                         });
                     } else {
@@ -1341,7 +1463,7 @@ pub fn VcsScreenWith(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab);
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone());
                         });
                     }
                 } else {
@@ -1377,6 +1499,29 @@ pub fn preview() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fr_l19_commit_request_preserves_description_and_staging() {
+        let snap = sample_snapshot();
+        let mut staging = Staging::new(&snap.changes, false);
+        staging.toggle_file(&snap.changes[0]);
+        let req = commit_request(&snap, &staging, "요약", "설명", false);
+        assert_eq!(req.summary, "요약");
+        assert_eq!(req.description, "설명");
+        assert!(!req.ops.is_empty());
+    }
+
+    #[test]
+    fn fr_l19_branch_input_requires_valid_name() {
+        assert_eq!(branch_input("  feat/new  "), Some("feat/new".to_string()));
+        assert_eq!(branch_input("bad name"), None);
+    }
+
+    #[test]
+    fn fr_l19_load_notes_distinguish_failure_and_missing_repository() {
+        assert!(crate::ui::vcs::Load::NotRepo.note().unwrap().contains("저장소가 아닙니다"));
+        assert_eq!(crate::ui::vcs::Load::Failed("오류입니다".into()).note().as_deref(), Some("오류입니다"));
+    }
+
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{
         EventPayload, Host, PropertyKind, Recomposer, WidgetKind, WindowHeightClass,

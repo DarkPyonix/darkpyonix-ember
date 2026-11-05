@@ -900,3 +900,27 @@ async fn fr_g3_a_switch_blocked_by_local_changes_answers_409_in_korean() {
     assert!(has_korean(&msg) && msg.contains("a.txt"), "{msg}");
     assert_eq!(f.status(&repo).await.branch, "main");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_g3_a_configured_ssh_command_is_used_with_batch_mode() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    // A stand-in for the user's ssh: records its arguments and fails like an unreachable host.
+    let script = f.root.join("my-ssh.sh");
+    let record = f.root.join("ssh-args.txt");
+    std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 255\n", s(&record))).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&repo, &["config", "core.sshCommand", &s(&script)]);
+    git(&repo, &["remote", "add", "origin", "ssh://example.invalid/x.git"]);
+    let body = GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) };
+    let msg = f.err("fetch", &body, 409, "conflict").await;
+    assert!(has_korean(&msg), "{msg}");
+    let args = std::fs::read_to_string(&record).expect("the configured ssh command ran");
+    assert!(args.contains("BatchMode=yes"), "{args}");
+    assert!(args.contains("example.invalid"), "{args}");
+}

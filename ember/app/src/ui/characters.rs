@@ -45,6 +45,23 @@ impl CharStyle {
         CharStyle::Keyring,
     ];
 
+    /// The id the server stores as `character_style` (FR-L26).
+    pub fn id(self) -> &'static str {
+        match self {
+            CharStyle::Mongle => "mongle",
+            CharStyle::Malang => "malang",
+            CharStyle::Crew => "crew",
+            CharStyle::Pocket => "pocket",
+            CharStyle::Cream => "cream",
+            CharStyle::Keyring => "keyring",
+        }
+    }
+
+    /// The style of a server id; `None` for an id this client does not know.
+    pub fn from_id(id: &str) -> Option<CharStyle> {
+        CharStyle::ALL.into_iter().find(|s| s.id() == id)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             CharStyle::Mongle => "몽글",

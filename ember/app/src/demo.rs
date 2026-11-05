@@ -258,11 +258,13 @@ pub fn projects() -> Vec<Project> {
             name: "demo-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            ..Default::default()
         },
         Project {
             name: "second-project".into(),
             created_at: 0,
             computers: vec!["local".into()],
+            ..Default::default()
         },
     ]
 }
@@ -784,6 +786,7 @@ impl DemoSource {
             name,
             created_at: now_ms() / 1000,
             computers: vec!["local".into()],
+            ..Default::default()
         };
         client.apply(Input::Push(Push::ProjectUpdated {
             project: project.clone(),

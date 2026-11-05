@@ -81,6 +81,68 @@ pub struct ReadBody {
     pub seq: Option<i64>,
 }
 
+/// The member agent a feed item is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedAgent {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub harness: String,
+}
+
+/// One feed entry (FR-T11). `kind` is `approval` or `report` and stays a string so a new kind
+/// does not break decoding. Fields not meant for the kind are absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedItem {
+    /// `approval:<approval_id>` or `report:<session id>:<seq>`.
+    pub id: String,
+    pub kind: String,
+    pub agent: FeedAgent,
+    pub session_id: String,
+    /// The session's route, for the client to open.
+    pub link: String,
+    /// Unix seconds.
+    pub at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    /// `completed`, `failed` or `interrupted` (reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The answer to a pending approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedDecision {
+    AllowOnce,
+    AllowAlways,
+    Deny,
+}
+
+/// Body of `POST /api/channels/{id}/feed/{approval_id}/answer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedAnswer {
+    pub decision: FeedDecision,
+}
+
+/// Path of `GET /channels/{id}/feed`.
+pub(crate) fn feed_path(id: &str) -> String {
+    format!("/channels/{}/feed", crate::api::seg(id))
+}
+
+/// Path of `POST /channels/{id}/feed/{approval_id}/answer`.
+pub(crate) fn feed_answer_path(id: &str, approval_id: &str) -> String {
+    format!("/channels/{}/feed/{}/answer", crate::api::seg(id), crate::api::seg(approval_id))
+}
+
 /// Path of `GET /channels`, with `?project=` when given.
 pub(crate) fn list_path(project: Option<&str>) -> Result<String, serde_urlencoded::ser::Error> {
     match project {
@@ -165,5 +227,57 @@ mod tests {
         assert_eq!(messages_path("c1", &MessagesQuery::default()), "/channels/c1/messages");
         assert_eq!(messages_path("c1", &MessagesQuery { after: Some(4) }), "/channels/c1/messages?after=4");
         assert_eq!(messages_path("a/b", &MessagesQuery::default()), "/channels/a%2Fb/messages");
+    }
+
+    #[test]
+    fn fr_t10_client_feed_item_roundtrip() {
+        let approval = json!({
+            "id":"approval:approval-1","kind":"approval",
+            "agent":{"id":"s1","name":"alpha","harness":"codex"},
+            "session_id":"s1","link":"/sessions/s1","at":1700000000,
+            "approval_id":"approval-1","tool":"Bash","input":{"command":"ls"}
+        });
+        let i: FeedItem = serde_json::from_value(approval.clone()).unwrap();
+        assert_eq!((i.kind.as_str(), i.approval_id.as_deref(), i.tool.as_deref()), ("approval", Some("approval-1"), Some("Bash")));
+        assert_eq!(i.agent.name, "alpha");
+        assert_eq!(serde_json::to_value(&i).unwrap(), approval);
+        let report = json!({
+            "id":"report:s1:4","kind":"report",
+            "agent":{"id":"s1","name":"alpha","harness":"codex"},
+            "session_id":"s1","link":"/sessions/s1","at":5,
+            "outcome":"failed","summary":"partial","error":"boom"
+        });
+        let r: FeedItem = serde_json::from_value(report.clone()).unwrap();
+        assert_eq!((r.outcome.as_deref(), r.error.as_deref()), (Some("failed"), Some("boom")));
+        assert!(r.approval_id.is_none() && r.input.is_none());
+        assert_eq!(serde_json::to_value(&r).unwrap(), report);
+        // Unknown fields and kinds from a newer server do not break decoding.
+        let n: FeedItem = serde_json::from_value(json!({
+            "id":"q:1","kind":"question","agent":{"id":"s","name":"n","harness":"h","extra":1},
+            "session_id":"s","link":"/sessions/s","at":1,"new_field":true
+        }))
+        .unwrap();
+        assert_eq!(n.kind, "question");
+    }
+
+    #[test]
+    fn fr_t10_client_feed_decision_wire_names() {
+        assert_eq!(serde_json::to_value(FeedDecision::AllowOnce).unwrap(), json!("allow_once"));
+        assert_eq!(serde_json::to_value(FeedDecision::AllowAlways).unwrap(), json!("allow_always"));
+        assert_eq!(serde_json::to_value(FeedDecision::Deny).unwrap(), json!("deny"));
+        assert_eq!(
+            serde_json::to_value(FeedAnswer { decision: FeedDecision::Deny }).unwrap(),
+            json!({"decision":"deny"})
+        );
+        let a: FeedAnswer = serde_json::from_value(json!({"decision":"allow_always"})).unwrap();
+        assert_eq!(a.decision, FeedDecision::AllowAlways);
+    }
+
+    #[test]
+    fn fr_t10_client_feed_paths() {
+        assert_eq!(feed_path("c1"), "/channels/c1/feed");
+        assert_eq!(feed_path("a/b"), "/channels/a%2Fb/feed");
+        assert_eq!(feed_answer_path("c1", "approval-1"), "/channels/c1/feed/approval-1/answer");
+        assert_eq!(feed_answer_path("c/1", "a b"), "/channels/c%2F1/feed/a%20b/answer");
     }
 }

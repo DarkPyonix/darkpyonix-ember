@@ -24,7 +24,7 @@ use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
-use crate::channels::{Channel, ChannelMessage, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
+use crate::channels::{Channel, ChannelMessage, FeedAnswer, FeedDecision, FeedItem, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
@@ -667,6 +667,19 @@ impl Api {
     pub async fn mark_channel_read(&self, id: &str, upto: Option<i64>) -> ApiResult<Channel> {
         let body = serde_json::to_value(ReadBody { seq: upto }).expect("ReadBody serialises");
         Self::decode(self.post(&format!("/channels/{}/read", seg(id)), body).await?)
+    }
+
+    /// The feed of a channel (FR-T11): pending approvals and last-turn reports of its agents,
+    /// newest first.
+    pub async fn channel_feed(&self, id: &str) -> ApiResult<Vec<FeedItem>> {
+        self.get(&crate::channels::feed_path(id)).await
+    }
+
+    /// Answer a pending approval from the feed; the server answers 204.
+    pub async fn answer_channel_feed(&self, id: &str, approval_id: &str, decision: FeedDecision) -> ApiResult<()> {
+        let body = serde_json::to_value(FeedAnswer { decision }).expect("FeedAnswer serialises");
+        self.post(&crate::channels::feed_answer_path(id, approval_id), body).await?;
+        Ok(())
     }
 
     // ---- schedules (FR-A8) -----------------------------------------------------------------

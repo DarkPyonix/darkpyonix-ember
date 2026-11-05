@@ -20,6 +20,9 @@ pub enum ServerError {
     Transport(#[from] reqwest::Error),
     #[error("server answered {status}: {message}")]
     Status { status: u16, message: String },
+    /// The server answered 401: the token is missing or wrong (FR-S11). Not retried.
+    #[error("authentication failed: the server refused the token ({0})")]
+    Unauthorized(String),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -175,15 +178,21 @@ impl IdeLaunch {
         let Some(Ok(l)) = launch else {
             return EditorConnection::default();
         };
-        let ose = l
-            .target("ember")
-            .and_then(|t| t.launch.as_ref())
-            .and_then(|e| e.ose.as_ref());
+        let ember = l.target("ember").and_then(|t| t.launch.as_ref());
+        let ose = ember.and_then(|e| e.ose.as_ref());
         EditorConnection {
             project: l.project.clone(),
             folder: l.folder.clone(),
             endpoint: ose.map(|o| host_port(&o.endpoint)),
             token: ose.map(|o| o.connection_token.clone()),
+            computer: ember
+                .map(|e| e.computer.clone())
+                .filter(|c| !c.is_empty())
+                .or_else(|| Some(l.computer.name.clone()).filter(|c| !c.is_empty())),
+            server_url: ember
+                .and_then(|e| e.server_url.clone())
+                .filter(|u| !u.is_empty())
+                .or_else(|| crate::services::try_services().map(|s| s.config.server_url.clone()).filter(|u| !u.is_empty())),
         }
     }
 }
@@ -195,6 +204,10 @@ pub struct EditorConnection {
     pub folder: String,
     pub endpoint: Option<String>,
     pub token: Option<String>,
+    /// The computer's id for the terminal relay.
+    pub computer: Option<String>,
+    /// The ember server's base URL for the terminal relay.
+    pub server_url: Option<String>,
 }
 
 /// `http://127.0.0.1:9000/` becomes `127.0.0.1:9000`; a bare `host:port` is kept.
@@ -223,7 +236,7 @@ mod editor_connection_tests {
                     project: "p".into(),
                     computer: "c".into(),
                     folder: "/w".into(),
-                    server_url: None,
+                    server_url: Some("http://srv:7".into()),
                     ose: ose.map(|(e, t)| ember_client::wire::EmberOseConnection {
                         endpoint: e.into(),
                         connection_token: t.into(),
@@ -240,6 +253,17 @@ mod editor_connection_tests {
         assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
         assert_eq!(c.token.as_deref(), Some("tok"));
         assert_eq!((c.project.as_str(), c.folder.as_str()), ("p", "/w"));
+        assert_eq!(c.computer.as_deref(), Some("c"));
+        assert_eq!(c.server_url.as_deref(), Some("http://srv:7"));
+    }
+
+    #[test]
+    fn fr_l31_editor_connection_computer_falls_back_to_the_ide_computer() {
+        let mut l = launch(None).unwrap();
+        l.targets[0].launch.as_mut().unwrap().computer = String::new();
+        l.computer.name = "fallback".into();
+        let c = IdeLaunch::editor_connection(Some(&Ok(l)));
+        assert_eq!(c.computer.as_deref(), Some("fallback"));
     }
 
     #[test]
@@ -274,8 +298,29 @@ pub struct ServerApi {
 }
 
 impl ServerApi {
+    /// Reads the server token once from the environment (FR-S11, `ember_client::token`).
     pub fn new(base_url: &str) -> ServerApi {
-        ServerApi { http: reqwest::Client::new(), base: base_url.trim_end_matches('/').to_string() }
+        // A server that is not local gets no token and none is read (FR-S11).
+        let token = ember_client::token::token_allowed_for(base_url)
+            .then(ember_client::token::server_token_from_env)
+            .flatten();
+        ServerApi::with_token(base_url, token)
+    }
+
+    /// Like [`ServerApi::new`] with the token given; `None` sends no `Authorization` header, and
+    /// so does a base URL that is not loopback or listed in `EMBER_TOKEN_HOSTS`. Panics if the
+    /// HTTP client cannot be built, rather than continuing without the header.
+    pub fn with_token(base_url: &str, token: Option<String>) -> ServerApi {
+        let auth = token
+            .filter(|_| ember_client::token::token_allowed_for(base_url))
+            .as_deref()
+            .and_then(ember_client::token::auth_headers);
+        let mut builder = reqwest::Client::builder();
+        if let Some(headers) = auth {
+            builder = builder.default_headers(headers);
+        }
+        let http = builder.build().expect("cannot build the HTTP client for the server API (TLS backend failed to initialise)");
+        ServerApi { http, base: base_url.trim_end_matches('/').to_string() }
     }
 
     fn url(&self, path: &str) -> String {
@@ -288,11 +333,7 @@ impl ServerApi {
             return Ok(res);
         }
         let body = res.text().await.unwrap_or_default();
-        let message = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-            .unwrap_or(body);
-        Err(ServerError::Status { status: status.as_u16(), message })
+        Err(status_error(status.as_u16(), body))
     }
 
     pub async fn accounts(&self) -> ServerResult<Vec<Account>> {
@@ -337,6 +378,20 @@ impl ServerApi {
     }
 }
 
+/// The error for a non-success answer: 401 is [`ServerError::Unauthorized`], the rest carry the
+/// server's `error` text (or the raw body).
+fn status_error(status: u16, body: String) -> ServerError {
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or(body);
+    if status == 401 {
+        ServerError::Unauthorized(message)
+    } else {
+        ServerError::Status { status, message }
+    }
+}
+
 /// Percent-encode one path segment.
 fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -353,6 +408,28 @@ fn seg(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_s11_server_api_default_headers_carry_a_sensitive_bearer() {
+        let h = ember_client::token::auth_headers("tok").unwrap();
+        let v = h.get(reqwest::header::AUTHORIZATION).unwrap();
+        assert_eq!(v, "Bearer tok");
+        assert!(v.is_sensitive());
+        assert!(ember_client::token::auth_headers("bad\ntoken").is_none());
+    }
+
+    #[test]
+    fn fr_s11_server_api_debug_output_never_holds_the_token() {
+        let api = ServerApi::with_token("http://127.0.0.1:1", Some("secret".into()));
+        assert!(!format!("{api:?}").contains("secret"));
+    }
+
+    #[test]
+    fn fr_s11_server_api_401_is_the_auth_error() {
+        let e = status_error(401, r#"{"error":"unauthorized"}"#.into());
+        assert!(matches!(&e, ServerError::Unauthorized(m) if m == "unauthorized"));
+        assert!(matches!(status_error(500, "boom".into()), ServerError::Status { status: 500, .. }));
+    }
 
     #[test]
     fn fr_l7_fr_l31_fr_w4_decodes_editor_connection() {

@@ -87,25 +87,54 @@ fn hello(device: &str) -> String {
     .unwrap()
 }
 
+/// Await `fut` for at most 20 s and panic with `label` otherwise, so a hang names its step.
+async fn step<T>(label: &str, fut: impl std::future::Future<Output = T>) -> T {
+    match tokio::time::timeout(Duration::from_secs(20), fut).await {
+        Ok(v) => v,
+        Err(_) => panic!("step timed out after 20 s: {label}"),
+    }
+}
+
 async fn attach(s: &Server, computer: &str, tid: &str, device: &str) -> Ws {
     let url = format!("ws://{}/api/computers/{computer}/terms/{tid}/attach", s.base);
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-    ws.send(Message::text(hello(device))).await.unwrap();
+    let (mut ws, _) = step(&format!("connect attach websocket for {device}"), tokio_tungstenite::connect_async(url)).await.unwrap();
+    step(&format!("send hello for {device}"), ws.send(Message::text(hello(device)))).await.unwrap();
     ws
 }
 
 async fn event(ws: &mut Ws) -> Option<TermEvent> {
-    loop {
-        match ws.next().await? {
-            Ok(Message::Text(t)) => return Some(serde_json::from_str(t.as_str()).unwrap()),
-            Ok(Message::Close(_)) | Err(_) => return None,
-            Ok(_) => continue,
+    step("wait for the next terminal event", async {
+        loop {
+            match ws.next().await? {
+                Ok(Message::Text(t)) => return Some(serde_json::from_str(t.as_str()).unwrap()),
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => continue,
+            }
         }
-    }
+    })
+    .await
+}
+
+/// Wait until the node reports no attached client for `tid` (a dropped server connection has
+/// been noticed), so the next server instance starts from a known state.
+async fn wait_no_clients(node: &NodeFx, tid: &str) {
+    step(&format!("node reports 0 clients for {tid}"), async {
+        loop {
+            if node.direct.term(tid).await.unwrap().clients.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
 }
 
 /// Read output and snapshot bytes until `needle` shows up.
 async fn read_until(ws: &mut Ws, needle: &str) -> String {
+    step(&format!("read output until {needle:?}"), read_until_inner(ws, needle)).await
+}
+
+async fn read_until_inner(ws: &mut Ws, needle: &str) -> String {
     let mut out = String::new();
     while !out.contains(needle) {
         match event(ws).await {
@@ -126,18 +155,47 @@ async fn type_line(ws: &mut Ws, line: &str) {
     ws.send(Message::text(serde_json::to_string(&input).unwrap())).await.unwrap();
 }
 
+/// Type `line` and read until `needle` shows up. A shell that is still starting can drop what is
+/// typed before it reads (a line-editor start flushes pending input), so the line is typed again
+/// every 3 s until the output arrives (#345).
+async fn type_until(ws: &mut Ws, line: &str, needle: &str) -> String {
+    step(&format!("type {line:?} until {needle:?}"), async {
+        let mut out = String::new();
+        loop {
+            type_line(ws, line).await;
+            let round = tokio::time::Instant::now() + Duration::from_secs(3);
+            while !out.contains(needle) {
+                match tokio::time::timeout_at(round, event(ws)).await {
+                    Err(_) => break,
+                    Ok(Some(TermEvent::Output { data })) | Ok(Some(TermEvent::Snapshot { data, .. })) => {
+                        out.push_str(&String::from_utf8_lossy(&data))
+                    }
+                    Ok(Some(TermEvent::Exit { .. })) | Ok(Some(TermEvent::Error { .. })) | Ok(None) => {
+                        panic!("ended waiting for {needle:?}; output {out:?}")
+                    }
+                    Ok(Some(_)) => {}
+                }
+            }
+            if out.contains(needle) {
+                return out;
+            }
+        }
+    })
+    .await
+}
+
 async fn within<T>(f: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(60), f).await.expect("timed out")
 }
 
 async fn register(s: &Server, node: &NodeFx) -> String {
     // Through the computers API, as a client would.
-    let r = reqwest::Client::new()
-        .post(http(s, "/api/computers"))
-        .json(&json!({ "name": "box", "url": node.url, "token": TOKEN }))
-        .send()
-        .await
-        .unwrap();
+    let r = step(
+        "register the computer",
+        reqwest::Client::new().post(http(s, "/api/computers")).json(&json!({ "name": "box", "url": node.url, "token": TOKEN })).send(),
+    )
+    .await
+    .unwrap();
     assert_eq!(r.status(), 201);
     r.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string()
 }
@@ -176,8 +234,7 @@ async fn fr_p3_create_list_attach_type_and_read_through_the_server() {
             Some(TermEvent::Attached { term, .. }) => assert_eq!(term.id, tid),
             other => panic!("expected attached, got {other:?}"),
         }
-        type_line(&mut ws, "echo relay-$((40+2))\n").await;
-        read_until(&mut ws, "relay-42").await;
+        type_until(&mut ws, "echo relay-$((40+2))\n", "relay-42").await;
 
         // The plain snapshot route and the single-session route.
         let snap: TermSnapshot =
@@ -213,8 +270,7 @@ async fn fr_p6_the_session_keeps_running_when_the_server_connection_drops() {
 
         let mut ws = attach(&s, &cid, &tid, "laptop").await;
         event(&mut ws).await;
-        type_line(&mut ws, "echo before-drop\n").await;
-        read_until(&mut ws, "before-drop").await;
+        type_until(&mut ws, "echo before-drop\n", "before-drop").await;
         // Abrupt drop, no detach message.
         drop(ws);
         // The node sees the client leave, and the session is still running.
@@ -246,31 +302,34 @@ async fn fr_p6_a_restarted_server_lists_and_attaches_again() {
         let c = reqwest::Client::new();
         let mut ids = Vec::new();
         for key in ["a", "b"] {
-            let t: TermCreateResponse = c
-                .post(http(&first, &format!("/api/computers/{cid}/terms")))
-                .json(&create_body(&node.root, key))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
+            let r = step(
+                &format!("create session {key}"),
+                c.post(http(&first, &format!("/api/computers/{cid}/terms"))).json(&create_body(&node.root, key)).send(),
+            )
+            .await
+            .unwrap();
+            let t: TermCreateResponse = step(&format!("read create response {key}"), r.json()).await.unwrap();
             ids.push(t.term.id);
         }
-        let mut ws = attach(&first, &cid, &ids[0], "laptop").await;
+        // `ids` is sorted below, so keep the id of the session that gets the typed line.
+        let typed_id = ids[0].clone();
+        let mut ws = attach(&first, &cid, &typed_id, "laptop").await;
         event(&mut ws).await;
-        type_line(&mut ws, "echo kept-$((6*7))\n").await;
-        read_until(&mut ws, "kept-42").await;
+        type_until(&mut ws, "echo kept-$((6*7))\n", "kept-42").await;
 
         // The server goes away: its listener and every connection with it.
         first.task.abort();
         let _ = first.task.await;
         drop(ws);
+        // Wait until the node has seen the first attachment leave before the second server starts.
+        wait_no_clients(&node, &ids[0]).await;
 
         // A new instance on the same store (same computers registry).
         let second = start_server(store).await;
-        let list: Vec<TermInfo> =
-            c.get(http(&second, &format!("/api/computers/{cid}/terms"))).send().await.unwrap().json().await.unwrap();
+        let r = step("list sessions on the second server", c.get(http(&second, &format!("/api/computers/{cid}/terms"))).send())
+            .await
+            .unwrap();
+        let list: Vec<TermInfo> = step("read the session list", r.json()).await.unwrap();
         let mut got: Vec<_> = list.iter().map(|t| t.id.clone()).collect();
         got.sort();
         ids.sort();
@@ -281,10 +340,10 @@ async fn fr_p6_a_restarted_server_lists_and_attaches_again() {
             let mut ws = attach(&second, &cid, id, "after-restart").await;
             assert!(matches!(event(&mut ws).await, Some(TermEvent::Attached { .. })));
         }
-        let mut ws = attach(&second, &cid, &ids[0], "after-restart-2").await;
+        let mut ws = attach(&second, &cid, &typed_id, "after-restart-2").await;
         event(&mut ws).await;
         read_until(&mut ws, "kept-42").await;
-        type_line(&mut ws, "echo again-$((1+1))\n").await;
+        step("type again line", type_line(&mut ws, "echo again-$((1+1))\n")).await;
         read_until(&mut ws, "again-2").await;
     })
     .await;

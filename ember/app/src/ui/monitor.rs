@@ -5,7 +5,8 @@
 //! counters become rates by differencing them) and a short rolling series per card. A card
 //! the node cannot fill says why; fans are not collected yet and say "준비 중입니다". The
 //! functions below are pure so that rates, formats, sort and empty states are tested without a
-//! window.
+//! window. The temperature meter shows the hottest sensor on a fixed 0 to 100 degree Celsius
+//! scale (memory and disk meters use their percent).
 
 use ember_client::api::{MemoryMetrics, MetricsSample};
 use ember_client::state::Reachability;

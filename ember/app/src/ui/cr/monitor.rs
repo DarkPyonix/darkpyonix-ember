@@ -4,7 +4,8 @@
 //! While the sheet is open it asks the server for the computer's metrics every few seconds
 //! (FR-X7, `GET /api/computers/{id}/metrics`) and draws them: the pure feed, formats and sort
 //! are `ui::monitor`'s. An offline computer is not asked and says so; a failed request keeps the
-//! last values dimmed. Demo mode takes its samples from `demo::metrics_sample`.
+//! last values dimmed (the cards at 55 percent opacity). The temperature meter runs on a fixed
+//! 0 to 100 degree Celsius scale (hottest sensor). Demo mode takes its samples from `demo::metrics_sample`.
 
 #![allow(non_snake_case)]
 
@@ -149,8 +150,10 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
                     } else if let (FeedStatus::Failed, Some(e)) = (feed.status(), feed.error()) {
                         FailureNotice(e);
                     }
-                    // `.mon-wrap.stale`: a computer that is not online is greyed out.
-                    let wrap = if online { Modifier::new() } else { Modifier::new().alpha(0.55) };
+                    // `.mon-wrap.stale`: a computer that is not online, or whose last request failed
+                    // (the old values stay), is greyed out.
+                    let stale = !online || matches!(feed.status(), FeedStatus::Failed);
+                    let wrap = if stale { Modifier::new().alpha(0.55) } else { Modifier::new() };
                     cu::Column().space_role(SpaceRole::Md).modifier(wrap.fill_max_width()).content(|| {
                         Grid(columns, c, &feed, online);
                         ProcessTable(&rows, cur, &sort, &on_close);

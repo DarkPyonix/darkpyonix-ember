@@ -915,6 +915,35 @@ struct GitState {
     files: Vec<DemoFile>,
     fetched_age_secs: Option<u64>,
     commits: u128,
+    /// Newest first, as `git stash list` (index 0 is the newest).
+    stashes: Vec<DemoStash>,
+}
+
+/// One demo stash. `files` are the changes it holds, put back by apply and pop.
+#[derive(Debug, Clone)]
+struct DemoStash {
+    message: String,
+    branch: String,
+    /// Unix seconds.
+    time: i64,
+    files: Vec<DemoFile>,
+}
+
+/// A unix time as the ISO 8601 text of `git stash list --format=%cI` (UTC offset written `+00:00`).
+fn iso_time(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00", secs / 3_600, secs % 3_600 / 60, secs % 60)
 }
 
 fn hunk(header: &str, lines: &[&str]) -> String {
@@ -1026,6 +1055,20 @@ impl GitState {
             ],
             fetched_age_secs: Some(300),
             commits: 0,
+            stashes: {
+                let now = now_ms() / 1000;
+                let held = |path: &str, line: &str| DemoFile {
+                    path: path.into(),
+                    old_path: None,
+                    kind: Kind::Modified,
+                    staged: vec![],
+                    unstaged: vec![hunk("@@ -1,1 +1,2 @@", &[" //! demo", &format!("+{line}")])],
+                };
+                vec![
+                    DemoStash { message: "세션 shim 작업 중".into(), branch: "feat/git-api".into(), time: now - 60 * 40, files: vec![held("ember/node/src/shim.rs", "// wip")] },
+                    DemoStash { message: "릴리스 문서 초안".into(), branch: "main".into(), time: now - 86_400 * 2, files: vec![held("docs/RELEASE.md", "초안")] },
+                ]
+            },
         }
     }
 
@@ -1193,6 +1236,43 @@ impl GitState {
                 Ok(json!({ "output": output }))
             }
             "conflicts" => Ok(json!({ "paths": Vec::<String>::new() })),
+            "stash/list" => Ok(Value::Array(
+                self.stashes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, st)| json!({ "index": i, "message": st.message, "branch": st.branch, "time": iso_time(st.time) }))
+                    .collect(),
+            )),
+            "stash/push" => {
+                let untracked = body.get("include_untracked").and_then(Value::as_bool).unwrap_or(false);
+                let (held, kept): (Vec<DemoFile>, Vec<DemoFile>) =
+                    std::mem::take(&mut self.files).into_iter().partition(|f| untracked || !(f.kind == Kind::New && f.staged.is_empty()));
+                self.files = kept;
+                if held.is_empty() {
+                    return Err(GitError::conflict("stash할 로컬 변경 사항이 없습니다."));
+                }
+                let message = str_of(body, "message").map(str::trim).filter(|m| !m.is_empty());
+                let message = message.map(str::to_string).unwrap_or_else(|| format!("{} 작업 저장", self.current));
+                self.stashes.insert(0, DemoStash { message, branch: self.current.clone(), time: now_ms() / 1000, files: held });
+                Ok(Value::Null)
+            }
+            "stash/apply" | "stash/pop" | "stash/drop" => {
+                let at = body.get("index").and_then(Value::as_u64).map(|i| i as usize).filter(|i| *i < self.stashes.len());
+                let Some(at) = at else {
+                    return Err(GitError::conflict("그런 stash가 없습니다."));
+                };
+                if op != "stash/drop" {
+                    let held = if op == "stash/pop" { self.stashes.remove(at).files } else { self.stashes[at].files.clone() };
+                    for f in held {
+                        if !self.files.iter().any(|x| x.path == f.path) {
+                            self.files.push(f);
+                        }
+                    }
+                } else {
+                    self.stashes.remove(at);
+                }
+                Ok(Value::Null)
+            }
             "log" => {
                 let limit = body["limit"].as_u64().unwrap_or(50) as usize;
                 let skip = body["skip"].as_u64().unwrap_or(0) as usize;
@@ -1399,6 +1479,78 @@ mod tests {
         assert_eq!(page[0]["sha"], all[3]["sha"]);
         let past = gs(&d, "log", json!({ "limit": 5, "skip": 100 })).unwrap();
         assert!(past["commits"].as_array().unwrap().is_empty());
+    }
+
+    fn stash_list(d: &DemoSource) -> Vec<Value> {
+        gs(d, "stash/list", json!({})).unwrap().as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn fr_g6_demo_stash_lists_two_newest_first_with_iso_times() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let list = stash_list(&d);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["index"], 0);
+        assert_eq!(list[1]["index"], 1);
+        assert!(list[0]["time"].as_str().unwrap().contains('T'));
+        assert!(!list[0]["message"].as_str().unwrap().is_empty());
+        assert_eq!(iso_time(0), "1970-01-01T00:00:00+00:00");
+        assert_eq!(iso_time(1_788_000_000), "2026-08-29T10:40:00+00:00");
+    }
+
+    #[test]
+    fn fr_g6_demo_stash_push_takes_tracked_changes_and_adds_an_entry() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let before = status(&d)["files"].as_array().unwrap().len();
+        gs(&d, "stash/push", json!({ "message": "  내 작업  ", "include_untracked": false })).unwrap();
+        let list = stash_list(&d);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0]["message"], "내 작업");
+        let after = status(&d)["files"].as_array().unwrap().len();
+        assert!(after < before, "tracked changes left the work tree");
+        assert!(after > 0, "untracked files stay without include_untracked");
+    }
+
+    #[test]
+    fn fr_g6_demo_stash_push_with_untracked_clears_everything_then_refuses_when_clean() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        gs(&d, "stash/push", json!({ "include_untracked": true })).unwrap();
+        assert!(status(&d)["files"].as_array().unwrap().is_empty());
+        let e = gs(&d, "stash/push", json!({})).unwrap_err();
+        assert_eq!(e.status, 409);
+        assert_eq!(stash_list(&d).len(), 3);
+    }
+
+    #[test]
+    fn fr_g6_demo_stash_pop_removes_the_entry_and_restores_its_changes() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        gs(&d, "stash/pop", json!({ "index": 0 })).unwrap();
+        assert_eq!(stash_list(&d).len(), 1);
+        assert_eq!(stash_list(&d)[0]["message"], "릴리스 문서 초안");
+        assert!(!file(&status(&d), "ember/node/src/shim.rs").is_null());
+    }
+
+    #[test]
+    fn fr_g6_demo_stash_apply_keeps_the_entry_and_drop_removes_it() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        gs(&d, "stash/apply", json!({ "index": 1 })).unwrap();
+        assert_eq!(stash_list(&d).len(), 2);
+        assert!(!file(&status(&d), "docs/RELEASE.md").is_null());
+        gs(&d, "stash/drop", json!({ "index": 1 })).unwrap();
+        assert_eq!(stash_list(&d).len(), 1);
+    }
+
+    #[test]
+    fn fr_g6_demo_stash_invalid_index_is_a_korean_conflict_and_changes_nothing() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for op in ["stash/apply", "stash/pop", "stash/drop"] {
+            for body in [json!({ "index": 9 }), json!({}), json!({ "index": "x" })] {
+                let e = gs(&d, op, body).unwrap_err();
+                assert_eq!(e.status, 409);
+                assert_eq!(e.message, "그런 stash가 없습니다.");
+            }
+        }
+        assert_eq!(stash_list(&d).len(), 2);
     }
 
     #[test]

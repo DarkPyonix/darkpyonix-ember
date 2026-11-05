@@ -144,6 +144,7 @@ where
 pub fn router(node: Node) -> Router {
     let authed = Router::new()
         .route("/env", get(env))
+        .route("/metrics", get(metrics))
         .route("/fs/stat", post(stat))
         .route("/fs/read", post(read))
         .route("/fs/write", post(write))
@@ -323,6 +324,14 @@ async fn health() -> Json<Health> {
 
 async fn env(State(n): State<Node>) -> Json<EnvInfo> {
     Json(crate::envinfo::describe(n.0.policy.roots().to_vec()).await)
+}
+
+async fn metrics(Query(q): Query<MetricsQuery>) -> ApiResult<MetricsSample> {
+    let top = q.top.unwrap_or(crate::metrics::DEFAULT_TOP).min(crate::metrics::MAX_TOP);
+    match tokio::task::spawn_blocking(move || crate::metrics::sample(top)).await {
+        Ok(s) => Ok(Json(s)),
+        Err(e) => Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, e.to_string())),
+    }
 }
 
 async fn stat(State(n): State<Node>, Json(r): Json<PathRequest>) -> ApiResult<Stat> {

@@ -721,7 +721,7 @@ pub fn sheet_width(window_width_dp: f32, max_width: f32) -> f32 {
 }
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
-/// TODO(compose-rust#372): a pointer-up subscription; Escape and the scrim also dismiss.
+/// TODO(compose-rust#372): a pointer-up subscription; the toolkit's Dialog calls on_dismiss for Escape and the scrim (not yet checked on a display).
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     Clickable(

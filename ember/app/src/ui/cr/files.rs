@@ -901,14 +901,7 @@ fn RoundGlyph(icon: &'static str, on_click: impl FnMut() + 'static) {
 /// toolkit indicator, whose colours are the design system's (compose-rust#377), so the done part
 /// is the token colour and the rest the track in both schemes.
 fn Bar(pct: u32, height: f32, fill: compose_rust::Color) {
-    let p = ember_theme().palette;
-    let pct = pct.min(100);
-    cu::Row().modifier(Modifier::new().fill_max_width().height(height).background(paint(p.track)).shape_role(ShapeRole::Full)).content(|| {
-        if pct > 0 {
-            cu::Spacer().modifier(Modifier::new().weight(pct as f32).height(height).background(paint(fill)).shape_role(ShapeRole::Full));
-        }
-        cu::Spacer().modifier(Modifier::new().weight((100 - pct) as f32 + 0.001));
-    });
+    super::components::TrackBar(pct.min(100) as f32, height, fill);
 }
 
 fn TransfersCard(model: &FilesModel, ready: bool) {

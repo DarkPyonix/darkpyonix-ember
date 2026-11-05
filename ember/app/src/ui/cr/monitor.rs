@@ -20,7 +20,7 @@ pub use crate::ui::monitor::{
     SortState,
 };
 use crate::ui::monitor::{
-    bar_fraction, bar_max, card_view, empty_text, process_footer, status_line, CardView, FeedStatus,
+    bar_fraction, bar_max, card_view, meter_fraction, empty_text, process_footer, status_line, CardView, FeedStatus,
     POLL_SECS, TOP_PROCESSES,
 };
 use super::characters::{Character, CharState};
@@ -92,9 +92,14 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
         let poll = chip.is_some_and(|c| !matches!(c.reachability, Reachability::Offline));
         let id = chip.map(|c| c.id.clone()).unwrap_or_default();
         let feed_w = feed_state.clone();
+        let demo = crate::services::services().demo.is_some() || crate::demo::active_from_env();
         launched_effect((id.clone(), poll), move || async move {
             if !poll || id.is_empty() {
                 return;
+            }
+            if demo {
+                // Two samples at once, so the network card has a rate on the first frame.
+                feed_w.update(|f| f.push(crate::demo::metrics_previous(crate::demo::now_ms().max(0) as u64)));
             }
             loop {
                 match fetch_metrics(id.clone()).await {
@@ -214,7 +219,7 @@ fn Grid(columns: usize, c: &ComputerChip, feed: &MonitorFeed, online: bool) {
             for card in chunk.iter().copied() {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| match card {
                     Card::Status => StatusCard(c, feed, online),
-                    Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status())),
+                    Card::Metric(m) => MetricCard(m, card_view(m, feed), empty_text(m, online, feed.status()), meter_fraction(m, feed)),
                 });
             }
             for _ in chunk.len()..columns {
@@ -282,7 +287,7 @@ fn StatusCard(c: &ComputerChip, feed: &MonitorFeed, online: bool) {
     });
 }
 
-fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str) {
+fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option<f32>) {
     let p = ember_theme().palette;
     MonCard(metric_icon(metric), metric.title(), || match view.as_ref() {
         Some(v) => {
@@ -291,9 +296,28 @@ fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str) {
                 Label(line, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
             }
             Bars(metric, &v.bars);
+            if let Some(f) = meter {
+                Meter(f);
+            }
         }
         None => Label(empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
     });
+}
+
+/// One value against a track: the track in surface-2, the fill in the accent, both rounded.
+fn Meter(fraction: f32) {
+    let p = ember_theme().palette;
+    let f = bar_fraction(fraction, 1.0);
+    cu::Row()
+        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.surface_2)).corner_radius(4.0).clip(true))
+        .content(move || {
+            if f > 0.0 {
+                cu::Spacer().modifier(Modifier::new().weight(f).height(8.0).background(paint(p.blue.strong)).corner_radius(4.0));
+            }
+            if f < 1.0 {
+                cu::Spacer().modifier(Modifier::new().weight(1.0 - f).height(8.0));
+            }
+        });
 }
 
 /// A row of thin bars, one per core (CPU) or per recent sample, drawn from the bottom.

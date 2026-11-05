@@ -480,7 +480,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             Some(m) => CardView {
                 headline: percent_text(Some(ratio_percent(m.used_bytes, m.total_bytes))),
                 lines: memory_lines(m),
-                bars: feed.series(Metric::Memory).unwrap_or_default(),
+                bars: vec![],
             },
             None => CardView {
                 headline: "-".into(),
@@ -500,13 +500,17 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
                 .take(3)
                 .map(|d| {
                     let used = d.total_bytes.saturating_sub(d.available_bytes);
-                    format!(
-                        "{} {} ({} / {})",
-                        d.mount,
-                        percent_text(Some(disk_used_percent(d.total_bytes, d.available_bytes))),
-                        bytes_text(used),
-                        bytes_text(d.total_bytes)
-                    )
+                    if s.disks.len() == 1 {
+                        format!("{} / {} 사용 중입니다", bytes_text(used), bytes_text(d.total_bytes))
+                    } else {
+                        format!(
+                            "{} {} ({} / {})",
+                            d.mount,
+                            percent_text(Some(disk_used_percent(d.total_bytes, d.available_bytes))),
+                            bytes_text(used),
+                            bytes_text(d.total_bytes)
+                        )
+                    }
                 })
                 .collect();
             if s.disks.len() > 3 {
@@ -521,7 +525,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
             Some((rx, tx)) => CardView {
                 headline: format!("\u{2193} {}", rate_text(rx)),
                 lines: vec![format!("\u{2191} {}", rate_text(tx))],
-                bars: feed.series(Metric::Network).unwrap_or_default(),
+                bars: feed.series(Metric::Network).filter(|b| b.len() >= 2).unwrap_or_default(),
             },
             None => CardView {
                 headline: "-".into(),
@@ -538,7 +542,7 @@ pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
                     .take(3)
                     .map(|t| format!("{} {:.1} \u{00B0}C", t.label, t.celsius))
                     .collect(),
-                bars: feed.series(Metric::Temperature).unwrap_or_default(),
+                bars: vec![],
             },
             None => CardView {
                 headline: "-".into(),
@@ -615,6 +619,23 @@ pub fn bar_fraction(v: f32, max: f32) -> f32 {
     } else {
         (v / max).clamp(0.0, 1.0)
     }
+}
+
+/// The fill of a card's meter, 0 to 1, for the cards that show one value against a track:
+/// memory and disk by their percent, temperature on a 0 to 100 degree scale. `None` for the others.
+pub fn meter_fraction(metric: Metric, feed: &MonitorFeed) -> Option<f32> {
+    let s = feed.latest()?;
+    let pct = match metric {
+        Metric::Memory => s.memory.as_ref().map(|m| ratio_percent(m.used_bytes, m.total_bytes))?,
+        Metric::Disk => s
+            .disks
+            .iter()
+            .map(|d| disk_used_percent(d.total_bytes, d.available_bytes))
+            .fold(None, |a: Option<f32>, v| Some(a.map_or(v, |a| a.max(v))))?,
+        Metric::Temperature => hottest(s)?.celsius,
+        _ => return None,
+    };
+    Some(bar_fraction(pct, 100.0))
 }
 
 /// The scale of a card's bars: 100 for percents, the series maximum for the network card.
@@ -936,7 +957,8 @@ mod tests {
         assert_eq!(mem.lines, vec!["8.0 GB / 16.0 GB".to_string(), "스왑 1.0 GB / 4.0 GB".to_string()]);
         let disk = card_view(Metric::Disk, &f).unwrap();
         assert_eq!(disk.headline, "60.0%");
-        assert!(disk.lines[0].starts_with("/ 60.0%"));
+        assert_eq!(disk.lines, vec!["60 B / 100 B 사용 중입니다".to_string()]);
+        assert!(!disk.lines[0].contains('%'));
         let net = card_view(Metric::Network, &f).unwrap();
         assert_eq!(net.headline, "\u{2193} 2.0 KB/s");
         assert_eq!(net.lines, vec!["\u{2191} 1.0 KB/s".to_string()]);
@@ -1000,5 +1022,33 @@ mod tests {
         assert_eq!(bar_fraction(500.0, 100.0), 1.0);
         assert_eq!(bar_max(Metric::Cpu, &[1.0]), 100.0);
         assert_eq!(bar_max(Metric::Network, &[10.0, 40.0]), 40.0);
+    }
+
+    #[test]
+    fn fr_l21_meter_fill_equals_the_value_and_clamps() {
+        let mut f = MonitorFeed::default();
+        assert_eq!(meter_fraction(Metric::Memory, &f), None);
+        f.push(sample(1000, 0, 0));
+        assert_eq!(meter_fraction(Metric::Memory, &f), Some(0.5));
+        assert_eq!(meter_fraction(Metric::Disk, &f), Some(0.6));
+        assert!((meter_fraction(Metric::Temperature, &f).unwrap() - 0.515).abs() < 1e-4);
+        assert_eq!(meter_fraction(Metric::Cpu, &f), None);
+        assert_eq!(bar_fraction(-5.0, 100.0), 0.0);
+        assert_eq!(bar_fraction(250.0, 100.0), 1.0);
+        let mem = card_view(Metric::Memory, &f).unwrap();
+        assert!(mem.bars.is_empty(), "a single sample must not draw a full-width bar");
+    }
+
+    #[test]
+    fn fr_l21_several_mounts_keep_their_rows() {
+        let mut f = MonitorFeed::default();
+        let mut s = sample(1000, 0, 0);
+        let mut d2 = s.disks[0].clone();
+        d2.mount = "/data".into();
+        s.disks.push(d2);
+        f.push(s);
+        let disk = card_view(Metric::Disk, &f).unwrap();
+        assert_eq!(disk.lines.len(), 2);
+        assert!(disk.lines[1].starts_with("/data 60.0%"));
     }
 }

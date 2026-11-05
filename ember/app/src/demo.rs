@@ -243,7 +243,7 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
             swap_used_bytes: GB / 2,
         }),
         disks: vec![DiskMetrics { name: "Macintosh HD".into(), mount: "/".into(), total_bytes: 500 * GB, available_bytes: 210 * GB }],
-        network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 180_000, tx_bytes: now_ms / 1000 * 40_000 }],
+        network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 2_400_000, tx_bytes: now_ms / 1000 * 380_000 }],
         temperatures: vec![TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) }],
         gpu: GpuReport { devices: vec![], reason: Some("이 컴퓨터에서는 GPU 값을 읽지 못했습니다".into()) },
         processes: procs
@@ -258,6 +258,12 @@ pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
             .collect(),
         process_count: 412,
     }
+}
+
+/// The sample one poll interval before `now_ms`. The monitor feed takes it first in demo mode,
+/// so the network card shows a rate from the first frame instead of waiting for a second poll.
+pub fn metrics_previous(now_ms: u64) -> ember_client::api::MetricsSample {
+    metrics_sample(now_ms.saturating_sub(crate::ui::monitor::POLL_SECS * 1000))
 }
 
 pub fn computers() -> Vec<Computer> {
@@ -1223,7 +1229,20 @@ mod tests {
         assert!(m.used_bytes < m.total_bytes);
         assert!(a.gpu.devices.is_empty() && a.gpu.reason.is_some());
         let (rx, _) = crate::ui::monitor::net_rates(&a, &b).unwrap();
-        assert_eq!(rx, 180_000);
+        assert_eq!(rx, 2_400_000);
+    }
+
+    #[test]
+    fn fr_l21_demo_feed_has_a_network_rate_after_the_first_poll() {
+        let now = 1_000_000u64;
+        let mut f = crate::ui::monitor::MonitorFeed::default();
+        f.push(metrics_previous(now));
+        f.push(metrics_sample(now));
+        let (rx, tx) = f.rates().unwrap();
+        assert!(rx > 1 << 20 && tx > 0);
+        let net = crate::ui::monitor::card_view(crate::ui::monitor::Metric::Network, &f).unwrap();
+        assert!(net.headline.contains("MB/s"), "{}", net.headline);
+        assert!(metrics_previous(0).at_ms == 0);
     }
     use ember_client::state::State;
 

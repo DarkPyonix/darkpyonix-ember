@@ -200,7 +200,7 @@ pub fn launch_ide_shared(
                 notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
                 return;
             }
-            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token);
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token, c.server_url, c.computer);
         }
         IdeAction::Unavailable(why) => {
             notice::post(format!("{label}: 사용할 수 없습니다: {why}"));

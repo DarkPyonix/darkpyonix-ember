@@ -3218,9 +3218,12 @@ fn EmptyText(text: &str) {
 /// right column is not right-aligned (no column cross-axis alignment in the pinned toolkit).
 fn PrRowView(row: PrRow, first: bool) {
     let p = ember_theme().palette;
-    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+    // The divider sits between rows with 12 dp above and below, clear of the right column.
+    cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         if !first {
+            cu::Spacer().modifier(Modifier::new().height(SP[2]));
             cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+            cu::Spacer().modifier(Modifier::new().height(SP[2]));
         }
         cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(move || {
             cu::Box()

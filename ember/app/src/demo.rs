@@ -222,6 +222,44 @@ pub fn projects() -> Vec<Project> {
     ]
 }
 
+/// A plausible metrics sample for the demo computer (FR-L21, `GET /api/computers/{id}/metrics`).
+/// The values move with `now_ms` so the cards and rates change on screen; the network counters
+/// grow steadily, so two samples give a rate. Nothing here is measured.
+pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
+    use ember_client::api::*;
+    let t = (now_ms / 1000) as f32;
+    let wave = |period: f32, lo: f32, hi: f32, phase: f32| lo + (hi - lo) * (0.5 + 0.5 * ((t / period) + phase).sin());
+    let cores: Vec<f32> = (0..8).map(|i| wave(7.0 + i as f32, 4.0, 80.0, i as f32)).collect();
+    let total = cores.iter().sum::<f32>() / cores.len() as f32;
+    const GB: u64 = 1 << 30;
+    let procs = [("ember-server", 14.0, 420u64), ("claude", 9.5, 880), ("rust-analyzer", 6.0, 1500), ("node", 3.2, 310), ("Code Helper", 2.1, 640)];
+    MetricsSample {
+        at_ms: now_ms,
+        cpu: CpuMetrics { total_percent: Some(total), cores },
+        memory: Some(MemoryMetrics {
+            total_bytes: 16 * GB,
+            used_bytes: (9.0 * GB as f32 + wave(30.0, 0.0, 2.0, 0.0) * GB as f32) as u64,
+            swap_total_bytes: 4 * GB,
+            swap_used_bytes: GB / 2,
+        }),
+        disks: vec![DiskMetrics { name: "Macintosh HD".into(), mount: "/".into(), total_bytes: 500 * GB, available_bytes: 210 * GB }],
+        network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 180_000, tx_bytes: now_ms / 1000 * 40_000 }],
+        temperatures: vec![TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) }],
+        gpu: GpuReport { devices: vec![], reason: Some("이 컴퓨터에서는 GPU 값을 읽지 못했습니다".into()) },
+        processes: procs
+            .iter()
+            .enumerate()
+            .map(|(i, (name, cpu, mb))| ProcessMetrics {
+                pid: 100 + i as u32 * 37,
+                name: (*name).into(),
+                cpu_percent: *cpu + wave(5.0, 0.0, 2.0, i as f32),
+                memory_bytes: mb << 20,
+            })
+            .collect(),
+        process_count: 412,
+    }
+}
+
 pub fn computers() -> Vec<Computer> {
     vec![
         Computer {
@@ -1175,6 +1213,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn fr_l21_demo_metrics_are_plausible_and_give_a_network_rate() {
+        let a = metrics_sample(1_000_000);
+        let b = metrics_sample(1_003_000);
+        assert!(a.cpu.total_percent.unwrap() <= 100.0 && !a.cpu.cores.is_empty());
+        let m = a.memory.as_ref().unwrap();
+        assert!(m.used_bytes < m.total_bytes);
+        assert!(a.gpu.devices.is_empty() && a.gpu.reason.is_some());
+        let (rx, _) = crate::ui::monitor::net_rates(&a, &b).unwrap();
+        assert_eq!(rx, 180_000);
+    }
     use ember_client::state::State;
 
     #[test]

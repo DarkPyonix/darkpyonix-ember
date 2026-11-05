@@ -1,10 +1,13 @@
 //! The computer monitor sheet (FR-L21; `docs/DESIGN.md` section 6.9).
 //!
-//! The node does not collect metrics yet (FR-X7, Draft), so the sheet draws only what the client
-//! knows: name, online state, assigned projects and the member sessions of those projects. The
-//! metric cards say "준비 중입니다". The pure functions below (rolling series, the process table
-//! sort) are what the live update will use once a [`ComputerMetrics`] source exists.
+//! The server serves one metrics sample per request (FR-X7, `GET /api/computers/{id}/metrics`).
+//! The sheet polls it while open and keeps a [`MonitorFeed`]: the last two samples (network
+//! counters become rates by differencing them) and a short rolling series per card. A card
+//! the node cannot fill says why; fans are not collected yet and say "준비 중입니다". The
+//! functions below are pure so that rates, formats, sort and empty states are tested without a
+//! window.
 
+use ember_client::api::{MemoryMetrics, MetricsSample};
 use ember_client::state::Reachability;
 
 use crate::ui::project::{Member, ProjectBox};
@@ -242,6 +245,387 @@ pub fn mem_text(v: Option<u64>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Live feed (FR-X7, FR-L21)
+// ---------------------------------------------------------------------------------------------
+
+/// Seconds between two requests while the sheet is open.
+pub const POLL_SECS: u64 = 3;
+/// Processes asked for (`?top=`).
+pub const TOP_PROCESSES: u32 = 30;
+/// Samples kept per card graph: three minutes at one request every [`POLL_SECS`].
+pub const FEED_CAP: usize = 60;
+
+/// Bytes per second from two cumulative counters `dt_ms` apart. A counter that went down (the
+/// interface was reset or the node restarted) gives 0, never a huge wrapped number.
+pub fn rate_per_sec(prev: u64, cur: u64, dt_ms: u64) -> u64 {
+    if dt_ms == 0 || cur < prev {
+        return 0;
+    }
+    ((cur - prev) as u128 * 1000 / dt_ms as u128) as u64
+}
+
+/// Receive and send bytes per second over all interfaces present in both samples. `None` when
+/// the samples are not in time order, so there is nothing to difference.
+pub fn net_rates(prev: &MetricsSample, cur: &MetricsSample) -> Option<(u64, u64)> {
+    if cur.at_ms <= prev.at_ms {
+        return None;
+    }
+    let dt = cur.at_ms - prev.at_ms;
+    let (mut rx, mut tx) = (0u64, 0u64);
+    for n in &cur.network {
+        if let Some(p) = prev.network.iter().find(|p| p.interface == n.interface) {
+            rx = rx.saturating_add(rate_per_sec(p.rx_bytes, n.rx_bytes, dt));
+            tx = tx.saturating_add(rate_per_sec(p.tx_bytes, n.tx_bytes, dt));
+        }
+    }
+    Some((rx, tx))
+}
+
+/// A percent for display: one decimal and `%`; a missing or non-finite one is a dash.
+pub fn percent_text(v: Option<f32>) -> String {
+    match v {
+        Some(v) if v.is_finite() => format!("{v:.1}%"),
+        _ => "-".to_string(),
+    }
+}
+
+/// A byte count with a binary unit (1024), one decimal from KB up.
+pub fn bytes_text(b: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if b < 1024 {
+        return format!("{b} B");
+    }
+    let mut v = b as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    format!("{v:.1} {}", UNITS[u])
+}
+
+/// A byte rate: [`bytes_text`] and `/s`.
+pub fn rate_text(bytes_per_sec: u64) -> String {
+    format!("{}/s", bytes_text(bytes_per_sec))
+}
+
+/// `part` of `whole` as a percent; 0 when `whole` is 0.
+pub fn ratio_percent(part: u64, whole: u64) -> f32 {
+    if whole == 0 {
+        0.0
+    } else {
+        (part as f64 * 100.0 / whole as f64).min(100.0) as f32
+    }
+}
+
+/// Used percent of a disk, from total and available bytes.
+pub fn disk_used_percent(total: u64, available: u64) -> f32 {
+    ratio_percent(total.saturating_sub(available), total)
+}
+
+/// Where the feed is, for the cards' empty text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedStatus {
+    /// Nothing asked or answered yet.
+    Waiting,
+    /// The latest request succeeded.
+    Live,
+    /// The latest request failed; the last values (if any) are kept.
+    Failed,
+}
+
+/// The last two samples, a rolling series per card and the last error.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MonitorFeed {
+    latest: Option<MetricsSample>,
+    prev: Option<MetricsSample>,
+    error: Option<String>,
+    cpu: Vec<f32>,
+    memory: Vec<f32>,
+    temperature: Vec<f32>,
+    net_rx: Vec<f32>,
+}
+
+impl MonitorFeed {
+    /// Take a sample. One that is not newer than the latest is dropped (a late answer).
+    pub fn push(&mut self, sample: MetricsSample) {
+        if self.latest.as_ref().is_some_and(|l| sample.at_ms <= l.at_ms) {
+            self.error = None;
+            return;
+        }
+        let rates = self.latest.as_ref().and_then(|l| net_rates(l, &sample));
+        let cpu = sample.cpu.total_percent.into_iter().collect::<Vec<_>>();
+        let mem = sample.memory.iter().map(|m| ratio_percent(m.used_bytes, m.total_bytes)).collect::<Vec<_>>();
+        let temp = hottest(&sample).map(|t| t.celsius).into_iter().collect::<Vec<_>>();
+        self.cpu = fold_samples(&self.cpu, &cpu, FEED_CAP);
+        self.memory = fold_samples(&self.memory, &mem, FEED_CAP);
+        self.temperature = fold_samples(&self.temperature, &temp, FEED_CAP);
+        if let Some((rx, _)) = rates {
+            self.net_rx = fold_samples(&self.net_rx, &[rx as f32], FEED_CAP);
+        }
+        self.prev = self.latest.take();
+        self.latest = Some(sample);
+        self.error = None;
+    }
+
+    /// A request failed. The last values stay so the sheet can show them dimmed.
+    pub fn fail(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+    }
+
+    pub fn status(&self) -> FeedStatus {
+        if self.error.is_some() {
+            FeedStatus::Failed
+        } else if self.latest.is_some() {
+            FeedStatus::Live
+        } else {
+            FeedStatus::Waiting
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub fn latest(&self) -> Option<&MetricsSample> {
+        self.latest.as_ref()
+    }
+
+    /// Network rates between the last two samples; `None` until there are two.
+    pub fn rates(&self) -> Option<(u64, u64)> {
+        net_rates(self.prev.as_ref()?, self.latest.as_ref()?)
+    }
+}
+
+impl ComputerMetrics for MonitorFeed {
+    fn series(&self, metric: Metric) -> Option<Vec<f32>> {
+        let v = match metric {
+            Metric::Cpu => &self.cpu,
+            Metric::Memory => &self.memory,
+            Metric::Temperature => &self.temperature,
+            Metric::Network => &self.net_rx,
+            _ => return None,
+        };
+        (!v.is_empty()).then(|| v.clone())
+    }
+
+    fn processes(&self) -> Option<Vec<ProcessRow>> {
+        self.latest.as_ref().map(process_rows)
+    }
+}
+
+fn hottest(s: &MetricsSample) -> Option<&ember_client::api::TempMetrics> {
+    s.temperatures
+        .iter()
+        .filter(|t| t.celsius.is_finite())
+        .max_by(|a, b| a.celsius.partial_cmp(&b.celsius).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// The sample's processes as table rows. The client cannot tell an agent process from another
+/// yet (FR-X7), so none is linked to a session.
+pub fn process_rows(s: &MetricsSample) -> Vec<ProcessRow> {
+    s.processes
+        .iter()
+        .map(|p| ProcessRow {
+            pid: Some(p.pid),
+            name: p.name.clone(),
+            cpu: Some(p.cpu_percent),
+            mem: Some(p.memory_bytes),
+            session: None,
+            agent: String::new(),
+            leader: false,
+        })
+        .collect()
+}
+
+/// What one card shows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CardView {
+    /// The big value; a dash when nothing is known.
+    pub headline: String,
+    pub lines: Vec<String>,
+    /// Bars, 0 to 100 each: the cores for CPU, the recent series for the others.
+    pub bars: Vec<f32>,
+}
+
+fn memory_lines(m: &MemoryMetrics) -> Vec<String> {
+    let mut lines = vec![format!("{} / {}", bytes_text(m.used_bytes), bytes_text(m.total_bytes))];
+    if m.swap_total_bytes > 0 {
+        lines.push(format!(
+            "스왑 {} / {}",
+            bytes_text(m.swap_used_bytes),
+            bytes_text(m.swap_total_bytes)
+        ));
+    } else {
+        lines.push("스왑 없음".to_string());
+    }
+    lines
+}
+
+/// The values of one card from the feed, or `None` when the feed has no sample (the card then
+/// shows [`empty_text`]).
+pub fn card_view(metric: Metric, feed: &MonitorFeed) -> Option<CardView> {
+    if metric == Metric::Fans {
+        return None;
+    }
+    let s = feed.latest()?;
+    Some(match metric {
+        Metric::Cpu => CardView {
+            headline: percent_text(s.cpu.total_percent),
+            lines: vec![format!("코어 {}개", s.cpu.cores.len())],
+            bars: s.cpu.cores.clone(),
+        },
+        Metric::Memory => match &s.memory {
+            Some(m) => CardView {
+                headline: percent_text(Some(ratio_percent(m.used_bytes, m.total_bytes))),
+                lines: memory_lines(m),
+                bars: feed.series(Metric::Memory).unwrap_or_default(),
+            },
+            None => CardView {
+                headline: "-".into(),
+                lines: vec!["이 컴퓨터가 메모리 값을 알려주지 않습니다".into()],
+                bars: vec![],
+            },
+        },
+        Metric::Disk => {
+            let worst = s
+                .disks
+                .iter()
+                .map(|d| disk_used_percent(d.total_bytes, d.available_bytes))
+                .fold(None, |a: Option<f32>, v| Some(a.map_or(v, |a| a.max(v))));
+            let mut lines: Vec<String> = s
+                .disks
+                .iter()
+                .take(3)
+                .map(|d| {
+                    let used = d.total_bytes.saturating_sub(d.available_bytes);
+                    format!(
+                        "{} {} ({} / {})",
+                        d.mount,
+                        percent_text(Some(disk_used_percent(d.total_bytes, d.available_bytes))),
+                        bytes_text(used),
+                        bytes_text(d.total_bytes)
+                    )
+                })
+                .collect();
+            if s.disks.len() > 3 {
+                lines.push(format!("외 {}개", s.disks.len() - 3));
+            }
+            if s.disks.is_empty() {
+                lines.push("디스크를 찾지 못했습니다".into());
+            }
+            CardView { headline: percent_text(worst), lines, bars: vec![] }
+        }
+        Metric::Network => match feed.rates() {
+            Some((rx, tx)) => CardView {
+                headline: format!("\u{2193} {}", rate_text(rx)),
+                lines: vec![format!("\u{2191} {}", rate_text(tx))],
+                bars: feed.series(Metric::Network).unwrap_or_default(),
+            },
+            None => CardView {
+                headline: "-".into(),
+                lines: vec!["속도를 계산하는 중입니다".into()],
+                bars: vec![],
+            },
+        },
+        Metric::Temperature => match hottest(s) {
+            Some(t) => CardView {
+                headline: format!("{:.1} \u{00B0}C", t.celsius),
+                lines: s
+                    .temperatures
+                    .iter()
+                    .take(3)
+                    .map(|t| format!("{} {:.1} \u{00B0}C", t.label, t.celsius))
+                    .collect(),
+                bars: feed.series(Metric::Temperature).unwrap_or_default(),
+            },
+            None => CardView {
+                headline: "-".into(),
+                lines: vec!["이 컴퓨터가 온도를 알려주지 않습니다".into()],
+                bars: vec![],
+            },
+        },
+        Metric::Gpu => {
+            if s.gpu.devices.is_empty() {
+                CardView {
+                    headline: "-".into(),
+                    lines: vec![s
+                        .gpu
+                        .reason
+                        .clone()
+                        .filter(|r| !r.is_empty())
+                        .unwrap_or_else(|| "GPU 값을 읽지 못했습니다".into())],
+                    bars: vec![],
+                }
+            } else {
+                let d = &s.gpu.devices[0];
+                let mut lines = vec![d.name.clone()];
+                if let (Some(u), Some(t)) = (d.memory_used_bytes, d.memory_total_bytes) {
+                    lines.push(format!("{} / {}", bytes_text(u), bytes_text(t)));
+                }
+                CardView { headline: percent_text(d.utilization_percent), lines, bars: vec![] }
+            }
+        }
+        Metric::Fans => return None,
+    })
+}
+
+/// What a card says when [`card_view`] has nothing: the computer is offline, the first answer
+/// is pending, the request failed, or (fans) the node does not collect it yet.
+pub fn empty_text(metric: Metric, online: bool, status: FeedStatus) -> &'static str {
+    if metric == Metric::Fans {
+        "준비 중입니다"
+    } else if !online {
+        "연결이 끊겨 값을 읽을 수 없습니다"
+    } else if status == FeedStatus::Failed {
+        "지표를 읽지 못했습니다"
+    } else {
+        "불러오는 중입니다"
+    }
+}
+
+/// The status card's line: the process count, or the reason there is none.
+pub fn status_line(feed: &MonitorFeed, online: bool) -> String {
+    match (feed.latest(), online) {
+        (Some(s), true) => format!("프로세스 {}개 실행 중입니다", s.process_count),
+        (_, false) => "연결이 끊겨 값을 읽을 수 없습니다".to_string(),
+        (None, true) if feed.status() == FeedStatus::Failed => "지표를 읽지 못했습니다".to_string(),
+        (None, true) => "불러오는 중입니다".to_string(),
+    }
+}
+
+/// The note under the process table.
+pub fn process_footer(feed: &MonitorFeed) -> String {
+    match feed.latest() {
+        Some(s) if !s.processes.is_empty() => format!(
+            "CPU 사용량이 높은 상위 {}개 프로세스를 표시합니다. 전체는 {}개입니다.",
+            s.processes.len(),
+            s.process_count
+        ),
+        _ => "프로세스 목록은 팀원의 세션만 표시합니다.".to_string(),
+    }
+}
+
+/// Bar height as a share of the card: 0 to 100 clamped; non-finite is 0. A series without a
+/// natural 0 to 100 range (network) is scaled by its own maximum.
+pub fn bar_fraction(v: f32, max: f32) -> f32 {
+    if !v.is_finite() || max <= 0.0 {
+        0.0
+    } else {
+        (v / max).clamp(0.0, 1.0)
+    }
+}
+
+/// The scale of a card's bars: 100 for percents, the series maximum for the network card.
+pub fn bar_max(metric: Metric, bars: &[f32]) -> f32 {
+    if metric == Metric::Network {
+        bars.iter().copied().filter(|v| v.is_finite()).fold(1.0, f32::max)
+    } else {
+        100.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +820,185 @@ mod tests {
     fn card_columns_by_width() {
         assert_eq!(card_columns(false), 2);
         assert_eq!(card_columns(true), 1);
+    }
+
+    // ---- FR-X7 / FR-L21 live feed ----
+
+    use ember_client::api::{CpuMetrics, DiskMetrics, GpuReport, NetMetrics, ProcessMetrics, TempMetrics};
+
+    fn sample(at_ms: u64, rx: u64, tx: u64) -> MetricsSample {
+        MetricsSample {
+            at_ms,
+            cpu: CpuMetrics { total_percent: Some(25.0), cores: vec![10.0, 40.0] },
+            memory: Some(MemoryMetrics {
+                total_bytes: 16 << 30,
+                used_bytes: 8 << 30,
+                swap_total_bytes: 4 << 30,
+                swap_used_bytes: 1 << 30,
+            }),
+            disks: vec![DiskMetrics { name: "d".into(), mount: "/".into(), total_bytes: 100, available_bytes: 40 }],
+            network: vec![NetMetrics { interface: "en0".into(), rx_bytes: rx, tx_bytes: tx }],
+            temperatures: vec![TempMetrics { label: "cpu".into(), celsius: 51.5 }],
+            gpu: GpuReport { devices: vec![], reason: Some("GPU를 읽을 수 없습니다".into()) },
+            processes: vec![ProcessMetrics { pid: 7, name: "node".into(), cpu_percent: 3.0, memory_bytes: 1 << 20 }],
+            process_count: 321,
+        }
+    }
+
+    #[test]
+    fn fr_x7_rates_difference_two_counters() {
+        assert_eq!(rate_per_sec(1000, 4000, 1000), 3000);
+        assert_eq!(rate_per_sec(0, 1000, 2000), 500);
+    }
+
+    #[test]
+    fn fr_x7_a_counter_reset_or_zero_interval_gives_zero() {
+        assert_eq!(rate_per_sec(5000, 100, 1000), 0);
+        assert_eq!(rate_per_sec(100, 5000, 0), 0);
+    }
+
+    #[test]
+    fn fr_x7_net_rates_sum_interfaces_present_in_both_samples() {
+        let a = sample(1000, 1000, 500);
+        let mut b = sample(3000, 5000, 1500);
+        b.network.push(NetMetrics { interface: "utun".into(), rx_bytes: 9_999_999, tx_bytes: 9_999_999 });
+        assert_eq!(net_rates(&a, &b), Some((2000, 500)));
+        assert_eq!(net_rates(&b, &a), None);
+        let reset = sample(4000, 10, 10);
+        assert_eq!(net_rates(&b, &reset), Some((0, 0)));
+    }
+
+    #[test]
+    fn fr_l21_percent_and_byte_text() {
+        assert_eq!(percent_text(Some(12.34)), "12.3%");
+        assert_eq!(percent_text(None), "-");
+        assert_eq!(percent_text(Some(f32::NAN)), "-");
+        assert_eq!(bytes_text(512), "512 B");
+        assert_eq!(bytes_text(1536), "1.5 KB");
+        assert_eq!(bytes_text(3 << 30), "3.0 GB");
+        assert_eq!(bytes_text(5 << 40), "5.0 TB");
+        assert_eq!(rate_text(2 << 20), "2.0 MB/s");
+        assert_eq!(disk_used_percent(100, 40), 60.0);
+        assert_eq!(disk_used_percent(0, 0), 0.0);
+    }
+
+    #[test]
+    fn fr_l21_feed_keeps_two_samples_and_a_rolling_series() {
+        let mut f = MonitorFeed::default();
+        assert_eq!(f.status(), FeedStatus::Waiting);
+        f.push(sample(1000, 0, 0));
+        assert_eq!(f.status(), FeedStatus::Live);
+        assert_eq!(f.rates(), None);
+        f.push(sample(2000, 1000, 100));
+        assert_eq!(f.rates(), Some((1000, 100)));
+        assert_eq!(f.series(Metric::Cpu), Some(vec![25.0, 25.0]));
+        assert_eq!(f.series(Metric::Network), Some(vec![1000.0]));
+        assert_eq!(f.series(Metric::Fans), None);
+        for i in 0..(FEED_CAP as u64 + 10) {
+            f.push(sample(3000 + i, 0, 0));
+        }
+        assert_eq!(f.series(Metric::Cpu).unwrap().len(), FEED_CAP);
+    }
+
+    #[test]
+    fn fr_l21_a_late_sample_is_dropped() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(2000, 0, 0));
+        f.push(sample(1000, 0, 0));
+        assert_eq!(f.latest().unwrap().at_ms, 2000);
+    }
+
+    #[test]
+    fn fr_l21_a_failure_keeps_the_last_values_and_a_success_clears_it() {
+        let mut f = MonitorFeed::default();
+        f.fail("server answered 502");
+        assert_eq!(f.status(), FeedStatus::Failed);
+        assert!(card_view(Metric::Cpu, &f).is_none());
+        f.push(sample(1000, 0, 0));
+        f.fail("timeout");
+        assert_eq!(f.status(), FeedStatus::Failed);
+        assert!(card_view(Metric::Cpu, &f).is_some());
+        f.push(sample(2000, 0, 0));
+        assert_eq!(f.status(), FeedStatus::Live);
+        assert_eq!(f.error(), None);
+    }
+
+    #[test]
+    fn fr_l21_cards_show_live_values() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        f.push(sample(2000, 2048, 1024));
+        let cpu = card_view(Metric::Cpu, &f).unwrap();
+        assert_eq!(cpu.headline, "25.0%");
+        assert_eq!(cpu.bars, vec![10.0, 40.0]);
+        let mem = card_view(Metric::Memory, &f).unwrap();
+        assert_eq!(mem.headline, "50.0%");
+        assert_eq!(mem.lines, vec!["8.0 GB / 16.0 GB".to_string(), "스왑 1.0 GB / 4.0 GB".to_string()]);
+        let disk = card_view(Metric::Disk, &f).unwrap();
+        assert_eq!(disk.headline, "60.0%");
+        assert!(disk.lines[0].starts_with("/ 60.0%"));
+        let net = card_view(Metric::Network, &f).unwrap();
+        assert_eq!(net.headline, "\u{2193} 2.0 KB/s");
+        assert_eq!(net.lines, vec!["\u{2191} 1.0 KB/s".to_string()]);
+        let t = card_view(Metric::Temperature, &f).unwrap();
+        assert_eq!(t.headline, "51.5 \u{00B0}C");
+    }
+
+    #[test]
+    fn fr_l21_the_gpu_card_shows_the_server_reason_when_it_has_no_device() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        let gpu = card_view(Metric::Gpu, &f).unwrap();
+        assert_eq!(gpu.headline, "-");
+        assert_eq!(gpu.lines, vec!["GPU를 읽을 수 없습니다".to_string()]);
+    }
+
+    #[test]
+    fn fr_l21_first_sample_has_no_network_rate_and_fans_stay_unbuilt() {
+        let mut f = MonitorFeed::default();
+        f.push(sample(1000, 0, 0));
+        assert_eq!(card_view(Metric::Network, &f).unwrap().lines, vec!["속도를 계산하는 중입니다".to_string()]);
+        assert!(card_view(Metric::Fans, &f).is_none());
+        assert_eq!(empty_text(Metric::Fans, true, FeedStatus::Live), "준비 중입니다");
+    }
+
+    #[test]
+    fn fr_l21_empty_states_for_offline_waiting_and_failed() {
+        assert_eq!(empty_text(Metric::Cpu, false, FeedStatus::Waiting), "연결이 끊겨 값을 읽을 수 없습니다");
+        assert_eq!(empty_text(Metric::Cpu, true, FeedStatus::Waiting), "불러오는 중입니다");
+        assert_eq!(empty_text(Metric::Cpu, true, FeedStatus::Failed), "지표를 읽지 못했습니다");
+        let mut f = MonitorFeed::default();
+        assert_eq!(status_line(&f, true), "불러오는 중입니다");
+        f.fail("x");
+        assert_eq!(status_line(&f, true), "지표를 읽지 못했습니다");
+        f.push(sample(1, 0, 0));
+        assert_eq!(status_line(&f, true), "프로세스 321개 실행 중입니다");
+        assert_eq!(status_line(&f, false), "연결이 끊겨 값을 읽을 수 없습니다");
+    }
+
+    #[test]
+    fn fr_l21_live_processes_sort_by_cpu_or_memory() {
+        let mut s = sample(1, 0, 0);
+        s.processes = vec![
+            ProcessMetrics { pid: 1, name: "a".into(), cpu_percent: 1.0, memory_bytes: 900 },
+            ProcessMetrics { pid: 2, name: "b".into(), cpu_percent: 9.0, memory_bytes: 100 },
+            ProcessMetrics { pid: 3, name: "c".into(), cpu_percent: 5.0, memory_bytes: 500 },
+        ];
+        let mut rows = process_rows(&s);
+        sort_rows(&mut rows, SortState { key: SortKey::Cpu, descending: true });
+        assert_eq!(names(&rows), ["b", "c", "a"]);
+        sort_rows(&mut rows, SortState { key: SortKey::Memory, descending: true });
+        assert_eq!(names(&rows), ["a", "c", "b"]);
+        assert_eq!(rows[0].pid, Some(1));
+        assert!(rows.iter().all(|r| r.session.is_none()));
+    }
+
+    #[test]
+    fn fr_l21_bar_scale() {
+        assert_eq!(bar_fraction(50.0, 100.0), 0.5);
+        assert_eq!(bar_fraction(f32::NAN, 100.0), 0.0);
+        assert_eq!(bar_fraction(500.0, 100.0), 1.0);
+        assert_eq!(bar_max(Metric::Cpu, &[1.0]), 100.0);
+        assert_eq!(bar_max(Metric::Network, &[10.0, 40.0]), 40.0);
     }
 }

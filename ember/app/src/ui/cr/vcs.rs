@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{fetch_snapshot, load_from, Load, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use crate::ui::vcs::{fetch_history, history_append, history_from, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -1385,7 +1385,168 @@ fn SectionContent(
                 }
             });
         }
+        (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
         _ => Unavailable(sec),
+    }
+}
+
+/// How many ref chips a history row shows before "+N".
+fn chip_limit(layout: PaneLayout) -> usize {
+    if layout == PaneLayout::Tabs { 2 } else { 4 }
+}
+
+/// The chip tone of a ref: HEAD and branches blue, remotes grey, tags orange.
+fn ref_tone(r: &HistoryRef) -> PillTone {
+    use ember_client::api::GitLogRefKind::*;
+    match r.kind {
+        Head => PillTone::Green,
+        Branch => PillTone::Blue,
+        Remote => PillTone::Grey,
+        Tag => PillTone::Orange,
+    }
+}
+
+/// A chip text cut to 24 characters so a long branch name cannot push the row past the screen.
+fn chip_text(label: &str) -> String {
+    if label.chars().count() <= 24 {
+        label.to_string()
+    } else {
+        format!("{}\u{2026}", label.chars().take(23).collect::<String>())
+    }
+}
+
+/// The meta line of a history row: short sha, author and time.
+fn history_meta(e: &HistoryEntry) -> String {
+    format!("{} \u{00b7} {} \u{00b7} {}", e.short, e.author, e.time_text)
+}
+
+/// One commit of the history list. The row has no click yet (the 상세 pane comes with the lane
+/// graph).
+fn HistoryRow(e: &HistoryEntry, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    let limit = chip_limit(layout);
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        // TODO(compose-rust#308): lane graph (a `Canvas` column of dots and edges) goes left of the text.
+        Txt(&e.subject, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            Txt(&history_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
+        });
+        if e.is_merge || !e.refs.is_empty() {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                if e.is_merge {
+                    Pill("병합", PillTone::Sky, true);
+                }
+                for r in e.refs.iter().take(limit) {
+                    Pill(&chip_text(&r.label), ref_tone(r), true);
+                }
+                if e.refs.len() > limit {
+                    Pill(&format!("+{}", e.refs.len() - limit), PillTone::Grey, true);
+                }
+            });
+        }
+    });
+}
+
+/// Commits for the review captures (`EMBER_CR_ROUTE=vcs`): the only path that reaches `HistoryPane`
+/// without actions, because a screen without services has no snapshot and shows 준비 중입니다.
+fn sample_history() -> HistoryLoad {
+    let e = |short: &str, subject: &str, author: &str, time: &str, merge: bool, refs: &[(&str, ember_client::api::GitLogRefKind)]| HistoryEntry {
+        sha: format!("{short}0000000000000000000000000000000000"),
+        short: short.to_string(),
+        subject: subject.to_string(),
+        author: author.to_string(),
+        time_text: time.to_string(),
+        refs: refs.iter().map(|(l, k)| HistoryRef { label: l.to_string(), kind: k.clone() }).collect(),
+        is_merge: merge,
+    };
+    use ember_client::api::GitLogRefKind::*;
+    HistoryLoad::Ready {
+        entries: vec![
+            e("a1b2c3d", "Feat: attach the session shim before routing", "BREW", "12분 전", false, &[("HEAD", Head), ("feat/session-shim", Branch)]),
+            e("2b3c4d5", "Merge branch 'feat/egress-stop' into develop", "BREW", "3시간 전", true, &[("develop", Branch), ("origin/develop", Remote)]),
+            e("8f90123", "Fix: stop egress when a session detaches", "Minji Kim", "1일 전", false, &[("v0.3.0", Tag)]),
+        ],
+        more: false,
+        loading_more: false,
+    }
+}
+
+/// 히스토리: the commits of the current branch as a list, newest first. `project` is the project
+/// and the screen's reload counter (a commit or a branch change reads the list again); `None`
+/// shows sample commits.
+fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    let key_project = project.as_ref().map(|(name, _)| name.clone());
+    let state = remember_with_key(key_project, || mutable_state_of(HistoryLoad::Loading));
+    let retry = remember(|| mutable_state_of(0_u64));
+    if let Some((name, reload)) = project.clone() {
+        let (st, again) = (state.clone(), retry.get());
+        launched_effect((name.clone(), reload, again), move || async move {
+            if crate::services::try_services().is_some() {
+                st.set(HistoryLoad::Loading);
+                let now = crate::demo::now_ms() / 1000;
+                crate::services::run_shared(async move { history_from(fetch_history(&name, 0).await, now) }, move |result| st.set(result));
+            } else {
+                st.set(HistoryLoad::Failed("서버에 연결되어 있지 않아 히스토리를 불러올 수 없습니다.".to_string()));
+            }
+        });
+    }
+    let current = if project.is_some() { state.get() } else { sample_history() };
+
+    let more_state = state.clone();
+    let more_project = project.as_ref().map(|(name, _)| name.clone());
+    let load_more = move || {
+        let (Some(name), HistoryLoad::Ready { entries, more: true, loading_more: false }) = (more_project.clone(), more_state.get()) else {
+            return;
+        };
+        let skip = entries.len() as u64;
+        more_state.set(HistoryLoad::Ready { entries, more: true, loading_more: true });
+        let st = more_state.clone();
+        let now = crate::demo::now_ms() / 1000;
+        crate::services::run_shared(async move { fetch_history(&name, skip).await }, move |result| {
+            let (next, error) = history_append(st.get(), result, now);
+            st.set(next);
+            if let Some(line) = error {
+                notice::post(line);
+            }
+        });
+    };
+
+    let list = move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || match current {
+            HistoryLoad::Loading => {
+                Label("히스토리를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+            HistoryLoad::Failed(text) => {
+                Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+            }
+            HistoryLoad::Ready { entries, more, loading_more } => {
+                if entries.is_empty() {
+                    EmberCard(false, true, None, Some(SP[3]), None, || {
+                        Label("커밋이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    });
+                    return;
+                }
+                VcsCard(|| {
+                    for (i, e) in entries.iter().enumerate() {
+                        if i > 0 {
+                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                        }
+                        HistoryRow(e, layout);
+                    }
+                });
+                if more {
+                    let label = if loading_more { "불러오는 중입니다" } else { "더 보기" };
+                    AppButton(label, None, ButtonKind::Default, false, !loading_more, true, load_more);
+                }
+            }
+        });
+    };
+    if layout == PaneLayout::Two {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+    } else {
+        list();
     }
 }
 
@@ -1967,6 +2128,44 @@ mod tests {
         let text = text_of(VcsScreen);
         assert!(text.contains("버전 관리"));
         assert!(text.contains(SOON));
+    }
+
+    #[compose_rust::runtime::composable]
+    fn history_sample_wide() {
+        HistoryPane(None, PaneLayout::Two);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn history_sample_compact() {
+        HistoryPane(None, PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_g5_history_list_shows_subject_sha_author_time_chips_and_merge_marker() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [history_sample_wide as fn(), history_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("Feat: attach the session shim before routing"));
+            assert!(text.contains("a1b2c3d"));
+            assert!(text.contains("BREW"));
+            assert!(text.contains("12분 전"));
+            assert!(text.contains("feat/session-shim"));
+            assert!(text.contains("병합"));
+            assert!(!text.contains(SOON));
+        }
+    }
+
+    #[test]
+    fn fr_g5_chips_are_cut_and_the_meta_line_joins_sha_author_time() {
+        assert_eq!(chip_text("main"), "main");
+        let long = "feat/".to_string() + &"x".repeat(40);
+        assert_eq!(chip_text(&long).chars().count(), 24);
+        assert!(chip_text(&long).ends_with('\u{2026}'));
+        assert_eq!(chip_limit(PaneLayout::Tabs), 2);
+        assert_eq!(chip_limit(PaneLayout::Two), 4);
+        let HistoryLoad::Ready { entries, .. } = sample_history() else { panic!() };
+        assert_eq!(history_meta(&entries[0]), "a1b2c3d \u{00b7} BREW \u{00b7} 12분 전");
     }
 
     #[compose_rust::runtime::composable]

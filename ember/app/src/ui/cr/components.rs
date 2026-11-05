@@ -6,7 +6,8 @@
 //! `Copy` state handles, #286 `#[Composable]`, #289 and #290 call macros) touch one place.
 //!
 //! Gaps in the pinned compose-rust, each with its issue:
-//! - #372: no container click, so nothing here is clickable except `Button`;
+//! - #372: container `on_click` is in compose-rust after v0.0.4 (FR-55); Ember pins that revision
+//!   in `Cargo.toml` until the next tag;
 //! - #373: `Button` has no `max_lines`, so the width estimate `label_min_width` stays (#208);
 //! - #374: `Text` and `TextField` have no `font` or `word_break`, so no bundled font and no
 //!   Korean word-keep yet (#216, #208);
@@ -16,7 +17,6 @@
 
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::PointerKinds;
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
     KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
@@ -116,21 +116,18 @@ fn with_height(m: Modifier, height: Option<f32>) -> Modifier {
 
 /// A container that reacts to a click.
 ///
-/// TODO(compose-rust#372): this is a pointer-up subscription on a `Box`. It has no keyboard
-/// focus or activation, no button role for screen readers and no hover or press feedback, which
-/// `Modifier.clickable` is to bring. Every clickable container in `ui/cr` goes through here so
-/// the swap is one function.
+/// This is the container's own `on_click`, which the renderer turns into a button: keyboard
+/// focus, Enter and Space, a button role for screen readers, hover and press state
+/// (compose-rust#372, FR-55). It is not a pointer subscription: the renderer of v0.0.4 accepts
+/// `on_pointer` but never sends the Host a `Pointer` event, so a handler written that way never
+/// runs (the sidebar rows did nothing). Every clickable container in `ui/cr` goes through here.
 pub fn Clickable(
     modifier: Modifier,
     alignment: Alignment,
     mut on_click: impl FnMut() + 'static,
     content: impl FnOnce(),
 ) {
-    cu::Box()
-        .modifier(modifier)
-        .alignment(alignment)
-        .on_pointer(PointerKinds::UP, move |_| on_click())
-        .content(content);
+    cu::Box().modifier(modifier).alignment(alignment).on_click(move || on_click()).content(content);
 }
 
 /// One row of a popup menu: 38 px high, left-aligned `--text`, the chosen row on `--sel`.
@@ -1003,5 +1000,51 @@ mod tests {
             })
             .collect();
         assert!(floats.contains(&14.0) && floats.contains(&22.0), "{floats:?}");
+    }
+
+    // ---- FR-L10: a navigation row is a control the renderer can click -----------------------
+
+    use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
+    use compose_rust::{composable, EventPayload, Host, PropertyKind, Recomposer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CLICKS: AtomicUsize = AtomicUsize::new(0);
+
+    #[composable]
+    fn host_clickables() {
+        use crate::ui::shell::{NavBadge, NavMenu};
+        use crate::ui::cr::shell::{NavRow, RailItem, ToolRow};
+        cu::Column().content(|| {
+            NavRow(NavMenu::Projects, false, NavBadge::None, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
+            RailItem(NavMenu::Projects, false, NavBadge::None, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
+            ToolRow(crate::ui::shell::ICON_GEAR_SVG, "설정", false, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
+            MenuRow("항목", 200.0, false, || { CLICKS.fetch_add(1, Ordering::SeqCst); });
+            Clickable(Modifier::new().size(40.0, 40.0), Alignment::Center, || { CLICKS.fetch_add(1, Ordering::SeqCst); }, || {});
+        });
+    }
+
+    /// The renderer acts on `OnClick` (it makes the node a button) and on nothing else a
+    /// container could carry: v0.0.4 ignored `OnPointer`, so rows built on it were dead. The
+    /// test asks the Host for the handler of each row as the renderer does, and clicks it.
+    #[test]
+    fn fr_l10_every_clickable_row_has_a_click_handler_that_runs_when_the_renderer_clicks_it() {
+        let _guard = crate::services::test_guard();
+        CLICKS.store(0, Ordering::SeqCst);
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_clickables)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let clickable: Vec<(u32, u64)> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::OnClick, value: PropertyValue::Integer(h) } => {
+                    Some((*node_id, *h as u64))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clickable.len(), 5, "each row and the bare Clickable carry OnClick: {clickable:?}");
+        for (i, (node_id, handler_id)) in clickable.into_iter().enumerate() {
+            host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch");
+            assert_eq!(CLICKS.load(Ordering::SeqCst), i + 1, "the click on row {i} reached its closure");
+        }
     }
 }

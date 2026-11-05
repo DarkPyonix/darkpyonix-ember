@@ -355,7 +355,7 @@ impl Skip {
         let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
             Some("bottom") => (total_est - window_h).max(0.0),
             // Named starts: the first block in view. `status` shows the 팀원 상태 card with its
-            // legend at the top, `usage` the 하네스별 사용량 and 지금 일하는 팀원 row.
+            // legend at the top, `usage` the 하네스별 세션 and 지금 일하는 팀원 row.
             Some("status") => EST_HERO + EST_HEAD,
             Some("usage") => EST_HERO + EST_HEAD + EST_TREND,
             Some("efficiency") => EST_HERO + EST_HEAD + EST_TREND + EST_USAGE,
@@ -1137,7 +1137,7 @@ pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
     days
 }
 
-/// 하네스별 사용량 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
+/// 하네스별 세션 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
 /// bars per harness, one ring per harness with its share, and a "자세히" button to 에이전트.
 /// The width of one weekday bar.
 const BAR_W: f32 = 28.0;
@@ -1151,7 +1151,7 @@ fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
     const H: f32 = 100.0;
     let heights = bar_heights(&totals, H);
     Tile(|| {
-        CardHead(ICON_CHART, "하네스별 사용량", || {
+        CardHead(ICON_CHART, "하네스별 세션", || {
             let u = ui.clone();
             AppButton("자세히", None, ButtonKind::Default, true, true, false, move || shell::choose(&u, NavMenu::Agents));
         });

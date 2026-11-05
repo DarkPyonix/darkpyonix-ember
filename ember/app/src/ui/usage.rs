@@ -58,7 +58,7 @@ pub fn agent_label(kind: &str) -> String {
     match kind {
         "claude-code" => "Claude Code".to_string(),
         "codex" => "Codex".to_string(),
-        "antigravity" => "Antigravity".to_string(),
+        "antigravity" => "agy".to_string(),
         other => other.to_string(),
     }
 }
@@ -359,5 +359,14 @@ mod tests {
         assert_eq!(bar_of(&d).other, 50);
         assert_eq!(agent_label("claude-code"), "Claude Code");
         assert_eq!(agent_label("omp"), "omp");
+    }
+
+    #[test]
+    fn fr_u7_agent_names_map_to_harness_labels() {
+        assert_eq!(agent_label("claude-code"), "Claude Code");
+        assert_eq!(agent_label("codex"), "Codex");
+        assert_eq!(agent_label("antigravity"), "agy");
+        assert_eq!(agent_label("scripted"), "scripted");
+        assert_eq!(agent_label("my-acp-agent"), "my-acp-agent");
     }
 }

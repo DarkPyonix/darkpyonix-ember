@@ -62,6 +62,16 @@ const WAIT_SERVER: &str = "서버 데이터를 기다리고 있습니다";
 const TIMELINE_TITLE: &str = "에이전트 소통 타임라인";
 
 /// Every sentence this screen shows, checked for plain "~다" endings (NFR-L4).
+/// The summary line of the agent-to-agent timeline card. The figures are demo data; a real
+/// session has no duration comparison and no cost (FR-U7: cost is unknown, never invented).
+pub fn timeline_summary(demo: bool) -> &'static str {
+    if demo {
+        "5명 · 16.4s · 순차 실행보다 2.4배 빠름 · $0.24"
+    } else {
+        "비용은 알 수 없습니다"
+    }
+}
+
 pub const UI_STRINGS: &[&str] = &[
     SOON,
     NO_PROJECT,
@@ -1334,6 +1344,13 @@ mod tests {
             assert!(!t.contains('\u{2014}'), "no em-dash: {t}");
         }
         assert!(UI_STRINGS.contains(&"준비 중입니다"));
+    }
+
+    #[test]
+    fn fr_u7_timeline_cost_is_demo_only() {
+        assert!(timeline_summary(true).contains("$0.24"));
+        assert!(!timeline_summary(false).contains('$'));
+        assert_eq!(timeline_summary(false), "비용은 알 수 없습니다");
     }
 
     #[test]

@@ -352,7 +352,11 @@ async fn agent_relay_activity_and_takeover() {
 
     let cfg: Value =
         serde_json::from_str(&http_get(api_addr, "/api/browsers/agent/agent-config").await).unwrap();
-    assert_eq!(cfg["cdp_ws"], ws_url);
+    // FR-S9: the agent config carries the per-run nonce path, so the token middleware lets the
+    // agent's MCP server connect without a header.
+    let cdp_ws = cfg["cdp_ws"].as_str().unwrap();
+    assert!(cdp_ws.starts_with(&format!("{ws_url}/")), "{cdp_ws}");
+    assert!(cdp_ws.len() > ws_url.len() + 16, "a nonce follows the route: {cdp_ws}");
     b.stop().await;
 }
 

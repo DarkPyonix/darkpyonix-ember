@@ -50,7 +50,9 @@ async fn start() -> Fixture {
 }
 
 async fn within<T>(fut: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(30), fut).await.expect("timed out")
+    // Generous: the suite runs many shells and keepers in parallel, and a slow machine must not
+    // turn that into a failure. A hang still ends the test.
+    tokio::time::timeout(Duration::from_secs(90), fut).await.expect("timed out")
 }
 
 fn req(root: &Path, argv: &[&str]) -> TermCreateRequest {
@@ -404,6 +406,8 @@ async fn a_new_node_readopts_running_sessions_and_reports_lost_ones() {
     let f = start().await;
     within(async {
         let t = f.client.term_create(&req(&f.root, &["/bin/sh"])).await.unwrap().term;
+        // Without a keeper the session cannot be re-adopted: fail here, not as a "lost" below.
+        assert!(t.survives_node_restart, "a keeper should hold the PTY");
         let mut a = f.client.term_attach(&t.id, &hello("A", None, true)).await.unwrap();
         let (mut out, mut seen) = (String::new(), Vec::new());
         a.tx.input("X=42; echo before-$X\n").await.unwrap();
@@ -441,10 +445,12 @@ async fn a_new_node_readopts_running_sessions_and_reports_lost_ones() {
         let mut b = c2.term_attach(&t.id, &hello("B", None, true)).await.unwrap();
         let file = f.root.join("adopted.txt");
         b.tx.input(format!("echo $X-adopted > {}\n", file.display())).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             if std::fs::read_to_string(&file).map(|s| s.trim() == "42-adopted").unwrap_or(false) {
                 break;
             }
+            assert!(std::time::Instant::now() < deadline, "the adopted shell never wrote {}", file.display());
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         c2.term_kill(&t.id, Some(9)).await.unwrap();

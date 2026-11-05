@@ -140,6 +140,11 @@ pub const KEEPER_SUBCOMMAND: &str = "__keep-pty";
 /// Unix socket paths are limited to ~104 bytes (macOS); longer ones are refused up front.
 const MAX_SOCKET_PATH: usize = 100;
 
+/// How long session creation waits for a new keeper to listen. Generous: a loaded machine or a
+/// first exec of a fresh binary can take seconds, and a session without a keeper is lost on the
+/// next node restart.
+const KEEPER_READY_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A keeper started by this node run.
 pub struct KeeperHandle {
     pub socket: PathBuf,
@@ -179,6 +184,26 @@ pub fn spawn_keeper(exe: &Path, socket: &Path, pty: &Pty, session_pid: u32) -> i
     }
     let mut child = cmd.spawn()?;
     let pid = child.id();
+    // The keeper binds its socket only after it has exec'd and started, which can take seconds
+    // on a loaded machine or on the first run of a fresh binary (macOS verifies it). A node
+    // that restarted before then would find no socket and report a healthy session as lost, so
+    // creation waits until the keeper accepts connections (a probe that sends nothing is
+    // ignored by the keeper).
+    let deadline = std::time::Instant::now() + KEEPER_READY_TIMEOUT;
+    loop {
+        if UnixStream::connect(socket).is_ok() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(io::Error::other(format!("keeper exited before it was ready ({status})")));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "keeper did not start listening in time"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     // Reap it whenever it exits, so it never lingers as a zombie of this node.
     std::thread::spawn(move || {
         let _ = child.wait();

@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [features]
 # An in-process fake of the hub (the subset of hub.openapi.yaml Ember uses), for tests.
-fake = ["dep:axum"]
+fake = ["dep:axum", "ember-transport/letify"]
 
 [dependencies]
 # PeerId / SecretKey (signing the link challenge), TransportConfig + HubDirectory, RelayConfig.

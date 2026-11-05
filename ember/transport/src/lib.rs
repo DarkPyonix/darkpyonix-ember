@@ -57,7 +57,7 @@ pub use signal::{
     SignalChannel, SIGNAL_MAX,
 };
 #[cfg(feature = "letify")]
-pub use letify::{HttpPkarrStore, LETIFY_TRANSPORT_ID};
+pub use letify::{direct_addresses_from_txt, is_record_label, HttpPkarrStore, LETIFY_TRANSPORT_ID};
 
 /// Errors from the transport. Backend errors are carried as text so no backend type leaks.
 #[derive(Debug, thiserror::Error)]

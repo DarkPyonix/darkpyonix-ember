@@ -39,9 +39,10 @@ before any provider request made at version *n*, because both are effects of the
 | `SessionConfig` | `host`, `remote_authority`, `connection_token`, `workspace_path`, `workspace_name`, `app_language`, `user_settings`, `core: CoreOptions` |
 | `CoreOptions` | `tab_width` (4), `insert_spaces`, `codelens_debounce` (250 ms), `codelens_resolve_cap` (100), `inline_completions` |
 | `SessionUpdate` | `Opened{uri, generation, text, language_id, tab_width}`, `OpenFailed`, `Command{uri, WidgetCommand}`, `Decorations{uri, generation, Vec<Decoration>}`, `Hover(HoverPopup)`, `HoverHidden`, `Dirty`, `Saved`, `SaveFailed`, `ExternalChange{ChangedWhileDirty \| Deleted}`, `RunCommand{CommandDto}`, `Desync`, `Closed`, `ConnectionLost` |
-| `WidgetEvent` | `CodeChanged{version, range, text}`, `CodeEditRejected{…}`, `CodeHovered{decoration, pos, phase}`, `CodeSaveRequested{version}`, `DecorationActivated{decoration}` |
+| `WidgetEvent` | `CodeChanged{version, range, text}`, `CodeEditRejected{…}`, `CodeHovered{decoration, pos, phase}`, `CodeSaveRequested{version}`, `DecorationActivated{decoration}`, `SelectionChanged{version, anchor, active}`, `VisibleRangeChanged{version, first_line, last_line}` |
 | `WidgetCommand` | `SetText{generation, text}` (new node, key = generation), `EditCode{request_id, base_version, range, text}` |
-| `Decoration` | `{id: DecorationId(u64 ≠ 0), version, kind: Underline\|CodeLens\|HoverAnchor\|GhostText, severity, color: 0, range, text}`, the FR-38 44-byte record |
+| `Decoration` | `{id: DecorationId(u64 ≠ 0), version, kind: Underline\|CodeLens\|HoverAnchor\|GhostText, severity, color: 0, range, text}`, plus `Decoration::encode_records` and `Decoration::decode_records` for the FR-38 44-byte record wire blob |
+| `WidgetBridge` | `new()`, `apply(SessionUpdate) -> BridgeAction`, `document(uri)`, `active_document()`, `set_active(uri)`, `take_pending_edits(uri)`, and `on_*` event helpers (`bridge.rs`) |
 | `SessionCore` | `new(LanguageRegistry, CoreOptions, now)`, `handle(now, Input) -> Vec<Effect>`, `next_wake()`, `resync(now, uri)`, for tests and for a driver on another transport |
 | helpers | `coords` (`WidgetPos`/`WidgetRange` ↔ `IPosition`/`IRange`, UTF-16 ↔ byte/char, `transform_range`), `selector::score` (port of `languages.score`), `languages::LanguageRegistry`, `ids::DecorationIds` |
 
@@ -115,7 +116,8 @@ Registrations: `$registerCodeLensSupport(handle, selector, eventHandle?)`. On op
 matching provider gets `$provideCodeLenses(handle, uri)`; an outstanding request for the same
 (document, provider) is cancelled; a reply for an older document version is released and dropped.
 Lenses without a `command` are resolved with `$resolveCodeLens(handle, lens-as-received)` (up to
-`codelens_resolve_cap`; FR-38 has no viewport event, so it is eager). A replaced or closed list is
+`codelens_resolve_cap`, prioritizing lenses inside the last `VisibleRangeChanged` viewport first,
+and resolving newly visible unresolved lenses when the viewport scrolls). A replaced or closed list is
 released with `$releaseCodeLenses(handle, cacheId)`. Each lens with a non-empty title is a
 `CodeLens` decoration (text = title, `$(icon)` syntax passed through).
 
@@ -127,12 +129,17 @@ workbench command (`editor.action.showReferences`, …) and goes to the UI as `R
 
 ### 4.3 Hover (FR-E3)
 
-`CodeHovered(Rest, pos)` → cancel the previous hover's requests → `$provideHover(handle, uri,
-pos+1, undefined)` to every matching provider (best first). The popup model (`HoverPopup`) is
+`CodeHovered(Rest, decoration, pos)` → cancel the previous hover's requests → `$provideHover(handle, uri,
+pos+1, undefined)` to every matching provider (best first; if `decoration != 0` names a diagnostic
+or hover-anchor decoration whose range does not contain `pos`, falls back to the decoration's range
+start). The popup model (`HoverPopup`) is
 diagnostics under the position (most severe first), then provider Markdown (`IMarkdownString`:
 `value`, `isTrusted`, `supportThemeIcons`, `supportHtml`) in provider order, plus the first
-provider range. It is emitted immediately if there are diagnostics, and again as each reply
-arrives (`complete` once none is outstanding). `Leave`, any edit, or close → cancel + `HoverHidden`.
+provider range. When a provider reply carries a `range`, `flush_decorations` also emits a
+`DecorationKind::HoverAnchor` (`IdSpace::HoverAnchor`) decoration for that range until the hover
+ends. It is emitted immediately if there are diagnostics, and again as each reply
+arrives (`complete` once none is outstanding). `Leave`, any edit, or close → cancel + `HoverHidden`
+(and removes the `HoverAnchor` decoration).
 Like upstream (`mainThreadLanguageFeatures.ts`, finalization registry commented out),
 `$releaseHover` is never sent.
 
@@ -142,8 +149,9 @@ Registration: `$registerInlineCompletionsSupport` (17 args; Ember reads `support
 `extensionId` (3), `yieldsToExtensionIds` (6), `debounceDelayMs` (8), `excludesExtensionIds` (9)).
 
 - **Trigger.** Every `CodeChanged` restarts a debounce: the largest `debounceDelayMs` among
-  matching providers, else 50 ms (Monaco's `InlineCompletionsDebounce`). The cursor is estimated
-  as the end of the last change (FR-38 has no cursor event). `trigger_inline_completion` is the
+  matching providers, else 50 ms (Monaco's `InlineCompletionsDebounce`). The cursor is updated from
+  `SelectionChanged` events and the end of the last `CodeChanged`; moving the caret away from an
+  active ghost text via `SelectionChanged` ends the ghost (`Ignored`, `userTypingDisagreed: false`). `trigger_inline_completion` is the
   explicit trigger (`triggerKind: 1`, no debounce). `$emitInlineCompletionsChange` re-triggers in the
   active document.
 - **Cancellation.** A change or a new trigger cancels the outstanding request (RPC `Cancel` for
@@ -183,21 +191,26 @@ Answered by `replies::session_reply` = `exthost::default_reply` plus what `live_
   `registry.rs`, with selector matching ported from `languageSelector.ts` `score()` (scheme,
   language, `*` → 5, glob or relative patterns, notebook filters never match text).
 
-## 6. What the widget side must provide
+## 6. What the widget side provides (`WidgetBridge`)
 
-1. **The FR-38 events exactly as specified**, decoded into `WidgetEvent`, plus the node key the
-   event came from (the `generation` from `Opened` / `SetText`). If the UI cannot attach the key,
-   a `SetText` racing with in-flight events will be reported as `Desync`.
-2. **Line splitting:** the widget must treat `\r\n` in pasted text as one line break (or normalize
-   to `\n`) so its line count matches the session's.
-3. **Decoration records** built from `Decoration` (44-byte record + text blob); `version` is the
-   widget version the ranges refer to.
+`WidgetBridge` (`bridge.rs`) sits between `SessionUpdate` and the `CodeEditor` widget (FR-38):
+
+1. **Per-document state (`DocumentWidgetState`):** holds `uri`, `generation` (node key), `text`,
+   `language_id`, `tab_width`, `dirty`, `decorations`, `decoration_bytes` (the 44-byte FR-38
+   `DECORATION_RECORD` wire blob encoded via `Decoration::encode_records`), `hover` (`HoverPopup`),
+   `pending_edits` (`EditCode` commands), and `external_change`.
+2. **Event helpers with automatic `generation` tagging:** `on_code_changed`, `on_edit_rejected`,
+   `on_code_hovered`, `on_save_requested`, `on_decoration_activated`, `on_selection_changed`, and
+   `on_visible_range_changed` attach the document's current `generation` so the UI never passes a
+   stale generation by mistake.
+3. **44-byte `DECORATION_RECORD` wire encoding (`Decoration::encode_records` / `decode_records`):**
+   matches `compose_rust::code::Decorations::new` and `Decorations::decorations()` byte-for-byte
+   (`0..4` version, `4..6` kind, `6..8` severity, `8..10` color, `10..12` reserved 0, `12..28`
+   range, `28..36` id, `36..40` text offset, `40..44` text len, followed by UTF-8 text bytes).
 4. **Ghost-text accept order** as §38.4 says (`CodeChanged` then `DecorationActivated` in the same
    frame). Esc / rejection is not reported by FR-38, so Ember can never send `Rejected`;
    a `CodeGhostDismissed` event (or `DecorationActivated` with a reject flag) would close that gap.
-5. **Gaps worth adding to FR-38** (not blocking): a cursor / selection event (for inline
-   completions at the real cursor, `$acceptEditorPropertiesChanged`, and `activeTextEditor.selection`);
-   a viewport event (lazy CodeLens resolve); an undo/redo flag on `CodeChanged`
+5. **Remaining FR-38 gaps** (not blocking): an undo/redo flag on `CodeChanged`
    (`isUndoing`/`isRedoing`, and clean-after-undo); marker tags (unnecessary/deprecated) on
    underlines; partial ghost-text accept (word / line).
 6. **Hover popup and Markdown** are drawn by the UI with dioxus-compose's overlay widgets and the

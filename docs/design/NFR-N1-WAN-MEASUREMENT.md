@@ -32,6 +32,15 @@
 4. 다른 조합도 같은 절차로 실행한다. 결과는 `.scratch/nfr-n1/results/<조합>/`의 `01.json`부터 `20.json`, 각 실행의 `.stderr`, 실패 시 `.exit`, `failures.txt`, `listener.json`에 남는다. 디렉터리가 이미 있으면 스크립트는 덮어쓰기를 거부한다. 실패도 분모에 포함하고 로그와 조건을 보존한다.
 5. 각 JSON의 `setup_first_byte_ms`, `time_to_direct_ms`, `initial_path`, `path_during_pings`, `path_history`, `rtt`, `throughput`, `tcp_baseline`을 검토한다. `tcp_baseline` 오류나 null은 기준값 부재로 기록한다. 경로가 같은 raw TCP와 비교해야 한다. 측정 일시, 장비, NAT, 방화벽, 서버 설정, 실행 옵션과 함께 결과와 판정을 #10에 기록한다. 주소와 키 등 민감한 정보는 공개 전 제거한다.
 
+6. 모든 조합이 끝나면 요약기로 표를 만든다. 요약기는 조합별 직접과 릴레이 비율, 첫 바이트 p50 및 p95, 직접 수립 p95, raw TCP 대비 RTT 차이와 처리량 비율, 릴레이에서 직접 전환 p95를 계산하고 20회 미만 조합, 실패, 없는 조합과 `tcp_baseline`이 없는 실행을 표시한다. 실패는 분모에 포함한다. 네트워크 전환, 직접에서 릴레이 복귀와 모바일 줄은 자동 데이터가 없어 항상 MISSING으로 나온다.
+
+   ```sh
+   uv run python -I .github/scripts/bench/summarize-matrix.py .scratch/nfr-n1/results \
+     --expect home-office home-lte symmetric-nat udp-blocked
+   ```
+
+   조합 이름에 `sym`이 들어가면 대칭 NAT, `udp`가 들어가면 UDP 차단으로 본다. 다른 이름은 `--symmetric`, `--udp-blocked`로 지정한다. `--strict`는 표시할 항목이 있으면 종료 코드 1을 돌려준다. 요약기는 판정 보조일 뿐 합격을 선언하지 않으며, 테스트는 `bash .github/scripts/bench/tests/summarize-matrix.test.sh`다. p95는 정렬 후 `round((n - 1) * 0.95)`번째 값으로, 벤치와 같은 규칙이다.
+
 이 벤치는 독립 실행 시 hub 디렉터리와 rendezvous를 설정하지 않는다. `--relay`만 지정해도 두 피어의 릴레이 페어링이 보장되지 않는다. 따라서 별도로 실제 Ember 장치와 메인 서버를 연결하여 릴레이, 경로 전환 및 복구를 측정하고 증거를 남긴다. 이 스크립트는 네트워크 전환, 배터리 소모 또는 합격 여부를 자동 측정하거나 판정하지 않는다. 필요한 수동 측정 도구나 절차가 없으면 해당 기준은 미검증으로 둔다.
 
 ## 판정

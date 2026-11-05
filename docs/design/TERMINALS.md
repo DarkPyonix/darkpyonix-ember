@@ -159,6 +159,14 @@ terminal tab by the user = `kill`; the window going away = just close the socket
 `control`; scale the PTY size to the viewport. Through ember server the same messages are relayed
 over the node link.
 
+Built (not yet compiled or run, #26) [provisional]: ember server relays the node routes under
+`/api/computers/{id}/terms` (list, create, get, snapshot, control, kill, remove) and
+`/api/computers/{id}/terms/{tid}/attach` (WebSocket), in `ember/server/src/computers/terms.rs`.
+The server keeps no terminal state, so a dropped client connection or a server restart leaves the
+sessions on the node. The attach socket carries the `TermHello` first, then `TermInput` frames, and
+returns `TermEvent` frames unchanged. The local computer has no node client: its terminal routes
+answer 400. Tests: `ember/server/tests/terms_relay.rs`.
+
 ## 3. VS Code Web (no VS Code source patch)
 
 Two pieces, both on the VS Code extension/settings surface:

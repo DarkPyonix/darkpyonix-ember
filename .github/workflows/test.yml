@@ -6,6 +6,7 @@
 #   vendored-css         .github/scripts/checks/check-vendored-css.sh + check-no-has-selector.sh (D23, #143)
 #   no-webview           .github/scripts/checks/check-no-webview.sh (SPEC NFR-L2), when present
 #   sync-release         .github/scripts/tests/sync-release.test.sh (release keeps develop's history)
+#   bench-summary        .github/scripts/bench/tests/summarize-matrix.test.sh (NFR-N1 matrix summarizer)
 #   release-workflow     .github/scripts/checks/check-release-workflow.sh (SPEC NFR-R1)
 #   node-units           .github/scripts/checks/check-node-units.sh + its test (SPEC FR-P6)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
@@ -59,6 +60,15 @@ jobs:
         run: bash .github/scripts/tests/check-node-units.test.sh
       - name: Run .github/scripts/checks/check-node-units.sh
         run: bash .github/scripts/checks/check-node-units.sh
+
+  bench-summary:
+    name: Bench matrix summarizer (NFR-N1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run .github/scripts/bench/tests/summarize-matrix.test.sh
+        run: bash .github/scripts/bench/tests/summarize-matrix.test.sh
 
   no-em-dash:
     name: No em-dash

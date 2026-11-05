@@ -52,13 +52,43 @@ pub fn unavailable(demo_active: bool) -> Option<&'static str> {
 /// The IDE list the demo serves itself (#218): Ember 에디터 opens the session's folder, the
 /// other two say they are not available. Pure, for tests.
 pub fn ide_launch(session: &str, project: &str, cwd: &str) -> crate::server::IdeLaunch {
+    ide_launch_with(session, project, cwd, demo_ose_from_env())
+}
+
+/// Env var that names a running OSE server (`host:port`, started without a connection token)
+/// for the demo's Ember 에디터 to connect to, since the demo has no node to start one.
+pub const DEMO_OSE_ENV: &str = "EMBER_DEMO_OSE";
+
+fn demo_ose_from_env() -> Option<ember_client::wire::EmberOseConnection> {
+    let raw = std::env::var(DEMO_OSE_ENV).ok()?;
+    let raw = raw.trim();
+    (!raw.is_empty()).then(|| ember_client::wire::EmberOseConnection {
+        endpoint: format!("http://{raw}"),
+        connection_token: String::new(),
+    })
+}
+
+/// [`ide_launch`] with the OSE connection given. Pure, for tests.
+pub fn ide_launch_with(
+    session: &str,
+    project: &str,
+    cwd: &str,
+    ose: Option<ember_client::wire::EmberOseConnection>,
+) -> crate::server::IdeLaunch {
     use crate::server::{IdeComputer, IdeLaunch, IdeTarget};
     let target = |kind: &str, available: bool| IdeTarget {
         kind: kind.to_string(),
         available,
         url: None,
         command: None,
-        launch: None,
+        launch: (kind == "ember" && ose.is_some()).then(|| ember_client::wire::EmberLaunch {
+            session: session.to_string(),
+            project: project.to_string(),
+            computer: "이 컴퓨터".to_string(),
+            folder: cwd.to_string(),
+            server_url: None,
+            ose: ose.clone(),
+        }),
         reason: (!available).then(|| UNAVAILABLE.to_string()),
     };
     IdeLaunch {
@@ -1092,6 +1122,19 @@ impl GitState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l31_demo_ember_target_carries_the_given_ose_connection() {
+        let ose = ember_client::wire::EmberOseConnection {
+            endpoint: "http://127.0.0.1:18765".into(),
+            connection_token: String::new(),
+        };
+        let l = ide_launch_with("s", "p", "/w", Some(ose));
+        let c = crate::server::IdeLaunch::editor_connection(Some(&Ok(l)));
+        assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:18765"));
+        let none = ide_launch_with("s", "p", "/w", None);
+        assert!(none.target("ember").unwrap().launch.is_none());
+    }
+
     use super::*;
     use ember_client::state::State;
 

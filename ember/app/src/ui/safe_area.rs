@@ -37,13 +37,20 @@ pub fn current_platform() -> Platform {
     }
 }
 
+/// The traffic-light footprint measured on macOS (strip height 66 dp, button group 98 dp wide).
+pub const MACOS_FALLBACK: SafeArea = SafeArea { top: 66.0, leading: 98.0, trailing: 0.0 };
+
 /// The safe area for `platform`, given what the toolkit reported (`toolkit`). macOS takes the
 /// toolkit's value (traffic-light group width and strip height); Windows keeps its caption
 /// buttons' width at the right (the toolkit draws them, #340, #204, #205); Linux and mobile have
 /// nothing to clear.
 pub fn safe_area_for(platform: Platform, toolkit: SafeArea) -> SafeArea {
     match platform {
-        Platform::MacOs => toolkit,
+        Platform::MacOs => {
+            // TODO(compose-rust#468): under FullSize the toolkit reports zeros until a later size
+            // event, and at a compact size none follows, so fall back to the measured values.
+            if toolkit == SafeArea::default() { MACOS_FALLBACK } else { toolkit }
+        }
         Platform::Windows => SafeArea {
             top: WINDOWS_CAPTION_HEIGHT_DP,
             leading: 0.0,
@@ -115,7 +122,7 @@ mod tests {
     #[test]
     fn fr_l33_macos_takes_the_toolkits_traffic_light_footprint() {
         assert_eq!(safe_area_for(Platform::MacOs, LIGHTS), LIGHTS);
-        assert_eq!(safe_area_for(Platform::MacOs, SafeArea::default()), SafeArea::default());
+        assert_eq!(safe_area_for(Platform::MacOs, SafeArea::default()), MACOS_FALLBACK);
     }
 
     #[test]

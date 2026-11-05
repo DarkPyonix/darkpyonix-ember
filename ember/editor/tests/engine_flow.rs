@@ -275,6 +275,28 @@ fn hover_merges_diagnostics_and_provider_markdown_and_cancels() {
 }
 
 #[test]
+fn selection_and_visible_range_events_drive_ghost_cancellation_and_codelens_priority() {
+    let t0 = Instant::now();
+    let mut c = core(t0);
+    let u = uri("/w/data.json");
+    let (_, g) = open(&mut c, t0, "/w/data.json", "fo\nbar\nbaz\n");
+    c.handle(t0, request(1, "MainThreadLanguageFeatures", "$registerInlineCompletionsSupport", inline_registration(9, 0)));
+    let w = |e| Input::Widget { uri: u.clone(), generation: g, event: e };
+
+    // Typing triggers ghost text at (0, 3).
+    let fx = c.handle(t0, w(changed(1, p(0, 2), "o")));
+    let (t, _) = call(&fx, "$provideInlineCompletions");
+    let fx = c.handle(t0, Input::RpcReply { token: t.unwrap(), result: Ok(json!({"pid": 1, "items": [{"insertText": "()", "idx": 0}]})) });
+    assert!(decorations(&fx).iter().any(|d| d.kind == DecorationKind::GhostText));
+
+    // Moving selection away from (0, 3) ends the ghost text as Ignored(userTypingDisagreed: false).
+    let fx = c.handle(t0, w(WidgetEvent::SelectionChanged { version: 1, anchor: p(1, 0), active: p(1, 0) }));
+    assert!(!decorations(&fx).iter().any(|d| d.kind == DecorationKind::GhostText));
+    let end = call(&fx, "$handleInlineCompletionEndOfLifetime").1;
+    assert_eq!(arg(end, 3), json!({"kind": 2, "userTypingDisagreed": false}));
+}
+
+#[test]
 fn code_lens_is_requested_resolved_drawn_and_clicked() {
     let t0 = Instant::now();
     let mut c = core(t0);

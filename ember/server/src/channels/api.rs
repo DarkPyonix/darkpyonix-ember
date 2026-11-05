@@ -42,6 +42,11 @@
 //!
 //! A posted message is also pushed as `channel_message` on `/api/push` (FR-L12).
 //!
+//! Every message carries `author_name` and `author_kind` besides `from` (FR-T15): `나`/`person`
+//! for `user`, the member name/`agent` for a session id, the guest's display name/`guest` for
+//! `guest:<id>`, and `system`/`system`. They are derived at read time, so an owner client renders
+//! a guest without knowing guest ids.
+//!
 //! `from` defaults to `user`; otherwise it is a member agent's session id. Errors are
 //! `{error, code}` with `code` one of `not_found`, `bad_request`, `forbidden`, `internal`.
 
@@ -121,6 +126,14 @@ impl IntoResponse for ChannelError {
                 let body = json!({ "error": format!("{self:#}"), "code": "not_a_member", "reason": "not_a_member", "unknown": names });
                 return (StatusCode::BAD_REQUEST, Json(body)).into_response();
             }
+            ChannelError::Coded(code, _) => {
+                let status = if matches!(*code, "rate_limited" | "quota_exceeded") {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                (status, *code)
+            }
             ChannelError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (status, Json(json!({ "error": format!("{self:#}"), "code": code }))).into_response()
@@ -179,13 +192,24 @@ async fn post_message(
 
 /// Store a message, append it to the JSONL file and push it (FR-T16, FR-L12).
 fn append_and_publish(c: &ChannelsCtx, id: &str, from: &str, text: &str) -> ApiResult<super::Message> {
-    // FR-T16: insert the row, then append the line, both under the log's lock so lines reach the
-    // file in seq order; if the append fails the row is deleted and the caller gets 500.
-    let _guard = c.jsonl.as_ref().map(|j| j.guard());
-    let message = c.store.post_channel_message(id, from, text)?;
-    if let Some(j) = &c.jsonl {
+    persist_and_publish(&c.store, &c.sessions, c.jsonl.as_deref(), id, || c.store.post_channel_message(id, from, text))
+}
+
+/// Run `insert` (which stores the row), append the line, then push (FR-T16, FR-L12). Insert and
+/// append happen under the log's lock so lines reach the file in seq order; if the append fails
+/// the row is deleted and the caller gets 500. Shared by the owner and the guest routes.
+pub(super) fn persist_and_publish(
+    store: &Store,
+    sessions: &Sessions,
+    jsonl: Option<&super::jsonl::JsonlLog>,
+    id: &str,
+    insert: impl FnOnce() -> ApiResult<super::Message>,
+) -> ApiResult<super::Message> {
+    let _guard = jsonl.map(|j| j.guard());
+    let message = insert()?;
+    if let Some(j) = jsonl {
         if let Err(e) = j.append(id, &message) {
-            let _ = c.store.delete_channel_message(message.seq);
+            let _ = store.delete_channel_message(message.seq);
             return Err(match e {
                 ChannelError::Other(_) => e,
                 other => ChannelError::Other(anyhow::anyhow!("{other}")),
@@ -193,7 +217,7 @@ fn append_and_publish(c: &ChannelsCtx, id: &str, from: &str, text: &str) -> ApiR
         }
     }
     // Every attached client hears of it (FR-L12); no receiver is not an error.
-    c.sessions.publish(Push::ChannelMessage { channel_id: id.to_string(), message: message.clone() });
+    sessions.publish(Push::ChannelMessage { channel_id: id.to_string(), message: message.clone() });
     Ok(message)
 }
 

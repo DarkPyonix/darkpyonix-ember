@@ -8,7 +8,7 @@ use compose_rust::runtime::{composable, mutable_state_of, remember};
 use compose_rust::schema::Window;
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ColorScheme, DesignSystem, IconRole, Theme, TypeRole};
+use compose_rust::{Alignment, ColorScheme, IconRole, TypeRole};
 
 use super::compat::*;
 use super::components::*;

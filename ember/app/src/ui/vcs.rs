@@ -21,7 +21,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dioxus_compose::prelude::WindowSizeClass;
 
-use ember_client::api::{ApiError, GitCommitted, GitConflicts, GitDiff, GitOutput, GitStatus};
+use ember_client::api::{
+    ApiError, GitCommitted, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStatus,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -1169,6 +1171,142 @@ pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
     Ok(snap)
 }
 
+// ---------------------------------------------------------------------------------------------
+// History (FR-G5)
+// ---------------------------------------------------------------------------------------------
+
+/// Commits read per page of the history list.
+pub const HISTORY_PAGE: u32 = 30;
+
+/// A ref chip beside a commit: the short name and what it points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryRef {
+    pub label: String,
+    pub kind: GitLogRefKind,
+}
+
+/// One row of the history list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub sha: String,
+    /// The first 7 characters of the sha.
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    pub time_text: String,
+    pub refs: Vec<HistoryRef>,
+    /// A commit with two or more parents.
+    pub is_merge: bool,
+}
+
+/// The chip text of a ref: the node sends full names (`refs/heads/main`), the chip shows `main`.
+pub fn ref_label(name: &str) -> String {
+    for prefix in ["refs/heads/", "refs/remotes/", "refs/tags/"] {
+        if let Some(short) = name.strip_prefix(prefix) {
+            return short.to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// "방금 전", "N분 전", "N시간 전", "N일 전" for a commit time, relative to `now` (both unix
+/// seconds). A time in the future reads as "방금 전".
+pub fn history_time_text(now: i64, time: i64) -> String {
+    let age = (now - time).max(0);
+    match age {
+        s if s < 60 => "방금 전".to_string(),
+        s if s < 3_600 => format!("{}분 전", s / 60),
+        s if s < 86_400 => format!("{}시간 전", s / 3_600),
+        s if s < 86_400 * 30 => format!("{}일 전", s / 86_400),
+        s if s < 86_400 * 365 => format!("{}개월 전", s / (86_400 * 30)),
+        s => format!("{}년 전", s / (86_400 * 365)),
+    }
+}
+
+/// The list row of one commit. Head and branches come first among the chips, then remotes, then
+/// tags, so the chips read in a steady order.
+pub fn history_entry(c: &GitLogCommit, now: i64) -> HistoryEntry {
+    let rank = |k: &GitLogRefKind| match k {
+        GitLogRefKind::Head => 0,
+        GitLogRefKind::Branch => 1,
+        GitLogRefKind::Remote => 2,
+        GitLogRefKind::Tag => 3,
+    };
+    let mut refs: Vec<HistoryRef> = c.refs.iter().map(|r| HistoryRef { label: ref_label(&r.name), kind: r.kind.clone() }).collect();
+    refs.sort_by_key(|r| rank(&r.kind));
+    HistoryEntry {
+        sha: c.sha.clone(),
+        short: c.sha.chars().take(7).collect(),
+        subject: c.subject.clone(),
+        author: c.author.clone(),
+        time_text: history_time_text(now, c.time),
+        refs,
+        is_merge: c.parents.len() > 1,
+    }
+}
+
+/// The rows of one page of the log, in the node's order (newest first).
+pub fn history_entries(log: &GitLog, now: i64) -> Vec<HistoryEntry> {
+    log.commits.iter().map(|c| history_entry(c, now)).collect()
+}
+
+/// Whether another page may exist: the last page came back full. An empty log (a branch with no
+/// commit yet) and a short page both mean the end.
+pub fn history_may_have_more(page_len: usize) -> bool {
+    page_len >= HISTORY_PAGE as usize
+}
+
+/// The `git/log` body for the page starting after `skip` commits (the current branch).
+pub fn log_body(skip: u64) -> Value {
+    json!({ "limit": HISTORY_PAGE, "skip": skip, "branch": null })
+}
+
+/// Read one page of a project's history. Runs on the runtime, not the UI thread.
+pub async fn fetch_history(project: &str, skip: u64) -> Result<GitLog, ApiError> {
+    git_call(project, "log", log_body(skip)).await
+}
+
+/// The state of the history list of one project.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistoryLoad {
+    Loading,
+    /// The pages read so far; `more` is whether another page may exist. `loading_more` is set
+    /// while the next page is on its way.
+    Ready { entries: Vec<HistoryEntry>, more: bool, loading_more: bool },
+    /// The server answered with an error: the Korean line with the node's message (shown with a
+    /// retry button).
+    Failed(String),
+}
+
+/// A first page as a view state.
+pub fn history_from(result: Result<GitLog, ApiError>, now: i64) -> HistoryLoad {
+    match result {
+        Ok(log) => {
+            let entries = history_entries(&log, now);
+            let more = history_may_have_more(entries.len());
+            HistoryLoad::Ready { entries, more, loading_more: false }
+        }
+        Err(e) => HistoryLoad::Failed(failure_text("히스토리를 확인", &e)),
+    }
+}
+
+/// Add the next page to a ready list. A failure keeps the pages already shown and says why in
+/// the returned line; other states are left alone.
+pub fn history_append(state: HistoryLoad, result: Result<GitLog, ApiError>, now: i64) -> (HistoryLoad, Option<String>) {
+    let HistoryLoad::Ready { mut entries, .. } = state else {
+        return (state, None);
+    };
+    match result {
+        Ok(log) => {
+            let page = history_entries(&log, now);
+            let more = history_may_have_more(page.len());
+            entries.extend(page);
+            (HistoryLoad::Ready { entries, more, loading_more: false }, None)
+        }
+        Err(e) => (HistoryLoad::Ready { entries, more: true, loading_more: false }, Some(failure_text("다음 히스토리를 확인", &e))),
+    }
+}
+
 /// One call that brings the index to the staging the user chose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageOp {
@@ -2261,5 +2399,114 @@ rename to new.txt
         let e = git_result::<Value>(Err(conflict)).unwrap_err();
         assert_eq!(e.status(), Some(409));
         assert!(e.to_string().contains("diverged"));
+    }
+
+    // ---- FR-G5: history ----
+
+    fn commit(sha: &str, parents: &[&str], time: i64, refs: &[(&str, GitLogRefKind)]) -> GitLogCommit {
+        GitLogCommit {
+            sha: sha.into(),
+            parents: s(parents),
+            author: "BREW".into(),
+            email: "brew@example.com".into(),
+            time,
+            subject: "Feat: x".into(),
+            refs: refs
+                .iter()
+                .map(|(n, k)| ember_client::api::GitLogRef { name: n.to_string(), kind: k.clone() })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn fr_g5_an_entry_has_a_short_sha_and_the_commit_fields() {
+        let e = history_entry(&commit("0123456789abcdef", &["aaa"], 1_000, &[]), 1_000 + 90);
+        assert_eq!(e.short, "0123456");
+        assert_eq!(e.sha, "0123456789abcdef");
+        assert_eq!(e.subject, "Feat: x");
+        assert_eq!(e.author, "BREW");
+        assert_eq!(e.time_text, "1분 전");
+        assert!(!e.is_merge);
+        assert!(e.refs.is_empty());
+    }
+
+    #[test]
+    fn fr_g5_a_commit_with_two_parents_is_a_merge() {
+        let merge = history_entry(&commit("m1m1m1m1", &["a", "b"], 0, &[]), 0);
+        let root = history_entry(&commit("r1r1r1r1", &[], 0, &[]), 0);
+        assert!(merge.is_merge);
+        assert!(!root.is_merge);
+    }
+
+    #[test]
+    fn fr_g5_ref_chips_are_short_and_ordered_head_branch_remote_tag() {
+        let c = commit(
+            "abcdef012",
+            &["p"],
+            0,
+            &[
+                ("refs/tags/v1", GitLogRefKind::Tag),
+                ("refs/remotes/origin/main", GitLogRefKind::Remote),
+                ("refs/heads/main", GitLogRefKind::Branch),
+                ("HEAD", GitLogRefKind::Head),
+            ],
+        );
+        let labels: Vec<String> = history_entry(&c, 0).refs.into_iter().map(|r| r.label).collect();
+        assert_eq!(labels, s(&["HEAD", "main", "origin/main", "v1"]));
+        assert_eq!(ref_label("refs/heads/feat/a"), "feat/a");
+    }
+
+    #[test]
+    fn fr_g5_commit_times_are_relative() {
+        assert_eq!(history_time_text(100, 100), "방금 전");
+        assert_eq!(history_time_text(100, 500), "방금 전");
+        assert_eq!(history_time_text(3_600, 0), "1시간 전");
+        assert_eq!(history_time_text(86_400 * 3, 0), "3일 전");
+        assert_eq!(history_time_text(86_400 * 60, 0), "2개월 전");
+        assert_eq!(history_time_text(86_400 * 800, 0), "2년 전");
+    }
+
+    #[test]
+    fn fr_g5_an_empty_log_is_an_empty_ready_list_without_more() {
+        // An unborn branch answers an empty list, which is not an error.
+        let load = history_from(Ok(GitLog { commits: Vec::new() }), 0);
+        assert_eq!(load, HistoryLoad::Ready { entries: Vec::new(), more: false, loading_more: false });
+    }
+
+    #[test]
+    fn fr_g5_a_full_page_may_have_more_and_a_short_page_does_not() {
+        let page = |n: usize| GitLog { commits: (0..n).map(|i| commit(&format!("{i:040}"), &[], 0, &[])).collect() };
+        let HistoryLoad::Ready { more, .. } = history_from(Ok(page(HISTORY_PAGE as usize)), 0) else { panic!() };
+        assert!(more);
+        let HistoryLoad::Ready { more, .. } = history_from(Ok(page(3)), 0) else { panic!() };
+        assert!(!more);
+    }
+
+    #[test]
+    fn fr_g5_the_next_page_is_appended_and_a_failure_keeps_the_shown_pages() {
+        let first = history_from(Ok(GitLog { commits: vec![commit("a0a0a0a0", &[], 0, &[])] }), 0);
+        let (next, err) = history_append(first.clone(), Ok(GitLog { commits: vec![commit("b0b0b0b0", &[], 0, &[])] }), 0);
+        assert!(err.is_none());
+        let HistoryLoad::Ready { entries, more, .. } = &next else { panic!() };
+        assert_eq!(entries.iter().map(|e| e.short.as_str()).collect::<Vec<_>>(), ["a0a0a0a", "b0b0b0b"]);
+        assert!(!more);
+
+        let down = ApiError::Status { status: 500, message: "boom".into() };
+        let (kept, err) = history_append(first, Err(down), 0);
+        assert!(err.unwrap().contains("boom"));
+        let HistoryLoad::Ready { entries, more, .. } = kept else { panic!() };
+        assert_eq!(entries.len(), 1);
+        assert!(more, "the user may retry the page");
+    }
+
+    #[test]
+    fn fr_g5_a_failed_first_page_shows_the_nodes_message() {
+        let e = ApiError::Status { status: 500, message: "로그를 읽지 못했습니다".into() };
+        assert_eq!(history_from(Err(e), 0), HistoryLoad::Failed("로그를 읽지 못했습니다".into()));
+    }
+
+    #[test]
+    fn fr_g5_the_log_body_pages_with_skip() {
+        assert_eq!(log_body(60), json!({ "limit": HISTORY_PAGE, "skip": 60, "branch": null }));
     }
 }

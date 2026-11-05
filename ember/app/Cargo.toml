@@ -27,7 +27,7 @@ path = "src/main.rs"
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
 compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.5", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "0d7dcc0833378a5b383fa57112f5305cfbccb8d9" }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "0a7d0c44b8487a25543aed24f004170c1b6f530e" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }

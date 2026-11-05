@@ -28,8 +28,8 @@ async fn call_all(api: &Api) {
     // The recorder answers 404, so the results are errors; only the request headers matter.
     let _ = api.channels(None).await;
     let _ = api.channel("c1").await;
-    let _ = api.channel_messages("c1", 0).await;
-    let _ = api.post_channel_message("c1", "hi").await;
+    let _ = api.channel_messages("c1", &ember_client::channels::MessagesQuery::default()).await;
+    let _ = api.post_channel_message("c1", &ember_client::channels::NewChannelMessage { text: "hi".into(), from: None }).await;
 }
 
 #[tokio::test]

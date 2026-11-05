@@ -146,7 +146,7 @@ impl Feed {
             let after = self.after(&id);
             let answer = {
                 let id = id.clone();
-                on_runtime(async move { crate::services::services().client.api().channel_messages(&id, after).await }).await
+                on_runtime(async move { crate::services::services().client.api().channel_messages(&id, &ember_client::channels::MessagesQuery { after: Some(after), ..Default::default() }).await }).await
             };
             match answer {
                 Some(Ok(list)) if !list.is_empty() => self.merge(&id, list.iter().map(message_from).collect()),
@@ -167,7 +167,7 @@ impl Feed {
         crate::services::run_shared(
             {
                 let (id, text) = (id.clone(), text);
-                async move { crate::services::services().client.api().post_channel_message(&id, &text).await }
+                async move { crate::services::services().client.api().post_channel_message(&id, &ember_client::channels::NewChannelMessage { text, from: None }).await }
             },
             move |r| match r {
                 Ok(m) => {

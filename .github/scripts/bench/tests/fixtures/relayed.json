@@ -1,0 +1,10 @@
+{
+  "setup_ms": 2000.0,
+  "setup_first_byte_ms": 2000.0,
+  "initial_path": "relayed via letify://relay rtt=60ms",
+  "time_to_direct_ms": null,
+  "path_during_pings": "relayed via letify://relay rtt=60ms",
+  "rtt": {"n": 200, "min_ms": 55.0, "p50_ms": 60.0, "p95_ms": 70.0, "max_ms": 90.0},
+  "throughput": {"bytes": 33554432, "seconds": 6.0, "mbit_per_s": 45.0},
+  "tcp_baseline": {"error": "listener has no TCP port"}
+}

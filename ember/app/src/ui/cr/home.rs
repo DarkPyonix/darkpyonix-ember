@@ -12,7 +12,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole};
+use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole, TextOverflow};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
@@ -755,13 +755,15 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 /// TODO(compose-rust#372, #373): the mockup's folder, star, shield and monitor line icons and the
 /// chevron of the model and mode chips need a button that takes an SVG icon; the toolkit glyph
 /// roles stand in.
-fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, on_click: impl FnMut() + 'static) {
+fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, weighted: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
     let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
-    let modifier = if icon_only { modifier.width(H_CTL) } else { modifier };
+    let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
     cu::Button(if icon_only { "" } else { text })
         .variant(ButtonVariant::Text)
+        .max_lines(1)
+        .overflow(TextOverflow::Ellipsis)
         .color(paint(p.text_2))
         .icon(icon)
         .modifier(modifier)
@@ -783,7 +785,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let mode_text = sel.mode.label().to_string();
     let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool| {
         let open = c.open.clone();
-        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, move || open.set(Some(pick)));
+        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, !icon_only || pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(FR-L11): attachments need the file picker and an upload API.
@@ -837,12 +839,13 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     });
                 }
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                    add();
-                    chip(&sel.project, IconRole::Library, Pick::Project, false);
-                    chip(&model_text, IconRole::Compose, Pick::Model, false);
-                    chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
-                    chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
-                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    cu::Box().modifier(Modifier::new().size(36.0, 36.0)).content(add);
+                    cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
+                        chip(&sel.project, IconRole::Library, Pick::Project, false);
+                        chip(&model_text, IconRole::Compose, Pick::Model, false);
+                        chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
+                        chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
+                    });
                     if c.busy.get() {
                         cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
                     }
@@ -1398,6 +1401,41 @@ mod tests {
         assert_eq!(composer_width(1158.0), 720.0);
         assert_eq!(composer_width(340.0), 340.0);
 
+    }
+
+    #[test]
+    fn fr_l11_long_chips_leave_the_send_button_its_width() {
+        use compose_rust::schema::PropertyKind;
+        let _guard = crate::services::test_guard();
+        for width in [1440.0, 390.0] {
+            let mut host = Host::new(move || Box::new(Recomposer::new(move || {
+                let c = Composer::new();
+                let mut selection = Selection::initial();
+                selection.project = "아주 긴 프로젝트 이름".repeat(20);
+                c.selection.set(selection);
+                ComposerCard(&c, shared_ui(), composer_width(width - 50.0), layout(width));
+            })));
+            let bytes = host.rebuild().expect("rebuild");
+            let batch = decode_batch(bytes).expect("decode");
+            let send = batch.iter().find_map(|m| match m {
+                Mutation::SetProp { node_id, property: PropertyKind::Icon, value: PropertyValue::Integer(icon) }
+                    if *icon == IconRole::Send as i64 => Some(*node_id),
+                _ => None,
+            }).expect("send button");
+            assert!(batch.iter().any(|m| matches!(m, Mutation::SetModifier {
+                node_id, modifier: compose_rust::Modifier::Width(w), ..
+            } if *node_id == send && *w == 36.0)));
+            let parent = batch.iter().find_map(|m| match m {
+                Mutation::Insert { parent_id, node_id, .. } if *node_id == send => Some(*parent_id),
+                _ => None,
+            }).expect("send row");
+            assert!(batch.iter().any(|m| match m {
+                Mutation::Insert { parent_id, node_id, .. } if *parent_id == parent => batch.iter().any(|n| matches!(n,
+                    Mutation::SetModifier { node_id: id, modifier: compose_rust::Modifier::Weight(w), .. }
+                    if id == node_id && *w == 1.0)),
+                _ => false,
+            }), "chip row must take the remaining width at {width} dp");
+        }
     }
 
     #[test]

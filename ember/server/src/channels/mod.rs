@@ -5,8 +5,8 @@
 //! channels are created with a chosen subset of the project's sessions. The signed-in person is
 //! a member of every channel as the person `user`. Messages are an append-only log per channel
 //! in the main store (SQLite), and human messages are also appended to a per-channel JSONL file
-//! ([`jsonl`], FR-T16); mentions are parsed and gated ([`mention`], FR-T12, FR-T13) but not yet
-//! delivered to agents; invites (FR-T14, FR-T15, FR-T17) are not built. Read tracking is one
+//! ([`jsonl`], FR-T16); mentions are parsed and gated ([`mention`], FR-T12, FR-T13) and delivered to
+//! the mentioned agents through A2A ([`api`]); invites (FR-T14, FR-T15, FR-T17) are not built. Read tracking is one
 //! cursor per channel for the person `user` ([`READS_MIGRATION`]). Tables: [`MIGRATION`]. The
 //! agent feed (FR-T11) is derived from session events: [`feed`]. Routes: [`api`].
 
@@ -66,6 +66,11 @@ ALTER TABLE channel_messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]';
 
 /// The person every channel includes.
 pub const USER: &str = "user";
+/// The name the person `user` has in a channel, also used in the header an agent sees (FR-T12).
+pub const USER_LABEL: &str = "나";
+/// The author of a message the server writes into a channel, such as a delivery failure
+/// (FR-T13). Not a member, not an agent session id, and never written to the JSONL (FR-T16).
+pub const SYSTEM: &str = "system";
 /// The name a default channel gets.
 pub const DEFAULT_NAME: &str = "전체";
 /// Messages in a channel detail (the latest ones); older ones come from `?after=`.
@@ -188,7 +193,7 @@ impl Store {
         let mut stmt = conn.prepare(sql)?;
         let agents: Vec<(String, String, String)> =
             stmt.query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<_, _>>()?;
-        let mut out = vec![Member { id: USER.into(), name: "나".into(), is_agent: false, harness: String::new() }];
+        let mut out = vec![Member { id: USER.into(), name: USER_LABEL.into(), is_agent: false, harness: String::new() }];
         out.extend(agents.into_iter().map(|(id, harness, title)| Member {
             name: if title.trim().is_empty() { harness.clone() } else { title },
             id,
@@ -375,6 +380,31 @@ impl Store {
             params![channel, from, text, at, mentions],
         )?;
         Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last, &mentions))
+    }
+
+    /// Append a message from [`SYSTEM`], e.g. "not reached" (FR-T13). It skips the member check
+    /// and mention parsing, and the caller writes no JSONL line for it.
+    pub fn post_channel_system_message(&self, channel: &str, text: &str) -> Result<Message, ChannelError> {
+        self.channel_row(channel)?;
+        let at = now_ms();
+        let last = self.read_cursor(channel)?;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO channel_messages (channel_id, author, body, at) VALUES (?1, ?2, ?3, ?4)",
+            params![channel, SYSTEM, text, at],
+        )?;
+        Ok(msg(conn.last_insert_rowid(), SYSTEM.to_string(), text.to_string(), at, last, "[]"))
+    }
+
+    /// The members of a channel (404 when it does not exist).
+    pub fn channel_members(&self, channel: &str) -> Result<Vec<Member>, ChannelError> {
+        let row = self.channel_row(channel)?;
+        self.members_of(&row)
+    }
+
+    /// The name of a channel, if it exists.
+    pub fn channel_name(&self, channel: &str) -> Option<String> {
+        self.channel_row(channel).ok().map(|r| r.name)
     }
 
     /// Remove one message row. Used only to undo a post whose JSONL append failed (FR-T16).

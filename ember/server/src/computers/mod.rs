@@ -60,6 +60,7 @@ pub mod observations;
 pub mod relay;
 pub mod schema;
 pub mod shim;
+pub mod terms;
 
 /// Id of the implicit computer that is this server.
 pub const LOCAL: &str = "local";

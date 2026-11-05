@@ -6,6 +6,61 @@
 
 use serde::{Deserialize, Serialize};
 
+/// OSE connection details delivered with an Ember editor launch.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmberOseConnection {
+    pub endpoint: String,
+    pub connection_token: String,
+}
+
+impl std::fmt::Debug for EmberOseConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmberOseConnection").field("endpoint", &self.endpoint)
+            .field("connection_token", &"[REDACTED]").finish()
+    }
+}
+
+/// Launch data for the native editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmberLaunch {
+    pub session: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub computer: String,
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default)]
+    pub server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ose: Option<EmberOseConnection>,
+}
+
+#[cfg(test)]
+mod ide_launch_tests {
+    use super::*;
+
+    #[test]
+    fn fr_l7_fr_l31_fr_w4_connection_round_trip() {
+        let value = serde_json::json!({
+            "session": "s", "project": "p", "computer": "local", "folder": "/w",
+            "server_url": null,
+            "ose": { "endpoint": "http://localhost:9000", "connection_token": "secret" }
+        });
+        let launch: EmberLaunch = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(launch.ose.as_ref().unwrap().connection_token, "secret");
+        assert!(!format!("{launch:?}").contains("secret"));
+        assert_eq!(serde_json::to_value(launch).unwrap(), value);
+    }
+
+    #[test]
+    fn fr_l7_fr_l31_fr_w4_older_launch_has_no_connection() {
+        let launch: EmberLaunch = serde_json::from_value(serde_json::json!({"session": "s"})).unwrap();
+        assert!(launch.ose.is_none());
+        assert!(serde_json::to_value(&launch).unwrap().get("ose").is_none());
+    }
+}
+
 /// One thing that happened in a session (server `AgentEvent`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

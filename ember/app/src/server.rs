@@ -134,7 +134,7 @@ pub struct IdeTarget {
     #[serde(default)]
     pub command: Option<Vec<String>>,
     #[serde(default)]
-    pub launch: Option<serde_json::Value>,
+    pub launch: Option<ember_client::wire::EmberLaunch>,
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -272,6 +272,22 @@ fn seg(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l7_fr_l31_fr_w4_decodes_editor_connection() {
+        let ide: IdeLaunch = serde_json::from_value(json!({
+            "session": "s", "project": "p", "folder": "/w",
+            "computer": { "name": "local", "local": true },
+            "targets": [{ "kind": "ember", "available": true, "launch": {
+                "session": "s", "project": "p", "computer": "local", "folder": "/w",
+                "server_url": "http://localhost:8740",
+                "ose": { "endpoint": "http://localhost:9000", "connection_token": "secret" }
+            }}]
+        })).unwrap();
+        let connection = ide.target("ember").unwrap().launch.as_ref().unwrap().ose.as_ref().unwrap();
+        assert_eq!(connection.endpoint, "http://localhost:9000");
+        assert_eq!(connection.connection_token, "secret");
+    }
 
     #[test]
     fn decodes_server_shapes() {

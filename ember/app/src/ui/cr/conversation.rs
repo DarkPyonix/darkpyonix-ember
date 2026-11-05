@@ -631,6 +631,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 let im = ide_menu.clone();
                                 let ui_ide_btn = ui.clone();
                                 let launch_btn = ide.get();
+                                let chev = ide_menu.clone();
                                 AppButton(
                                     "IDE 열기",
                                     Some(IconRole::Forward),
@@ -639,17 +640,16 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     true,
                                     false,
                                     move || {
-                                        if let Some(kind) = remembered {
+                                        super::session::ide_main_click(remembered, &im, |kind| {
                                             super::session::launch_ide_shared(
                                                 &ui_ide_btn,
                                                 kind,
                                                 launch_btn.clone(),
-                                            );
-                                        } else {
-                                            im.set(true);
-                                        }
+                                            )
+                                        })
                                     },
                                 );
+                                super::session::IdeChevron(chev, false);
                             });
                     }
 

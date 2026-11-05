@@ -24,3 +24,4 @@ pub mod session;
 pub mod session_shim;
 pub mod store;
 pub mod transport;
+pub mod usage;

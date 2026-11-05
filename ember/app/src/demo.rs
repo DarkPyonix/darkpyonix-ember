@@ -731,6 +731,40 @@ impl DemoSource {
     }
 }
 
+/// The demo history, newest first, as the node's `/git/log` commits. `c7` is a merge of `c8`
+/// (first parent) and `b2` (the side branch). `now` is unix seconds. Pure, for tests.
+fn demo_log(now: i64) -> Vec<Value> {
+    // (sha, parents, author, minutes ago, subject, refs as (name, kind))
+    type Row = (&'static str, &'static [&'static str], &'static str, i64, &'static str, &'static [(&'static str, &'static str)]);
+    const ROWS: &[Row] = &[
+        ("a1b2c3d4e5f60718293a4b5c6d7e8f9012345601", &["e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c02"], "BREW", 12, "Feat: Git log API and history list", &[("HEAD", "head"), ("refs/heads/feat/git-api", "branch")]),
+        ("e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c02", &["9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c03"], "BREW", 95, "Fix: keep the staged selection after a refresh", &[("refs/remotes/origin/feat/git-api", "remote")]),
+        ("9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c03", &["5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f04"], "Minji Kim", 60 * 5, "Docs: describe the commit message rules", &[]),
+        ("5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f04", &["2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d05"], "BREW", 60 * 26, "Test: cover unborn branch history", &[]),
+        ("2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d05", &["c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f06", "b2a1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a407"], "BREW", 60 * 30, "Merge branch 'feat/stage-lines' into feat/git-api", &[]),
+        ("b2a1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a407", &["c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f06"], "Minji Kim", 60 * 40, "Feat: stage single lines from the diff", &[("refs/heads/feat/stage-lines", "branch")]),
+        ("c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f06", &["3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b408"], "BREW", 60 * 52, "Refactor: split the status parser", &[]),
+        ("3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b408", &["8f9012345678901234567890abcdef1234567809"], "Jisoo Park", 60 * 24 * 3, "Fix: handle renamed files in status", &[]),
+        ("8f9012345678901234567890abcdef1234567809", &["1f2e3d4c5b6a79880716253443526170898a0b10"], "Jisoo Park", 60 * 24 * 4, "Chore: bump dependencies", &[("refs/tags/v0.3.0", "tag")]),
+        ("1f2e3d4c5b6a79880716253443526170898a0b10", &["0a1b2c3d4e5f60718293a4b5c6d7e8f901234511"], "Minji Kim", 60 * 24 * 6, "Feat: show ahead and behind counts", &[("refs/heads/main", "branch"), ("refs/remotes/origin/main", "remote")]),
+        ("0a1b2c3d4e5f60718293a4b5c6d7e8f901234511", &["7a8b9c0d1e2f30415263748596a7b8c9d0e1f212"], "BREW", 60 * 24 * 9, "Feat: commit from the staged files", &[]),
+        ("7a8b9c0d1e2f30415263748596a7b8c9d0e1f212", &[], "BREW", 60 * 24 * 14, "Chore: initial commit", &[]),
+    ];
+    ROWS.iter()
+        .map(|(sha, parents, author, mins, subject, refs)| {
+            json!({
+                "sha": sha,
+                "parents": parents,
+                "author": author,
+                "email": format!("{}@example.com", author.to_lowercase().replace(' ', ".")),
+                "time": now - mins * 60,
+                "subject": subject,
+                "refs": refs.iter().map(|(name, kind)| json!({ "name": name, "kind": kind })).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
+}
+
 /// An error answer of a demo git route: the status and the `ErrorBody` fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitError {
@@ -1115,6 +1149,11 @@ impl GitState {
                 Ok(json!({ "output": output }))
             }
             "conflicts" => Ok(json!({ "paths": Vec::<String>::new() })),
+            "log" => {
+                let limit = body["limit"].as_u64().unwrap_or(50) as usize;
+                let skip = body["skip"].as_u64().unwrap_or(0) as usize;
+                Ok(json!({ "commits": demo_log(now_ms() / 1000).into_iter().skip(skip).take(limit).collect::<Vec<_>>() }))
+            }
             _ => Err(GitError::new(404, "not_found", "unknown git operation")),
         }
     }
@@ -1262,6 +1301,35 @@ mod tests {
 
     fn file<'a>(st: &'a Value, path: &str) -> &'a Value {
         st["files"].as_array().unwrap().iter().find(|f| f["path"] == path).unwrap_or(&Value::Null)
+    }
+
+    #[test]
+    fn fr_g5_demo_log_lists_newest_first_with_one_merge_and_refs() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let log = gs(&d, "log", json!({ "limit": 50, "skip": 0 })).unwrap();
+        let commits = log["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 12);
+        let times: Vec<i64> = commits.iter().map(|c| c["time"].as_i64().unwrap()).collect();
+        assert!(times.windows(2).all(|w| w[0] > w[1]), "newest first");
+        let merges: Vec<_> = commits.iter().filter(|c| c["parents"].as_array().unwrap().len() == 2).collect();
+        assert_eq!(merges.len(), 1);
+        assert_eq!(commits.last().unwrap()["parents"].as_array().unwrap().len(), 0);
+        let kinds: Vec<&str> = commits.iter().flat_map(|c| c["refs"].as_array().unwrap()).map(|r| r["kind"].as_str().unwrap()).collect();
+        for k in ["head", "branch", "tag"] {
+            assert!(kinds.contains(&k), "missing ref kind {k}");
+        }
+    }
+
+    #[test]
+    fn fr_g5_demo_log_honors_limit_and_skip() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let all = gs(&d, "log", json!({})).unwrap()["commits"].as_array().unwrap().clone();
+        let page = gs(&d, "log", json!({ "limit": 5, "skip": 3 })).unwrap();
+        let page = page["commits"].as_array().unwrap();
+        assert_eq!(page.len(), 5);
+        assert_eq!(page[0]["sha"], all[3]["sha"]);
+        let past = gs(&d, "log", json!({ "limit": 5, "skip": 100 })).unwrap();
+        assert!(past["commits"].as_array().unwrap().is_empty());
     }
 
     #[test]

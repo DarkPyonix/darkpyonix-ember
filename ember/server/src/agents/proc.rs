@@ -13,11 +13,17 @@
 //! Output offsets: the stdout bridge stores the offset after the last complete line it handed to
 //! the adapter, and acknowledges it to the shim. A new server attaching to the same session
 //! resumes from that offset, so no complete line is lost or repeated.
+//!
+//! Commit-gated acknowledgement: a session whose event pump called [`require_commit`] does not
+//! acknowledge a line when the adapter asks for the next one, but only when the pump has stored
+//! every event sent so far ([`CommitGate::commit_if_idle`]). A crash between reading a line and
+//! storing its event then leaves the line for the next server to replay.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -60,11 +66,123 @@ pub fn shim_enabled() -> bool {
     std::env::var("EMBER_SESSION_SHIM").map(|v| v != "off").unwrap_or(true)
 }
 
+/// Per-session commit gates, registered by [`require_commit`] and picked up when the stdout
+/// bridge of that session is built.
+static GATES: Mutex<Option<HashMap<String, Arc<CommitGate>>>> = Mutex::new(None);
+
+/// Acknowledges a session's shim output only after the events it produced were stored.
+pub struct CommitGate {
+    /// End offset of the last line the adapter has fully handed on (it asked for the next one).
+    ready: AtomicU64,
+    /// The highest offset already acknowledged.
+    sent: AtomicU64,
+    /// The agent ended and its output was read to the end.
+    exited: AtomicBool,
+    exit_sent: AtomicBool,
+    store_failed: AtomicBool,
+    notify: tokio::sync::Notify,
+    acks: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Ack>>>,
+}
+
+impl CommitGate {
+    fn new() -> CommitGate {
+        CommitGate {
+            ready: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+            exited: AtomicBool::new(false),
+            exit_sent: AtomicBool::new(false),
+            store_failed: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+            acks: Mutex::new(None),
+        }
+    }
+
+    /// Resolves when the reader made more output ready to acknowledge (or the agent ended).
+    pub async fn notified(&self) {
+        self.notify.notified().await
+    }
+
+    /// Acknowledge everything handled so far, if `idle()` says the pump has stored every event
+    /// sent to it. The offset is read before `idle` runs, so an event sent after the offset was
+    /// taken cannot be covered by it.
+    pub fn commit_if_idle(&self, idle: impl FnOnce() -> bool) {
+        let ready = self.ready.load(Ordering::SeqCst);
+        let exited = self.exited.load(Ordering::SeqCst);
+        if !idle() {
+            return;
+        }
+        self.send(ready, exited);
+    }
+
+    /// Acknowledge everything handled so far unconditionally. For a pump that has stored
+    /// everything it was given (and for tests).
+    pub fn commit_ready(&self) {
+        let (ready, exited) = (self.ready.load(Ordering::SeqCst), self.exited.load(Ordering::SeqCst));
+        self.send(ready, exited);
+    }
+
+    /// Keep all remaining output available for replay after an event could not be stored.
+    pub fn store_failed(&self) {
+        self.store_failed.store(true, Ordering::SeqCst);
+    }
+
+    fn send(&self, ready: u64, exited: bool) {
+        if self.store_failed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(tx) = self.acks.lock().unwrap().clone() else { return };
+        if ready > self.sent.fetch_max(ready, Ordering::SeqCst) {
+            let _ = tx.send(Ack::Offset(ready));
+        }
+        if exited && !self.exit_sent.swap(true, Ordering::SeqCst) {
+            let _ = tx.send(Ack::Exited);
+        }
+    }
+}
+
+/// Make the next stdout bridge of `session` acknowledge only on commit. Called by the session's
+/// event pump before it starts the agent; the returned gate is the pump's handle.
+pub fn require_commit(session: &str) -> Arc<CommitGate> {
+    let gate = Arc::new(CommitGate::new());
+    GATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(session.to_string(), gate.clone());
+    gate
+}
+
+/// Forget the gate of `session` (the pump ended).
+pub fn release_commit(session: &str) {
+    if let Some(m) = GATES.lock().unwrap().as_mut() {
+        m.remove(session);
+    }
+}
+
+/// [`release_commit`], but only when the registered gate is still `gate` (a newer run of the
+/// session may have replaced it).
+pub fn release_commit_of(session: &str, gate: &Arc<CommitGate>) {
+    if let Some(m) = GATES.lock().unwrap().as_mut() {
+        if m.get(session).is_some_and(|g| Arc::ptr_eq(g, gate)) {
+            m.remove(session);
+        }
+    }
+}
+
+fn gate_of(session: &str) -> Option<Arc<CommitGate>> {
+    GATES.lock().unwrap().as_ref()?.get(session).cloned()
+}
+
 fn active_runtime() -> Option<Arc<ShimRuntime>> {
     if !shim_enabled() {
         return None;
     }
     RUNTIME.read().unwrap().clone()
+}
+
+/// Whether recorded metadata identifies a shim that has died while its server is still running.
+pub fn shim_died(session: &str) -> bool {
+    active_runtime().is_some_and(|rt| {
+        session_shim::scan(&rt.dir)
+            .into_iter()
+            .any(|meta| meta.session == session && !session_shim::pid_alive(meta.shim_pid))
+    })
 }
 
 /// The `ember-shim` binary next to the running server (or `EMBER_SHIM_BIN`).
@@ -124,6 +242,19 @@ impl ProcHandle {
         }
         Ok(())
     }
+}
+
+/// Attach to an existing session without starting a new process (FR-S8).
+pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<AgentProc>> {
+    let Some(rt) = active_runtime() else { return Ok(None) };
+    let Some(session) = env.iter().find(|(k, _)| k == SESSION_ENV).map(|(_, v)| v.clone()) else { return Ok(None) };
+    if !safe_id(&session) { return Ok(None) }
+    let stored = rt.store.shim_offset(&session)?;
+    let Ok(client) = session_shim::attach(&rt.dir, &session, stored).await else {
+        return Ok(None);
+    };
+    let pid = agent_pid(&rt.dir, &session).await;
+    Ok(Some(bridge(rt, session, client, pid, true, stored)))
 }
 
 /// Start (or reattach) an agent process.
@@ -259,6 +390,8 @@ struct ShimReader {
     pos: u64,
     pending: Option<u64>,
     acks: tokio::sync::mpsc::UnboundedSender<Ack>,
+    /// Set when the session acknowledges on commit instead of on the next read.
+    gate: Option<Arc<CommitGate>>,
     eof: bool,
 }
 
@@ -271,7 +404,15 @@ impl AsyncRead for ShimReader {
         use std::task::Poll;
         let this = &mut *self;
         if let Some(p) = this.pending.take() {
-            let _ = this.acks.send(Ack::Offset(p));
+            match &this.gate {
+                Some(g) => {
+                    g.ready.store(p, Ordering::SeqCst);
+                    g.notify.notify_one();
+                }
+                None => {
+                    let _ = this.acks.send(Ack::Offset(p));
+                }
+            }
         }
         loop {
             if this.off < this.cur.len() {
@@ -299,7 +440,15 @@ impl AsyncRead for ShimReader {
                 }
                 Poll::Ready(Some(Chunk::Eof)) => {
                     this.eof = true;
-                    let _ = this.acks.send(Ack::Exited);
+                    match &this.gate {
+                        Some(g) => {
+                            g.exited.store(true, Ordering::SeqCst);
+                            g.notify.notify_one();
+                        }
+                        None => {
+                            let _ = this.acks.send(Ack::Exited);
+                        }
+                    }
                 }
                 Poll::Ready(None) => this.eof = true,
                 Poll::Pending => return Poll::Pending,
@@ -358,6 +507,14 @@ fn bridge(
             }
         });
     }
+    let gate = gate_of(&session);
+    if let Some(g) = &gate {
+        *g.acks.lock().unwrap() = Some(ack_tx.clone());
+        g.ready.store(from, Ordering::SeqCst);
+        g.sent.store(from, Ordering::SeqCst);
+        g.exited.store(false, Ordering::SeqCst);
+        g.exit_sent.store(false, Ordering::SeqCst);
+    }
     let out_r = ShimReader {
         rx: chunk_rx,
         cur: Vec::new(),
@@ -365,6 +522,7 @@ fn bridge(
         pos: from,
         pending: None,
         acks: ack_tx,
+        gate,
         eof: false,
     };
 
@@ -414,4 +572,66 @@ pub async fn live_shim_sessions(rt: &ShimRuntime) -> anyhow::Result<Vec<String>>
         }
     }
     Ok(live)
+}
+
+/// Server startup (SPEC FR-S8) for an agent that cannot be rejoined as it runs (Codex): read what
+/// the surviving agent wrote since the stored offset, up to `max` or until `done` accepts a
+/// line, then stop the agent and forget its offset. The session resumes natively on its next
+/// message. Returns the complete lines read; empty when the session has no live shim.
+pub async fn drain_surviving_lines(
+    rt: &ShimRuntime,
+    session: &str,
+    max: Duration,
+    done: impl Fn(&str) -> bool,
+) -> anyhow::Result<Vec<String>> {
+    if !safe_id(session) {
+        return Ok(Vec::new());
+    }
+    let stored = rt.store.shim_offset(session)?;
+    let Reattach::Live(mut c) = session_shim::attach_or_resume(&rt.dir, session, stored).await else {
+        rt.store.clear_shim_offset(session)?;
+        return Ok(Vec::new());
+    };
+    let deadline = tokio::time::Instant::now() + max;
+    let mut pos = stored;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = Vec::new();
+    let mut exited = false;
+    'read: loop {
+        match tokio::time::timeout_at(deadline, c.events.recv()).await {
+            Ok(Some(ShimEvent::Output { start, data })) => {
+                if start > pos {
+                    // The shim dropped unacknowledged bytes: what is buffered is a torn line.
+                    buf.clear();
+                    pos = start;
+                }
+                let skip = (pos - start).min(data.len() as u64) as usize;
+                buf.extend_from_slice(&data[skip..]);
+                pos = start + data.len() as u64;
+                while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=i).collect();
+                    let line = String::from_utf8_lossy(&line[..line.len() - 1]).into_owned();
+                    let stop = done(&line);
+                    lines.push(line);
+                    if stop {
+                        break 'read;
+                    }
+                }
+            }
+            Ok(Some(ShimEvent::Exited(_))) => {
+                exited = true;
+                break;
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    if exited {
+        let _ = c.ack(u64::MAX).await;
+        drop(c);
+        wait_gone(&rt.dir, session).await;
+    } else {
+        stop_shim(c, &rt.dir, session).await;
+    }
+    rt.store.clear_shim_offset(session)?;
+    Ok(lines)
 }

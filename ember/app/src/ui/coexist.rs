@@ -122,6 +122,9 @@ pub struct SharedUi {
     /// A phone screen shows a detail view (an open room): the shell hides its top-right menu
     /// there (`body.view-detail .phonemenu { display: none }`).
     pub detail_open: MutableState<bool>,
+    /// `true` when this process was launched directly with `--editor <project> <folder>`, so
+    /// closing the editor exits the process instead of leaving a blank window.
+    pub standalone_editor: MutableState<bool>,
     mirrors: Arc<OnceLock<DioxusMirrors>>,
 }
 
@@ -141,6 +144,7 @@ impl SharedUi {
             theme_pref: mutable_state_of(theme),
             notice: mutable_state_of(None),
             detail_open: mutable_state_of(false),
+            standalone_editor: mutable_state_of(false),
             mirrors: Arc::new(OnceLock::new()),
         }
     }
@@ -232,19 +236,54 @@ impl SharedUi {
         }
     }
 
-    /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
+    /// Open the Ember 에디터 for a project in its own window (FR-L7, FR-L31).
+    /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the
+    /// editor window in the same process instead of spawning `--editor <project> <folder>`.
     pub fn open_editor(&self, project: String, folder: String) {
-        let target = Some(EditorTarget { project, folder });
+        #[cfg(not(test))]
+        self.open_editor_with(project, folder, crate::ide::spawn_editor_process);
+        #[cfg(test)]
+        self.open_editor_with(project, folder, |_, _| Ok(()));
+    }
+
+    /// Testable core of [`SharedUi::open_editor`]: records the [`EditorTarget`] and, when
+    /// `Services` is installed, runs `spawner(&project, &folder)` and posts the corresponding
+    /// user notice.
+    pub fn open_editor_with(
+        &self,
+        project: String,
+        folder: String,
+        spawner: impl FnOnce(&str, &str) -> std::io::Result<()>,
+    ) {
+        let target = Some(EditorTarget {
+            project: project.clone(),
+            folder: folder.clone(),
+        });
         self.editor.set(target.clone());
         if let Some(mut m) = self.mirrors() {
             m.editor.set(target);
         }
+        if crate::services::try_services().is_some() {
+            let notice = crate::ide::spawn_editor_notice(&project, &folder, spawner);
+            crate::ui::cr::notice::post(notice);
+        }
     }
 
     pub fn close_editor(&self) {
+        self.close_editor_with(|| std::process::exit(crate::shutdown()));
+    }
+
+    /// Close the Ember 에디터 screen; when this process was launched directly with
+    /// `--editor <project> <folder>` (`standalone_editor` is true), closing the editor exits the
+    /// window process instead of leaving a blank window behind.
+    pub fn close_editor_with(&self, on_exit_standalone: impl FnOnce()) {
+        let standalone = self.standalone_editor.get_untracked();
         self.editor.set(None);
         if let Some(mut m) = self.mirrors() {
             m.editor.set(None);
+        }
+        if standalone {
+            on_exit_standalone();
         }
     }
 
@@ -359,6 +398,44 @@ mod tests {
         ui.set_theme_pref(ThemePref::Dark);
         assert_eq!(ui.theme_pref.get_untracked(), ThemePref::Dark);
         assert_eq!(ui.prefs.get_untracked().theme, ThemePref::Dark);
+
+        // Standalone `--editor` mode exits when `close_editor_with` is called; normal mode does not.
+        let mut exited = false;
+        ui.close_editor_with(|| exited = true);
+        assert!(!exited);
+        ui.standalone_editor.set(true);
+        ui.close_editor_with(|| exited = true);
+        assert!(exited);
+        ui.standalone_editor.set(false);
+    }
+
+    #[test]
+    fn fr_l31_open_editor_with_spawns_and_posts_success_or_error_notice() {
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        let mut spawned: Option<(String, String)> = None;
+        ui.open_editor_with("demo-project".into(), "/work/demo".into(), |p, f| {
+            spawned = Some((p.to_string(), f.to_string()));
+            Ok(())
+        });
+        assert_eq!(
+            spawned,
+            Some(("demo-project".to_string(), "/work/demo".to_string()))
+        );
+        assert_eq!(
+            ui.notice.get_untracked().map(|(_, s)| s),
+            Some("Ember 에디터: 새 창에서 여는 중입니다".to_string())
+        );
+
+        ui.open_editor_with("demo-project".into(), "/work/demo".into(), |_, _| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no binary"))
+        });
+        let err_notice = ui.notice.get_untracked().map(|(_, s)| s).unwrap_or_default();
+        assert!(
+            err_notice.starts_with("Ember 에디터: 열지 못했습니다:"),
+            "unexpected error notice: {err_notice}"
+        );
+        ui.close_editor();
     }
 
     fn has_text(mutations: &[Mutation<'_>], expected: &str) -> bool {

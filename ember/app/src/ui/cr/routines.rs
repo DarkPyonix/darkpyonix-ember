@@ -806,6 +806,8 @@ fn RoutineHeader(compact: bool, trailing: impl FnOnce()) {
     );
 }
 
+// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
+// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -816,6 +818,8 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
         .on_click(on_click);
 }
 
+// TODO(compose-rust#426): the toolkit Switch cannot take the ink 36x20 style or an accessible name;
+// drawn on a Canvas under a named Button until it can.
 /// A 36x20 toggle switch matching the mockup (`.switch.on` ink, off `track`, knob `surface`).
 ///
 /// TODO(compose-rust#372): the toolkit `Switch` draws 54x32 green (#2ec04f) and cannot be

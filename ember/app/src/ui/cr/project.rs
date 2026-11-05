@@ -17,9 +17,9 @@ use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
     chip_line, computer_chips, danger_allowed, deck_count, deck_label, display_name, filter_members,
-    is_default_project, leader_choice_visible, part_supported, project_boxes, reach_pill, status_pill,
-    validate_settings, visible_tiles, ComputerChip, Member, MemberFilter, ProjectBox, SettingsDraft,
-    SettingsPart, MAX_TILES, SETTINGS_SAVE_AVAILABLE, SOON,
+    is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
+    reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
+    ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
 use super::components::{
@@ -215,8 +215,9 @@ fn set_assignment(project: String, computer_id: String, assign: bool) {
 pub fn ProjectScreen() {
     let ui = shared_ui().clone();
     let _ = ui.live.launcher.get();
+    let show_archived = ui.show_archived.get();
     let (boxes, chips) = services().client.read(|s| {
-        let boxes = project_boxes(s);
+        let boxes = project_boxes_with_archived(s, show_archived);
         let chips = computer_chips(s, &boxes);
         (boxes, chips)
     });
@@ -316,10 +317,9 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
                 ..Default::default()
             });
         });
-    } else {
-        let u = ui.clone();
-        IconButton(IconRole::Search, false, move || u.go(crate::ui::Route::Search));
     }
+    let u_search = ui.clone();
+    IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
     let can_create = services().demo.is_some();
@@ -761,20 +761,20 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
     let has_session = session.is_some();
     cu::Box().content(|| {
-        let o = open.clone();
+        let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
         AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
-            if has_session {
-                o.set(true)
+            if !has_session {
+                notice::post("세션이 없어 IDE를 열 수 없습니다");
+            } else if let Some(kind) = remembered {
+                launch_ide(&ui_btn, kind, ide_btn.get_untracked());
             } else {
-                notice::post("세션이 없어 IDE를 열 수 없습니다")
+                o.set(true);
             }
         });
         let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());
         OptionSheet(open.get(), &labels, None, 220.0, move || close.set(false), move |i| {
             if let Some(c) = choices.get(i) {
-                let kind = c.kind;
-                ui2.update_prefs(|p| p.ide_target = Some(kind.key().to_string()));
-                launch_ide(&ui2, kind, ide2.get_untracked());
+                launch_ide(&ui2, c.kind, ide2.get_untracked());
             }
         });
     });
@@ -1079,7 +1079,7 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                                 Label(reach_pill(c.reachability).0, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                                 let (pr, id) = (b.id.clone(), c.id.clone());
-                                // TODO(compose-rust): a switch; a toggle button stands in.
+                                // TODO(compose-rust#426): a switch; a toggle button stands in.
                                 AppButton(if on { "할당됨" } else { "할당" }, None, if on { ButtonKind::Primary } else { ButtonKind::Default }, true, true, false, move || {
                                     set_assignment(pr.clone(), id.clone(), !on)
                                 });
@@ -1224,6 +1224,82 @@ mod tests {
         for want in ["프로젝트", "새 프로젝트", "새 팀원"] {
             assert!(has(want), "missing {want}: {all:?}");
         }
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l9_show_archived_includes_archived_sessions_in_project_boxes_and_side_sections() {
+        use ember_client::wire::{SessionRecord, SessionStatus};
+        use ember_client::Input;
+        let mut state = ember_client::State::default();
+        let active = SessionRecord {
+            id: "s-active".into(),
+            project: "ember".into(),
+            title: "활성 작업".into(),
+            agent: "claude-code".into(),
+            cwd: "/work".into(),
+            model: None,
+            native_id: None,
+            status: SessionStatus::Running,
+            created_at: 100,
+            updated_at: 200,
+            last_seq: 1,
+            account_id: None,
+            account_reason: None,
+            pinned: false,
+            archived: false,
+        };
+        let mut archived = active.clone();
+        archived.id = "s-archived".into();
+        archived.title = "보관된 작업".into();
+        archived.archived = true;
+        state.apply(Input::SessionsLoaded(vec![active, archived]));
+
+        let hidden = project_boxes_with_archived(&state, false);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].members.len(), 1);
+        assert_eq!(hidden[0].members[0].session_id, "s-active");
+
+        let shown = project_boxes_with_archived(&state, true);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].members.len(), 2);
+        assert!(shown[0].members.iter().any(|m| m.session_id == "s-archived"));
+
+        let secs = crate::ui::session::side_sections(&shown, "ember", "");
+        assert_eq!(secs.len(), 1);
+        assert_eq!(secs[0].members.len(), 2);
+    }
+
+    #[test]
+    fn fr_l9_wide_header_renders_global_search_icon_button_beside_inline_filter() {
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.go(crate::ui::Route::Projects);
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
+        let _ = host.rebuild().expect("rebuild");
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        let batch = decode_batch(bytes).expect("decode");
+        // Verify both the inline "팀원 검색" placeholder and the Search icon button exist at 1440dp.
+        let has_placeholder = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
+        });
+        let has_search_icon = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. })
+        });
+        assert!(has_placeholder, "expected inline filter field at 1440dp");
+        assert!(has_search_icon, "expected global search icon button at 1440dp");
         compose_rust::window::reset_window_size();
     }
 }

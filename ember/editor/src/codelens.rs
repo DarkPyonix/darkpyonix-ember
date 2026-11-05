@@ -58,6 +58,8 @@ pub struct Lens {
     pub command: Option<CommandDto>,
     /// Stable id key, fixed when the list arrived.
     pub key: String,
+    /// Whether `$resolveCodeLens` has already been requested for this lens.
+    pub resolving: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +89,8 @@ pub struct CodeLenses {
     by_doc: HashMap<String, BTreeMap<i64, LensList>>,
     /// decoration id → (doc, handle, index)
     by_id: HashMap<u64, (String, i64, usize)>,
+    /// doc key → visible `(first_line, last_line)` inclusive (0-based)
+    visible_ranges: HashMap<String, (u32, u32)>,
     serial: u64,
 }
 
@@ -95,8 +99,37 @@ impl CodeLenses {
         Self::default()
     }
 
+    /// Update the visible line range for `doc` and return `(handle, serial, index, dto)` for any
+    /// unresolved lenses in the newly visible viewport that have not yet been requested.
+    pub fn set_visible_range(&mut self, doc: &str, first_line: u32, last_line: u32) -> Vec<(i64, u64, usize, Value)> {
+        let range = (first_line.min(last_line), first_line.max(last_line));
+        self.visible_ranges.insert(doc.to_owned(), range);
+        let mut to_resolve = Vec::new();
+        if let Some(lists) = self.by_doc.get_mut(doc) {
+            for (handle, list) in lists.iter_mut() {
+                let serial = list.serial;
+                for (i, lens) in list.lenses.iter_mut().enumerate() {
+                    if lens.command.is_none()
+                        && !lens.resolving
+                        && lens.range.start.line >= range.0
+                        && lens.range.start.line <= range.1
+                    {
+                        lens.resolving = true;
+                        to_resolve.push((*handle, serial, i, lens.dto.clone()));
+                    }
+                }
+            }
+        }
+        to_resolve
+    }
+
+    pub fn visible_range(&self, doc: &str) -> Option<(u32, u32)> {
+        self.visible_ranges.get(doc).copied()
+    }
+
     /// Store a `$provideCodeLenses` reply (`Value::Null` = provider returned nothing).
-    /// `resolve_cap` bounds how many unresolved lenses are returned for resolving.
+    /// `resolve_cap` bounds how many unresolved lenses are returned for resolving; lenses inside
+    /// the document's visible range (if known) are prioritized first.
     pub fn set_list(&mut self, doc: &str, handle: i64, reply: &Value, resolve_cap: usize) -> SetOutcome {
         self.serial += 1;
         let serial = self.serial;
@@ -109,15 +142,27 @@ impl CodeLenses {
             let key = format!("{handle}|{}|{n}", range.start.line);
             *n += 1;
             let command = dto.get("command").and_then(CommandDto::from_json);
-            lenses.push(Lens { dto: dto.clone(), range, command, key });
+            lenses.push(Lens { dto: dto.clone(), range, command, key, resolving: false });
         }
-        let to_resolve = lenses
+        let vis = self.visible_ranges.get(doc).copied();
+        let mut candidates: Vec<usize> = lenses
             .iter()
             .enumerate()
             .filter(|(_, l)| l.command.is_none())
-            .take(resolve_cap)
-            .map(|(i, l)| (i, l.dto.clone()))
+            .map(|(i, _)| i)
             .collect();
+        if let Some((first_line, last_line)) = vis {
+            candidates.sort_by_key(|&i| {
+                let line = lenses[i].range.start.line;
+                let outside = !(line >= first_line && line <= last_line);
+                (outside, i)
+            });
+        }
+        let mut to_resolve = Vec::new();
+        for i in candidates.into_iter().take(resolve_cap) {
+            lenses[i].resolving = true;
+            to_resolve.push((i, lenses[i].dto.clone()));
+        }
         let list = LensList { handle, cache_id: reply.get("cacheId").and_then(Value::as_i64), serial, lenses };
         let release = self.by_doc.entry(doc.to_owned()).or_default().insert(handle, list).and_then(|old| old.cache_id);
         SetOutcome { release, to_resolve, serial }

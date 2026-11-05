@@ -241,14 +241,21 @@ where
     });
 }
 
-/// Persist prefs off the UI thread.
-pub fn save_prefs(prefs: crate::prefs::Prefs) {
-    let Some(path) = services().config.prefs_path() else { return };
-    services().rt.spawn_blocking(move || {
+/// Persist the latest prefs, serializing writes so an older snapshot cannot overwrite a newer one.
+pub fn save_prefs(_prefs: crate::prefs::Prefs) {
+    let _guard = prefs_write_lock();
+    let s = services();
+    if let Some(path) = s.config.prefs_path() {
+        let prefs = s.ui.prefs.get_untracked();
         if let Err(e) = crate::prefs::save(&path, &prefs) {
             tracing::warn!("could not save prefs to {}: {e}", path.display());
         }
-    });
+    }
+}
+
+pub(crate) fn prefs_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Services for unit tests that compose screens: demo data, no server contacted, data under

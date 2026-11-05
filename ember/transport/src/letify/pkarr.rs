@@ -288,6 +288,25 @@ impl Drop for PkarrNode {
     }
 }
 
+/// The direct (TCP) addresses in the letify address record published under the `_letify` label,
+/// given the record's TXT text (its character-strings joined). `None` when the text is not a
+/// valid signed record. A directory view such as the fake hub's reads published addresses
+/// with this, without naming the backend library (FR-N5).
+pub fn direct_addresses_from_txt(joined: &str) -> Option<Vec<std::net::SocketAddr>> {
+    let strings: Vec<&str> = joined
+        .as_bytes()
+        .chunks(255)
+        .map(|c| std::str::from_utf8(c).ok())
+        .collect::<Option<_>>()?;
+    let rec = AddressRecord::decode_txt(strings.as_slice(), record::unix_now()).ok()?;
+    Some(rec.tcp)
+}
+
+/// Whether a DNS name is the `_letify` address record label.
+pub fn is_record_label(name: &str) -> bool {
+    first_label(name) == RECORD_LABEL
+}
+
 impl PkarrNode {
     /// Starts publishing and polling. `record` returns the fresh TXT strings of our address
     /// record (empty: publish mailboxes only).
@@ -595,6 +614,7 @@ mod tests {
         rec.tcp = vec!["127.0.0.1:4242".parse().unwrap()];
         rec.transports = vec![record::DEFAULT_TRANSPORT.to_string()];
         let txt = rec.encode_txt(&identity);
+        let rec_joined = txt.concat();
         let _b = PkarrNode::start(kb.clone(), Arc::new(store.clone()), Arc::new(move || txt.clone()), Duration::from_secs(60));
         let a = PkarrNode::start(ka, Arc::new(store.clone()), Arc::new(|| Vec::<String>::new()), Duration::from_secs(60));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -607,6 +627,11 @@ mod tests {
         };
         assert_eq!(found.tcp, vec!["127.0.0.1:4242".parse::<std::net::SocketAddr>().unwrap()]);
         assert!(found.speaks(record::DEFAULT_TRANSPORT));
+        // The directory view decodes the same record from its joined TXT text.
+        let joined = rec_joined.clone();
+        assert_eq!(direct_addresses_from_txt(&joined), Some(vec!["127.0.0.1:4242".parse().unwrap()]));
+        assert_eq!(direct_addresses_from_txt("not-a-record"), None);
+        assert!(is_record_label("_letify.abc"));
         // Nothing is published for an unknown key.
         assert!(a.lookup(SecretKey::generate().peer_id()).await.unwrap().is_none());
     }

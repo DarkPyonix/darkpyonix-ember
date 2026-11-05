@@ -21,12 +21,11 @@ use compose_rust::{
 
 pub use crate::ui::vcs::{
     ahead_behind_text, bar_fractions, build_tree, check_glyph, check_of, commit_enabled,
-    commit_label, effective_tab, fetched_text, folder_check, merge_gate, open_for_project,
-    pane_layout, pane_tabs, parse_hunk_header, parse_unified, pick_project, remote_action,
-    repo_projects, route_section, section_count, section_nav, snapshot, soon_line,
-    tab_after_select, upstream_text, Check, CiState, DiffLine, FileDiff, FileStaging,
-    FileStatus, Hunk, LineKind, PaneLayout, PaneTab, RemoteAction, RepoSnapshot, ReviewState,
-    Section, SectionNav, Staging, TreeRow, SOON,
+    commit_label, effective_tab, fetched_text, folder_check, merge_gate, pane_layout, pane_tabs,
+    parse_hunk_header, parse_unified, pick_project, remote_action, repo_projects, route_section,
+    section_count, section_nav, snapshot, soon_line, tab_after_select, upstream_text, Check,
+    CiState, DiffLine, FileDiff, FileStaging, FileStatus, Hunk, LineKind, PaneLayout, PaneTab,
+    RemoteAction, RepoSnapshot, ReviewState, Section, SectionNav, Staging, TreeRow, SOON,
 };
 use crate::ui::coexist::SharedUi;
 use crate::ui::project::{display_name, project_boxes, ProjectBox};
@@ -186,6 +185,8 @@ fn SmallNote(text: &str) {
     Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
+// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
+// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -1063,6 +1064,7 @@ fn CommitBox(
             // Amend checkbox
             cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                 let am = amend_state.clone();
+                // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so staging looks hollow.
                 cu::Checkbox(is_amend)
                     .modifier(Modifier::new().size(18.0, 18.0))
                     .on_change(move |v| am.set(v));

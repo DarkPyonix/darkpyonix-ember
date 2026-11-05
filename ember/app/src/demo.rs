@@ -874,6 +874,9 @@ impl GitError {
     }
 }
 
+/// What the node answers for a path that is not unmerged (409).
+const NOT_UNMERGED: &str = "병합 충돌 중인 파일이 아닙니다.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Modified,
@@ -962,6 +965,15 @@ struct GitState {
     commits: u128,
     /// Newest first, as `git stash list` (index 0 is the newest).
     stashes: Vec<DemoStash>,
+    /// Unmerged files (FR-G7), in path order; resolving one removes it.
+    conflicts: Vec<DemoConflict>,
+}
+
+/// One unmerged demo file: the blocks `git/conflict` answers, as the node's JSON.
+#[derive(Debug, Clone)]
+struct DemoConflict {
+    path: String,
+    blocks: Vec<Value>,
 }
 
 /// One demo stash. `files` are the changes it holds, put back by apply and pop.
@@ -989,6 +1001,33 @@ fn iso_time(unix: i64) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00", secs / 3_600, secs % 3_600 / 60, secs % 60)
+}
+
+fn demo_conflicts() -> Vec<DemoConflict> {
+    let common = |text: &str| json!({ "kind": "common", "text": text });
+    let block = |ours: &str, theirs: &str| {
+        json!({ "kind": "conflict", "ours": ours, "theirs": theirs, "ours_label": "HEAD (feat/git-api)", "theirs_label": "origin/main" })
+    };
+    vec![
+        DemoConflict {
+            path: "ember/app/src/ui/cr/shell.rs".into(),
+            blocks: vec![
+                common("use compose_rust::ui as cu;\n"),
+                block("use crate::ui::vcs::Section;\n", "use crate::ui::vcs::{Section, SectionNav};\n"),
+                common("\npub fn shell() {\n"),
+                block("    let pad = 16.0;\n", "    let pad = 24.0;\n"),
+                common("}\n"),
+            ],
+        },
+        DemoConflict {
+            path: "docs/SPEC.md".into(),
+            blocks: vec![
+                common("# SPEC\n\n"),
+                block("FR-G7 is in progress.\n", "FR-G7 is built.\n"),
+                common("\nEnd of file"),
+            ],
+        },
+    ]
 }
 
 fn hunk(header: &str, lines: &[&str]) -> String {
@@ -1100,6 +1139,7 @@ impl GitState {
             ],
             fetched_age_secs: Some(300),
             commits: 0,
+            conflicts: demo_conflicts(),
             stashes: {
                 let now = now_ms() / 1000;
                 let held = |path: &str, line: &str| DemoFile {
@@ -1280,7 +1320,25 @@ impl GitState {
                 b.behind = 0;
                 Ok(json!({ "output": output }))
             }
-            "conflicts" => Ok(json!({ "paths": Vec::<String>::new() })),
+            "conflicts" => Ok(json!({ "paths": self.conflicts.iter().map(|c| c.path.clone()).collect::<Vec<_>>() })),
+            "conflict" => {
+                let path = str_of(body, "path").ok_or_else(|| GitError::bad("path is required"))?;
+                let c = self.conflicts.iter().find(|c| c.path == path).ok_or_else(|| GitError::conflict(NOT_UNMERGED))?;
+                Ok(json!({ "blocks": c.blocks }))
+            }
+            "resolve" => {
+                let path = str_of(body, "path").ok_or_else(|| GitError::bad("path is required"))?.to_string();
+                let content = str_of(body, "content").ok_or_else(|| GitError::bad("content is required"))?.to_string();
+                let at = self.conflicts.iter().position(|c| c.path == path).ok_or_else(|| GitError::conflict(NOT_UNMERGED))?;
+                self.conflicts.remove(at);
+                // Resolving stages the file: the whole content as one staged hunk.
+                let lines: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
+                let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                let staged = vec![hunk(&format!("@@ -0,0 +1,{} @@", refs.len().max(1)), &refs)];
+                self.files.retain(|f| f.path != path);
+                self.files.push(DemoFile { path, old_path: None, kind: Kind::Modified, staged, unstaged: vec![] });
+                Ok(Value::Null)
+            }
             "stash/list" => Ok(Value::Array(
                 self.stashes
                     .iter()
@@ -1598,6 +1656,54 @@ mod tests {
         assert_eq!(stash_list(&d).len(), 2);
     }
 
+    fn conflict_paths(d: &DemoSource) -> Vec<String> {
+        gs(d, "conflicts", json!({})).unwrap()["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_string()).collect()
+    }
+
+    fn conflict_blocks(d: &DemoSource, path: &str) -> usize {
+        let v = gs(d, "conflict", json!({ "path": path })).unwrap();
+        v["blocks"].as_array().unwrap().iter().filter(|b| b["kind"] == "conflict").count()
+    }
+
+    #[test]
+    fn fr_g7_demo_lists_two_unmerged_files_with_two_blocks_and_one() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let paths = conflict_paths(&d);
+        assert_eq!(paths.len(), 2);
+        let mut counts: Vec<usize> = paths.iter().map(|p| conflict_blocks(&d, p)).collect();
+        counts.sort();
+        assert_eq!(counts, vec![1, 2]);
+        let v = gs(&d, "conflict", json!({ "path": paths[0] })).unwrap();
+        let first = v["blocks"].as_array().unwrap().iter().find(|b| b["kind"] == "conflict").unwrap();
+        assert!(first["ours_label"].as_str().unwrap().contains("feat/git-api"));
+        assert_eq!(first["theirs_label"], "origin/main");
+    }
+
+    #[test]
+    fn fr_g7_demo_resolve_removes_the_file_from_conflicts_and_stages_it() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let path = conflict_paths(&d)[1].clone();
+        gs(&d, "resolve", json!({ "path": path, "content": "a\nb" })).unwrap();
+        assert_eq!(conflict_paths(&d).len(), 1);
+        assert!(!conflict_paths(&d).contains(&path));
+        let f = file(&status(&d), &path).clone();
+        assert!(!f.is_null(), "resolved file is in the work tree status");
+        assert_eq!(f["index"], "M");
+    }
+
+    #[test]
+    fn fr_g7_demo_not_unmerged_path_is_a_korean_409() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for (op, body) in [("conflict", json!({ "path": "nope.rs" })), ("resolve", json!({ "path": "nope.rs", "content": "x" }))] {
+            let e = gs(&d, op, body).unwrap_err();
+            assert_eq!(e.status, 409);
+            assert_eq!(e.message, "병합 충돌 중인 파일이 아닙니다.");
+        }
+        let path = conflict_paths(&d)[0].clone();
+        gs(&d, "resolve", json!({ "path": path, "content": "x" })).unwrap();
+        assert_eq!(gs(&d, "resolve", json!({ "path": path, "content": "x" })).unwrap_err().status, 409);
+    }
+
     #[test]
     fn git_status_has_the_contract_shape() {
         let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
@@ -1727,7 +1833,7 @@ mod tests {
         assert_eq!(status(&d)["ahead"], 0);
         gs(&d, "fetch", json!({})).unwrap();
         assert_eq!(status(&d)["fetched_age_secs"], 0);
-        assert_eq!(gs(&d, "conflicts", json!({})).unwrap(), json!({"paths": []}));
+        assert_eq!(gs(&d, "conflicts", json!({})).unwrap()["paths"].as_array().unwrap().len(), 2);
         assert_eq!(gs(&d, "bogus", json!({})).unwrap_err().status, 404);
     }
 

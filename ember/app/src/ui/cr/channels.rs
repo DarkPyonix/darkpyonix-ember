@@ -3,27 +3,36 @@
 //! the list and the room replace each other and the room has a back button.
 //!
 //! The decisions (grouping, ordering, unread badges, bubble side, date dividers, filter and
-//! search) are `ui::channels`' plain functions, used as they are. The server has no channel data
-//! yet (FR-T10), so [`ChannelsScreen`] reads an empty room list and says "준비 중입니다";
-//! [`ChannelsScreenWith`] takes rooms, for the preview window and for when the data exists.
+//! search, wire to room mapping, after-seq merging) are `ui::channels`' plain functions, used as
+//! they are. [`ChannelsScreen`] reads the server's channels (FR-T10, `GET /api/channels`), loads
+//! the open room's messages, polls `?after=seq` every [`POLL_EVERY`] while a room is open (the
+//! effect is keyed on the open room, so closing the room or leaving the screen stops it) and
+//! sends with `POST`. In demo mode the sample rooms stand in. [`ChannelsScreenWith`] takes rooms,
+//! for the preview window. Unread counts are not built on the server, so no badge is drawn.
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{mutable_state_of, remember, MutableState};
+use std::time::Duration;
+
+use compose_rust::runtime::{
+    delay, launched_effect, mutable_state_of, remember, remember_with_key, MutableState,
+};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, IconRole, SpaceRole};
 
 pub use crate::ui::channels::{
-    bubble_side, compact_shows_room, feed, filter_chips, group_rooms, rooms_snapshot,
-    split_view, time_label, BubbleView, FeedItem, ListFilter, Member, Message, Room, RoomRow,
-    Section, Side,
+    bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
+    me_id, merge_messages, message_from, room_from, rooms_from, rooms_snapshot, split_view,
+    time_label, BubbleView, FeedItem, ListFilter, Load, Member, Message, Room, RoomRow, Section,
+    Side,
 };
 use super::components::{
     pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone,
 };
 use super::theme::*;
-use crate::ui::project::{display_name, harness_tone, SOON};
+use super::notice;
+use crate::ui::project::{display_name, harness_tone};
 
 /// The shell's "a detail view is open" flag; `None` in unit tests without services.
 fn detail_state() -> Option<MutableState<bool>> {
@@ -62,18 +71,144 @@ pub fn Avatar(name: &str, harness: &str, size: f32) {
         .content(|| Label(&initial, Fs::Sm, Weight::Semibold, Some(paint(fg)), None));
 }
 
-/// The screen with no data: the server has no channels yet. With `EMBER_CR_ROUTE=channels` the
-/// sample rooms stand in, for review captures.
+/// How often an open room asks the server for messages after the last seq it has.
+pub const POLL_EVERY: Duration = Duration::from_secs(2);
+
+/// What the live screen holds: the rooms read from the server and the state of that read.
+#[derive(Clone)]
+struct Feed {
+    rooms: MutableState<Vec<Room>>,
+    load: MutableState<Load>,
+}
+
+/// Runs `work` on the tokio runtime and resumes the (UI-thread) caller with the answer. `None`
+/// when the runtime dropped it. Dropping the caller drops the wait, so a cancelled effect never
+/// writes late.
+async fn on_runtime<T, F>(work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    crate::services::services().rt.spawn(async move {
+        let _ = tx.send(work.await);
+    });
+    rx.await.ok()
+}
+
+impl Feed {
+    /// Reads every channel. A failure keeps the rooms already shown and records the reason.
+    async fn refresh(&self) {
+        let answer = on_runtime(async { crate::services::services().client.api().channels(None).await }).await;
+        match answer {
+            Some(Ok(list)) => {
+                let old = self.rooms.get_untracked();
+                self.rooms.set(rooms_from(&list, &old));
+                self.load.set(Load::Ready);
+            }
+            Some(Err(e)) => {
+                tracing::warn!("channel list failed: {e}");
+                self.load.set(Load::Failed(String::new()))
+            }
+            None => self.load.set(Load::Failed("연결이 끊겼습니다".to_string())),
+        }
+    }
+
+    /// Adds `incoming` to the room `id` (no duplicates, log order).
+    fn merge(&self, id: &str, incoming: Vec<Message>) {
+        self.rooms.update(|rooms| {
+            if let Some(r) = rooms.iter_mut().find(|r| r.id == id) {
+                merge_messages(&mut r.messages, incoming);
+            }
+        });
+    }
+
+    fn after(&self, id: &str) -> i64 {
+        self.rooms.get_untracked().iter().find(|r| r.id == id).map(|r| last_seq(&r.messages)).unwrap_or(0)
+    }
+
+    /// Loads the room's latest messages once, then polls `after=seq` until cancelled.
+    async fn follow(&self, id: String) {
+        let first = {
+            let id = id.clone();
+            on_runtime(async move { crate::services::services().client.api().channel(&id).await }).await
+        };
+        match first {
+            Some(Ok(c)) => self.merge(&id, c.messages.iter().map(message_from).collect()),
+            Some(Err(e)) => {
+                tracing::warn!("channel messages failed: {e}");
+                notice::post("메시지를 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.".to_string())
+            }
+            None => return,
+        }
+        loop {
+            delay(POLL_EVERY).await;
+            let after = self.after(&id);
+            let answer = {
+                let id = id.clone();
+                on_runtime(async move { crate::services::services().client.api().channel_messages(&id, &ember_client::channels::MessagesQuery { after: Some(after), ..Default::default() }).await }).await
+            };
+            match answer {
+                Some(Ok(list)) if !list.is_empty() => self.merge(&id, list.iter().map(message_from).collect()),
+                // A failed poll is tried again on the next beat; the room stays as it is.
+                Some(_) => {}
+                None => return,
+            }
+        }
+    }
+
+    /// Posts `text` as the person; the answer joins the room at once, a failure is told.
+    fn send(&self, id: &str, text: &str, done: impl FnOnce(bool) + Send + 'static) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let (feed, id) = (self.clone(), id.to_string());
+        crate::services::run_shared(
+            {
+                let (id, text) = (id.clone(), text);
+                async move { crate::services::services().client.api().post_channel_message(&id, &ember_client::channels::NewChannelMessage { text, from: None }).await }
+            },
+            move |r| match r {
+                Ok(m) => {
+                    feed.merge(&id, vec![message_from(&m)]);
+                    done(true);
+                }
+                Err(e) => {
+                    tracing::warn!("channel send failed: {e}");
+                    notice::post("메시지를 보내지 못했습니다. 입력한 내용은 그대로 남아 있습니다.".to_string());
+                    done(false);
+                }
+            },
+        );
+    }
+}
+
+/// The screen: the server's channels, or the sample rooms in demo mode and for review captures
+/// (`EMBER_CR_ROUTE=channels`).
 pub fn ChannelsScreen() {
-    let rooms = if std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("channels") {
-        sample_rooms()
-    } else {
-        rooms_snapshot()
-    };
-    ChannelsScreenWith(rooms);
+    let sample = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("channels");
+    let live = crate::services::try_services().filter(|s| s.demo.is_none() && !sample);
+    if live.is_none() {
+        let rooms = if sample || crate::services::try_services().is_some() { sample_rooms() } else { rooms_snapshot() };
+        ChannelsView(rooms, Load::Ready, None);
+        return;
+    }
+    let feed = remember(|| Feed { rooms: mutable_state_of(Vec::new()), load: mutable_state_of(Load::Loading) });
+    {
+        let f = feed.clone();
+        launched_effect((), move || async move {
+            f.refresh().await;
+        });
+    }
+    ChannelsView(feed.rooms.get(), feed.load.get(), Some(feed));
 }
 
 pub fn ChannelsScreenWith(rooms: Vec<Room>) {
+    ChannelsView(rooms, Load::Ready, None);
+}
+
+fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let filter = remember(|| mutable_state_of(ListFilter::default()));
     // `EMBER_CR_ROOM=<index>` opens a room at the start, for review captures.
@@ -90,24 +225,35 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     let cur = open.get();
     let show_room = compact_shows_room(&cur);
 
-    if rooms.is_empty() {
+    // Nothing to draw yet (loading) or nothing could be read (failed): say so, plainly. An empty
+    // answer falls through to the list, which has the new-channel button.
+    if let Some(text) = empty_text(&load, rooms.len()).filter(|_| load != Load::Ready) {
         cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
                 Label("채널", Fs::Xl3, Weight::Medium, None, Some(1));
-                Label(SOON, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                Label(&text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             });
         });
         return;
     }
 
+    // Load and poll the open room's messages; the effect ends when the room or the screen closes.
+    if let Some(f) = feed.clone() {
+        let key = cur.clone();
+        launched_effect(key.clone(), move || async move {
+            if let Some(id) = key {
+                f.follow(id).await;
+            }
+        });
+    }
     let order: Vec<String> = Vec::new();
     let room = cur.as_ref().and_then(|id| rooms.iter().find(|r| &r.id == id)).cloned();
-    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0);
+    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0, &load);
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
             let detail = detail_state();
-            RoomView(&r, !split, move || {
+            RoomView(&r, !split, feed.clone(), move || {
                 if let Some(d) = &detail {
                     d.set(false);
                 }
@@ -134,14 +280,14 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     }
 }
 
-fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool) {
+fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool, load: &Load) {
     let p = ember_theme().palette;
     let current = filter.get();
     let sections = group_rooms(rooms, order, &current);
     let chips = filter_chips(rooms, order);
     let selected = open.get();
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
-        // Header: the title at 15 px and a round "+" (new channel, FR-T10 not built).
+        // Header: the title at 15 px and a round "+" (new channel).
         cu::Row()
             .alignment(Alignment::CenterStart)
             .modifier(Modifier::new().fill_max_width().height(56.0))
@@ -149,7 +295,10 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                // TODO(FR-T10): creates a channel; disabled until the server has them.
+                // TODO(FR-T10): `POST /api/channels` and `Api::create_channel` work, but the screen
+                // has no sheet to ask for the name, the project and the agents yet, so the button
+                // stays disabled rather than creating a channel with guessed values.
+                // TODO(compose-rust#429): accessible name (new channel).
                 cu::Box()
                     .alignment(Alignment::Center)
                     .modifier(
@@ -194,8 +343,13 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 }
             });
             cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
-                if sections.is_empty() {
-                    Label("채널이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                if let Load::Failed(why) = load {
+                    // Rooms stay on screen through a failed refresh; the reason is told once.
+                    let _ = why;
+                    Label("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
+                }
+                if sections.is_empty() && *load == Load::Ready {
+                    Label(&empty_text(&Load::Ready, 0).unwrap_or_default(), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
                 }
                 // The mockup list is flat, one row per room, newest first; the project is a chip.
                 cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
@@ -261,10 +415,10 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
     );
 }
 
-fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
+fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    // The signed-in user's member id. TODO: the server names it once channels exist (FR-T10).
-    let items = feed(room, "me", local_tz());
+    // The person is the member `user` (shown as 나) on the server, `me` in the samples.
+    let items = feed(room, me_id(room), local_tz());
     // `.room{background:var(--room)}`: the room is on `--surface`, not the page.
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface))).content(|| {
         // `.topbar`: the room mark, the name with the member count and the project, round
@@ -276,6 +430,7 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 if show_back {
+                    // TODO(compose-rust#429): accessible name (back).
                     AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
                 }
                 RoomIcon(&room.project, 36.0);
@@ -290,6 +445,7 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
                     });
                 });
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
+                // TODO(compose-rust#429): accessible name (members, menu).
                 for svg in [super::shell::ICON_USERS_SVG, super::shell::ICON_MORE_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
@@ -325,7 +481,7 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
                 }
             });
         });
-        InputBar();
+        InputBar(&room.id, live);
     });
 }
 
@@ -333,7 +489,35 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
 /// button, the field, an emoji button and the ink send button.
 /// TODO(compose-rust#376, #375): the field keeps the toolkit's own frame inside the pill, and
 /// the bar has no `--shadow-lg`.
-fn InputBar() {
+fn InputBar(room_id: &str, live: Option<Feed>) {
+    // The text typed so far, kept per room; sending bumps `generation`, which draws a fresh,
+    // empty field (the field is uncontrolled and has no way to be cleared).
+    let draft = remember_with_key(room_id.to_string(), || mutable_state_of(String::new()));
+    let generation = remember_with_key(room_id.to_string(), || mutable_state_of(0_u64));
+    let state = remember_with_key(room_id.to_string(), || mutable_state_of(SendState::Idle));
+    // The draft stays until the server answers Ok; on failure it is left as typed.
+    let send = {
+        let (draft, generation, live, id, state) =
+            (draft.clone(), generation.clone(), live.clone(), room_id.to_string(), state.clone());
+        move |text: String| {
+            if let Some(f) = &live {
+                if state.get_untracked().can_send(&text) {
+                    state.set(SendState::Sending);
+                    let (draft, generation, state) = (draft.clone(), generation.clone(), state.clone());
+                    let sent = text.clone();
+                    f.send(&id, &text, move |ok| {
+                        state.set(SendState::Idle);
+                        let now = draft.get_untracked();
+                        let next = draft_after_send(ok, &now, sent.trim());
+                        if next != now {
+                            draft.set(next);
+                            generation.update(|g| *g += 1);
+                        }
+                    });
+                }
+            }
+        }
+    };
     let p = ember_theme().palette;
     // The room's own width is not known here, so it is the window less the sidebar's rail share,
     // the list panel and the margins, kept to 740 at most.
@@ -354,7 +538,9 @@ fn InputBar() {
                     .shape_role(compose_rust::ShapeRole::Full),
             )
             .content(|| {
+                let _generation = generation.get();
                 cu::Spacer().modifier(Modifier::new().width(6.0));
+                // TODO(compose-rust#429): accessible name (attach (+)).
                 for svg in [super::shell::ICON_PLUS_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
@@ -364,14 +550,28 @@ fn InputBar() {
                 EmberField(FieldOptions {
                     weight: Some(1.0),
                     placeholder: "메시지 입력".to_string(),
+                    enabled: Some(live.is_some()),
+                    on_value_change: Some(Box::new({
+                        let draft = draft.clone();
+                        move |v| draft.set(v)
+                    })),
+                    on_submit: Some(Box::new({
+                        let send = send.clone();
+                        move |v| send(v)
+                    })),
                     ..Default::default()
                 });
+                // TODO(compose-rust#429): accessible name (emoji).
                 cu::Box()
                     .alignment(Alignment::Center)
                     .modifier(Modifier::new().size(H_CTL, H_CTL))
                     .content(|| super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0));
-                // Sending needs the channel feed (FR-T11, not built): the button stays disabled.
-                AppButton("전송", None, ButtonKind::Primary, false, false, false, || {});
+                // Sending is for the server's rooms; the sample rooms (demo) cannot send.
+                let sending = state.get() == SendState::Sending;
+                let can_send = live.is_some() && !sending && !draft.get().trim().is_empty();
+                let (draft, send) = (draft.clone(), send.clone());
+                // TODO(compose-rust#429): accessible name (send, icon-less label only, no icon role).
+                AppButton(if sending { "전송 중" } else { "전송" }, None, ButtonKind::Primary, false, can_send, false, move || send(draft.get_untracked()));
                 cu::Spacer().modifier(Modifier::new().width(6.0));
             });
         cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -510,9 +710,36 @@ mod tests {
     }
 
     #[test]
-    fn fr_l12_without_channels_the_screen_says_it_is_not_ready() {
-        let text = text_of(ChannelsScreen);
-        assert!(text.contains("채널") && text.contains(SOON));
+    fn fr_l12_a_loading_screen_says_it_is_loading() {
+        fn loading() {
+            ChannelsView(Vec::new(), Load::Loading, None);
+        }
+        let text = text_of(loading);
+        assert!(text.contains("채널을 불러오는 중입니다"), "{text}");
+    }
+
+    #[test]
+    fn fr_l12_a_failed_read_with_no_rooms_says_why() {
+        fn failed() {
+            ChannelsView(Vec::new(), Load::Failed("503".into()), None);
+        }
+        let text = text_of(failed);
+        assert!(text.contains("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.") && !text.contains("503"), "{text}");
+    }
+
+    #[test]
+    fn fr_l12_an_empty_answer_says_there_are_no_channels() {
+        fn empty() {
+            ChannelsScreenWith(Vec::new());
+        }
+        assert!(text_of(empty).contains("채널이 없습니다"));
+    }
+
+    #[test]
+    fn fr_l12_no_unread_means_no_badge_text() {
+        let rooms = sample_rooms();
+        let rows = group_rooms(&rooms[2..], &[], &ListFilter::default());
+        assert_eq!(rows[0].rooms[0].unread, 0);
     }
 
     /// Everything emitted composing the sample list, then after the window reports `width`.

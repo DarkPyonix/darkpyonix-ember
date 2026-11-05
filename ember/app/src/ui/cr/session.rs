@@ -27,7 +27,7 @@ use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
 use ember_client::LauncherStatus;
 
 pub use crate::ui::session::{
-    INFO_PANEL_W, IdeChoice, InfoCard, KanbanColumn, PANE_H, PaneLayout, PaneMove, PaneTab,
+    INFO_PANEL_W, IdeChoice, StatusCard, status_cards, token_tile, InfoCard, KanbanColumn, PANE_H, PaneLayout, PaneMove, PaneTab,
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
@@ -86,10 +86,7 @@ const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
 const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
-const PR_TITLE: &str = "PR과 CI";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
-const SUBAGENT_TITLE: &str = "서브 에이전트 스레드";
-const LOAD_TITLE: &str = "부하";
 
 const POPUP_W: f32 = 280.0;
 
@@ -3138,7 +3135,31 @@ fn TimelineCard(project: &str) {
         });
 }
 
-/// The kanban of member status, with the PR list and timeline not built yet.
+/// One card of the status grid: a title row, then the rows or the empty state.
+fn StatusCardBody(ico: &'static str, card: StatusCard) {
+    let p = ember_theme().palette;
+    cu::Column()
+        .space_role(SpaceRole::Xs)
+        .modifier(Modifier::new().fill_max_width())
+        .content(move || {
+            cu::Row()
+                .alignment(Alignment::CenterStart)
+                .space_role(SpaceRole::Xs)
+                .content(|| {
+                    NavIcon(ico, p.text_2.to_argb(), 16.0);
+                    Label(card.title, Fs::Md, Weight::Semibold, None, Some(1));
+                });
+            if card.rows.is_empty() {
+                Label(card.empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+            } else {
+                for r in card.rows.iter() {
+                    Label(r, Fs::Sm, Weight::Regular, None, Some(1));
+                }
+            }
+        });
+}
+
+/// The kanban of member status, with the cards fed by the view-model (#324).
 pub fn StatusView(
     project: &str,
     members: &[Member],
@@ -3148,6 +3169,7 @@ pub fn StatusView(
     let p = ember_theme().palette;
     let proj_owned = project.to_string();
     let members_vec = members.to_vec();
+    let members_for_cards = members_vec.clone();
     let columns = kanban(&members_vec);
     let count = |s: LauncherStatus| members_vec.iter().filter(|m| m.status == s).count();
     let total_cnt = members_vec.len();
@@ -3195,20 +3217,10 @@ pub fn StatusView(
             },
             Some(p.red.strong),
         ),
-        (
-            "오늘 토큰".to_string(),
-            if services().demo.is_some() {
-                "1.2M".to_string()
-            } else {
-                "준비 중".to_string()
-            },
-            if services().demo.is_some() {
-                "$13.20".to_string()
-            } else {
-                SOON.to_string()
-            },
-            None,
-        ),
+        {
+            let (value, sub) = token_tile(services().demo.is_some());
+            ("오늘 토큰".to_string(), value, sub, None)
+        },
         (
             "성공률".to_string(),
             format!("{ok_pct}%"),
@@ -3325,78 +3337,26 @@ pub fn StatusView(
                     });
 
                     // 4. Bottom 3-column grid (.sgrid): PR과 CI, 서브 에이전트 스레드, 부하
+                    // Rows come from the pure view-model; no data shows an honest empty state (#324).
+                    let demo_cards = services().demo.is_some();
+                    let cards = status_cards(demo_cards, &members_for_cards);
+                    let icons = [ICON_GIT_SVG, ICON_USERS_SVG, ICON_CPU_SVG];
                     if wide_grid {
                         cu::Row()
                             .alignment(Alignment::TopStart)
                             .space_role(SpaceRole::Sm)
                             .modifier(Modifier::new().fill_max_width())
-                            .content(|| {
-                                EmberCard(false, false, Some(1.0), None, None, || {
-                                    cu::Column()
-                                        .space_role(SpaceRole::Xs)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(|| {
-                                            cu::Row()
-                                                .alignment(Alignment::CenterStart)
-                                                .space_role(SpaceRole::Xs)
-                                                .content(|| {
-                                                    NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 16.0);
-                                                    Label(PR_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
-                                                });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                        });
-                                });
-                                EmberCard(false, false, Some(1.0), None, None, || {
-                                    cu::Column()
-                                        .space_role(SpaceRole::Xs)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(|| {
-                                            cu::Row()
-                                                .alignment(Alignment::CenterStart)
-                                                .space_role(SpaceRole::Xs)
-                                                .content(|| {
-                                                    NavIcon(ICON_USERS_SVG, p.text_2.to_argb(), 16.0);
-                                                    Label(SUBAGENT_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
-                                                });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                        });
-                                });
-                                EmberCard(false, false, Some(1.0), None, None, || {
-                                    cu::Column()
-                                        .space_role(SpaceRole::Xs)
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(|| {
-                                            cu::Row()
-                                                .alignment(Alignment::CenterStart)
-                                                .space_role(SpaceRole::Xs)
-                                                .content(|| {
-                                                    NavIcon(ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
-                                                    Label(LOAD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
-                                                });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                        });
-                                });
+                            .content(move || {
+                                for (card, ico) in cards.clone().into_iter().zip(icons) {
+                                    EmberCard(false, false, Some(1.0), None, None, move || {
+                                        StatusCardBody(ico, card.clone());
+                                    });
+                                }
                             });
                     } else {
-                        for (ico, title) in [
-                            (ICON_GIT_SVG, PR_TITLE),
-                            (ICON_USERS_SVG, SUBAGENT_TITLE),
-                            (ICON_CPU_SVG, LOAD_TITLE),
-                        ] {
+                        for (card, ico) in cards.into_iter().zip(icons) {
                             EmberCard(false, true, None, None, None, move || {
-                                cu::Column()
-                                    .space_role(SpaceRole::Xs)
-                                    .modifier(Modifier::new().fill_max_width())
-                                    .content(move || {
-                                        cu::Row()
-                                            .alignment(Alignment::CenterStart)
-                                            .space_role(SpaceRole::Xs)
-                                            .content(|| {
-                                                NavIcon(ico, p.text_2.to_argb(), 16.0);
-                                                Label(title, Fs::Md, Weight::Semibold, None, Some(1));
-                                            });
-                                        Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                                    });
+                                StatusCardBody(ico, card.clone());
                             });
                         }
                     }

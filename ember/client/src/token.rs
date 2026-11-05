@@ -85,7 +85,25 @@ pub fn token_allowed_for_hosts(base_url: &str, extra_hosts: &str) -> bool {
     if host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()) {
         return true;
     }
-    extra_hosts.split(',').map(|h| h.trim().to_ascii_lowercase()).any(|h| !h.is_empty() && h == host)
+    extra_hosts.split(',').map(str::trim).any(|entry| entry_matches(entry, &url, &host))
+}
+
+/// One `EMBER_TOKEN_HOSTS` entry against the target. A bare `host` matches that host on any
+/// scheme and port. An entry with a scheme (`https://host:8740`) matches only that scheme, host
+/// and port; a missing port means the scheme's default port.
+fn entry_matches(entry: &str, url: &reqwest::Url, host: &str) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    if !entry.contains("://") {
+        return entry.to_ascii_lowercase() == host;
+    }
+    let Ok(listed) = reqwest::Url::parse(entry) else { return false };
+    let Some(listed_host) = listed.host_str() else { return false };
+    let norm = |h: &str| h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    listed.scheme() == url.scheme()
+        && norm(listed_host) == host
+        && listed.port_or_known_default() == url.port_or_known_default()
 }
 
 /// Default headers holding `Authorization: Bearer <token>`, marked sensitive so it stays out of
@@ -178,6 +196,28 @@ mod tests {
         assert!(!token_allowed_for_hosts("not a url", ""));
         assert!(token_allowed_for_hosts("https://dev.example.com:9", "foo.org, Dev.Example.com"));
         assert!(!token_allowed_for_hosts("https://example.com", "foo.org,,"));
+    }
+
+    #[test]
+    fn fr_s11_token_hosts_entries_may_carry_scheme_and_port() {
+        let list = "https://dev.example.com:8740";
+        assert!(token_allowed_for_hosts("https://dev.example.com:8740/api", list));
+        assert!(token_allowed_for_hosts("https://DEV.example.com:8740", list));
+        // Another port, another scheme or another host is refused.
+        assert!(!token_allowed_for_hosts("https://dev.example.com:9", list));
+        assert!(!token_allowed_for_hosts("https://dev.example.com", list));
+        assert!(!token_allowed_for_hosts("http://dev.example.com:8740", list));
+        assert!(!token_allowed_for_hosts("https://other.example.com:8740", list));
+        // A missing port in the entry means the scheme's default port.
+        assert!(token_allowed_for_hosts("https://dev.example.com", "https://dev.example.com"));
+        assert!(token_allowed_for_hosts("https://dev.example.com:443", "https://dev.example.com"));
+        assert!(!token_allowed_for_hosts("https://dev.example.com:8740", "https://dev.example.com"));
+        // A bare host still matches any scheme and port; entries mix freely.
+        assert!(token_allowed_for_hosts("http://dev.example.com:1", "dev.example.com"));
+        assert!(token_allowed_for_hosts("http://b.org:1", "https://a.org:2, b.org"));
+        // An entry that is not a URL never matches; loopback is unchanged.
+        assert!(!token_allowed_for_hosts("https://dev.example.com", "https://"));
+        assert!(token_allowed_for_hosts("http://127.0.0.1:5", "https://a.org:2"));
     }
 
     #[cfg(unix)]

@@ -7,12 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
+use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::proc::{
-    clear_runtime, install_runtime, spawn_agent, AgentCommand, ProcHandle, ShimRuntime, SESSION_ENV,
+    clear_runtime, install_runtime, release_commit, require_commit, spawn_agent, AgentCommand,
+    ProcHandle, ShimRuntime, SESSION_ENV,
 };
-use ember_server::agents::{AgentAdapter, StartRequest};
-use ember_server::events::{AgentEvent, ApprovalDecision, TurnOutcome};
-use ember_server::session_shim::pid_alive;
+use ember_server::agents::{AgentAdapter, AgentKind, StartRequest};
+use ember_server::events::{AgentEvent, ApprovalDecision, SessionStatus, TurnOutcome};
+use ember_server::session::Sessions;
+use ember_server::session_shim::{pid_alive, scan};
 use ember_server::store::Store;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -210,5 +213,325 @@ async fn fr_s8_claude_adapter_runs_under_the_shim() {
     run.shutdown().await.unwrap();
     let args = std::fs::read_to_string(work.path().join("args.log")).unwrap();
     assert!(args.contains("--permission-prompt-tool stdio"), "{args}");
+    clear_runtime();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transactional acknowledgement, approval restoration, Codex drain, three-session handoff.
+
+/// Run "server 1" on its own runtime and drop that runtime afterwards: every task, socket and
+/// child handle of the old server goes away at once, as in a crash, while the shims stay.
+fn run_server1<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(f);
+        rt.shutdown_background();
+    })
+    .join()
+    .unwrap();
+}
+
+async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    for _ in 0..400 {
+        if ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn events_of(store: &Store, id: &str) -> Vec<AgentEvent> {
+    store.events_after(id, 0).unwrap().into_iter().map(|e| e.event).collect()
+}
+
+fn ended(store: &Store, id: &str) -> bool {
+    events_of(store, id).iter().any(|e| matches!(e, AgentEvent::TurnEnded { .. }))
+}
+
+fn runtime(dir: &Path, store: &Arc<Store>) -> ShimRuntime {
+    ShimRuntime {
+        bin: PathBuf::from(env!("CARGO_BIN_EXE_ember-shim")),
+        dir: dir.to_path_buf(),
+        store: store.clone(),
+    }
+}
+
+/// Offsets are acknowledged only after the event they cover was committed: a server that dies
+/// between reading a line and storing its event leaves that line to the next server.
+#[tokio::test]
+async fn fr_s8_crash_between_stdout_read_and_store_commit_replays_event() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+
+    let gate = require_commit("s-commit");
+    let proc = spawn_agent(fake_agent_cmd("s-commit", work.path(), 10)).await.unwrap();
+    let mut lines = BufReader::new(proc.stdout).lines();
+    let mut seen = Vec::new();
+    while let Some(l) = tokio::time::timeout(Duration::from_secs(15), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        seen.extend(tick(&l));
+        if seen.len() == 3 {
+            break;
+        }
+    }
+    // Tick 3 was read but not stored; ticks 1 and 2 were handled, yet nothing is acknowledged
+    // until the store has them.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(store.shim_offset("s-commit").unwrap(), 0, "no ack before a commit");
+    gate.commit_ready();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        store.shim_offset("s-commit").unwrap(),
+        "tick 1\ntick 2\n".len() as u64,
+        "the commit acknowledges the end of tick 2, not tick 3"
+    );
+    // Crash before tick 3 is stored.
+    drop(lines);
+    drop(proc.stdin);
+    drop(proc.handle);
+    release_commit("s-commit");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let proc = spawn_agent(fake_agent_cmd("s-commit", work.path(), 10)).await.unwrap();
+    assert!(proc.reattached);
+    let mut lines = BufReader::new(proc.stdout).lines();
+    let first = tokio::time::timeout(Duration::from_secs(15), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, "tick 3", "the line that was read but not stored is replayed");
+    let mut rest = vec![3];
+    while let Some(l) = tokio::time::timeout(Duration::from_secs(20), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        rest.extend(tick(&l));
+    }
+    assert_eq!(rest, (3..=10).collect::<Vec<_>>(), "nothing after it is lost: {rest:?}");
+    clear_runtime();
+}
+
+#[tokio::test]
+async fn fr_s8_failed_event_store_never_acknowledges_later_output() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let gate = require_commit("s-store-failed");
+    let proc = spawn_agent(fake_agent_cmd("s-store-failed", work.path(), 10)).await.unwrap();
+    let mut lines = BufReader::new(proc.stdout).lines();
+    for _ in 0..3 {
+        tokio::time::timeout(Duration::from_secs(15), lines.next_line()).await.unwrap().unwrap().unwrap();
+    }
+    // The pump must retain every subsequent line when one append fails, including at EOF.
+    gate.store_failed();
+    gate.commit_if_idle(|| true);
+    gate.commit_ready();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(store.shim_offset("s-store-failed").unwrap(), 0);
+    drop(lines);
+    drop(proc.stdin);
+    drop(proc.handle);
+    release_commit("s-store-failed");
+    let proc = spawn_agent(fake_agent_cmd("s-store-failed", work.path(), 10)).await.unwrap();
+    assert!(proc.reattached);
+    let mut lines = BufReader::new(proc.stdout).lines();
+    assert_eq!(lines.next_line().await.unwrap().as_deref(), Some("tick 1"));
+    proc.handle.shutdown(Duration::from_secs(1)).await.unwrap();
+    clear_runtime();
+}
+
+/// A permission prompt that was pending when the server died can still be answered after the
+/// new server rejoins the agent (the adapter's pending table is rebuilt from the store).
+#[tokio::test]
+async fn fr_s8_pending_approval_restored_and_answerable_after_server_crash() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let bin = crate_dir().join("tests/fixtures/claude/fake-claude-approval.sh");
+    let id = store
+        .create_session("p", AgentKind::ClaudeCode, work.path().to_str().unwrap(), None, "t")
+        .unwrap()
+        .id;
+
+    {
+        let (store, bin, id) = (store.clone(), bin.clone(), id.clone());
+        run_server1(async move {
+            let sessions =
+                Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "hello").await.unwrap();
+            wait_for("the approval request", || {
+                events_of(&store, &id).iter().any(|e| matches!(e, AgentEvent::ApprovalRequested { .. }))
+            })
+            .await;
+            // Let the offset settle past the approval line, so the new server does not see it
+            // again: the pending prompt must come from the store.
+            wait_for("a stored offset", || store.shim_offset(&id).unwrap() > 0).await;
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        });
+    }
+    assert!(store.shim_offset(&id).unwrap() > 0);
+
+    let sessions =
+        Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+    let rejoined = sessions.rejoin_shims(&runtime(shims.path(), &store)).await;
+    assert_eq!(rejoined, vec![id.clone()]);
+    sessions
+        .answer(&id, "r1", ApprovalDecision::AllowOnce)
+        .await
+        .expect("the approval taken over from the old server can be answered");
+    wait_for("the turn to end", || ended(&store, &id)).await;
+    let log = std::fs::read_to_string(work.path().join("stdin.log")).unwrap();
+    assert!(log.contains("\"behavior\":\"allow\""), "the CLI got the allow response: {log}");
+    sessions.release(&id).await.unwrap();
+    clear_runtime();
+}
+
+/// Codex cannot be rejoined as it runs (its `initialize` needs a fresh process), but a turn in
+/// flight when the server died is drained from the surviving app-server into the store before
+/// that process is stopped.
+#[tokio::test]
+async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let bin = crate_dir().join("tests/fixtures/codex/fake-app-server.sh");
+    let id = store
+        .create_session("p", AgentKind::Codex, work.path().to_str().unwrap(), None, "t")
+        .unwrap()
+        .id;
+
+    {
+        let (store, bin, id) = (store.clone(), bin.clone(), id.clone());
+        run_server1(async move {
+            let sessions =
+                Sessions::new(store.clone(), vec![Arc::new(CodexAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "go").await.unwrap();
+            wait_for("two deltas", || {
+                events_of(&store, &id)
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::AssistantDelta { .. }))
+                    .count()
+                    >= 2
+            })
+            .await;
+        });
+    }
+    let before = events_of(&store, &id).len();
+    assert!(!ended(&store, &id), "the turn is still running when the server dies");
+    let pid = scan(shims.path()).into_iter().find(|m| m.session == id).expect("the shim survives").agent_pid;
+    assert!(pid_alive(pid));
+
+    let sessions =
+        Sessions::new(store.clone(), vec![Arc::new(CodexAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+    let rejoined = sessions.rejoin_shims(&runtime(shims.path(), &store)).await;
+    assert!(rejoined.is_empty(), "Codex is drained, not rejoined");
+    let events = events_of(&store, &id);
+    assert!(events.len() > before, "the rest of the turn was stored");
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("tick 25 "), "the last delta arrived: {text}");
+    assert!(
+        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        "{events:?}"
+    );
+    assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Idle);
+    wait_for("the surviving app-server to be stopped", || !pid_alive(pid)).await;
+    clear_runtime();
+}
+
+/// Update the server with three sessions running: none stops, none loses a turn.
+#[tokio::test]
+async fn fr_s8_update_server_with_three_sessions_running_none_stops_or_loses_turn() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let bin = crate_dir().join("tests/fixtures/claude/fake-claude-ticks.sh");
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let ids: Vec<String> = dirs
+        .iter()
+        .map(|d| {
+            store
+                .create_session("p", AgentKind::ClaudeCode, d.path().to_str().unwrap(), None, "t")
+                .unwrap()
+                .id
+        })
+        .collect();
+    let ticks_of = |id: &str| -> Vec<u32> {
+        events_of(&store, id)
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::AssistantMessage { text } => tick(text),
+                _ => None,
+            })
+            .collect()
+    };
+
+    {
+        let (store, bin, ids) = (store.clone(), bin.clone(), ids.clone());
+        run_server1(async move {
+            let sessions =
+                Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+            for id in &ids {
+                sessions.send(id, "go").await.unwrap();
+            }
+            wait_for("three ticks in every session", || {
+                ids.iter().all(|id| {
+                    events_of(&store, id)
+                        .iter()
+                        .filter(|e| matches!(e, AgentEvent::AssistantMessage { .. }))
+                        .count()
+                        >= 3
+                })
+            })
+            .await;
+        });
+    }
+    // The old server is gone: all three agents and shims run on.
+    let metas = scan(shims.path());
+    assert_eq!(metas.len(), 3);
+    for m in &metas {
+        assert!(pid_alive(m.shim_pid) && pid_alive(m.agent_pid), "{m:?}");
+    }
+    assert!(ids.iter().all(|id| !ended(&store, id)), "no turn ended while the server was away");
+
+    let sessions =
+        Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+    let mut rejoined = sessions.rejoin_shims(&runtime(shims.path(), &store)).await;
+    rejoined.sort();
+    let mut expect = ids.clone();
+    expect.sort();
+    assert_eq!(rejoined, expect, "all three sessions are rejoined");
+    for id in &ids {
+        wait_for("the turn to end", || ended(&store, id)).await;
+        let seen = ticks_of(id);
+        let mut dedup = seen.clone();
+        dedup.dedup();
+        assert_eq!(dedup, (1..=30).collect::<Vec<_>>(), "no tick lost, in order: {seen:?}");
+        assert!(seen.len() - dedup.len() <= 1, "at most the line in flight repeats: {seen:?}");
+    }
+    for id in &ids {
+        sessions.release(id).await.unwrap();
+    }
     clear_runtime();
 }

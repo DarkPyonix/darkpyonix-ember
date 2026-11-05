@@ -240,10 +240,39 @@ impl SharedUi {
     /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the
     /// editor window in the same process instead of spawning `--editor <project> <folder>`.
     pub fn open_editor(&self, project: String, folder: String) {
+        self.open_editor_connection(project, folder, None, None);
+    }
+
+    /// Open an editor with the remote connection when one is available.
+    pub fn open_editor_connection(
+        &self,
+        project: String,
+        folder: String,
+        endpoint: Option<String>,
+        token: Option<String>,
+    ) {
+        let target = EditorTarget {
+            project: project.clone(),
+            folder: folder.clone(),
+            endpoint: endpoint.unwrap_or_default(),
+            token: token.unwrap_or_default(),
+        };
         #[cfg(not(test))]
-        self.open_editor_with(project, folder, crate::ide::spawn_editor_process);
-        #[cfg(test)]
-        self.open_editor_with(project, folder, |_, _| Ok(()));
+        let spawn_target = target.clone();
+        self.editor.set(Some(target.clone()));
+        if let Some(mut mirrors) = self.mirrors() {
+            mirrors.editor.set(Some(target));
+        }
+        if crate::services::try_services().is_some() {
+            #[cfg(not(test))]
+            let notice = crate::ide::spawn_editor_notice(&project, &folder, move |_, _| {
+                let exe = std::env::current_exe()?;
+                crate::ide::spawn_editor_target(&exe, &spawn_target).map(|_| ())
+            });
+            #[cfg(test)]
+            let notice = crate::ide::spawn_editor_notice(&project, &folder, |_, _| Ok(()));
+            crate::ui::cr::notice::post(notice);
+        }
     }
 
     /// Testable core of [`SharedUi::open_editor`]: records the [`EditorTarget`] and, when
@@ -258,6 +287,7 @@ impl SharedUi {
         let target = Some(EditorTarget {
             project: project.clone(),
             folder: folder.clone(),
+            ..Default::default()
         });
         self.editor.set(target.clone());
         if let Some(mut m) = self.mirrors() {
@@ -366,6 +396,20 @@ mod tests {
     use compose_rust::{Host, Recomposer};
 
     #[test]
+    fn editor_connection_is_retained_in_target() {
+        let ui = SharedUi::new(Prefs::default());
+        ui.open_editor_connection(
+            "project".into(),
+            "/work".into(),
+            Some("localhost:8000".into()),
+            Some("secret".into()),
+        );
+        let target = ui.editor.get_untracked().unwrap();
+        assert_eq!(target.endpoint, "localhost:8000");
+        assert_eq!(target.token, "secret");
+    }
+
+    #[test]
     fn shared_ui_tracks_route_editor_and_theme_transitions() {
         let ui = SharedUi::new(Prefs::default());
         assert_eq!(ui.menu.get_untracked(), NavMenu::Home);
@@ -390,6 +434,7 @@ mod tests {
             Some(EditorTarget {
                 project: "ember".to_string(),
                 folder: "/workspace/ember".to_string(),
+                ..Default::default()
             })
         );
         ui.close_editor();

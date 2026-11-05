@@ -14,6 +14,12 @@
 //! moves forward. `unread` on a channel counts messages after the cursor not written by `user`;
 //! on a message it is 1 or 0 the same way.
 //!
+//! | POST   | `/api/channels/{id}/mentions/preview` | `{text}` → `{reaches: [{id, name}], unknown: [name]}` |
+//!
+//! A message from `user` with `@name` of a name that is not a member agent is refused 400 with
+//! `code`/`reason` `not_a_member` and `unknown: [name]`; nothing is stored or pushed (FR-T13).
+//! Resolved mentions are stored and returned as `mentions: [session_id]` (FR-T12).
+//!
 //! A posted message is also pushed as `channel_message` on `/api/push` (FR-L12).
 //!
 //! `from` defaults to `user`; otherwise it is a member agent's session id. Errors are
@@ -47,6 +53,7 @@ pub fn router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
         .route("/api/channels/{id}", get(one))
         .route("/api/channels/{id}/messages", get(messages).post(post_message))
         .route("/api/channels/{id}/read", post(mark_read))
+        .route("/api/channels/{id}/mentions/preview", post(preview))
         .with_state(ChannelsCtx { store, sessions })
 }
 
@@ -56,6 +63,10 @@ impl IntoResponse for ChannelError {
             ChannelError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             ChannelError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ChannelError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            ChannelError::NotAMember(names) => {
+                let body = json!({ "error": format!("{self:#}"), "code": "not_a_member", "reason": "not_a_member", "unknown": names });
+                return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+            }
             ChannelError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
         (status, Json(json!({ "error": format!("{self:#}"), "code": code }))).into_response()
@@ -126,4 +137,19 @@ async fn mark_read(
 ) -> ApiResult<impl IntoResponse> {
     let seq = body.and_then(|Json(b)| b.seq);
     Ok(Json(c.store.mark_channel_read(&id, seq)?))
+}
+
+#[derive(Deserialize)]
+struct PreviewBody {
+    text: String,
+}
+
+async fn preview(
+    State(c): State<ChannelsCtx>,
+    Path(id): Path<String>,
+    Json(b): Json<PreviewBody>,
+) -> ApiResult<impl IntoResponse> {
+    let m = c.store.preview_channel_mentions(&id, &b.text)?;
+    let reaches: Vec<_> = m.mentioned.iter().map(|a| json!({ "id": a.id, "name": a.name })).collect();
+    Ok(Json(json!({ "reaches": reaches, "unknown": m.unknown })))
 }

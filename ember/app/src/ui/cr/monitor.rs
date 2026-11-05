@@ -19,7 +19,9 @@ pub use crate::ui::monitor::{
     sort_rows, toggle_sort, ComputerMetrics, Metric, NoMetrics, ProcessRow, SortKey, SortState,
 };
 use super::characters::{Character, CharState};
-use super::components::{EmberCard, EmberSheetSized, Label, Pill, PillTone};
+use super::components::{
+    EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+};
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{display_name, reach_pill, ComputerChip, ProjectBox, SOON};
@@ -56,11 +58,6 @@ pub fn mon_columns(width_dp: f32) -> usize {
     }
 }
 
-/// The sheet's width: `min(1360px, 100%)` less the dialog's margin.
-pub fn sheet_width(window_dp: f32) -> f32 {
-    (window_dp - 32.0).clamp(280.0, 1360.0)
-}
-
 /// Column widths of the process table (dp): the name takes the rest.
 const PID_W: f32 = 72.0;
 const PWR_W: f32 = 72.0;
@@ -77,7 +74,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = compose_rust::runtime::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 1200.0);
+    let body_height = if window.width_dp > 0.0 && window.width_dp <= 560.0 {
+        (window.height_dp - 60.0).max(0.0)
+    } else {
+        (window.height_dp - 32.0 - 60.0).clamp(240.0, 1200.0)
+    };
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -87,14 +88,14 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
         }
     };
-    EmberSheetSized(&title, true, sheet_width(window.width_dp), on_close.clone(), Some(&mut actions), || {
+    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {
                 cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     let Some(c) = chip else {
                         cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(240.0)).content(|| {
-                            Label("컴퓨터를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                            Label("컴퓨터를 찾을 수 없습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                         return;
                     };
@@ -199,6 +200,7 @@ fn MonCard(icon: &'static str, label: &str, body: impl FnOnce()) {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().height(168.0)).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
+                // TODO(compose-rust#443): no overflow_wrap on Text, so a long label clips with an ellipsis.
                 Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
             });
             body();
@@ -217,9 +219,9 @@ fn StatusCard(c: &ComputerChip) {
     MonCard(super::shell::ICON_GAUGE_SVG, "상태", || {
         cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().weight(1.0)).content(|| {
-                Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3));
                 if c.projects.is_empty() {
-                    Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+                    Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
                 }
                 for pr in c.projects.iter() {
                     Pill(&display_name(pr), PillTone::Grey, true);
@@ -234,8 +236,8 @@ fn StatusCard(c: &ComputerChip) {
 fn MetricCard(metric: Metric, series: Option<Vec<f32>>) {
     let p = ember_theme().palette;
     MonCard(metric_icon(metric), metric.title(), || match series.as_ref().and_then(|s| s.last()) {
-        Some(v) => Label(&format!("{v:.1}"), Fs::Xl4, Weight::Semibold, None, None),
-        None => Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None),
+        Some(v) => Label(&format!("{v:.1}"), Fs::Xl4, Weight::Semibold, None, Some(1)),
+        None => Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
     });
 }
 
@@ -275,7 +277,7 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
                     // is a label only (`th.c-pwr`).
                     if key == SortKey::Pid {
                         cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(PWR_W).height(H_CTL)).content(|| {
-                            Label("전력", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                            Label("전력", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                         });
                     }
                 }
@@ -293,7 +295,7 @@ fn ProcessTable(rows: &[ProcessRow], cur: SortState, sort: &MutableState<SortSta
             if rows.is_empty() {
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
-                    Label("이 컴퓨터에서 실행 중인 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("이 컴퓨터에서 실행 중인 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
             }
         });
@@ -329,7 +331,7 @@ fn ProcessRowView(row: &ProcessRow, mut on_open: impl FnMut(String) + 'static) {
             });
             let cell = |w: f32, text: String| {
                 cu::Box().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(w)).content(|| {
-                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                 });
             };
             cell(PID_W, row.pid.map_or_else(|| "-".to_string(), |v| v.to_string()));
@@ -411,5 +413,66 @@ mod tests {
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         assert!(text.contains("컴퓨터를 찾을 수 없습니다"));
+    }
+
+    fn has_text_with_max_lines_1(batch: &[compose_rust::protocol::Mutation<'_>], prefix: &str) -> bool {
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
+        let mut target_nodes = Vec::new();
+        for m in batch {
+            if let Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } = m {
+                if s.starts_with(prefix) {
+                    target_nodes.push(*node_id);
+                }
+            }
+        }
+        for node_id in target_nodes {
+            for m in batch {
+                if let Mutation::SetProp { node_id: nid, property: PropertyKind::MaxLines, value: PropertyValue::Integer(n) } = m {
+                    if *nid == node_id && *n == 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn fr_l10_1_table_headers_and_cells_emit_single_line_max_lines() {
+        let _guard = crate::services::test_guard();
+        let c = chip();
+        let mut host = Host::new(move || {
+            let c = c.clone();
+            Box::new(Recomposer::new(move || MonitorSheet(Some(&c), &[], || {})))
+        });
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        for label in ["전력", "메모리", "CPU", "PID", "이름 (0)"] {
+            assert!(
+                has_text_with_max_lines_1(&batch, label),
+                "header text '{label}' should emit MaxLines(1)"
+            );
+        }
+    }
+
+    #[test]
+    fn fr_l10_1_process_row_cells_emit_single_line_max_lines() {
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                let row = ProcessRow {
+                    pid: Some(1234),
+                    name: "ember-agent".into(),
+                    agent: "claude".into(),
+                    leader: false,
+                    cpu: Some(12.5),
+                    mem: Some(256),
+                    session: None,
+                };
+                ProcessRowView(&row, |_| {});
+            }))
+        });
+        let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(has_text_with_max_lines_1(&batch, "1234"));
+        assert!(has_text_with_max_lines_1(&batch, "ember-agent"));
     }
 }

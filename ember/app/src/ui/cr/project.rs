@@ -23,7 +23,7 @@ pub use crate::ui::project::{
 };
 use super::characters::{CharState, Character, StylePicker};
 use super::components::{
-    AppButton, ButtonKind, Clickable, EmberField, EmberSheet, EmberSheetSized, FieldOptions, FilterChip,
+    AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip,
     IconButton, Label, OptionSheet, Pill, PillTone, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
@@ -446,8 +446,8 @@ fn TeamDonut(members: &[Member], size: f32) {
     cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(size, size)).content(|| {
         ring_image(size, 6.0, &parts);
         cu::Column().alignment(Alignment::Center).content(|| {
-            Label(&members.len().to_string(), Fs::Lg, Weight::Semibold, None, None);
-            Label("팀원", Fs::Xs2, Weight::Regular, Some(paint(p.muted)), None);
+            Label(&members.len().to_string(), Fs::Lg, Weight::Semibold, None, Some(1));
+            Label("팀원", Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
     });
 }
@@ -497,7 +497,7 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                     .content(|| {
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             if total == 0 {
-                                Label("아직 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                                Label("아직 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                             }
                             let tiles: Vec<Part> = b
                                 .members
@@ -575,7 +575,7 @@ fn Stats(b: &ProjectBox, inner: f32) {
                             }
                             None => NavIcon(shell::ICON_CPU_SVG, p.muted.to_argb(), 14.0),
                         }
-                        Label(&n.to_string(), Fs::Md, Weight::Semibold, None, None);
+                        Label(&n.to_string(), Fs::Md, Weight::Semibold, None, Some(1));
                         Label(label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                 }
@@ -723,8 +723,12 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
             },
         ),
         IdeAction::EmberPlaceholder => {
-            let (project, folder) = IdeLaunch::editor_target(launch.as_ref());
-            ui.open_editor(project, folder);
+            let c = IdeLaunch::editor_connection(launch.as_ref());
+            if c.endpoint.as_deref().map_or(true, str::is_empty) {
+                notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
+                return;
+            }
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token);
         }
         IdeAction::Unavailable(why) => notice::post(format!("{label}: 사용할 수 없습니다: {why}")),
     }
@@ -995,7 +999,7 @@ fn FieldRow(label: &str, content: impl FnOnce()) {
     });
 }
 
-/// The settings sheet: 760 wide, with 취소 and 저장 in the header beside the close button.
+/// The settings sheet has 취소 and 저장 in the header beside the close button.
 fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() + Clone + 'static) {
     let p = ember_theme().palette;
     let default_project = is_default_project(&b.id);
@@ -1011,7 +1015,6 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
     let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty();
     let window = compose_rust::runtime::current_window_size();
     let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 900.0);
-    let width = (window.width_dp - 32.0).clamp(280.0, 760.0);
     let mut actions = {
         let close = on_close.clone();
         move || {
@@ -1021,7 +1024,7 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
         }
     };
-    EmberSheetSized(&format!("{} 설정", b.name), true, width, on_close.clone(), Some(&mut actions), || {
+    EmberSheet(&format!("{} 설정", b.name), true, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                 // TODO(server): rename and repository need a project settings API (FR-L26); the
@@ -1096,12 +1099,12 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                 });
                 if leader_choice_visible(&b.id) {
                     Section("리더 (오케스트레이터)", "리더 지정은 준비 중입니다", false, || match b.leader() {
-                        Some(l) => Label(&format!("현재 리더: {}", l.name), Fs::Md, Weight::Regular, None, None),
-                        None => Label("리더가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None),
+                        Some(l) => Label(&format!("현재 리더: {}", l.name), Fs::Md, Weight::Regular, None, Some(1)),
+                        None => Label("리더가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1)),
                     });
                 } else {
                     Section("리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, || {
-                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
                 Section("프로필 덮어쓰기", "선택 사항입니다. 이 프로젝트에서만 하네스에 다른 프로필을 씁니다. 준비 중입니다", false, || {

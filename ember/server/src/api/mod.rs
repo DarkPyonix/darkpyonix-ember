@@ -22,9 +22,12 @@
 //! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
 //! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
 //!
+//! Git per project (FR-G4) is in [`git`]: `POST /api/projects/{name}/git/<op>`.
+//!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
 //! changes are pushed (`project_updated`, `session_updated`).
 
+pub mod git;
 pub mod ide;
 
 use std::path::PathBuf;

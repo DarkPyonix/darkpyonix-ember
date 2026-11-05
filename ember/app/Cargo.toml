@@ -27,10 +27,16 @@ path = "src/main.rs"
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
 # TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
 compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.5", default-features = false }
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "0d7dcc0833378a5b383fa57112f5305cfbccb8d9" }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "0a7d0c44b8487a25543aed24f004170c1b6f530e" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
+ember-editor = { path = "../editor" }
+ember-editor-conn = { path = "../editor-conn" }
+alacritty_terminal = { version = "0.26", default-features = false }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = "0.28"
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).

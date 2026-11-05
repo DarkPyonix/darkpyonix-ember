@@ -6,12 +6,9 @@
 //! `Copy` state handles, #286 `#[Composable]`, #289 and #290 call macros) touch one place.
 //!
 //! Gaps in the pinned compose-rust, each with its issue:
-//! - #372: container `on_click` is in compose-rust after v0.0.4 (FR-55); Ember pins that revision
-//!   in `Cargo.toml` until the next tag;
-//! - #373: `Button` has no `max_lines`, so the width estimate `label_min_width` stays (#208);
-//! - #374: `Text` and `TextField` have no `font` or `word_break`, so no bundled font and no
-//!   Korean word-keep yet (#216, #208);
-//! - #375: no `Modifier.shadow`, so one `elevation` stands in for the layered shadow (#214).
+//! - #372: container `on_click` is in compose-rust v0.0.5 (FR-55);
+//! - #443: `Text` has no `overflow_wrap`, so a long unbreakable token clips (#208);
+//! - #444: `TextField` has no `word_break`, so the placeholder can break inside a word (#208);
 
 #![allow(non_snake_case)]
 
@@ -19,7 +16,7 @@ use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
     Alignment, ButtonVariant, Color, ColorRole, FontRef, FontRefs, GenericFamily, IconRole,
-    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole,
+    KeyEvent, Paint, ShapeRole, TextAlign, TextOverflow, TypeRole, WordBreak,
 };
 
 use super::theme::*;
@@ -162,10 +159,11 @@ pub fn OptionSheet(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    let p = ember_theme().palette;
+    let theme = ember_theme();
+    let p = theme.palette;
     cu::Dialog(open)
         .modifier(
-            Modifier::new()
+            with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(width + 2.0 * SP[0])
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
@@ -254,7 +252,10 @@ pub fn SheetFooter(content: impl FnOnce()) {
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
+    // TODO(compose-rust#443): Text has no overflow_wrap builder in v0.0.5, so a single
+    // word wider than its container can still be clipped by the renderer.
     let mut t = cu::Text(text)
+        .word_break(WordBreak::KeepAll)
         .font_size(fs.size())
         .line_height(fs.line_height())
         .font_weight(weight.value())
@@ -284,7 +285,7 @@ pub fn Txt(
         None if type_role == TypeRole::Caption => paint(theme.palette.muted),
         None => paint(theme.palette.text),
     };
-    let mut t = cu::Text(text);
+    let mut t = cu::Text(text).word_break(WordBreak::KeepAll);
     if mono {
         // The theme's monospace face; the bundled font stack lands with compose-rust#374.
         t = t.type_role(TypeRole::Mono);
@@ -357,6 +358,8 @@ pub fn EmberField(o: FieldOptions) {
     // TODO(compose-rust#376): the renderer paints the design system's field frame over these
     // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
     // appear once the node's own are honored. 14 px text needs #374.
+    // TODO(compose-rust#444): TextField has no word_break or overflow builder; its
+    // multiline placeholder can break Korean words inside a line.
     let mut f = cu::TextField()
         .modifier(modifier)
         .placeholder(o.placeholder)
@@ -504,27 +507,6 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
-/// Workaround until compose-rust#373 (`Button` `max_lines` / `overflow`): Button and Chip labels
-/// are measured too narrow, so a short Korean label such as "보내기" wraps to two lines. The
-/// button gets a width that fits its label: an estimate of the label's advance (a wide glyph is
-/// one em, a narrow one about 0.55 em), the 24 dp side padding of the toolkit button on both sides (measured: 16 dp left only
-/// one glyph and an ellipsis), and room for the icon. Remove this once #373 is in.
-pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
-    let advance: f32 = text
-        .chars()
-        .map(|c| if c.is_ascii() { 0.55 } else { 1.0 })
-        .sum::<f32>()
-        * font_px;
-    let icon = if has_icon { 20.0 + 8.0 } else { 0.0 };
-    advance + icon + 2.0 * 24.0 + 4.0
-}
-
-// A Box with a pointer-up subscription would give the mockup's label sizes and no width
-// estimate, but it has no keyboard focus or activation, no button role for screen readers and
-// no hover or press feedback (only the toolkit `Button` and `Chip` carry those), so every
-// control here is the toolkit's. The differences from the mockup (label size, side padding,
-// the 16 px close glyph in the small icon button) are compose-rust#373 and #372.
-
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 pub fn AppButton(
     text: &str,
@@ -537,13 +519,6 @@ pub fn AppButton(
 ) {
     let theme = ember_theme();
     let s = button_style(kind, small, theme.palette);
-    // TODO(compose-rust#373): the toolkit label size and padding stand in for the mockup's,
-    // and `label_min_width` keeps Korean labels on one line until `max_lines` exists.
-    let width = if fill_max_width || text.is_empty() {
-        None
-    } else {
-        Some(label_min_width(text, s.fs.size(), icon.is_some()))
-    };
     let mut b = cu::Button(text)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
@@ -551,7 +526,6 @@ pub fn AppButton(
         .modifier(
             Modifier::new()
                 .fill_max_width_if(fill_max_width)
-                .width_if(width)
                 .height(s.height)
                 .background(paint(s.fill))
                 .border(1.0, paint(s.border))
@@ -605,18 +579,11 @@ pub fn PickChip(
     let theme = ember_theme();
     let (height, fill) = pickchip_style(selected, theme.palette);
     let text = if icon_only && icon.is_some() { "" } else { text };
-    // TODO(compose-rust#373): label size and padding are the toolkit's, see AppButton.
-    let width = if text.is_empty() {
-        None
-    } else {
-        Some(label_min_width(text, Fs::Sm.size(), icon.is_some()))
-    };
     let mut b = cu::Button(text)
         .variant(ButtonVariant::Text)
         .color(paint(theme.palette.text_2))
         .modifier(
             Modifier::new()
-                .width_if(width)
                 .height(height)
                 .background(paint(fill))
                 .shape_role(ShapeRole::Full),
@@ -645,8 +612,6 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
 /// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
 /// TODO(compose-rust#378): corner radii render at about 0.55x the dp value on macOS, so the
 /// card, inset and field corners look tighter than the mockup until that is fixed.
-/// TODO(compose-rust#375): one elevation stands in for the layered shadow (#214); plain arc
-/// corners instead of the squircle.
 pub fn EmberCard(
     selected: bool,
     fill_max_width: bool,
@@ -658,12 +623,10 @@ pub fn EmberCard(
     let theme = ember_theme();
     let (fill, line) = card_colors(selected, theme.palette);
     let border = border.unwrap_or(line);
-    let m = with_weight(Modifier::new(), weight)
+    let m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
         .fill_max_width_if(fill_max_width)
         .background(paint(fill))
         .border(1.0, paint(border))
-        // TODO(compose-rust#375): no `elevation`: under Material 3 it tints the fill and paints a
-        // lighter band along the top edge; the card shadow comes with `Modifier.shadow`.
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
     // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
@@ -673,7 +636,7 @@ pub fn EmberCard(
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
         cu::Row().content(|| {
             cu::Spacer().modifier(Modifier::new().width(side));
-            cu::Column().content(content);
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
             cu::Spacer().modifier(Modifier::new().width(side));
         });
     });
@@ -705,8 +668,44 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
 // Sheet header
 // ---------------------------------------------------------------------------------------------
 
+/// The default maximum width of an Ember sheet (760 dp, #212).
+pub const SHEET_WIDTH_DEFAULT: f32 = 760.0;
+
+/// The maximum width of the computer monitor sheet (1360 dp, #212, FR-L21).
+pub const SHEET_WIDTH_MONITOR: f32 = 1360.0;
+
+/// Width of a centered sheet, capped by the window width.
+pub fn sheet_width(window_width_dp: f32, max_width: f32) -> f32 {
+    if window_width_dp <= 0.0 {
+        max_width
+    } else {
+        window_width_dp.min(max_width)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SheetPresentation {
+    Bottom,
+    FullScreen,
+    Dialog,
+}
+
+fn sheet_presentation(window_width_dp: f32, monitor: bool) -> SheetPresentation {
+    if monitor && window_width_dp > 0.0 && window_width_dp <= 560.0 {
+        SheetPresentation::FullScreen
+    } else if window_width_dp > 0.0 && window_width_dp < 560.0 {
+        SheetPresentation::Bottom
+    } else {
+        SheetPresentation::Dialog
+    }
+}
+
+fn bottom_sheet_height(window_height_dp: f32) -> f32 {
+    window_height_dp.max(0.0) * 0.85
+}
+
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
-/// TODO(compose-rust#372): a pointer-up subscription; Escape and the scrim also dismiss.
+/// TODO(compose-rust#372): a pointer-up subscription; the toolkit's modal calls on_dismiss for Escape and the scrim (not yet checked on a display).
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     Clickable(
@@ -733,8 +732,10 @@ pub fn SheetHeader(
         .modifier(Modifier::new().fill_max_width().height(SHEET_HEADER_H))
         .content(|| {
             cu::Spacer().modifier(Modifier::new().width(SP[4]));
-            Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
-            cu::Spacer().modifier(Modifier::new().weight(1.0));
+            cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
+            });
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
             if let Some(actions) = actions {
                 actions();
             }
@@ -743,8 +744,7 @@ pub fn SheetHeader(
         });
 }
 
-/// A modal with the shared header (#212). Wide windows get a centered dialog over the scrim;
-/// a compact window gets the toolkit's bottom sheet, full width.
+/// A responsive modal with the shared header and a scrim (#212).
 /// TODO(compose-rust#294): `corner-xl` squircle corners; plain arcs for now.
 pub fn EmberSheet(
     title: &str,
@@ -753,26 +753,25 @@ pub fn EmberSheet(
     actions: Option<&mut dyn FnMut()>,
     content: impl FnOnce(),
 ) {
-    EmberSheetSized(title, open, 560.0, on_dismiss, actions, content);
+    EmberSheetSized(title, open, SHEET_WIDTH_DEFAULT, false, on_dismiss, actions, content);
 }
 
-/// [`EmberSheet`] with the dialog's width (`min(560px, 100%)` for most sheets, `min(1360px,
+/// [`EmberSheet`] with the dialog's width (`min(760px, 100%)` for most sheets, `min(1360px,
 /// 100%)` for the computer monitor). Without a width the dialog takes the whole window,
 /// because its content asks for the full width.
 pub fn EmberSheetSized(
     title: &str,
     open: bool,
     width: f32,
+    monitor: bool,
     on_dismiss: impl FnMut() + Clone + 'static,
     actions: Option<&mut dyn FnMut()>,
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    let modifier = Modifier::new()
-        .background(paint(theme.palette.surface))
-        // TODO(compose-rust#375): no `elevation` here. Under Material 3 it paints a tinted shadow
-        // ring inside the dialog's own frame, which showed as a band at the top and sides.
-        .corner_radius(CORNER_XL);
+    // TODO(compose-rust#384): expose modal scrim color; the mockup uses rgba(0, 0, 0, 0.3).
+    // The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    let modifier = with_shadows(Modifier::new(), theme.shadow_sm()).background(paint(theme.palette.surface));
     let dismiss = on_dismiss.clone();
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
@@ -781,13 +780,26 @@ pub fn EmberSheetSized(
             content();
         });
     };
-    if compose_rust::runtime::current_window_size().is_compact() {
+    let window = compose_rust::runtime::current_window_size();
+    let presentation = sheet_presentation(window.width_dp, monitor);
+    if presentation == SheetPresentation::Bottom {
+        // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap
+        // their content instead of occupying the full 85 percent height.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width())
-            .on_dismiss(on_dismiss.clone())
+            .modifier(modifier.fill_max_width().height(bottom_sheet_height(window.height_dp))
+                .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .on_dismiss(on_dismiss)
+            .content(body);
+    } else if presentation == SheetPresentation::FullScreen {
+        cu::Dialog(open)
+            .modifier(modifier.width(window.width_dp).height(window.height_dp))
+            .on_dismiss(on_dismiss)
             .content(body);
     } else {
-        cu::Dialog(open).modifier(modifier.width(width)).on_dismiss(on_dismiss).content(body);
+        cu::Dialog(open)
+            .modifier(modifier.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
+            .on_dismiss(on_dismiss)
+            .content(body);
     }
 }
 
@@ -878,16 +890,6 @@ mod tests {
     fn pill_sizes() {
         assert_eq!(pill_metrics(false), (24.0, Fs::Xs, Weight::Medium));
         assert_eq!(pill_metrics(true), (20.0, Fs::Xs2, Weight::Medium));
-    }
-
-    #[test]
-    fn label_min_width_grows_with_the_label_and_the_icon() {
-        // Three Hangul glyphs at 14 px, no icon: 42 + 48 padding + 4 slack.
-        assert_eq!(label_min_width("보내기", 14.0, false), 94.0);
-        assert_eq!(label_min_width("보내기", 14.0, true), 122.0);
-        assert!(label_min_width("명령마다 확인", 13.0, false) > label_min_width("확인", 13.0, false));
-        // Latin letters are narrower than Hangul.
-        assert!(label_min_width("abc", 14.0, false) < label_min_width("가나다", 14.0, false));
     }
 
     #[test]
@@ -1000,6 +1002,156 @@ mod tests {
             })
             .collect();
         assert!(floats.contains(&14.0) && floats.contains(&22.0), "{floats:?}");
+    }
+
+    #[test]
+    fn fr_l32_sheet_width_for_each_sheet() {
+        assert_eq!(SHEET_WIDTH_DEFAULT, 760.0);
+        assert_eq!(SHEET_WIDTH_MONITOR, 1360.0);
+        assert_eq!(sheet_width(1440.0, SHEET_WIDTH_DEFAULT), 760.0);
+        assert_eq!(sheet_width(1440.0, SHEET_WIDTH_MONITOR), 1360.0);
+        assert_eq!(sheet_width(600.0, SHEET_WIDTH_MONITOR), 600.0);
+        assert_eq!(sheet_width(0.0, SHEET_WIDTH_DEFAULT), 760.0);
+        // These call sites use EmberSheet, which selects SHEET_WIDTH_DEFAULT.
+        for (source, call) in [
+            (include_str!("settings.rs"), "EmberSheet(\"설정\""),
+            (include_str!("new_session.rs"), "EmberSheet(\"새 세션\""),
+            (include_str!("project.rs"), "EmberSheet(\"새 프로젝트\""),
+            (include_str!("project.rs"), "EmberSheet(&format!"),
+            (include_str!("routines.rs"), "EmberSheet(title"),
+            (include_str!("files.rs"), "EmberSheet(\"파일 보내기\""),
+        ] {
+            assert!(source.contains(call), "missing {call}");
+        }
+        assert!(include_str!("monitor.rs").contains("EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR"));
+    }
+
+    #[test]
+    fn fr_l32_compact_sheet_presentation_and_height() {
+        assert_eq!(sheet_presentation(390.0, false), SheetPresentation::Bottom);
+        assert_eq!(sheet_presentation(390.0, true), SheetPresentation::FullScreen);
+        assert_eq!(sheet_presentation(560.0, true), SheetPresentation::FullScreen);
+        assert_eq!(sheet_presentation(561.0, true), SheetPresentation::Dialog);
+        assert_eq!(sheet_presentation(600.0, false), SheetPresentation::Dialog);
+        assert_eq!(sheet_presentation(559.0, false), SheetPresentation::Bottom);
+        assert_eq!(sheet_presentation(560.0, false), SheetPresentation::Dialog);
+        assert_eq!(bottom_sheet_height(1000.0), 850.0);
+    }
+
+    static DISMISSES: AtomicUsize = AtomicUsize::new(0);
+
+    #[composable]
+    fn host_sheet() {
+        EmberSheet("설정", true, || { DISMISSES.fetch_add(1, Ordering::SeqCst); }, None, || {});
+    }
+
+    #[test]
+    fn fr_l32_renderer_dismiss_reaches_sheet_callback() {
+        let _guard = crate::services::test_guard();
+        DISMISSES.store(0, Ordering::SeqCst);
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_sheet)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let (node_id, handler_id) = batch.iter().find_map(|m| match m {
+            Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => Some((*node_id, *h as u64)),
+            _ => None,
+        }).expect("modal dismiss handler");
+        // Escape and scrim are interpreted by the renderer, which sends the same
+        // dismissal event for both. Host cannot synthesize those physical inputs.
+        for expected in 1..=2 {
+            host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch dismiss");
+            assert_eq!(DISMISSES.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[test]
+    fn fr_l10_1_chips_and_pills_emit_single_line_max_lines() {
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, PropertyKind, Recomposer};
+        let mut host = Host::new(|| {
+            Box::new(Recomposer::new(|| {
+                Pill("브랜치", PillTone::Blue, false);
+                FilterChip("전체", false, || {});
+                MenuRow("새 세션", 120.0, false, || {});
+                SheetHeader("IDE 열기", || {}, None);
+                Label("보내기", Fs::Md, Weight::Medium, None, Some(1));
+            }))
+        });
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        for label in ["브랜치", "전체", "새 세션", "IDE 열기", "보내기"] {
+            let mut target_nodes = Vec::new();
+            for m in &batch {
+                if let Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } = m {
+                    if *s == label {
+                        target_nodes.push(*node_id);
+                    }
+                }
+            }
+            let mut found = false;
+            for nid in target_nodes {
+                for m in &batch {
+                    if let Mutation::SetProp { node_id, property: PropertyKind::MaxLines, value: PropertyValue::Integer(1) } = m {
+                        if *node_id == nid {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            assert!(found, "expected text '{label}' to emit MaxLines(1)");
+        }
+    }
+
+    #[test]
+    fn fr_l10_1_cr_screens_use_safe_label_builders() {
+        use std::fs;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr");
+        for entry in fs::read_dir(dir).expect("cr sources") {
+            let path = entry.expect("source entry").path();
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") { continue; }
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let source = fs::read_to_string(&path).expect("source text");
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(!production.contains("WordBreak::BreakAll"), "{name} enables word breaking");
+            if name != "components.rs" && name != "vcs.rs" {
+                assert!(!production.contains("cu::Text("), "{name} bypasses the shared text builder");
+            }
+            // Existing direct buttons are explicitly counted until their specialized controls
+            // move into shared components. Any additional bypass must be reviewed.
+            let allowed_buttons = match name {
+                "components.rs" => 3,
+                "agents.rs" => 2,
+                "files.rs" => 1,
+                "home.rs" => 2,
+                "launcher.rs" => 1,
+                "project.rs" => 2,
+                "routines.rs" => 2,
+                "vcs.rs" => 1,
+                _ => 0,
+            };
+            assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");
+            // Paragraphs and descriptions can use multiple lines. Button and Chip retain
+            // their toolkit one-line defaults.
+        }
+        let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
+        assert!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count() >= 1);
+    }
+
+    #[test]
+    fn fr_l10_1_card_content_has_available_width() {
+        let source = include_str!("components.rs");
+        let card = source.split("pub fn EmberCard(").nth(1).unwrap()
+            .split("pub fn InsetPanel(").next().unwrap();
+        assert!(card.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
+    }
+
+    #[test]
+    fn fr_l10_1_monitor_descriptions_wrap_and_diff_lines_ellipsize() {
+        let monitor = include_str!("monitor.rs");
+        assert_eq!(monitor.matches("Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3))").count(), 2);
+        assert!(monitor.contains(r#"Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3))"#));
+        let vcs = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!vcs.contains("TextOverflow::Clip"));
+        assert!(vcs.contains(".word_break(compose_rust::WordBreak::KeepAll)"));
     }
 
     // ---- FR-L10: a navigation row is a control the renderer can click -----------------------

@@ -3,7 +3,7 @@
 //! Pure decisions (sections, tabs, ahead/behind text, diff parsing, line/hunk/file staging,
 //! file tree, commit validation, merge gate) are re-exported from `crate::ui::vcs`.
 //!
-//! When `snapshot()` returns None (no server git data exists yet), views show `SOON` ("준비 중입니다").
+//! The repository view loads the selected project's server or demo data asynchronously.
 //! When `std::env::var("EMBER_CR_ROUTE") == Ok("vcs")`, sample data from mockup v8 is used
 //! so review captures show the full layout.
 
@@ -11,7 +11,9 @@
 
 use std::collections::BTreeSet;
 
-use compose_rust::runtime::{current_window_size, mutable_state_of, remember, MutableState};
+use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
+use crate::ui::vcs::{fetch_snapshot, load_from, Load, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{
@@ -23,7 +25,7 @@ pub use crate::ui::vcs::{
     ahead_behind_text, bar_fractions, build_tree, check_glyph, check_of, commit_enabled,
     commit_label, effective_tab, fetched_text, folder_check, merge_gate, pane_layout, pane_tabs,
     parse_hunk_header, parse_unified, pick_project, remote_action, repo_projects, route_section,
-    section_count, section_nav, snapshot, soon_line, tab_after_select, upstream_text, Check,
+    section_count, section_nav, soon_line, tab_after_select, upstream_text, Check,
     CiState, DiffLine, FileDiff, FileStaging, FileStatus, Hunk, LineKind, PaneLayout, PaneTab,
     RemoteAction, RepoSnapshot, ReviewState, Section, SectionNav, Staging, TreeRow, SOON,
 };
@@ -33,7 +35,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, Label, OptionSheet,
+    AppButton, ButtonKind, EmberCard, Label, MenuRow, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -45,6 +47,71 @@ pub fn open_for_project_cr(ui: &SharedUi, project: &str) {
     ui.set_selected_project(Some(project.to_string()));
     ui.go(Route::Projects);
     ui.set_menu(NavMenu::VersionControl);
+}
+
+#[derive(Clone)]
+struct Actions {
+    project: String,
+    reload: MutableState<u64>,
+}
+
+impl Actions {
+    fn finish(&self, what: &'static str, task: impl std::future::Future<Output = Result<String, ember_client::api::ApiError>> + Send + 'static) {
+        self.finish_with(what, task, || {});
+    }
+
+    fn finish_with(&self, what: &'static str, task: impl std::future::Future<Output = Result<String, ember_client::api::ApiError>> + Send + 'static, mut on_success: impl FnMut() + Send + 'static) {
+        let reload = self.reload.clone();
+        crate::services::run_shared(task, move |result| {
+            notice::post(match result {
+                Ok(text) => {
+                    on_success();
+                    reload.set(reload.get() + 1);
+                    text
+                }
+                Err(e) => failure_text(what, &e),
+            });
+        });
+    }
+
+    fn remote(&self, action: RemoteAction) {
+        let project = self.project.clone();
+        self.finish("원격 작업을 ", async move { run_remote(&project, action).await });
+    }
+
+    fn branch(&self, name: String, create: bool, on_success: impl FnMut() + Send + 'static) {
+        let project = self.project.clone();
+        self.finish_with("브랜치를 ", async move {
+            let (op, body) = if create { ("branch", json!({"name": name})) } else { ("checkout", json!({"branch": name})) };
+            git_call::<Value>(&project, op, body).await?;
+            Ok(if create { "새 브랜치를 만들었습니다" } else { "브랜치를 전환했습니다" }.to_string())
+        }, on_success);
+    }
+}
+
+fn text_after_success(current: &str, submitted: &str) -> String {
+    if current == submitted { String::new() } else { current.to_string() }
+}
+
+fn screen_subtitle(project: &ProjectBox, snap: Option<&RepoSnapshot>, sample: bool) -> String {
+    if sample {
+        if let Some(s) = snap {
+            return format!("darkpyonix-ember · {} · 변경 {} · PR 4", s.branch, s.changes.len());
+        }
+    }
+    match snap {
+        Some(s) => format!("{} · {} · {} · 변경 {}", project.name, s.branch, ahead_behind_text(s.ahead, s.behind), s.changes.len()),
+        None => project.name.clone(),
+    }
+}
+
+fn branch_input(name: &str) -> Option<String> {
+    let name = name.trim();
+    valid_branch_name(name).then(|| name.to_string())
+}
+
+fn commit_request(snap: &RepoSnapshot, staging: &Staging, summary: &str, description: &str, amend: bool) -> CommitRequest {
+    CommitRequest { ops: plan_staging(snap, staging), summary: summary.to_string(), description: description.to_string(), amend }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -140,6 +207,8 @@ pub fn sample_snapshot() -> RepoSnapshot {
             "feat/routine-scheduler".into(),
         ],
         changes: parse_unified(SAMPLE_DIFF),
+        staged: Default::default(),
+        conflicts: Vec::new(),
     }
 }
 
@@ -312,6 +381,7 @@ fn RemoteMainButton(
     enabled: bool,
     on_click: impl FnMut() + 'static,
 ) {
+    // TODO(compose-rust#328): keep button labels visible when the available width is narrow.
     let p = ember_theme().palette;
     let (action_icon, action_text, action_count) = match action {
         RemoteAction::Pull(n) => (ICON_ARROW_DOWN_SVG, "Pull", Some(n)),
@@ -398,6 +468,15 @@ fn RemoteSubNote(snap: Option<&RepoSnapshot>) {
     }
 }
 
+// EmberCard's inner row does not expand its content to the card width.
+fn VcsCard(content: impl FnOnce()) {
+    let p = ember_theme().palette;
+    cu::Box().modifier(Modifier::new().fill_max_width().background(paint(p.surface))
+        .border(1.0, paint(p.line)).corner_radius(CORNER_LG)).content(|| {
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(content);
+    });
+}
+
 /// The bar of three: repository, current branch, remote origin in ONE split card.
 pub fn RepoBar(
     projects: &[(String, String)],
@@ -406,8 +485,17 @@ pub fn RepoBar(
     compact: bool,
     mut on_pick: impl FnMut(String) + Clone + 'static,
 ) {
+    RepoBarWithActions(projects, project, snap, compact, on_pick, None);
+}
+
+fn RepoBarWithActions(
+    projects: &[(String, String)], project: &ProjectBox, snap: Option<&RepoSnapshot>, compact: bool,
+    mut on_pick: impl FnMut(String) + Clone + 'static, actions: Option<Actions>,
+) {
     let project_menu = remember(|| mutable_state_of(false));
     let branch_menu = remember(|| mutable_state_of(false));
+    let new_branch = remember(|| mutable_state_of(String::new()));
+    let branch_generation = remember(|| mutable_state_of(0_u64));
 
     let has = snap.is_some();
     let (ahead, behind) = snap.map_or((0, 0), |s| (s.ahead, s.behind));
@@ -425,7 +513,7 @@ pub fn RepoBar(
 
     let proj_id = project.id.clone();
     let proj_name = display_name(&project.id);
-    let repo_line = project.repo_line();
+    let repo_line = crate::ui::vcs::repo_card_line(project, snap);
     let project_opts: Vec<String> = projects.iter().map(|(_, name)| name.clone()).collect();
     let chosen_proj = projects.iter().position(|(id, _)| id == &proj_id);
 
@@ -444,7 +532,8 @@ pub fn RepoBar(
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
-        EmberCard(false, true, None, Some(0.0), None, move || {
+        let remote_actions = actions.clone();
+        VcsCard(move || {
             if compact {
                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                     let p_open = project_menu_c.clone();
@@ -472,14 +561,7 @@ pub fn RepoBar(
                     cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
                         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
-                            RemoteMainButton(action, has, move || {
-                                notice::post(soon_line("원격 동작"));
-                            });
-                            cu::Row().spacing(4.0).content(|| {
-                                CircleIconButton(ICON_FETCH_SVG, "가져오기", || notice::post(soon_line("가져오기")));
-                                CircleIconButton(ICON_ARROW_DOWN_SVG, "내려받기", || notice::post(soon_line("내려받기")));
-                                CircleIconButton(ICON_ARROW_UP_SVG, "올리기", || notice::post(soon_line("올리기")));
-                            });
+                            RemoteControls(action, has, remote_actions.clone());
                         });
                         RemoteSubNote(snap);
                     });
@@ -511,14 +593,7 @@ pub fn RepoBar(
                     cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height().padding(SP[3])).spacing(SP[1]).content(move || {
                         SmallNote("원격 origin");
                         cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(10.0).content(move || {
-                            RemoteMainButton(action, has, move || {
-                                notice::post(soon_line("원격 동작"));
-                            });
-                            cu::Row().spacing(4.0).content(|| {
-                                CircleIconButton(ICON_FETCH_SVG, "가져오기", || notice::post(soon_line("가져오기")));
-                                CircleIconButton(ICON_ARROW_DOWN_SVG, "내려받기", || notice::post(soon_line("내려받기")));
-                                CircleIconButton(ICON_ARROW_UP_SVG, "올리기", || notice::post(soon_line("올리기")));
-                            });
+                            RemoteControls(action, has, remote_actions.clone());
                         });
                         RemoteSubNote(snap);
                     });
@@ -541,16 +616,56 @@ pub fn RepoBar(
             },
         );
 
-        OptionSheet(
-            branch_menu.get(),
-            &branch_opts,
-            chosen_br,
-            240.0,
-            move || b_dismiss.set(false),
-            move |_| {
-                notice::post(soon_line("브랜치 전환"));
-            },
-        );
+        cu::Dialog(branch_menu.get())
+            .modifier(Modifier::new().width(248.0).background(paint(p.surface))
+                .border(1.0, paint(p.line)).corner_radius(CORNER_MD).padding(SP[0]))
+            .on_dismiss(move || b_dismiss.set(false))
+            .content(|| {
+                cu::Column().modifier(Modifier::new().fill_max_width()).spacing(SP[1]).content(|| {
+                    for (idx, name) in branch_opts.iter().enumerate() {
+                        let dismiss = branch_menu.clone();
+                        let select_actions = actions.clone();
+                        let selected_name = branches.get(idx).cloned();
+                        MenuRow(name, 240.0, chosen_br == Some(idx), move || {
+                            dismiss.set(false);
+                            if let (Some(actions), Some(name)) = (select_actions.as_ref(), selected_name.as_ref()) {
+                                actions.branch(name.clone(), false, || {});
+                            }
+                        });
+                    }
+                    let branch_value = new_branch.clone();
+                    key(branch_generation.get(), || {
+                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
+                            .text(new_branch.get()).placeholder("새 브랜치 이름")
+                            .on_value_change(move |v| branch_value.set(v));
+                    });
+                    let create_actions = actions.clone();
+                    let create_value = new_branch.clone();
+                    let generation = branch_generation.clone();
+                    AppButton("새 브랜치", None, ButtonKind::Primary, false, has && branch_input(&new_branch.get()).is_some(), true, move || {
+                        if let (Some(actions), Some(name)) = (create_actions.as_ref(), branch_input(&create_value.get())) {
+                            let submitted = create_value.get();
+                            let value = create_value.clone();
+                            let generation = generation.clone();
+                            actions.branch(name, true, move || {
+                                value.set(text_after_success(&value.get(), &submitted));
+                                generation.set(generation.get() + 1);
+                            });
+                        }
+                    });
+                });
+            });
+    });
+}
+
+fn RemoteControls(action: RemoteAction, enabled: bool, actions: Option<Actions>) {
+    let main = actions.clone();
+    RemoteMainButton(action, enabled, move || { if let Some(a) = &main { a.remote(action); } });
+    cu::Row().spacing(4.0).content(move || {
+        for (icon, label, action) in [(ICON_FETCH_SVG, "가져오기", RemoteAction::Fetch), (ICON_ARROW_DOWN_SVG, "내려받기", RemoteAction::Pull(0)), (ICON_ARROW_UP_SVG, "올리기", RemoteAction::Push(0))] {
+            let a = actions.clone();
+            CircleIconButton(icon, label, move || { if let Some(a) = &a { a.remote(action); } });
+        }
     });
 }
 
@@ -560,8 +675,14 @@ pub fn SectionList(
     snap: Option<&RepoSnapshot>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
+    SectionListWithSample(active, snap, false, on_pick);
+}
+
+fn SectionListWithSample(
+    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool,
+    mut on_pick: impl FnMut(Section) + Clone + 'static,
+) {
     let p = ember_theme().palette;
-    let is_sample = snap.map_or(false, |s| s.branch == "feat/session-shim");
     cu::Column().modifier(Modifier::new().width(200.0)).spacing(2.0).content(|| {
         for sec in Section::ALL {
             let is_active = sec == active;
@@ -588,7 +709,7 @@ pub fn SectionList(
                 .background(bg)
                 .corner_radius(CORNER_SM);
             if is_active {
-                m = m.border(1.0, paint(p.line)).elevation(ELEVATION_CARD);
+                m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
 
             cu::Box()
@@ -708,10 +829,9 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
         }
 
         for (hi, h) in file.hunks.iter().enumerate() {
-            // Hunk header row (45 px)
-            cu::Row().modifier(Modifier::new().fill_max_width().height(45.0).background(paint(p.surface_2)).padding(SP[2])).alignment(Alignment::CenterStart).content(|| {
+            // Keep the action below the header so long hunk labels cannot overlap it.
+            cu::Column().modifier(Modifier::new().fill_max_width().background(paint(p.surface_2)).padding(SP[2])).spacing(SP[1]).content(|| {
                 Label(&h.header, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                cu::Spacer().modifier(Modifier::new().weight(1.0));
                 let st_hunk = staging.clone();
                 let f_hunk = file.clone();
                 cu::Box()
@@ -789,7 +909,8 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                             .line_height(Fs::Xs2.line_height())
                             .color(paint(p.text))
                             .max_lines(1)
-                            .overflow(TextOverflow::Clip);
+                            .word_break(compose_rust::WordBreak::KeepAll)
+                            .overflow(TextOverflow::Ellipsis);
                     });
                 }
             });
@@ -989,7 +1110,7 @@ fn FilesPane(
     let sel_clone = selected.clone();
     let p = ember_theme().palette;
 
-    EmberCard(false, true, None, Some(0.0), None, move || {
+    VcsCard(move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             FilesHeader(diffs_len, &all_checks, &st_clone, &d_clone);
             cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
@@ -1002,7 +1123,7 @@ fn DiffPane(diffs: &[FileDiff], selected: usize, staging: &MutableState<Staging>
     let p = ember_theme().palette;
     let selected_file = diffs.get(selected).cloned();
     let st_diff = staging.clone();
-    EmberCard(false, true, None, Some(0.0), None, move || {
+    VcsCard(move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             if let Some(file) = selected_file {
                 DiffView(&file, &st_diff);
@@ -1021,11 +1142,13 @@ fn CommitBox(
     summary: &MutableState<String>,
     body: &MutableState<String>,
     amend: &MutableState<bool>,
+    commit: Option<(Actions, RepoSnapshot, MutableState<Staging>)>,
 ) {
     let p = ember_theme().palette;
     let sum_state = summary.clone();
     let body_state = body.clone();
     let amend_state = amend.clone();
+    let field_generation = remember(|| mutable_state_of(0_u64));
     let is_amend = amend.get();
     let branch_name = branch.to_string();
     let can_commit = commit_enabled(&summary.get(), staged_files, is_amend);
@@ -1040,25 +1163,17 @@ fn CommitBox(
         .spacing(SP[2])
         .content(move || {
             let s_state = sum_state.clone();
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
-                on_value_change: Some(Box::new(move |v: String| {
-                    s_state.set(v);
-                })),
-                ..Default::default()
+            key((field_generation.get(), 0_u8), || {
+                cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
+                    .text(sum_state.get()).placeholder("요약 (필수) 예: Feat: Wire shim")
+                    .on_value_change(move |v| s_state.set(v));
             });
 
             let b_state = body_state.clone();
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                multiline: true,
-                height: Some(64.0),
-                placeholder: "설명 (선택)".to_string(),
-                on_value_change: Some(Box::new(move |v: String| {
-                    b_state.set(v);
-                })),
-                ..Default::default()
+            key((field_generation.get(), 1_u8), || {
+                cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
+                    .text(body_state.get()).placeholder("설명 (선택)").multiline(true)
+                    .on_value_change(move |v| b_state.set(v));
             });
 
             // Amend checkbox
@@ -1079,12 +1194,25 @@ fn CommitBox(
                 can_commit,
                 true,
                 move || {
-                    notice::post(soon_line("커밋"));
+                    if let Some((actions, snap, staging)) = &commit {
+                        let req = commit_request(snap, &staging.get(), &sum_state.get(), &body_state.get(), amend_state.get());
+                        let project = actions.project.clone();
+                        let submitted_summary = req.summary.clone();
+                        let submitted_body = req.description.clone();
+                        let summary = sum_state.clone();
+                        let body = body_state.clone();
+                        let generation = field_generation.clone();
+                        actions.finish_with("커밋을 ", async move { run_commit(&project, req).await }, move || {
+                            summary.set(text_after_success(&summary.get(), &submitted_summary));
+                            body.set(text_after_success(&body.get(), &submitted_body));
+                            generation.set(generation.get() + 1);
+                        });
+                    }
                 },
             );
 
             let note_text = if can_commit {
-                SOON.to_string()
+                "선택한 변경 사항을 커밋합니다".to_string()
             } else {
                 "요약과 스테이징한 파일이 필요합니다".to_string()
             };
@@ -1098,9 +1226,10 @@ fn CommitPane(
     summary: &MutableState<String>,
     body: &MutableState<String>,
     amend: &MutableState<bool>,
+    commit: Option<(Actions, RepoSnapshot, MutableState<Staging>)>,
 ) {
-    EmberCard(false, true, None, Some(0.0), None, move || {
-        CommitBox(branch, staged_files, summary, body, amend);
+    VcsCard(move || {
+        CommitBox(branch, staged_files, summary, body, amend, commit);
     });
 }
 
@@ -1111,9 +1240,19 @@ pub fn ChangesPane(
     tab: Option<PaneTab>,
     on_tab: impl FnMut(PaneTab) + Clone + 'static,
 ) {
+    ChangesPaneWithActions(snap, layout, tab, on_tab, None);
+}
+
+fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<PaneTab>, on_tab: impl FnMut(PaneTab) + Clone + 'static, actions: Option<Actions>) {
     let p = ember_theme().palette;
     let diffs = snap.changes.clone();
-    let staging = remember(|| mutable_state_of(Staging::new(&diffs, false)));
+    let staging_key = (actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), snap.branch.clone(), snap.staged.clone(), diffs.clone());
+    let staging = remember_with_key(staging_key, || {
+        let mut state = Staging::new(&diffs, false);
+        for diff in &diffs { if snap.staged.contains(&diff.path) { state.toggle_file(diff); } }
+        mutable_state_of(state)
+    });
+    let commit = actions.map(|a| (a, snap.clone(), staging.clone()));
     let folded = remember(|| mutable_state_of(BTreeSet::<String>::new()));
     let selected = remember(|| mutable_state_of(0usize));
     let summary = remember(|| mutable_state_of(String::new()));
@@ -1146,14 +1285,14 @@ pub fn ChangesPane(
                 .spacing(GAP_CARD)
                 .content(move || {
                     // Left card: file tree + commit box directly under tree
-                    cu::Column().modifier(Modifier::new().width(320.0)).content(move || {
-                        EmberCard(false, true, None, Some(0.0), None, move || {
+                    cu::ScrollColumn().modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
+                        VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                                 FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                                 FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files);
+                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
                             });
                         });
                     });
@@ -1176,13 +1315,13 @@ pub fn ChangesPane(
             let am_files = amend.clone();
 
             cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
-                EmberCard(false, true, None, Some(0.0), None, move || {
+                VcsCard(move || {
                     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                         FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                         FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                        CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files);
+                        CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
                     });
                 });
                 DiffPane(&diffs, sel, &staging);
@@ -1200,9 +1339,9 @@ pub fn ChangesPane(
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging),
-                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend),
+                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone()),
                     _ => {
-                        EmberCard(false, true, None, Some(0.0), None, move || {
+                        VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                                 FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
@@ -1222,16 +1361,29 @@ fn SectionContent(
     layout: PaneLayout,
     active_tab: Option<PaneTab>,
     tab: &MutableState<PaneTab>,
+    actions: Option<Actions>,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
             let tab_state = tab.clone();
-            ChangesPane(
+            ChangesPaneWithActions(
                 s,
                 layout,
                 active_tab,
                 move |t| tab_state.set(t),
+                actions,
             );
+        }
+        (Some(s), Section::Conflicts) => {
+            EmberCard(false, true, None, Some(SP[3]), None, || {
+                Label("충돌", Fs::Lg, Weight::Semibold, None, None);
+                if s.conflicts.is_empty() {
+                    Label("충돌이 없습니다", Fs::Sm, Weight::Regular, None, None);
+                }
+                for path in &s.conflicts {
+                    Label(path, Fs::Sm, Weight::Regular, None, None);
+                }
+            });
         }
         _ => Unavailable(sec),
     }
@@ -1256,12 +1408,24 @@ pub fn VcsScreen() {
         None
     };
     let current = pick_project(selected.as_deref(), &boxes);
-    let snap = if is_sample_route {
-        Some(sample_snapshot())
-    } else {
-        current.as_deref().and_then(snapshot)
-    };
-    VcsScreenWith(snap, boxes, current);
+    if is_sample_route {
+        let reload = remember(|| mutable_state_of(0_u64));
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), boxes, current, reload, true);
+        return;
+    }
+    let load = remember_with_key(current.clone(), || mutable_state_of(Load::Loading));
+    let reload = remember_with_key(current.clone(), || mutable_state_of(0_u64));
+    let key = (current.clone(), reload.get());
+    let load_effect = load.clone();
+    let project_effect = current.clone();
+    launched_effect(key, move || async move {
+        if let (Some(project), Some(_)) = (project_effect, crate::services::try_services()) {
+            load_effect.set(Load::Loading);
+            crate::services::run_shared(async move { load_from(fetch_snapshot(&project).await) }, move |result| load_effect.set(result));
+        }
+    });
+    let state = load.get();
+    VcsScreenWithLoad(state, boxes, current, reload, false);
 }
 
 /// VCS screen with explicit snapshot and projects.
@@ -1270,6 +1434,19 @@ pub fn VcsScreenWith(
     boxes: Vec<ProjectBox>,
     current_id: Option<String>,
 ) {
+    let state = snap.map(Load::Ready).unwrap_or_else(|| Load::Unavailable(String::new()));
+    let reload = remember(|| mutable_state_of(0_u64));
+    VcsScreenWithLoad(state, boxes, current_id, reload, false);
+}
+
+fn VcsScreenWithLoad(
+    load: Load,
+    boxes: Vec<ProjectBox>,
+    current_id: Option<String>,
+    reload: MutableState<u64>,
+    sample: bool,
+) {
+    let snap = load.snapshot().cloned();
     let p = ember_theme().palette;
     let window = current_window_size();
     let class = window.class;
@@ -1296,18 +1473,15 @@ pub fn VcsScreenWith(
         cu::Column().modifier(Modifier::new().fill_max_width()).spacing(4.0).content(|| {
             Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
             if let Some(ref proj) = project {
-                let repo_name = proj.repo.as_deref().unwrap_or("darkpyonix-ember");
-                let repo_short = repo_name.split('/').last().unwrap_or(repo_name);
-                let branch_name = snap.as_ref().map_or("feat/session-shim", |s| &s.branch);
-                let changes_cnt = snap.as_ref().map_or(0, |s| s.changes.len());
-                let subtitle = format!("{repo_short} \u{00b7} {branch_name} \u{00b7} 변경 {changes_cnt} \u{00b7} PR 4");
+                let subtitle = screen_subtitle(proj, snap.as_ref(), sample);
                 Label(&subtitle, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
         });
 
         if let Some(project) = project {
                     let sel_proj = selected_proj.clone();
-                    RepoBar(
+                    let actions = crate::services::try_services().map(|_| Actions { project: project.id.clone(), reload: reload.clone() });
+                    RepoBarWithActions(
                         &projects,
                         &project,
                         snap.as_ref(),
@@ -1318,20 +1492,25 @@ pub fn VcsScreenWith(
                                 s.ui.set_selected_project(Some(id));
                             }
                         },
+                        actions.clone(),
                     );
 
-                    if snap.is_none() {
-                        Label(&soon_line("저장소 정보"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    if let Some(note) = load.note() {
+                        Label(&note, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        if matches!(load, Load::Failed(_)) {
+                            let retry = reload.clone();
+                            AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                        }
                     }
 
                     if wide {
                         cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
                             cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
-                                SectionList(sec, snap.as_ref(), move |s| sec_state.set(s));
+                                SectionListWithSample(sec, snap.as_ref(), sample, move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab);
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone());
                             });
                         });
                     } else {
@@ -1342,7 +1521,7 @@ pub fn VcsScreenWith(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab);
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone());
                         });
                     }
                 } else {
@@ -1367,7 +1546,8 @@ pub fn VcsScreenWith(
 pub fn preview() {
     let p = ember_theme().palette;
     cu::Box().modifier(Modifier::new().fill_max_size().background(paint(p.bg))).content(|| {
-        VcsScreenWith(Some(sample_snapshot()), sample_projects(), Some("ember".into()));
+        let reload = remember(|| mutable_state_of(0_u64));
+        VcsScreenWithLoad(Load::Ready(sample_snapshot()), sample_projects(), Some("ember".into()), reload, true);
     });
 }
 
@@ -1378,6 +1558,53 @@ pub fn preview() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fr_l19_success_clears_only_submitted_text() {
+        assert_eq!(text_after_success("요약", "요약"), "");
+        assert_eq!(text_after_success("새 요약", "요약"), "새 요약");
+    }
+
+    #[test]
+    fn fr_l19_subtitle_uses_snapshot_and_project() {
+        let project = ProjectBox { name: "프로젝트".into(), repo: None, ..sample_project_box() };
+        let snap = RepoSnapshot { branch: "main".into(), ahead: 3, behind: 2, ..Default::default() };
+        assert_eq!(screen_subtitle(&project, Some(&snap), false), "프로젝트 · main · 앞섬 3 · 뒤처짐 2 · 변경 0");
+        assert_eq!(screen_subtitle(&project, None, false), "프로젝트");
+        assert!(screen_subtitle(&sample_project_box(), Some(&sample_snapshot()), true).contains("PR 4"));
+        assert!(!screen_subtitle(&project, Some(&snap), false).contains("PR 4"));
+    }
+
+    #[test]
+    fn fr_l19_repo_card_uses_loaded_snapshot() {
+        let project = ProjectBox { repo: None, ..sample_project_box() };
+        let snap = RepoSnapshot { branch: "main".into(), ..Default::default() };
+        assert_eq!(crate::ui::vcs::repo_card_line(&project, Some(&snap)), "git 저장소 · main");
+        assert_eq!(crate::ui::vcs::repo_card_line(&project, None), project.repo_line());
+    }
+
+    #[test]
+    fn fr_l19_commit_request_preserves_description_and_staging() {
+        let snap = sample_snapshot();
+        let mut staging = Staging::new(&snap.changes, false);
+        staging.toggle_file(&snap.changes[0]);
+        let req = commit_request(&snap, &staging, "요약", "설명", false);
+        assert_eq!(req.summary, "요약");
+        assert_eq!(req.description, "설명");
+        assert!(!req.ops.is_empty());
+    }
+
+    #[test]
+    fn fr_l19_branch_input_requires_valid_name() {
+        assert_eq!(branch_input("  feat/new  "), Some("feat/new".to_string()));
+        assert_eq!(branch_input("bad name"), None);
+    }
+
+    #[test]
+    fn fr_l19_load_notes_distinguish_failure_and_missing_repository() {
+        assert!(crate::ui::vcs::Load::NotRepo.note().unwrap().contains("저장소가 아닙니다"));
+        assert_eq!(crate::ui::vcs::Load::Failed("오류입니다".into()).note().as_deref(), Some("오류입니다"));
+    }
+
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{
         EventPayload, Host, PropertyKind, Recomposer, WidgetKind, WindowHeightClass,
@@ -1684,7 +1911,6 @@ mod tests {
 
     #[test]
     fn fr_l19_no_repository_data_is_invented() {
-        assert!(snapshot("ember").is_none());
         for sec in Section::ALL {
             assert_eq!(section_count(sec, None), None);
         }

@@ -31,7 +31,7 @@ pub use crate::ui::files::{
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
 use super::characters::{CharState, Character};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheetSized, FilterChip, IconButton, Label, Pill, PillTone};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -389,14 +389,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                                 .modifier(Modifier::new().size(H_BTN, H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
                                 .on_click(open);
                         } else {
-                            // The mockup's 보내기 is 96 px wide; `AppButton` estimates wider.
-                            let p = ember_theme().palette;
-                            cu::Button("보내기")
-                                .icon(IconRole::Send)
-                                .variant(ButtonVariant::Text)
-                                .color(paint(p.ink_text))
-                                .modifier(Modifier::new().width(96.0).height(H_BTN).background(paint(p.ink)).shape_role(ShapeRole::Full))
-                                .on_click(open);
+                            AppButton("보내기", Some(IconRole::Send), ButtonKind::Primary, false, true, false, open);
                         }
                     });
                     Cols(
@@ -1212,7 +1205,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         blocker = Some("이 장비는 지금 연결되어 있지 않습니다");
     }
     let can_send = blocker.is_none() && target_device.is_some();
-    let sheet_w = (w - 32.0).clamp(280.0, 620.0);
+    let sheet_w = super::components::sheet_width(w, super::components::SHEET_WIDTH_DEFAULT);
     let inner = sheet_w - 2.0 * SP[4];
     let close = {
         let s = st.sheet.clone();
@@ -1234,11 +1227,11 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         .map(|(l, icon, ..)| target_chip_width(&fit_label(l, 160.0, Fs::Sm.size()), if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 }))
         .collect();
     let lines = super::project::wrap_lines(&widths, SP[1], inner);
-    EmberSheetSized("파일 보내기", open, sheet_w, close.clone(), None, || {
+    EmberSheet("파일 보내기", open, close.clone(), None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-            Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+            Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             if chips.is_empty() {
-                Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
             for line in lines.iter() {
                 cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1259,9 +1252,9 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                     }
                 });
             }
-            Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+            Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             // TODO(compose-rust): a file picker and drag and drop; until then the files stay empty.
-            Label(&format!("{}개 선택됨", d.files.len()), Fs::Sm, Weight::Regular, None, None);
+            Label(&format!("{}개 선택됨", d.files.len()), Fs::Sm, Weight::Regular, None, Some(1));
             if let Some(text) = blocker {
                 Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
             }

@@ -146,7 +146,7 @@ async fn fr_u6_unsupported_harness_with_a_proxy_is_an_error() {
     let f = fx();
     let proxy = ProxySpec { endpoint: "http://127.0.0.1:7777".into(), key_env: None };
     let mut d = def(None, true, Some(proxy));
-    d.harness = "codex".into();
+    d.harness = "scripted".into();
     let e = create_member_session(&f.sessions, &d, new).unwrap_err().to_string();
-    assert!(e.contains("claude-code only"), "{e}");
+    assert!(e.contains("claude-code, codex and agy only"), "{e}");
 }

@@ -287,7 +287,7 @@ pub fn AgentsScreenWith(
                                 }
                             });
                     } else {
-                        // Desktop: 200px Nav on the left + 917px Body on the right (ends at 1408)
+                        // Desktop: navigation on the left and the remaining width for the body
                         cu::Row()
                             .spacing(25.0)
                             .modifier(Modifier::new().fill_max_width())
@@ -297,7 +297,7 @@ pub fn AgentsScreenWith(
                                 });
                                 cu::Column()
                                     .spacing(20.0)
-                                    .modifier(Modifier::new().width(917.0))
+                                    .modifier(Modifier::new().weight(1.0))
                                     .content(|| {
                                         match cur_sec {
                                             Section::Harness => HarnessSection(&store, &live, compact),
@@ -624,10 +624,10 @@ fn VendorDot(h: AgentHarness) {
 fn KpiItem(label: &str, value: &str, pill: Option<(&str, PillTone)>) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-        Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+        Label(label, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
         cu::Spacer().modifier(Modifier::new().height(SP[0]));
         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-            Label(value, Fs::Xl, Weight::Semibold, None, None);
+            Label(value, Fs::Xl, Weight::Semibold, None, Some(1));
             if let Some((p_text, tone)) = pill {
                 Pill(p_text, tone, true);
             }
@@ -1279,16 +1279,16 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| {
                 cu::Box().modifier(Modifier::new().width(28.0)).content(|| {
-                    Label("기본", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                    Label("기본", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                    Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
                 cu::Box().modifier(Modifier::new().width(120.0)).alignment(Alignment::CenterEnd).content(|| {
-                    Label("플랜별 사용", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                    Label("플랜별 사용", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
                 cu::Box().modifier(Modifier::new().width(60.0)).alignment(Alignment::CenterEnd).content(|| {
-                    Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+                    Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
             });
 
@@ -1989,11 +1989,11 @@ fn ComputerTile(name: &str, r: Reachability) {
             Label(ip_str, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
             cu::Spacer().modifier(Modifier::new().height(SP[0]));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label(sessions_num, Fs::Sm, Weight::Medium, None, None);
-                Label(" 세션", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label(sessions_num, Fs::Sm, Weight::Medium, None, Some(1));
+                Label(" 세션", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                Label(tunnels_num, Fs::Sm, Weight::Medium, None, None);
-                Label(" 열린 연결", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label(tunnels_num, Fs::Sm, Weight::Medium, None, Some(1));
+                Label(" 열린 연결", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 AppButton("IP 확인", None, ButtonKind::Default, true, r == Reachability::Online, false, move || {
                     post_notice(&format!("{name_owned} 세션이 본 IP: {ip_owned}"));
@@ -2031,7 +2031,7 @@ fn UsageSection(
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             if compact {
                 cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-                    Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                     let tok_str = tokens.map(format_tokens).unwrap_or_else(|| "1,234,567".to_string());
                     Label(&tok_str, Fs::Xl3, Weight::Semibold, None, Some(1));
                     Label(&format!("토큰 · 14일 평균 3.5M (최근 7일 {})", format_tokens(week_tokens)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
@@ -2039,18 +2039,18 @@ fn UsageSection(
             } else {
                 cu::Row().alignment(Alignment::CenterEnd).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
                     cu::Column().modifier(Modifier::new().width(320.0)).content(|| {
-                        Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                        Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                         let tok_str = tokens.map(format_tokens).unwrap_or_else(|| "1,234,567".to_string());
                         Label(&tok_str, Fs::Xl3, Weight::Semibold, None, Some(1));
                         Label(&format!("토큰 · 14일 평균 3.5M (최근 7일 {})", format_tokens(week_tokens)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                         cu::Spacer().modifier(Modifier::new().height(SP[2]));
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
                             VendorDot(AgentHarness::ClaudeCode);
-                            Label("Claude 28.5M", Fs::Xs, Weight::Regular, None, None);
+                            Label("Claude 28.5M", Fs::Xs, Weight::Regular, None, Some(1));
                             VendorDot(AgentHarness::Codex);
-                            Label("Codex 15.2M", Fs::Xs, Weight::Regular, None, None);
+                            Label("Codex 15.2M", Fs::Xs, Weight::Regular, None, Some(1));
                             VendorDot(AgentHarness::Gemini);
-                            Label("Gemini 5.1M", Fs::Xs, Weight::Regular, None, None);
+                            Label("Gemini 5.1M", Fs::Xs, Weight::Regular, None, Some(1));
                         });
                     });
                     cu::Box().modifier(Modifier::new().width(440.0).height(150.0)).content(|| {
@@ -2118,24 +2118,24 @@ fn TokenKindsCard(compact: bool) {
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("입력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    Label("1.1M", Fs::Lg, Weight::Semibold, None, None);
-                    Label("28%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("입력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label("1.1M", Fs::Lg, Weight::Semibold, None, Some(1));
+                    Label("28%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("출력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    Label("0.4M", Fs::Lg, Weight::Semibold, None, None);
-                    Label("10%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("출력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label("0.4M", Fs::Lg, Weight::Semibold, None, Some(1));
+                    Label("10%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("캐시 읽기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    Label("2.2M", Fs::Lg, Weight::Semibold, None, None);
-                    Label("56%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("캐시 읽기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label("2.2M", Fs::Lg, Weight::Semibold, None, Some(1));
+                    Label("56%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("캐시 쓰기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                    Label("0.2M", Fs::Lg, Weight::Semibold, None, None);
-                    Label("5%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label("캐시 쓰기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label("0.2M", Fs::Lg, Weight::Semibold, None, Some(1));
+                    Label("5%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
             });
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
@@ -2162,22 +2162,22 @@ fn HarnessCostCard(bars: &[crate::ui::home::HarnessBar]) {
                     let donut_draw = draw_donut(p);
                     cu::Canvas(donut_draw).modifier(Modifier::new().size(132.0, 132.0));
                     cu::Column().content(|| {
-                        Label("$174", Fs::Lg, Weight::Semibold, None, None);
-                        Label("이번 달", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        Label("$174", Fs::Lg, Weight::Semibold, None, Some(1));
+                        Label("이번 달", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                 });
                 cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                         VendorDot(AgentHarness::ClaudeCode);
-                        Label("Claude $120", Fs::Sm, Weight::Regular, None, None);
+                        Label("Claude $120", Fs::Sm, Weight::Regular, None, Some(1));
                     });
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                         VendorDot(AgentHarness::Codex);
-                        Label("Codex $46", Fs::Sm, Weight::Regular, None, None);
+                        Label("Codex $46", Fs::Sm, Weight::Regular, None, Some(1));
                     });
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                         VendorDot(AgentHarness::Gemini);
-                        Label("Gemini $8", Fs::Sm, Weight::Regular, None, None);
+                        Label("Gemini $8", Fs::Sm, Weight::Regular, None, Some(1));
                     });
                 });
             });
@@ -2194,7 +2194,7 @@ fn HarnessCostCard(bars: &[crate::ui::home::HarnessBar]) {
                     cu::Spacer().modifier(Modifier::new().width(SP[1]));
                     Label(model, Fs::Sm, Weight::Medium, None, Some(1));
                     cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    Label(cost, Fs::Sm, Weight::Medium, None, None);
+                    Label(cost, Fs::Sm, Weight::Medium, None, Some(1));
                 });
             }
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
@@ -2202,13 +2202,13 @@ fn HarnessCostCard(bars: &[crate::ui::home::HarnessBar]) {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
                 Label("보고 안 함", Fs::Sm, Weight::Medium, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                Label("모름", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                Label("모름", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
             for b in bars {
                 cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
                     Label(&b.label, Fs::Sm, Weight::Regular, None, Some(1));
                     cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    Label(&format!("세션 {}개", b.sessions), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label(&format!("세션 {}개", b.sessions), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
             }
         });
@@ -2316,10 +2316,33 @@ pub fn sample_bars() -> Vec<crate::ui::home::HarnessBar> {
     ]
 }
 
+// Models the harness card's share of the shell and section layout with expanded navigation.
+#[cfg(test)]
+fn agent_card_width(window_width: f32) -> f32 {
+    use crate::ui::shell::{nav_mode, ShellMode};
+    let nav = match nav_mode(window_width, false) {
+        ShellMode::BottomTabs => 0.0,
+        ShellMode::Rail => RAIL_W,
+        ShellMode::Sidebar => SIDE_W,
+    };
+    if window_width <= 900.0 {
+        (window_width - nav - 2.0 * SP[3]).max(0.0)
+    } else {
+        ((window_width - nav - 2.0 * SP[6] - 200.0 - 25.0 - SP[3]) / 2.0).max(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_l20a_agent_card_width_fills_available_content() {
+        assert_eq!(agent_card_width(390.0), 358.0);
+        assert_eq!(agent_card_width(768.0), 664.0);
+        assert_eq!(agent_card_width(1440.0), 450.5);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

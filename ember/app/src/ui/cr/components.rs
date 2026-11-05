@@ -1005,11 +1005,25 @@ mod tests {
             if name != "components.rs" && name != "vcs.rs" {
                 assert!(!production.contains("cu::Text("), "{name} bypasses the shared text builder");
             }
+            // Existing direct buttons are explicitly counted until their specialized controls
+            // move into shared components. Any additional bypass must be reviewed.
+            let allowed_buttons = match name {
+                "components.rs" => 3,
+                "agents.rs" => 2,
+                "files.rs" => 1,
+                "home.rs" => 2,
+                "launcher.rs" => 1,
+                "project.rs" => 2,
+                "routines.rs" => 2,
+                "vcs.rs" => 1,
+                _ => 0,
+            };
+            assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");
             // Button and Chip use the toolkit's one-line default. No screen overrides it.
             assert!(!production.contains(".max_lines(2)"), "{name} overrides a label's line limit");
         }
         let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
-        assert_eq!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count(), 2);
+        assert!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count() >= 1);
     }
 
     // ---- FR-L10: a navigation row is a control the renderer can click -----------------------

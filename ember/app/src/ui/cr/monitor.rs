@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l21_table_headers_and_cells_emit_single_line_max_lines() {
+    fn fr_l10_1_table_headers_and_cells_emit_single_line_max_lines() {
         let _guard = crate::services::test_guard();
         let c = chip();
         let mut host = Host::new(move || {
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l21_process_row_cells_emit_single_line_max_lines() {
+    fn fr_l10_1_process_row_cells_emit_single_line_max_lines() {
         let mut host = Host::new(|| {
             Box::new(Recomposer::new(|| {
                 let row = ProcessRow {

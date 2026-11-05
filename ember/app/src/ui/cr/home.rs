@@ -97,70 +97,6 @@ pub fn layout(width_dp: f32) -> Layout {
     }
 }
 
-/// Estimated text width in dp: Hangul and other wide glyphs one em, ASCII 0.55 em.
-pub fn text_px(text: &str, font_px: f32) -> f32 {
-    text.chars().map(|c| if c.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * font_px
-}
-
-/// `text` cut to fit `max_px` at `font_px`, ending in an ellipsis when it was cut.
-pub fn fit_label(text: &str, max_px: f32, font_px: f32) -> String {
-    if text_px(text, font_px) <= max_px {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    for ch in text.chars() {
-        let next = format!("{out}{ch}\u{2026}");
-        if text_px(&next, font_px) > max_px {
-            break;
-        }
-        out.push(ch);
-    }
-    format!("{out}\u{2026}")
-}
-
-/// Widths for chips whose natural widths do not all fit in `avail`. The chips are in shrink
-/// order (project, model, mode, computer): the first gives up width down to its minimum, then
-/// the next, and so on, so the last keeps its full width while the others can still give.
-pub fn shrink_widths(natural: &[f32], mins: &[f32], avail: f32) -> Vec<f32> {
-    let mut w = natural.to_vec();
-    let mut deficit = natural.iter().sum::<f32>() - avail;
-    // Two passes: down to the minimums, then (a row too narrow even for those) down to the hard
-    // floor of a glyph and an ellipsis, in the same order.
-    for floors in [mins.to_vec(), vec![HARD_MIN; natural.len()]] {
-        for (wi, floor) in w.iter_mut().zip(floors) {
-            let cut = deficit.max(0.0).min((*wi - floor.min(*wi)).max(0.0));
-            deficit -= cut;
-            *wi -= cut;
-        }
-    }
-    w
-}
-
-/// The narrowest a composer chip gets.
-const HARD_MIN: f32 = 96.0;
-
-/// A short label (at most six Hangul or ten Latin characters) keeps its full chip width while the
-/// row has room for it; a longer one can be cut to four characters.
-pub fn chip_floor(text: &str, natural: f32) -> f32 {
-    if text_px(text, Fs::Sm.size()) <= 6.0 * Fs::Sm.size() {
-        natural
-    } else {
-        chip_natural(&fit_label(text, 52.0, Fs::Sm.size())).min(natural)
-    }
-}
-
-/// A budget for distributing the composer row across its four controls.
-pub fn chip_natural(text: &str) -> f32 {
-    text_px(text, Fs::Sm.size()) + 80.0
-}
-
-/// The text a chip of width `w` can show.
-pub fn chip_text(text: &str, w: f32) -> String {
-    // The estimate's own slack (4 dp) and a little more: text that exactly fits its natural width
-    // must not be cut by float rounding ("이 서버" read "이…" at 1440).
-    fit_label(text, (w - chip_natural("") + 6.0).max(0.0), Fs::Sm.size())
-}
-
 /// "10월 25일 토요일" for `YYYY-MM-DD`.
 pub fn date_line(ymd: &str) -> String {
     let n = crate::ui::home::day_number(ymd);
@@ -793,19 +729,20 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
 }
 
 /// A composer chip (`.pickchip`): the toolkit button on a `surface-2` pill with its glyph and the
-/// text cut to the width `w` the row gave it; `icon_only` chips are 32 px circles.
+/// content-sized text; `icon_only` chips are 32 px circles.
 /// TODO(compose-rust#372, #373): the mockup's folder, star, shield and monitor line icons and the
 /// chevron of the model and mode chips need a button that takes an SVG icon; the toolkit glyph
 /// roles stand in.
-fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, w: f32, on_click: impl FnMut() + 'static) {
+fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
-    let (shown, width) = if icon_only { (String::new(), H_CTL) } else { (text.to_string(), w) };
-    cu::Button(shown)
+    let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
+    let modifier = if icon_only { modifier.width(H_CTL) } else { modifier };
+    cu::Button(if icon_only { "" } else { text })
         .variant(ButtonVariant::Text)
         .color(paint(p.text_2))
         .icon(icon)
-        .modifier(Modifier::new().width(width).height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full))
+        .modifier(modifier)
         .on_click(on_click);
 }
 
@@ -819,35 +756,12 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let computer_text = crate::ui::home::computer_chip_text(sel.computer.as_deref(), &computers);
     let computer_text = if sel.computer.is_none() { c.local_name(ui) } else { computer_text };
     let icon_only = l.compact;
-    let pad = if l.compact { SP[2] } else { SP[3] };
     let gap = if l.compact { SP[0] } else { 6.0 };
-    let inner = w - 2.0 * pad - 2.0;
     let model_text = sel.option.chip_label();
     let mode_text = sel.mode.label().to_string();
-    // The row: add (32), the chips, a spacer, send (36), `gap` between all of them. The chips
-    // share what is left and are cut to it.
-    let (widths, project_w): (Vec<f32>, f32) = if icon_only {
-        let project_avail = (inner - 32.0 - 3.0 * H_CTL - 36.0 - 6.0 * gap).max(60.0);
-        let project_nat = chip_natural(&fit_label(&sel.project, 110.0, Fs::Sm.size()));
-        (vec![], project_nat.min(project_avail))
-    } else {
-        let avail = inner - 32.0 - 36.0 - 6.0 * gap;
-        let nat = [
-            chip_natural(&fit_label(&sel.project, 180.0, Fs::Sm.size())),
-            chip_natural(&fit_label(&model_text, 180.0, Fs::Sm.size())),
-            chip_natural(&fit_label(&mode_text, 180.0, Fs::Sm.size())),
-            chip_natural(&fit_label(&computer_text, 180.0, Fs::Sm.size())),
-        ];
-        // At least four Hangul of text, except a short computer label, which stays whole.
-        let floor = |t: &str, n: f32| chip_floor(t, n);
-        let mins = [floor(&sel.project, nat[0]), floor(&model_text, nat[1]), floor(&mode_text, nat[2]), floor(&computer_text, nat[3])];
-        let w4 = shrink_widths(&nat, &mins, avail);
-        (w4.clone(), w4[0])
-    };
-    let width_of = |i: usize| widths.get(i).copied().unwrap_or(0.0);
-    let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool, w: f32| {
+    let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool| {
         let open = c.open.clone();
-        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, w, move || open.set(Some(pick)));
+        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(FR-L11): attachments need the file picker and an upload API.
@@ -902,10 +816,10 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                 }
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     add();
-                    chip(&sel.project, IconRole::Library, Pick::Project, false, if icon_only { project_w } else { width_of(0) });
-                    chip(&model_text, IconRole::Compose, Pick::Model, false, width_of(1));
-                    chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass(), width_of(2));
-                    chip(&computer_text, IconRole::Sidebar, Pick::Computer, false, width_of(3));
+                    chip(&sel.project, IconRole::Library, Pick::Project, false);
+                    chip(&model_text, IconRole::Compose, Pick::Model, false);
+                    chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
+                    chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
                     cu::Spacer().modifier(Modifier::new().weight(1.0));
                     if c.busy.get() {
                         cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
@@ -926,8 +840,7 @@ fn Suggestions(c: &Composer, width_dp: f32) {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
                     // TODO(compose-rust#372): the mockup's sparkle, branch and bars icons.
-                    let shown = fit_label(text, 240.0 - 52.0, Fs::Sm.size());
-                    AppButton(&shown, None, ButtonKind::Default, true, true, false, move || s.set(Some(t.clone())));
+                    AppButton(text, None, ButtonKind::Default, true, true, false, move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -1457,20 +1370,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l11_composer_chips_shrink_to_the_row_and_end_in_an_ellipsis() {
+    fn fr_l11_composer_layout() {
         assert_eq!(suggestion_cols(1440.0), 3);
         assert_eq!(suggestion_cols(768.0), 2);
         assert_eq!(composer_width(1158.0), 720.0);
         assert_eq!(composer_width(340.0), 340.0);
-        let nat = [150.0, 300.0, 120.0, 90.0];
-        let w = shrink_widths(&nat, &[80.0; 4], 480.0);
-        assert!(w.iter().sum::<f32>() <= 480.5, "{w:?}");
-        // In order: the first gives up 70 (to its 80 minimum), the second the remaining 110.
-        assert_eq!(w, vec![80.0, 190.0, 120.0, 90.0]);
-        assert_eq!(shrink_widths(&nat, &[80.0; 4], 1000.0), nat.to_vec());
-        let cut = fit_label("Claude Code · Opus 5.5 · High", 120.0, 13.0);
-        assert!(cut.ends_with('\u{2026}') && text_px(&cut, 13.0) <= 120.0, "{cut}");
-        assert_eq!(fit_label("이 서버", 120.0, 13.0), "이 서버");
+
     }
 
     #[test]
@@ -1495,32 +1400,6 @@ mod tests {
         // 2025-10-25 is a Saturday.
         assert_eq!(days.last().map(|d| d.label), Some("토"));
         assert_eq!(days[0].label, "일");
-    }
-
-    #[test]
-    fn fr_l11_the_computer_chip_keeps_its_label_at_the_1440_budget() {
-        // 1440: composer 720, inner 686, less the add (32), send (36) and six 6 dp gaps.
-        let avail = 686.0 - 32.0 - 36.0 - 6.0 * 6.0;
-        let texts = ["기본 프로젝트", "Claude Code \u{b7} Opus 5.5 \u{b7} High", "명령마다 확인", "이 컴퓨터"];
-        let nat: Vec<f32> = texts.iter().map(|t| chip_natural(&fit_label(t, 180.0, 13.0))).collect();
-        let mins: Vec<f32> = texts.iter().zip(&nat).map(|(t, n)| chip_floor(t, *n)).collect();
-        let w = shrink_widths(&nat, &mins, avail);
-        assert!(w.iter().sum::<f32>() <= avail + 0.5, "{w:?}");
-        assert_eq!(w[3], nat[3], "the short computer label keeps its width");
-        assert_eq!(chip_text("이 컴퓨터", w[3]), "이 컴퓨터");
-        assert!(w[0] < nat[0], "the project chip gives first");
-        // A row that cannot fit even that shrinks the computer chip last.
-        let tight = shrink_widths(&nat, &mins, 300.0);
-        assert!(tight[3] < nat[3] && tight[0] <= w[0]);
-        assert!(tight.iter().all(|x| *x >= HARD_MIN));
-    }
-
-    #[test]
-    fn fr_l11_a_chip_that_fits_its_natural_width_is_not_cut() {
-        for t in ["이 서버", "기본 프로젝트", "명령마다 확인", "mac-mini"] {
-            assert_eq!(chip_text(t, chip_natural(t)), t);
-        }
-        assert!(chip_text("Claude Code · Opus 5.5 · High", 200.0).ends_with('\u{2026}'));
     }
 
     #[test]

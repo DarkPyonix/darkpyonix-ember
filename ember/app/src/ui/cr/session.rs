@@ -325,7 +325,7 @@ pub fn ModelChip(session: &str, compact_label: bool) {
 }
 
 /// The permission mode chip of a composer (`.pickchip.modechip`).
-pub fn ModeChip(session: &str, compact_label: bool) {
+pub fn ModeChip(session: &str, _compact_label: bool) {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let sid = session.to_string();
@@ -347,11 +347,6 @@ pub fn ModeChip(session: &str, compact_label: bool) {
     }
 
     let mode_text = mode_chip_label(approve_all);
-    let shown_text = if compact_label && mode_text.chars().count() > 6 {
-        "확인".to_string()
-    } else {
-        mode_text.to_string()
-    };
     let warns = mode_chip_warns(approve_all);
     let rows = mode_rows(&agent);
     let (bg, fg) = if warns {
@@ -377,7 +372,7 @@ pub fn ModeChip(session: &str, compact_label: bool) {
                         cu::Spacer().modifier(Modifier::new().width(4.0));
                         NavIcon(ICON_SHIELD_SVG, fg.to_argb(), 13.0);
                         Label(
-                            &shown_text,
+                            mode_text,
                             Fs::Xs,
                             Weight::Medium,
                             Some(paint(fg)),

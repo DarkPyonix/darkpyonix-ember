@@ -310,15 +310,22 @@ fn MetricCard(metric: Metric, view: Option<CardView>, empty: &str, meter: Option
 /// One value against a track: the track in surface-2, the fill in the accent, both rounded.
 fn Meter(fraction: f32) {
     let p = ember_theme().palette;
+    ColorMeter(fraction, p.blue.strong, 8.0);
+}
+
+/// A meter with its own fill colour and height, also used by the session status cards (#349).
+pub fn ColorMeter(fraction: f32, fill: compose_rust::Color, height: f32) {
+    let p = ember_theme().palette;
     let f = bar_fraction(fraction, 1.0);
+    let r = height / 2.0;
     cu::Row()
-        .modifier(Modifier::new().fill_max_width().height(8.0).background(paint(p.surface_2)).corner_radius(4.0).clip(true))
+        .modifier(Modifier::new().fill_max_width().height(height).background(paint(p.surface_2)).corner_radius(r).clip(true))
         .content(move || {
             if f > 0.0 {
-                cu::Spacer().modifier(Modifier::new().weight(f).height(8.0).background(paint(p.blue.strong)).corner_radius(4.0));
+                cu::Spacer().modifier(Modifier::new().weight(f).height(height).background(paint(fill)).corner_radius(r));
             }
             if f < 1.0 {
-                cu::Spacer().modifier(Modifier::new().weight(1.0 - f).height(8.0));
+                cu::Spacer().modifier(Modifier::new().weight(1.0 - f).height(height));
             }
         });
 }

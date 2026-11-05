@@ -723,14 +723,166 @@ pub fn environment_rows(
 // Status view cards (FR-L18, #324)
 // ---------------------------------------------------------------------------------------------
 
-/// One card of the status view's bottom grid, or the 오늘 토큰 tile.
+/// CI state of a pull request (FR-L18, #349), drawn as a coloured pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+    Pass,
+    Fail,
+    Running,
+}
+
+impl CiState {
+    /// The pill text: 통과, 실패 or 진행 중.
+    pub fn label(self) -> &'static str {
+        match self {
+            CiState::Pass => "통과",
+            CiState::Fail => "실패",
+            CiState::Running => "진행 중",
+        }
+    }
+
+    /// The pill tone: green, red or blue.
+    pub fn tone(self) -> crate::ui::components::PillTone {
+        use crate::ui::components::PillTone;
+        match self {
+            CiState::Pass => PillTone::Green,
+            CiState::Fail => PillTone::Red,
+            CiState::Running => PillTone::Blue,
+        }
+    }
+}
+
+/// One row of the PR과 CI card: title, branch, CI pill and the review (or merged) label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrRow {
+    pub title: String,
+    pub branch: String,
+    pub ci: CiState,
+    /// "리뷰 대기", "승인됨" or "병합됨".
+    pub review: &'static str,
+}
+
+/// State of a sub-agent thread; the dot beside its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubState {
+    Running,
+    Waiting,
+    Done,
+    Failed,
+}
+
+impl SubState {
+    /// The launcher status whose dot colour the thread takes.
+    pub fn launcher_status(self) -> LauncherStatus {
+        match self {
+            SubState::Running => LauncherStatus::Running,
+            SubState::Waiting => LauncherStatus::WaitingForApproval,
+            SubState::Done => LauncherStatus::Finished,
+            SubState::Failed => LauncherStatus::Failed,
+        }
+    }
+}
+
+/// One node of the sub-agent tree. `depth` 0 is a team member (drawn as an avatar of `agent`),
+/// deeper nodes are threads (drawn with a status dot or spinner).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubAgentRow {
+    pub name: String,
+    pub task: String,
+    pub agent: String,
+    pub state: SubState,
+    pub depth: u8,
+}
+
+/// One member bar of the 부하 card. `tokens_k` is today's tokens in thousands; `None` until the
+/// server reports it (no number is invented outside demo mode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadRow {
+    pub member: String,
+    pub agent: String,
+    pub leader: bool,
+    pub tokens_k: Option<u32>,
+    /// Vendor colour of the bar.
+    pub vendor: crate::ui::components::PillTone,
+}
+
+/// One computer bar of the 부하 card's 컴퓨터 section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerRow {
+    pub name: String,
+    pub online: bool,
+    /// Usage percent, 0 to 100.
+    pub usage: u8,
+    pub running: usize,
+}
+
+impl ComputerRow {
+    /// "62% · 3실행", or "오프라인".
+    pub fn label(&self) -> String {
+        if self.online {
+            format!("{}% · {}실행", self.usage, self.running)
+        } else {
+            "오프라인".to_string()
+        }
+    }
+
+    /// The bar turns orange above 75 percent.
+    pub fn hot(&self) -> bool {
+        self.online && self.usage > 75
+    }
+}
+
+/// The rows of a card, by kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusBody {
+    Pr(Vec<PrRow>),
+    SubAgents(Vec<SubAgentRow>),
+    Load { counts: Vec<String>, members: Vec<LoadRow>, computers: Vec<ComputerRow> },
+}
+
+/// One card of the status view's bottom grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusCard {
     pub title: &'static str,
-    /// Rows to draw; empty means the card shows `empty`.
-    pub rows: Vec<String>,
+    pub body: StatusBody,
     /// The honest empty state.
     pub empty: &'static str,
+}
+
+impl StatusCard {
+    /// True when there is nothing to draw, so the card shows `empty`.
+    pub fn is_empty(&self) -> bool {
+        match &self.body {
+            StatusBody::Pr(r) => r.is_empty(),
+            StatusBody::SubAgents(r) => r.is_empty(),
+            StatusBody::Load { counts, members, computers } => {
+                counts.is_empty() && members.is_empty() && computers.is_empty()
+            }
+        }
+    }
+
+    /// The count pill of the header.
+    pub fn count(&self) -> usize {
+        match &self.body {
+            StatusBody::Pr(r) => r.len(),
+            StatusBody::SubAgents(r) => r.len(),
+            StatusBody::Load { members, .. } => members.len(),
+        }
+    }
+}
+
+/// A member bar's fill, 0 to 1: tokens against the largest member (mockup `tmax`).
+pub fn token_fraction(tokens_k: u32, max_k: u32) -> f32 {
+    if max_k == 0 {
+        0.0
+    } else {
+        (tokens_k as f32 / max_k as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// "184k" for a member's tokens, "-" when not reported.
+pub fn token_label(tokens_k: Option<u32>) -> String {
+    tokens_k.map_or_else(|| "-".to_string(), |k| format!("{k}k"))
 }
 
 /// The 오늘 토큰 tile: (value, sub line), today's tokens of the project on the UTC day (FR-U7,
@@ -744,44 +896,76 @@ pub fn token_tile(load: &crate::ui::usage::Load<ember_client::api::UsageSummary>
 /// PR과 CI. No PR API exists yet (TODO(server): PR list with CI state, #324), so only the demo
 /// shows sample rows.
 pub fn pr_card(demo: bool) -> StatusCard {
+    let row = |title: &str, branch: &str, ci, review| PrRow {
+        title: title.to_string(),
+        branch: branch.to_string(),
+        ci,
+        review,
+    };
     let rows = if demo {
         vec![
-            "#212 센터 시트와 스크림 · CI 통과".to_string(),
-            "#273 모니터 폭 1360 dp · CI 진행 중".to_string(),
+            row("#212 센터 시트와 스크림", "feat/centered-sheets", CiState::Pass, "병합됨"),
+            row("#273 모니터 폭 1360 dp", "feat/monitor-width", CiState::Running, "리뷰 대기"),
+            row("#298 프록시 연결", "feat/agy-proxy", CiState::Fail, "리뷰 대기"),
         ]
     } else {
         Vec::new()
     };
-    StatusCard { title: PR_TITLE, rows, empty: WAIT_SERVER }
+    StatusCard { title: PR_TITLE, body: StatusBody::Pr(rows), empty: WAIT_SERVER }
 }
 
 /// 서브 에이전트 스레드. The server does not report sub-agent threads yet (TODO(server): FR-U7,
 /// #324); team members are not threads, so nothing is derived from them.
 pub fn subagent_card(demo: bool) -> StatusCard {
+    let row = |name: &str, task: &str, state, depth| SubAgentRow {
+        name: name.to_string(),
+        task: task.to_string(),
+        agent: "claude-code".to_string(),
+        state,
+        depth,
+    };
     let rows = if demo {
         vec![
-            "리더 > 구현 · 파일 검색".to_string(),
-            "리더 > 리뷰 · 테스트 읽기".to_string(),
+            row("리더", "claude-code", SubState::Running, 0),
+            row("구현", "파일 검색", SubState::Running, 1),
+            row("리뷰", "테스트 읽기", SubState::Done, 1),
         ]
     } else {
         Vec::new()
     };
-    StatusCard { title: SUBAGENT_TITLE, rows, empty: NONE_YET }
+    StatusCard { title: SUBAGENT_TITLE, body: StatusBody::SubAgents(rows), empty: NONE_YET }
 }
 
-/// 부하. Session counts come from the members; CPU and memory need a server metric
-/// (TODO(server): host load, #324) and show only in demo mode.
+/// 부하. Session counts and the member rows come from the members; today's tokens per member
+/// and the computers' usage need a server metric (TODO(server): per-member tokens and host
+/// load, #324) and carry numbers only in demo mode.
 pub fn load_card(demo: bool, members: &[Member]) -> StatusCard {
-    let mut rows = Vec::new();
+    let mut counts = Vec::new();
     if !members.is_empty() {
         let n = |s: LauncherStatus| members.iter().filter(|m| m.status == s).count();
-        rows.push(format!("실행 중 세션 {}개", n(LauncherStatus::Running)));
-        rows.push(format!("승인 대기 세션 {}개", n(LauncherStatus::WaitingForApproval)));
+        counts.push(format!("실행 중 세션 {}개", n(LauncherStatus::Running)));
+        counts.push(format!("승인 대기 세션 {}개", n(LauncherStatus::WaitingForApproval)));
     }
-    if demo {
-        rows.push("CPU 38% · 메모리 5.1 GB".to_string());
-    }
-    StatusCard { title: LOAD_TITLE, rows, empty: NONE_YET }
+    let mut rows: Vec<LoadRow> = members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| LoadRow {
+            member: m.name.clone(),
+            agent: m.agent.clone(),
+            leader: m.leader,
+            tokens_k: if demo { Some(40 + ((i as u32 * 97 + 53) % 360)) } else { None },
+            vendor: crate::ui::project::harness_tone(&m.agent),
+        })
+        .collect();
+    // Largest first, as in the mockup; unreported tokens keep the member order (stable sort).
+    rows.sort_by(|a, b| b.tokens_k.cmp(&a.tokens_k));
+    let computers = if demo {
+        let c = |name: &str, online, usage, running| ComputerRow { name: name.to_string(), online, usage, running };
+        vec![c("macmini", true, 38, 2), c("linux-dev", true, 82, 1), c("laptop", false, 0, 0)]
+    } else {
+        Vec::new()
+    };
+    StatusCard { title: LOAD_TITLE, body: StatusBody::Load { counts, members: rows, computers }, empty: NONE_YET }
 }
 
 /// The three cards in grid order.
@@ -1353,6 +1537,13 @@ mod tests {
         assert_eq!(timeline_summary(false), "비용은 알 수 없습니다");
     }
 
+    fn load_parts(c: &StatusCard) -> (&Vec<String>, &Vec<LoadRow>, &Vec<ComputerRow>) {
+        match &c.body {
+            StatusBody::Load { counts, members, computers } => (counts, members, computers),
+            _ => panic!("not a load card"),
+        }
+    }
+
     #[test]
     fn fr_l18_status_data_present() {
         let ms = vec![
@@ -1361,15 +1552,22 @@ mod tests {
             member("c", LauncherStatus::Running, false, 3),
         ];
         let load = load_card(false, &ms);
-        assert_eq!(load.rows, vec!["실행 중 세션 2개", "승인 대기 세션 1개"]);
-        assert!(!load.rows.iter().any(|r| r.contains("CPU")));
+        let (counts, rows, computers) = load_parts(&load);
+        assert_eq!(counts, &vec!["실행 중 세션 2개".to_string(), "승인 대기 세션 1개".to_string()]);
+        // Real members get a row each, with no invented token number or computer.
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.tokens_k.is_none()));
+        assert!(computers.is_empty());
+        assert_eq!(load.count(), 3);
+        assert!(!load.is_empty());
     }
 
     #[test]
     fn fr_l18_status_no_data_is_honest() {
         let cards = status_cards(false, &[]);
         for c in &cards {
-            assert!(c.rows.is_empty(), "{} must not invent rows", c.title);
+            assert!(c.is_empty(), "{} must not invent rows", c.title);
+            assert_eq!(c.count(), 0);
         }
         assert_eq!(cards[0].empty, "서버 데이터를 기다리고 있습니다");
         assert_eq!(cards[1].empty, "아직 없습니다");
@@ -1382,10 +1580,52 @@ mod tests {
     }
 
     #[test]
+    fn fr_l18_status_ci_state_pill() {
+        use crate::ui::components::PillTone;
+        assert_eq!((CiState::Pass.label(), CiState::Pass.tone()), ("통과", PillTone::Green));
+        assert_eq!((CiState::Fail.label(), CiState::Fail.tone()), ("실패", PillTone::Red));
+        assert_eq!((CiState::Running.label(), CiState::Running.tone()), ("진행 중", PillTone::Blue));
+    }
+
+    #[test]
+    fn fr_l18_status_token_bar_fraction() {
+        assert_eq!(token_fraction(200, 400), 0.5);
+        assert_eq!(token_fraction(400, 400), 1.0);
+        assert_eq!(token_fraction(500, 400), 1.0);
+        assert_eq!(token_fraction(10, 0), 0.0);
+        assert_eq!(token_label(Some(184)), "184k");
+        assert_eq!(token_label(None), "-");
+    }
+
+    #[test]
+    fn fr_l18_status_computer_row_label() {
+        let on = ComputerRow { name: "a".into(), online: true, usage: 82, running: 3 };
+        assert_eq!(on.label(), "82% · 3실행");
+        assert!(on.hot());
+        let off = ComputerRow { name: "b".into(), online: false, usage: 0, running: 0 };
+        assert_eq!(off.label(), "오프라인");
+        assert!(!off.hot());
+    }
+
+    #[test]
     fn fr_l18_status_demo_mode_shows_samples() {
-        let cards = status_cards(true, &[]);
-        assert!(cards[0].rows.len() >= 1 && cards[1].rows.len() >= 1);
-        assert_eq!(cards[2].rows, vec!["CPU 38% · 메모리 5.1 GB"]);
+        let ms = vec![member("a", LauncherStatus::Running, true, 1), member("b", LauncherStatus::Running, false, 2)];
+        let cards = status_cards(true, &ms);
+        match &cards[0].body {
+            StatusBody::Pr(r) => {
+                assert!(r.iter().any(|p| p.ci == CiState::Pass) && r.iter().any(|p| p.ci == CiState::Fail));
+                assert!(r.iter().all(|p| !p.branch.is_empty()));
+            }
+            _ => panic!("pr body"),
+        }
+        match &cards[1].body {
+            StatusBody::SubAgents(r) => assert!(r[0].depth == 0 && r[1..].iter().all(|x| x.depth > 0)),
+            _ => panic!("sub-agent body"),
+        }
+        let (_, rows, computers) = load_parts(&cards[2]);
+        assert!(rows.iter().all(|r| r.tokens_k.is_some()));
+        assert!(rows[0].tokens_k >= rows[1].tokens_k, "largest first");
+        assert!(computers.iter().any(|c| !c.online) && computers.iter().any(|c| c.hot()));
         let now = crate::demo::now_ms();
         let mut sample = crate::demo::usage_summary(now);
         let today = crate::demo::day_string(now);

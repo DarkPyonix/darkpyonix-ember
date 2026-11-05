@@ -27,7 +27,8 @@ use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
 use ember_client::LauncherStatus;
 
 pub use crate::ui::session::{
-    INFO_PANEL_W, IdeChoice, StatusCard, status_cards, token_tile, InfoCard, KanbanColumn, PANE_H, PaneLayout, PaneMove, PaneTab,
+    INFO_PANEL_W, IdeChoice, StatusCard, status_cards, token_tile, token_fraction, token_label, CiState,
+    ComputerRow, LoadRow, PrRow, StatusBody, SubAgentRow, SubState, InfoCard, KanbanColumn, PANE_H, PaneLayout, PaneMove, PaneTab,
     PaneToggle, ProjectPanes, SIDE_LIST_W, SOON, Section, SessionView, SideListMode, UI_STRINGS,
     add_pane, can_move, close_pane, current_mode, environment_rows, ide_choices, kanban,
     kanban_column, lease_plan, mode_chip_label, mode_chip_warns, mode_rows, model_chip_label,
@@ -45,8 +46,9 @@ use crate::ui::shell::NavMenu;
 
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
+use super::monitor::ColorMeter;
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberField, EmberSheet,
+    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, pill_colors, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
@@ -3136,8 +3138,138 @@ fn TimelineCard(project: &str) {
         });
 }
 
-/// One card of the status grid: a title row, then the rows or the empty state.
-fn StatusCardBody(ico: &'static str, card: StatusCard) {
+/// The 30 dp icon tile of a card header and of a PR row (`.card-h .ico`, `.tile`).
+fn IconTile(ico: &'static str) {
+    let p = ember_theme().palette;
+    cu::Box()
+        .alignment(Alignment::Center)
+        .modifier(Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).corner_radius(CORNER_SM))
+        .content(move || NavIcon(ico, p.text_2.to_argb(), 16.0));
+}
+
+/// A status dot or spinner centred in a 22 dp box, so tree rows line up with avatars.
+fn ThreadMark(state: SubState) {
+    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(22.0, 22.0)).content(move || {
+        if state == SubState::Running {
+            Spinner(12.0);
+        } else {
+            StatusDot(state.launcher_status());
+        }
+    });
+}
+
+fn char_state(s: SubState) -> CharState {
+    match s {
+        SubState::Running => CharState::Run,
+        SubState::Waiting => CharState::Wait,
+        SubState::Done => CharState::Done,
+        SubState::Failed => CharState::Fail,
+    }
+}
+
+/// A muted section caption inside the 부하 card.
+fn Caption(text: &str) {
+    let p = ember_theme().palette;
+    Label(text, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+}
+
+/// One bar row: leading mark, name, a bar, and a fixed-width value (`.sl-row`).
+fn BarRow(lead: impl FnOnce(), name: &str, fraction: f32, fill: Color, value: &str, value_w: f32) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .spacing(SP[1])
+        .modifier(Modifier::new().fill_max_width())
+        .content(|| {
+            lead();
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(name, Fs::Sm, Weight::Regular, None, Some(1));
+            });
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                ColorMeter(fraction, fill, 6.0);
+            });
+            cu::Row().alignment(Alignment::CenterEnd).modifier(Modifier::new().width(value_w)).content(|| {
+                Label(value, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        });
+}
+
+fn PrRowView(r: &PrRow) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .spacing(SP[1])
+        .modifier(Modifier::new().fill_max_width())
+        .content(|| {
+            IconTile(ICON_GIT_SVG);
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(&r.title, Fs::Sm, Weight::Medium, None, Some(1));
+                Label(&r.branch, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+            cu::Column().alignment(Alignment::CenterEnd).content(|| {
+                Pill(r.ci.label(), r.ci.tone().into(), true);
+                Label(r.review, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        });
+}
+
+fn SubAgentRowView(r: &SubAgentRow, project: &str) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .spacing(SP[1])
+        .modifier(Modifier::new().fill_max_width())
+        .content(|| {
+            // Each level of the tree is indented 14 dp (`.tree ul`).
+            if r.depth > 0 {
+                cu::Spacer().modifier(Modifier::new().width(14.0 * r.depth as f32));
+            }
+            if r.depth == 0 {
+                Character(&r.agent, false, 22.0, &r.name, project, char_state(r.state), None);
+            } else {
+                ThreadMark(r.state);
+            }
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                Label(&r.name, Fs::Sm, Weight::Semibold, None, Some(1));
+                Label(&r.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        });
+}
+
+fn LoadBody(counts: &[String], members: &[LoadRow], computers: &[ComputerRow], project: &str) {
+    let p = ember_theme().palette;
+    for c in counts {
+        Label(c, Fs::Sm, Weight::Regular, None, Some(1));
+    }
+    if !members.is_empty() {
+        Caption("팀원별 오늘 토큰");
+        let max = members.iter().filter_map(|m| m.tokens_k).max().unwrap_or(0);
+        for m in members {
+            let frac = m.tokens_k.map_or(0.0, |k| token_fraction(k, max));
+            let fill = pill_colors(m.vendor.into(), p).0;
+            BarRow(
+                || Character(&m.agent, m.leader, 22.0, &m.member, project, CharState::Idle, None),
+                &m.member,
+                frac,
+                fill,
+                &token_label(m.tokens_k),
+                44.0,
+            );
+        }
+    }
+    if !computers.is_empty() {
+        Caption("컴퓨터");
+        for c in computers {
+            let frac = if c.online { c.usage as f32 / 100.0 } else { 0.0 };
+            let fill = if c.hot() { p.orange.strong } else { p.green.strong };
+            BarRow(|| NavIcon(ICON_PC_SVG, p.muted.to_argb(), 18.0), &c.name, frac, fill, &c.label(), 84.0);
+        }
+    }
+}
+
+/// One card of the status grid (`.card`): a header with the icon tile, the title and a count
+/// pill, then the rows or the empty state (#349).
+fn StatusCardBody(ico: &'static str, project: String, card: StatusCard) {
     let p = ember_theme().palette;
     cu::Column()
         .space_role(SpaceRole::Xs)
@@ -3145,17 +3277,34 @@ fn StatusCardBody(ico: &'static str, card: StatusCard) {
         .content(move || {
             cu::Row()
                 .alignment(Alignment::CenterStart)
-                .space_role(SpaceRole::Xs)
+                .spacing(SP[1])
+                .modifier(Modifier::new().fill_max_width())
                 .content(|| {
-                    NavIcon(ico, p.text_2.to_argb(), 16.0);
-                    Label(card.title, Fs::Md, Weight::Semibold, None, Some(1));
+                    IconTile(ico);
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        Label(card.title, Fs::Md, Weight::Semibold, None, Some(1));
+                    });
+                    if card.count() > 0 {
+                        Pill(&card.count().to_string(), PillTone::Grey, true);
+                    }
                 });
-            if card.rows.is_empty() {
+            cu::Separator(Some(paint(p.line)));
+            if card.is_empty() {
                 Label(card.empty, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-            } else {
-                for r in card.rows.iter() {
-                    Label(r, Fs::Sm, Weight::Regular, None, Some(1));
+                return;
+            }
+            match &card.body {
+                StatusBody::Pr(rows) => {
+                    for r in rows {
+                        PrRowView(r);
+                    }
                 }
+                StatusBody::SubAgents(rows) => {
+                    for r in rows {
+                        SubAgentRowView(r, &project);
+                    }
+                }
+                StatusBody::Load { counts, members, computers } => LoadBody(counts, members, computers, &project),
             }
         });
 }
@@ -3343,6 +3492,7 @@ pub fn StatusView(
                     // Rows come from the pure view-model; no data shows an honest empty state (#324).
                     let demo_cards = services().demo.is_some();
                     let cards = status_cards(demo_cards, &members_for_cards);
+                    let proj_cards = proj_owned.clone();
                     let icons = [ICON_GIT_SVG, ICON_USERS_SVG, ICON_CPU_SVG];
                     if wide_grid {
                         cu::Row()
@@ -3351,15 +3501,17 @@ pub fn StatusView(
                             .modifier(Modifier::new().fill_max_width())
                             .content(move || {
                                 for (card, ico) in cards.clone().into_iter().zip(icons) {
+                                    let pj = proj_cards.clone();
                                     EmberCard(false, false, Some(1.0), None, None, move || {
-                                        StatusCardBody(ico, card.clone());
+                                        StatusCardBody(ico, pj, card.clone());
                                     });
                                 }
                             });
                     } else {
                         for (card, ico) in cards.into_iter().zip(icons) {
+                            let pj = proj_cards.clone();
                             EmberCard(false, true, None, None, None, move || {
-                                StatusCardBody(ico, card.clone());
+                                StatusCardBody(ico, pj, card.clone());
                             });
                         }
                     }

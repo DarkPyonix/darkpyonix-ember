@@ -29,7 +29,7 @@ pub fn launch(pref: ThemePref) {
     crate::ui::coexist::shared_ui().theme_pref.set(pref);
     let scheme = if pref == ThemePref::Dark { ColorScheme::Dark } else { ColorScheme::Light };
     compose_rust::LaunchBuilder::new()
-        .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
+        .with_theme(crate::ui::fonts::app_theme(scheme))
         .with_window(Window::new().with_title("Ember components (compose-rust)").with_size(1100, 800))
         .launch(gallery);
 }

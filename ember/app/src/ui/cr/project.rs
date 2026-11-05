@@ -723,8 +723,8 @@ fn launch_ide(ui: &SharedUi, kind: IdeKind, launch: Option<Result<IdeLaunch, Str
             },
         ),
         IdeAction::EmberPlaceholder => {
-            let (project, folder) = IdeLaunch::editor_target(launch.as_ref());
-            ui.open_editor(project, folder);
+            let c = IdeLaunch::editor_connection(launch.as_ref());
+            ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token);
         }
         IdeAction::Unavailable(why) => notice::post(format!("{label}: 사용할 수 없습니다: {why}")),
     }

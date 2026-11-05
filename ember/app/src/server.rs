@@ -168,6 +168,87 @@ impl IdeLaunch {
             .map(|l| (l.project.clone(), l.folder.clone()))
             .unwrap_or_default()
     }
+
+    /// What the Ember editor window needs to connect: project, folder and the OSE runtime's
+    /// `host:port` and connection token when the server started one for the folder.
+    pub fn editor_connection(launch: Option<&Result<IdeLaunch, String>>) -> EditorConnection {
+        let Some(Ok(l)) = launch else {
+            return EditorConnection::default();
+        };
+        let ose = l
+            .target("ember")
+            .and_then(|t| t.launch.as_ref())
+            .and_then(|e| e.ose.as_ref());
+        EditorConnection {
+            project: l.project.clone(),
+            folder: l.folder.clone(),
+            endpoint: ose.map(|o| host_port(&o.endpoint)),
+            token: ose.map(|o| o.connection_token.clone()),
+        }
+    }
+}
+
+/// The editor window's connection data (`endpoint` is `host:port`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditorConnection {
+    pub project: String,
+    pub folder: String,
+    pub endpoint: Option<String>,
+    pub token: Option<String>,
+}
+
+/// `http://127.0.0.1:9000/` becomes `127.0.0.1:9000`; a bare `host:port` is kept.
+pub fn host_port(endpoint: &str) -> String {
+    let rest = endpoint.split_once("://").map_or(endpoint, |(_, r)| r);
+    rest.trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod editor_connection_tests {
+    use super::*;
+
+    fn launch(ose: Option<(&str, &str)>) -> Result<IdeLaunch, String> {
+        Ok(IdeLaunch {
+            session: "s".into(),
+            project: "p".into(),
+            folder: "/w".into(),
+            computer: IdeComputer { name: "c".into(), local: true },
+            targets: vec![IdeTarget {
+                kind: "ember".into(),
+                available: true,
+                url: None,
+                command: None,
+                launch: Some(ember_client::wire::EmberLaunch {
+                    session: "s".into(),
+                    project: "p".into(),
+                    computer: "c".into(),
+                    folder: "/w".into(),
+                    server_url: None,
+                    ose: ose.map(|(e, t)| ember_client::wire::EmberOseConnection {
+                        endpoint: e.into(),
+                        connection_token: t.into(),
+                    }),
+                }),
+                reason: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn fr_l31_editor_connection_strips_scheme_and_carries_token() {
+        let c = IdeLaunch::editor_connection(Some(&launch(Some(("http://127.0.0.1:9000/", "tok")))));
+        assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(c.token.as_deref(), Some("tok"));
+        assert_eq!((c.project.as_str(), c.folder.as_str()), ("p", "/w"));
+    }
+
+    #[test]
+    fn fr_l31_editor_connection_without_ose_has_no_endpoint() {
+        let c = IdeLaunch::editor_connection(Some(&launch(None)));
+        assert_eq!(c.endpoint, None);
+        assert_eq!(IdeLaunch::editor_connection(None), EditorConnection::default());
+        assert_eq!(host_port("host:1"), "host:1");
+    }
 }
 
 /// `POST /api/sessions` body, including the account (FR-U2) that

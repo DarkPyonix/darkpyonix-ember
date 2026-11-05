@@ -49,18 +49,18 @@ fn join_path(dir: &str, name: &str) -> String {
     if dir == "/" { format!("/{name}") } else if dir.is_empty() { name.to_string() } else { format!("{}/{name}", dir.trim_end_matches('/')) }
 }
 
-// Fixed pane size until WidgetView can fill a flex-assigned box (dioxus-compose
-// issue 160); a CodeEditor measured with unbounded height aborts the renderer.
-// TODO(dioxus-compose#160): fixed size until WidgetView fills a flex-assigned box.
-const EDITOR_W: f32 = 980.0;
-const EDITOR_H: f32 = 700.0;
-
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
 fn send(s: &Shared, event: Option<(ember_editor_conn::uri::UriComponents, u64, ember_editor::WidgetEvent)>) {
     if let Some((uri, generation, event)) = event { s.host.send(HostCommand::Widget(uri, generation, event)); }
 }
 fn editor_pane() -> Element {
     let s = shared();
+    // The editor fills the box the page's layout gave this tree. Until the first layout the
+    // box is empty, and a CodeEditor measured without a limit would abort the renderer.
+    let (box_w, box_h) = dioxus_compose::use_widget_box();
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return rsx! {};
+    }
     let _ = *s.revision.read();
     let _ = s.tabs.read();
     let doc = s.bridge.borrow().active_document().cloned();
@@ -73,7 +73,7 @@ fn editor_pane() -> Element {
     let click_s = s.clone(); let click_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
     rsx! { CodeEditor {
-        key: "{generation}", width: Some(EDITOR_W), height: Some(EDITOR_H),
+        key: "{generation}", width: Some(box_w), height: Some(box_h),
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), tab_width: Some(doc.tab_width),
         on_change: move |e: compose_rust::code::CodeChange| { let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
         on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
@@ -227,8 +227,8 @@ pub mod page {
                             if let Some(path) = current.as_deref() {
                                 {breadcrumbs(path, &s.folder)}
                             }
-                            div { style: "flex:1; min-height:0; overflow:hidden;",
-                                if active.is_some() { WidgetView { app: editor_pane, style: "width:980px; height:700px; flex-shrink:0;" } }
+                            div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                                if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                                 else { div { style: "padding:20px;", "열린 파일이 없습니다" } }
                             }
                             if let Some(w) = sel.selected(Side::Bottom) {

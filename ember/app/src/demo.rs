@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use ember_client::state::{Computer, ConnectionState, Input, Reachability};
 use ember_client::wire::{
@@ -283,6 +283,7 @@ fn script_done(now: i64) -> Vec<StoredEvent> {
 pub struct DemoSource {
     events: Mutex<HashMap<String, Vec<StoredEvent>>>,
     created: Mutex<u32>,
+    git: Mutex<HashMap<String, GitState>>,
 }
 
 impl DemoSource {
@@ -290,7 +291,7 @@ impl DemoSource {
         let mut events = HashMap::new();
         events.insert("demo-s1".to_string(), script_waiting(now));
         events.insert("demo-s2".to_string(), script_done(now - 600_000));
-        DemoSource { events: Mutex::new(events), created: Mutex::new(0) }
+        DemoSource { events: Mutex::new(events), created: Mutex::new(0), git: Mutex::new(HashMap::new()) }
     }
 
     /// Reset all demo transcripts, created-session counter, and client state to the initial seed.
@@ -302,6 +303,7 @@ impl DemoSource {
             ev.insert("demo-s2".to_string(), script_done(now - 600_000));
         }
         *self.created.lock().unwrap() = 0;
+        self.git.lock().unwrap().clear();
         for input in self.inputs(now) {
             client.apply(input);
         }
@@ -410,6 +412,17 @@ impl DemoSource {
         Ok(project)
     }
 
+    /// Answer `POST /projects/{id}/git/<op>` with the contract's JSON (`.scratch/git/contract.md`,
+    /// FR-G4). Operations that answer 204 return `Value::Null`. Each project keeps its own
+    /// in-memory repository, seeded on first use and dropped by [`DemoSource::reset`].
+    pub fn git(&self, project: &str, op: &str, body: &Value) -> Result<Value, GitError> {
+        if project.is_empty() {
+            return Err(GitError::new(404, "not_a_repo", "not a git repository"));
+        }
+        let mut all = self.git.lock().unwrap();
+        all.entry(project.to_string()).or_insert_with(GitState::seed).run(op, body)
+    }
+
     /// Rename, pin or archive in this run only.
     pub fn patch_session(&self, client: &Client, id: &str, patch: &SessionPatch) {
         let Some(mut rec) = client.read(|s| s.session(id).map(|v| v.record.clone())) else { return };
@@ -423,6 +436,395 @@ impl DemoSource {
             rec.archived = a;
         }
         client.apply(Input::Push(Push::SessionUpdated { session: rec }));
+    }
+}
+
+/// An error answer of a demo git route: the status and the `ErrorBody` fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitError {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
+}
+
+impl GitError {
+    fn new(status: u16, code: &str, message: &str) -> GitError {
+        GitError { status, code: code.into(), message: message.into() }
+    }
+    fn bad(message: &str) -> GitError {
+        GitError::new(400, "bad_input", message)
+    }
+    fn conflict(message: &str) -> GitError {
+        GitError::new(409, "conflict", message)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Modified,
+    /// Untracked until a hunk is staged, then added.
+    New,
+    Renamed,
+    Deleted,
+}
+
+#[derive(Debug, Clone)]
+struct DemoFile {
+    path: String,
+    old_path: Option<String>,
+    kind: Kind,
+    /// Hunk texts (each starts with its `@@` line and ends with a newline).
+    staged: Vec<String>,
+    unstaged: Vec<String>,
+}
+
+impl DemoFile {
+    fn chars(&self) -> (char, char) {
+        let w = |m: char| if self.unstaged.is_empty() { '.' } else { m };
+        match self.kind {
+            Kind::Modified => (if self.staged.is_empty() { '.' } else { 'M' }, w('M')),
+            Kind::Deleted => {
+                if self.staged.is_empty() {
+                    ('.', 'D')
+                } else {
+                    ('D', '.')
+                }
+            }
+            Kind::New => {
+                if self.staged.is_empty() {
+                    ('?', '?')
+                } else {
+                    ('A', w('M'))
+                }
+            }
+            Kind::Renamed => ('R', w('M')),
+        }
+    }
+
+    fn diff(&self, staged: bool) -> String {
+        let hunks = if staged { &self.staged } else { &self.unstaged };
+        if hunks.is_empty() {
+            return String::new();
+        }
+        let p = &self.path;
+        let mut out = String::new();
+        let renamed_side = self.kind == Kind::Renamed && staged;
+        let from = if renamed_side { self.old_path.as_deref().unwrap_or(p) } else { p };
+        out.push_str(&format!("diff --git a/{from} b/{p}\n"));
+        let new_side = self.kind == Kind::New && (staged || self.staged.is_empty());
+        if new_side {
+            out.push_str("new file mode 100644\n--- /dev/null\n");
+            out.push_str(&format!("+++ b/{p}\n"));
+        } else if self.kind == Kind::Deleted {
+            out.push_str(&format!("deleted file mode 100644\n--- a/{p}\n+++ /dev/null\n"));
+        } else {
+            if renamed_side {
+                out.push_str(&format!("similarity index 88%\nrename from {from}\nrename to {p}\n"));
+            }
+            out.push_str(&format!("--- a/{from}\n+++ b/{p}\n"));
+        }
+        for h in hunks {
+            out.push_str(h);
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DemoBranch {
+    name: String,
+    upstream: Option<String>,
+    ahead: u32,
+    behind: u32,
+}
+
+#[derive(Debug, Clone)]
+struct GitState {
+    current: String,
+    branches: Vec<DemoBranch>,
+    files: Vec<DemoFile>,
+    fetched_age_secs: Option<u64>,
+    commits: u128,
+}
+
+fn hunk(header: &str, lines: &[&str]) -> String {
+    let mut s = format!("{header}\n");
+    for l in lines {
+        s.push_str(l);
+        s.push('\n');
+    }
+    s
+}
+
+/// The old-start number of a hunk header (`@@ -12,6 +12,8 @@` gives `12`).
+fn old_start(h: &str) -> Option<&str> {
+    let line = h.lines().next()?;
+    line.strip_prefix("@@ -")?.split([',', ' ']).next()
+}
+
+fn split_patch(patch: &str) -> (Option<String>, Vec<String>) {
+    let mut path = None;
+    let mut hunks: Vec<String> = Vec::new();
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            hunks.push(format!("{line}\n"));
+        } else if let Some(last) = hunks.last_mut() {
+            last.push_str(line);
+            last.push('\n');
+        } else if let Some(p) = line.strip_prefix("+++ b/") {
+            path = Some(p.to_string());
+        } else if path.is_none() {
+            if let Some(p) = line.strip_prefix("--- a/") {
+                path = Some(p.to_string());
+            }
+        }
+    }
+    (path, hunks)
+}
+
+fn take_hunk(from: &mut Vec<String>, wanted: &str) -> Option<String> {
+    let header = wanted.lines().next().unwrap_or("");
+    let at = from
+        .iter()
+        .position(|h| h.lines().next() == Some(header))
+        .or_else(|| from.iter().position(|h| old_start(h).is_some() && old_start(h) == old_start(wanted)))?;
+    Some(from.remove(at))
+}
+
+fn str_of<'a>(body: &'a Value, key: &str) -> Option<&'a str> {
+    body.get(key).and_then(Value::as_str)
+}
+
+impl GitState {
+    fn seed() -> GitState {
+        let b = |name: &str, up: Option<&str>, ahead, behind| DemoBranch { name: name.into(), upstream: up.map(Into::into), ahead, behind };
+        let f = |path: &str, old: Option<&str>, kind, staged: Vec<String>, unstaged: Vec<String>| DemoFile {
+            path: path.into(),
+            old_path: old.map(Into::into),
+            kind,
+            staged,
+            unstaged,
+        };
+        let vcs = "ember/app/src/ui/vcs.rs";
+        GitState {
+            current: "feat/git-api".into(),
+            branches: vec![
+                b("feat/git-api", Some("origin/feat/git-api"), 2, 1),
+                b("main", Some("origin/main"), 0, 0),
+                b("develop", Some("origin/develop"), 0, 0),
+                b("feat/ui-phase-6", None, 0, 0),
+            ],
+            files: vec![
+                f(
+                    vcs,
+                    None,
+                    Kind::Modified,
+                    vec![hunk("@@ -20,5 +20,6 @@ use crate::ui::{use_ui, Route, Ui};", &[" use crate::ui::theme::*;", "+use crate::ui::git::Snapshot;", " ", " /// What a view shows.", " pub const SOON: &str = \"준비 중입니다\";", " "])],
+                    vec![
+                        hunk("@@ -88,6 +89,6 @@ pub enum Section {", &["     Changes,", "     History,", "-    Branches,", "+    Branches2,", "     PullRequests,", "     Stash,", "     Conflicts,"]),
+                        hunk("@@ -140,0 +141,3 @@ impl Section {", &["+    pub fn demo(self) -> bool {", "+        true", "+    }"]),
+                    ],
+                ),
+                f(
+                    "ember/server/src/git.rs",
+                    None,
+                    Kind::New,
+                    vec![hunk("@@ -0,0 +1,6 @@", &["+//! Git routes (FR-G4).", "+", "+pub fn routes() -> Vec<&'static str> {", "+    vec![\"status\", \"diff\"]", "+}", "+"])],
+                    vec![],
+                ),
+                f(
+                    "docs/GIT.md",
+                    None,
+                    Kind::New,
+                    vec![],
+                    vec![hunk("@@ -0,0 +1,4 @@", &["+# Git", "+", "+노드가 git CLI로 저장소를 읽습니다.", "+"])],
+                ),
+                f(
+                    "ember/app/src/ui/diff_view.rs",
+                    Some("ember/app/src/ui/review.rs"),
+                    Kind::Renamed,
+                    vec![],
+                    vec![hunk("@@ -1,4 +1,4 @@", &["-//! The review view.", "+//! The diff view.", " ", " use dioxus_compose::prelude::*;", " "])],
+                ),
+                f(
+                    "ember/app/src/legacy.rs",
+                    None,
+                    Kind::Deleted,
+                    vec![],
+                    vec![hunk("@@ -1,3 +0,0 @@", &["-//! Old helpers.", "-", "-pub fn old() {}"])],
+                ),
+            ],
+            fetched_age_secs: Some(300),
+            commits: 0,
+        }
+    }
+
+    fn branch(&self) -> &DemoBranch {
+        self.branches.iter().find(|b| b.name == self.current).expect("current branch exists")
+    }
+
+    fn branch_mut(&mut self) -> &mut DemoBranch {
+        let cur = self.current.clone();
+        self.branches.iter_mut().find(|b| b.name == cur).expect("current branch exists")
+    }
+
+    fn find(&mut self, path: &str) -> Result<&mut DemoFile, GitError> {
+        self.files
+            .iter_mut()
+            .find(|f| f.path == path)
+            .ok_or_else(|| GitError::bad(&format!("pathspec '{path}' did not match any files")))
+    }
+
+    fn tidy(&mut self) {
+        self.files.retain(|f| !(f.staged.is_empty() && f.unstaged.is_empty()));
+    }
+
+    fn run(&mut self, op: &str, body: &Value) -> Result<Value, GitError> {
+        match op {
+            "status" => {
+                let b = self.branch();
+                let files: Vec<Value> = self
+                    .files
+                    .iter()
+                    .map(|f| {
+                        let (i, w) = f.chars();
+                        json!({"path": f.path, "old_path": f.old_path, "index": i.to_string(), "worktree": w.to_string()})
+                    })
+                    .collect();
+                Ok(json!({
+                    "branch": self.current,
+                    "upstream": b.upstream,
+                    "ahead": b.ahead,
+                    "behind": b.behind,
+                    "fetched_age_secs": self.fetched_age_secs,
+                    "branches": self.branches.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
+                    "files": files,
+                }))
+            }
+            "diff" => {
+                let staged = body.get("staged").and_then(Value::as_bool).unwrap_or(false);
+                let only = str_of(body, "path");
+                let patch: String = self.files.iter().filter(|f| only.is_none_or(|p| p == f.path)).map(|f| f.diff(staged)).collect();
+                Ok(json!({ "patch": patch }))
+            }
+            "stage" | "unstage" => {
+                let paths: Vec<String> = body
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .ok_or_else(|| GitError::bad("paths is required"))?;
+                for p in &paths {
+                    let f = self.find(p)?;
+                    if op == "stage" {
+                        let mut moved = std::mem::take(&mut f.unstaged);
+                        f.staged.append(&mut moved);
+                    } else {
+                        let mut moved = std::mem::take(&mut f.staged);
+                        f.unstaged.append(&mut moved);
+                    }
+                }
+                self.tidy();
+                Ok(Value::Null)
+            }
+            "apply" => {
+                let patch = str_of(body, "patch").ok_or_else(|| GitError::bad("patch is required"))?;
+                let reverse = body.get("reverse").and_then(Value::as_bool).unwrap_or(false);
+                let (path, hunks) = split_patch(patch);
+                let path = path.ok_or_else(|| GitError::bad("patch names no file"))?;
+                if hunks.is_empty() {
+                    return Err(GitError::bad("patch has no hunks"));
+                }
+                let f = self.find(&path)?;
+                for h in &hunks {
+                    let (from, to) = if reverse { (&mut f.staged, &mut f.unstaged) } else { (&mut f.unstaged, &mut f.staged) };
+                    let moved = take_hunk(from, h).ok_or_else(|| GitError::conflict("error: patch does not apply"))?;
+                    to.push(moved);
+                }
+                self.tidy();
+                Ok(Value::Null)
+            }
+            "commit" => {
+                let summary = str_of(body, "summary").unwrap_or("").trim();
+                if summary.is_empty() {
+                    return Err(GitError::bad("summary is required"));
+                }
+                let amend = body.get("amend").and_then(Value::as_bool).unwrap_or(false);
+                if !amend && self.files.iter().all(|f| f.staged.is_empty()) {
+                    return Err(GitError::conflict("nothing to commit"));
+                }
+                for f in &mut self.files {
+                    if f.staged.is_empty() {
+                        continue;
+                    }
+                    f.staged.clear();
+                    f.old_path = None;
+                    if f.kind != Kind::Deleted {
+                        f.kind = Kind::Modified;
+                    }
+                }
+                self.tidy();
+                if !amend {
+                    self.branch_mut().ahead += 1;
+                }
+                self.commits += 1;
+                Ok(json!({ "sha": format!("{:040x}", 0x00de_c0de_0000_u128 + self.commits) }))
+            }
+            "checkout" => {
+                let name = str_of(body, "branch").ok_or_else(|| GitError::bad("branch is required"))?;
+                if !self.branches.iter().any(|b| b.name == name) {
+                    return Err(GitError::bad(&format!("pathspec '{name}' did not match any branch")));
+                }
+                self.current = name.to_string();
+                Ok(Value::Null)
+            }
+            "branch" => {
+                let name = str_of(body, "name").unwrap_or("").trim();
+                if name.is_empty() || name.contains(char::is_whitespace) {
+                    return Err(GitError::bad("invalid branch name"));
+                }
+                if self.branches.iter().any(|b| b.name == name) {
+                    return Err(GitError::conflict(&format!("a branch named '{name}' already exists")));
+                }
+                if let Some(from) = str_of(body, "from") {
+                    if !self.branches.iter().any(|b| b.name == from) {
+                        return Err(GitError::bad(&format!("not a valid object name: '{from}'")));
+                    }
+                }
+                self.branches.push(DemoBranch { name: name.into(), upstream: None, ahead: 0, behind: 0 });
+                self.current = name.to_string();
+                Ok(Value::Null)
+            }
+            "fetch" => {
+                self.fetched_age_secs = Some(0);
+                // A fetch learns of one new upstream commit on a branch that tracks something.
+                let b = self.branch_mut();
+                if b.upstream.is_some() && b.behind == 0 {
+                    b.behind = 1;
+                }
+                Ok(json!({ "output": "From origin\n   a1b2c3d..e4f5a6b  main       -> origin/main\n" }))
+            }
+            "pull" => {
+                let b = self.branch_mut();
+                if b.upstream.is_none() {
+                    return Err(GitError::conflict("There is no tracking information for the current branch."));
+                }
+                let output = if b.behind == 0 { "Already up to date.\n" } else { "Updating a1b2c3d..e4f5a6b\nFast-forward\n 1 file changed, 3 insertions(+)\n" };
+                b.behind = 0;
+                self.fetched_age_secs = Some(0);
+                Ok(json!({ "output": output }))
+            }
+            "push" => {
+                let name = self.current.clone();
+                let b = self.branch_mut();
+                let output = format!("To origin\n   a1b2c3d..e4f5a6b  {name} -> {name}\n");
+                b.upstream = Some(format!("origin/{name}"));
+                b.ahead = 0;
+                b.behind = 0;
+                Ok(json!({ "output": output }))
+            }
+            "conflicts" => Ok(json!({ "paths": Vec::<String>::new() })),
+            _ => Err(GitError::new(404, "not_found", "unknown git operation")),
+        }
     }
 }
 
@@ -506,6 +908,167 @@ mod tests {
         assert_eq!(g[0].status, "signed_in");
         assert!(g[0].tokens_today > 0);
         assert!(accounts().iter().any(|a| a.is_default));
+    }
+
+    fn gs(d: &DemoSource, op: &str, body: Value) -> Result<Value, GitError> {
+        d.git("demo-project", op, &body)
+    }
+
+    fn status(d: &DemoSource) -> Value {
+        gs(d, "status", json!({})).unwrap()
+    }
+
+    fn file<'a>(st: &'a Value, path: &str) -> &'a Value {
+        st["files"].as_array().unwrap().iter().find(|f| f["path"] == path).unwrap_or(&Value::Null)
+    }
+
+    #[test]
+    fn git_status_has_the_contract_shape() {
+        let d = DemoSource::new(0);
+        let st = status(&d);
+        assert_eq!(st["branch"], "feat/git-api");
+        assert_eq!(st["upstream"], "origin/feat/git-api");
+        assert_eq!(st["ahead"], 2);
+        assert_eq!(st["behind"], 1);
+        assert!(st["fetched_age_secs"].is_u64());
+        assert!(st["branches"].as_array().unwrap().len() >= 3);
+        let files = st["files"].as_array().unwrap();
+        assert!((4..=6).contains(&files.len()));
+        let ch = |p: &str| (file(&st, p)["index"].as_str().unwrap().to_string(), file(&st, p)["worktree"].as_str().unwrap().to_string());
+        assert_eq!(ch("ember/app/src/ui/vcs.rs"), ("M".into(), "M".into()));
+        assert_eq!(ch("ember/server/src/git.rs"), ("A".into(), ".".into()));
+        assert_eq!(ch("docs/GIT.md"), ("?".into(), "?".into()));
+        assert_eq!(ch("ember/app/src/ui/diff_view.rs").0, "R");
+        assert_eq!(file(&st, "ember/app/src/ui/diff_view.rs")["old_path"], "ember/app/src/ui/review.rs");
+        assert_eq!(ch("ember/app/src/legacy.rs"), (".".into(), "D".into()));
+    }
+
+    #[test]
+    fn demo_hunk_line_counts_match_their_headers() {
+        let g = GitState::seed();
+        for f in &g.files {
+            for staged in [false, true] {
+                let text = f.diff(staged);
+                for file in crate::ui::vcs::parse_unified(&text) {
+                    for h in &file.hunks {
+                        let old = h.lines.iter().filter(|l| l.kind != crate::ui::vcs::LineKind::Add).count() as u32;
+                        let new = h.lines.iter().filter(|l| l.kind != crate::ui::vcs::LineKind::Del).count() as u32;
+                        assert_eq!((old, new), (h.old_len, h.new_len), "{} {}", f.path, h.header);
+                        assert!(h.lines.iter().all(|l| !l.text.starts_with("@@ ")), "{} {}", f.path, h.header);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn git_diff_has_hunks_for_staged_unstaged_and_deleted() {
+        let d = DemoSource::new(0);
+        let p = |staged: bool, path: Option<&str>| gs(&d, "diff", json!({"path": path, "staged": staged})).unwrap()["patch"].as_str().unwrap().to_string();
+        let un = p(false, Some("ember/app/src/ui/vcs.rs"));
+        assert_eq!(un.matches("\n@@ ").count() + usize::from(un.starts_with("@@")), 2);
+        assert!(un.contains("@@ -140,0 +141,3 @@"));
+        let st = p(true, Some("ember/app/src/ui/vcs.rs"));
+        assert_eq!(st.matches("\n@@ ").count(), 1);
+        assert!(p(false, Some("ember/app/src/legacy.rs")).contains("deleted file mode"));
+        assert!(p(true, Some("ember/server/src/git.rs")).contains("--- /dev/null"));
+        let all = p(false, None);
+        assert!(all.contains("diff --git a/docs/GIT.md") && all.contains("diff --git a/ember/app/src/legacy.rs"));
+        assert!(!all.contains("ember/server/src/git.rs"));
+    }
+
+    #[test]
+    fn git_diff_accepts_include_untracked_and_lists_the_untracked_file_once() {
+        let d = DemoSource::new(0);
+        let body = json!({"path": null, "staged": false, "include_untracked": true});
+        let all = gs(&d, "diff", body).unwrap()["patch"].as_str().unwrap().to_string();
+        // docs/GIT.md is the demo's untracked file: one header, in the one patch.
+        assert_eq!(all.matches("diff --git a/docs/GIT.md").count(), 1);
+    }
+
+    #[test]
+    fn git_stage_unstage_and_apply_change_the_status() {
+        let d = DemoSource::new(0);
+        gs(&d, "stage", json!({"paths": ["docs/GIT.md"]})).unwrap();
+        assert_eq!(file(&status(&d), "docs/GIT.md")["index"], "A");
+        gs(&d, "unstage", json!({"paths": ["docs/GIT.md"]})).unwrap();
+        assert_eq!(file(&status(&d), "docs/GIT.md")["index"], "?");
+        // Stage one hunk by patch, leaving the other unstaged, then reverse it.
+        let patch = "diff --git a/ember/app/src/ui/vcs.rs b/ember/app/src/ui/vcs.rs\n--- a/ember/app/src/ui/vcs.rs\n+++ b/ember/app/src/ui/vcs.rs\n@@ -140,0 +141,3 @@ impl Section {\n+    pub fn demo(self) -> bool {\n+        true\n+    }\n";
+        gs(&d, "apply", json!({"patch": patch, "reverse": false})).unwrap();
+        let staged = gs(&d, "diff", json!({"path": "ember/app/src/ui/vcs.rs", "staged": true})).unwrap();
+        assert!(staged["patch"].as_str().unwrap().contains("@@ -140,0 +141,3 @@"));
+        let unstaged = gs(&d, "diff", json!({"path": "ember/app/src/ui/vcs.rs", "staged": false})).unwrap();
+        assert!(!unstaged["patch"].as_str().unwrap().contains("@@ -140,0 +141,3 @@"));
+        gs(&d, "apply", json!({"patch": patch, "reverse": true})).unwrap();
+        let again = gs(&d, "diff", json!({"path": "ember/app/src/ui/vcs.rs", "staged": false})).unwrap();
+        assert!(again["patch"].as_str().unwrap().contains("@@ -140,0 +141,3 @@"));
+        let err = gs(&d, "apply", json!({"patch": patch, "reverse": true})).unwrap_err();
+        assert_eq!(err.status, 409);
+        assert_eq!(gs(&d, "stage", json!({"paths": ["nope.rs"]})).unwrap_err().status, 400);
+    }
+
+    #[test]
+    fn git_commit_clears_the_index_and_counts_ahead() {
+        let d = DemoSource::new(0);
+        assert_eq!(gs(&d, "commit", json!({"summary": " "})).unwrap_err().status, 400);
+        let r = gs(&d, "commit", json!({"summary": "Feat: git demo", "description": null, "amend": false})).unwrap();
+        assert_eq!(r["sha"].as_str().unwrap().len(), 40);
+        let st = status(&d);
+        assert_eq!(st["ahead"], 3);
+        // The staged added file is gone from the list as a change; the unstaged parts remain.
+        assert!(file(&st, "ember/server/src/git.rs").is_null());
+        assert_eq!(file(&st, "ember/app/src/ui/vcs.rs")["index"], ".");
+        assert_eq!(file(&st, "ember/app/src/ui/vcs.rs")["worktree"], "M");
+        assert!(st["files"].as_array().unwrap().iter().all(|f| f["index"] != "A" && f["index"] != "M"));
+        // Nothing staged now: a plain commit is a conflict, an amend is allowed and keeps ahead.
+        assert_eq!(gs(&d, "commit", json!({"summary": "x"})).unwrap_err().status, 409);
+        gs(&d, "commit", json!({"summary": "x", "amend": true})).unwrap();
+        assert_eq!(status(&d)["ahead"], 3);
+    }
+
+    #[test]
+    fn git_branches_and_remote_actions_update_the_status() {
+        let d = DemoSource::new(0);
+        gs(&d, "checkout", json!({"branch": "main"})).unwrap();
+        let st = status(&d);
+        assert_eq!((st["branch"].as_str().unwrap(), st["ahead"].as_u64().unwrap()), ("main", 0));
+        assert_eq!(gs(&d, "checkout", json!({"branch": "ghost"})).unwrap_err().status, 400);
+        gs(&d, "branch", json!({"name": "feat/new", "from": "develop"})).unwrap();
+        let st = status(&d);
+        assert_eq!(st["branch"], "feat/new");
+        assert!(st["upstream"].is_null());
+        assert!(st["branches"].as_array().unwrap().iter().any(|b| b == "feat/new"));
+        assert_eq!(gs(&d, "branch", json!({"name": "feat/new"})).unwrap_err().status, 409);
+        assert_eq!(gs(&d, "pull", json!({})).unwrap_err().status, 409);
+        gs(&d, "push", json!({})).unwrap();
+        assert_eq!(status(&d)["upstream"], "origin/feat/new");
+        // Back on the seeded branch: pull clears behind, push clears ahead, fetch is reported.
+        gs(&d, "checkout", json!({"branch": "feat/git-api"})).unwrap();
+        assert!(gs(&d, "pull", json!({})).unwrap()["output"].is_string());
+        assert_eq!(status(&d)["behind"], 0);
+        assert!(gs(&d, "push", json!({"remote": null})).unwrap()["output"].is_string());
+        assert_eq!(status(&d)["ahead"], 0);
+        gs(&d, "fetch", json!({})).unwrap();
+        assert_eq!(status(&d)["fetched_age_secs"], 0);
+        assert_eq!(gs(&d, "conflicts", json!({})).unwrap(), json!({"paths": []}));
+        assert_eq!(gs(&d, "bogus", json!({})).unwrap_err().status, 404);
+    }
+
+    #[test]
+    fn git_state_resets_with_the_demo() {
+        let _g = crate::services::test_guard();
+        let s = crate::services::test_services();
+        let d = DemoSource::new(0);
+        gs(&d, "commit", json!({"summary": "x"})).unwrap();
+        gs(&d, "checkout", json!({"branch": "main"})).unwrap();
+        d.reset(&s.client, 0);
+        let st = status(&d);
+        assert_eq!((st["branch"].as_str().unwrap(), st["ahead"].as_u64().unwrap()), ("feat/git-api", 2));
+        assert_eq!(file(&st, "ember/server/src/git.rs")["index"], "A");
+        // Each project has its own repository.
+        gs(&d, "checkout", json!({"branch": "main"})).unwrap();
+        assert_eq!(d.git("second-project", "status", &json!({})).unwrap()["branch"], "feat/git-api");
     }
 
     #[test]

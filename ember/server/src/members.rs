@@ -3,8 +3,8 @@
 //! A member is defined by a harness plus exactly one account choice: a fixed account id, or the
 //! automatic account-switching pipeline (the account router, FR-U3). Optionally a model proxy
 //! path (opencodex style) sits on top: the harness is pointed at a proxy endpoint so it runs a
-//! model from another source. Only Claude Code supports the proxy path today
-//! (`ANTHROPIC_BASE_URL`); the other harnesses are rejected with an error rather than guessed at,
+//! model from another source. Claude Code (`ANTHROPIC_BASE_URL`) and Codex (a custom model provider set by `-c`, see
+//! `agents::codex::proxy_config_args`) support the proxy path today; the other harnesses are rejected with an error rather than guessed at,
 //! because their proxy behaviour is not verified (AGENTS.md rule 4).
 //!
 //! The proxy server itself is not part of Ember; the member only names its endpoint. The
@@ -141,8 +141,20 @@ pub fn proxy_env(
                 ("ANTHROPIC_AUTH_TOKEN".into(), key),
             ])
         }
+        AgentKind::Codex => {
+            // `OPENAI_BASE_URL` is ignored by Codex; the adapter maps these to `-c` overrides.
+            let key = proxy
+                .key_env
+                .as_deref()
+                .and_then(&lookup)
+                .unwrap_or_else(|| PLACEHOLDER_KEY.to_string());
+            Ok(vec![
+                (crate::agents::codex::PROXY_BASE_ENV.into(), endpoint.to_string()),
+                (crate::agents::codex::PROXY_KEY_ENV.into(), key),
+            ])
+        }
         other => Err(MemberError::Unsupported(format!(
-            "the model proxy path is supported for claude-code only; {} has no verified proxy \
+            "the model proxy path is supported for claude-code and codex only; {} has no verified proxy \
              setting",
             other.as_str()
         ))),
@@ -249,11 +261,19 @@ mod tests {
     #[test]
     fn fr_u6_unsupported_harness_with_proxy_errors() {
         let p = ProxySpec { endpoint: "http://x".into(), key_env: None };
-        let e = proxy_env(AgentKind::Codex, &p, |_| None).unwrap_err();
+        let e = proxy_env(AgentKind::Antigravity, &p, |_| None).unwrap_err();
         assert!(matches!(e, MemberError::Unsupported(_)));
         let mut d = def(None, true);
-        d.harness = "codex".into();
+        d.harness = "agy".into();
         d.proxy = Some(p);
         assert!(d.resolve().is_err());
+    }
+
+    #[test]
+    fn fr_u6_codex_proxy_sets_base_and_key_markers() {
+        let p = ProxySpec { endpoint: "http://127.0.0.1:9000".into(), key_env: Some("K".into()) };
+        let env = proxy_env(AgentKind::Codex, &p, |k| (k == "K").then(|| "sekret".into())).unwrap();
+        assert!(env.contains(&("EMBER_CODEX_PROXY_BASE_URL".into(), "http://127.0.0.1:9000".into())));
+        assert!(env.contains(&("EMBER_CODEX_PROXY_KEY".into(), "sekret".into())));
     }
 }

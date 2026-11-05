@@ -250,6 +250,8 @@ pub fn SheetFooter(content: impl FnOnce()) {
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
+    // TODO(compose-rust): Text has no overflow_wrap builder in v0.0.5, so a single
+    // word wider than its container can still be clipped by the renderer.
     let mut t = cu::Text(text)
         .word_break(WordBreak::KeepAll)
         .font_size(fs.size())
@@ -354,6 +356,8 @@ pub fn EmberField(o: FieldOptions) {
     // TODO(compose-rust#376): the renderer paints the design system's field frame over these
     // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
     // appear once the node's own are honored. 14 px text needs #374.
+    // TODO(compose-rust): TextField has no word_break or overflow builder; its
+    // multiline placeholder can break Korean words inside a line.
     let mut f = cu::TextField()
         .modifier(modifier)
         .placeholder(o.placeholder)
@@ -634,7 +638,7 @@ pub fn EmberCard(
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
         cu::Row().content(|| {
             cu::Spacer().modifier(Modifier::new().width(side));
-            cu::Column().content(content);
+            cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
             cu::Spacer().modifier(Modifier::new().width(side));
         });
     });
@@ -1019,11 +1023,29 @@ mod tests {
                 _ => 0,
             };
             assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");
-            // Button and Chip use the toolkit's one-line default. No screen overrides it.
-            assert!(!production.contains(".max_lines(2)"), "{name} overrides a label's line limit");
+            // Paragraphs and descriptions can use multiple lines. Button and Chip retain
+            // their toolkit one-line defaults.
         }
         let source = fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui/cr/components.rs")).unwrap();
         assert!(source.split("#[cfg(test)]").next().unwrap().matches(".word_break(WordBreak::KeepAll)").count() >= 1);
+    }
+
+    #[test]
+    fn fr_l10_1_card_content_has_available_width() {
+        let source = include_str!("components.rs");
+        let card = source.split("pub fn EmberCard(").nth(1).unwrap()
+            .split("pub fn InsetPanel(").next().unwrap();
+        assert!(card.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
+    }
+
+    #[test]
+    fn fr_l10_1_monitor_descriptions_wrap_and_diff_lines_ellipsize() {
+        let monitor = include_str!("monitor.rs");
+        assert_eq!(monitor.matches("Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3))").count(), 2);
+        assert!(monitor.contains("Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3))"));
+        let vcs = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!vcs.contains("TextOverflow::Clip"));
+        assert!(vcs.contains(".word_break(compose_rust::WordBreak::KeepAll)"));
     }
 
     // ---- FR-L10: a navigation row is a control the renderer can click -----------------------

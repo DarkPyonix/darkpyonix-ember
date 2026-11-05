@@ -787,7 +787,8 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                             .line_height(Fs::Xs2.line_height())
                             .color(paint(p.text))
                             .max_lines(1)
-                            .overflow(TextOverflow::Clip);
+                            .word_break(compose_rust::WordBreak::KeepAll)
+                            .overflow(TextOverflow::Ellipsis);
                     });
                 }
             });

@@ -217,9 +217,9 @@ fn StatusCard(c: &ComputerChip) {
     MonCard(super::shell::ICON_GAUGE_SVG, "상태", || {
         cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().weight(1.0)).content(|| {
-                Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3));
                 if c.projects.is_empty() {
-                    Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3));
                 }
                 for pr in c.projects.iter() {
                     Pill(&display_name(pr), PillTone::Grey, true);
@@ -235,7 +235,7 @@ fn MetricCard(metric: Metric, series: Option<Vec<f32>>) {
     let p = ember_theme().palette;
     MonCard(metric_icon(metric), metric.title(), || match series.as_ref().and_then(|s| s.last()) {
         Some(v) => Label(&format!("{v:.1}"), Fs::Xl4, Weight::Semibold, None, Some(1)),
-        None => Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1)),
+        None => Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3)),
     });
 }
 

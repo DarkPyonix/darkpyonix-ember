@@ -3,8 +3,8 @@
 //! `DELETE /api/devices/{peer}` and a device removed on the hub (`FakeHub`), which the server's
 //! devices sync turns into `Devices::sync_from_hub`, which calls `PeerGate::revoke`.
 //!
-//! The heartbeat is 5 s (the bound `ember/transport/tests/gate.rs` uses for the iroh backend).
-//! SPEC also says a letify-link device sees close code 401 within a second, so the local path
+//! The heartbeat is 5 s (the bound `ember/transport/tests/gate.rs` uses for its first backend).
+//! SPEC also says a device on the default transport sees close code 401 within a second, so the local path
 //! asserts one second. Waits carry larger timeouts, so a slow CI machine fails on the product
 //! bound and not on a hung wait.
 
@@ -34,7 +34,7 @@ use tower::ServiceExt;
 
 /// One heartbeat, the bound FR-N3 gives.
 const HEARTBEAT: Duration = Duration::from_secs(5);
-/// The letify-link bound in the FR-N3 acceptance column.
+/// The default transport's bound in the FR-N3 acceptance column.
 const ONE_SECOND: Duration = Duration::from_secs(1);
 /// A wait that only guards against a hang; the product bounds are asserted separately.
 const WAIT: Duration = Duration::from_secs(30);
@@ -69,6 +69,16 @@ fn serve_server_with(server_t: Transport, devices: &Arc<Devices>, store: Arc<Sto
     server_t
 }
 
+/// The gate registers a connection on the server side after the dial returns, so wait for the
+/// count instead of reading it at once.
+async fn wait_live(count: impl Fn() -> usize, want: usize) {
+    let deadline = Instant::now() + WAIT;
+    while count() != want && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(count(), want, "live connections of the device");
+}
+
 async fn open_connection(device: &Dialer, server: &Transport) -> Connection {
     tokio::time::timeout(WAIT, device.connection(&PeerAddr::new(server.peer_id()), SERVER_SERVICE))
         .await
@@ -89,7 +99,7 @@ async fn fr_n3_revoked_device_connection_closes_within_one_second() {
     assert_eq!(st, StatusCode::CREATED, "{d}");
     let dialer = Dialer::new(device_t.clone());
     let conn = open_connection(&dialer, &server_t).await;
-    assert_eq!(devices.gate().live_connections(&device_t.peer_id()), 1);
+    wait_live(|| devices.gate().live_connections(&device_t.peer_id()), 1).await;
 
     // From the DELETE request to the device's own closed().
     let start = Instant::now();
@@ -101,7 +111,7 @@ async fn fr_n3_revoked_device_connection_closes_within_one_second() {
     assert_revoked(&reason);
     assert!(elapsed < ONE_SECOND, "closed after {elapsed:?}, FR-N3 says within a second");
     assert!(elapsed < HEARTBEAT);
-    assert_eq!(devices.gate().live_connections(&device_t.peer_id()), 0);
+    wait_live(|| devices.gate().live_connections(&device_t.peer_id()), 0).await;
 }
 
 /// Every live connection of the revoked device closes in the same bound, not only the first.
@@ -128,7 +138,7 @@ async fn fr_n3_revoking_closes_every_connection_of_the_device_within_one_heartbe
 
     // The other device is untouched, and the revoked one cannot return.
     assert!(tokio::time::timeout(Duration::from_millis(200), bystander.closed()).await.is_err());
-    assert_eq!(devices.gate().live_connections(&other_t.peer_id()), 1);
+    wait_live(|| devices.gate().live_connections(&other_t.peer_id()), 1).await;
     assert!(tokio::time::timeout(WAIT, phone.connection(&PeerAddr::new(server_t.peer_id()), SERVER_SERVICE))
         .await
         .expect("re-dial timed out")
@@ -193,7 +203,7 @@ async fn synced_device_with_connection(f: &HubFixture, net: &MemNetwork) -> (Tra
     assert!(f.devices.gate().is_allowed(&device_t.peer_id()));
     let dialer = Dialer::new(device_t.clone());
     let conn = open_connection(&dialer, &f.server_t).await;
-    assert_eq!(f.devices.gate().live_connections(&device_t.peer_id()), 1);
+    wait_live(|| f.devices.gate().live_connections(&device_t.peer_id()), 1).await;
     (device_t, conn, dialer)
 }
 

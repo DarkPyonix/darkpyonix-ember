@@ -22,7 +22,7 @@ use compose_rust::runtime::{
     remember_with_key,
 };
 use compose_rust::ui::{self as cu, Modifier};
-use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
+use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole, TypeRole};
 
 use ember_client::LauncherStatus;
 
@@ -52,7 +52,7 @@ use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, ButtonKind, Clickable, CloseButton, EmberCard, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter, Txt,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
 use super::notice;
@@ -87,7 +87,6 @@ const NO_PROJECT: &str = "프로젝트가 없습니다";
 const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
-const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
 const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
@@ -1080,6 +1079,79 @@ pub fn PaneTranscript(session: &str, agent: &str) {
         });
 }
 
+/// The Terminal side of a pane: the member's terminal, read-only, in the mockup's `.term` colours
+/// (FR-L18). Outside the demo the client has no stream to attach to for a member, so it says so.
+///
+/// TODO(compose-rust#5): wrap in `SelectionContainer` so the output can be selected and copied.
+/// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
+/// TODO(#325): attach to the member's terminal stream (needs a read-only attach by term id in
+/// `terminal_stream`); stop it when the pane closes. No stream is started today, so none leaks.
+pub fn PaneTerminal(member: &Member, project: &str) {
+    use crate::ui::term_pane::{self as tp, TermRole, TermView};
+    let p = ember_theme().palette;
+    let view = tp::view_for_member(
+        services().demo.is_some(),
+        None,
+        &member.agent,
+        &member.agent,
+        project,
+        &member.task,
+    );
+    let note = |text: &str| {
+        let text = text.to_string();
+        cu::Box()
+            .alignment(Alignment::Center)
+            .modifier(Modifier::new().fill_max_width().weight(1.0))
+            .content(move || {
+                Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+            });
+    };
+    match view {
+        TermView::Connecting => note(tp::CONNECTING),
+        TermView::NoTerminal => note(tp::NO_TERMINAL),
+        TermView::Failed(text) => note(text),
+        TermView::Lines { rows, notice } => {
+            cu::Box()
+                .modifier(
+                    Modifier::new()
+                        .fill_max_width()
+                        .weight(1.0)
+                        .background(paint(p.surface_2))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_SM),
+                )
+                .content(move || {
+                    cu::ScrollColumn()
+                        .modifier(Modifier::new().fill_max_width().fill_max_height())
+                        .content(move || {
+                            cu::Column()
+                                .modifier(Modifier::new().fill_max_width().padding(SP[2]))
+                                .content(move || {
+                                    for (role, line) in rows.iter() {
+                                        let (color, weight) = match role {
+                                            TermRole::Banner | TermRole::Warn => (p.orange.strong, None),
+                                            TermRole::User => (p.text, Some(600.0)),
+                                            TermRole::Agent => (p.text, None),
+                                            TermRole::Tool | TermRole::Selected => (p.blue.strong, None),
+                                            TermRole::Add => (p.green.strong, None),
+                                            TermRole::Del => (p.red.strong, None),
+                                            TermRole::Muted => (p.muted, None),
+                                            TermRole::Plain => (p.text_2, None),
+                                        };
+                                        // An empty line still takes a row.
+                                        let text = if line.is_empty() { " " } else { line.as_str() };
+                                        Txt(text, TypeRole::Mono, Some(paint(color)), None, None, weight, None);
+                                    }
+                                    if let Some(n) = &notice {
+                                        Txt(n, TypeRole::Mono, Some(paint(p.muted)), None, None, None, None);
+                                    }
+                                });
+                        });
+                });
+        }
+    }
+}
+
 /// A pane's own composer: Enter sends, a message while the agent is busy is queued (FR-L6).
 pub fn PaneComposer(session: &str, busy: bool) {
     let ui = shared_ui().clone();
@@ -1375,18 +1447,7 @@ pub fn Pane(
                         PaneTranscript(&id, &member_owned.agent);
                         PaneComposer(&id, busy);
                     } else {
-                        cu::Box()
-                            .alignment(Alignment::Center)
-                            .modifier(Modifier::new().fill_max_width().weight(1.0))
-                            .content(|| {
-                                Label(
-                                    TERMINAL_SOON,
-                                    Fs::Sm,
-                                    Weight::Regular,
-                                    Some(paint(p.muted)),
-                                    None,
-                                );
-                            });
+                        PaneTerminal(&member_owned, &proj_owned);
                     }
                 });
 

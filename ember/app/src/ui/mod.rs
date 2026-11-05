@@ -24,6 +24,7 @@ pub mod project;
 pub mod routines;
 pub mod session;
 pub mod shell;
+pub mod term_pane;
 pub mod theme;
 pub mod usage;
 pub mod vcs;

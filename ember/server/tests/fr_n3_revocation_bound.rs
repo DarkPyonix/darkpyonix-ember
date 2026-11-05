@@ -79,6 +79,22 @@ async fn wait_live(count: impl Fn() -> usize, want: usize) {
     assert_eq!(count(), want, "live connections of the device");
 }
 
+/// A revoked device cannot come back: the dial fails, or it returns a connection the gate closes
+/// at once (the gate admits at the transport and then closes with 401).
+async fn assert_refused(dialer: &Dialer, server: &Transport) {
+    match tokio::time::timeout(WAIT, dialer.connection(&PeerAddr::new(server.peer_id()), SERVER_SERVICE))
+        .await
+        .expect("re-dial timed out")
+    {
+        Err(_) => {}
+        Ok(conn) => {
+            tokio::time::timeout(Duration::from_secs(1), conn.closed())
+                .await
+                .expect("a revoked device's new connection stayed open");
+        }
+    }
+}
+
 async fn open_connection(device: &Dialer, server: &Transport) -> Connection {
     tokio::time::timeout(WAIT, device.connection(&PeerAddr::new(server.peer_id()), SERVER_SERVICE))
         .await
@@ -130,6 +146,8 @@ async fn fr_n3_revoking_closes_every_connection_of_the_device_within_one_heartbe
     let conn = open_connection(&phone, &server_t).await;
     let bystander = open_connection(&other, &server_t).await;
 
+    wait_live(|| devices.gate().live_connections(&phone_t.peer_id()), 1).await;
+    wait_live(|| devices.gate().live_connections(&other_t.peer_id()), 1).await;
     let start = Instant::now();
     assert_eq!(devices.remove(&phone_t.peer_id()).unwrap(), 1);
     let reason = tokio::time::timeout(WAIT, conn.closed()).await.expect("connection never closed");
@@ -139,10 +157,7 @@ async fn fr_n3_revoking_closes_every_connection_of_the_device_within_one_heartbe
     // The other device is untouched, and the revoked one cannot return.
     assert!(tokio::time::timeout(Duration::from_millis(200), bystander.closed()).await.is_err());
     wait_live(|| devices.gate().live_connections(&other_t.peer_id()), 1).await;
-    assert!(tokio::time::timeout(WAIT, phone.connection(&PeerAddr::new(server_t.peer_id()), SERVER_SERVICE))
-        .await
-        .expect("re-dial timed out")
-        .is_err());
+    assert_refused(&phone, &server_t).await;
 }
 
 struct HubFixture {
@@ -225,10 +240,7 @@ async fn fr_n3_device_removed_on_the_hub_is_dropped_by_the_gate_on_sync() {
     assert_revoked(&reason);
     assert!(start.elapsed() < HEARTBEAT, "closed after {:?}", start.elapsed());
     assert!(!f.devices.gate().is_allowed(&device_t.peer_id()));
-    assert!(tokio::time::timeout(WAIT, dialer.connection(&PeerAddr::new(f.server_t.peer_id()), SERVER_SERVICE))
-        .await
-        .expect("re-dial timed out")
-        .is_err());
+    assert_refused(&dialer, &f.server_t).await;
 }
 
 /// With sync on and no manual call, the server's own watcher notices the removal and the live

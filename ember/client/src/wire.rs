@@ -320,6 +320,8 @@ pub enum Push {
     TeamUpdated { team: TeamView },
     /// A session's approve-everything mode was switched (FR-A5).
     ApproveAll { session_id: String, enabled: bool },
+    /// A message was posted to a channel (FR-T10, FR-L12).
+    ChannelMessage { channel_id: String, message: crate::channels::ChannelMessage },
 }
 
 // ---- teams and mentions (FR-T6, FR-T7; server `a2a::team`, `a2a::mention`) -------------------

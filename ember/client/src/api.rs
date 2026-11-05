@@ -24,6 +24,7 @@ use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
+use crate::channels::{Channel, ChannelMessage, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
@@ -634,6 +635,40 @@ impl Api {
         Ok(())
     }
 
+    // ---- channels (FR-T10, FR-T16) ---------------------------------------------------------
+
+    /// Every channel, or one project's. Entries carry `last_message` and `unread`, no `messages`.
+    pub async fn channels(&self, project: Option<&str>) -> ApiResult<Vec<Channel>> {
+        let path = crate::channels::list_path(project).map_err(|e| ApiError::Decode(e.to_string()))?;
+        self.get(&path).await
+    }
+
+    pub async fn create_channel(&self, new: &NewChannel) -> ApiResult<Channel> {
+        let body = serde_json::to_value(new).expect("NewChannel serialises");
+        Self::decode(self.post("/channels", body).await?)
+    }
+
+    /// One channel with its latest messages.
+    pub async fn channel(&self, id: &str) -> ApiResult<Channel> {
+        self.get(&format!("/channels/{}", seg(id))).await
+    }
+
+    /// Messages with `seq > after`, oldest first.
+    pub async fn channel_messages(&self, id: &str, q: &MessagesQuery) -> ApiResult<Vec<ChannelMessage>> {
+        self.get(&crate::channels::messages_path(id, q)).await
+    }
+
+    pub async fn post_channel_message(&self, id: &str, new: &NewChannelMessage) -> ApiResult<ChannelMessage> {
+        let body = serde_json::to_value(new).expect("NewChannelMessage serialises");
+        Self::decode(self.post(&format!("/channels/{}/messages", seg(id)), body).await?)
+    }
+
+    /// Mark everything up to `upto` (default the latest) as read; the cursor only moves forward.
+    pub async fn mark_channel_read(&self, id: &str, upto: Option<i64>) -> ApiResult<Channel> {
+        let body = serde_json::to_value(ReadBody { seq: upto }).expect("ReadBody serialises");
+        Self::decode(self.post(&format!("/channels/{}/read", seg(id)), body).await?)
+    }
+
     // ---- schedules (FR-A8) -----------------------------------------------------------------
 
     /// Every schedule, or one project's.
@@ -772,7 +807,7 @@ fn authority_addr(authority: &str) -> (String, u16) {
 }
 
 /// Percent-encode one path segment (ids are UUIDs today, but approval ids come from agents).
-fn seg(s: &str) -> String {
+pub(crate) fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {

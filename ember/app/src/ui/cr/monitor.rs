@@ -414,7 +414,8 @@ mod tests {
     }
 
     fn has_text_with_max_lines_1(batch: &[compose_rust::protocol::Mutation<'_>], prefix: &str) -> bool {
-        use compose_rust::protocol::{Mutation, PropertyKind, PropertyValue};
+        use compose_rust::protocol::{Mutation, PropertyValue};
+        use compose_rust::PropertyKind;
         let mut target_nodes = Vec::new();
         for m in batch {
             if let Mutation::SetProp { node_id, property: PropertyKind::Text, value: PropertyValue::String(s) } = m {

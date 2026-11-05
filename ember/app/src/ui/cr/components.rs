@@ -955,8 +955,8 @@ mod tests {
 
     #[test]
     fn fr_l10_chips_and_pills_emit_single_line_max_lines() {
-        use compose_rust::protocol::{decode_batch, Mutation, PropertyKind, PropertyValue};
-        use compose_rust::{Host, Recomposer};
+        use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
+        use compose_rust::{Host, PropertyKind, Recomposer};
         let mut host = Host::new(|| {
             Box::new(Recomposer::new(|| {
                 Pill("브랜치", PillTone::Blue, false);

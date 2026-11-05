@@ -304,7 +304,7 @@ async fn serve(f: Fx) -> (SocketAddr, String, tempfile::TempDir) {
 fn ws_request(addr: SocketAddr, path: &str, headers: &[(&str, String)]) -> Request<()> {
     let mut req = format!("ws://{addr}{path}").into_client_request().unwrap();
     for (k, v) in headers {
-        req.headers_mut().insert(*k, v.parse().unwrap());
+        req.headers_mut().insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
     }
     req
 }

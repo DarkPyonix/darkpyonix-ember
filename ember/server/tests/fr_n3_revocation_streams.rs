@@ -14,8 +14,8 @@
 //!
 //! Not testable here: the handler of an in-flight request after its stream is gone (whether
 //! hyper drops it is hyper's behaviour; a request that already reached a handler may finish its
-//! side effects), and the letify-link wire (`CLOSE_REVOKED` over real sockets is
-//! `ember/transport/tests/gate.rs`).
+//! side effects), and the wire of the real transport backends (`CLOSE_REVOKED` over real sockets is
+//! covered by the transport crate's gate tests).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -119,6 +119,12 @@ async fn next_text(ws: &mut DeviceWs, within: Duration) -> Result<Option<String>
     tokio::time::timeout(within, fut).await.map_err(|_| "still open")
 }
 
+/// Frames that were broadcast to both streams while the other one was being checked are still
+/// buffered here; read them out so that what arrives after the revoke is only what was sent after.
+async fn drain(ws: &mut DeviceWs) {
+    while let Ok(Some(_)) = next_text(ws, Duration::from_millis(150)).await {}
+}
+
 /// After a revoke the device's WebSocket must end, whatever the server sends or does not.
 async fn assert_ends_within_heartbeat(ws: &mut DeviceWs, started: Instant) {
     match next_text(ws, HEARTBEAT).await {
@@ -185,6 +191,8 @@ async fn fr_n3_revoking_one_device_keeps_another_devices_push_stream() {
     let mut laptop_push = device_ws(&laptop, &f.server_t, "/api/push").await.unwrap();
     assert_push_flows(&mut laptop_push, &f).await;
     assert_push_flows(&mut phone_push, &f).await;
+    drain(&mut phone_push).await;
+    drain(&mut laptop_push).await;
 
     let started = Instant::now();
     f.devices.remove(&phone_t.peer_id()).unwrap();

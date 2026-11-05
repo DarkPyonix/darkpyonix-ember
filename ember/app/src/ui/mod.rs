@@ -14,6 +14,7 @@ pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod editor;
+pub mod editor_workbench;
 pub mod files;
 pub mod home;
 pub mod keymap;
@@ -120,7 +121,7 @@ impl Ui {
 
     /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
     pub fn open_editor(&self, project: String, folder: String) {
-        let target = Some(editor::EditorTarget { project, folder });
+        let target = Some(editor::EditorTarget { project, folder, ..Default::default() });
         services().ui.editor.set(target.clone());
         let mut e = self.editor;
         e.set(target);

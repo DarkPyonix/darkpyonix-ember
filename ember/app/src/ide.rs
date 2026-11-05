@@ -116,6 +116,14 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    parse_editor_args_with_token(args, std::env::var("EMBER_EDITOR_TOKEN").unwrap_or_default())
+}
+
+fn parse_editor_args_with_token<I, S>(args: I, token: String) -> Option<EditorTarget>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         if arg.as_ref() == EDITOR_ARG {
@@ -124,7 +132,8 @@ where
                 .next()
                 .map(|s| s.as_ref().to_string())
                 .unwrap_or_default();
-            return Some(EditorTarget { project, folder });
+            let endpoint = it.next().map(|s| s.as_ref().to_string()).unwrap_or_default();
+            return Some(EditorTarget { project, folder, endpoint, token });
         }
     }
     None
@@ -132,21 +141,27 @@ where
 
 /// The `(executable, args)` pair that spawns a separate Ember editor window (FR-L31).
 /// TODO(dioxus-compose#152): replace with an in-process `window` node once #152 lands.
-pub fn editor_command(exe: &Path, project: &str, folder: &str) -> (PathBuf, Vec<String>) {
+pub fn editor_command(exe: &Path, project: &str, folder: &str, endpoint: &str, _token: &str) -> (PathBuf, Vec<String>) {
     (
         exe.to_path_buf(),
         vec![
             EDITOR_ARG.to_string(),
             project.to_string(),
             folder.to_string(),
+            endpoint.to_string(),
         ],
     )
 }
 
 /// Spawn `exe --editor <project> <folder>` and return without waiting for the window to close.
 pub fn spawn_editor_with(exe: &Path, project: &str, folder: &str) -> std::io::Result<std::process::Child> {
-    let (bin, args) = editor_command(exe, project, folder);
-    Command::new(bin).args(args).spawn()
+    spawn_editor_target(exe, &EditorTarget { project: project.into(), folder: folder.into(), ..Default::default() })
+}
+
+/// Spawn an editor with the token in the child environment, never in argv.
+pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result<std::process::Child> {
+    let (bin, args) = editor_command(exe, &target.project, &target.folder, &target.endpoint, &target.token);
+    Command::new(bin).args(args).env("EMBER_EDITOR_TOKEN", &target.token).spawn()
 }
 
 /// Spawn a new Ember process in `--editor <project> <folder>` mode (FR-L31).
@@ -222,6 +237,7 @@ mod tests {
             Some(EditorTarget {
                 project: "demo-project".into(),
                 folder: "/work/demo".into(),
+                ..Default::default()
             })
         );
         assert_eq!(
@@ -229,17 +245,19 @@ mod tests {
             Some(EditorTarget {
                 project: "demo-project".into(),
                 folder: String::new(),
+                ..Default::default()
             })
         );
 
-        let (exe, args) = editor_command(Path::new("/usr/local/bin/ember"), "ember-core", "/repo");
+        let (exe, args) = editor_command(Path::new("/usr/local/bin/ember"), "ember-core", "/repo", "", "");
         assert_eq!(exe, PathBuf::from("/usr/local/bin/ember"));
-        assert_eq!(args, vec!["--editor", "ember-core", "/repo"]);
+        assert_eq!(args, vec!["--editor", "ember-core", "/repo", ""]);
         assert_eq!(
             parse_editor_args(std::iter::once("ember".to_string()).chain(args)),
             Some(EditorTarget {
                 project: "ember-core".into(),
                 folder: "/repo".into(),
+                ..Default::default()
             })
         );
 
@@ -251,5 +269,14 @@ mod tests {
             let status = child.wait().expect("wait for child");
             assert!(status.success());
         }
+    }
+
+    #[test]
+    fn fr_l31_editor_connection_arguments_round_trip() {
+        let (_, args) = editor_command(Path::new("ember"), "project", "/work", "localhost:8000", "secret");
+        assert!(!args.iter().any(|arg| arg == "secret"));
+        let target = parse_editor_args_with_token(std::iter::once("ember".to_owned()).chain(args), "secret".into()).unwrap();
+        assert_eq!(target.endpoint, "localhost:8000");
+        assert_eq!(target.token, "secret");
     }
 }

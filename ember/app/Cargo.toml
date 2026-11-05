@@ -31,6 +31,8 @@ dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
+ember-editor = { path = "../editor" }
+ember-editor-conn = { path = "../editor-conn" }
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).

@@ -15,6 +15,7 @@ pub mod bridge;
 pub mod config;
 pub mod demo;
 pub mod export;
+pub mod editor_host;
 pub mod ide;
 pub mod model;
 pub mod prefs;
@@ -105,9 +106,10 @@ pub fn launch() {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the dioxus-compose
         // EditorScreen in its own process until dioxus-compose#152 (the `window` element on a
         // shared host) lands.
+        let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
-        launch_builder().launch(ui::app);
+        launch_builder().with_window(Window::new().with_title(title).with_size(1280, 820)).launch(ui::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
         ui::cr::gallery::launch(pref);

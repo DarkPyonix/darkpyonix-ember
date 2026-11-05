@@ -39,7 +39,7 @@ async fn stub_node() -> (String, Seen) {
             _ => (StatusCode::OK, Json(json!({ "op": op, "echo": body }))),
         }
     }
-    let app = Router::new().route("/git/{op}", post(git)).with_state(seen.clone());
+    let app = Router::new().route("/git/{*op}", post(git)).with_state(seen.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -123,7 +123,7 @@ fn fr_g4_the_contract_ops_are_all_routed() {
     let mut ops = computers_ops();
     ops.sort();
     let mut want =
-        vec!["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts"];
+        vec!["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
     want.sort();
     assert_eq!(ops, want);
 }
@@ -163,6 +163,9 @@ async fn fr_g4_unknown_project_op_or_missing_session_is_404_and_a_dead_node_is_5
 
     let (f, _) = on_node("/work/alpha").await;
     let (st, _) = call(&f.app, "/api/projects/alpha/git/rebase", Some(json!({}))).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+
+    let (st, _) = call(&f.app, "/api/projects/alpha/git/stash/unknown", Some(json!({}))).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
     let f2 = fixture();

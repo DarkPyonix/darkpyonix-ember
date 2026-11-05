@@ -38,7 +38,7 @@ use crate::session::Sessions;
 
 /// Every operation the node serves under `/git/`.
 pub const OPS: &[&str] =
-    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts"];
+    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
 
 #[derive(Clone)]
 struct GitState {
@@ -49,7 +49,7 @@ struct GitState {
 
 pub fn router(sessions: Arc<Sessions>, computers: Arc<Computers>) -> Router {
     Router::new()
-        .route("/api/projects/{name}/git/{op}", post(relay))
+        .route("/api/projects/{name}/git/{*op}", post(relay))
         .with_state(GitState { sessions, computers, local: Arc::new(Mutex::new(None)) })
 }
 

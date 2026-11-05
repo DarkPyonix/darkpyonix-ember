@@ -129,6 +129,58 @@ pub struct GitConflicts {
     pub paths: Vec<String>,
 }
 
+/// Repository history returned by the node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLog {
+    pub commits: Vec<GitLogCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLogCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub subject: String,
+    pub refs: Vec<GitLogRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLogRef {
+    pub name: String,
+    pub kind: GitLogRefKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitLogRefKind {
+    Branch,
+    Remote,
+    Tag,
+    Head,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitStashEntry {
+    pub index: u32,
+    pub message: String,
+    pub branch: String,
+    pub time: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitConflict {
+    pub blocks: Vec<GitConflictBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum GitConflictBlock {
+    Common { text: String },
+    Conflict { ours: String, theirs: String, ours_label: String, theirs_label: String },
+}
+
 /// The `POST /projects/{id}/git/<op>` body for `diff`.
 pub(crate) fn git_diff_body(path: Option<&str>, staged: bool) -> serde_json::Value {
     json!({ "path": path, "staged": staged })
@@ -500,6 +552,44 @@ impl Api {
     /// The unmerged paths.
     pub async fn git_conflicts(&self, project: &str) -> ApiResult<GitConflicts> {
         Self::decode(self.git_post(project, "conflicts", json!({})).await?)
+    }
+
+    /// Read a page of repository history.
+    pub async fn git_log(&self, project: &str, limit: u32, skip: u64, branch: Option<&str>) -> ApiResult<GitLog> {
+        Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
+    }
+
+    pub async fn git_stash_list(&self, project: &str) -> ApiResult<Vec<GitStashEntry>> {
+        Self::decode(self.git_post(project, "stash/list", json!({})).await?)
+    }
+
+    pub async fn git_stash_push(&self, project: &str, message: Option<&str>, include_untracked: bool) -> ApiResult<()> {
+        self.git_post(project, "stash/push", json!({ "message": message, "include_untracked": include_untracked })).await?;
+        Ok(())
+    }
+
+    pub async fn git_stash_apply(&self, project: &str, index: u32) -> ApiResult<()> {
+        self.git_post(project, "stash/apply", json!({ "index": index })).await?;
+        Ok(())
+    }
+
+    pub async fn git_stash_pop(&self, project: &str, index: u32) -> ApiResult<()> {
+        self.git_post(project, "stash/pop", json!({ "index": index })).await?;
+        Ok(())
+    }
+
+    pub async fn git_stash_drop(&self, project: &str, index: u32) -> ApiResult<()> {
+        self.git_post(project, "stash/drop", json!({ "index": index })).await?;
+        Ok(())
+    }
+
+    pub async fn git_conflict(&self, project: &str, path: &str) -> ApiResult<GitConflict> {
+        Self::decode(self.git_post(project, "conflict", json!({ "path": path })).await?)
+    }
+
+    pub async fn git_resolve(&self, project: &str, path: &str, content: &str) -> ApiResult<()> {
+        self.git_post(project, "resolve", json!({ "path": path, "content": content })).await?;
+        Ok(())
     }
 
     // ---- schedules (FR-A8) -----------------------------------------------------------------

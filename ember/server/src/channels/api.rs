@@ -8,6 +8,12 @@
 //! | GET    | `/api/channels/{id}/messages?after=` | → `[Message]`, oldest first, `seq > after` |
 //! | POST   | `/api/channels/{id}/messages` | `{text, from?}` → 201 `Message` |
 //!
+//! | POST   | `/api/channels/{id}/read` | `{seq?}` → `Channel` (no `messages`) with `unread` recomputed |
+//!
+//! `read` marks everything up to `seq` (default the latest) as read by `user`; the cursor only
+//! moves forward. `unread` on a channel counts messages after the cursor not written by `user`;
+//! on a message it is 1 or 0 the same way.
+//!
 //! A posted message is also pushed as `channel_message` on `/api/push` (FR-L12).
 //!
 //! `from` defaults to `user`; otherwise it is a member agent's session id. Errors are
@@ -18,7 +24,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -40,6 +46,7 @@ pub fn router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
         .route("/api/channels", get(list).post(create))
         .route("/api/channels/{id}", get(one))
         .route("/api/channels/{id}/messages", get(messages).post(post_message))
+        .route("/api/channels/{id}/read", post(mark_read))
         .with_state(ChannelsCtx { store, sessions })
 }
 
@@ -104,4 +111,19 @@ async fn post_message(
     // Every attached client hears of it (FR-L12); no receiver is not an error.
     c.sessions.publish(Push::ChannelMessage { channel_id: id, message: message.clone() });
     Ok((StatusCode::CREATED, Json(message)))
+}
+
+#[derive(Deserialize, Default)]
+struct ReadBody {
+    #[serde(default)]
+    seq: Option<i64>,
+}
+
+async fn mark_read(
+    State(c): State<ChannelsCtx>,
+    Path(id): Path<String>,
+    body: Option<Json<ReadBody>>,
+) -> ApiResult<impl IntoResponse> {
+    let seq = body.and_then(|Json(b)| b.seq);
+    Ok(Json(c.store.mark_channel_read(&id, seq)?))
 }

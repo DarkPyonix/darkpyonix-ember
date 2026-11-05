@@ -196,3 +196,71 @@ async fn fr_t10_router_takes_sessions_and_store() {
     let (st, _) = call(&app(&store), "GET", "/api/channels", None).await;
     assert_eq!(st, StatusCode::OK);
 }
+
+async fn default_channel(app: &Router) -> String {
+    let (_, list) = call(app, "GET", "/api/channels?project=core", None).await;
+    list[0]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn fr_t10_unread_counts_messages_from_others_after_posts() {
+    let (store, a, b, _) = fixture();
+    let app = app(&store);
+    let id = default_channel(&app).await;
+    let uri = format!("/api/channels/{id}/messages");
+    call(&app, "POST", &uri, Some(json!({"text":"one","from":a}))).await;
+    let (_, m2) = call(&app, "POST", &uri, Some(json!({"text":"two","from":b}))).await;
+    assert_eq!(m2["unread"], 1);
+    let (_, list) = call(&app, "GET", "/api/channels?project=core", None).await;
+    assert_eq!(list[0]["unread"], 2);
+    assert_eq!(list[0]["last_message"]["unread"], 1);
+    let (_, d) = call(&app, "GET", &format!("/api/channels/{id}"), None).await;
+    assert_eq!(d["unread"], 2);
+    assert_eq!(d["messages"][0]["unread"], 1);
+}
+
+#[tokio::test]
+async fn fr_t10_a_users_own_posts_never_count_as_unread() {
+    let (store, _, _, _) = fixture();
+    let app = app(&store);
+    let id = default_channel(&app).await;
+    let (_, m) = call(&app, "POST", &format!("/api/channels/{id}/messages"), Some(json!({"text":"mine"}))).await;
+    assert_eq!(m["unread"], 0);
+    let (_, d) = call(&app, "GET", &format!("/api/channels/{id}"), None).await;
+    assert_eq!(d["unread"], 0);
+    assert_eq!(d["messages"][0]["unread"], 0);
+}
+
+#[tokio::test]
+async fn fr_t10_mark_read_resets_the_count_and_later_posts_count_again() {
+    let (store, a, _, _) = fixture();
+    let app = app(&store);
+    let id = default_channel(&app).await;
+    let uri = format!("/api/channels/{id}/messages");
+    let (_, m1) = call(&app, "POST", &uri, Some(json!({"text":"one","from":a}))).await;
+    call(&app, "POST", &uri, Some(json!({"text":"two","from":a}))).await;
+    // Reading up to the first leaves the second unread.
+    let (st, c) = call(&app, "POST", &format!("/api/channels/{id}/read"), Some(json!({"seq": m1["seq"]}))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(c["unread"], 1);
+    // No body reads everything.
+    let (st, c) = call(&app, "POST", &format!("/api/channels/{id}/read"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(c["unread"], 0);
+    let (_, d) = call(&app, "GET", &format!("/api/channels/{id}"), None).await;
+    assert!(d["messages"].as_array().unwrap().iter().all(|m| m["unread"] == 0));
+    // The cursor does not move back, and a new message counts again.
+    let (_, c) = call(&app, "POST", &format!("/api/channels/{id}/read"), Some(json!({"seq": 0}))).await;
+    assert_eq!(c["unread"], 0);
+    call(&app, "POST", &uri, Some(json!({"text":"three","from":a}))).await;
+    let (_, list) = call(&app, "GET", "/api/channels?project=core", None).await;
+    assert_eq!(list[0]["unread"], 1);
+}
+
+#[tokio::test]
+async fn fr_t10_read_of_an_unknown_channel_is_404() {
+    let (store, _, _, _) = fixture();
+    let (st, e) = call(&app(&store), "POST", "/api/channels/nope/read", Some(json!({}))).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(e["code"], "not_found");
+}

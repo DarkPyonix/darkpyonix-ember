@@ -2436,9 +2436,9 @@ mod tests {
     }
 
     #[test]
-    fn fr_s8_antigravity_has_no_shim_yet_the_others_default_to_one() {
-        assert!(!AgentHarness::Antigravity.shim_supported());
-        assert!(!default_settings(AgentHarness::Antigravity).shim);
+    fn fr_s8_antigravity_and_other_harnesses_default_to_shim() {
+        assert!(AgentHarness::Antigravity.shim_supported());
+        assert!(default_settings(AgentHarness::Antigravity).shim);
         assert!(default_settings(AgentHarness::ClaudeCode).shim);
         assert!(default_settings(AgentHarness::Codex).shim);
     }

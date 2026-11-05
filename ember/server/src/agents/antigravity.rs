@@ -1067,6 +1067,7 @@ impl AgentRun for AgyRun {
         let proc = match spawn_agent(AgentCommand {
             program: self.bin.clone(), args, env: self.req.env.clone(),
             cwd: self.req.cwd.clone(), reattachable: true,
+            mem_limit_mb: self.req.mem_limit_mb,
         }).await {
             Ok(proc) => proc,
             Err(e) => {

@@ -151,6 +151,9 @@ pub struct Sessions {
     /// Sessions in approve-everything mode (FR-A5). Opt-in per session, kept in memory: a server
     /// restart returns every session to asking.
     approve_all: std::sync::Mutex<HashSet<String>>,
+    /// Memory limit in MiB per agent kind, from the settings (FR-L20, FR-S8). Applies to agents
+    /// started afterwards; a running shim keeps the limit it started with.
+    mem_limits: std::sync::Mutex<HashMap<AgentKind, u64>>,
 }
 
 impl Sessions {
@@ -173,7 +176,27 @@ impl Sessions {
             last_active: std::sync::Mutex::new(HashMap::new()),
             leases: std::sync::Mutex::new(HashMap::new()),
             approve_all: std::sync::Mutex::new(HashSet::new()),
+            mem_limits: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Set (`Some(mb)`) or clear (`None`, `Some(0)`) the memory limit for agents of `agent`
+    /// started from now on (FR-L20, FR-S8). Cleared falls back to `EMBER_SESSION_MEM_LIMIT_MB`.
+    pub fn set_mem_limit_mb(&self, agent: AgentKind, limit: Option<u64>) {
+        let mut m = self.mem_limits.lock().unwrap();
+        match limit.filter(|mb| *mb > 0) {
+            Some(mb) => {
+                m.insert(agent, mb);
+            }
+            None => {
+                m.remove(&agent);
+            }
+        }
+    }
+
+    /// The memory limit in MiB for the next agent of `agent`, if one was set.
+    pub fn mem_limit_mb(&self, agent: AgentKind) -> Option<u64> {
+        self.mem_limits.lock().unwrap().get(&agent).copied()
     }
 
     /// Register a hook that adds environment to every agent process this server starts.
@@ -349,6 +372,7 @@ impl Sessions {
             mcp_servers: Vec::new(),
             computer: None,
             fork_from: None,
+            mem_limit_mb: self.mem_limit_mb(rec.agent),
         };
         let prepare_hooks: Vec<PrepareHook> = self.prepare_hooks.lock().unwrap().clone();
         for hook in &prepare_hooks {

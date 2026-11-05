@@ -186,6 +186,11 @@ pub struct StartRequest {
     /// for a fork whose parent the agent can fork. `resume_native_id` is `None` then. An adapter
     /// that fails to fork returns an error; the session layer falls back to the conversation copy.
     pub fork_from: Option<ForkFrom>,
+    /// Memory limit of the agent's process tree in MiB (FR-S8, FR-L20). Handed to the shim, which
+    /// kills only this session's agent above it. `None` = the server default
+    /// (`EMBER_SESSION_MEM_LIMIT_MB`), else no limit. Set by `Sessions::ensure_live` from
+    /// `Sessions::set_mem_limit_mb`; a start-config hook may override it.
+    pub mem_limit_mb: Option<u64>,
 }
 
 /// The native session a fork starts from (FR-S5).

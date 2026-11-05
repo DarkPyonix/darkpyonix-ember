@@ -303,6 +303,24 @@ impl AgentAdapter for AcpAdapter {
         NativeFork::Latest
     }
 
+    /// A turn in flight when the server died is read back from the surviving agent (FR-S8). The
+    /// agent itself cannot be rejoined: its `initialize` and `session/*` handshake belongs to the
+    /// dead connection, and ACP has no method to attach another client to a running turn
+    /// (`session/load` and `session/resume` open a session on a connection, they do not rejoin an
+    /// in-flight `session/prompt`). So the output is drained, the agent stopped, and the session
+    /// resumes natively on its next message.
+    fn drains_shim(&self) -> bool {
+        true
+    }
+
+    fn drain_turn_end(&self, line: &str) -> bool {
+        drain_ends_turn(line)
+    }
+
+    fn translate_drained(&self, lines: &[String]) -> Vec<AgentEvent> {
+        translate_drained_lines(lines)
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -341,6 +359,7 @@ impl AgentAdapter for AcpAdapter {
             // `initialize` and `session/*` have to run on a fresh agent, so a surviving one is
             // restarted through the agent's native resume instead of rejoined.
             reattachable: false,
+            mem_limit_mb: req.mem_limit_mb,
         })
         .await
         .with_context(|| format!("starting {} (ACP agent {})", self.config.command.display(), self.config.name))?;
@@ -367,6 +386,59 @@ impl AgentAdapter for AcpAdapter {
         let run = connect(stdout, stdin, Some(child), setup, events).await?;
         Ok(Box::new(run))
     }
+}
+
+/// Whether `line` of output drained from a surviving ACP agent ends the draining: the response to
+/// the in-flight `session/prompt` (the only response the agent can send, since the dead client's
+/// other requests were answered by it), or a request to the client (a permission prompt, `fs/*`,
+/// `terminal/*`) that nobody can answer any more.
+pub(crate) fn drain_ends_turn(line: &str) -> bool {
+    let Ok(msg) = serde_json::from_str::<Value>(line) else { return false };
+    match (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+        (Some(_), Some(_)) => true,
+        (None, Some(_)) => msg.get("result").is_some() || msg.get("error").is_some(),
+        _ => false,
+    }
+}
+
+/// The events behind lines drained from a surviving ACP agent: `session/update` notifications go
+/// through the normal [`Mapper`]; the `session/prompt` response ends the turn like a live one
+/// (usage, stop reason). Without an end line the message in progress is still flushed, and the
+/// session layer ends the unfinished turn as failed.
+pub(crate) fn translate_drained_lines(lines: &[String]) -> Vec<AgentEvent> {
+    // Terminals belonged to the dead connection: `terminal` content falls back to a placeholder.
+    let host = Host::new(PathBuf::new(), None);
+    let mut mapper = Mapper::default();
+    let mut out = Vec::new();
+    for line in lines {
+        let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+        let params = msg.get("params").cloned().unwrap_or(Value::Null);
+        match (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+            (Some("session/update"), None) => {
+                let update = params.get("update").cloned().unwrap_or(Value::Null);
+                out.extend(mapper.on_update(&update, &host));
+            }
+            // A request to the client: nobody answers it; the turn cannot continue.
+            (Some(_), Some(_)) => break,
+            (None, Some(_)) => {
+                out.extend(mapper.end_turn());
+                match msg.get("error") {
+                    Some(err) => {
+                        let why = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+                        out.push(AgentEvent::Error { message: format!("ACP session/prompt failed: {why}") });
+                        out.push(AgentEvent::TurnEnded { outcome: TurnOutcome::Failed });
+                    }
+                    None => {
+                        out.extend(turn_end_events(msg.get("result").unwrap_or(&Value::Null), false))
+                    }
+                }
+                return out;
+            }
+            _ => {}
+        }
+    }
+    out.extend(mapper.end_turn());
+    out
 }
 
 /// `omp 18.5.0` / `18.5.0` → `18.5.0`: the last word of the first non-empty line.

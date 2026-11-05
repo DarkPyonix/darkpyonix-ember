@@ -207,6 +207,7 @@ impl AgentAdapter for CodexAdapter {
             // `initialize` has to run on a fresh app-server, so a surviving one is restarted
             // through `thread/resume` instead of rejoined.
             reattachable: false,
+            mem_limit_mb: req.mem_limit_mb,
         })
         .await
         .with_context(|| format!("starting {} app-server", self.bin.display()))?;

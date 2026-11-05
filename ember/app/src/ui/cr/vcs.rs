@@ -1603,6 +1603,8 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                     cnt.set(if let StashLoad::Ready(list) = &result { Some(list.len()) } else { None });
                     st.set(result);
                 });
+            } else {
+                st.set(StashLoad::Failed("서버에 연결되어 있지 않아 스태시를 불러올 수 없습니다.".to_string()));
             }
         });
     }

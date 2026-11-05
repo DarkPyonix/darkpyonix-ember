@@ -1808,7 +1808,8 @@ fn VcsScreenWithLoad(
     let compact = class == WindowSizeClass::Compact;
     let pad = if compact { SP[2] } else { 32.0 };
 
-    let section = remember(|| mutable_state_of(Section::Changes));
+    // `EMBER_CR_VCS_SECTION=<key>` opens a section directly, for captures without clicks.
+    let section = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_SECTION").map(|k| route_section(&k)).unwrap_or(Section::Changes)));
     let tab = remember(|| mutable_state_of(PaneTab::Files));
     let selected_proj = remember(|| mutable_state_of(current_id));
     let stash_count = remember(|| mutable_state_of(None::<usize>));

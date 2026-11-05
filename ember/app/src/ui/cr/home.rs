@@ -97,6 +97,28 @@ pub fn layout(width_dp: f32) -> Layout {
     }
 }
 
+/// Estimated text width in dp: Hangul and other wide glyphs one em, ASCII 0.55 em. Used to lay out
+/// rows of chips and cards, never to cut or wrap a label.
+pub fn text_px(text: &str, font_px: f32) -> f32 {
+    text.chars().map(|c| if c.is_ascii() { 0.55 } else { 1.0 }).sum::<f32>() * font_px
+}
+
+/// `text` cut to fit `max_px` at `font_px`, ending in an ellipsis when it was cut.
+pub fn fit_label(text: &str, max_px: f32, font_px: f32) -> String {
+    if text_px(text, font_px) <= max_px {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for ch in text.chars() {
+        let next = format!("{out}{ch}\u{2026}");
+        if text_px(&next, font_px) > max_px {
+            break;
+        }
+        out.push(ch);
+    }
+    format!("{out}\u{2026}")
+}
+
 /// "10월 25일 토요일" for `YYYY-MM-DD`.
 pub fn date_line(ymd: &str) -> String {
     let n = crate::ui::home::day_number(ymd);

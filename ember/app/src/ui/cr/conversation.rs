@@ -629,6 +629,8 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     Badge(&format!("승인 대기 {pending}"), Tone::Warning);
                                 }
                                 let im = ide_menu.clone();
+                                let ui_ide_btn = ui.clone();
+                                let launch_btn = ide.get();
                                 AppButton(
                                     "IDE 열기",
                                     Some(IconRole::Forward),
@@ -636,7 +638,17 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                     true,
                                     true,
                                     false,
-                                    move || im.set(true),
+                                    move || {
+                                        if let Some(kind) = remembered {
+                                            super::session::launch_ide_shared(
+                                                &ui_ide_btn,
+                                                kind,
+                                                launch_btn.clone(),
+                                            );
+                                        } else {
+                                            im.set(true);
+                                        }
+                                    },
                                 );
                             });
                     }
@@ -1151,14 +1163,13 @@ pub fn ConversationView(id: &str, embedded: bool) {
                 OptionSheet(
                     ide_menu.get(),
                     &ide_labels,
-                    Some(0),
+                    remembered.map(|_| 0),
                     POPUP_W,
                     move || ide_dismiss.set(false),
                     move |idx| {
                         let Some(&kind) = ide_kinds.get(idx) else {
                             return;
                         };
-                        ui_ide.update_prefs(|p| p.ide_target = Some(kind.key().to_string()));
                         super::session::launch_ide_shared(&ui_ide, kind, launch_res.clone());
                     },
                 );

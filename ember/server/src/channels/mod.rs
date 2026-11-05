@@ -4,11 +4,13 @@
 //! members are all the project's sessions (computed when read, so a new session joins it); more
 //! channels are created with a chosen subset of the project's sessions. The signed-in person is
 //! a member of every channel as the person `user`. Messages are an append-only log per channel
-//! in the main store (SQLite); the per-channel JSONL file of FR-T16, mentions (FR-T12, FR-T13),
+//! in the main store (SQLite), and human messages are also appended to a per-channel JSONL file
+//! ([`jsonl`], FR-T16); mentions (FR-T12, FR-T13),
 //! the agent feed (FR-T11) and invites (FR-T14, FR-T15, FR-T17) are not built. Read tracking is
 //! one cursor per channel for the person `user` ([`READS_MIGRATION`]). Tables: [`MIGRATION`]. Routes: [`api`].
 
 pub mod api;
+pub mod jsonl;
 
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -346,6 +348,12 @@ impl Store {
             params![channel, from, text, at],
         )?;
         Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last))
+    }
+
+    /// Remove one message row. Used only to undo a post whose JSONL append failed (FR-T16).
+    pub fn delete_channel_message(&self, seq: i64) -> Result<(), ChannelError> {
+        self.conn().execute("DELETE FROM channel_messages WHERE seq = ?1", params![seq])?;
+        Ok(())
     }
 
     /// Messages with `seq > after`, oldest first (or the newest `limit` when `newest`).

@@ -39,15 +39,26 @@ use crate::store::Store;
 pub struct ChannelsCtx {
     pub store: Arc<Store>,
     pub sessions: Arc<Sessions>,
+    /// The human-message JSONL file (FR-T16); `None` writes no file (routers built without a data dir).
+    pub jsonl: Option<Arc<super::jsonl::JsonlLog>>,
 }
 
 pub fn router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
+    build(ChannelsCtx { store, sessions, jsonl: None })
+}
+
+/// As [`router`], and human messages are also appended under `<data_dir>/channels/` (FR-T16).
+pub fn router_with_dir(store: Arc<Store>, sessions: Arc<Sessions>, data_dir: &std::path::Path) -> Router {
+    build(ChannelsCtx { store, sessions, jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))) })
+}
+
+fn build(ctx: ChannelsCtx) -> Router {
     Router::new()
         .route("/api/channels", get(list).post(create))
         .route("/api/channels/{id}", get(one))
         .route("/api/channels/{id}/messages", get(messages).post(post_message))
         .route("/api/channels/{id}/read", post(mark_read))
-        .with_state(ChannelsCtx { store, sessions })
+        .with_state(ctx)
 }
 
 impl IntoResponse for ChannelError {
@@ -107,7 +118,19 @@ async fn post_message(
     Json(b): Json<NewMessage>,
 ) -> ApiResult<impl IntoResponse> {
     let from = b.from.unwrap_or_else(|| USER.to_string());
+    // FR-T16: insert the row, then append the line, both under the log's lock so lines reach the
+    // file in seq order; if the append fails the row is deleted and the caller gets 500.
+    let _guard = c.jsonl.as_ref().map(|j| j.guard());
     let message = c.store.post_channel_message(&id, &from, &b.text)?;
+    if let Some(j) = &c.jsonl {
+        if let Err(e) = j.append(&id, &message) {
+            let _ = c.store.delete_channel_message(message.seq);
+            return Err(match e {
+                ChannelError::Other(_) => e,
+                other => ChannelError::Other(anyhow::anyhow!("{other}")),
+            });
+        }
+    }
     // Every attached client hears of it (FR-L12); no receiver is not an error.
     c.sessions.publish(Push::ChannelMessage { channel_id: id, message: message.clone() });
     Ok((StatusCode::CREATED, Json(message)))

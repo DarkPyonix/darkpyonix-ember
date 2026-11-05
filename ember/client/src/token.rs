@@ -26,41 +26,55 @@ pub fn server_token(env_token: Option<&str>, data_dir: Option<&Path>, home: Opti
         (None, Some(home)) => home.join(".ember").join("server-token"),
         (None, None) => return None,
     };
-    if !token_file_usable(&file) {
-        return None;
-    }
-    std::fs::read_to_string(file).ok().and_then(|s| clean(&s))
+    read_token_file(&file).and_then(|s| clean(&s))
 }
 
-/// Whether the token file may be read (unix): a regular file, not a symlink, with no group or
-/// other permission bits. A missing file is quietly unusable; a refused one logs why (never the
-/// token). The file's owner must be the owner of its folder (the data folder is the user's own);
-/// the current uid is not asked for, so `ember-client` needs no `libc`. The environment variable
-/// is not subject to this.
-fn token_file_usable(path: &Path) -> bool {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
+/// Reads the token file if it may be used (unix): a regular file, not a symlink, with no group
+/// or other permission bits. A missing file is quietly unusable; a refused one logs why (never
+/// the token). The file's owner must be the owner of its folder (the data folder is the user's
+/// own); the current uid is not asked for, so `ember-client` needs no `libc`. The environment
+/// variable is not subject to this.
+///
+/// The file is opened once and every check runs on the open handle, then the text is read from
+/// that handle, so swapping the path between check and read changes nothing. A swap between the
+/// open and the check is caught by comparing the path's own `symlink_metadata` (a symlink, or a
+/// different dev/inode, is refused) with the handle's.
+fn read_token_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let handle = file.metadata().ok()?;
     let refuse = |why: &str| {
         tracing::warn!("ignoring server token file {}: {why}", path.display());
-        false
+        None
     };
-    if !meta.file_type().is_file() {
+    let on_path = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return refuse("the path changed while it was opened"),
+    };
+    if on_path.file_type().is_symlink() {
         return refuse("not a regular file (symlinks are refused)");
+    }
+    if !handle.is_file() || !on_path.is_file() {
+        return refuse("not a regular file");
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if meta.permissions().mode() & 0o077 != 0 {
+        if handle.dev() != on_path.dev() || handle.ino() != on_path.ino() {
+            return refuse("the path was replaced while it was opened");
+        }
+        if handle.permissions().mode() & 0o077 != 0 {
             return refuse("group or other can access it, set mode 0600");
         }
         let dir_uid = path.parent().and_then(|d| std::fs::metadata(d).ok()).map(|m| m.uid());
-        if !owner_matches(meta.uid(), dir_uid) {
+        if !owner_matches(handle.uid(), dir_uid) {
             return refuse("its owner is not the owner of its folder");
         }
     }
-    true
+    // A token is short; a larger file is not one and is not read whole.
+    let mut text = String::new();
+    file.by_ref().take(64 * 1024).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// The token file's owner matches its folder's owner; an unreadable folder fails the check.
@@ -255,6 +269,25 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(&target, d.path().join("server-token")).unwrap();
         assert_eq!(server_token(None, Some(d.path()), None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_s11_token_file_read_goes_through_the_open_handle() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = token_in(d.path(), 0o600);
+        // A regular 0600 file reads, and the handle and the path name the same inode.
+        assert_eq!(read_token_file(&f).as_deref(), Some("filetok\n"));
+        let handle = std::fs::File::open(&f).unwrap().metadata().unwrap();
+        let on_path = std::fs::symlink_metadata(&f).unwrap();
+        assert_eq!((handle.dev(), handle.ino()), (on_path.dev(), on_path.ino()));
+        // A symlink, a directory and a missing path are refused.
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&f, &link).unwrap();
+        assert_eq!(read_token_file(&link), None);
+        assert_eq!(read_token_file(d.path()), None);
+        assert_eq!(read_token_file(&d.path().join("missing")), None);
     }
 
     #[test]

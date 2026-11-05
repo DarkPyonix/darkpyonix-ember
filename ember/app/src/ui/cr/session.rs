@@ -27,7 +27,7 @@ use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
 use ember_client::LauncherStatus;
 
 pub use crate::ui::session::{
-    INFO_PANEL_W, IdeChoice, token_tile, ComputerRow, NodeStatus, PrRow, StatusTone, SubNode, TokenRow,
+    INFO_PANEL_W, IdeChoice, status_card_width, status_grid_columns, status_page_pad, token_tile, ComputerRow, NodeStatus, PrRow, StatusTone, SubNode, TokenRow,
     COMPUTERS_CAPTION, COMPUTERS_EMPTY, LOAD_CARD_TITLE, PR_CARD_TITLE, PR_EMPTY, SUBAGENT_CARD_TITLE,
     SUBAGENT_EMPTY, TOKENS_CAPTION, TOKENS_EMPTY, computer_fill_pct, computer_rows, computer_value_text,
     cpu_fill_tone, pr_count_text, pr_rows, session_count_rows, subagent_tree, token_rows,
@@ -3390,29 +3390,36 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
 }
 
 /// The bottom grid (`.grid.g3.sgrid`), gap 20: three columns from 1280 dp, two from 900 dp
-/// (the third card below), one under that.
+/// (the third card below), one under that. Every card fills its share of the page width
+/// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
+/// content shrank the cards to about 308 dp at 390 dp.
 fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     let (d1, d2, d3) = (d.clone(), d.clone(), d);
-    if width_dp >= 1280.0 {
-        cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
-            PrCard(true, d1);
-            SubagentCard(true, d2);
-            LoadCard(true, d3);
-        });
-    } else if width_dp >= 900.0 {
-        cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+    match status_grid_columns(width_dp) {
+        3 => {
             cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
                 PrCard(true, d1);
                 SubagentCard(true, d2);
+                LoadCard(true, d3);
             });
-            LoadCard(false, d3);
-        });
-    } else {
-        cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
-            PrCard(false, d1);
-            SubagentCard(false, d2);
-            LoadCard(false, d3);
-        });
+        }
+        2 => {
+            cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                    PrCard(true, d1);
+                    SubagentCard(true, d2);
+                });
+                LoadCard(false, d3);
+            });
+        }
+        _ => {
+            let w = status_card_width(width_dp, 1, SP[4]);
+            cu::Column().spacing(SP[4]).modifier(Modifier::new().width(w)).content(move || {
+                PrCard(false, d1);
+                SubagentCard(false, d2);
+                LoadCard(false, d3);
+            });
+        }
     }
 }
 
@@ -3513,7 +3520,7 @@ pub fn StatusView(
                 .modifier(
                     Modifier::new()
                         .fill_max_width()
-                        .padding(if window.width_dp <= 560.0 { SP[2] } else { SP[4] }),
+                        .padding(status_page_pad(window.width_dp)),
                 )
                 .content(move || {
                     // Review captures: `EMBER_CR_SCROLL=cards` leaves out the blocks above the cards.

@@ -858,6 +858,30 @@ impl NodeStatus {
     }
 }
 
+/// Side padding of the status page: 12 dp up to 560 dp, 20 dp above.
+pub fn status_page_pad(width_dp: f32) -> f32 {
+    if width_dp <= 560.0 { 12.0 } else { 20.0 }
+}
+
+/// Columns of the status cards grid: three from 1280 dp, two from 900 dp, one below.
+pub fn status_grid_columns(width_dp: f32) -> usize {
+    if width_dp >= 1280.0 {
+        3
+    } else if width_dp >= 900.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Width of one status card when the grid has `columns` columns and `gap` between them: the
+/// whole page row (window minus both paddings) shared equally, as the stat tiles do.
+pub fn status_card_width(window_dp: f32, columns: usize, gap: f32) -> f32 {
+    let row = window_dp - 2.0 * status_page_pad(window_dp);
+    let n = columns.max(1) as f32;
+    (row - gap * (n - 1.0)) / n
+}
+
 /// One node of the sub-agent tree: a team member that has threads (`member` set), or a thread.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubNode {
@@ -1819,5 +1843,17 @@ mod tests {
             );
             assert!(!t.contains('\u{2014}'), "no em-dash: {t}");
         }
+    }
+
+    #[test]
+    fn fr_l18_status_cards_fill_the_page_width_per_column_count() {
+        assert_eq!(status_grid_columns(390.0), 1);
+        assert_eq!(status_grid_columns(900.0), 2);
+        assert_eq!(status_grid_columns(1440.0), 3);
+        // 390 dp: one card as wide as the stat tiles row, window minus both paddings.
+        assert_eq!(status_card_width(390.0, 1, 20.0), 390.0 - 2.0 * status_page_pad(390.0));
+        // 1440 dp: three cards and two gaps fill the row exactly.
+        let w = status_card_width(1440.0, 3, 20.0);
+        assert!((3.0 * w + 40.0 - (1440.0 - 40.0)).abs() < 0.01);
     }
 }

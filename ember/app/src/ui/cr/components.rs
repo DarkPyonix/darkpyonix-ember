@@ -650,7 +650,8 @@ pub fn EmberCard(
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
-        cu::Row().content(|| {
+        // The row fills the card, so the card does not shrink to its content (FR-L18).
+        cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width || weight.is_some())).content(|| {
             cu::Spacer().modifier(Modifier::new().width(side));
             cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
             cu::Spacer().modifier(Modifier::new().width(side));

@@ -405,21 +405,20 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
 /// TODO(compose-rust): backdrop blur (Liquid Glass on iOS) and the safe-area inset; only the
 /// 10 px gap is added.
 pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(BottomTab) + Clone + 'static) {
-    let p = ember_theme().palette;
+    let theme = ember_theme();
+    let p = theme.palette;
     let marked = tab_for_menu(active);
     cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Spacer().modifier(Modifier::new().width(TABBAR_SIDE_GAP));
             cu::Box()
                 .modifier(
-                    Modifier::new()
+                    with_shadows(Modifier::new(), theme.shadow_md())
                         .weight(1.0)
                         .height(TABBAR_H)
                         .background(paint(p.surface))
                         .border(1.0, paint(p.line))
                         .corner_radius(TABBAR_RADIUS),
-                    // TODO(compose-rust#375): the bar's shadow; `elevation` also tints the fill
-                    // with a vertical gradient under Material 3, so the bar stays flat.
                 )
                 .alignment(Alignment::Center)
                 .content(|| {

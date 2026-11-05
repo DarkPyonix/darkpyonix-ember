@@ -648,8 +648,6 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
 /// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
 /// TODO(compose-rust#378): corner radii render at about 0.55x the dp value on macOS, so the
 /// card, inset and field corners look tighter than the mockup until that is fixed.
-/// TODO(compose-rust#375): one elevation stands in for the layered shadow (#214); plain arc
-/// corners instead of the squircle.
 pub fn EmberCard(
     selected: bool,
     fill_max_width: bool,
@@ -661,12 +659,10 @@ pub fn EmberCard(
     let theme = ember_theme();
     let (fill, line) = card_colors(selected, theme.palette);
     let border = border.unwrap_or(line);
-    let m = with_weight(Modifier::new(), weight)
+    let m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
         .fill_max_width_if(fill_max_width)
         .background(paint(fill))
         .border(1.0, paint(border))
-        // TODO(compose-rust#375): no `elevation`: under Material 3 it tints the fill and paints a
-        // lighter band along the top edge; the card shadow comes with `Modifier.shadow`.
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
     // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
@@ -771,10 +767,8 @@ pub fn EmberSheetSized(
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    let modifier = Modifier::new()
+    let modifier = with_shadows(Modifier::new(), theme.shadow_lg())
         .background(paint(theme.palette.surface))
-        // TODO(compose-rust#375): no `elevation` here. Under Material 3 it paints a tinted shadow
-        // ring inside the dialog's own frame, which showed as a band at the top and sides.
         .corner_radius(CORNER_XL);
     let dismiss = on_dismiss.clone();
     let body = move || {

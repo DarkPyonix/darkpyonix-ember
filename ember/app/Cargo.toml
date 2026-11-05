@@ -31,6 +31,10 @@ dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
+alacritty_terminal = { version = "0.26", default-features = false }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = "0.28"
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).

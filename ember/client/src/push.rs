@@ -54,6 +54,12 @@ struct ApproveAllBody {
 }
 
 #[derive(Deserialize)]
+struct ChannelMessageBody {
+    channel_id: String,
+    message: crate::channels::ChannelMessage,
+}
+
+#[derive(Deserialize)]
 struct LaggedBody {
     #[serde(default)]
     missed: u64,
@@ -62,7 +68,7 @@ struct LaggedBody {
 /// Push types the server sends that this client knows about and ignores for now: the
 /// schedule pushes (FR-A8) have no client UI yet. Skipped quietly, unlike an unknown type.
 pub const SKIPPED_TYPES: &[&str] =
-    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run", "channel_message"];
+    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run"];
 
 /// Decode one push text frame. 
 pub fn decode(text: &str) -> Result<Push, DecodeError> {
@@ -93,6 +99,10 @@ pub fn decode(text: &str) -> Result<Push, DecodeError> {
         "approve_all" => {
             let b: ApproveAllBody = serde_json::from_value(value).map_err(malformed)?;
             Ok(Push::ApproveAll { session_id: b.session_id, enabled: b.enabled })
+        }
+        "channel_message" => {
+            let b: ChannelMessageBody = serde_json::from_value(value).map_err(malformed)?;
+            Ok(Push::ChannelMessage { channel_id: b.channel_id, message: b.message })
         }
         "lagged" => {
             let b: LaggedBody = serde_json::from_value(value).map_err(malformed)?;
@@ -196,11 +206,16 @@ mod tests {
             decode(r#"{"type":"schedule_run","run":{"id":"r"}}"#),
             Err(DecodeError::Skipped("schedule_run".into()))
         );
-        // Channel messages (FR-T10) are pushed but the client does not read channels yet.
-        assert_eq!(
-            decode(r#"{"type":"channel_message","channel_id":"c","message":{}}"#),
-            Err(DecodeError::Skipped("channel_message".into()))
-        );
+    }
+
+    #[test]
+    fn fr_t10_client_decodes_channel_message_push() {
+        let p = decode(
+            r#"{"type":"channel_message","channel_id":"c1","message":{"id":"2","seq":2,"from":"s1","text":"hi","at":5,"unread":1}}"#,
+        )
+        .unwrap();
+        assert!(matches!(p, Push::ChannelMessage { channel_id, message } if channel_id == "c1" && message.seq == 2));
+        assert!(matches!(decode(r#"{"type":"channel_message","channel_id":"c"}"#), Err(DecodeError::Malformed(_))));
     }
 
     #[test]

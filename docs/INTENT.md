@@ -527,11 +527,35 @@ Rejected: messages as the only channel between sessions.
 - Storage: SQLite stays the read index and the message store. Human messages are also appended to the per-channel JSONL file (`FR-T16`) in parallel. Rejected: JSONL as the only store (no index for `after=` and unread counts) and SQLite as the only store (`FR-T16` asks for the file).
 - Allowance: whole hours, capped at 168 h (`FR-T17`). Rejected: free-form minutes and open-ended allowances, because an allowance spends the owner's tokens.
 - Guest: an invited person sees the message log only and has no right to answer approvals (`FR-T14`). Rejected: guests answering an agent's approval request, because that steers the owner's session.
-- Invite authentication (`FR-T14`, `FR-T15`, `FR-T17`) is still an owner decision (Q10, remaining part). The supervisor recommends (a) a channel-scoped invite token. Nothing is built on it until the owner chooses.
+- Invite authentication: decided below ("Invite authentication, 2026-11-06 [user]"). It replaces the earlier note that the supervisor only recommended (a).
+- Confirmation: the supervisor and the leader approved the five remaining decisions of this block (mention syntax, `channel_post`, storage, the 168 h cap, guest sees the log only). The supervisor message did not name them as owner-confirmed, so they stay [provisional] until the owner confirms them in their own words.
+
+**Invite authentication, 2026-11-06 [user, relayed by the supervisor].** The owner chose option (a): "(a) 채널 한정 초대 링크" (a channel-scoped invite link). The supervisor relayed only this choice, not the owner's own sentence, so the quote is the option's label. This closes the remainder of Q10. The model (`FR-T14`, `FR-T15`, `FR-T17`):
+
+1. The channel owner creates an invite. It is a single-use, channel-scoped link carrying a random token. The server stores only a hash of the token, never the token.
+2. Accepting the link yields a per-person Bearer credential scoped to that one channel. The server stores only its hash.
+3. Revoking the invite, or removing the person, makes the credential invalid at once (the next request gets 401).
+4. A guest credential is refused on every route except that channel's message log: reading it and the guest's own posts there (a guest's mention is what `FR-T15` and `FR-T17` gate, so a guest can post). It can never answer approvals, see the feed or other channels, or reach projects, sessions, files or computers.
+5. An allowance (`FR-T17`) is in whole hours, capped at 168. By default an invited person's mention reaches no agent unless the owner allows it (`FR-T15`).
+
+**Rejected** (the supervisor's relayed choice gave no reasons; recorded as the alternatives the choice excluded, reasons not stated): other mechanisms than a channel-scoped invite link. The single-use, hash-only storage and the immediate revocation are the supervisor's description of (a); where this text adds a detail (posting by guests), it is [provisional].
+
+**Interaction with D37.** The server token middleware (`auth.rs`) must treat a guest credential as a different credential class: valid only on the channel guest routes, never accepted where the device key or the local token is. A guest credential must not pass as the server token on any route.
+
+
+**Open items on invites (questions, not decided).**
+
+- Q-a: How long does an unused invite live before it expires (a default and a maximum)?
+- Q-b: Does a guest have a display name the owner sets at invite time, or one the guest types on acceptance? `FR-T15` attributes each message to the account that wrote it.
+- Q-c: May a guest post at all? The text above assumes yes, because `FR-T15` speaks of an invited person's mention; the supervisor said only "log only". Confirm.
+- Q-d: Does a guest credential expire by itself, or live until revoked?
+- Q-e: Can a guest receive pushes (the `channel_message` WebSocket event) or only poll the log? Push needs the WebSocket route to know the credential class (D37 part 3, Origin and Host checks apply to guests too).
+- Q-f: Reachability: a guest outside the owner's network cannot reach a loopback or LAN server. Does the invite link need a relay or the device layer (`FR-N`), and does a guest become a device?
+- Q-g: Does the owner see a list of invites and guests (pending, used, revoked) in the channel?
 
 **Later (2026-10-25).** D26 fills the open tab set with eight entries; D28 renames Unsorted to 기본 프로젝트.
 
-**Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: how an invited person authenticates (Q10, remaining part) and the exact JSONL layout of `FR-T16`.
+**Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: the exact JSONL layout of `FR-T16` and the invite details listed under Open questions (invite lifetime, guest identity, reach beyond the v1 server).
 
 ## Open questions
 
@@ -546,7 +570,7 @@ Rejected: messages as the only channel between sessions.
 | **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. Implemented in `ember/transport` (#23); `NFR-N1` not yet measured on real networks (#10). tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). **Update [user, 2026-10-30]:** the move to letify-link with the main server as relay is D36 (`FR-N5`); iroh stays until it ships. |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed: deleted** [user, 2026-10-03] |
 | **Q9** | `ember/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `ember/proxy/docs/BACKGROUND.md` §7-3. | Open; HTTPS over P2P is #10 |
-| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Open remainder:** the authentication mechanism of the invite |
+| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Remainder closed** [user, 2026-11-06, relayed by the supervisor: "(a) 채널 한정 초대 링크"]: a single-use, channel-scoped invite link, token hashed on the server, accepting it yields a per-person channel-scoped Bearer credential (D22). Open details: invite lifetime, guest identity, guest posting (listed after D22's block) |
 | **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | **Closed** [user, 2026-10-25]: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." Home chat sessions live in a built-in Unsorted project (`FR-L13`), renamed 기본 프로젝트 by D28 |
 | **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | **Closed** [user, 2026-10-25]: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" Per-channel append-only JSONL on the main server (`FR-T16`); the exact layout is [provisional] |
 | **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | **Closed** [user, 2026-10-25]: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. ..." Full quote in D22. A channel belongs to one project; every project has a default channel (`FR-L12`, `FR-T10`) |

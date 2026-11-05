@@ -1,0 +1,22 @@
+# systemd user unit for ember-node (SPEC FR-P6). Install:
+#   mkdir -p ~/.config/systemd/user && cp ember-node.service ~/.config/systemd/user/
+#   printf 'EMBER_NODE_TOKEN=%s\n' "$(head -c 24 /dev/urandom | base64)" > ~/.config/ember-node.env
+#   chmod 600 ~/.config/ember-node.env
+#   systemctl --user daemon-reload && systemctl --user enable --now ember-node
+# KillMode=process: stopping or restarting the unit signals only the daemon. The default
+# (control-group) would also kill the PTY keepers and the shells in the unit's cgroup, which
+# ends every persistent terminal.
+[Unit]
+Description=Ember node (terminals, files, git, jobs)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/ember-node.env
+ExecStart=%h/.local/bin/ember-node
+KillMode=process
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

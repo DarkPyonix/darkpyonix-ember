@@ -17,12 +17,9 @@ pub mod editor;
 pub mod files;
 pub mod home;
 pub mod keymap;
-pub mod launcher;
 pub mod monitor;
-pub mod new_session;
 pub mod project;
 pub mod routines;
-pub mod search;
 pub mod session;
 pub mod shell;
 pub mod theme;
@@ -130,9 +127,9 @@ impl Ui {
     }
 
     pub fn close_editor(&self) {
-        services().ui.editor.set(None);
         let mut e = self.editor;
         e.set(None);
+        services().ui.close_editor();
     }
 
     pub fn open_new_session(&self, project: Option<String>) {
@@ -182,7 +179,7 @@ pub fn app() -> Element {
     let new_session = use_signal(|| None::<String>);
     let show_archived = use_signal(|| false);
     let menu = use_signal(initial_menu);
-    let editor = use_signal(|| None::<editor::EditorTarget>);
+    let editor = use_signal(|| services().ui.editor.get_untracked());
     let theme_pref = use_signal(|| services().initial_prefs.theme);
     use_context_provider(|| ThemeCtx { pref: theme_pref });
     use_context_provider(|| Ui {
@@ -199,7 +196,7 @@ pub fn app() -> Element {
     let open = editor.read().clone();
     match open {
         Some(target) => rsx! { editor::EditorScreen { target } },
-        None => rsx! { shell::Shell {} },
+        None => rsx! {},
     }
 }
 

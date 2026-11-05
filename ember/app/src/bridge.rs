@@ -19,7 +19,7 @@
 //! per session and project assignments arrive with the client's own sync (records and push).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dioxus_compose::prelude::*;
@@ -86,25 +86,50 @@ impl Live {
     }
 }
 
+static BRIDGE_STARTED: OnceLock<()> = OnceLock::new();
+
+/// Start the runtime bridge tasks once for [`crate::ui::coexist::SharedLive`] (#220), without
+/// requiring a Dioxus component tree.
+pub fn start_shared() {
+    if BRIDGE_STARTED.set(()).is_err() {
+        return;
+    }
+    let s = services();
+    let refresh = Arc::new(Notify::new());
+    s.spawn(changes_task(s, None, refresh.clone()));
+    s.spawn(refresh_task(s, None, refresh));
+}
+
 /// Start the bridge tasks once, from the root component.
 pub fn use_bridge(live: Live) {
     use_hook(move || {
         let s = services();
-        if s.live.set(live).is_err() {
-            // Already running (a second root mount); the first set of tasks stays.
+        let _ = s.live.set(live);
+        if BRIDGE_STARTED.set(()).is_err() {
+            // Already running; the first set of tasks stays.
             return;
         }
         let refresh = Arc::new(Notify::new());
-        s.spawn(changes_task(s, live, refresh.clone()));
-        s.spawn(refresh_task(s, live, refresh));
+        s.spawn(changes_task(s, Some(live), refresh.clone()));
+        s.spawn(refresh_task(s, Some(live), refresh));
     });
 }
 
-async fn changes_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
+fn bump_all(s: &'static Services, live: Option<Live>) {
+    s.ui.live.bump_all();
+    if let Some(live) = live.or_else(|| s.live.get().copied()) {
+        Live::bump(live.launcher);
+        Live::bump(live.transcripts);
+        Live::bump(live.outbox);
+        Live::bump(live.teams);
+    }
+}
+
+async fn changes_task(s: &'static Services, live: Option<Live>, refresh: Arc<Notify>) {
     let mut changes = s.client.subscribe();
     let mut revision = s.client.watch_revision();
     // Anything that changed before this subscription existed.
-    live.bump_all();
+    bump_all(s, live);
     let mut lagged = false;
     let mut prints = Fingerprints::default();
     loop {
@@ -114,7 +139,7 @@ async fn changes_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
                 Err(RecvError::Lagged(n)) => {
                     tracing::debug!("ui bridge lagged by {n} changes; redrawing everything");
                     lagged = true;
-                    live.bump_all();
+                    bump_all(s, live);
                 }
                 Err(RecvError::Closed) => return,
             },
@@ -125,7 +150,7 @@ async fn changes_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
                 if lagged {
                     // Changes were dropped: the revision is the only reliable signal now.
                     lagged = false;
-                    live.bump_all();
+                    bump_all(s, live);
                     refresh.notify_one();
                     let open: Vec<String> = s.client.read(|st| st.open_sessions().cloned().collect());
                     for id in open {
@@ -174,21 +199,28 @@ impl Fingerprints {
     }
 }
 
-fn on_changes(s: &'static Services, live: Live, ch: &Changes, prints: &mut Fingerprints) {
+fn on_changes(s: &'static Services, live: Option<Live>, ch: &Changes, prints: &mut Fingerprints) {
+    let live = live.or_else(|| s.live.get().copied());
     let sessions_changed = prints.changed(s, &ch.sessions);
     // A project change without session changes is the project list itself (a project created
     // or its assignment changed, FR-L4); with session changes the fingerprints decide.
     let projects_changed = ch.projects && ch.sessions.is_empty();
     if sessions_changed || projects_changed || ch.computers || ch.connection {
-        Live::bump(live.launcher);
+        if let Some(live) = live {
+            Live::bump(live.launcher);
+        }
         crate::ui::coexist::SharedLive::bump(&s.ui.live.launcher);
     }
     if !ch.transcripts.is_empty() {
-        Live::bump(live.transcripts);
+        if let Some(live) = live {
+            Live::bump(live.transcripts);
+        }
         crate::ui::coexist::SharedLive::bump(&s.ui.live.transcripts);
     }
     if !ch.teams.is_empty() {
-        Live::bump(live.teams);
+        if let Some(live) = live {
+            Live::bump(live.teams);
+        }
         crate::ui::coexist::SharedLive::bump(&s.ui.live.teams);
     }
     // Turn boundaries show up as session status changes.
@@ -197,7 +229,7 @@ fn on_changes(s: &'static Services, live: Live, ch: &Changes, prints: &mut Finge
     }
 }
 
-async fn refresh_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
+async fn refresh_task(s: &'static Services, live: Option<Live>, refresh: Arc<Notify>) {
     let mut first = true;
     let mut full = true;
     loop {
@@ -217,7 +249,7 @@ async fn refresh_task(s: &'static Services, live: Live, refresh: Arc<Notify>) {
 /// `full`: probe computers and re-read accounts and agents; otherwise (after the bridge
 /// lagged) only reload the projects and their assignments, which push keeps current
 /// otherwise.
-async fn refresh_once(s: &'static Services, live: Live, first: bool, full: bool) {
+async fn refresh_once(s: &'static Services, live: Option<Live>, first: bool, full: bool) {
     if full {
         refresh_slow(s, live, first).await;
     } else if s.demo.is_some() {
@@ -227,7 +259,8 @@ async fn refresh_once(s: &'static Services, live: Live, first: bool, full: bool)
     }
 }
 
-async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
+async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
+    let live = live.or_else(|| s.live.get().copied());
     // Demo only (#199): the same signals, filled from the demo source; no request is made.
     if s.demo.is_some() {
         let now = crate::demo::now_ms();
@@ -239,10 +272,12 @@ async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
         s.ui.live.chatgpt.set(gpt.clone());
         s.ui.live.usage.set(usg.clone());
         s.ui.live.agents.set(agt.clone());
-        live.accounts.set(acc);
-        live.chatgpt.set(gpt);
-        live.usage.set(usg);
-        live.agents.set(agt);
+        if let Some(mut live) = live {
+            live.accounts.set(acc);
+            live.chatgpt.set(gpt);
+            live.usage.set(usg);
+            live.agents.set(agt);
+        }
         return;
     }
     // Computers: list at once without probing so the list renders before reachability is
@@ -256,22 +291,28 @@ async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
     match s.server.accounts().await {
         Ok(a) => {
             s.ui.live.accounts.set(a.clone());
-            if *live.accounts.peek() != a {
-                live.accounts.set(a);
+            if let Some(mut live) = live {
+                if *live.accounts.peek() != a {
+                    live.accounts.set(a);
+                }
             }
         }
         Err(e) => tracing::debug!("accounts refresh failed: {e}"),
     }
     let g = s.server.chatgpt_accounts().await.unwrap_or_default();
     s.ui.live.chatgpt.set(g.clone());
-    if *live.chatgpt.peek() != g {
-        live.chatgpt.set(g);
+    if let Some(mut live) = live {
+        if *live.chatgpt.peek() != g {
+            live.chatgpt.set(g);
+        }
     }
     match s.client.api().usage(Some(14)).await {
         Ok(u) => {
             s.ui.live.usage.set(u.clone());
-            if *live.usage.peek() != u {
-                live.usage.set(u);
+            if let Some(mut live) = live {
+                if *live.usage.peek() != u {
+                    live.usage.set(u);
+                }
             }
         }
         Err(e) => tracing::debug!("usage refresh failed: {e}"),
@@ -279,8 +320,10 @@ async fn refresh_slow(s: &'static Services, mut live: Live, first: bool) {
     match s.client.agents().await {
         Ok(a) => {
             s.ui.live.agents.set(a.clone());
-            if *live.agents.peek() != a {
-                live.agents.set(a);
+            if let Some(mut live) = live {
+                if *live.agents.peek() != a {
+                    live.agents.set(a);
+                }
             }
         }
         Err(e) => tracing::debug!("agents refresh failed: {e}"),

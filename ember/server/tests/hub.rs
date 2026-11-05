@@ -339,7 +339,16 @@ async fn registration_keeps_a_sealed_resolve_token_and_reports_the_app() {
     let again = ServerHub::new(HubConfig::new(f.hub.url()), f.store.clone(), f.accounts.clone(), f.key.clone(), devices);
     assert_eq!(again.directory_token(), Some(resolve));
     // The app record (FR-H10) was published with the server's own token.
-    let device = f.hub.devices().into_iter().find(|d| d.endpoint_id == me).unwrap();
+    // `registered` turns true when the registration is saved; the app record follows from a
+    // spawned task (`follow_link`), so wait for it instead of reading it at once (#312).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let device = loop {
+        let device = f.hub.devices().into_iter().find(|d| d.endpoint_id == me).unwrap();
+        if device.app.is_some() || std::time::Instant::now() >= deadline {
+            break device;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
     let app = device.app.expect("app reported");
     assert_eq!(app.kind, "ember-server");
     assert_eq!(app.services, vec!["ember-server"]);

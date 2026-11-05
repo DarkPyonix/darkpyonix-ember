@@ -185,6 +185,7 @@ impl Services {
             return false;
         };
         d.reset(&self.client, crate::demo::now_ms());
+        crate::ui::cr::routines::clear_local_store();
         *self.outbox.lock().unwrap() = Outbox::default();
         self.ui.update_prefs(|p| {
             p.panes.clear();

@@ -13,6 +13,8 @@
 
 #[path = "git_log.rs"]
 pub mod git_log;
+#[path = "git_prs.rs"]
+pub mod git_prs;
 #[path = "git_stash.rs"]
 pub mod git_stash;
 
@@ -221,6 +223,25 @@ async fn run_net(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
     run_with(repo, args, None, Some(network_timeout())).await
 }
 
+/// The `core.sshCommand` git would use here (repository, then global config), if any.
+async fn configured_ssh_command(repo: &Path) -> Option<String> {
+    let out = tokio::process::Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(repo)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// The ssh command for a network operation: the configured one (or plain `ssh`) in batch mode.
+fn batch_ssh_command(configured: Option<&str>) -> String {
+    format!("{} -o BatchMode=yes", configured.unwrap_or("ssh"))
+}
+
 async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
     let mut cmd = tokio::process::Command::new("git");
     // Non-ASCII paths stay raw (not octal-quoted), pathspecs are literal (`a[1].txt`, `*.rs`),
@@ -246,10 +267,26 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
     if !args.starts_with(&["stash", "push"]) {
         cmd.env("GIT_LITERAL_PATHSPECS", "1");
     }
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    // Network operations never ask for an ssh password. GIT_SSH_COMMAND outranks the user's
+    // `core.sshCommand` (keys, proxy jump), so when the variable is unset the configured command
+    // is read and kept, with BatchMode appended.
+    if deadline.is_some() && std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", batch_ssh_command(configured_ssh_command(repo).await.as_deref()));
     }
-    let mut child = cmd.spawn().map_err(|e| GitError::Internal(format!("cannot run git: {e}")))?;
+    exec_cmd(cmd, "git", stdin, deadline).await
+}
+
+/// Spawn a prepared command with piped output, the stdout cap and an optional deadline. Shared
+/// by git and the `gh` runner of FR-G8.
+async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound && what != "git" {
+            // A companion program (`gh`) that is not installed is a state the person can fix.
+            GitError::Conflict(format!("{what} 명령을 찾을 수 없습니다. 설치되어 있는지 확인하세요.\n{e}"))
+        } else {
+            GitError::Internal(format!("cannot run {what}: {e}"))
+        }
+    })?;
     let pipe = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");

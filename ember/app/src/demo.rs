@@ -1384,9 +1384,56 @@ impl GitState {
                 let skip = body["skip"].as_u64().unwrap_or(0) as usize;
                 Ok(json!({ "commits": demo_log(now_ms() / 1000).into_iter().skip(skip).take(limit).collect::<Vec<_>>() }))
             }
+            "prs" => {
+                let state = body.get("state").and_then(Value::as_str).unwrap_or("open");
+                if !["open", "closed", "merged", "all"].contains(&state) {
+                    return Err(GitError::bad("state must be open, closed, merged or all"));
+                }
+                let limit = body.get("limit").and_then(Value::as_u64).unwrap_or(30);
+                if limit == 0 || limit > 200 {
+                    return Err(GitError::bad("limit은 1에서 200 사이여야 합니다."));
+                }
+                let prs: Vec<Value> = demo_prs(now_ms() / 1000)
+                    .into_iter()
+                    .filter(|p| state == "all" || p["state"] == state)
+                    .take(limit as usize)
+                    .collect();
+                Ok(json!({ "prs": prs }))
+            }
             _ => Err(GitError::new(404, "not_found", "unknown git operation")),
         }
     }
+}
+
+/// Pull requests as the node answers them (`/git/prs`, FR-G8): an approved one with green checks,
+/// one with a failing check, a draft and a merged one. `now` is unix seconds.
+fn demo_prs(now: i64) -> Vec<Value> {
+    // (number, title, state, draft, author, head, minutes ago, review, (passed, failed, pending), (can_merge, reason))
+    type Row = (u64, &'static str, &'static str, bool, &'static str, &'static str, i64, &'static str, (u32, u32, u32), (bool, &'static str));
+    const ROWS: &[Row] = &[
+        (412, "Feat: attach the session shim before routing", "open", false, "BREW", "feat/session-shim", 12, "approved", (4, 0, 0), (true, "병합할 수 있습니다.")),
+        (409, "Fix: stop egress when a session detaches", "open", false, "Minji Kim", "fix/egress-stop", 60 * 5, "review_required", (3, 1, 0), (false, "CI 체크가 실패했습니다 (실패 1개). 통과해야 병합할 수 있습니다.")),
+        (405, "Feat: channel feed with mentions", "open", true, "Jisoo Park", "feat/channel-feed", 60 * 26, "none", (1, 0, 2), (false, "초안 상태라 병합할 수 없습니다. 검토 준비 후 초안을 해제하세요.")),
+        (398, "Docs: describe the commit message rules", "merged", false, "Minji Kim", "docs/commit-rules", 60 * 24 * 3, "approved", (4, 0, 0), (false, "이미 병합되었습니다.")),
+    ];
+    ROWS.iter()
+        .map(|(number, title, state, draft, author, head, minutes, review, checks, merge)| {
+            json!({
+                "number": number,
+                "title": title,
+                "state": state,
+                "draft": draft,
+                "author": author,
+                "head": head,
+                "base": "develop",
+                "updated_at": iso_time(now - minutes * 60).replace("+00:00", "Z"),
+                "review": review,
+                "checks": { "passed": checks.0, "failed": checks.1, "pending": checks.2 },
+                "merge": { "can_merge": merge.0, "reason": merge.1 },
+                "url": format!("https://github.com/DarkPyonix/darkpyonix-ember/pull/{number}"),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1585,6 +1632,51 @@ mod tests {
         assert_eq!(page[0]["sha"], all[3]["sha"]);
         let past = gs(&d, "log", json!({ "limit": 5, "skip": 100 })).unwrap();
         assert!(past["commits"].as_array().unwrap().is_empty());
+    }
+
+    fn prs(d: &DemoSource, body: Value) -> Vec<Value> {
+        gs(d, "prs", body).unwrap()["prs"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn fr_g8_demo_prs_default_to_the_open_ones_with_the_node_shape() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let list = prs(&d, json!({}));
+        assert_eq!(list.len(), 3);
+        assert!(list.iter().all(|p| p["state"] == "open"));
+        let first = &list[0];
+        for key in ["number", "title", "state", "draft", "author", "head", "base", "updated_at", "review", "checks", "merge", "url"] {
+            assert!(!first[key].is_null(), "missing {key}");
+        }
+        assert!(first["updated_at"].as_str().unwrap().ends_with('Z'));
+        // The client decodes the same JSON.
+        let decoded: ember_client::api::GitPrs = serde_json::from_value(json!({ "prs": list })).unwrap();
+        assert_eq!(decoded.prs.len(), 3);
+    }
+
+    #[test]
+    fn fr_g8_demo_prs_cover_green_failing_draft_and_merged() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let all = prs(&d, json!({ "state": "all" }));
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0]["merge"]["can_merge"], true);
+        assert_eq!(all[0]["review"], "approved");
+        assert_eq!(all[1]["checks"]["failed"], 1);
+        assert!(all[1]["merge"]["reason"].as_str().unwrap().contains("CI"));
+        assert_eq!(all[2]["draft"], true);
+        assert_eq!(all[3]["state"], "merged");
+        assert!(all.iter().filter(|p| p["merge"]["can_merge"] == true).count() == 1);
+        let merged = prs(&d, json!({ "state": "merged" }));
+        assert_eq!(merged.len(), 1);
+        assert!(prs(&d, json!({ "state": "closed" })).is_empty());
+        assert_eq!(prs(&d, json!({ "state": "all", "limit": 2 })).len(), 2);
+    }
+
+    #[test]
+    fn fr_g8_demo_prs_refuse_a_bad_state_or_limit() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        assert_eq!(gs(&d, "prs", json!({ "state": "nope" })).unwrap_err().status, 400);
+        assert_eq!(gs(&d, "prs", json!({ "limit": 0 })).unwrap_err().status, 400);
     }
 
     fn stash_list(d: &DemoSource) -> Vec<Value> {

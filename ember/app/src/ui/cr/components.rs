@@ -636,11 +636,30 @@ pub fn EmberCard(
     border: Option<Color>,
     content: impl FnOnce(),
 ) {
+    EmberCardSized(selected, fill_max_width, false, weight, padding, border, content);
+}
+
+/// `EmberCard` that can also fill the height its parent gives it. In a `Row` with
+/// `equal_height(true)` a child with `fill_max_height` takes the tallest sibling's height
+/// (FR-L18, compose-rust#389).
+pub fn EmberCardSized(
+    selected: bool,
+    fill_max_width: bool,
+    fill_max_height: bool,
+    weight: Option<f32>,
+    padding: Option<f32>,
+    border: Option<Color>,
+    content: impl FnOnce(),
+) {
     let theme = ember_theme();
     let (fill, line) = card_colors(selected, theme.palette);
     let border = border.unwrap_or(line);
-    let m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
-        .fill_max_width_if(fill_max_width)
+    let mut m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
+        .fill_max_width_if(fill_max_width);
+    if fill_max_height {
+        m = m.fill_max_height();
+    }
+    let m = m
         .background(paint(fill))
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);

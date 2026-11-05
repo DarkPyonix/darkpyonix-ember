@@ -765,14 +765,19 @@ fn IdeMenu(b: &ProjectBox, ui: &SharedUi, compact: bool) {
     let labels: Vec<String> = choices.iter().map(|c| c.label.to_string()).collect();
     let has_session = session.is_some();
     cu::Box().content(|| {
-        let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
-        AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
-            if !has_session {
-                notice::post("세션이 없어 IDE를 열 수 없습니다");
-            } else if let Some(kind) = remembered {
-                launch_ide(&ui_btn, kind, ide_btn.get_untracked());
-            } else {
-                o.set(true);
+        cu::Row().alignment(Alignment::Center).spacing(4.0).content(|| {
+            let (o, ui_btn, ide_btn) = (open.clone(), ui.clone(), ide.clone());
+            AppButton(if compact { "IDE" } else { "IDE 열기" }, Some(IconRole::Forward), ButtonKind::Default, false, true, false, move || {
+                if !has_session {
+                    notice::post("세션이 없어 IDE를 열 수 없습니다");
+                } else {
+                    crate::ui::cr::session::ide_main_click(remembered, &o, |kind| {
+                        launch_ide(&ui_btn, kind, ide_btn.get_untracked())
+                    });
+                }
+            });
+            if has_session {
+                crate::ui::cr::session::IdeChevron(open.clone(), false);
             }
         });
         let (close, ui2, ide2) = (open.clone(), ui.clone(), ide.clone());

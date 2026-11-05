@@ -249,8 +249,22 @@ fn gh_korean(text: &str) -> Option<&'static str> {
     }
 }
 
+/// gh's own text is shown as a detail line: at most this many characters, so a long error page
+/// never becomes the message.
+const MAX_DETAIL_CHARS: usize = 500;
+
+fn clip_detail(text: &str) -> String {
+    if text.chars().count() <= MAX_DETAIL_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_DETAIL_CHARS).collect();
+    format!("{head}...")
+}
+
 fn gh_failure(o: &Out) -> GitError {
     let text = if o.stderr.trim().is_empty() { o.stdout.trim() } else { o.stderr.trim() };
+    let text = clip_detail(text);
+    let text = text.as_str();
     GitError::Conflict(match (gh_korean(text), text.is_empty()) {
         (Some(k), true) => k.to_string(),
         (Some(k), false) => format!("{k}\n{text}"),
@@ -288,4 +302,18 @@ pub async fn list(policy: &PathPolicy, r: &GitPrsRequest) -> Result<GitPrsRespon
         return Err(gh_failure(&out));
     }
     Ok(GitPrsResponse { prs: parse_prs(&out.stdout)? })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fr_g8_gh_detail_is_clipped() {
+        let long = "x".repeat(MAX_DETAIL_CHARS + 50);
+        let clipped = clip_detail(&long);
+        assert_eq!(clipped.chars().count(), MAX_DETAIL_CHARS + 3);
+        assert!(clipped.ends_with("..."));
+        assert_eq!(clip_detail("short"), "short");
+    }
 }

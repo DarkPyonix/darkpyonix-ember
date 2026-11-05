@@ -96,7 +96,7 @@ fn text_after_success(current: &str, submitted: &str) -> String {
 fn screen_subtitle(project: &ProjectBox, snap: Option<&RepoSnapshot>, sample: bool) -> String {
     if sample {
         if let Some(s) = snap {
-            return format!("darkpyonix-ember · {} · 변경 {} · PR 4", s.branch, s.changes.len());
+            return format!("darkpyonix-ember · {} · 변경 {} · PR {}", s.branch, s.changes.len(), sample_pr_count());
         }
     }
     match snap {
@@ -688,7 +688,7 @@ fn SectionListWithSample(
             let count = section_count_with(sec, snap, stash_count, pr_count).or_else(|| {
                 if is_sample {
                     match sec {
-                        Section::PullRequests => Some(4),
+                        Section::PullRequests => Some(sample_pr_count()),
                         Section::Stash => Some(2),
                         Section::Conflicts => Some(2),
                         Section::Team => Some(6),
@@ -1803,6 +1803,14 @@ fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
 }
 
 /// Pull requests for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+/// How many pull requests the sample list holds (the header and the tab count follow it).
+fn sample_pr_count() -> usize {
+    match sample_prs() {
+        PrLoad::Ready(list) => list.len(),
+        _ => 0,
+    }
+}
+
 fn sample_prs() -> PrLoad {
     use ember_client::api::{GitPrReview::*, GitPrState::*};
     let e = |number: u64, title: &str, author: &str, head: &str, time: &str, state, draft: bool, review, checks: (u32, u32, u32), gate: (bool, &str)| PrEntry {
@@ -2343,8 +2351,8 @@ mod tests {
         let snap = RepoSnapshot { branch: "main".into(), ahead: 3, behind: 2, ..Default::default() };
         assert_eq!(screen_subtitle(&project, Some(&snap), false), "프로젝트 · main · 앞섬 3 · 뒤처짐 2 · 변경 0");
         assert_eq!(screen_subtitle(&project, None, false), "프로젝트");
-        assert!(screen_subtitle(&sample_project_box(), Some(&sample_snapshot()), true).contains("PR 4"));
-        assert!(!screen_subtitle(&project, Some(&snap), false).contains("PR 4"));
+        assert!(screen_subtitle(&sample_project_box(), Some(&sample_snapshot()), true).contains(&format!("PR {}", sample_pr_count())));
+        assert!(!screen_subtitle(&project, Some(&snap), false).contains("PR "));
     }
 
     #[test]

@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ember_server::agents::acp::{AcpAdapter, AcpConfig};
 use ember_server::agents::antigravity::{AntigravityAdapter, HookBroker};
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::proc::{
-    clear_runtime, install_runtime, release_commit, require_commit, spawn_agent, AgentCommand,
+    clear_runtime, install_runtime, mem_limit_bytes, release_commit, require_commit, spawn_agent, AgentCommand,
     ProcHandle, ShimRuntime, SESSION_ENV,
 };
 use ember_server::agents::{AgentAdapter, AgentKind, StartRequest};
@@ -48,6 +49,7 @@ fn fake_agent_cmd(session: &str, cwd: &Path, ticks: u32) -> AgentCommand {
         ],
         cwd: cwd.to_path_buf(),
         reattachable: true,
+        mem_limit_mb: None,
     }
 }
 
@@ -492,6 +494,79 @@ async fn fr_s8_codex_mid_turn_output_drained_and_persisted_after_server_crash() 
     clear_runtime();
 }
 
+/// An ACP agent mid-`session/prompt` when the server dies: the surviving agent's output is read
+/// back and stored, the agent is stopped (its `initialize` handshake cannot be repeated), and the
+/// session resumes natively on its next message (#284).
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let config = || AcpConfig {
+        name: "fake-acp-s8".into(),
+        command: crate_dir().join("tests/fixtures/acp/fake-acp-agent.sh"),
+        args: Vec::new(),
+        model_args: Vec::new(),
+        instructions_args: Vec::new(),
+        version_args: vec!["--version".into()],
+        env: Vec::new(),
+    };
+    let kind = AcpAdapter::new(config()).unwrap().kind();
+    let id = store.create_session("p", kind, work.path().to_str().unwrap(), None, "t").unwrap().id;
+
+    {
+        let (store, id) = (store.clone(), id.clone());
+        let adapter = AcpAdapter::new(config()).unwrap();
+        run_server1(async move {
+            let sessions = Sessions::new(store.clone(), vec![Arc::new(adapter) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "go").await.unwrap();
+            wait_for("two deltas", || {
+                events_of(&store, &id)
+                    .iter()
+                    .filter(|e| matches!(e, AgentEvent::AssistantDelta { .. }))
+                    .count()
+                    >= 2
+            })
+            .await;
+        });
+    }
+    let before = events_of(&store, &id).len();
+    assert!(!ended(&store, &id), "the turn is still running when the server dies");
+    let pid = scan(shims.path()).into_iter().find(|m| m.session == id).expect("the shim survives").agent_pid;
+    assert!(pid_alive(pid));
+
+    let sessions = Sessions::new(
+        store.clone(),
+        vec![Arc::new(AcpAdapter::new(config()).unwrap()) as Arc<dyn AgentAdapter>],
+    );
+    let rejoined = sessions.rejoin_shims(&runtime(shims.path(), &store)).await;
+    assert!(rejoined.is_empty(), "an ACP agent is drained, not rejoined");
+    let events = events_of(&store, &id);
+    assert!(events.len() > before, "the rest of the turn was stored");
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.contains("tick 25 "), "the last chunk arrived: {text}");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::AssistantMessage { text } if text.contains("tick 25 "))),
+        "the message was completed: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| *e == AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }),
+        "{events:?}"
+    );
+    assert_eq!(store.session(&id).unwrap().unwrap().status, SessionStatus::Finished);
+    wait_for("the surviving agent to be stopped", || !pid_alive(pid)).await;
+    clear_runtime();
+}
+
 /// Update the server with three sessions running: none stops, none loses a turn.
 #[tokio::test]
 async fn fr_s8_update_server_with_three_sessions_running_none_stops_or_loses_turn() {
@@ -602,4 +677,90 @@ async fn fr_s8_antigravity_turn_survives_server_restart() {
     assert!(events_of(&store, &id).contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
     sessions.release(&id).await.unwrap();
     clear_runtime();
+}
+
+#[test]
+fn fr_s8_memory_limit_request_wins_over_environment_and_zero_means_none() {
+    assert_eq!(mem_limit_bytes(Some(512), Some("2048")), Some(512 * 1024 * 1024));
+    assert_eq!(mem_limit_bytes(None, Some("2048")), Some(2048 * 1024 * 1024));
+    assert_eq!(mem_limit_bytes(None, Some(" 64 ")), Some(64 * 1024 * 1024));
+    assert_eq!(mem_limit_bytes(None, Some("many")), None);
+    assert_eq!(mem_limit_bytes(None, None), None);
+    assert_eq!(mem_limit_bytes(Some(0), None), None);
+}
+
+fn memhog_cmd(session: &str, cwd: &Path, limit_mb: Option<u64>) -> AgentCommand {
+    AgentCommand {
+        program: crate_dir().join("tests/fixtures/shim/memhog.sh"),
+        args: Vec::new(),
+        env: vec![(SESSION_ENV.into(), session.into())],
+        cwd: cwd.to_path_buf(),
+        reattachable: false,
+        mem_limit_mb: limit_mb,
+    }
+}
+
+/// The limit set on the request reaches the shim: the session over it ends, another session
+/// without a limit keeps running (#284, FR-L20).
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_per_session_memory_limit_from_the_start_request_ends_only_that_session() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    std::env::remove_var("EMBER_SESSION_MEM_LIMIT_MB");
+    std::env::set_var("EMBER_SESSION_MEM_POLL_MS", "100");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let _store = install(shims.path());
+
+    let hog = spawn_agent(memhog_cmd("s-hog", work.path(), Some(1))).await.unwrap();
+    let mut free = spawn_agent(memhog_cmd("s-free", work.path(), None)).await.unwrap();
+    let ProcHandle::Shim { exited: hog_exited, .. } = &hog.handle else { panic!("runs under a shim") };
+    let mut hog_exited = hog_exited.clone();
+    tokio::time::timeout(Duration::from_secs(20), hog_exited.wait_for(|v| *v))
+        .await
+        .expect("the session over its limit ends")
+        .unwrap();
+    let ProcHandle::Shim { exited: free_exited, .. } = &free.handle else { panic!("runs under a shim") };
+    assert!(!*free_exited.borrow(), "the session without a limit continues");
+    let pid = free.pid.expect("pid");
+    assert!(pid_alive(pid));
+    let _ = free.handle.shutdown(Duration::from_millis(200)).await;
+    std::env::remove_var("EMBER_SESSION_MEM_POLL_MS");
+    clear_runtime();
+}
+
+/// `Sessions::set_mem_limit_mb` is what `ensure_live` hands each adapter as the start request's
+/// limit (FR-L20): per agent kind, cleared by `None` or zero.
+#[test]
+fn fr_s8_sessions_keep_a_memory_limit_per_agent_kind() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store, Vec::new());
+    assert_eq!(sessions.mem_limit_mb(AgentKind::Codex), None);
+    sessions.set_mem_limit_mb(AgentKind::Codex, Some(2048));
+    assert_eq!(sessions.mem_limit_mb(AgentKind::Codex), Some(2048));
+    assert_eq!(sessions.mem_limit_mb(AgentKind::ClaudeCode), None, "only that agent kind");
+    sessions.set_mem_limit_mb(AgentKind::Codex, Some(0));
+    assert_eq!(sessions.mem_limit_mb(AgentKind::Codex), None);
+}
+
+/// `ensure_live` puts the configured limit on the start request the adapter receives (FR-L20).
+#[tokio::test]
+async fn fr_s8_start_request_carries_the_sessions_memory_limit() {
+    use ember_server::agents::scripted::ScriptedAdapter;
+    let work = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
+    sessions.set_mem_limit_mb(AgentKind::Scripted, Some(768));
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    {
+        let seen = seen.clone();
+        sessions.add_start_config_hook(Arc::new(move |_rec, req| {
+            *seen.lock().unwrap() = Some(req.mem_limit_mb);
+            anyhow::bail!("stop here")
+        }));
+    }
+    let id = store.create_session("p", AgentKind::Scripted, work.path().to_str().unwrap(), None, "t").unwrap().id;
+    let _ = sessions.send(&id, "hi").await;
+    assert_eq!(*seen.lock().unwrap(), Some(Some(768)));
 }

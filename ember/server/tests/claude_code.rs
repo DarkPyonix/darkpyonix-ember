@@ -46,6 +46,7 @@ async fn fake_cli_turn_with_allow_always_and_deny() {
                 mcp_servers: Vec::new(),
                 computer: None,
                 fork_from: None,
+                mem_limit_mb: None,
             },
             tx,
         )
@@ -187,6 +188,7 @@ async fn real_claude_read_edit_run_then_resume() {
         mcp_servers: Vec::new(),
         computer: None,
         fork_from: None,
+        mem_limit_mb: None,
     };
 
     // Turn 1: read, edit (needs approval in the default permission mode), run a command.

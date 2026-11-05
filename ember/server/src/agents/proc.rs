@@ -205,6 +205,19 @@ pub struct AgentCommand {
     /// protocols with no handshake state (Claude Code's stream-json). For others a live shim of
     /// the session is stopped and the agent restarts through its native resume.
     pub reattachable: bool,
+    /// Memory limit of the agent's process tree in MiB, enforced by the shim (FR-S8). `None`
+    /// falls back to `EMBER_SESSION_MEM_LIMIT_MB`, then to no limit. Applies when a shim is
+    /// started; a rejoined shim keeps the limit it was started with.
+    pub mem_limit_mb: Option<u64>,
+}
+
+/// The limit in bytes for a shim: the request's MiB value, else `env_mb` (the text of
+/// `EMBER_SESSION_MEM_LIMIT_MB`). Zero and unparsable values mean no limit.
+pub fn mem_limit_bytes(request_mb: Option<u64>, env_mb: Option<&str>) -> Option<u64> {
+    request_mb
+        .or_else(|| env_mb.and_then(|v| v.trim().parse::<u64>().ok()))
+        .filter(|mb| *mb > 0)
+        .map(|mb| mb.saturating_mul(1024 * 1024))
 }
 
 pub struct AgentProc {
@@ -323,11 +336,11 @@ async fn start_shim(rt: &ShimRuntime, session: &str, cmd: &AgentCommand) -> anyh
         args: cmd.args.clone(),
         cwd: cmd.cwd.clone(),
         env: cmd.env.clone(),
-        mem_limit_bytes: std::env::var("EMBER_SESSION_MEM_LIMIT_MB")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|mb| mb * 1024 * 1024),
-        mem_poll_ms: None,
+        mem_limit_bytes: mem_limit_bytes(
+            cmd.mem_limit_mb,
+            std::env::var("EMBER_SESSION_MEM_LIMIT_MB").ok().as_deref(),
+        ),
+        mem_poll_ms: std::env::var("EMBER_SESSION_MEM_POLL_MS").ok().and_then(|v| v.parse().ok()),
         linger_secs: None,
     };
     session_shim::spawn_shim(&rt.bin, &rt.dir, &spec).await

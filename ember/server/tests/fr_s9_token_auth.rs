@@ -72,11 +72,12 @@ async fn call(
     path: &str,
     headers: &[(&str, &str)],
 ) -> (StatusCode, Value) {
-    let mut b = Request::builder().method(method).uri(path).header("host", LISTEN);
+    // A test-supplied Host replaces the default; appending a second Host header would leave the
+    // first one in force for `headers.get(HOST)`.
+    let host = headers.iter().find(|(k, _)| *k == "host").map(|(_, v)| *v).unwrap_or(LISTEN);
+    let mut b = Request::builder().method(method).uri(path).header("host", host);
     for (k, v) in headers {
-        if *k == "host" {
-            b = b.header("host", *v);
-        } else {
+        if *k != "host" {
             b = b.header(*k, *v);
         }
     }

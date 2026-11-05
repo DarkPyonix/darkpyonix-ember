@@ -1,13 +1,7 @@
-//! Shared components (`docs/DESIGN.md` section 4): pick chip, pill, card, sheet header, buttons.
+//! Shared component tokens (`docs/DESIGN.md` section 4) and `Label` for the separate editor window (`FR-L31`).
 //!
 //! Each reads the tokens in [`super::theme`]. The style decisions (which colour, which height)
-//! are plain functions so they are unit-tested without a renderer; the components only hand
-//! them to dioxus-compose.
-//!
-//! Workarounds for what the pinned dioxus-compose cannot draw yet, from
-//! `.scratch/design-mockup/GAPS-WORKLIST.md` section 3: plain arc corners instead of the
-//! squircle, one `elevation` instead of the two-layer shadow, no press scale (the toolkit's own
-//! press feedback stays), no backdrop blur.
+//! are plain functions so they are unit-tested without a renderer.
 
 use dioxus_compose::prelude::*;
 use dioxus_compose::{FontRef, FontRefs, GenericFamily};
@@ -20,9 +14,7 @@ use super::theme::Palette;
 // ---------------------------------------------------------------------------------------------
 
 /// The font stack for prose (`--font`): Inter, then Apple SD Gothic Neo and Noto Sans KR for
-/// Hangul, then the system UI face. The toolkit resolves installed families by name; it has no
-/// way to bundle a font file yet, so Inter applies where it is installed
-/// (`.scratch/issues/custom-font.md`).
+/// Hangul, then the system UI face.
 pub fn font_refs(mono: bool) -> FontRefs {
     if mono {
         FontRefs::new([
@@ -89,7 +81,7 @@ pub fn type_role_style(role: TypeRole) -> (Fs, Weight, bool) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Text
+// Text (used by `ui/editor.rs`, FR-L31)
 // ---------------------------------------------------------------------------------------------
 
 /// Text on the type scale: one of the nine sizes and one of the three weights.
@@ -113,95 +105,6 @@ pub fn Label(
             color,
             max_lines,
             font: font_refs(false),
-        }
-    }
-}
-
-/// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
-/// and a role colour maps to its token in the current scheme.
-#[component]
-pub fn Txt(
-    #[props(into)] text: String,
-    #[props(default = TypeRole::Body)] type_role: TypeRole,
-    #[props(default)] color: Option<Paint>,
-    #[props(default)] max_lines: Option<u32>,
-    #[props(default)] overflow: Option<TextOverflow>,
-    #[props(default)] weight: Option<f32>,
-    #[props(default)] text_align: Option<TextAlign>,
-) -> Element {
-    let theme = use_ember_theme();
-    let (fs, font_weight, mono) = type_role_style(type_role);
-    let color = match color {
-        Some(c) => resolve_paint(c, theme.palette),
-        None => paint(theme.palette.text),
-    };
-    rsx! {
-        Text {
-            text,
-            font_size: fs.size(),
-            line_height: fs.line_height(),
-            font_weight: font_weight.value(),
-            letter_spacing: fs.letter_spacing(),
-            color,
-            max_lines,
-            overflow,
-            weight,
-            text_align,
-            font: font_refs(mono),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Text field
-// ---------------------------------------------------------------------------------------------
-
-/// A text field drawn with the tokens instead of the toolkit's filled style, which stays light
-/// in the dark scheme. `bare` is the field inside the composer or a row (no fill, no border);
-/// otherwise it is a `surface-2` field on a `line` border with the `corner-md` radius.
-#[component]
-pub fn EmberField(
-    #[props(default)] weight: Option<f32>,
-    #[props(default)] fill_max_width: bool,
-    #[props(into, default)] placeholder: String,
-    #[props(default)] multiline: bool,
-    #[props(default = true)] enabled: bool,
-    #[props(default)] bare: bool,
-    #[props(default)] height: Option<f32>,
-    #[props(default)] corner_radius: Option<f32>,
-    #[props(default)] background: Option<Paint>,
-    #[props(default)] border_width: Option<f32>,
-    #[props(default)] border_color: Option<Paint>,
-    #[props(default)] type_role: Option<TypeRole>,
-    #[props(default)] on_value_change: EventHandler<String>,
-    #[props(default)] on_submit: EventHandler<String>,
-    #[props(default)] on_focus_lost: EventHandler<()>,
-    #[props(default)] on_key_down: EventHandler<KeyEvent>,
-) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
-    let (fill, border_w) = if bare {
-        (Color::argb(0), 0.0)
-    } else {
-        (p.surface_2, 1.0)
-    };
-    rsx! {
-        TextField {
-            weight,
-            fill_max_width,
-            placeholder,
-            multiline,
-            enabled,
-            type_role,
-            height,
-            background: background.unwrap_or_else(|| paint(fill)),
-            border_width: border_width.unwrap_or(border_w),
-            border_color: border_color.unwrap_or_else(|| paint(p.line)),
-            corner_radius: corner_radius.unwrap_or(CORNER_MD),
-            on_value_change: move |v: String| on_value_change.call(v),
-            on_submit: move |v: String| on_submit.call(v),
-            on_focus_lost: move |()| on_focus_lost.call(()),
-            on_key_down: move |k: KeyEvent| on_key_down.call(k),
         }
     }
 }
@@ -240,29 +143,6 @@ pub fn pill_metrics(small: bool) -> (f32, Fs, Weight) {
         (H_PILL_SM, Fs::Xs2, Weight::Medium)
     } else {
         (H_PILL, Fs::Xs, Weight::Medium)
-    }
-}
-
-/// A status or count pill. Pills carry status and counts, never actions.
-#[component]
-pub fn Pill(#[props(into)] text: String, tone: PillTone, #[props(default)] small: bool) -> Element {
-    let theme = use_ember_theme();
-    let (fg, bg) = pill_colors(tone, theme.palette);
-    let (height, fs, weight) = pill_metrics(small);
-    rsx! {
-        dioxus_compose::Box {
-            height,
-            background: paint(bg),
-            shape_role: ShapeRole::Full,
-            alignment: Alignment::Center,
-            Row {
-                padding: 0.0,
-                alignment: Alignment::CenterStart,
-                Spacer { width: 10.0 }
-                Label { text, fs, weight, color: paint(fg), max_lines: 1 }
-                Spacer { width: 10.0 }
-            }
-        }
     }
 }
 
@@ -321,11 +201,6 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
-/// Workaround for compose-rust #328 (Button and Chip labels are measured too narrow, so a
-/// short Korean label such as "보내기" wraps to two lines). The toolkit's Button has no
-/// `max_lines`, so the button gets a width that fits its label: an estimate of the label's
-/// advance (a wide glyph is one em, a narrow one about 0.55 em), the 16 dp side padding on both
-/// sides, and room for the icon. Remove this once #328 is fixed upstream.
 pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
     let advance: f32 = text
         .chars()
@@ -336,119 +211,14 @@ pub fn label_min_width(text: &str, font_px: f32, has_icon: bool) -> f32 {
     advance + icon + 2.0 * 16.0
 }
 
-/// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
-#[component]
-pub fn AppButton(
-    #[props(into)] text: String,
-    #[props(default)] icon: Option<IconRole>,
-    #[props(default = ButtonKind::Default)] kind: ButtonKind,
-    #[props(default)] small: bool,
-    #[props(default = true)] enabled: bool,
-    #[props(default)] fill_max_width: bool,
-    #[props(default)] on_click: EventHandler<()>,
-) -> Element {
-    let theme = use_ember_theme();
-    let s = button_style(kind, small, theme.palette);
-    let width = if fill_max_width || text.is_empty() {
-        None
-    } else {
-        Some(label_min_width(&text, s.fs.size(), icon.is_some()))
-    };
-    rsx! {
-        Button {
-            text,
-            icon,
-            enabled,
-            fill_max_width,
-            // Workaround for compose-rust #328: no soft wrap, see `label_min_width`.
-            width,
-            height: s.height,
-            variant: ButtonVariant::Text,
-            background: paint(s.fill),
-            color: paint(s.text),
-            border_width: 1.0,
-            border_color: paint(s.border),
-            shape_role: ShapeRole::Full,
-            on_click: move |()| on_click.call(()),
-        }
-    }
-}
-
-/// A 40 px (or 32 px) circle with a 1 px border and a glyph.
-#[component]
-pub fn IconButton(
-    icon: IconRole,
-    #[props(default)] small: bool,
-    #[props(default)] on_click: EventHandler<()>,
-) -> Element {
-    let theme = use_ember_theme();
-    let size = if small { H_CTL } else { H_BTN };
-    rsx! {
-        Button {
-            text: "",
-            icon,
-            width: size,
-            height: size,
-            variant: ButtonVariant::Text,
-            background: paint(theme.palette.surface),
-            border_width: 1.0,
-            border_color: paint(theme.palette.line),
-            shape_role: ShapeRole::Full,
-            on_click: move |()| on_click.call(()),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
-// Pick chip
+// Pick chip & Card
 // ---------------------------------------------------------------------------------------------
 
 /// `(height, fill)`: 32 px, no border, `surface-2` fill; the selected chip takes `sel`.
 pub fn pickchip_style(selected: bool, p: &Palette) -> (f32, Color) {
     (H_CTL, if selected { p.sel } else { p.surface_2 })
 }
-
-/// The composer's choice chip (`.pickchip`): project, harness/model, computer, mode.
-/// With `icon_only` (390 px and below) it drops its text and keeps the glyph.
-#[component]
-pub fn PickChip(
-    #[props(into)] text: String,
-    #[props(default)] icon: Option<IconRole>,
-    #[props(default)] selected: bool,
-    #[props(default)] icon_only: bool,
-    #[props(default)] on_click: EventHandler<()>,
-) -> Element {
-    let theme = use_ember_theme();
-    let (height, fill) = pickchip_style(selected, theme.palette);
-    let text = if icon_only && icon.is_some() {
-        String::new()
-    } else {
-        text
-    };
-    // Workaround for compose-rust #328: no soft wrap, see `label_min_width`.
-    let width = if text.is_empty() {
-        None
-    } else {
-        Some(label_min_width(&text, Fs::Sm.size(), icon.is_some()))
-    };
-    rsx! {
-        Button {
-            text,
-            icon,
-            width,
-            height,
-            variant: ButtonVariant::Text,
-            background: paint(fill),
-            color: paint(theme.palette.text),
-            shape_role: ShapeRole::Full,
-            on_click: move |()| on_click.call(()),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Card
-// ---------------------------------------------------------------------------------------------
 
 /// `(fill, border)`: `surface` on a `line` border; a selected card takes `sel` and a 1 px
 /// `ink` border, never a 2 px one.
@@ -457,109 +227,6 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
         (p.sel, p.ink)
     } else {
         (p.surface, p.line)
-    }
-}
-
-/// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
-/// TODO(GAPS: 스퀘어클, 그림자 2겹): plain arc corners and one elevation for now.
-#[component]
-pub fn EmberCard(
-    #[props(default)] selected: bool,
-    #[props(default)] fill_max_width: bool,
-    #[props(default)] weight: Option<f32>,
-    #[props(default)] padding: Option<f32>,
-    #[props(default)] border: Option<Color>,
-    children: Element,
-) -> Element {
-    let theme = use_ember_theme();
-    let (fill, line) = card_colors(selected, theme.palette);
-    let border = border.unwrap_or(line);
-    rsx! {
-        Card {
-            fill_max_width,
-            weight,
-            padding,
-            background: paint(fill),
-            border_width: 1.0,
-            border_color: paint(border),
-            corner_radius: CORNER_LG,
-            elevation: ELEVATION_CARD,
-            {children}
-        }
-    }
-}
-
-/// The inset panel one level below a card: `surface-2`, `corner-md`.
-#[component]
-pub fn InsetPanel(#[props(default)] fill_max_width: bool, children: Element) -> Element {
-    let theme = use_ember_theme();
-    rsx! {
-        Surface {
-            fill_max_width,
-            background: paint(theme.palette.surface_2),
-            corner_radius: CORNER_MD,
-            padding: PAD_ROW_V,
-            {children}
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Sheet header
-// ---------------------------------------------------------------------------------------------
-
-/// The header every sheet shares: 60 px high, 20 px side padding, the title in `fs-xl` 600 on
-/// the left, actions right-aligned, a 32 px close button at the far right.
-#[component]
-pub fn SheetHeader(
-    #[props(into)] title: String,
-    #[props(default)] on_close: EventHandler<()>,
-    #[props(default)] actions: Option<Element>,
-) -> Element {
-    rsx! {
-        Row {
-            fill_max_width: true,
-            height: SHEET_HEADER_H,
-            alignment: Alignment::CenterStart,
-            Spacer { width: SP[4] }
-            Label { text: title, fs: Fs::Xl, weight: Weight::Semibold, max_lines: 1 }
-            Spacer { weight: 1.0 }
-            if let Some(actions) = actions {
-                {actions}
-            }
-            IconButton { icon: IconRole::Close, small: true, on_click: move |()| on_close.call(()) }
-            Spacer { width: SP[4] }
-        }
-    }
-}
-
-/// A modal sheet with the shared header. At 560 px and below it is a full-width bottom sheet;
-/// the toolkit's `Sheet` is that already.
-/// TODO(GAPS: 스퀘어클): `corner-xl` squircle top corners; plain arcs for now.
-#[component]
-pub fn EmberSheet(
-    #[props(into)] title: String,
-    open: bool,
-    #[props(default)] on_dismiss: EventHandler<()>,
-    #[props(default)] actions: Option<Element>,
-    children: Element,
-) -> Element {
-    let theme = use_ember_theme();
-    rsx! {
-        Sheet {
-            open,
-            fill_max_width: true,
-            background: paint(theme.palette.surface),
-            corner_radius: CORNER_XL,
-            elevation: ELEVATION_LARGE,
-            on_dismiss: move |()| on_dismiss.call(()),
-            Column {
-                fill_max_width: true,
-                SheetHeader { title, actions, on_close: move |()| on_dismiss.call(()) }
-                Separator { color: paint(theme.palette.line) }
-                {children}
-            }
-        }
     }
 }
 

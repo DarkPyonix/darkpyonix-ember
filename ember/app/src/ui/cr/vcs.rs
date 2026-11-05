@@ -21,12 +21,11 @@ use compose_rust::{
 
 pub use crate::ui::vcs::{
     ahead_behind_text, bar_fractions, build_tree, check_glyph, check_of, commit_enabled,
-    commit_label, effective_tab, fetched_text, folder_check, merge_gate, open_for_project,
-    pane_layout, pane_tabs, parse_hunk_header, parse_unified, pick_project, remote_action,
-    repo_projects, route_section, section_count, section_nav, snapshot, soon_line,
-    tab_after_select, upstream_text, Check, CiState, DiffLine, FileDiff, FileStaging,
-    FileStatus, Hunk, LineKind, PaneLayout, PaneTab, RemoteAction, RepoSnapshot, ReviewState,
-    Section, SectionNav, Staging, TreeRow, SOON,
+    commit_label, effective_tab, fetched_text, folder_check, merge_gate, pane_layout, pane_tabs,
+    parse_hunk_header, parse_unified, pick_project, remote_action, repo_projects, route_section,
+    section_count, section_nav, snapshot, soon_line, tab_after_select, upstream_text, Check,
+    CiState, DiffLine, FileDiff, FileStaging, FileStatus, Hunk, LineKind, PaneLayout, PaneTab,
+    RemoteAction, RepoSnapshot, ReviewState, Section, SectionNav, Staging, TreeRow, SOON,
 };
 use crate::ui::coexist::SharedUi;
 use crate::ui::project::{display_name, project_boxes, ProjectBox};

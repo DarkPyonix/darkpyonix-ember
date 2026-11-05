@@ -11,7 +11,7 @@
 use axum::http::{header, HeaderMap, StatusCode};
 
 /// The host part of an authority (`host`, `host:port`, `[v6]:port`), lower-cased.
-fn host_of(authority: &str) -> String {
+pub fn host_of(authority: &str) -> String {
     let a = authority.rsplit('@').next().unwrap_or(authority);
     let h = if let Some(rest) = a.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")

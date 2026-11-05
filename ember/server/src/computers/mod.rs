@@ -55,11 +55,13 @@ use crate::store::{now_ms, SessionRecord, Store};
 pub mod api;
 pub mod bridge;
 pub mod egress;
+pub mod metrics;
 pub mod mount;
 pub mod observations;
 pub mod relay;
 pub mod schema;
 pub mod shim;
+pub mod terms;
 
 /// Id of the implicit computer that is this server.
 pub const LOCAL: &str = "local";

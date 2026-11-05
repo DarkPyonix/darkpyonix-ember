@@ -793,3 +793,17 @@ silhouette rounder. It is not scheduled; it starts only when the owner asks agai
 **Rejected.** Running `relay.darkpyonix.dev` as a separate relay VPS (the previous design). Deleting the iroh backend in the same release that makes letify the default *[provisional]*: one release of overlap keeps a rollback path.
 
 **Main server defaults** *[provisional, #229]*. The relay and the address observer start with the server on port 7443 (TCP and UDP), overridable by environment; nodes read the relay URL from the main server's hub device record first, with `EMBER_RELAY_URL` as the explicit override; `derive_relay_url` and the `relay.<host>` derivation are removed from `ember-hub`.
+
+### D37: The server API is authenticated by device key and local token
+
+**Decision.** [user, 2026-11-06, relayed by the supervisor for issue #338: the model is "기기 키 + 로컬 토큰" (device key plus local token)] Three parts, applied to every HTTP and WebSocket route of the server:
+
+1. A remote device authenticates with its letify-link device key (the Noise IK handshake). A revoked device is dropped within one heartbeat (`FR-N3`, #229).
+2. The app and tools on the same computer authenticate with a token file in the data folder, mode 0600. The server creates it if it is missing. The app reads it and sends it as a header.
+3. Origin and Host checks are added on every route. Loopback alone is no longer trusted.
+
+A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S11`, `FR-N7`). Status: decided, not built (#338).
+
+**Why.** The server API trusted whoever reached `EMBER_LISTEN`, so any local process, any web page that opens a WebSocket to loopback (browsers apply no CORS to WebSockets) and, on a non-loopback address, the whole LAN could use every route, including agent exec, session input and terminal input.
+
+**Rejected.** Loopback trust alone, which is today's model and is documented in `docs/guide/en/install.html` as "anyone who can reach `EMBER_LISTEN` can use every route"; a per-process secret; session tokens only. The issue lists the last two as options and gives no reason against them, so none is recorded here.

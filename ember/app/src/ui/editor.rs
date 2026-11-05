@@ -12,6 +12,10 @@ pub struct EditorTarget {
     pub folder: String,
     pub endpoint: String,
     pub token: String,
+    /// The ember server's base URL, for the node terminal relay. Empty when unknown.
+    pub server_url: String,
+    /// The id of the computer the project lives on. Empty when unknown.
+    pub computer: String,
 }
 
 impl std::fmt::Debug for EditorTarget {
@@ -22,6 +26,8 @@ impl std::fmt::Debug for EditorTarget {
             .field("folder", &self.folder)
             .field("endpoint", &self.endpoint)
             .field("token", &"[REDACTED]")
+            .field("server_url", &self.server_url)
+            .field("computer", &self.computer)
             .finish()
     }
 }
@@ -398,10 +404,13 @@ mod tests {
             folder: "/f".into(),
             endpoint: "127.0.0.1:9000".into(),
             token: "s3cret-token".into(),
+            server_url: "http://srv:1".into(),
+            computer: "node-a".into(),
         };
         let text = format!("{target:?}");
         assert!(!text.contains("s3cret-token"), "{text}");
         assert!(text.contains("[REDACTED]"));
         assert!(text.contains("127.0.0.1:9000"));
+        assert!(text.contains("http://srv:1") && text.contains("node-a"));
     }
 }

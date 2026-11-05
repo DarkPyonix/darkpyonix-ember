@@ -67,8 +67,10 @@ someone kills it. Attaching and detaching never start or stop it.
     in the ember-node unit (the default `control-group` kills every process in the cgroup,
     including keepers and shells). launchd: `AbandonProcessGroup=true` in the plist, so stopping
     the job does not kill what remains of its process group (keepers and shells are in their
-    own sessions already; this guards against launchd versions that track descendants). Neither
-    unit file exists in this repository yet.
+    own sessions already; this guards against launchd versions that track descendants). Both
+    units are in `ember/node/service/` (`ember-node.service`, `ember.node.plist`), and
+    `.github/scripts/checks/check-node-units.sh` fails CI when a file or one of these keys is
+    missing. Whether a real systemd or launchd keeps the keepers alive is not yet verified.
   - Disable with `EMBER_NODE_KEEP_PTY=0` (sessions then end with the daemon). Without a state dir
     there are no keepers and no records.
   - Why a minimal keeper rather than a tmux/dtach-style holder that also owns the model: the
@@ -156,6 +158,14 @@ VS Code's and agents' sessions show with their origin badge) → attach each vis
 terminal tab by the user = `kill`; the window going away = just close the sockets. Banner from
 `control`; scale the PTY size to the viewport. Through ember server the same messages are relayed
 over the node link.
+
+Built (not yet compiled or run, #26) [provisional]: ember server relays the node routes under
+`/api/computers/{id}/terms` (list, create, get, snapshot, control, kill, remove) and
+`/api/computers/{id}/terms/{tid}/attach` (WebSocket), in `ember/server/src/computers/terms.rs`.
+The server keeps no terminal state, so a dropped client connection or a server restart leaves the
+sessions on the node. The attach socket carries the `TermHello` first, then `TermInput` frames, and
+returns `TermEvent` frames unchanged. The local computer has no node client: its terminal routes
+answer 400. Tests: `ember/server/tests/terms_relay.rs`.
 
 ## 3. VS Code Web (no VS Code source patch)
 

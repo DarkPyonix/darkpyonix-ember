@@ -119,7 +119,7 @@ cargo build --release --locked
 <span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">The HTTP listener has no login</span>
+      <span class="label">The HTTP listener has no login yet</span>
       <p>
         Anyone who can reach <code>EMBER_LISTEN</code> can use every route, including accounts,
         devices and the hub registration. Keep it on loopback (the default) or on a network you
@@ -127,6 +127,15 @@ cargo build --release --locked
         the server's allow-list (<a href="computers.html#peer">Computers and the hub</a>). To use
         the client from another machine today, forward the port over SSH:
         <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+        The owner has decided to close this: remote devices keep their device key, and the app and
+        tools on the same computer will send a local token (issue #338). It is in progress, not yet built.
+      </p>
+      <p>
+        <span class="pill partial">Partial</span> WebSocket routes (terminal attach, the push channel, the browser view and
+        DevTools relay) refuse a request whose browser <code>Origin</code> is neither the server's own host nor
+        loopback, so a web page you open cannot attach to a shell cross-site. Native clients send no
+        <code>Origin</code> and are unaffected. This is not a login: who may attach beyond the loopback trust is
+        open (FR-P3).
       </p>
     </div>
 

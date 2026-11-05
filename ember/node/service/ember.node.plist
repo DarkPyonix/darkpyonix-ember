@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent for ember-node (SPEC FR-P6). Install:
+    cp ember.node.plist ~/Library/LaunchAgents/dev.darkpyonix.ember.node.plist
+    (replace CHANGE_ME and the binary path, then)
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.darkpyonix.ember.node.plist
+  AbandonProcessGroup: stopping the job does not kill what is left of its process group
+  (PTY keepers and shells), so persistent terminals survive a restart of the daemon.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.darkpyonix.ember.node</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ember-node</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>EMBER_NODE_TOKEN</key>
+        <string>CHANGE_ME</string>
+    </dict>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>

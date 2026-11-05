@@ -34,6 +34,7 @@ pub mod git;
 pub mod git_conflict;
 pub mod hub;
 pub mod jobs;
+pub mod metrics;
 pub mod policy;
 pub mod proto;
 pub mod term;

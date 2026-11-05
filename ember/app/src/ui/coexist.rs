@@ -240,7 +240,7 @@ impl SharedUi {
     /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the
     /// editor window in the same process instead of spawning `--editor <project> <folder>`.
     pub fn open_editor(&self, project: String, folder: String) {
-        self.open_editor_connection(project, folder, None, None);
+        self.open_editor_connection(project, folder, None, None, None, None);
     }
 
     /// Open an editor with the remote connection when one is available.
@@ -250,12 +250,16 @@ impl SharedUi {
         folder: String,
         endpoint: Option<String>,
         token: Option<String>,
+        server_url: Option<String>,
+        computer: Option<String>,
     ) {
         let target = EditorTarget {
             project: project.clone(),
             folder: folder.clone(),
             endpoint: endpoint.unwrap_or_default(),
             token: token.unwrap_or_default(),
+            server_url: server_url.unwrap_or_default(),
+            computer: computer.unwrap_or_default(),
         };
         #[cfg(not(test))]
         let spawn_target = target.clone();
@@ -403,8 +407,11 @@ mod tests {
             "/work".into(),
             Some("localhost:8000".into()),
             Some("secret".into()),
+            Some("http://srv:1".into()),
+            Some("node-a".into()),
         );
         let target = ui.editor.get_untracked().unwrap();
+        assert_eq!((target.server_url.as_str(), target.computer.as_str()), ("http://srv:1", "node-a"));
         assert_eq!(target.endpoint, "localhost:8000");
         assert_eq!(target.token, "secret");
     }

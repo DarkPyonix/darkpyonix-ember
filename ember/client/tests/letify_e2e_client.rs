@@ -12,11 +12,17 @@ use ember_server::session::{NewSession, Sessions};
 use ember_server::store::Store;
 use ember_server::transport::SERVER_SERVICE;
 use ember_transport::gate::CLOSE_REVOKED;
-use ember_transport::{BackendKind, CloseReason, Dialer, SecretKey, Transport, TransportConfig};
+use ember_transport::{
+    BackendKind, CloseReason, Dialer, LetifyConfig, SecretKey, Transport, TransportConfig,
+};
 
+/// A transport whose dials give up after two seconds, so a handshake refused after revocation
+/// fails well inside the test's own timeouts (the default waits 20 s).
 async fn endpoint() -> Transport {
+    let letify = LetifyConfig { connect_timeout: Duration::from_secs(2), ..LetifyConfig::default() };
     let config = TransportConfig::new(SecretKey::generate())
         .backend(BackendKind::Letify)
+        .letify(letify)
         .bind_addr("127.0.0.1:0".parse().unwrap());
     Transport::bind(config).await.unwrap()
 }

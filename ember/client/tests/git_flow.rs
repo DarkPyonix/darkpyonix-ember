@@ -17,7 +17,7 @@ async fn handle(
     Path((project, op)): Path<(String, String)>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    seen.lock().unwrap().push((project.clone(), op.clone(), body));
+    seen.lock().unwrap().push((project.clone(), op.clone(), body.clone()));
     if project == "plain" {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_a_repo" })));
     }
@@ -39,6 +39,13 @@ async fn handle(
         "fetch" | "pull" | "push" => (StatusCode::OK, Json(json!({ "output": format!("{op} ok") }))),
         "conflicts" => (StatusCode::OK, Json(json!({ "paths": ["c.rs"] }))),
         "log" => (StatusCode::OK, Json(json!({"commits": [{"sha":"abc", "parents":["def"], "author":"A", "email":"a@example.com", "time":123, "subject":"subject", "refs":[{"name":"HEAD", "kind":"head"}]}]}))),
+        "prs" if body["state"] == "closed" => (StatusCode::CONFLICT, Json(json!({"error": "GitHub에 로그인되어 있지 않습니다.\ngh auth login"}))),
+        "prs" => (StatusCode::OK, Json(json!({"prs": [{
+            "number": 7, "title": "Add the pull request list", "state": "open", "draft": false, "author": "octo",
+            "head": "feat/prs", "base": "develop", "updated_at": "2026-11-05T10:00:00Z", "review": "changes_requested",
+            "checks": {"passed": 3, "failed": 1, "pending": 0},
+            "merge": {"can_merge": false, "reason": "CI 체크가 실패했습니다 (실패 1개)."},
+            "url": "https://github.com/o/r/pull/7"}]}))),
         "stash/list" => (StatusCode::OK, Json(json!([{"index":0, "message":"work", "branch":"main", "time":"2026-01-01"}]))),
         "conflict" => (StatusCode::OK, Json(json!({"blocks":[{"kind":"common", "text":"before"}, {"kind":"conflict", "ours":"a", "theirs":"b", "ours_label":"HEAD", "theirs_label":"other"}]}))),
         "stash/push" | "stash/apply" | "stash/pop" | "stash/drop" | "resolve" => (StatusCode::NO_CONTENT, Json(Value::Null)),
@@ -156,4 +163,20 @@ async fn fr_g4_history_stash_and_conflict_calls_match_node_contract() {
     assert!(matches!(&conflict.blocks[1], GitConflictBlock::Conflict { ours, theirs, ours_label, theirs_label } if ours == "a" && theirs == "b" && ours_label == "HEAD" && theirs_label == "other"));
     api.git_resolve("ember", "a.txt", "resolved").await.unwrap();
     assert_eq!(last(&seen).2, json!({"path":"a.txt", "content":"resolved"}));
+}
+
+#[tokio::test]
+async fn fr_g8_prs_call_decodes_the_nodes_shape_and_carries_gh_errors() {
+    use ember_client::api::{GitPrReview, GitPrState};
+    let (api, seen) = start().await;
+    let prs = api.git_prs("ember", "open", 30).await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("prs".into(), json!({"state":"open", "limit":30})));
+    let pr = &prs.prs[0];
+    assert_eq!((pr.number, pr.state, pr.draft), (7, GitPrState::Open, false));
+    assert_eq!((pr.author.as_str(), pr.head.as_str(), pr.base.as_str()), ("octo", "feat/prs", "develop"));
+    assert_eq!(pr.review, GitPrReview::ChangesRequested);
+    assert_eq!((pr.checks.passed, pr.checks.failed, pr.checks.pending), (3, 1, 0));
+    assert!(!pr.merge.can_merge && pr.merge.reason.contains("CI"));
+    let err = api.git_prs("ember", "closed", 30).await.unwrap_err();
+    assert!(err.to_string().contains("gh auth login"), "{err}");
 }

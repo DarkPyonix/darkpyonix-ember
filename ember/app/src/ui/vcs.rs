@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStashEntry, GitStatus,
+    ApiError, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrReview, GitPrState, GitPrs, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -1308,6 +1308,167 @@ pub fn history_append(state: HistoryLoad, result: Result<GitLog, ApiError>, now:
 }
 
 // ---------------------------------------------------------------------------------------------
+// Pull requests (FR-G8)
+// ---------------------------------------------------------------------------------------------
+
+/// Which pull requests the list asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrFilter {
+    #[default]
+    Open,
+    Closed,
+    Merged,
+    All,
+}
+
+impl PrFilter {
+    pub const ALL: [PrFilter; 4] = [PrFilter::Open, PrFilter::Closed, PrFilter::Merged, PrFilter::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PrFilter::Open => "열림",
+            PrFilter::Closed => "닫힘",
+            PrFilter::Merged => "병합됨",
+            PrFilter::All => "전체",
+        }
+    }
+
+    /// The `state` the node takes.
+    pub fn arg(self) -> &'static str {
+        match self {
+            PrFilter::Open => "open",
+            PrFilter::Closed => "closed",
+            PrFilter::Merged => "merged",
+            PrFilter::All => "all",
+        }
+    }
+
+    /// The line of an empty list.
+    pub fn empty_text(self) -> &'static str {
+        match self {
+            PrFilter::Open => "열린 풀 리퀘스트가 없습니다",
+            PrFilter::Closed => "닫힌 풀 리퀘스트가 없습니다",
+            PrFilter::Merged => "병합된 풀 리퀘스트가 없습니다",
+            PrFilter::All => "풀 리퀘스트가 없습니다",
+        }
+    }
+}
+
+/// How many pull requests one read asks for.
+pub const PR_LIMIT: u32 = 30;
+
+/// The row of one pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrEntry {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub head: String,
+    pub base: String,
+    pub time_text: String,
+    pub state: GitPrState,
+    /// "열림", "닫힘" or "병합됨".
+    pub state_text: &'static str,
+    pub draft: bool,
+    pub review: GitPrReview,
+    /// "승인됨", "변경 요청", "리뷰 필요" or "리뷰 없음".
+    pub review_text: &'static str,
+    /// "체크 3/4 통과", or "체크 없음".
+    pub checks_text: String,
+    pub checks_failed: u32,
+    pub checks_pending: u32,
+    pub can_merge: bool,
+    /// "병합할 수 있습니다", or the node's reason it cannot be merged.
+    pub gate_text: String,
+    pub url: String,
+}
+
+/// The state of the pull request list of one project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrLoad {
+    Loading,
+    Ready(Vec<PrEntry>),
+    /// The Korean line with the node's message (shown with a retry button). `gh` missing, not
+    /// logged in and a repository with no GitHub remote arrive here.
+    Failed(String),
+}
+
+pub fn pr_state_text(state: GitPrState) -> &'static str {
+    match state {
+        GitPrState::Open => "열림",
+        GitPrState::Closed => "닫힘",
+        GitPrState::Merged => "병합됨",
+    }
+}
+
+pub fn pr_review_text(review: GitPrReview) -> &'static str {
+    match review {
+        GitPrReview::Approved => "승인됨",
+        GitPrReview::ChangesRequested => "변경 요청",
+        GitPrReview::ReviewRequired => "리뷰 필요",
+        GitPrReview::None => "리뷰 없음",
+    }
+}
+
+/// "체크 3/4 통과": the checks that passed over all of them; "체크 없음" when there are none.
+pub fn pr_checks_text(passed: u32, failed: u32, pending: u32) -> String {
+    let total = passed + failed + pending;
+    if total == 0 {
+        "체크 없음".to_string()
+    } else {
+        format!("체크 {passed}/{total} 통과")
+    }
+}
+
+/// The row of one pull request. A time that cannot be read shows as the node sent it.
+pub fn pr_entry(pr: &GitPr, now: i64) -> PrEntry {
+    let c = pr.checks;
+    PrEntry {
+        number: pr.number,
+        title: pr.title.clone(),
+        author: pr.author.clone(),
+        head: pr.head.clone(),
+        base: pr.base.clone(),
+        time_text: iso_to_unix(&pr.updated_at).map(|t| history_time_text(now, t)).unwrap_or_else(|| pr.updated_at.clone()),
+        state: pr.state,
+        state_text: pr_state_text(pr.state),
+        draft: pr.draft,
+        review: pr.review,
+        review_text: pr_review_text(pr.review),
+        checks_text: pr_checks_text(c.passed, c.failed, c.pending),
+        checks_failed: c.failed,
+        checks_pending: c.pending,
+        can_merge: pr.merge.can_merge,
+        gate_text: if pr.merge.can_merge {
+            "병합할 수 있습니다".to_string()
+        } else if pr.merge.reason.trim().is_empty() {
+            "병합 조건을 채우지 못했습니다".to_string()
+        } else {
+            pr.merge.reason.clone()
+        },
+        url: pr.url.clone(),
+    }
+}
+
+/// The list as a view state. An empty list is a ready, empty state, not an error.
+pub fn prs_from(result: Result<GitPrs, ApiError>, now: i64) -> PrLoad {
+    match result {
+        Ok(list) => PrLoad::Ready(list.prs.iter().map(|p| pr_entry(p, now)).collect()),
+        Err(e) => PrLoad::Failed(failure_text("풀 리퀘스트 목록을 확인", &e)),
+    }
+}
+
+/// The `prs` body for a filter.
+pub fn prs_body(filter: PrFilter) -> Value {
+    json!({ "state": filter.arg(), "limit": PR_LIMIT })
+}
+
+/// Read a project's pull requests. Runs on the runtime, not the UI thread.
+pub async fn fetch_prs(project: &str, filter: PrFilter) -> Result<GitPrs, ApiError> {
+    git_call(project, "prs", prs_body(filter)).await
+}
+
+// ---------------------------------------------------------------------------------------------
 // Stash (FR-G6)
 // ---------------------------------------------------------------------------------------------
 
@@ -1664,10 +1825,17 @@ pub fn section_count(section: Section, snap: Option<&RepoSnapshot>) -> Option<us
 /// The count beside a section's name, with the stash count read by the stash section (`None`
 /// until it has been read). The stash count does not need the repository snapshot.
 pub fn section_count_with_stash(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>) -> Option<usize> {
-    if section == Section::Stash {
-        return stash;
+    section_count_with(section, snap, stash, None)
+}
+
+/// The count beside a section's name, with the counts the stash and pull request sections read
+/// themselves (`None` until read). Neither needs the repository snapshot.
+pub fn section_count_with(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>) -> Option<usize> {
+    match section {
+        Section::Stash => stash,
+        Section::PullRequests => prs,
+        _ => section_count(section, snap),
     }
-    section_count(section, snap)
 }
 
 /// Projects that can have a repository: every project except 기본 프로젝트.
@@ -3021,5 +3189,94 @@ rename to new.txt
         let e = ApiError::Status { status: 500, message: "boom".into() };
         assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("충돌 내용을 확인하지 못했습니다: boom".into()));
         assert!(matches!(conflict_from("a", Ok(GitConflict { blocks: vec![] })), ConflictLoad::Ready(_)));
+    }
+
+    // ---- FR-G8: pull requests ----
+
+    use ember_client::api::{GitPrChecks, GitPrMerge};
+
+    fn a_pr(number: u64, state: GitPrState, review: GitPrReview, checks: (u32, u32, u32), merge: (bool, &str)) -> GitPr {
+        GitPr {
+            number,
+            title: format!("change {number}"),
+            state,
+            draft: false,
+            author: "octo".into(),
+            head: "feat/x".into(),
+            base: "develop".into(),
+            updated_at: "2026-11-06T12:00:00Z".into(),
+            review,
+            checks: GitPrChecks { passed: checks.0, failed: checks.1, pending: checks.2 },
+            merge: GitPrMerge { can_merge: merge.0, reason: merge.1.into() },
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn fr_g8_the_checks_text_counts_passed_over_all() {
+        assert_eq!(pr_checks_text(3, 1, 0), "체크 3/4 통과");
+        assert_eq!(pr_checks_text(2, 0, 2), "체크 2/4 통과");
+        assert_eq!(pr_checks_text(4, 0, 0), "체크 4/4 통과");
+        assert_eq!(pr_checks_text(0, 0, 0), "체크 없음");
+    }
+
+    #[test]
+    fn fr_g8_an_entry_has_badges_the_time_and_the_gate_text() {
+        let now = iso_to_unix("2026-11-06T14:00:00Z").unwrap();
+        let ok = pr_entry(&a_pr(7, GitPrState::Open, GitPrReview::Approved, (4, 0, 0), (true, "병합할 수 있습니다.")), now);
+        assert_eq!((ok.number, ok.state_text, ok.review_text), (7, "열림", "승인됨"));
+        assert_eq!(ok.time_text, "2시간 전");
+        assert_eq!(ok.checks_text, "체크 4/4 통과");
+        assert!(ok.can_merge);
+        assert_eq!(ok.gate_text, "병합할 수 있습니다");
+        let bad = pr_entry(&a_pr(8, GitPrState::Open, GitPrReview::ChangesRequested, (3, 1, 0), (false, "CI 체크가 실패했습니다 (실패 1개).")), now);
+        assert_eq!((bad.review_text, bad.checks_failed, bad.can_merge), ("변경 요청", 1, false));
+        assert_eq!(bad.gate_text, "CI 체크가 실패했습니다 (실패 1개).");
+        let merged = pr_entry(&a_pr(9, GitPrState::Merged, GitPrReview::None, (0, 0, 0), (false, "")), now);
+        assert_eq!((merged.state_text, merged.review_text), ("병합됨", "리뷰 없음"));
+        assert!(!merged.gate_text.is_empty(), "an empty reason still says something");
+        assert_eq!(pr_state_text(GitPrState::Closed), "닫힘");
+        assert_eq!(pr_review_text(GitPrReview::ReviewRequired), "리뷰 필요");
+    }
+
+    #[test]
+    fn fr_g8_an_unreadable_time_shows_as_sent() {
+        let mut pr = a_pr(1, GitPrState::Open, GitPrReview::None, (0, 0, 0), (false, "승인이 필요합니다."));
+        pr.updated_at = "yesterday".into();
+        assert_eq!(pr_entry(&pr, 0).time_text, "yesterday");
+    }
+
+    #[test]
+    fn fr_g8_the_list_is_a_view_state_and_an_error_carries_the_nodes_message() {
+        assert_eq!(prs_from(Ok(GitPrs::default()), 0), PrLoad::Ready(Vec::new()));
+        let one = GitPrs { prs: vec![a_pr(1, GitPrState::Open, GitPrReview::Approved, (1, 0, 0), (true, "x"))] };
+        assert!(matches!(prs_from(Ok(one), 0), PrLoad::Ready(v) if v.len() == 1));
+        let login = ApiError::Status { status: 409, message: "GitHub에 로그인되어 있지 않습니다.\ngh auth login".into() };
+        assert_eq!(prs_from(Err(login), 0), PrLoad::Failed("GitHub에 로그인되어 있지 않습니다.\ngh auth login".into()));
+        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        assert_eq!(prs_from(Err(boom), 0), PrLoad::Failed("풀 리퀘스트 목록을 확인하지 못했습니다: boom".into()));
+        let down = ApiError::Peer("refused".into());
+        assert!(matches!(prs_from(Err(down), 0), PrLoad::Failed(t) if t.contains("서버에 닿지 않습니다")));
+    }
+
+    #[test]
+    fn fr_g8_the_filter_sends_its_state_and_has_korean_labels() {
+        assert_eq!(prs_body(PrFilter::Open), json!({ "state": "open", "limit": 30 }));
+        assert_eq!(prs_body(PrFilter::Merged), json!({ "state": "merged", "limit": 30 }));
+        assert_eq!(PrFilter::default(), PrFilter::Open);
+        assert_eq!(PrFilter::ALL.map(PrFilter::label), ["열림", "닫힘", "병합됨", "전체"]);
+        assert_eq!(PrFilter::Open.empty_text(), "열린 풀 리퀘스트가 없습니다");
+        for f in PrFilter::ALL {
+            assert!(f.empty_text().ends_with("니다"), "{}", f.empty_text());
+        }
+    }
+
+    #[test]
+    fn fr_g8_the_tab_count_is_read_by_the_pull_request_section() {
+        assert_eq!(section_count_with(Section::PullRequests, None, None, None), None, "not read yet");
+        assert_eq!(section_count_with(Section::PullRequests, None, Some(9), Some(3)), Some(3));
+        assert_eq!(section_count_with(Section::Stash, None, Some(9), Some(3)), Some(9));
+        let snap = RepoSnapshot { branches: s(&["main"]), ..Default::default() };
+        assert_eq!(section_count_with(Section::Branches, Some(&snap), None, Some(3)), Some(1));
     }
 }

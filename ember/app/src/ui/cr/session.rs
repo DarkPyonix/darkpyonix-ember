@@ -476,6 +476,8 @@ pub fn ide_main_click(
 
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
+/// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
+/// button role (compose-rust#372) but no label. Touch target 26x32, under 44 px: #323.
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {

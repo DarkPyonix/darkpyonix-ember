@@ -692,8 +692,8 @@ impl A2a {
             }
             if let Some(channel_id) = &m.origin_channel {
                 // A person in a channel (FR-T12): no sender session, so no A2A reply hint.
-                let who = m.origin_label.as_deref().unwrap_or("a person");
-                let place = match self.sessions.store().channel_name(channel_id) {
+                let who = channel::sanitize_label(m.origin_label.as_deref().unwrap_or("a person"));
+                let place = match self.sessions.store().channel_name(channel_id).map(|n| channel::sanitize_label(&n)) {
                     Some(name) => format!("channel #{name}, id {channel_id}"),
                     None => format!("channel {channel_id}"),
                 };

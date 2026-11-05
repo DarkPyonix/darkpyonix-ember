@@ -394,6 +394,14 @@ impl Store {
         if name.is_empty() {
             return Err(ChannelError::BadRequest("channel name must not be empty".into()));
         }
+        // A channel name is placed in headers an agent reads (FR-T17): no control, format or
+        // line-separator character, so it cannot carry a line break or a marker.
+        if name.chars().any(invites::is_forbidden_name_char) {
+            return Err(ChannelError::Coded(
+                "invalid_name",
+                "channel name must not contain a control, format or line-separator character".into(),
+            ));
+        }
         if self.project(&new.project)?.is_none() {
             return Err(ChannelError::NotFound(format!("project {:?}", new.project)));
         }

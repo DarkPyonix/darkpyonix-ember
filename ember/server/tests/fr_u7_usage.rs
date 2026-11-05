@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind};
-use ember_server::events::SessionStatus;
+use ember_server::events::{ApprovalDecision, SessionStatus};
 use ember_server::session::{NewSession, Sessions};
 use ember_server::store::Store;
 use http_body_util::BodyExt;
@@ -32,17 +32,24 @@ fn new_session(project: &str) -> NewSession {
     }
 }
 
-async fn turn(s: &Arc<Sessions>, id: &str, text: &str) {
-    let before = s.store().session(id).unwrap().unwrap().last_seq;
+/// One scripted turn: the agent asks to run a tool, the test allows it, and the turn ends with
+/// 10 input and 5 output tokens. `n` is the turn number of this session (the approval id is
+/// `approval-<n>`).
+async fn turn(s: &Arc<Sessions>, id: &str, text: &str, n: u32) {
     s.send(id, text).await.unwrap();
-    for _ in 0..400 {
-        let r = s.store().session(id).unwrap().unwrap();
-        if r.status == SessionStatus::Finished && r.last_seq > before {
+    wait_status(s, id, SessionStatus::WaitingForApproval).await;
+    s.answer(id, &format!("approval-{n}"), ApprovalDecision::AllowOnce).await.unwrap();
+    wait_status(s, id, SessionStatus::Finished).await;
+}
+
+async fn wait_status(s: &Arc<Sessions>, id: &str, want: SessionStatus) {
+    for _ in 0..2000 {
+        if s.store().session(id).unwrap().unwrap().status == want {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    panic!("turn never finished");
+    panic!("session never reached {want:?}");
 }
 
 async fn get(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
@@ -66,8 +73,8 @@ async fn fr_u7_session_usage_sums_the_reported_turns() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(v["reported"], false);
 
-    turn(&s, &rec.id, "one").await;
-    turn(&s, &rec.id, "two").await;
+    turn(&s, &rec.id, "one", 1).await;
+    turn(&s, &rec.id, "two", 2).await;
     let (_, v) = get(&app, &format!("/api/sessions/{}/usage", rec.id)).await;
     assert_eq!(v["session_id"], rec.id.as_str());
     assert_eq!(v["reported"], true);
@@ -90,9 +97,9 @@ async fn fr_u7_day_summary_totals_sessions_and_agents() {
     let app = ember_server::api::router(s.clone());
     let a = s.create(new_session("acme")).unwrap();
     let b = s.create(new_session("other")).unwrap();
-    turn(&s, &a.id, "x").await;
-    turn(&s, &b.id, "y").await;
-    turn(&s, &b.id, "z").await;
+    turn(&s, &a.id, "x", 1).await;
+    turn(&s, &b.id, "y", 1).await;
+    turn(&s, &b.id, "z", 2).await;
 
     let (st, v) = get(&app, "/api/usage/summary?days=3").await;
     assert_eq!(st, StatusCode::OK);
@@ -128,7 +135,7 @@ async fn fr_u7_cost_is_null_with_a_reason_not_an_estimate() {
     let s = sessions();
     let app = ember_server::api::router(s.clone());
     let a = s.create(new_session("acme")).unwrap();
-    turn(&s, &a.id, "x").await;
+    turn(&s, &a.id, "x", 1).await;
     let (_, v) = get(&app, "/api/usage/summary").await;
     assert!(v["cost_usd"].is_null());
     assert!(v["days"][6]["cost_usd"].is_null());

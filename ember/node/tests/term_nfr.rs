@@ -132,7 +132,6 @@ async fn attach_to_snapshot_is_under_500_ms_on_loopback() {
         }
     }
     a.tx.detach().await.unwrap();
-    drop(a);
 
     let mut worst = Duration::ZERO;
     for _ in 0..10 {

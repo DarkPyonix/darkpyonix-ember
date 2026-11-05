@@ -51,7 +51,7 @@ use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, TrackBar, EmberField, EmberSheet,
+    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
@@ -3185,7 +3185,8 @@ fn StatusCardShell(
     let p = ember_theme().palette;
     let title = title.to_string();
     let (fill, weight) = if weighted { (false, Some(1.0)) } else { (true, None) };
-    EmberCard(false, fill, weight, Some(0.0), None, move || {
+    // A weighted card sits in a multi-column row, which is `equal_height`; it fills that height.
+    EmberCardSized(false, fill, weighted, weight, Some(0.0), None, move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             cu::Spacer().modifier(Modifier::new().height(13.0));
             cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -3400,14 +3401,19 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
 /// (the third card below), one under that. Every card fills its share of the page width
 /// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
 /// content shrank the cards to about 308 dp at 390 dp.
-/// TODO(compose-rust#464): the cards of a row keep their own heights; the mockup stretches them to the
-/// tallest. The pinned toolkit has no intrinsic-size measurement (`IntrinsicSize.Max`), and
-/// `fill_max_height` in a row of unbounded height collapses, so no fixed heights are faked.
+/// The rows of the multi-column layouts use `equal_height(true)` and the cards `fill_max_height`, so
+/// the cards stretch to the tallest, as in the mockup (FR-L18, compose-rust#389).
+/// Whether a layout of `columns` columns stretches its cards to the tallest (FR-L18): only the
+/// multi-column rows do; the single column keeps each card's own height.
+fn status_cards_equal_height(columns: usize) -> bool {
+    columns >= 2
+}
+
 fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     let (d1, d2, d3) = (d.clone(), d.clone(), d);
     match status_grid_columns(width_dp) {
         3 => {
-            cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+            cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).equal_height(status_cards_equal_height(3)).modifier(Modifier::new().fill_max_width()).content(move || {
                 PrCard(true, d1);
                 SubagentCard(true, d2);
                 LoadCard(true, d3);
@@ -3415,7 +3421,7 @@ fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
         }
         2 => {
             cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).equal_height(status_cards_equal_height(2)).modifier(Modifier::new().fill_max_width()).content(move || {
                     PrCard(true, d1);
                     SubagentCard(true, d2);
                 });
@@ -4725,6 +4731,16 @@ pub fn SessionScreen(focus: Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_status_cards_equal_height_only_when_multi_column() {
+        assert!(!super::status_cards_equal_height(super::status_grid_columns(390.0)));
+        assert!(super::status_cards_equal_height(super::status_grid_columns(900.0)));
+        assert!(super::status_cards_equal_height(super::status_grid_columns(1280.0)));
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        assert!(src.contains(".equal_height(status_cards_equal_height(3))"));
+        assert!(src.contains(".equal_height(status_cards_equal_height(2))"));
+    }
+
     #[test]
     fn fr_l18_status_capture_scroll_cards_hides_the_blocks_above() {
         assert!(super::status_blocks_above_cards(None));

@@ -177,9 +177,10 @@ jobs:
         working-directory: ember/${{ matrix.crate }}
         run: |
           if [ -f Cargo.lock ]; then cargo test --locked; else cargo test; fi
-      - name: cargo test (letify-link backend)
-        # SPEC FR-N5: the same transport suite passes against the letify-link backend (feature
-        # `letify`, off by default). Includes the relay, revocation and canonical id cases.
+      - name: cargo test (legacy iroh backend)
+        # SPEC FR-N5: letify-link is the default backend (INTENT D36), so the plain test above
+        # covers it. The iroh backend stays for one release; its suite runs with the feature on.
+        # Removal is tracked in a follow-up issue.
         if: steps.present.outputs.yes == 'true' && matrix.crate == 'transport'
         working-directory: ember/transport
-        run: cargo test --locked --features letify
+        run: cargo test --locked --features iroh

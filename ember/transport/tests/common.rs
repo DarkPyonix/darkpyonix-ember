@@ -66,3 +66,25 @@ pub async fn iroh_pair() -> (Transport, Transport, ember_transport::MemoryDirect
     }
     (a, b, dir)
 }
+
+/// A letify-link transport on localhost: TCP on 127.0.0.1, found through a shared in-memory
+/// address directory, no relay.
+#[cfg(feature = "letify")]
+pub fn letify_config(dir: &ember_transport::MemoryDirectory) -> ember_transport::TransportConfig {
+    use ember_transport::{BackendKind, SecretKey, TransportConfig};
+    use std::sync::Arc;
+
+    TransportConfig::new(SecretKey::generate())
+        .backend(BackendKind::Letify)
+        .bind_addr("127.0.0.1:0".parse().unwrap())
+        .directory(Arc::new(dir.clone()))
+}
+
+/// Two letify-link transports on localhost that find each other through the directory.
+#[cfg(feature = "letify")]
+pub async fn letify_pair() -> (Transport, Transport, ember_transport::MemoryDirectory) {
+    let dir = ember_transport::MemoryDirectory::new();
+    let a = Transport::bind(letify_config(&dir)).await.unwrap();
+    let b = Transport::bind(letify_config(&dir)).await.unwrap();
+    (a, b, dir)
+}

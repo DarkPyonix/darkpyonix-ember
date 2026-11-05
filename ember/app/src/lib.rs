@@ -15,11 +15,13 @@ pub mod bridge;
 pub mod config;
 pub mod demo;
 pub mod export;
+pub mod editor_host;
 pub mod ide;
 pub mod model;
 pub mod prefs;
 pub mod server;
 pub mod services;
+pub mod terminal_stream;
 pub mod ui;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,7 +33,7 @@ use ember_client::Client;
 use crate::config::AppConfig;
 use crate::model::Outbox;
 use crate::server::ServerApi;
-use crate::services::{install, services, Services};
+use crate::services::{Services, install, services};
 
 /// Build the services, start the client, open the window. Returns when the window closes.
 pub fn launch() {
@@ -70,7 +72,12 @@ pub fn launch() {
     // the push connection and sync workers stay off so nothing waits for a server.
     let demo = demo::active_from_env().then(|| {
         let now = demo::now_ms();
-        let source = demo::DemoSource::new(now);
+        let data_dir = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("ember-demo"));
+        let source =
+            demo::DemoSource::with_data_dir(now, data_dir).expect("데모 폴더를 만들 수 없습니다");
         for input in source.inputs(now) {
             client.apply(input);
         }
@@ -87,6 +94,7 @@ pub fn launch() {
         .prefs_path()
         .map(|p| prefs::load(&p))
         .unwrap_or_default();
+    let shared_ui = ui::coexist::SharedUi::new(initial_prefs.clone());
     let server = ServerApi::new(&config.server_url);
     install(Services {
         config,
@@ -96,20 +104,66 @@ pub fn launch() {
         demo,
         outbox: Arc::new(Mutex::new(Outbox::default())),
         initial_prefs,
+        ui: shared_ui,
         live: OnceLock::new(),
     });
 
-    launch_builder().launch(ui::app);
+    if let Some(target) = ide::parse_editor_args(std::env::args()) {
+        // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
+        // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
+        // shared host) lands.
+        let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
+        services().ui.standalone_editor.set(true);
+        services().ui.editor.set(Some(target));
+        // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
+        launch_builder()
+            .with_html(ui::workbench::config)
+            .with_window(Window::new().with_title(title).with_size(1280, 820))
+            .launch(ui::editor_workbench::page::app);
+    } else if let Some(pref) = ui::cr::gallery::requested() {
+        // Phase 1 review window (#220): the compose-rust components, no app.
+        ui::cr::gallery::launch(pref);
+    } else {
+        // Default launch (#220 phase 8): start the background bridge and open the compose-rust
+        // shell. `EMBER_CR_SHELL` still overrides the initial theme preference when set.
+        bridge::start_shared();
+        let pref = ui::cr::shell::requested().unwrap_or_else(|| services().initial_prefs.theme);
+        ui::cr::shell::launch(pref);
+    }
 
-    // The window is closed: write the cache once more and stop the background tasks.
+    shutdown();
+}
+
+/// Flush the current state before the process exits or the window loop returns.
+pub(crate) fn shutdown() -> i32 {
     let s = services();
-    // Demo data is never written to the cache.
-    if s.demo.is_none() {
-        if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
-            tracing::warn!("final cache write failed: {e}");
+    let _guard = services::prefs_write_lock();
+    let prefs = s.ui.prefs.get_untracked();
+    let path = s.config.prefs_path();
+    let code = flush_before_exit(path.as_deref(), &prefs, || {
+        // Demo data is never written to the cache.
+        if s.demo.is_none() {
+            if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
+                tracing::warn!("final cache write failed: {e}");
+            }
+        }
+        s.client.stop();
+    });
+    code
+}
+
+fn flush_before_exit(
+    path: Option<&std::path::Path>,
+    prefs: &prefs::Prefs,
+    flush_cache: impl FnOnce(),
+) -> i32 {
+    if let Some(path) = path {
+        if let Err(e) = prefs::save(path, prefs) {
+            tracing::warn!("could not save prefs to {}: {e}", path.display());
         }
     }
-    s.client.stop();
+    flush_cache();
+    0
 }
 
 fn launch_builder() -> LaunchBuilder {
@@ -117,8 +171,30 @@ fn launch_builder() -> LaunchBuilder {
     LaunchBuilder::new()
         // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
         .with_theme(
-            Theme::adaptive(DesignSystem::Material3)
-                .with_color_scheme(services().initial_prefs.theme.color_scheme()),
+            // Inter, then Pretendard, then system fonts for every role but Mono.
+            ui::fonts::app_theme(services().initial_prefs.theme.color_scheme()),
         )
         .with_window(Window::new().with_title("Ember"))
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    #[test]
+    fn fr_l31_1_editor_close_flushes_prefs_and_cache_before_exit() {
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let path = dir.path().join("prefs.json");
+        let mut prefs = crate::prefs::Prefs::default();
+        prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
+        prefs.ide_target = Some("vscode".into());
+        let mut cache_flushed = false;
+        let code = super::flush_before_exit(Some(&path), &prefs, || {
+            assert_eq!(crate::prefs::load(&path), prefs);
+            cache_flushed = true;
+        });
+        assert_eq!(code, 0);
+        assert!(cache_flushed);
+        assert_eq!(crate::prefs::load(&path), prefs);
+    }
 }

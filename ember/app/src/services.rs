@@ -36,6 +36,8 @@ pub struct Services {
     pub outbox: Arc<Mutex<Outbox>>,
     /// Prefs as read from disk at start-up; the UI owns them from then on.
     pub initial_prefs: crate::prefs::Prefs,
+    /// Shared UI and live state for `compose-rust` composables (#220).
+    pub ui: crate::ui::coexist::SharedUi,
     /// The UI's sync signals, set when the root component mounts (see [`crate::bridge`]).
     pub live: OnceLock<crate::bridge::Live>,
 }
@@ -52,6 +54,11 @@ pub fn install(s: Services) -> &'static Services {
 
 pub fn services() -> &'static Services {
     SERVICES.get().expect("ember-app services are installed before the UI starts")
+}
+
+/// Returns `Some` when [`install`] has run, or `None` in isolated unit tests.
+pub fn try_services() -> Option<&'static Services> {
+    SERVICES.get()
 }
 
 impl Services {
@@ -159,8 +166,44 @@ impl Services {
         self.client.set_approve_all(id, enabled).await.map_err(|e| e.to_string())
     }
 
+    /// In the demo, say the action is not available and return true; the caller then returns
+    /// without calling the server (#202).
+    pub fn demo_blocked(&self) -> bool {
+        match crate::demo::unavailable(self.demo.is_some()) {
+            Some(m) => {
+                show_message(m);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Reset the demo state, outbox, and session pane prefs to the initial seed. Returns `true`
+    /// when demo mode is active.
+    pub fn reset_demo(&self) -> bool {
+        let Some(d) = &self.demo else {
+            return false;
+        };
+        d.reset(&self.client, crate::demo::now_ms());
+        *self.outbox.lock().unwrap() = Outbox::default();
+        self.ui.update_prefs(|p| {
+            p.panes.clear();
+        });
+        self.ui.live.bump_all();
+        if let Some(live) = self.live.get() {
+            let mut l = live.launcher;
+            *l.write() += 1;
+            let mut t = live.transcripts;
+            *t.write() += 1;
+            let mut o = live.outbox;
+            *o.write() += 1;
+        }
+        true
+    }
+
     /// Tell the UI the outbox changed (queued-message indicator).
     pub fn bump_outbox(&self) {
+        crate::ui::coexist::SharedLive::bump(&self.ui.live.outbox);
         if let Some(live) = self.live.get() {
             let mut sig = live.outbox;
             *sig.write() += 1;
@@ -184,12 +227,86 @@ where
     });
 }
 
-/// Persist prefs off the UI thread.
-pub fn save_prefs(prefs: crate::prefs::Prefs) {
-    let Some(path) = services().config.prefs_path() else { return };
-    services().rt.spawn_blocking(move || {
+/// Like [`run`], for `compose-rust` composables and handlers that do not sit inside a Dioxus
+/// scope (#220). `then` runs on the tokio worker and may write [`compose_rust::MutableState`]s
+/// or [`crate::ui::coexist::SharedUi`] fields, which automatically request a frame.
+pub fn run_shared<T, F>(work: F, then: impl FnOnce(T) + Send + 'static)
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    services().rt.spawn(async move {
+        then(work.await);
+    });
+}
+
+/// Persist the latest prefs, serializing writes so an older snapshot cannot overwrite a newer one.
+pub fn save_prefs(_prefs: crate::prefs::Prefs) {
+    let _guard = prefs_write_lock();
+    let s = services();
+    if let Some(path) = s.config.prefs_path() {
+        let prefs = s.ui.prefs.get_untracked();
         if let Err(e) = crate::prefs::save(&path, &prefs) {
             tracing::warn!("could not save prefs to {}: {e}", path.display());
         }
+    }
+}
+
+pub(crate) fn prefs_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Services for unit tests that compose screens: demo data, no server contacted, data under
+/// `.scratch/`. Installed once per test process; tests that change shared UI state take
+/// [`test_guard`] first so they do not see each other's.
+#[cfg(test)]
+pub fn test_services() -> &'static Services {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/test-data");
+        let config = crate::config::AppConfig::from_values(
+            Some("http://127.0.0.1:9".to_string()),
+            Some(data.clone()),
+            None,
+        );
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let client = rt.block_on(ember_client::Client::new(config.client_config())).expect("client");
+        let now = crate::demo::now_ms();
+        let source = crate::demo::DemoSource::new(now, data);
+        for input in source.inputs(now) {
+            client.apply(input);
+        }
+        let initial_prefs = crate::prefs::Prefs::default();
+        let server = crate::server::ServerApi::new(&config.server_url);
+        install(Services {
+            config,
+            rt,
+            client,
+            server,
+            demo: Some(source),
+            outbox: Arc::new(Mutex::new(crate::model::Outbox::default())),
+            ui: crate::ui::coexist::SharedUi::new(initial_prefs.clone()),
+            initial_prefs,
+            live: OnceLock::new(),
+        });
     });
+    services()
+}
+
+/// Serialises tests that touch the shared UI state and resets what they change.
+#[cfg(test)]
+pub fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let ui = &test_services().ui;
+    ui.new_session.set(None);
+    ui.notice.set(None);
+    ui.route.set(crate::ui::Route::Projects);
+    guard
 }

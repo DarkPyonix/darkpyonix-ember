@@ -31,6 +31,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# In-process node for the local computer (git relay, FR-G4).
+tower = { version = "0.5", features = ["util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.29"
 tracing = "0.1"
@@ -50,6 +52,8 @@ fuser = { version = "0.18", optional = true }
 # macOS: `mount-nfs`; Linux: `mount-fuse` (or `mount-nfs`, which needs root to mount there).
 mount-nfs = ["dep:nfsserve"]
 mount-fuse = ["dep:fuser"]
+# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). Already on through ember-transport's default features (INTENT D36).
+letify = ["ember-transport/letify"]
 
 [dev-dependencies]
 ember-hub = { path = "../hub", features = ["fake"] }

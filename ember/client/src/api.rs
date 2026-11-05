@@ -10,12 +10,12 @@
 
 use std::fmt;
 
-use ember_transport::{Dialer, PeerAddr};
+use ember_transport::{Dialer, PeerAddr, PowerState};
 use http::{header, Method, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::WebSocketStream;
@@ -71,6 +71,130 @@ fn peer_err(e: impl fmt::Display) -> ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+// ---- git (FR-G4) ---------------------------------------------------------------------------
+
+/// One changed file of `POST /projects/{id}/git/status`. `index` and `worktree` are the
+/// porcelain v2 status characters (`M`, `A`, `D`, `R`, `.`; an untracked file is `?`, `?`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitFile {
+    pub path: String,
+    #[serde(default)]
+    pub old_path: Option<String>,
+    pub index: char,
+    pub worktree: char,
+}
+
+/// `POST /projects/{id}/git/status` answer.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitStatus {
+    pub branch: String,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    #[serde(default)]
+    pub fetched_age_secs: Option<u64>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<GitFile>,
+}
+
+/// `POST /projects/{id}/git/diff` answer: a unified diff.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitDiff {
+    pub patch: String,
+}
+
+/// `POST /projects/{id}/git/commit` answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitted {
+    pub sha: String,
+}
+
+/// `POST /projects/{id}/git/fetch|pull|push` answer: what git printed.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitOutput {
+    #[serde(default)]
+    pub output: String,
+}
+
+/// `POST /projects/{id}/git/conflicts` answer: the unmerged paths.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitConflicts {
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// Repository history returned by the node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLog {
+    pub commits: Vec<GitLogCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLogCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub subject: String,
+    pub refs: Vec<GitLogRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitLogRef {
+    pub name: String,
+    pub kind: GitLogRefKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitLogRefKind {
+    Branch,
+    Remote,
+    Tag,
+    Head,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitStashEntry {
+    pub index: u32,
+    pub message: String,
+    pub branch: String,
+    pub time: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitConflict {
+    pub blocks: Vec<GitConflictBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum GitConflictBlock {
+    Common { text: String },
+    Conflict { ours: String, theirs: String, ours_label: String, theirs_label: String },
+}
+
+/// The `POST /projects/{id}/git/<op>` body for `diff`.
+pub(crate) fn git_diff_body(path: Option<&str>, staged: bool) -> serde_json::Value {
+    json!({ "path": path, "staged": staged })
+}
+
+/// The `diff` body for the whole work tree with the untracked files in the same patch.
+pub(crate) fn git_diff_untracked_body() -> serde_json::Value {
+    json!({ "path": null, "staged": false, "include_untracked": true })
+}
+
+/// The `POST /projects/{id}/git/commit` body.
+pub(crate) fn git_commit_body(summary: &str, description: Option<&str>, amend: bool) -> serde_json::Value {
+    json!({ "summary": summary, "description": description, "amend": amend })
+}
 
 /// `GET /health`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -137,6 +261,23 @@ impl Api {
         match &self.reach {
             Reach::Peer { addr, .. } => Some(addr),
             Reach::Http(_) => None,
+        }
+    }
+
+    /// Tells the transport the app's power state. Over the peer-to-peer transport a backend that
+    /// keeps a session alive slows its keepalives in the background; over plain
+    /// HTTP this does nothing.
+    pub fn set_power_state(&self, state: PowerState) {
+        if let Reach::Peer { dialer, .. } = &self.reach {
+            dialer.transport().set_power_state(state);
+        }
+    }
+
+    /// Re-establishes the transport's paths now (the app returned to the foreground, or the
+    /// network changed). Open connections survive. Does nothing over plain HTTP.
+    pub fn resume_transport(&self) {
+        if let Reach::Peer { dialer, .. } = &self.reach {
+            dialer.transport().resume_now();
         }
     }
 
@@ -317,6 +458,138 @@ impl Api {
     pub async fn unassign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
         let path = format!("/projects/{}/computers/{}", seg(project), seg(computer_id));
         Self::decode(self.send(Method::DELETE, &path, None).await?)
+    }
+
+    // ---- git (FR-G4) -------------------------------------------------------------------------
+
+    /// `POST /projects/{id}/git/<op>`; the server adds the repository path of the project.
+    async fn git_post(&self, project: &str, op: &str, body: serde_json::Value) -> ApiResult<Raw> {
+        self.post(&format!("/projects/{}/git/{op}", seg(project)), body).await
+    }
+
+    /// Any git operation as raw JSON: the body as the contract has it (without `repo`), the answer
+    /// as a value (`Null` for a 204). The typed calls below wrap it; the app also uses it so a
+    /// demo source can answer the same shapes.
+    pub async fn git_raw(&self, project: &str, op: &str, body: serde_json::Value) -> ApiResult<serde_json::Value> {
+        let raw = self.git_post(project, op, body).await?;
+        if raw.body.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_slice(&raw.body).map_err(|e| ApiError::Decode(e.to_string()))
+    }
+
+    /// Branch, remote state and changed files of the project's repository. A project whose
+    /// path is not a repository answers 404.
+    pub async fn git_status(&self, project: &str) -> ApiResult<GitStatus> {
+        Self::decode(self.git_post(project, "status", json!({})).await?)
+    }
+
+    /// The unified diff of one file (`path`) or all, staged or not.
+    pub async fn git_diff(&self, project: &str, path: Option<&str>, staged: bool) -> ApiResult<GitDiff> {
+        Self::decode(self.git_post(project, "diff", git_diff_body(path, staged)).await?)
+    }
+
+    /// The work tree diff of the whole repository with every untracked file in the same patch (one
+    /// call instead of one per file).
+    pub async fn git_diff_untracked(&self, project: &str) -> ApiResult<GitDiff> {
+        Self::decode(self.git_post(project, "diff", git_diff_untracked_body()).await?)
+    }
+
+    /// Stage whole files.
+    pub async fn git_stage(&self, project: &str, paths: &[String]) -> ApiResult<()> {
+        self.git_post(project, "stage", json!({ "paths": paths })).await?;
+        Ok(())
+    }
+
+    /// Unstage whole files.
+    pub async fn git_unstage(&self, project: &str, paths: &[String]) -> ApiResult<()> {
+        self.git_post(project, "unstage", json!({ "paths": paths })).await?;
+        Ok(())
+    }
+
+    /// Apply a unified patch to the index (`reverse` unstages it): a hunk or a line range.
+    pub async fn git_apply(&self, project: &str, patch: &str, reverse: bool) -> ApiResult<()> {
+        self.git_post(project, "apply", json!({ "patch": patch, "reverse": reverse })).await?;
+        Ok(())
+    }
+
+    /// Commit the index. An empty index answers 409.
+    pub async fn git_commit(
+        &self,
+        project: &str,
+        summary: &str,
+        description: Option<&str>,
+        amend: bool,
+    ) -> ApiResult<GitCommitted> {
+        Self::decode(self.git_post(project, "commit", git_commit_body(summary, description, amend)).await?)
+    }
+
+    /// Switch to an existing local branch.
+    pub async fn git_checkout(&self, project: &str, branch: &str) -> ApiResult<()> {
+        self.git_post(project, "checkout", json!({ "branch": branch })).await?;
+        Ok(())
+    }
+
+    /// Create a branch (from `from`, default the current one) and switch to it.
+    pub async fn git_branch(&self, project: &str, name: &str, from: Option<&str>) -> ApiResult<()> {
+        self.git_post(project, "branch", json!({ "name": name, "from": from })).await?;
+        Ok(())
+    }
+
+    pub async fn git_fetch(&self, project: &str, remote: Option<&str>) -> ApiResult<GitOutput> {
+        Self::decode(self.git_post(project, "fetch", json!({ "remote": remote })).await?)
+    }
+
+    /// Fast-forward only; a diverged branch answers 409 with git's message.
+    pub async fn git_pull(&self, project: &str, remote: Option<&str>) -> ApiResult<GitOutput> {
+        Self::decode(self.git_post(project, "pull", json!({ "remote": remote })).await?)
+    }
+
+    pub async fn git_push(&self, project: &str, remote: Option<&str>) -> ApiResult<GitOutput> {
+        Self::decode(self.git_post(project, "push", json!({ "remote": remote })).await?)
+    }
+
+    /// The unmerged paths.
+    pub async fn git_conflicts(&self, project: &str) -> ApiResult<GitConflicts> {
+        Self::decode(self.git_post(project, "conflicts", json!({})).await?)
+    }
+
+    /// Read a page of repository history.
+    pub async fn git_log(&self, project: &str, limit: u32, skip: u64, branch: Option<&str>) -> ApiResult<GitLog> {
+        Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
+    }
+
+    pub async fn git_stash_list(&self, project: &str) -> ApiResult<Vec<GitStashEntry>> {
+        Self::decode(self.git_post(project, "stash/list", json!({})).await?)
+    }
+
+    pub async fn git_stash_push(&self, project: &str, message: Option<&str>, include_untracked: bool) -> ApiResult<()> {
+        self.git_post(project, "stash/push", json!({ "message": message, "include_untracked": include_untracked })).await?;
+        Ok(())
+    }
+
+    pub async fn git_stash_apply(&self, project: &str, index: u32) -> ApiResult<()> {
+        self.git_post(project, "stash/apply", json!({ "index": index })).await?;
+        Ok(())
+    }
+
+    pub async fn git_stash_pop(&self, project: &str, index: u32) -> ApiResult<()> {
+        self.git_post(project, "stash/pop", json!({ "index": index })).await?;
+        Ok(())
+    }
+
+    pub async fn git_stash_drop(&self, project: &str, index: u32) -> ApiResult<()> {
+        self.git_post(project, "stash/drop", json!({ "index": index })).await?;
+        Ok(())
+    }
+
+    pub async fn git_conflict(&self, project: &str, path: &str) -> ApiResult<GitConflict> {
+        Self::decode(self.git_post(project, "conflict", json!({ "path": path })).await?)
+    }
+
+    pub async fn git_resolve(&self, project: &str, path: &str, content: &str) -> ApiResult<()> {
+        self.git_post(project, "resolve", json!({ "path": path, "content": content })).await?;
+        Ok(())
     }
 
     // ---- schedules (FR-A8) -----------------------------------------------------------------

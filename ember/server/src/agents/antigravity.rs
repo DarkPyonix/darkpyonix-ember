@@ -131,6 +131,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use super::proc::{reattach_agent, spawn_agent, AgentCommand, AgentProc};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, McpServer, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
@@ -138,6 +139,23 @@ use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 pub const HOOK_ROUTE: &str = "/api/agents/antigravity/hook";
 /// Name of Ember's hook in `hooks.json`; also what the pre-flight check looks for.
 pub const HOOK_NAME: &str = "ember-approvals";
+/// Spawn env that points agy at a model proxy (SPEC FR-U6, #146; `members::proxy_env`). agy reads
+/// it itself, but only in its Gemini API mode, so [`proxy_args`] adds `modelProvider: "gemini"`.
+pub const PROXY_BASE_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
+/// The key agy sends to the proxy (as `x-goog-api-key`) in that mode.
+pub const PROXY_KEY_ENV: &str = "GEMINI_API_KEY";
+
+/// Extra agy arguments when the spawn env carries a proxy base URL: a per-session `--settings`
+/// (never saved to `~/.gemini`) that switches agy from its Google sign-in to the Gemini API route.
+/// Without it agy ignores both variables and asks for a login (probed on agy 1.5.1).
+pub fn proxy_args(env: &[(String, String)]) -> Vec<String> {
+    if env.iter().any(|(k, v)| k == PROXY_BASE_ENV && !v.is_empty()) {
+        vec!["--settings".into(), r#"{"modelProvider":"gemini"}"#.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The agy version the SPEC §A Antigravity hook tests passed on. Any other version runs read-only.
 pub const PINNED_VERSION: &str = "1.2.16";
 /// agy's own timeout for the hook command, in seconds (agy's default is 30). Measured on 1.2.16:
@@ -309,6 +327,10 @@ impl AgentAdapter for AntigravityAdapter {
         AgentKind::Antigravity
     }
 
+    fn rejoins_shim(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -353,7 +375,8 @@ impl AgentAdapter for AntigravityAdapter {
         let approvals = Arc::new(RunApprovals::new(events.clone(), APPROVAL_TIMEOUT, &root, Policy::ReadOnly));
         // A fresh token per run (session (re)creation); revoked in `shutdown` / `Drop`.
         self.hooks.register(&token, approvals.clone());
-        Ok(Box::new(AgyRun {
+        let reattached = reattach_agent(&req.env).await?;
+        let mut run = AgyRun {
             bin: self.bin.clone(),
             home: self.home.clone(),
             root,
@@ -367,7 +390,12 @@ impl AgentAdapter for AntigravityAdapter {
             state: Arc::new(StdMutex::new(TurnState::default())),
             turn_task: None,
             policy: None,
-        }))
+        };
+        if let Some(proc) = reattached {
+            run.approvals.open();
+            run.start_reader(proc);
+        }
+        Ok(Box::new(run))
     }
 }
 
@@ -904,6 +932,23 @@ struct AgyRun {
 }
 
 impl AgyRun {
+    fn start_reader(&mut self, proc: AgentProc) {
+        let seq = {
+            let mut st = self.state.lock().unwrap();
+            st.active = true;
+            st.seq += 1;
+            st.interrupted = false;
+            st.pid = proc.pid;
+            st.seq
+        };
+        let turn = Turn {
+            events: self.events.clone(), state: self.state.clone(),
+            approvals: self.approvals.clone(), home: self.home.clone(),
+            root: self.new_root.then(|| self.root.clone()), seq,
+        };
+        self.turn_task = Some(tokio::spawn(turn.run(proc)));
+    }
+
     /// End a turn that could not start: `Error` then `TurnEnded { Failed }`.
     async fn fail(&self, message: String) -> anyhow::Result<()> {
         self.events.send(AgentEvent::Error { message }).await?;
@@ -1009,7 +1054,7 @@ impl AgentRun for AgyRun {
             let st = self.state.lock().unwrap();
             st.native_id.clone().or_else(|| self.req.resume_native_id.clone())
         };
-        let args = AntigravityAdapter::turn_args(
+        let mut args = AntigravityAdapter::turn_args(
             text,
             conversation.as_deref(),
             self.req.model.as_deref(),
@@ -1017,42 +1062,20 @@ impl AgentRun for AgyRun {
             policy,
             self.sandbox,
         );
+        args.extend(proxy_args(&self.req.env));
         self.approvals.open();
-        let spawned = Command::new(&self.bin)
-            .envs(self.req.env.iter().map(|(k, v)| (k, v)))
-            .args(&args)
-            .current_dir(&self.req.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
-        let mut child = match spawned {
-            Ok(c) => c,
+        let proc = match spawn_agent(AgentCommand {
+            program: self.bin.clone(), args, env: self.req.env.clone(),
+            cwd: self.req.cwd.clone(), reattachable: true,
+            mem_limit_mb: self.req.mem_limit_mb,
+        }).await {
+            Ok(proc) => proc,
             Err(e) => {
                 self.approvals.close();
                 return self.fail(format!("failed to start {}: {e}", self.bin.display())).await;
             }
         };
-        let seq = {
-            let mut st = self.state.lock().unwrap();
-            st.active = true;
-            st.seq += 1;
-            st.interrupted = false;
-            st.pid = child.id();
-            st.seq
-        };
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
-        let turn = Turn {
-            events: self.events.clone(),
-            state: self.state.clone(),
-            approvals: self.approvals.clone(),
-            home: self.home.clone(),
-            root: self.new_root.then(|| self.root.clone()),
-            seq,
-        };
-        self.turn_task = Some(tokio::spawn(turn.run(child, stdout, stderr)));
+        self.start_reader(proc);
         Ok(())
     }
 
@@ -1123,19 +1146,16 @@ struct Turn {
 }
 
 impl Turn {
-    async fn run(
-        mut self,
-        mut child: tokio::process::Child,
-        stdout: tokio::process::ChildStdout,
-        stderr: tokio::process::ChildStderr,
-    ) {
-        let pid = child.id();
+    async fn run(mut self, proc: AgentProc) {
+        let AgentProc { stdin: _stdin, stdout, stderr, pid, handle, .. } = proc;
         let stderr_task = tokio::spawn(async move {
             let mut errors = StderrErrors::default();
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(target: "ember::agy", pid, "stderr: {line}");
-                errors.push(&line);
+            if let Some(stderr) = stderr {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(target: "ember::agy", pid, "stderr: {line}");
+                    errors.push(&line);
+                }
             }
             errors
         });
@@ -1177,10 +1197,10 @@ impl Turn {
             }
         }
         let errors = stderr_task.await.unwrap_or_default();
-        let status = child.wait().await;
+        let status = handle.shutdown(Duration::from_secs(1)).await;
         if end.is_none() {
             let reason = errors.message().unwrap_or_else(|| match &status {
-                Ok(s) => format!("agy exited ({s}) without a result"),
+                Ok(()) => "agy exited without a result".to_string(),
                 Err(e) => format!("agy failed: {e}"),
             });
             if let Some(limit) = errors.rate_limit() {
@@ -1645,6 +1665,14 @@ mod tests {
         let args = AntigravityAdapter::turn_args("-x", None, None, Path::new("/r"), Policy::Gated, false);
         assert_eq!(args[1], " -x");
         assert!(!args.iter().any(|a| a.starts_with("--conversation") || a == "--model" || a == "--sandbox"));
+    }
+
+    #[test]
+    fn fr_u6_proxy_args_switch_agy_to_the_gemini_api_route_only_with_a_base_url() {
+        let env = vec![(PROXY_BASE_ENV.to_string(), "http://127.0.0.1:1".to_string())];
+        assert_eq!(proxy_args(&env), ["--settings", r#"{"modelProvider":"gemini"}"#]);
+        assert!(proxy_args(&[]).is_empty());
+        assert!(proxy_args(&[("OTHER".into(), "x".into())]).is_empty());
     }
 
     #[test]

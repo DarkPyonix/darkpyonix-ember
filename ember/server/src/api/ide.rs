@@ -1,8 +1,8 @@
-//! "Open IDE" launch targets for a session (SPEC `FR-L7`, `FR-W1`).
+//! "Open IDE" launch targets for a session.
 //!
 //! `GET /api/sessions/{id}/ide[?computer=<name>]` returns, for the session's project and
 //! current computer, how to open each IDE. The server only returns data; it never opens or
-//! renders anything (`NFR-L2`):
+//! renders anything:
 //!
 //! | `kind`    | What it is                                    | What we return                    |
 //! |-----------|-----------------------------------------------|-----------------------------------|
@@ -10,7 +10,7 @@
 //! | `vscode`  | VS Code Web wrapped by `ember/proxy/` on that computer | the proxy URL with `?folder=`   |
 //! | `gateway` | JetBrains Gateway                             | a `jetbrains-gateway://` link and the command that opens it on that computer |
 //!
-//! **Computers are not wired yet** (ember node, `FR-X1`): a session has no current-computer
+//! **Computers are not wired yet**: a session has no current-computer
 //! attribute in the store. Until it does, the computer is `?computer=` or the configured
 //! default, and each computer's IDE details come from [`IdeConfig`] (`EMBER_IDE_COMPUTERS`).
 //! The folder is the session's `cwd`, taken as a path on that computer.
@@ -38,6 +38,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::ose::OseManager;
 use crate::session::Sessions;
 use crate::store::SessionRecord;
 
@@ -137,6 +138,22 @@ pub struct EmberLaunch {
     pub folder: String,
     /// The main server the editor connects to.
     pub server_url: Option<String>,
+    /// Connection details when an OSE endpoint is reachable by the editor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ose: Option<EmberOseConnection>,
+}
+
+#[derive(Clone, Serialize, PartialEq)]
+pub struct EmberOseConnection {
+    pub endpoint: String,
+    pub connection_token: String,
+}
+
+impl std::fmt::Debug for EmberOseConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmberOseConnection").field("endpoint", &self.endpoint)
+            .field("connection_token", &"[REDACTED]").finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -233,18 +250,24 @@ pub fn open_command(os: Option<&str>, url: &str) -> Option<Vec<String>> {
     Some(argv.into_iter().map(String::from).collect())
 }
 
-/// The launch targets for one session on one computer. Pure: no I/O.
+/// The launch targets for one session on one computer.
 pub fn launch_targets(
     rec: &SessionRecord,
     computer_name: &str,
     computer: &ComputerIde,
     server_url: Option<&str>,
+    ose: &OseManager,
 ) -> IdeLaunch {
     let folder = rec.cwd.clone();
 
+    let connection = if computer.local {
+        ose.connection(std::path::Path::new(&folder))
+    } else {
+        Err("OSE server is only available on the local computer".into())
+    };
     let ember = Target {
         kind: "ember",
-        available: false,
+        available: connection.is_ok(),
         url: None,
         command: None,
         launch: Some(EmberLaunch {
@@ -253,8 +276,9 @@ pub fn launch_targets(
             computer: computer_name.to_string(),
             folder: folder.clone(),
             server_url: server_url.map(String::from),
+            ose: connection.as_ref().ok().cloned(),
         }),
-        reason: Some("the Ember editor (M8) is not built yet".into()),
+        reason: connection.err(),
     };
 
     let vscode = match computer.ide_url.as_deref().filter(|u| !u.is_empty()) {
@@ -297,12 +321,13 @@ pub fn launch_targets(
 struct IdeState {
     sessions: Arc<Sessions>,
     config: Arc<IdeConfig>,
+    ose: Arc<OseManager>,
 }
 
 pub fn router(sessions: Arc<Sessions>, config: Arc<IdeConfig>) -> Router {
     Router::new()
         .route("/api/sessions/{id}/ide", get(ide_targets))
-        .with_state(IdeState { sessions, config })
+        .with_state(IdeState { sessions, config, ose: Arc::new(OseManager::default()) })
 }
 
 #[derive(Deserialize)]
@@ -335,12 +360,69 @@ async fn ide_targets(
             .and_then(|h| h.to_str().ok())
             .map(|h| format!("http://{h}"))
     });
-    Json(launch_targets(&rec, &name, computer, server_url.as_deref())).into_response()
+    Json(launch_targets(&rec, &name, computer, server_url.as_deref(), &st.ose)).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l7_fr_l31_fr_w4_serializes_editor_connection() {
+        let launch = EmberLaunch {
+            session: "s".into(), project: "p".into(), computer: "local".into(),
+            folder: "/w".into(), server_url: None,
+            ose: Some(EmberOseConnection { endpoint: "http://localhost:9000".into(), connection_token: "secret".into() }),
+        };
+        let value = serde_json::to_value(launch).unwrap();
+        assert_eq!(value["ose"]["endpoint"], "http://localhost:9000");
+        assert_eq!(value["ose"]["connection_token"], "secret");
+    }
+
+    fn record(folder: &std::path::Path) -> SessionRecord {
+        SessionRecord {
+            id: "s".into(), project: "p".into(), agent: crate::agents::AgentKind::Scripted,
+            cwd: folder.to_string_lossy().into_owned(), model: None, native_id: None,
+            status: crate::events::SessionStatus::Idle, title: String::new(), created_at: 0,
+            updated_at: 0, last_seq: 0, account_id: None, account_reason: None,
+            pinned: false, archived: false,
+        }
+    }
+
+    #[test]
+    fn fr_l7_fr_w4_missing_server_omits_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = OseManager::new(None);
+        let targets = launch_targets(&record(dir.path()), "local", &ComputerIde { local: true, ..Default::default() }, None, &manager);
+        let ember = &targets.targets[0];
+        assert!(!ember.available);
+        assert!(ember.reason.as_ref().unwrap().contains("not installed"));
+        assert!(serde_json::to_value(ember).unwrap()["launch"].get("ose").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_l7_fr_w4_launch_starts_and_reuses_server() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server");
+        std::fs::write(&script, r##"#!/bin/sh
+exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
+while True: s.accept()[0].close()' "$@"
+"##).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manager = OseManager::new(Some(script));
+        let computer = ComputerIde { local: true, ..Default::default() };
+        let first = launch_targets(&record(dir.path()), "local", &computer, None, &manager);
+        let second = launch_targets(&record(dir.path()), "local", &computer, None, &manager);
+        assert!(first.targets[0].available);
+        let connection = first.targets[0].launch.as_ref().unwrap().ose.as_ref().unwrap();
+        assert_eq!(Some(connection), second.targets[0].launch.as_ref().unwrap().ose.as_ref());
+        assert!(!connection.connection_token.is_empty());
+        let value = serde_json::to_value(&first).unwrap();
+        assert_eq!(value["targets"][0]["launch"]["ose"]["connection_token"], connection.connection_token);
+        assert!(!format!("{first:?}").contains(&connection.connection_token));
+    }
 
     #[test]
     fn percent_encoding() {

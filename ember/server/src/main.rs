@@ -59,6 +59,9 @@ use ember_server::store::Store;
 ///   API is also served on transport service `ember-server` to allowed devices (FR-N3,
 ///   `/api/devices`, managed on the TCP listener only)
 /// - `EMBER_RELAY_URL`: relay server(s) for the transport (overrides the hub's relay)
+/// - `EMBER_SERVER_RELAY_PORT`: letify relay TCP and QAD UDP port (default 7443)
+/// - `EMBER_SERVER_RELAY=off`: disable the automatic letify relay and QAD roles
+/// - `EMBER_LETIFY_RELAY_LISTEN`, `EMBER_LETIFY_QAD_LISTEN`: override role addresses
 /// - `EMBER_HUB_URL`: the darkpyonix.dev hub (default `https://api.darkpyonix.dev`; `off` disables).
 ///   With the transport on, the server can register to the user's GitHub account there
 ///   (`POST /api/hub/link`, local only), then publishes its address and resolves computers
@@ -351,6 +354,8 @@ async fn main() -> anyhow::Result<()> {
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
+        .merge(computers::terms::router(computers.clone()))
+        .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::ide::router(sessions.clone(), ide))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))

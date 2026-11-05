@@ -9,13 +9,15 @@ PR #75). Contract: `darkpyonix-core` `docs/api/hub.openapi.yaml` and SPEC FR-H1,
 NFR-H2 as merged for review in darkpyonix-core PR #34 (branch `feat/m4-hub-ember-gaps`, base
 `feat/m4-hub-workers`). Worker source `ember/hub/worker/src/`.
 
+> Update 2026-10-30 (`INTENT.md` D36): the relay rows below describe the iroh backend. With letify-link the main server is the relay and the hub keeps the directory and sign-in only; `relay_urls` then goes unused.
+
 ## What it does
 
 | Need (SPEC) | How |
 | ----------- | --- |
 | A computer joins by signing in; no address or port entered (FR-N2) | Device link: `POST /device-links` → user code + verification URL → person approves (browser, or Ember as the account's main server for `computer` / `client` links) → device polls `POST /device-links/{id}/token` with an Ed25519 signature over `darkpyonix-hub/v2/link\n<link_id>\n<challenge>` → device token (`dpd_`, headers only) + resolve token (`dpr_`). A restarted device resumes with `GET /device-links/{id}`. |
 | Address directory | The transport publishes its signed record to `PUT /pkarr/{z32 key}` and resolves peers with `GET /pkarr/{key}?token=<resolve token>` (a device token there is refused, NFR-H2). |
-| Relay | `GET /config` `relay_urls`; fallback the hub's relay host (`https://relay.<hub host>`, iroh relay protocol at `/relay`). |
+| Relay | `GET /config` `relay_urls`; fallback none: no relay is derived from the hub host since #229 (INTENT D36). On the letify backend the relay URL comes from the main server's device record, then `EMBER_RELAY_URL` overrides. |
 | Add a computer without pasting a `PeerAddr` | `GET /devices` → pick → `POST /api/hub/devices/{endpoint_id}/computer {token}`; the computer row stores the bare peer id, resolved through the directory. |
 | FR-N3 allow-list from the account | Opt-in sync: `hub` rows of the server's `devices` table = account devices (minus the server). |
 | Revocation on the hub | `401 {code: device_removed}` (or a code-less `401` from a hub older than the codes) = removed; seen by a held `GET /devices?wait=25` (FR-H9) within the hub's ~2 s check when `/config` is served, else by `GET /me` every 60 s. Recorded, surfaced, token no longer used. `401 {code: invalid_credentials}` is not a revocation. |
@@ -61,12 +63,12 @@ minutes; 5 s timeout):
 `{hub_version, relay_urls, pkarr_url, link_url}`. There is no `api_version`: the API only grows
 (core INTENT D16) and Ember looks for the fields it needs.
 
-- `relay_urls` replace the derived `https://relay.<host>` (all go to the transport as
+- `relay_urls` (legacy iroh hubs) replace the absent relay (all go to the transport as
   `RelayConfig::Custom`, trailing `/` trimmed); `EMBER_HUB_RELAY_URL` still wins, and
   `EMBER_RELAY_URL` wins over both. `pkarr_url` replaces `<hub>/pkarr`. `link_url` is where Ember
   sends a person to approve codes it may not approve itself.
-- `404` / `405` / `501`, an unreachable hub, or an undecodable answer: the derived values, as
-  before.
+- `404` / `405` / `501`, an unreachable hub, or an undecodable answer: the default directory
+  values remain; no relay is derived from the hub host.
 - When it is asked: ember server at start only when registered (or `EMBER_HUB_URL` is set), and
   when a registration completes, so an unregistered server does not contact the hub; ember node
   when it binds the transport (registered or `EMBER_HUB_URL`), on SIGHUP after a new
@@ -137,7 +139,7 @@ with; nothing in Ember uses it yet.
 | `ember/transport/src/config.rs` | `HubDirectory`; `TransportConfig::hub`. |
 | `ember/transport/src/iroh_backend.rs` | `enable_hub` (iroh `PkarrPublisher` + token-switchable `HubResolver`), `set_directory_token`, `set_relays`. |
 | `ember/transport/src/key.rs` | `SecretKey::sign`, `PeerId::verify` (the link proof of possession). |
-| `ember/hub/` (`ember-hub`, new) | `HubConfig` (`EMBER_HUB_URL`, default `https://api.darkpyonix.dev`; relay and directory from `/config` via `discover`, else relay derived as `relay.<host>`, or the sibling `relay.<domain>` for an `api.` or `hub.` host; override `EMBER_HUB_RELAY_URL`; `EMBER_RELAY_URL` wins), `HubInfo`, `HubClient` (`config`, `devices_since`), `DeviceWatcher`, `DeviceLink`, `Registration` / `RegistrationFile` (0600), `check_registration` / `watch_registration` / `watch_registration_with`, `z32`, `fake::FakeHub` (the PR #34 contract: `/config`, versioned weak `ETag` + `?wait=0..25`, `device_removed` / `invalid_credentials`, resolve tokens, `PATCH`, self-removal, readmit, link status, `client` role). |
+| `ember/hub/` (`ember-hub`, new) | `HubConfig` (`EMBER_HUB_URL`, default `https://api.darkpyonix.dev`; relay and directory from `/config` via `discover`, else no relay (none is derived any more); override `EMBER_HUB_RELAY_URL`; `EMBER_RELAY_URL` wins), `HubInfo`, `HubClient` (`config`, `devices_since`), `DeviceWatcher`, `DeviceLink`, `Registration` / `RegistrationFile` (0600), `check_registration` / `watch_registration` / `watch_registration_with`, `z32`, `fake::FakeHub` (the PR #34 contract: `/config`, versioned weak `ETag` + `?wait=0..25`, `device_removed` / `invalid_credentials`, resolve tokens, `PATCH`, self-removal, readmit, link status, `client` role). |
 | `ember/server/src/hub/` | `ServerHub`: link as `main_server` (resumed after a restart), device and resolve tokens sealed with `secret.key` in `hub_registration` (migrations 10 and 11), revocation watch (long-poll, else 60 s), app record, device list, add computer, approve codes, devices sync, leave. `api::router` (status, devices, add computer: also over the transport) and `api::admin_router` (link, check, forget, remove, codes, sync: TCP only). |
 | `ember/server/src/devices/` | `source` column (`local` / `hub`), `Devices::sync_from_hub`. |
 | `ember/node/src/hub.rs` | `ember-node hub register|status|forget [--local]`, `<state dir>/hub.json` (+ `hub-link.json` while waiting), app record, transport config from the registration, watch (revocation → `revoked_at`, token cleared), `EMBER_NODE_HUB_ALLOW_SERVERS=1` admits the account's main servers. SIGHUP picks up a new registration. |
@@ -154,8 +156,7 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
 
 ### When the hub is used
 
-- Server: only with `EMBER_TRANSPORT=1`. The transport is bound with the hub's relay and
-  directory when registered, or when `EMBER_HUB_URL` is set explicitly; otherwise it starts as
+- Server: only with `EMBER_TRANSPORT=1`. The transport uses the hub directory and, for legacy iroh, any hub-provided relay when registered, or when `EMBER_HUB_URL` is set explicitly; otherwise it starts as
   before (no address is sent to darkpyonix.dev by an unregistered server) and switches when
   registration completes.
 - Node: same rule, from `hub.json`.
@@ -193,7 +194,7 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
   (`?local=1` does not); a link pending at restart is resumed; a removed server relinks after
   readmission; 503 when off.
 - `ember/node/tests/hub.rs`: `register` writes 0600 `hub.json` and configures the transport (and the
-  discovered relay, or the derived one when `/config` is `404`), resolving with the resolve
+  discovered legacy relay, with no derived relay when `/config` is `404`), resolving with the resolve
   token, reporting its app; removal marks `revoked_at` and drops hub-admitted servers (through
   the long-poll); re-registering is refused until readmitted, then works; an old registration
   gets a resolve token on bind; `forget` leaves the account (`--local` does not); an interrupted

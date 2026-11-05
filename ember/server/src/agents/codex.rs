@@ -139,6 +139,36 @@ impl AgentAdapter for CodexAdapter {
         NativeFork::AtTurn
     }
 
+    /// A turn in flight when the server died is read back from the surviving app-server (FR-S8).
+    fn drains_shim(&self) -> bool {
+        true
+    }
+
+    fn drain_turn_end(&self, line: &str) -> bool {
+        let Ok(msg) = serde_json::from_str::<Value>(line) else { return false };
+        match (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+            (Some("turn/completed"), None) => true,
+            // A request to the client (an approval): nobody is there to answer it.
+            (Some(_), Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn translate_drained(&self, lines: &[String]) -> Vec<AgentEvent> {
+        let mut mapper = Mapper::default();
+        let mut out = Vec::new();
+        for line in lines {
+            let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+            let null = Value::Null;
+            let params = msg.get("params").unwrap_or(&null);
+            // Only notifications: replies and requests belong to a connection that is gone.
+            if let (Some(method), None) = (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+                out.extend(mapper.on_notification(method, params));
+            }
+        }
+        out
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -177,6 +207,7 @@ impl AgentAdapter for CodexAdapter {
             // `initialize` has to run on a fresh app-server, so a surviving one is restarted
             // through `thread/resume` instead of rejoined.
             reattachable: false,
+            mem_limit_mb: req.mem_limit_mb,
         })
         .await
         .with_context(|| format!("starting {} app-server", self.bin.display()))?;
@@ -263,12 +294,32 @@ impl AgentAdapter for CodexAdapter {
     }
 }
 
+/// Spawn-env name carrying a model proxy base URL for Codex (SPEC FR-U6, set by
+/// `members::proxy_env`). Codex ignores `OPENAI_BASE_URL` (verified, codex-cli 0.164.0), so the
+/// adapter turns this into `-c` overrides ([`proxy_config_args`]) instead.
+pub const PROXY_BASE_ENV: &str = "EMBER_CODEX_PROXY_BASE_URL";
+/// Spawn-env name carrying the key the proxy provider reads (`env_key`); never written to args.
+pub const PROXY_KEY_ENV: &str = "EMBER_CODEX_PROXY_KEY";
+
+/// The `-c` overrides that send Codex's model traffic to `base_url` through a custom provider,
+/// whatever its login mode. The key is read by Codex from [`PROXY_KEY_ENV`], not passed here.
+pub fn proxy_config_args(base_url: &str) -> Vec<String> {
+    let provider = format!(
+        "model_providers.ember_proxy={{name=\"ember-proxy\", base_url={}, env_key=\"{PROXY_KEY_ENV}\", wire_api=\"responses\"}}",
+        toml_str(base_url)
+    );
+    vec!["-c".into(), provider, "-c".into(), "model_provider=\"ember_proxy\"".into()]
+}
+
 /// `app-server` plus a `-c` override per MCP server setting. A server's environment (FR-A7,
 /// possibly secrets) is never written here: only its variable names, as
 /// `mcp_servers.<name>.env_vars=[…]`, which makes Codex forward those variables from its own
 /// process environment ([`mcp_process_env`]) to the MCP server.
 fn app_server_args(req: &StartRequest) -> Vec<String> {
     let mut args = vec!["app-server".to_string()];
+    if let Some((_, base)) = req.env.iter().find(|(k, _)| k == PROXY_BASE_ENV) {
+        args.extend(proxy_config_args(base));
+    }
     let (_, skipped) = mcp_process_env(req);
     for m in req.mcp_servers.iter().filter(|m| !skipped.contains(&m.name)) {
         let key = format!("mcp_servers.{}", m.name);

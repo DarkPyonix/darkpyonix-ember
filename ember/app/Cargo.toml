@@ -19,16 +19,24 @@ name = "ember-app"
 path = "src/main.rs"
 
 [dependencies]
-# The UI toolkit. A git dependency rather than a path one so the manifest does not depend on
-# where this checkout sits relative to the dioxus-compose checkout (a worktree is three levels
-# deeper than the main checkout). To build against a local checkout, see README.md ("Local
-# dioxus-compose"). The crate's build script fetches the renderer for its version; set
+# The UI toolkit. Base screens are written on compose-rust directly; IDE screens use
+# dioxus-compose (SPEC §L, INTENT D9). A git dependency rather than a path one so the manifest
+# does not depend on where this checkout sits relative to the toolkit checkout (a worktree is
+# three levels deeper than the main checkout). To build against a local checkout, see README.md
+# ("Local dioxus-compose"). The crate's build script fetches the renderer for its version; set
 # DIOXUS_COMPOSE_RENDERER_DIR to use a renderer you built yourself.
-# TODO: 배포되면 버전 의존성으로 바꾼다 (dioxus-compose is not yet published).
-dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "4259fd08" }
+# TODO: 배포되면 버전 의존성으로 바꾼다 (compose-rust and dioxus-compose are not yet published).
+compose-rust = { git = "https://github.com/DarkPyonix/compose-rust", tag = "v0.0.5", default-features = false }
+dioxus-compose = { git = "https://github.com/DarkPyonix/dioxus-compose", rev = "0a7d0c44b8487a25543aed24f004170c1b6f530e" }
 
 # Everything below the UI: sync engine, state reducer, transcript, cache.
 ember-client = { path = "../client" }
+ember-editor = { path = "../editor" }
+ember-editor-conn = { path = "../editor-conn" }
+alacritty_terminal = { version = "0.26", default-features = false }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = "0.28"
 
 # The client's I/O is async; the app owns one multi-thread runtime for it (PR-3: no domain
 # work on the UI thread).

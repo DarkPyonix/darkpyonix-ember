@@ -6,21 +6,22 @@
 //! shared components in [`components`].
 
 pub mod characters;
+pub mod coexist;
+pub mod cr;
 pub mod compat;
 pub mod agents;
 pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod editor;
+pub mod editor_workbench;
 pub mod files;
+pub mod fonts;
 pub mod home;
 pub mod keymap;
-pub mod launcher;
 pub mod monitor;
-pub mod new_session;
 pub mod project;
 pub mod routines;
-pub mod search;
 pub mod session;
 pub mod shell;
 pub mod theme;
@@ -83,15 +84,23 @@ impl Ui {
                 .read(|s| s.session(id).map(|v| v.record.project.clone()));
             if let Some(p) = project {
                 let mut sel = self.selected_project;
-                sel.set(Some(p));
+                sel.set(Some(p.clone()));
+                services().ui.selected_project.set(Some(p));
             }
         }
         // Each route belongs to a menu, so the shell marks the right item however it was reached.
         let mut menu = self.menu;
         match &to {
-            Route::Projects | Route::Search => menu.set(NavMenu::Projects),
-            Route::Conversation(_) => menu.set(NavMenu::Sessions),
+            Route::Projects | Route::Search => {
+                menu.set(NavMenu::Projects);
+                services().ui.menu.set(NavMenu::Projects);
+            }
+            Route::Conversation(_) => {
+                menu.set(NavMenu::Sessions);
+                services().ui.menu.set(NavMenu::Sessions);
+            }
         }
+        services().ui.route.set(to.clone());
         route.set(to);
     }
 
@@ -107,23 +116,46 @@ impl Ui {
             f(&mut w);
             w.clone()
         };
+        services().ui.prefs.set(snapshot.clone());
         save_prefs(snapshot);
     }
 
     /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
     pub fn open_editor(&self, project: String, folder: String) {
+        // No launch data here, so no connection: the editor window shows its own error.
+        self.open_editor_connection(project, folder, None, None);
+    }
+
+    /// Open the editor with the OSE endpoint and token when the server started a runtime.
+    pub fn open_editor_connection(
+        &self,
+        project: String,
+        folder: String,
+        endpoint: Option<String>,
+        token: Option<String>,
+    ) {
+        let target = Some(editor::EditorTarget {
+            project,
+            folder,
+            endpoint: endpoint.unwrap_or_default(),
+            token: token.unwrap_or_default(),
+        });
+        services().ui.editor.set(target.clone());
         let mut e = self.editor;
-        e.set(Some(editor::EditorTarget { project, folder }));
+        e.set(target);
     }
 
     pub fn close_editor(&self) {
         let mut e = self.editor;
         e.set(None);
+        services().ui.close_editor();
     }
 
     pub fn open_new_session(&self, project: Option<String>) {
+        let val = Some(project.unwrap_or_default());
+        services().ui.new_session.set(val.clone());
         let mut d = self.new_session;
-        d.set(Some(project.unwrap_or_default()));
+        d.set(val);
     }
 
     /// Read the live data a session row needs (subscribing the caller to it, previews
@@ -166,7 +198,7 @@ pub fn app() -> Element {
     let new_session = use_signal(|| None::<String>);
     let show_archived = use_signal(|| false);
     let menu = use_signal(initial_menu);
-    let editor = use_signal(|| None::<editor::EditorTarget>);
+    let editor = use_signal(|| services().ui.editor.get_untracked());
     let theme_pref = use_signal(|| services().initial_prefs.theme);
     use_context_provider(|| ThemeCtx { pref: theme_pref });
     use_context_provider(|| Ui {
@@ -183,7 +215,7 @@ pub fn app() -> Element {
     let open = editor.read().clone();
     match open {
         Some(target) => rsx! { editor::EditorScreen { target } },
-        None => rsx! { shell::Shell {} },
+        None => rsx! {},
     }
 }
 

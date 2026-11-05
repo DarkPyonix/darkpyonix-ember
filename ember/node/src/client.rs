@@ -317,6 +317,13 @@ impl NodeClient {
         Self::decode(self.send(Method::POST, path, Some(Self::json(body)), true).await?)
     }
 
+    /// POST `body` to `path` and return the node's status and body untouched, success or not.
+    /// For relays that forward a request as is (the server's `/projects/{name}/git/...`, FR-G4).
+    pub async fn post_raw(&self, path: &str, body: &serde_json::Value) -> Result<(u16, Vec<u8>)> {
+        let raw = self.send(Method::POST, path, Some(Self::json(body)), true).await?;
+        Ok((raw.status.as_u16(), raw.body.to_vec()))
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::decode(self.send(Method::GET, path, None, true).await?)
     }

@@ -1,30 +1,33 @@
-//! The 버전 관리 screen (FR-L19, INTENT D34, `docs/DESIGN.md` section 6.6).
+//! Data and action logic for 버전 관리 (FR-L19, INTENT D34, `docs/DESIGN.md` section 6.6).
 //!
 //! The decisions are plain functions and types in the first half of this file, unit-tested
 //! without a renderer: section routing, the compact tabs, the remote action and ahead/behind
 //! text, the merge gate, unified diff parsing, line, hunk and file staging, and the file tree.
-//! The components in the second half only hand them to dioxus-compose.
+//! The dioxus-compose screen lives in `ui/cr/vcs.rs`.
 //!
-//! No git data exists in the server, node or client yet. [`snapshot`] returns `None`, every data
-//! view says [`SOON`], and nothing is invented. The endpoints the screen needs are listed on
-//! issue #168.
+//! The data comes from the server's `/api/projects/{name}/git/{op}` routes (FR-G4) through
+//! `ember_client::Api::git_*`: [`fetch_snapshot`] reads it, [`build_snapshot`] maps status and
+//! unified diffs into [`FileDiff`]s, and [`plan_staging`] and [`build_patch`] turn the line
+//! staging into server calls. The data views say [`SOON`] when the server is unreachable or a
+//! section is not built. A project that is not a repository shows "이 프로젝트의 경로는 git
+//! 저장소가 아닙니다". Sections beyond changes and branches still wait for their endpoints (#168).
 //!
 //! What the pinned toolkit cannot do yet, with the workaround used (`GAPS-WORKLIST.md`):
-//! - no clickable Row or Column: a text Button is the hit target of a row or a diff line;
-//! - no sticky column: the line check sits in the row and scrolls with it;
-//! - no SVG graph: the history is a list first (TODO: draw the graph on a `Canvas`).
+//! - no clickable Row or Column: a text Button is the hit target of a row or a diff line (TODO(compose-rust#372): drop once Row/Column on_click is confirmed);
+//! - no sticky column: the line check sits in the row and scrolls with it (TODO(compose-rust#424));
+//! - no SVG graph: the history is a list first (TODO(compose-rust#308): draw the graph on a `Canvas`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dioxus_compose::prelude::*;
+use dioxus_compose::prelude::WindowSizeClass;
 
-use crate::services::services;
-use crate::ui::components::{AppButton, ButtonKind, EmberCard, Label, PickChip, Pill, PillTone};
-use crate::ui::home::MenuItem;
-use crate::ui::project::{display_name, is_default_project, project_boxes, ProjectBox};
-use crate::ui::shell::NavMenu;
-use crate::ui::theme::*;
-use crate::ui::{use_ui, Route, Ui};
+use ember_client::api::{ApiError, GitCommitted, GitConflicts, GitDiff, GitOutput, GitStatus};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
+
+use crate::demo::GitError;
+use crate::services::{run, services};
+use crate::ui::project::{is_default_project, ProjectBox};
 
 /// What a view shows while the server does not provide its data.
 pub const SOON: &str = "준비 중입니다";
@@ -317,6 +320,8 @@ pub struct DiffLine {
     pub old_no: Option<u32>,
     /// The line number in the new file; `None` for a deleted line.
     pub new_no: Option<u32>,
+    /// A `\ No newline at end of file` marker followed this line.
+    pub no_eol: bool,
 }
 
 impl DiffLine {
@@ -373,6 +378,8 @@ pub struct FileDiff {
     pub old_path: Option<String>,
     pub status: FileStatus,
     pub binary: bool,
+    /// The file mode from `new file mode`, `old mode` or `new mode`; `None` when the diff has none.
+    pub mode: Option<String>,
     pub hunks: Vec<Hunk>,
 }
 
@@ -417,6 +424,87 @@ fn strip_side(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Read one C-quoted string (git quotes a path with a quote, a backslash, a control character or,
+/// unless `core.quotepath=false`, a non-ASCII byte) from the start of `s`. Returns the decoded text
+/// and what follows the closing quote. `None` when `s` does not start with a complete quoted string.
+fn unquote_c(s: &str) -> Option<(String, &str)> {
+    let body = s.strip_prefix('"')?;
+    let bytes = body.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some((String::from_utf8_lossy(&out).into_owned(), &body[i + 1..])),
+            b'\\' => {
+                i += 1;
+                let c = *bytes.get(i)?;
+                match c {
+                    b'0'..=b'7' => {
+                        let mut v = 0u32;
+                        let mut n = 0;
+                        while n < 3 && i < bytes.len() && (b'0'..=b'7').contains(&bytes[i]) {
+                            v = v * 8 + u32::from(bytes[i] - b'0');
+                            i += 1;
+                            n += 1;
+                        }
+                        out.push((v & 0xff) as u8);
+                        continue;
+                    }
+                    b'n' => out.push(b'\n'),
+                    b't' => out.push(b'\t'),
+                    b'r' => out.push(b'\r'),
+                    b'a' => out.push(7),
+                    b'b' => out.push(8),
+                    b'f' => out.push(12),
+                    b'v' => out.push(11),
+                    other => out.push(other),
+                }
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// A path as it follows `--- `, `+++ `, `rename from ` or `rename to `: quoted or plain. A plain
+/// path with spaces carries a trailing tab in `---`/`+++` lines, which is not part of the name.
+fn path_field(s: &str) -> String {
+    match unquote_c(s) {
+        Some((p, _)) => p,
+        None => s.trim_end_matches('\t').to_string(),
+    }
+}
+
+/// The new-side path of a `diff --git <a> <b>` header (the text after `diff --git `). Handles
+/// quoted names on either side, and unquoted names with spaces.
+fn git_header_path(rest: &str) -> String {
+    if rest.starts_with('"') {
+        if let Some((_, tail)) = unquote_c(rest) {
+            let tail = tail.trim_start();
+            return strip_side(&path_field(tail)).to_string();
+        }
+    }
+    if let Some(i) = rest.rfind(" \"") {
+        if let Some((b, _)) = unquote_c(&rest[i + 1..]) {
+            return strip_side(&b).to_string();
+        }
+    }
+    // Same name on both sides: `a/P b/P` is 2L + 5 bytes long.
+    if rest.starts_with("a/") && rest.len() >= 5 && (rest.len() - 5) % 2 == 0 {
+        let l = (rest.len() - 5) / 2;
+        if rest.is_char_boundary(2 + l) && rest[2 + l..].starts_with(" b/") && rest[2..2 + l] == rest[2 + l + 3..] {
+            return rest[2 + l + 3..].to_string();
+        }
+    }
+    rest.rsplit_once(" b/")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_else(|| strip_side(rest).to_string())
+}
+
 /// Parse the output of `git diff` (or any unified diff) into files, hunks and lines.
 ///
 /// A hunk's lengths decide where its content ends, so a deleted line that reads `-- x` (shown
@@ -434,7 +522,13 @@ pub fn parse_unified(text: &str) -> Vec<FileDiff> {
             old_path: None,
             status: FileStatus::Modified,
             binary: false,
+            mode: None,
             hunks: Vec::new(),
+        }
+    }
+    fn mark_no_eol(open: &mut Option<Hunk>) {
+        if let Some(l) = open.as_mut().and_then(|h| h.lines.last_mut()) {
+            l.no_eol = true;
         }
     }
     fn close(cur: &mut Option<FileDiff>, open: &mut Option<Hunk>) {
@@ -450,7 +544,10 @@ pub fn parse_unified(text: &str) -> Vec<FileDiff> {
                 Some('-') => (LineKind::Del, &line[1..]),
                 Some(' ') => (LineKind::Context, &line[1..]),
                 None => (LineKind::Context, ""),
-                Some('\\') => continue,
+                Some('\\') => {
+                    mark_no_eol(&mut open);
+                    continue;
+                }
                 Some(_) => (LineKind::Context, line),
             };
             let (old_no, new_no) = match kind {
@@ -478,21 +575,19 @@ pub fn parse_unified(text: &str) -> Vec<FileDiff> {
                     text: body.to_string(),
                     old_no,
                     new_no,
+                    no_eol: false,
                 });
             }
             continue;
         }
         if line.starts_with('\\') {
+            mark_no_eol(&mut open);
             continue;
         }
         if let Some(rest) = line.strip_prefix("diff --git ") {
             close(&mut cur, &mut open);
             files.extend(cur.take());
-            let path = rest
-                .rsplit_once(" b/")
-                .map(|(_, b)| b)
-                .unwrap_or_else(|| strip_side(rest));
-            cur = Some(blank(path));
+            cur = Some(blank(&git_header_path(rest)));
         } else if let Some((os, ol, ns, nl)) = parse_hunk_header(line) {
             close(&mut cur, &mut open);
             if cur.is_none() {
@@ -520,28 +615,35 @@ pub fn parse_unified(text: &str) -> Vec<FileDiff> {
             }
             if let Some(f) = cur.as_mut() {
                 if p != "/dev/null" {
-                    f.old_path = Some(strip_side(p).to_string());
+                    let old = path_field(p);
+                    f.old_path = Some(strip_side(&old).to_string());
                     if f.path.is_empty() {
-                        f.path = strip_side(p).to_string();
+                        f.path = strip_side(&old).to_string();
                     }
                 }
             }
         } else if let Some(p) = line.strip_prefix("+++ ") {
             if let Some(f) = cur.as_mut() {
                 if p != "/dev/null" {
-                    f.path = strip_side(p).to_string();
+                    f.path = strip_side(&path_field(p)).to_string();
                 }
             }
         } else if let Some(f) = cur.as_mut() {
-            if line.starts_with("new file mode") {
+            if let Some(m) = line.strip_prefix("new file mode ") {
                 f.status = FileStatus::Added;
-            } else if line.starts_with("deleted file mode") {
+                f.mode = Some(m.trim().to_string());
+            } else if let Some(m) = line.strip_prefix("deleted file mode ") {
                 f.status = FileStatus::Deleted;
+                f.mode = Some(m.trim().to_string());
+            } else if let Some(m) = line.strip_prefix("old mode ") {
+                f.mode.get_or_insert_with(|| m.trim().to_string());
+            } else if let Some(m) = line.strip_prefix("new mode ") {
+                f.mode = Some(m.trim().to_string());
             } else if let Some(from) = line.strip_prefix("rename from ") {
                 f.status = FileStatus::Renamed;
-                f.old_path = Some(from.to_string());
+                f.old_path = Some(path_field(from));
             } else if let Some(to) = line.strip_prefix("rename to ") {
-                f.path = to.to_string();
+                f.path = path_field(to);
             } else if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
                 f.binary = true;
             }
@@ -871,7 +973,6 @@ pub fn build_tree(paths: &[String], folded: &BTreeSet<String>) -> Vec<TreeRow> {
 // ---------------------------------------------------------------------------------------------
 
 /// What the screen reads of a project's repository.
-/// TODO(server): nothing provides this yet; see [`snapshot`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RepoSnapshot {
     pub branch: String,
@@ -881,13 +982,388 @@ pub struct RepoSnapshot {
     pub fetched_age_secs: Option<u64>,
     pub branches: Vec<String>,
     pub changes: Vec<FileDiff>,
+    /// Paths already fully staged in the index when the snapshot was read.
+    pub staged: BTreeSet<String>,
+    /// Paths with unresolved merge conflicts (`git/conflicts`).
+    pub conflicts: Vec<String>,
 }
 
-/// The repository of a project, read on the project's computer through ember node.
-/// TODO(server, #168): needs git status, diff, stage, commit, log graph, branches, pull requests,
-/// stash, and push, pull and fetch. Until then this is `None` and the screen says [`SOON`].
-pub fn snapshot(_project: &str) -> Option<RepoSnapshot> {
-    None
+/// The state of the repository view of one project.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Load {
+    Loading,
+    Ready(RepoSnapshot),
+    /// The project's path is not a repository (the server answered 404).
+    NotRepo,
+    /// The server could not be reached; the text says why.
+    Unavailable(String),
+    /// The server answered with an error (not 404): the Korean failure line, with the node's
+    /// message. The screen shows it with a retry button.
+    Failed(String),
+}
+
+impl Load {
+    pub fn snapshot(&self) -> Option<&RepoSnapshot> {
+        match self {
+            Load::Ready(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The line under the bar while there is no snapshot.
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Load::Ready(_) => None,
+            Load::Loading => Some("저장소 정보를 불러오는 중입니다".to_string()),
+            Load::NotRepo => Some("이 프로젝트의 경로는 git 저장소가 아닙니다".to_string()),
+            Load::Unavailable(_) => Some(soon_line("저장소 정보")),
+            Load::Failed(text) => Some(text.clone()),
+        }
+    }
+}
+
+/// A server answer as a view state: 404 means not a repository, an unreachable server means the
+/// data is unavailable (준비 중입니다), and any other answer is a failure that shows the node's
+/// message. The node's `not_a_repo` code does not reach [`ApiError`] (only its message does), so
+/// every 404 of a git route reads as "not a repository".
+pub fn load_from(result: Result<RepoSnapshot, ApiError>) -> Load {
+    match result {
+        Ok(s) => Load::Ready(s),
+        Err(e) if e.status() == Some(404) => Load::NotRepo,
+        Err(e @ (ApiError::Peer(_) | ApiError::Transport(_) | ApiError::Push(_) | ApiError::BadUrl(_))) => {
+            Load::Unavailable(e.to_string())
+        }
+        Err(e) => Load::Failed(failure_text("저장소 정보를 확인", &e)),
+    }
+}
+
+/// The file status shown for porcelain v2 characters (index first, then the work tree).
+pub fn status_of(index: char, worktree: char) -> FileStatus {
+    match (index, worktree) {
+        ('R', _) | (_, 'R') | ('C', _) | (_, 'C') => FileStatus::Renamed,
+        ('D', _) | (_, 'D') => FileStatus::Deleted,
+        ('A', _) | ('?', _) => FileStatus::Added,
+        _ => FileStatus::Modified,
+    }
+}
+
+/// Files by path in a unified diff.
+fn diffs_by_path(patch: &str) -> BTreeMap<String, FileDiff> {
+    parse_unified(patch)
+        .into_iter()
+        .map(|d| (d.path.clone(), d))
+        .collect()
+}
+
+/// Paths of untracked files in a status, which have no entry in `git diff`.
+pub fn untracked_paths(status: &GitStatus) -> Vec<String> {
+    status
+        .files
+        .iter()
+        .filter(|f| f.index == '?' && f.worktree == '?')
+        .map(|f| f.path.clone())
+        .collect()
+}
+
+/// Map a status and its diffs into a snapshot. A file takes its work tree diff, else its staged
+/// diff, else the diff read for an untracked file; one with none shows no hunks. The status
+/// decides the file's status letter and whether it starts staged (index changed, work tree
+/// clean).
+pub fn build_snapshot(
+    status: &GitStatus,
+    unstaged: &str,
+    staged: &str,
+    untracked: &BTreeMap<String, String>,
+) -> RepoSnapshot {
+    let work = diffs_by_path(unstaged);
+    let index = diffs_by_path(staged);
+    let mut changes = Vec::new();
+    let mut already = BTreeSet::new();
+    for f in &status.files {
+        let mut d = work
+            .get(&f.path)
+            .or_else(|| index.get(&f.path))
+            .cloned()
+            .or_else(|| {
+                untracked
+                    .get(&f.path)
+                    .and_then(|p| parse_unified(p).into_iter().next())
+            })
+            .unwrap_or_else(|| FileDiff {
+                path: f.path.clone(),
+                old_path: None,
+                status: FileStatus::Modified,
+                binary: false,
+                mode: None,
+                hunks: Vec::new(),
+            });
+        d.path = f.path.clone();
+        d.status = status_of(f.index, f.worktree);
+        if f.old_path.is_some() {
+            d.old_path = f.old_path.clone();
+        }
+        if !matches!(f.index, '.' | '?' | ' ') && f.worktree == '.' {
+            already.insert(f.path.clone());
+        }
+        changes.push(d);
+    }
+    RepoSnapshot {
+        branch: status.branch.clone(),
+        upstream: status.upstream.clone(),
+        ahead: status.ahead,
+        behind: status.behind,
+        fetched_age_secs: status.fetched_age_secs,
+        branches: status.branches.clone(),
+        changes,
+        staged: already,
+        conflicts: Vec::new(),
+    }
+}
+
+/// A demo source answer as an API result: the status and message of its error become an
+/// [`ApiError::Status`], so the demo and the server share the same load states.
+pub fn git_result<T: DeserializeOwned>(r: Result<Value, GitError>) -> Result<T, ApiError> {
+    let v = r.map_err(|e| ApiError::Status { status: e.status, message: format!("{}: {}", e.code, e.message) })?;
+    serde_json::from_value(v).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// One git operation of a project: the demo source when the app serves itself, else the main
+/// server. `body` is the contract's body without `repo`; the answer is decoded into `T` (use
+/// `Value` for the operations that answer 204).
+pub async fn git_call<T: DeserializeOwned>(project: &str, op: &str, body: Value) -> Result<T, ApiError> {
+    let svc = services();
+    let v = match &svc.demo {
+        Some(demo) => return git_result(demo.git(project, op, &body)),
+        None => svc.client.api().git_raw(project, op, body).await?,
+    };
+    serde_json::from_value(v).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+/// The `git/diff` body of the whole work tree or the index. `include_untracked` makes the node
+/// add the untracked files to the one patch (only meaningful with `staged: false`).
+pub fn diff_body(staged: bool, include_untracked: bool) -> Value {
+    json!({ "path": null, "staged": staged, "include_untracked": include_untracked })
+}
+
+async fn git_diff_of(project: &str, staged: bool) -> Result<String, ApiError> {
+    let d: GitDiff = git_call(project, "diff", diff_body(staged, !staged)).await?;
+    Ok(d.patch)
+}
+
+/// Read a project's repository: status, the work tree diff (untracked files included, in one
+/// call), the staged diff and the conflicts. Runs on the runtime, not the UI thread.
+pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
+    let status: GitStatus = git_call(project, "status", json!({})).await?;
+    let conflicts = match git_call::<GitConflicts>(project, "conflicts", json!({})).await {
+        Ok(c) => c.paths,
+        // The conflict list is secondary: a failure here leaves the section empty, not the screen.
+        Err(e) => {
+            tracing::warn!("reading the conflicts failed: {e}");
+            Vec::new()
+        }
+    };
+    let unstaged = git_diff_of(project, false).await?;
+    let staged = git_diff_of(project, true).await?;
+    let mut snap = build_snapshot(&status, &unstaged, &staged, &BTreeMap::new());
+    snap.conflicts = conflicts;
+    Ok(snap)
+}
+
+/// One call that brings the index to the staging the user chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageOp {
+    Stage(Vec<String>),
+    Unstage(Vec<String>),
+    /// A patch of only the staged lines of one file.
+    Apply(String),
+}
+
+/// A unified patch holding only the staged lines of `diff`: an unstaged addition is left out and
+/// an unstaged deletion stays as context. `None` when no line is staged.
+pub fn build_patch(diff: &FileDiff, staging: &FileStaging) -> Option<String> {
+    let old = diff.old_path.as_deref().unwrap_or(&diff.path);
+    let mut out = format!("diff --git a/{old} b/{}\n", diff.path);
+    if diff.status == FileStatus::Added {
+        let mode = diff.mode.as_deref().unwrap_or("100644");
+        out.push_str(&format!("new file mode {mode}\n--- /dev/null\n"));
+    } else {
+        out.push_str(&format!("--- a/{old}\n"));
+    }
+    out.push_str(&format!("+++ b/{}\n", diff.path));
+    let mut any = false;
+    // The lines already added or removed by earlier hunks shift where a later hunk lands.
+    let mut shift: i64 = 0;
+    for (hi, h) in diff.hunks.iter().enumerate() {
+        let mut body = String::new();
+        let (mut old_len, mut new_len) = (0u32, 0u32);
+        let mut picked = false;
+        for (li, l) in h.lines.iter().enumerate() {
+            let on = staging.is_staged(hi, li);
+            match (l.kind, on) {
+                (LineKind::Context, _) | (LineKind::Del, false) => {
+                    body.push_str(&format!(" {}\n", l.text));
+                    old_len += 1;
+                    new_len += 1;
+                }
+                (LineKind::Add, true) => {
+                    body.push_str(&format!("+{}\n", l.text));
+                    new_len += 1;
+                    picked = true;
+                }
+                (LineKind::Del, true) => {
+                    body.push_str(&format!("-{}\n", l.text));
+                    old_len += 1;
+                    picked = true;
+                }
+                (LineKind::Add, false) => continue,
+            }
+            // The line had no newline in the diff; never invent one.
+            if l.no_eol {
+                body.push_str("\\ No newline at end of file\n");
+            }
+        }
+        if !picked {
+            continue;
+        }
+        any = true;
+        let new_start = (h.old_start as i64 + shift).max(0);
+        out.push_str(&format!("@@ -{},{} +{},{} @@\n", h.old_start, old_len, new_start, new_len));
+        out.push_str(&body);
+        shift += new_len as i64 - old_len as i64;
+    }
+    any.then_some(out)
+}
+
+/// The calls that make the index match `staging`, for the files that changed. A file fully
+/// checked is staged whole (unless the index has it already); a partly checked one goes as a
+/// patch; an unchecked one is unstaged when the index had it.
+pub fn plan_staging(snap: &RepoSnapshot, staging: &Staging) -> Vec<StageOp> {
+    let (mut stage, mut unstage, mut patches) = (Vec::new(), Vec::new(), Vec::new());
+    for d in &snap.changes {
+        let in_index = snap.staged.contains(&d.path);
+        let no_lines = d.added() + d.removed() == 0;
+        match staging.check(d) {
+            Check::On => {
+                if !in_index {
+                    stage.push(d.path.clone());
+                }
+            }
+            Check::Partial => {
+                if let Some(p) = staging.file(&d.path).and_then(|s| build_patch(d, s)) {
+                    patches.push(StageOp::Apply(p));
+                }
+            }
+            Check::Off => {
+                // A file without lines (binary, empty) has no check to uncheck: keep the index.
+                if in_index && !no_lines {
+                    unstage.push(d.path.clone());
+                }
+            }
+        }
+    }
+    let mut ops = Vec::new();
+    if !unstage.is_empty() {
+        ops.push(StageOp::Unstage(unstage));
+    }
+    if !stage.is_empty() {
+        ops.push(StageOp::Stage(stage));
+    }
+    ops.extend(patches);
+    ops
+}
+
+/// What the commit button hands over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRequest {
+    pub ops: Vec<StageOp>,
+    pub summary: String,
+    /// The commit body; empty means none.
+    pub description: String,
+    pub amend: bool,
+}
+
+/// The `git/commit` body: an empty description is sent as `null`.
+pub fn commit_body(req: &CommitRequest) -> Value {
+    let d = req.description.trim();
+    json!({
+        "summary": req.summary,
+        "description": if d.is_empty() { Value::Null } else { Value::from(d) },
+        "amend": req.amend,
+    })
+}
+
+/// Staging calls in order, then the commit. Stops at the first failure.
+pub async fn run_commit(project: &str, req: CommitRequest) -> Result<String, ApiError> {
+    for op in &req.ops {
+        let (name, body) = match op {
+            StageOp::Stage(p) => ("stage", json!({ "paths": p })),
+            StageOp::Unstage(p) => ("unstage", json!({ "paths": p })),
+            StageOp::Apply(patch) => ("apply", json!({ "patch": patch, "reverse": false })),
+        };
+        git_call::<Value>(project, name, body).await?;
+    }
+    let body = commit_body(&req);
+    let done: GitCommitted = git_call(project, "commit", body).await?;
+    Ok(commit_done_text(&done.sha))
+}
+
+/// "커밋했습니다 (abc1234)".
+pub fn commit_done_text(sha: &str) -> String {
+    let short: String = sha.chars().take(7).collect();
+    format!("커밋했습니다 ({short})")
+}
+
+/// Fetch, pull or push, as the remote button's action says.
+pub async fn run_remote(project: &str, action: RemoteAction) -> Result<String, ApiError> {
+    let op = match action {
+        RemoteAction::Pull(_) => "pull",
+        RemoteAction::Push(_) => "push",
+        RemoteAction::Fetch => "fetch",
+    };
+    let out: GitOutput = git_call(project, op, json!({ "remote": null })).await?;
+    Ok(remote_done_text(action, &out.output))
+}
+
+/// The notice after a remote action: the first line git printed, else a plain "done".
+pub fn remote_done_text(action: RemoteAction, output: &str) -> String {
+    let name = match action {
+        RemoteAction::Pull(_) => "Pull",
+        RemoteAction::Push(_) => "Push",
+        RemoteAction::Fetch => "Fetch",
+    };
+    match output.lines().map(str::trim).find(|l| !l.is_empty()) {
+        Some(line) => format!("{name} 완료: {line}"),
+        None => format!("{name}을 마쳤습니다"),
+    }
+}
+
+/// A name the new-branch button accepts: not empty, no spaces, and none of the characters git
+/// refuses in a ref name. The server answers 400 for anything else git rejects.
+pub fn valid_branch_name(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty()
+        && !n.starts_with('-')
+        && !n.starts_with('/')
+        && !n.ends_with('/')
+        && !n.ends_with('.')
+        && !n.contains("..")
+        && !n.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
+}
+
+/// Whether a text holds Hangul, so it is already a Korean sentence.
+fn is_korean(text: &str) -> bool {
+    text.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c))
+}
+
+/// The notice for a failed call. A Korean message from the node is shown as it is (the node
+/// writes the whole sentence, detail after it); an English one (git's own, or a demo's) goes
+/// after "{what}하지 못했습니다:".
+pub fn failure_text(what: &str, e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { message, .. } => format!("{what}하지 못했습니다: {message}"),
+        other => format!("{what}하지 못했습니다. 서버에 닿지 않습니다: {other}"),
+    }
 }
 
 /// The count beside a section's name; `None` while the data is unavailable.
@@ -896,6 +1372,7 @@ pub fn section_count(section: Section, snap: Option<&RepoSnapshot>) -> Option<us
     match section {
         Section::Changes => Some(s.changes.len()),
         Section::Branches => Some(s.branches.len()),
+        Section::Conflicts => Some(s.conflicts.len()),
         _ => None,
     }
 }
@@ -918,591 +1395,12 @@ pub fn pick_project(selected: Option<&str>, boxes: &[ProjectBox]) -> Option<Stri
         .map(|b| b.id.clone())
 }
 
-/// Open 버전 관리 on a project (from the project screen and the session top bar).
-pub fn open_for_project(ui: Ui, project: &str) {
-    let mut sel = ui.selected_project;
-    sel.set(Some(project.to_string()));
-    // Leaves an open conversation; the menu is set after, because `go` marks 프로젝트.
-    ui.go(Route::Projects);
-    let mut menu = ui.menu;
-    menu.set(NavMenu::VersionControl);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Components
-// ---------------------------------------------------------------------------------------------
-
-fn notice(text: &str) {
-    Message::new(text.to_string())
-        .with_duration(MessageDuration::Short)
-        .show();
-}
-
-#[component]
-fn SmallNote(#[props(into)] text: String) -> Element {
-    let p = use_ember_theme().palette;
-    rsx! { Label { text, fs: Fs::Xs, color: paint(p.text_2) } }
-}
-
-#[component]
-fn Unavailable(section: Section) -> Element {
-    let p = use_ember_theme().palette;
-    rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[4],
-                space_role: SpaceRole::Sm,
-                Label { text: section.label(), fs: Fs::Lg, weight: Weight::Semibold }
-                // TODO(server, #168): this section needs the repository endpoints listed there.
-                Label { text: SOON, color: paint(p.text_2) }
-            }
-        }
-    }
-}
-
-/// The bar of three: repository, current branch, remote origin.
-#[component]
-fn RepoBar(
-    projects: Vec<(String, String)>,
-    project: ProjectBox,
-    snap: Option<RepoSnapshot>,
-    compact: bool,
-    on_pick: EventHandler<String>,
-) -> Element {
-    let mut project_menu = use_signal(|| false);
-    let mut branch_menu = use_signal(|| false);
-    let has = snap.is_some();
-    let (ahead, behind) = snap.as_ref().map_or((0, 0), |s| (s.ahead, s.behind));
-    let action = remote_action(ahead, behind);
-    let branch_text = match (&snap, &project.branch) {
-        (Some(s), _) => s.branch.clone(),
-        (None, Some(b)) => b.clone(),
-        _ => "브랜치".to_string(),
-    };
-    let upstream = snap
-        .as_ref()
-        .map(|s| upstream_text(s.upstream.as_deref()))
-        .unwrap_or_else(|| SOON.to_string());
-    let remote_line = match &snap {
-        Some(s) => format!(
-            "{} \u{00b7} {}",
-            ahead_behind_text(s.ahead, s.behind),
-            fetched_text(s.fetched_age_secs)
-        ),
-        None => SOON.to_string(),
-    };
-    let branches = snap
-        .as_ref()
-        .map(|s| s.branches.clone())
-        .unwrap_or_default();
-    let current_branch = snap.as_ref().map(|s| s.branch.clone());
-
-    let repo_cell = rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[2],
-                space_role: SpaceRole::Xs,
-                SmallNote { text: "저장소" }
-                Menu {
-                    expanded: project_menu(),
-                    on_dismiss: move |_| project_menu.set(false),
-                    anchor: rsx! {
-                        PickChip {
-                            text: display_name(&project.id),
-                            icon: IconRole::Library,
-                            on_click: move |()| project_menu.set(true),
-                        }
-                    },
-                    for (id, name) in projects.iter().cloned() {
-                        MenuItem {
-                            key: "{id}",
-                            text: name.clone(),
-                            selected: id == project.id,
-                            on_click: move |()| {
-                                on_pick.call(id.clone());
-                                project_menu.set(false);
-                            },
-                        }
-                    }
-                }
-                SmallNote { text: project.repo_line() }
-            }
-        }
-    };
-    let branch_cell = rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[2],
-                space_role: SpaceRole::Xs,
-                SmallNote { text: "현재 브랜치" }
-                Menu {
-                    expanded: branch_menu(),
-                    on_dismiss: move |_| branch_menu.set(false),
-                    anchor: rsx! {
-                        PickChip {
-                            text: branch_text.clone(),
-                            icon: IconRole::List,
-                            on_click: move |()| branch_menu.set(true),
-                        }
-                    },
-                    if branches.is_empty() {
-                        Label { text: soon_line("브랜치 목록"), fs: Fs::Sm }
-                    }
-                    for b in branches.iter().cloned() {
-                        MenuItem {
-                            key: "{b}",
-                            text: b.clone(),
-                            selected: Some(&b) == current_branch.as_ref(),
-                            // TODO(server, #168): checkout.
-                            on_click: move |()| {
-                                notice(&soon_line("브랜치 전환"));
-                                branch_menu.set(false);
-                            },
-                        }
-                    }
-                    // TODO(server, #168): create a branch.
-                    AppButton { text: "새 브랜치", icon: IconRole::Add, small: true, enabled: false }
-                }
-                SmallNote { text: upstream.clone() }
-            }
-        }
-    };
-    let remote_cell = rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[2],
-                space_role: SpaceRole::Xs,
-                SmallNote { text: "원격 origin" }
-                Row {
-                    fill_max_width: true,
-                    space_role: SpaceRole::Sm,
-                    alignment: Alignment::CenterStart,
-                    // TODO(server, #168): pull, push and fetch run on the project's computer.
-                    AppButton {
-                        text: action.label(),
-                        kind: ButtonKind::Primary,
-                        small: true,
-                        enabled: has,
-                        on_click: move |()| notice(&soon_line("원격 동작")),
-                    }
-                }
-                SmallNote { text: remote_line.clone() }
-            }
-        }
-    };
-
-    rsx! {
-        if compact {
-            Column { fill_max_width: true, space_role: SpaceRole::Sm, {repo_cell} {branch_cell} {remote_cell} }
-        } else {
-            Row {
-                fill_max_width: true,
-                space_role: SpaceRole::Sm,
-                Column { weight: 1.0, {repo_cell} }
-                Column { weight: 1.0, {branch_cell} }
-                Column { weight: 1.5, {remote_cell} }
-            }
-        }
-    }
-}
-
-/// The section list on the left (wide windows) with counts.
-#[component]
-fn SectionList(
-    active: Section,
-    snap: Option<RepoSnapshot>,
-    on_pick: EventHandler<Section>,
-) -> Element {
-    let p = use_ember_theme().palette;
-    rsx! {
-        Column {
-            width: 200.0,
-            space_role: SpaceRole::Xs,
-            for sec in Section::ALL {
-                Button {
-                    key: "{sec.key()}",
-                    text: match section_count(sec, snap.as_ref()) {
-                        Some(n) => format!("{}  {n}", sec.label()),
-                        None => sec.label().to_string(),
-                    },
-                    variant: ButtonVariant::Text,
-                    fill_max_width: true,
-                    height: H_NAV_ITEM,
-                    shape_role: ShapeRole::Full,
-                    background: if sec == active { paint(p.sel) } else { paint(p.bg) },
-                    color: paint(if sec == active { p.text } else { p.muted }),
-                    on_click: move |()| on_pick.call(sec),
-                }
-            }
-        }
-    }
-}
-
-/// The section pills above the panes (medium and compact windows).
-#[component]
-fn SectionPills(active: Section, on_pick: EventHandler<Section>) -> Element {
-    rsx! {
-        ScrollRow {
-            fill_max_width: true,
-            Row {
-                spacing: SP[1],
-                for sec in Section::ALL {
-                    PickChip {
-                        key: "{sec.key()}",
-                        text: sec.label(),
-                        selected: sec == active,
-                        on_click: move |()| on_pick.call(sec),
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn PaneTabs(section: Section, active: Option<PaneTab>, on_pick: EventHandler<PaneTab>) -> Element {
-    rsx! {
-        Row {
-            fill_max_width: true,
-            spacing: SP[1],
-            for t in pane_tabs(section).iter().copied() {
-                PickChip {
-                    key: "{t.label()}",
-                    text: t.label(),
-                    selected: Some(t) == active,
-                    on_click: move |()| on_pick.call(t),
-                }
-            }
-        }
-    }
-}
-
-/// The changes section: tree, diff and commit box.
-#[component]
-fn ChangesPane(
-    snap: RepoSnapshot,
-    layout: PaneLayout,
-    tab: Option<PaneTab>,
-    on_tab: EventHandler<PaneTab>,
-) -> Element {
-    let p = use_ember_theme().palette;
-    let diffs = snap.changes.clone();
-    let mut staging = use_signal(|| Staging::new(&diffs, false));
-    let mut folded = use_signal(BTreeSet::<String>::new);
-    let mut selected = use_signal(|| 0usize);
-    let mut summary = use_signal(String::new);
-    let mut amend = use_signal(|| false);
-
-    let paths: Vec<String> = diffs.iter().map(|d| d.path.clone()).collect();
-    let rows = build_tree(&paths, &folded.read());
-    let sel = (*selected.read()).min(diffs.len().saturating_sub(1));
-    let staged_files = staging.read().staged_files(&diffs);
-    let can_commit = commit_enabled(&summary.read(), staged_files, *amend.read());
-
-    let files_pane = rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[2],
-                space_role: SpaceRole::Xs,
-                Row {
-                    fill_max_width: true,
-                    alignment: Alignment::CenterStart,
-                    Button {
-                        text: format!("{}  변경 파일 {}", check_glyph(folder_check(&diffs.iter().map(|d| staging.read().check(d)).collect::<Vec<_>>())), diffs.len()),
-                        variant: ButtonVariant::Text,
-                        on_click: { let d = diffs.clone(); move |()| staging.write().toggle_all(&d) },
-                    }
-                }
-                for row in rows.iter().cloned() {
-                    match row {
-                        TreeRow::Dir { label, path, depth, open } => rsx! {
-                            Row {
-                                key: "{path}",
-                                fill_max_width: true,
-                                Spacer { width: depth as f32 * SP[3] },
-                                Button {
-                                    text: format!("{} {label}", if open { "\u{25be}" } else { "\u{25b8}" }),
-                                    variant: ButtonVariant::Text,
-                                    on_click: move |()| {
-                                        let mut f = folded.write();
-                                        if !f.remove(&path) { f.insert(path.clone()); }
-                                    },
-                                }
-                            }
-                        },
-                        TreeRow::File { index, name, depth } => rsx! {
-                            Row {
-                                key: "{index}",
-                                fill_max_width: true,
-                                Spacer { width: depth as f32 * SP[3] },
-                                Button {
-                                    text: check_glyph(staging.read().check(&diffs[index])),
-                                    variant: ButtonVariant::Text,
-                                    on_click: { let d = diffs[index].clone(); move |()| staging.write().toggle_file(&d) },
-                                }
-                                Button {
-                                    text: format!("{name}  {}", diffs[index].status.letter()),
-                                    variant: ButtonVariant::Text,
-                                    background: if index == sel { paint(p.sel) } else { paint(p.surface) },
-                                    on_click: move |()| {
-                                        selected.set(index);
-                                        on_tab.call(tab_after_select(PaneTab::Files));
-                                    },
-                                }
-                            }
-                        },
-                    }
-                }
-            }
-        }
-    };
-
-    let diff_pane = rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[2],
-                space_role: SpaceRole::Xs,
-                if let Some(file) = diffs.get(sel).cloned() {
-                    DiffView { file: file.clone(), staging }
-                } else {
-                    Label { text: "변경 사항이 없습니다. 작업 트리가 깨끗합니다", color: paint(p.text_2) }
-                }
-            }
-        }
-    };
-
-    let commit_pane = rsx! {
-        EmberCard {
-            fill_max_width: true,
-            Column {
-                fill_max_width: true,
-                padding: SP[2],
-                space_role: SpaceRole::Sm,
-                TextField {
-                    fill_max_width: true,
-                    placeholder: "요약 (필수)",
-                    on_value_change: move |v: String| summary.set(v),
-                }
-                Row {
-                    fill_max_width: true,
-                    alignment: Alignment::CenterStart,
-                    space_role: SpaceRole::Sm,
-                    Switch { checked: amend(), on_change: move |v: bool| amend.set(v) }
-                    Label { text: "마지막 커밋 수정 (amend)", fs: Fs::Sm }
-                }
-                // TODO(server, #168): commit only the staged lines (apply a patch built from the staging).
-                AppButton {
-                    text: commit_label(&snap.branch, staged_files),
-                    kind: ButtonKind::Primary,
-                    enabled: false,
-                    on_click: move |()| notice(&soon_line("커밋")),
-                }
-                SmallNote { text: if can_commit { SOON.to_string() } else { "요약과 스테이징한 파일이 필요합니다".to_string() } }
-            }
-        }
-    };
-
-    rsx! {
-        match layout {
-            PaneLayout::Two => rsx! {
-                Row { fill_max_width: true, space_role: SpaceRole::Sm,
-                    Column { width: 320.0, {files_pane} }
-                    Column { weight: 1.0, space_role: SpaceRole::Sm, {diff_pane} {commit_pane} }
-                }
-            },
-            PaneLayout::Stacked => rsx! {
-                Column { fill_max_width: true, space_role: SpaceRole::Sm, {files_pane} {diff_pane} {commit_pane} }
-            },
-            PaneLayout::Tabs => rsx! {
-                Column { fill_max_width: true, space_role: SpaceRole::Sm,
-                    PaneTabs { section: Section::Changes, active: tab, on_pick: move |t| on_tab.call(t) }
-                    match tab.unwrap_or(PaneTab::Files) {
-                        PaneTab::Diff => diff_pane,
-                        PaneTab::Commit => commit_pane,
-                        _ => files_pane,
-                    }
-                }
-            },
-        }
-    }
-}
-
-/// One file's diff with a check per changed line and per hunk.
-#[component]
-fn DiffView(file: FileDiff, staging: Signal<Staging>) -> Element {
-    let p = use_ember_theme().palette;
-    let (on, total) = staging
-        .read()
-        .file(&file.path)
-        .map_or((0, file.added() + file.removed()), |s| s.counts(&file));
-    rsx! {
-        Row {
-            fill_max_width: true,
-            space_role: SpaceRole::Sm,
-            alignment: Alignment::CenterStart,
-            Label { text: file.path.clone(), weight: Weight::Medium, max_lines: 1 }
-            Spacer { weight: 1.0 }
-            Pill { text: format!("+{}", file.added()), tone: PillTone::Green, small: true }
-            Pill { text: format!("-{}", file.removed()), tone: PillTone::Red, small: true }
-            Pill { text: format!("{on}/{total}줄 스테이징"), tone: PillTone::Grey, small: true }
-        }
-        if file.binary {
-            Label { text: "이진 파일은 차이를 보여 주지 않습니다", color: paint(p.text_2) }
-        }
-        for (hi, h) in file.hunks.iter().enumerate() {
-            Row {
-                key: "h{hi}",
-                fill_max_width: true,
-                alignment: Alignment::CenterStart,
-                Label { text: h.header.clone(), fs: Fs::Xs, color: paint(p.text_2), max_lines: 1 }
-                Spacer { weight: 1.0 }
-                AppButton {
-                    text: "이 덩어리 전체",
-                    small: true,
-                    on_click: { let f = file.clone(); move |()| staging.write().file_mut(&f.path).toggle_hunk(&f, hi) },
-                }
-            }
-            for (li, l) in h.lines.iter().enumerate() {
-                Surface {
-                    key: "{hi}:{li}",
-                    fill_max_width: true,
-                    background: match l.kind {
-                        LineKind::Add => paint(p.green.soft),
-                        LineKind::Del => paint(p.red.soft),
-                        LineKind::Context => paint(p.surface),
-                    },
-                    Row {
-                        fill_max_width: true,
-                        alignment: Alignment::CenterStart,
-                        if l.is_change() {
-                            Button {
-                                text: check_glyph(if staging.read().file(&file.path).is_some_and(|s| s.is_staged(hi, li)) { Check::On } else { Check::Off }),
-                                variant: ButtonVariant::Text,
-                                on_click: { let f = file.clone(); move |()| staging.write().file_mut(&f.path).toggle_line(&f, hi, li) },
-                            }
-                        } else {
-                            Spacer { width: H_BTN }
-                        }
-                        Text {
-                            text: format!(
-                                "{:>4} {:>4} {}{}",
-                                l.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                                l.new_no.map(|n| n.to_string()).unwrap_or_default(),
-                                match l.kind { LineKind::Add => "+", LineKind::Del => "-", LineKind::Context => " " },
-                                l.text
-                            ),
-                            type_role: TypeRole::Mono,
-                            max_lines: 1,
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// The screen wired as 버전 관리.
-#[component]
-pub fn VcsScreen() -> Element {
-    let ui = use_ui();
-    let window = use_window_size();
-    let p = use_ember_theme().palette;
-    let class = window.class;
-    let mut section = use_signal(|| Section::Changes);
-    let mut tab = use_signal(|| PaneTab::Files);
-
-    let boxes = {
-        let _ = *ui.live.launcher.read();
-        services().client.read(project_boxes)
-    };
-    let selected = ui.selected_project.read().clone();
-    let current = pick_project(selected.as_deref(), &boxes);
-    let project = current
-        .as_ref()
-        .and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
-    let snap = current.as_deref().and_then(snapshot);
-    let projects: Vec<(String, String)> = repo_projects(&boxes)
-        .into_iter()
-        .map(|b| (b.id.clone(), b.name.clone()))
-        .collect();
-
-    let sec = *section.read();
-    let active_tab = effective_tab(sec, *tab.read());
-    let layout = pane_layout(class);
-    let wide = section_nav(class) == SectionNav::List;
-
-    let panes = match (&snap, sec) {
-        (Some(s), Section::Changes) => rsx! {
-            ChangesPane {
-                key: "{s.branch}",
-                snap: s.clone(),
-                layout,
-                tab: active_tab,
-                on_tab: move |t| tab.set(t),
-            }
-        },
-        _ => rsx! { Unavailable { section: sec } },
-    };
-
-    rsx! {
-        ScrollColumn {
-            fill_max_width: true,
-            weight: 1.0,
-            Column {
-                fill_max_width: true,
-                padding: SP[3],
-                space_role: SpaceRole::Md,
-                Label { text: "버전 관리", fs: Fs::Xl2, weight: Weight::Semibold }
-                if let Some(project) = project {
-                    RepoBar {
-                        key: "{project.id}",
-                        projects,
-                        project: project.clone(),
-                        snap: snap.clone(),
-                        compact: class == WindowSizeClass::Compact,
-                        on_pick: move |id: String| {
-                            let mut s = ui.selected_project;
-                            s.set(Some(id));
-                        },
-                    }
-                    if snap.is_none() {
-                        Label { text: soon_line("저장소 정보"), fs: Fs::Sm, color: paint(p.text_2) }
-                    }
-                    if wide {
-                        Row {
-                            fill_max_width: true,
-                            space_role: SpaceRole::Md,
-                            SectionList { active: sec, snap: snap.clone(), on_pick: move |s| section.set(s) }
-                            Column { weight: 1.0, space_role: SpaceRole::Sm, {panes} }
-                        }
-                    } else {
-                        Column {
-                            fill_max_width: true,
-                            space_role: SpaceRole::Sm,
-                            SectionPills { active: sec, on_pick: move |s| section.set(s) }
-                            if layout == PaneLayout::Tabs && snap.is_none() && !pane_tabs(sec).is_empty() {
-                                PaneTabs { section: sec, active: active_tab, on_pick: move |t| tab.set(t) }
-                            }
-                            {panes}
-                        }
-                    }
-                } else {
-                    Label { text: "저장소를 둘 수 있는 프로젝트가 없습니다" }
-                }
-            }
-        }
+/// The line under the repository chip. A project without a recorded repository (FR-L26) still
+/// has one when the node read it, so the note says "not configured" only while there is no data.
+pub fn repo_card_line(project: &ProjectBox, snap: Option<&RepoSnapshot>) -> String {
+    match (&project.repo, snap) {
+        (None, Some(s)) => format!("git 저장소 \u{00b7} {}", s.branch),
+        _ => project.repo_line(),
     }
 }
 
@@ -1974,7 +1872,6 @@ rename to new.txt
 
     #[test]
     fn no_repository_data_is_invented() {
-        assert!(snapshot("ember").is_none());
         for sec in Section::ALL {
             assert_eq!(section_count(sec, None), None);
         }
@@ -2016,5 +1913,353 @@ rename to new.txt
                 "plain ending: {t}"
             );
         }
+    }
+
+    // ---- git data (FR-G4) ----
+
+    use ember_client::api::GitFile;
+
+    fn gf(path: &str, index: char, worktree: char) -> GitFile {
+        GitFile { path: path.into(), old_path: None, index, worktree }
+    }
+
+    fn status(files: Vec<GitFile>) -> GitStatus {
+        GitStatus {
+            branch: "feat/x".into(),
+            upstream: Some("origin/feat/x".into()),
+            ahead: 2,
+            behind: 1,
+            fetched_age_secs: Some(60),
+            branches: s(&["main", "feat/x"]),
+            files,
+        }
+    }
+
+    #[test]
+    fn a_missing_repository_or_server_is_not_data() {
+        let not_repo = ApiError::Status { status: 404, message: "not_a_repo".into() };
+        assert_eq!(load_from(Err(not_repo)), Load::NotRepo);
+        let down = ApiError::Peer("refused".into());
+        assert!(matches!(load_from(Err(down)), Load::Unavailable(_)));
+        // Any other answer of the node is a failure with its message, not "준비 중입니다".
+        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        let failed = load_from(Err(boom));
+        assert!(matches!(&failed, Load::Failed(t) if t.contains("boom")), "{failed:?}");
+        assert_ne!(failed.note(), Some(soon_line("저장소 정보")));
+        let busy = ApiError::Status { status: 409, message: "병합 중이라 차이를 읽지 못했습니다: x".into() };
+        assert_eq!(load_from(Err(busy)), Load::Failed("병합 중이라 차이를 읽지 못했습니다: x".into()));
+        assert!(matches!(load_from(Err(ApiError::Decode("bad".into()))), Load::Failed(_)));
+        assert!(Load::Loading.snapshot().is_none());
+        assert_eq!(Load::Unavailable("x".into()).note(), Some(soon_line("저장소 정보")));
+        assert!(Load::NotRepo.note().unwrap().contains("저장소가 아닙니다"));
+        assert_eq!(Load::Ready(RepoSnapshot::default()).note(), None);
+        assert_eq!(SOON, "준비 중입니다");
+    }
+
+    #[test]
+    fn porcelain_characters_map_to_file_statuses() {
+        assert_eq!(status_of('M', '.'), FileStatus::Modified);
+        assert_eq!(status_of('.', 'M'), FileStatus::Modified);
+        assert_eq!(status_of('A', '.'), FileStatus::Added);
+        assert_eq!(status_of('?', '?'), FileStatus::Added);
+        assert_eq!(status_of('D', '.'), FileStatus::Deleted);
+        assert_eq!(status_of('.', 'D'), FileStatus::Deleted);
+        assert_eq!(status_of('R', '.'), FileStatus::Renamed);
+    }
+
+    #[test]
+    fn the_snapshot_joins_status_with_its_diffs() {
+        let st = status(vec![
+            gf("src/a.rs", '.', 'M'),
+            gf("docs/new.md", 'A', '.'),
+            gf("notes.txt", '?', '?'),
+        ]);
+        let untracked_patch = "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hi\n";
+        let mut untracked = BTreeMap::new();
+        untracked.insert("notes.txt".to_string(), untracked_patch.to_string());
+        assert_eq!(untracked_paths(&st), s(&["notes.txt"]));
+
+        // SAMPLE holds src/a.rs (work tree) and docs/new.md (also used as the staged diff).
+        let snap = build_snapshot(&st, SAMPLE, SAMPLE, &untracked);
+        assert_eq!(snap.branch, "feat/x");
+        assert_eq!((snap.ahead, snap.behind), (2, 1));
+        assert_eq!(snap.branches, s(&["main", "feat/x"]));
+        let paths: Vec<_> = snap.changes.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, ["src/a.rs", "docs/new.md", "notes.txt"]);
+        assert_eq!(snap.changes[0].hunks.len(), 2);
+        assert_eq!(snap.changes[1].status, FileStatus::Added);
+        assert_eq!(snap.changes[2].added(), 1);
+        assert_eq!(snap.changes[2].status, FileStatus::Added);
+        // Only the file whose index changed and work tree is clean starts staged.
+        assert_eq!(snap.staged, ["docs/new.md".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn a_file_without_a_diff_stays_listed_and_a_rename_keeps_its_old_path() {
+        let mut renamed = gf("new.txt", 'R', '.');
+        renamed.old_path = Some("old.txt".into());
+        let st = status(vec![gf("gone.bin", '.', 'M'), renamed]);
+        let snap = build_snapshot(&st, "", "", &BTreeMap::new());
+        assert_eq!(snap.changes.len(), 2);
+        assert!(snap.changes[0].hunks.is_empty());
+        assert_eq!(snap.changes[1].status, FileStatus::Renamed);
+        assert_eq!(snap.changes[1].old_path.as_deref(), Some("old.txt"));
+    }
+
+    #[test]
+    fn the_patch_holds_only_the_staged_lines() {
+        let d = a_diff();
+        let mut st = FileStaging::none();
+        assert_eq!(build_patch(&d, &st), None);
+        // Only "old one" (hunk 0, line 1): the other lines turn into context or vanish.
+        st.toggle_line(&d, 0, 1);
+        assert_eq!(
+            build_patch(&d, &st).unwrap(),
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n\
+             @@ -1,4 +1,3 @@\n keep\n-old one\n - dashes\n tail\n"
+        );
+        // A second hunk lands one line earlier after the first removed a line.
+        st.toggle_line(&d, 1, 1);
+        let patch = build_patch(&d, &st).unwrap();
+        assert!(patch.ends_with("@@ -20,1 +19,2 @@\n x\n+y\n\\ No newline at end of file\n"), "{patch}");
+    }
+
+    #[test]
+    fn staging_only_the_second_hunk_skips_the_first() {
+        let d = a_diff();
+        let mut st = FileStaging::none();
+        st.toggle_hunk(&d, 1);
+        let patch = build_patch(&d, &st).unwrap();
+        assert!(!patch.contains("keep"));
+        assert!(patch.contains("@@ -20,1 +20,2 @@\n x\n+y\n"), "{patch}");
+    }
+
+    fn snap_of(files: Vec<GitFile>) -> RepoSnapshot {
+        build_snapshot(&status(files), SAMPLE, "", &BTreeMap::new())
+    }
+
+    #[test]
+    fn a_fully_checked_file_is_staged_whole() {
+        let snap = snap_of(vec![gf("src/a.rs", '.', 'M')]);
+        let mut st = Staging::new(&snap.changes, false);
+        assert_eq!(plan_staging(&snap, &st), vec![]);
+        st.toggle_file(&snap.changes[0]);
+        assert_eq!(plan_staging(&snap, &st), vec![StageOp::Stage(s(&["src/a.rs"]))]);
+    }
+
+    #[test]
+    fn a_partly_checked_file_goes_as_a_patch() {
+        let snap = snap_of(vec![gf("src/a.rs", '.', 'M')]);
+        let mut st = Staging::new(&snap.changes, false);
+        st.file_mut("src/a.rs").toggle_line(&snap.changes[0], 0, 3);
+        let ops = plan_staging(&snap, &st);
+        assert_eq!(ops.len(), 1);
+        match &ops[0] {
+            StageOp::Apply(p) => assert!(p.contains("+new one\n") && !p.contains("+new two")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_the_index_holds_is_not_staged_again_and_is_unstaged_when_unchecked() {
+        let mut snap = snap_of(vec![gf("src/a.rs", 'M', '.')]);
+        snap.staged.insert("src/a.rs".to_string());
+        let mut st = Staging::new(&snap.changes, false);
+        st.file_mut("src/a.rs").set_all(&snap.changes[0], true);
+        assert_eq!(plan_staging(&snap, &st), vec![]);
+        st.file_mut("src/a.rs").set_all(&snap.changes[0], false);
+        assert_eq!(plan_staging(&snap, &st), vec![StageOp::Unstage(s(&["src/a.rs"]))]);
+    }
+
+    #[test]
+    fn unstaging_comes_before_staging() {
+        let mut snap = snap_of(vec![gf("src/a.rs", '.', 'M'), gf("docs/new.md", 'A', '.')]);
+        snap.staged.insert("docs/new.md".to_string());
+        let mut st = Staging::new(&snap.changes, false);
+        st.toggle_file(&snap.changes[0]);
+        let ops = plan_staging(&snap, &st);
+        assert_eq!(
+            ops,
+            vec![
+                StageOp::Unstage(s(&["docs/new.md"])),
+                StageOp::Stage(s(&["src/a.rs"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn notice_texts_are_korean_and_carry_git_s_message() {
+        assert_eq!(commit_done_text("abcdef0123"), "커밋했습니다 (abcdef0)");
+        assert_eq!(
+            remote_done_text(RemoteAction::Pull(1), "\n Already up to date.\n"),
+            "Pull 완료: Already up to date."
+        );
+        assert_eq!(remote_done_text(RemoteAction::Fetch, ""), "Fetch을 마쳤습니다");
+        let e = ApiError::Status { status: 409, message: "not fast-forward".into() };
+        assert_eq!(failure_text("Pull", &e), "Pull하지 못했습니다: not fast-forward");
+        let down = ApiError::Peer("refused".into());
+        assert!(failure_text("Push", &down).contains("서버에 닿지 않습니다"));
+    }
+
+    #[test]
+    fn a_korean_message_from_the_node_is_not_wrapped_again() {
+        let e = ApiError::Status {
+            status: 409,
+            message: "분기되어 있어 pull할 수 없습니다: fatal: Not possible to fast-forward".into(),
+        };
+        assert_eq!(
+            failure_text("Pull", &e),
+            "분기되어 있어 pull할 수 없습니다: fatal: Not possible to fast-forward"
+        );
+    }
+
+    #[test]
+    fn the_commit_body_sends_the_description_or_null() {
+        let mut req = CommitRequest {
+            ops: Vec::new(),
+            summary: "Fix: x".into(),
+            description: "  왜 고쳤는지  ".into(),
+            amend: false,
+        };
+        assert_eq!(
+            commit_body(&req),
+            json!({ "summary": "Fix: x", "description": "왜 고쳤는지", "amend": false })
+        );
+        req.description = "  ".into();
+        assert_eq!(commit_body(&req)["description"], Value::Null);
+    }
+
+    #[test]
+    fn the_diff_body_asks_for_untracked_files_in_the_work_tree_patch_only() {
+        assert_eq!(
+            diff_body(false, true),
+            json!({ "path": null, "staged": false, "include_untracked": true })
+        );
+        assert_eq!(diff_body(true, false)["include_untracked"], false);
+    }
+
+    #[test]
+    fn the_repo_card_does_not_say_unconfigured_while_data_shows() {
+        let p = boxed("demo-project");
+        assert_eq!(repo_card_line(&p, None), "저장소가 설정되지 않았습니다");
+        let snap = RepoSnapshot { branch: "feat/x".into(), ..Default::default() };
+        assert_eq!(repo_card_line(&p, Some(&snap)), "git 저장소 \u{00b7} feat/x");
+        let mut q = boxed("core");
+        q.repo = Some("github.com/x/y".into());
+        assert_eq!(repo_card_line(&q, Some(&snap)), "github.com/x/y");
+    }
+
+    #[test]
+    fn the_conflicts_section_counts_its_files() {
+        let snap = RepoSnapshot { conflicts: s(&["a.rs", "b.rs"]), ..Default::default() };
+        assert_eq!(section_count(Section::Conflicts, Some(&snap)), Some(2));
+        assert_eq!(section_count(Section::Conflicts, None), None);
+    }
+
+    // ---- quoted headers, spaces, modes, no newline ----
+
+    #[test]
+    fn quoted_headers_with_octal_escapes_are_decoded() {
+        // 한 = ED 95 9C, 글 = EA B8 80.
+        let d = "diff --git \"a/\\355\\225\\234\\352\\270\\200.txt\" \"b/\\355\\225\\234\\352\\270\\200.txt\"\n\
+                 index 1..2 100644\n--- \"a/\\355\\225\\234\\352\\270\\200.txt\"\n+++ \"b/\\355\\225\\234\\352\\270\\200.txt\"\n\
+                 @@ -1 +1 @@\n-a\n+b\n";
+        let f = parse_unified(d);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].path, "한글.txt");
+        assert_eq!(f[0].old_path.as_deref(), Some("한글.txt"));
+        assert_eq!(f[0].hunks.len(), 1);
+    }
+
+    #[test]
+    fn quoted_names_with_a_quote_a_tab_or_a_space_parse() {
+        let d = "diff --git \"a/we\\\"ird\\tname.txt\" \"b/we\\\"ird\\tname.txt\"\nnew file mode 100644\n";
+        let f = parse_unified(d);
+        assert_eq!(f[0].path, "we\"ird\tname.txt");
+        assert_eq!(f[0].status, FileStatus::Added);
+        // A rename whose names are quoted.
+        let r = parse_unified("diff --git \"a/\\355\\225\\234 x\" \"b/y z\"\nrename from \"\\355\\225\\234 x\"\nrename to \"y z\"\n");
+        assert_eq!(r[0].path, "y z");
+        assert_eq!(r[0].old_path.as_deref(), Some("한 x"));
+        assert_eq!(r[0].status, FileStatus::Renamed);
+    }
+
+    #[test]
+    fn unquoted_names_with_spaces_parse_with_and_without_hunks() {
+        let d = "diff --git a/my docs/read me.md b/my docs/read me.md\nnew file mode 100755\n\
+                 --- /dev/null\n+++ b/my docs/read me.md\t\n@@ -0,0 +1 @@\n+hi\n\
+                 diff --git a/한 글/파일 b.txt b/한 글/파일 b.txt\nold mode 100644\nnew mode 100755\n";
+        let f = parse_unified(d);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].path, "my docs/read me.md");
+        assert_eq!(f[0].mode.as_deref(), Some("100755"));
+        // No hunks and no `+++`: the path comes from the header alone.
+        assert_eq!(f[1].path, "한 글/파일 b.txt");
+        assert_eq!(f[1].mode.as_deref(), Some("100755"));
+        assert!(f[1].hunks.is_empty());
+    }
+
+    #[test]
+    fn the_patch_keeps_the_real_file_mode_of_a_new_file() {
+        let d = "diff --git a/run.sh b/run.sh\nnew file mode 100755\n--- /dev/null\n+++ b/run.sh\n@@ -0,0 +1,2 @@\n+#!/bin/sh\n+echo\n";
+        let f = parse_unified(d).remove(0);
+        let mut st = FileStaging::none();
+        st.toggle_line(&f, 0, 0);
+        let patch = build_patch(&f, &st).unwrap();
+        assert!(patch.starts_with("diff --git a/run.sh b/run.sh\nnew file mode 100755\n--- /dev/null\n"), "{patch}");
+        // Without a mode line in the diff the default is a plain file.
+        let mut plain = f.clone();
+        plain.mode = None;
+        assert!(build_patch(&plain, &st).unwrap().contains("new file mode 100644\n"));
+    }
+
+    #[test]
+    fn a_missing_final_newline_is_kept_in_the_patch_and_never_invented() {
+        let d = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1,2 +1,2 @@\n keep\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
+        let f = parse_unified(d).remove(0);
+        let lines = &f.hunks[0].lines;
+        assert_eq!(lines.iter().map(|l| l.no_eol).collect::<Vec<_>>(), [false, true, true]);
+        let mut st = FileStaging::none();
+        st.toggle_hunk(&f, 0);
+        let patch = build_patch(&f, &st).unwrap();
+        assert!(
+            patch.ends_with("@@ -1,2 +1,2 @@\n keep\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n"),
+            "{patch}"
+        );
+        // A line with a newline gets no marker.
+        let with_eol = parse_unified("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n").remove(0);
+        let mut all = FileStaging::none();
+        all.toggle_hunk(&with_eol, 0);
+        assert!(!build_patch(&with_eol, &all).unwrap().contains("No newline"));
+    }
+
+    #[test]
+    fn a_new_branch_name_must_be_one_git_accepts() {
+        assert!(valid_branch_name("feat/git-api"));
+        assert!(valid_branch_name("  fix_1 "));
+        for bad in ["", "  ", "a b", "-x", "a..b", "a~1", "a:b", "x/", "/x", "x.", "a?b", "a[b"] {
+            assert!(!valid_branch_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_demo_answer_maps_to_the_same_load_states() {
+        let not_repo = GitError { status: 404, code: "not_a_repo".into(), message: "no".into() };
+        let r: Result<GitStatus, ApiError> = git_result(Err(not_repo));
+        let snap = r.map(|_| RepoSnapshot::default());
+        assert_eq!(load_from(snap), Load::NotRepo);
+
+        let st: GitStatus = git_result(Ok(json!({ "branch": "main", "files": [] }))).unwrap();
+        assert_eq!(st.branch, "main");
+        // A 204 operation answers null and is read as a plain value.
+        assert_eq!(git_result::<Value>(Ok(Value::Null)).unwrap(), Value::Null);
+        let c: GitCommitted = git_result(Ok(json!({ "sha": "abc" }))).unwrap();
+        assert_eq!(c.sha, "abc");
+        let bad: Result<GitStatus, _> = git_result(Ok(json!({ "nope": 1 })));
+        assert!(matches!(bad, Err(ApiError::Decode(_))));
+        let conflict = GitError { status: 409, code: "conflict".into(), message: "diverged".into() };
+        let e = git_result::<Value>(Err(conflict)).unwrap_err();
+        assert_eq!(e.status(), Some(409));
+        assert!(e.to_string().contains("diverged"));
     }
 }

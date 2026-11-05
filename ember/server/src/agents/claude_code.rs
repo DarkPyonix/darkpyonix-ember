@@ -270,9 +270,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
             cwd: req.cwd.clone(),
             // stream-json has no handshake state, so a running agent can be rejoined (FR-S8).
             reattachable: true,
+            mem_limit_mb: req.mem_limit_mb,
         })
         .await?;
         let pid = proc.pid;
+        let reattached = proc.reattached;
         let stdin: SharedStdin = Arc::new(Mutex::new(Some(proc.stdin)));
         let stdout = proc.stdout;
         let stderr = proc.stderr;
@@ -295,6 +297,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             stdin,
             state,
             request_counter: 0,
+            reattached,
             _mcp_file: mcp_file,
         }))
     }
@@ -461,6 +464,8 @@ struct ClaudeRun {
     stdin: SharedStdin,
     state: Arc<StdMutex<RunState>>,
     request_counter: u64,
+    /// The agent was already running (FR-S8): its prompts may be waiting for an answer.
+    reattached: bool,
     /// The private `--mcp-config` file, removed with the run.
     _mcp_file: Option<PrivateConfigFile>,
 }
@@ -508,6 +513,22 @@ impl AgentRun for ClaudeRun {
             }
         };
         write_line(&self.stdin, &msg).await
+    }
+
+    /// A rejoined CLI may be blocked on a permission prompt whose request line this process never
+    /// saw (it was stored by the previous server). Rebuild the entry, so the answer can go out.
+    async fn restore_pending_approvals(
+        &mut self,
+        pending: Vec<(String, String, Value)>,
+    ) {
+        if !self.reattached || pending.is_empty() {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        for (id, tool, input) in pending {
+            st.pending.entry(id).or_insert((tool, input));
+        }
+        st.turn_active = true;
     }
 
     async fn interrupt(&mut self) -> anyhow::Result<()> {
@@ -945,6 +966,7 @@ mod tests {
             mcp_servers: Vec::new(),
             computer: None,
             fork_from: None,
+            mem_limit_mb: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));

@@ -5,12 +5,8 @@
 //! belongs to, which layout a window size gets) are plain functions and enums at the top of
 //! this file, tested without a renderer. The components below draw them.
 
-use dioxus_compose::prelude::*;
+use crate::ui::Route;
 
-use crate::model;
-use crate::ui::components::{AppButton, EmberSheet, Label};
-use crate::ui::theme::*;
-use crate::ui::{agents, channels, files, home, new_session, project, routines, search, session, vcs, use_ui, Route};
 
 // ---------------------------------------------------------------------------------------------
 // Menus
@@ -54,20 +50,33 @@ impl NavMenu {
         }
     }
 
-    /// The nearest glyph the pinned toolkit has.
-    /// TODO(GAPS: 임의 아이콘 세트): Heroicons outline per menu once `Icon` takes an SVG asset.
-    pub fn icon(self) -> IconRole {
+    /// The mockup's icon for the menu (Heroicons outline, 1.5 stroke), as an SVG whose stroke is
+    /// `currentColor`. The toolkit's `IconRole` set has no such glyphs, so the app registers
+    /// these itself.
+    pub fn svg(self) -> &'static str {
         match self {
-            NavMenu::Home => IconRole::Home,
-            NavMenu::Projects => IconRole::Library,
-            NavMenu::Sessions => IconRole::Compose,
-            NavMenu::Channels => IconRole::Inbox,
-            NavMenu::Routines => IconRole::History,
-            NavMenu::VersionControl => IconRole::List,
-            NavMenu::Agents => IconRole::Sidebar,
-            NavMenu::Files => IconRole::Image,
+            NavMenu::Home => include_str!("../../assets/nav/home.svg"),
+            NavMenu::Projects => include_str!("../../assets/nav/folder.svg"),
+            NavMenu::Sessions => include_str!("../../assets/nav/grid.svg"),
+            NavMenu::Channels => include_str!("../../assets/nav/hash.svg"),
+            NavMenu::Routines => include_str!("../../assets/nav/repeat.svg"),
+            NavMenu::VersionControl => include_str!("../../assets/nav/git.svg"),
+            NavMenu::Agents => include_str!("../../assets/nav/cpu.svg"),
+            NavMenu::Files => include_str!("../../assets/nav/arrows-right-left.svg"),
         }
     }
+}
+
+pub const ICON_MORE_SVG: &str = include_str!("../../assets/nav/more.svg");
+pub const ICON_SUN_SVG: &str = include_str!("../../assets/nav/sun.svg");
+pub const ICON_MOON_SVG: &str = include_str!("../../assets/nav/moon.svg");
+pub const ICON_GEAR_SVG: &str = include_str!("../../assets/nav/gear.svg");
+
+/// `svg` at `px` dp with its `currentColor` stroke set to `argb` (alpha dropped).
+pub fn tinted_svg(svg: &str, px: f32, argb: u32) -> String {
+    let size = format!("{}", px.round() as i32);
+    svg.replace("currentColor", &format!("#{:06x}", argb & 0x00ff_ffff))
+        .replacen("width=\"24\" height=\"24\"", &format!("width=\"{size}\" height=\"{size}\""), 1)
 }
 
 /// The menu to mark active: an open conversation always belongs to 세션.
@@ -154,10 +163,10 @@ impl BottomTab {
         }
     }
 
-    pub fn icon(self) -> IconRole {
+    pub fn svg(self) -> &'static str {
         match self {
-            BottomTab::NavMenu(m) => m.icon(),
-            BottomTab::More => IconRole::More,
+            BottomTab::NavMenu(m) => m.svg(),
+            BottomTab::More => ICON_MORE_SVG,
         }
     }
 }
@@ -185,50 +194,113 @@ pub enum ShellMode {
     BottomTabs,
 }
 
-/// The layout for a window size class.
-///
-/// TODO(GAPS: 창 폭 레이아웃): the design breaks at 1279 (sidebar to rail) and 560 (rail to
-/// bar). The pinned toolkit reports only its three classes (600 and 840 dp), so Compact is
-/// the bar, Medium the rail and Expanded the sidebar; the exact boundaries come with
-/// `use_window_breakpoints`.
-pub fn shell_mode(class: WindowSizeClass, collapsed: bool) -> ShellMode {
-    match class {
-        WindowSizeClass::Compact => ShellMode::BottomTabs,
-        WindowSizeClass::Medium => ShellMode::Rail,
-        WindowSizeClass::Expanded if collapsed => ShellMode::Rail,
-        WindowSizeClass::Expanded => ShellMode::Sidebar,
+/// Widest window (dp) that shows the icon rail; wider shows the full sidebar (mockup
+/// `@media (max-width:1279px)`).
+pub const RAIL_MAX_DP: f32 = 1279.0;
+/// Widest window (dp) that shows the bottom tab bar (mockup `@media (max-width:560px)`).
+pub const BAR_MAX_DP: f32 = 560.0;
+
+/// The layout for a window width. 1024 and 768 get the rail, 390 the bar. The collapse toggle
+/// turns a wide window's sidebar into the rail.
+pub fn nav_mode(width_dp: f32, collapsed: bool) -> ShellMode {
+    if width_dp <= BAR_MAX_DP {
+        ShellMode::BottomTabs
+    } else if width_dp <= RAIL_MAX_DP || collapsed {
+        ShellMode::Rail
+    } else {
+        ShellMode::Sidebar
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Components
-// ---------------------------------------------------------------------------------------------
+/// The collapse choice after the toggle at `width_dp`. It exists only in the full-sidebar range
+/// (above [`RAIL_MAX_DP`]); below, the width alone decides, so the toggle changes nothing and
+/// the choice cannot leak to another breakpoint (#218).
+pub fn toggled_collapse(width_dp: f32, collapsed: bool) -> bool {
+    if width_dp > RAIL_MAX_DP { !collapsed } else { collapsed }
+}
 
-/// Go to a menu. Projects and a conversation are real screens; the rest only change the menu.
-fn choose(ui: crate::ui::Ui, menu: NavMenu) {
+/// Live numbers for the navigation. `None` or 0 means no data feeds it yet, so nothing is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NavCounts {
+    /// Projects, shown as a muted count beside 프로젝트.
+    pub projects: Option<usize>,
+    /// Sessions waiting for approval, shown as a red badge on 세션.
+    pub waiting: usize,
+    /// Unread channel rooms, a red badge on 채널 (no live source yet).
+    pub unread_rooms: usize,
+    /// Enabled routines, a muted count beside 루틴 (no live source yet).
+    pub routines: Option<usize>,
+    /// Running file transfers, a muted count beside 파일 (no live source yet).
+    pub transfers: usize,
+}
+
+/// What sits at the right of a menu row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavBadge {
+    None,
+    /// Plain muted number (sidebar only).
+    Count(usize),
+    /// Red badge (everywhere).
+    Alert(usize),
+}
+
+pub fn nav_badge(menu: NavMenu, c: &NavCounts) -> NavBadge {
+    let alert = |n: usize| if n > 0 { NavBadge::Alert(n) } else { NavBadge::None };
     match menu {
-        NavMenu::Projects => ui.go(Route::Projects),
-        NavMenu::Sessions => {
-            let in_conversation = matches!(*ui.route.peek(), Route::Conversation(_));
-            if !in_conversation {
-                let recent = ui.with_rows_no_previews(|s, cx| model::recent_sessions(s, cx, 1));
-                if let Some(row) = recent.first() {
-                    ui.open_conversation(&row.id);
-                }
-            }
-        }
-        _ => {
-            if matches!(*ui.route.peek(), Route::Conversation(_)) {
-                ui.go(Route::Projects);
-            }
-        }
+        NavMenu::Projects => c.projects.map_or(NavBadge::None, NavBadge::Count),
+        NavMenu::Sessions => alert(c.waiting),
+        NavMenu::Channels => alert(c.unread_rooms),
+        NavMenu::Routines => c.routines.map_or(NavBadge::None, NavBadge::Count),
+        NavMenu::Files if c.transfers > 0 => NavBadge::Count(c.transfers),
+        _ => NavBadge::None,
     }
-    let mut chosen = ui.menu;
-    chosen.set(menu);
 }
 
-fn transparent() -> Paint {
-    Paint::Literal(Color::argb(0))
+/// The red badge a bottom tab shows: the alert of its menu. 더보기 sums the alerts of the
+/// menus it hides (none today).
+pub fn tab_badge(tab: BottomTab, c: &NavCounts) -> Option<usize> {
+    match tab {
+        BottomTab::NavMenu(m) => match nav_badge(m, c) {
+            NavBadge::Alert(n) => Some(n),
+            _ => None,
+        },
+        BottomTab::More => {
+            let n: usize = MORE_MENUS
+                .iter()
+                .map(|m| if let NavBadge::Alert(n) = nav_badge(*m, c) { n } else { 0 })
+                .sum();
+            (n > 0).then_some(n)
+        }
+    }
+}
+
+/// Badge text: the number, capped at `99+`.
+pub fn badge_text(n: usize) -> String {
+    if n > 99 { "99+".into() } else { n.to_string() }
+}
+
+/// The signed-in user shown in the sidebar footer. No account source exists yet, so this is
+/// the mockup's demo user.
+pub const DEMO_USER: (&str, &str) = ("BREW", "ncmnd");
+/// The org line under the wordmark.
+pub const ORG_NAME: &str = "darkpyonix";
+
+/// First letter of a name, for the avatar.
+pub fn avatar_initial(name: &str) -> String {
+    name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
+}
+
+/// Width of the three caption buttons Windows draws at the window's top-right (46 dp each).
+/// compose-rust #340 draws them when the app takes the caption; `LocalWindowCaption.buttonsWidth`
+/// reaches only a TopAppBar at the top of the tree, which Ember's shell does not open with, and
+/// dioxus-compose at the pinned rev exposes no caption width. So Ember reserves it itself.
+pub const WINDOWS_CAPTION_BUTTONS_DP: f32 = 138.0;
+/// Windows 11 caption height (compose-rust #340).
+pub const WINDOWS_CAPTION_HEIGHT_DP: f32 = 32.0;
+
+/// Width to keep clear at the top-right: the caption buttons on Windows, nothing elsewhere.
+pub fn caption_reserved_width(windows: bool) -> f32 {
+    if windows { WINDOWS_CAPTION_BUTTONS_DP } else { 0.0 }
 }
 
 /// The temporary Ember logo (logo B, phoenix fold; D35, rework pending).
@@ -246,321 +318,6 @@ pub fn mark_svg_for(size: f32) -> &'static str {
         MARK_SM_SVG
     } else {
         MARK_SVG
-    }
-}
-
-/// The logo slot: the temporary mark, with the wordmark beside it when there is room.
-/// Only this component changes when the final logo lands.
-#[component]
-fn LogoSlot(#[props(default)] compact: bool) -> Element {
-    let size = 28.0;
-    let id = asset(AssetKind::Svg, mark_svg_for(size).as_bytes());
-    rsx! {
-        Row {
-            height: SHEET_HEADER_H,
-            alignment: Alignment::CenterStart,
-            space_role: SpaceRole::Sm,
-            Spacer { width: SP[3] }
-            Image { asset_id: id, width: size, height: size }
-            if !compact {
-                Label { text: "Ember", fs: Fs::Xl, weight: Weight::Semibold }
-            }
-        }
-    }
-}
-
-#[component]
-fn NavItem(menu: NavMenu, active: bool, icon_only: bool, on_click: EventHandler<()>) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
-    rsx! {
-        Button {
-            text: if icon_only { "" } else { menu.label() },
-            icon: menu.icon(),
-            fill_max_width: !icon_only,
-            width: if icon_only { Some(48.0) } else { None },
-            height: H_NAV_ITEM,
-            variant: ButtonVariant::Text,
-            shape_role: ShapeRole::Full,
-            background: if active { paint(p.ink) } else { transparent() },
-            color: if active { paint(p.ink_text) } else { paint(p.text_2) },
-            on_click: move |()| on_click.call(()),
-        }
-    }
-}
-
-#[component]
-fn Sidebar(
-    rail: bool,
-    active: NavMenu,
-    on_choose: EventHandler<NavMenu>,
-    on_theme: EventHandler<()>,
-    on_settings: EventHandler<()>,
-    on_collapse: EventHandler<()>,
-) -> Element {
-    let theme = use_ember_theme();
-    let pref = *use_context::<ThemeCtx>().pref.read();
-    let width = if rail { RAIL_W } else { SIDE_W };
-    rsx! {
-        Column {
-            width,
-            fill_max_height: true,
-            background: paint(theme.palette.bg),
-            space_role: SpaceRole::Xs,
-            alignment: Alignment::TopCenter,
-            LogoSlot { compact: rail }
-            for menu in NavMenu::ALL {
-                NavItem {
-                    key: "{menu.label()}",
-                    menu,
-                    active: menu == active,
-                    icon_only: rail,
-                    on_click: move |()| on_choose.call(menu),
-                }
-            }
-            Spacer { weight: 1.0 }
-            // Tools: theme, collapse, settings.
-            Button {
-                text: if rail { String::new() } else { format!("테마: {}", pref.label()) },
-                icon: IconRole::Image,
-                variant: ButtonVariant::Text,
-                fill_max_width: !rail,
-                height: H_NAV_ITEM,
-                shape_role: ShapeRole::Full,
-                color: paint(theme.palette.text_2),
-                on_click: move |()| on_theme.call(()),
-            }
-            Button {
-                text: if rail { "" } else { "접기" },
-                icon: if rail { IconRole::Sidebar } else { IconRole::Collapse },
-                variant: ButtonVariant::Text,
-                fill_max_width: !rail,
-                height: H_NAV_ITEM,
-                shape_role: ShapeRole::Full,
-                color: paint(theme.palette.text_2),
-                on_click: move |()| on_collapse.call(()),
-            }
-            Button {
-                text: if rail { "" } else { "설정" },
-                icon: IconRole::Settings,
-                variant: ButtonVariant::Text,
-                fill_max_width: !rail,
-                height: H_NAV_ITEM,
-                shape_role: ShapeRole::Full,
-                color: paint(theme.palette.text_2),
-                on_click: move |()| on_settings.call(()),
-            }
-            Spacer { height: SP[2] }
-        }
-    }
-}
-
-/// The floating bottom bar. Opaque on every platform for now.
-/// TODO(GAPS: 배경 흐림): Liquid Glass on iOS only. TODO(GAPS: 떠 있는 하단 바): the safe-area
-/// inset (`use_safe_area`) is not available, so only the 10 px gap is added.
-#[component]
-fn BottomBar(active: NavMenu, on_choose: EventHandler<BottomTab>) -> Element {
-    let theme = use_ember_theme();
-    let p = theme.palette;
-    let marked = tab_for_menu(active);
-    rsx! {
-        Column {
-            fill_max_width: true,
-            Row {
-                fill_max_width: true,
-                Spacer { width: TABBAR_SIDE_GAP }
-                Surface {
-                    weight: 1.0,
-                    height: TABBAR_H,
-                    background: paint(p.surface),
-                    border_width: 1.0,
-                    border_color: paint(p.line),
-                    corner_radius: TABBAR_RADIUS,
-                    elevation: ELEVATION_LARGE,
-                    Row {
-                        fill_max_width: true,
-                        fill_max_height: true,
-                        arrangement: Arrangement::SpaceEvenly,
-                        alignment: Alignment::Center,
-                        for tab in BOTTOM_TABS {
-                            Button {
-                                key: "{tab.label()}",
-                                text: tab.label(),
-                                icon: tab.icon(),
-                                variant: ButtonVariant::Text,
-                                shape_role: ShapeRole::Full,
-                                background: if tab == marked { paint(p.sel) } else { transparent() },
-                                color: if tab == marked { paint(p.text) } else { paint(p.muted) },
-                                on_click: move |()| on_choose.call(tab),
-                            }
-                        }
-                    }
-                }
-                Spacer { width: TABBAR_SIDE_GAP }
-            }
-            Spacer { height: TABBAR_BOTTOM_GAP }
-        }
-    }
-}
-
-#[component]
-fn Placeholder(menu: NavMenu) -> Element {
-    rsx! {
-        Column {
-            fill_max_width: true,
-            fill_max_height: true,
-            alignment: Alignment::Center,
-            space_role: SpaceRole::Sm,
-            Label { text: menu.label(), fs: Fs::Xl3, weight: Weight::Medium }
-            Label { text: PLACEHOLDER_TEXT, fs: Fs::Md, color: paint(use_ember_theme().palette.muted) }
-        }
-    }
-}
-
-/// The root layout: navigation around the content area.
-#[component]
-pub fn Shell() -> Element {
-    let ui = use_ui();
-    let window = use_window_size();
-    let theme = use_ember_theme();
-    let mut collapsed = use_signal(|| false);
-    let mut more_open = use_signal(|| false);
-    let mut settings_open = use_signal(|| false);
-
-    let route = ui.route.read().clone();
-    let active = active_menu(&route, *ui.menu.read());
-    let screen = screen_for(&route, active);
-    let mode = shell_mode(window.class, *collapsed.read());
-
-    let on_choose = move |m: NavMenu| choose(ui, m);
-    let theme_ctx = use_context::<ThemeCtx>();
-    let on_theme = move |()| {
-        let mut pref = theme_ctx.pref;
-        let next = pref.peek().next();
-        pref.set(next);
-        ui.update_prefs(|p| p.theme = next);
-    };
-
-    let content = rsx! {
-        Column {
-            weight: 1.0,
-            fill_max_height: true,
-            if matches!(screen, Screen::Launcher | Screen::Search) {
-                Row {
-                    fill_max_width: true,
-                    padding_role: SpaceRole::Sm,
-                    space_role: SpaceRole::Sm,
-                    alignment: Alignment::CenterEnd,
-                    Spacer { weight: 1.0 }
-                    AppButton {
-                        text: "검색",
-                        icon: IconRole::Search,
-                        small: true,
-                        on_click: move |()| ui.go(Route::Search),
-                    }
-                    AppButton {
-                        text: "새 세션",
-                        icon: IconRole::Compose,
-                        small: true,
-                        kind: crate::ui::components::ButtonKind::Primary,
-                        on_click: move |()| {
-                            let project = ui.selected_project.peek().clone();
-                            ui.open_new_session(project);
-                        },
-                    }
-                }
-            }
-            Column {
-                weight: 1.0,
-                fill_max_width: true,
-                match screen {
-                    Screen::Home => rsx! { home::Home {} },
-                    Screen::Files => rsx! { files::Files {} },
-                    Screen::Launcher => rsx! { project::ProjectScreen {} },
-                    Screen::Search => rsx! { search::SearchScreen {} },
-                    Screen::Agents => rsx! { agents::Agents {} },
-                    Screen::Routines => rsx! { routines::Routines {} },
-                    // 세션 is the inside of a project (FR-L18); the open conversation is its focus.
-                    Screen::Conversation(id) => rsx! { session::SessionScreen { focus: Some(id.clone()) } },
-                    Screen::VersionControl => rsx! { vcs::VcsScreen {} },
-                    Screen::Channels => rsx! { channels::ChannelsScreen {} },
-                    Screen::Placeholder(menu) => rsx! { Placeholder { menu } },
-                }
-            }
-        }
-    };
-
-    rsx! {
-        dioxus_compose::Box {
-            fill_max_width: true,
-            fill_max_height: true,
-            background: paint(theme.palette.bg),
-            if mode == ShellMode::BottomTabs {
-                Column {
-                    fill_max_width: true,
-                    fill_max_height: true,
-                    {content}
-                    BottomBar {
-                        active,
-                        on_choose: move |tab: BottomTab| match tab {
-                            BottomTab::NavMenu(m) => on_choose(m),
-                            BottomTab::More => more_open.set(true),
-                        },
-                    }
-                }
-            } else {
-                Row {
-                    fill_max_width: true,
-                    fill_max_height: true,
-                    Sidebar {
-                        rail: mode == ShellMode::Rail,
-                        active,
-                        on_choose,
-                        on_theme,
-                        on_settings: move |()| settings_open.set(true),
-                        on_collapse: move |()| {
-                            let now = *collapsed.peek();
-                            collapsed.set(!now);
-                        },
-                    }
-                    {content}
-                }
-            }
-
-            EmberSheet {
-                title: "더보기",
-                open: *more_open.read(),
-                on_dismiss: move |()| more_open.set(false),
-                Column {
-                    fill_max_width: true,
-                    padding_role: SpaceRole::Md,
-                    space_role: SpaceRole::Sm,
-                    for menu in MORE_MENUS {
-                        AppButton {
-                            key: "{menu.label()}",
-                            text: menu.label(),
-                            icon: menu.icon(),
-                            fill_max_width: true,
-                            on_click: move |()| {
-                                more_open.set(false);
-                                on_choose(menu);
-                            },
-                        }
-                    }
-                }
-            }
-            EmberSheet {
-                title: "설정",
-                open: *settings_open.read(),
-                on_dismiss: move |()| settings_open.set(false),
-                Column {
-                    fill_max_width: true,
-                    padding_role: SpaceRole::Md,
-                    Label { text: PLACEHOLDER_TEXT, color: paint(theme.palette.muted) }
-                }
-            }
-            new_session::NewSessionDialog {}
-        }
     }
 }
 
@@ -692,22 +449,109 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_layout_per_size_class() {
-        assert_eq!(
-            shell_mode(WindowSizeClass::Compact, false),
-            ShellMode::BottomTabs
-        );
-        assert_eq!(
-            shell_mode(WindowSizeClass::Compact, true),
-            ShellMode::BottomTabs
-        );
-        assert_eq!(shell_mode(WindowSizeClass::Medium, false), ShellMode::Rail);
-        assert_eq!(
-            shell_mode(WindowSizeClass::Expanded, false),
-            ShellMode::Sidebar
-        );
-        // The collapse control turns the sidebar into the rail.
-        assert_eq!(shell_mode(WindowSizeClass::Expanded, true), ShellMode::Rail);
+    fn fr_l10_nav_mode_follows_the_mockup_breakpoints() {
+        // 1440: sidebar. 1280 is still the sidebar, 1279 and 1024 and 768 are the rail,
+        // 561 is the rail, 560 and 390 are the bar.
+        assert_eq!(nav_mode(1440.0, false), ShellMode::Sidebar);
+        assert_eq!(nav_mode(1280.0, false), ShellMode::Sidebar);
+        assert_eq!(nav_mode(1279.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(1024.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(768.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(561.0, false), ShellMode::Rail);
+        assert_eq!(nav_mode(560.0, false), ShellMode::BottomTabs);
+        assert_eq!(nav_mode(390.0, false), ShellMode::BottomTabs);
+        assert_eq!(nav_mode(390.0, true), ShellMode::BottomTabs);
+    }
+
+    #[test]
+    fn nav_mode_does_not_remember_the_previous_width() {
+        // 1440 -> 1024 -> 1440, and 768 -> 1024: the mode follows the width only.
+        let c = false;
+        assert_eq!(nav_mode(1440.0, c), ShellMode::Sidebar);
+        assert_eq!(nav_mode(1024.0, c), ShellMode::Rail);
+        assert_eq!(nav_mode(1440.0, c), ShellMode::Sidebar);
+        assert_eq!(nav_mode(768.0, c), ShellMode::Rail);
+        assert_eq!(nav_mode(1024.0, c), ShellMode::Rail);
+    }
+
+    #[test]
+    fn collapse_toggle_applies_only_in_the_sidebar_range() {
+        assert!(toggled_collapse(1440.0, false));
+        assert!(!toggled_collapse(1440.0, true));
+        // A click on the brand at 1024 or 768 must not store a choice for 1440.
+        assert!(!toggled_collapse(1024.0, false));
+        assert!(!toggled_collapse(768.0, false));
+        assert_eq!(nav_mode(1440.0, toggled_collapse(1024.0, false)), ShellMode::Sidebar);
+    }
+
+    #[test]
+    fn fr_l10_collapse_turns_the_sidebar_into_the_rail() {
+        assert_eq!(nav_mode(1440.0, true), ShellMode::Rail);
+        assert_eq!(nav_mode(1024.0, true), ShellMode::Rail);
+    }
+
+    #[test]
+    fn fr_l10_every_menu_has_its_own_mockup_icon() {
+        let mut seen = std::collections::BTreeSet::new();
+        for m in NavMenu::ALL {
+            let svg = m.svg();
+            assert!(svg.trim_start().starts_with("<svg"), "{}", m.label());
+            assert!(svg.contains("currentColor"), "{}", m.label());
+            assert!(seen.insert(svg), "{} shares an icon", m.label());
+        }
+        assert!(BottomTab::More.svg().contains("<svg"));
+    }
+
+    #[test]
+    fn tinted_svg_sets_colour_and_size() {
+        let t = tinted_svg(NavMenu::Home.svg(), 18.0, 0xff1c1b19);
+        assert!(t.contains("stroke=\"#1c1b19\""));
+        assert!(t.contains("width=\"18\" height=\"18\""));
+        assert!(!t.contains("currentColor"));
+    }
+
+    #[test]
+    fn fr_l10_badges_come_from_live_counts_only() {
+        let none = NavCounts::default();
+        for m in NavMenu::ALL {
+            assert_eq!(nav_badge(m, &none), NavBadge::None, "{}", m.label());
+        }
+        let c = NavCounts { projects: Some(5), waiting: 3, unread_rooms: 5, routines: Some(6), transfers: 2 };
+        assert_eq!(nav_badge(NavMenu::Projects, &c), NavBadge::Count(5));
+        assert_eq!(nav_badge(NavMenu::Sessions, &c), NavBadge::Alert(3));
+        assert_eq!(nav_badge(NavMenu::Channels, &c), NavBadge::Alert(5));
+        assert_eq!(nav_badge(NavMenu::Routines, &c), NavBadge::Count(6));
+        assert_eq!(nav_badge(NavMenu::Files, &c), NavBadge::Count(2));
+        assert_eq!(nav_badge(NavMenu::Home, &c), NavBadge::None);
+    }
+
+    #[test]
+    fn fr_l28_tab_badges_are_red_alerts_only() {
+        let c = NavCounts { projects: Some(5), waiting: 3, unread_rooms: 5, routines: Some(6), transfers: 2 };
+        assert_eq!(tab_badge(BottomTab::NavMenu(NavMenu::Sessions), &c), Some(3));
+        assert_eq!(tab_badge(BottomTab::NavMenu(NavMenu::Channels), &c), Some(5));
+        assert_eq!(tab_badge(BottomTab::NavMenu(NavMenu::Projects), &c), None);
+        assert_eq!(tab_badge(BottomTab::More, &c), None);
+    }
+
+    #[test]
+    fn badge_text_caps_at_99() {
+        assert_eq!(badge_text(3), "3");
+        assert_eq!(badge_text(99), "99");
+        assert_eq!(badge_text(100), "99+");
+    }
+
+    #[test]
+    fn sidebar_footer_and_brand_text() {
+        assert_eq!(ORG_NAME, "darkpyonix");
+        assert_eq!(avatar_initial(DEMO_USER.0), "B");
+        assert_eq!(avatar_initial(""), "");
+    }
+
+    #[test]
+    fn caption_width_is_reserved_only_on_windows() {
+        assert_eq!(caption_reserved_width(true), 138.0);
+        assert_eq!(caption_reserved_width(false), 0.0);
     }
 
     #[test]

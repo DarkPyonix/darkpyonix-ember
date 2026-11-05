@@ -22,7 +22,7 @@ use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, IconRole, SpaceRole};
 
 pub use crate::ui::channels::{
-    bubble_side, compact_shows_room, empty_text, feed, filter_chips, group_rooms, last_seq,
+    bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
     me_id, merge_messages, message_from, room_from, rooms_from, rooms_snapshot, split_view,
     time_label, BubbleView, FeedItem, ListFilter, Load, Member, Message, Room, RoomRow, Section,
     Side,
@@ -106,7 +106,10 @@ impl Feed {
                 self.rooms.set(rooms_from(&list, &old));
                 self.load.set(Load::Ready);
             }
-            Some(Err(e)) => self.load.set(Load::Failed(e.to_string())),
+            Some(Err(e)) => {
+                tracing::warn!("channel list failed: {e}");
+                self.load.set(Load::Failed(String::new()))
+            }
             None => self.load.set(Load::Failed("연결이 끊겼습니다".to_string())),
         }
     }
@@ -132,7 +135,10 @@ impl Feed {
         };
         match first {
             Some(Ok(c)) => self.merge(&id, c.messages.iter().map(message_from).collect()),
-            Some(Err(e)) => notice::post(format!("메시지를 불러오지 못했습니다: {e}")),
+            Some(Err(e)) => {
+                tracing::warn!("channel messages failed: {e}");
+                notice::post("메시지를 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.".to_string())
+            }
             None => return,
         }
         loop {
@@ -152,7 +158,7 @@ impl Feed {
     }
 
     /// Posts `text` as the person; the answer joins the room at once, a failure is told.
-    fn send(&self, id: &str, text: &str) {
+    fn send(&self, id: &str, text: &str, done: impl FnOnce(bool) + Send + 'static) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -164,8 +170,15 @@ impl Feed {
                 async move { crate::services::services().client.api().post_channel_message(&id, &text).await }
             },
             move |r| match r {
-                Ok(m) => feed.merge(&id, vec![message_from(&m)]),
-                Err(e) => notice::post(format!("메시지를 보내지 못했습니다: {e}")),
+                Ok(m) => {
+                    feed.merge(&id, vec![message_from(&m)]);
+                    done(true);
+                }
+                Err(e) => {
+                    tracing::warn!("channel send failed: {e}");
+                    notice::post("메시지를 보내지 못했습니다. 입력한 내용은 그대로 남아 있습니다.".to_string());
+                    done(false);
+                }
             },
         );
     }
@@ -331,7 +344,8 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(|| {
                 if let Load::Failed(why) = load {
                     // Rooms stay on screen through a failed refresh; the reason is told once.
-                    Label(&format!("채널을 새로 불러오지 못했습니다: {why}"), Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
+                    let _ = why;
+                    Label("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
                 }
                 if sections.is_empty() {
                     Label(&empty_text(&Load::Ready, 0).unwrap_or_default(), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
@@ -477,14 +491,26 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
     // empty field (the field is uncontrolled and has no way to be cleared).
     let draft = remember_with_key(room_id.to_string(), || mutable_state_of(String::new()));
     let generation = remember_with_key(room_id.to_string(), || mutable_state_of(0_u64));
+    let state = remember_with_key(room_id.to_string(), || mutable_state_of(SendState::Idle));
+    // The draft stays until the server answers Ok; on failure it is left as typed.
     let send = {
-        let (draft, generation, live, id) = (draft.clone(), generation.clone(), live.clone(), room_id.to_string());
+        let (draft, generation, live, id, state) =
+            (draft.clone(), generation.clone(), live.clone(), room_id.to_string(), state.clone());
         move |text: String| {
             if let Some(f) = &live {
-                if !text.trim().is_empty() {
-                    f.send(&id, &text);
-                    draft.set(String::new());
-                    generation.update(|g| *g += 1);
+                if state.get_untracked().can_send(&text) {
+                    state.set(SendState::Sending);
+                    let (draft, generation, state) = (draft.clone(), generation.clone(), state.clone());
+                    let sent = text.clone();
+                    f.send(&id, &text, move |ok| {
+                        state.set(SendState::Idle);
+                        let now = draft.get_untracked();
+                        let next = draft_after_send(ok, &now, sent.trim());
+                        if next != now {
+                            draft.set(next);
+                            generation.update(|g| *g += 1);
+                        }
+                    });
                 }
             }
         }
@@ -536,9 +562,10 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                     .modifier(Modifier::new().size(H_CTL, H_CTL))
                     .content(|| super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0));
                 // Sending is for the server's rooms; the sample rooms (demo) cannot send.
-                let can_send = live.is_some() && !draft.get().trim().is_empty();
+                let sending = state.get() == SendState::Sending;
+                let can_send = live.is_some() && !sending && !draft.get().trim().is_empty();
                 let (draft, send) = (draft.clone(), send.clone());
-                AppButton("전송", None, ButtonKind::Primary, false, can_send, false, move || send(draft.get_untracked()));
+                AppButton(if sending { "전송 중" } else { "전송" }, None, ButtonKind::Primary, false, can_send, false, move || send(draft.get_untracked()));
                 cu::Spacer().modifier(Modifier::new().width(6.0));
             });
         cu::Spacer().modifier(Modifier::new().weight(1.0));
@@ -691,7 +718,7 @@ mod tests {
             ChannelsView(Vec::new(), Load::Failed("503".into()), None);
         }
         let text = text_of(failed);
-        assert!(text.contains("채널을 불러오지 못했습니다") && text.contains("503"), "{text}");
+        assert!(text.contains("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.") && !text.contains("503"), "{text}");
     }
 
     #[test]

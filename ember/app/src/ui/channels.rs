@@ -75,6 +75,28 @@ pub const USER_ID: &str = "user";
 /// What the person is called in a room.
 pub const USER_NAME: &str = "나";
 
+/// Whether a message is on its way to the server (FR-T10). One send at a time, so a double
+/// click or a second Enter cannot post the same text twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SendState {
+    #[default]
+    Idle,
+    Sending,
+}
+
+impl SendState {
+    /// A send may start only when idle and the text is not blank.
+    pub fn can_send(self, text: &str) -> bool {
+        self == SendState::Idle && !text.trim().is_empty()
+    }
+}
+
+/// The draft after the server answered: cleared on success (if the person did not type on
+/// meanwhile), kept as typed on failure so nothing is lost.
+pub fn draft_after_send(ok: bool, draft: &str, sent: &str) -> String {
+    if ok && draft == sent { String::new() } else { draft.to_string() }
+}
+
 /// What the channel list shows while and after it loads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Load {
@@ -90,7 +112,7 @@ pub enum Load {
 pub fn empty_text(load: &Load, rooms: usize) -> Option<String> {
     match load {
         Load::Loading if rooms == 0 => Some("채널을 불러오는 중입니다".to_string()),
-        Load::Failed(why) if rooms == 0 => Some(format!("채널을 불러오지 못했습니다: {why}")),
+        Load::Failed(_) if rooms == 0 => Some("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.".to_string()),
         Load::Ready if rooms == 0 => Some("채널이 없습니다".to_string()),
         _ => None,
     }
@@ -403,6 +425,20 @@ pub fn compact_shows_room(open: &Option<String>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_t10_send_blocks_while_in_flight() {
+        assert!(SendState::Idle.can_send("hi"));
+        assert!(!SendState::Sending.can_send("hi"));
+        assert!(!SendState::Idle.can_send("  "));
+    }
+
+    #[test]
+    fn fr_t10_draft_kept_on_failure() {
+        assert_eq!(draft_after_send(false, "hello", "hello"), "hello");
+        assert_eq!(draft_after_send(true, "hello", "hello"), "");
+        assert_eq!(draft_after_send(true, "hello more", "hello"), "hello more");
+    }
+
     use super::*;
 
     const ME: &str = "me";
@@ -708,7 +744,7 @@ mod layout_tests {
     #[test]
     fn fr_l12_empty_loading_and_failed_states_are_honest() {
         assert_eq!(empty_text(&Load::Loading, 0).unwrap(), "채널을 불러오는 중입니다");
-        assert!(empty_text(&Load::Failed("503".into()), 0).unwrap().contains("503"));
+        assert!(!empty_text(&Load::Failed("503".into()), 0).unwrap().contains("503"));
         assert_eq!(empty_text(&Load::Ready, 0).unwrap(), "채널이 없습니다");
         // Rooms already loaded stay on screen through a later failure.
         assert!(empty_text(&Load::Failed("x".into()), 2).is_none());

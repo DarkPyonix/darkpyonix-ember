@@ -318,6 +318,11 @@ impl Sessions {
     /// The running agent for `id`, starting or natively resuming it if needed.
     async fn ensure_live(self: &Arc<Self>, id: &str) -> Result<LiveRun, SessionError> {
         let mut live = self.live.lock().await;
+        // A dead shim cannot accept another message. Discard its adapter so the next start
+        // removes stale shim files and resumes from the stored native session id.
+        if crate::agents::proc::shim_died(id) {
+            live.remove(id);
+        }
         if let Some(run) = live.get(id) {
             return Ok(run.clone());
         }

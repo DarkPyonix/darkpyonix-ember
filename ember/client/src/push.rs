@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(
             decode(r#"{"type":"project_updated","project":{"name":"p","created_at":1,"computers":["local"]}}"#).unwrap(),
             Push::ProjectUpdated {
-                project: Project { name: "p".into(), created_at: 1, computers: vec!["local".into()] }
+                project: Project { name: "p".into(), created_at: 1, computers: vec!["local".into()], ..Default::default() }
             }
         );
         // An older server's record (no metadata fields) still decodes.

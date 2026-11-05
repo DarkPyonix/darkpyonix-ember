@@ -824,6 +824,7 @@ mod tests {
             name: name.into(),
             created_at: 0,
             computers: computers.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
         };
         let ch = s.apply(Input::ProjectsLoaded(vec![proj("alpha", &["studio"]), proj("empty", &[])]));
         assert!(ch.projects && ch.computers);

@@ -313,6 +313,18 @@ impl Client {
         Ok(list)
     }
 
+    /// Save project settings (FR-L26). The state takes the answer at once; after a rename the
+    /// list is reloaded so the old name goes away. The server's `project_updated` push tells
+    /// every other client.
+    pub async fn patch_project(&self, name: &str, patch: &crate::wire::ProjectPatch) -> Result<Project, crate::api::ProjectPatchError> {
+        let p = self.inner.api.patch_project(name, patch).await?;
+        self.inner.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        if patch.name.is_some() {
+            let _ = self.load_projects().await;
+        }
+        Ok(p)
+    }
+
     /// Assign a computer to a project (FR-L4).
     pub async fn assign_computer(&self, project: &str, computer_id: &str) -> ApiResult<Project> {
         let p = self.inner.api.assign_computer(project, computer_id).await?;

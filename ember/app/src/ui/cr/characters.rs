@@ -70,13 +70,11 @@ fn draw(spec: &CharSpec, size: f32) {
 }
 
 /// The 팀 캐릭터 picker of the project settings sheet: six preview cards, three rows of two, so
-/// the Korean names are not clipped. The choice is saved to prefs at once.
-/// TODO(server): save it on the project instead.
-pub fn StylePicker(project_id: &str, seed_name: &str) {
+/// the Korean names are not clipped. A pick goes to `on_pick`; the settings sheet keeps it in
+/// its draft and saves it with 저장 (FR-L26).
+pub fn StylePicker(seed_name: &str, current: CharStyle, on_pick: impl FnMut(CharStyle) + Clone + 'static) {
     let theme = ember_theme();
-    let ui = shared_ui().clone();
     let p = theme.palette;
-    let current = ui.prefs.get().character_style(project_id);
     let dark = theme.scheme == Scheme::Dark;
     cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
         for row in CharStyle::ALL.chunks(2) {
@@ -99,11 +97,9 @@ pub fn StylePicker(project_id: &str, seed_name: &str) {
                                 },
                                 56.0,
                             );
-                            let (ui, pid) = (ui.clone(), project_id.to_string());
+                            let mut pick = on_pick.clone();
                             let kind = if style == current { ButtonKind::Primary } else { ButtonKind::Default };
-                            AppButton(style.label(), None, kind, true, true, false, move || {
-                                ui.update_prefs(|pr| pr.set_character_style(&pid, style));
-                            });
+                            AppButton(style.label(), None, kind, true, true, false, move || pick(style));
                             Label(style.blurb(), Fs::Xs2, Weight::Regular, Some(paint(p.text_2)), Some(3));
                         });
                 }
@@ -127,7 +123,7 @@ mod tests {
     #[test]
     fn fr_l24_the_style_picker_lists_every_style_label() {
         let _guard = crate::services::test_guard();
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| StylePicker("p1", "ember"))));
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| StylePicker("ember", CharStyle::Crew, |_| {}))));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         for style in CharStyle::ALL {

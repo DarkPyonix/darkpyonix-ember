@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn fr_l4_assignment_comes_from_the_server_projects() {
         let mut s = state(vec![rec("a", "alpha", SessionStatus::Idle, 1)]);
-        s.apply(Input::ProjectsLoaded(vec![Project { name: "alpha".into(), created_at: 0, computers: vec!["local".into()] }]));
+        s.apply(Input::ProjectsLoaded(vec![Project { name: "alpha".into(), created_at: 0, computers: vec!["local".into()], ..Default::default() }]));
         assert!(is_assigned(&s, "alpha", "local"));
         assert!(!is_assigned(&s, "alpha", "studio"));
         assert!(!is_assigned(&s, "nope", "local"));

@@ -3,8 +3,10 @@
 //! members, the full view of one project and its settings sheet.
 //!
 //! The decisions (boxes, members, ordering, filters, deck, settings rules) are `ui::project`'s
-//! plain functions, used as they are. The server saves only computer assignment (FR-L26), so
-//! the other settings fields are shown disabled with "준비 중입니다".
+//! plain functions, used as they are. The settings sheet saves name, repository, default
+//! branch, new member defaults and character style with `PATCH /api/projects/{name}` (FR-L26,
+//! #327). Leader, profile override, archive and delete stay disabled: the server does not
+//! support them yet (TODO(#384)).
 
 #![allow(non_snake_case)]
 
@@ -13,18 +15,20 @@ use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
 
+use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    chip_line, computer_chips, danger_allowed, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
-    ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, SETTINGS_SAVE_AVAILABLE, SOON,
+    ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
+use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, OptionSheet, Pill, PillTone, SheetFooter,
+    IconButton, Label, OptionSheet, Pill, PillTone, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -973,7 +977,7 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
     if let Some(id) = st.settings.get() {
         if let Some(b) = boxes.iter().find(|b| b.id == id) {
             let s = st.settings.clone();
-            SettingsSheet(b, chips, move || s.set(None));
+            SettingsSheet(b, chips, st.settings.clone(), move || s.set(None));
         }
         let _ = ui;
     }
@@ -1004,37 +1008,81 @@ fn FieldRow(label: &str, content: impl FnOnce()) {
     });
 }
 
+/// Sends the patch and shows the honest result: close on success, a fixed Korean sentence on
+/// failure (FR-L26). The character style is also kept in this device's prefs, which the member
+/// tiles read.
+/// TODO(#384): leader, profile override, archive and delete are not sent (server `not_yet`).
+fn save_settings(
+    project: String,
+    patch: ember_client::wire::ProjectPatch,
+    style: Option<CharStyle>,
+    closed: MutableState<Option<String>>,
+    saving: MutableState<bool>,
+    failure: MutableState<Option<String>>,
+) {
+    saving.set(true);
+    failure.set(None);
+    let ui = shared_ui().clone();
+    let style_changed = patch.character_style.is_some();
+    let saved_as = patch.name.clone().unwrap_or_else(|| project.clone());
+    run_shared(
+        async move { services().client.patch_project(&project, &patch).await.map(|_| ()) },
+        move |r| {
+            saving.set(false);
+            match r {
+                Ok(()) => {
+                    if let (true, Some(st)) = (style_changed, style) {
+                        ui.update_prefs(|pr| pr.set_character_style(&saved_as, st));
+                    }
+                    closed.set(None);
+                }
+                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code()).to_string())),
+            }
+        },
+    );
+}
+
 /// The settings sheet has 취소 and 저장 in the header beside the close button.
-fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() + Clone + 'static) {
+fn SettingsSheet(
+    b: &ProjectBox,
+    chips: &[ComputerChip],
+    closed: MutableState<Option<String>>,
+    on_close: impl FnMut() + Clone + 'static,
+) {
     let p = ember_theme().palette;
     let default_project = is_default_project(&b.id);
-    let draft = remember_with_key(b.id.clone(), || {
-        mutable_state_of(SettingsDraft {
-            name: b.name.clone(),
-            repo: b.repo.clone().unwrap_or_default(),
-            branch: b.branch.clone().unwrap_or_default(),
-        })
+    // What the server holds now; the draft starts from it and 저장 sends only the difference.
+    let server = services().client.read(|s| s.project(&b.id).cloned()).unwrap_or_else(|| Project { name: b.id.clone(), ..Default::default() });
+    let draft = remember_with_key(b.id.clone(), {
+        let server = server.clone();
+        move || mutable_state_of(SettingsDraft::from_project(&server))
     });
+    let saving = remember_with_key(b.id.clone(), || mutable_state_of(false));
+    let failure = remember_with_key(b.id.clone(), || mutable_state_of(None::<String>));
     let d = draft.get();
     let errors = validate_settings(&d, &b.id);
-    let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty();
+    let patch = build_patch(&server, &d);
+    let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty() && !patch.is_empty() && !saving.get();
     let window = compose_rust::runtime::current_window_size();
     let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 900.0);
     let mut actions = {
         let close = on_close.clone();
+        let (patch, project, closed, saving, failure) = (patch.clone(), b.id.clone(), closed.clone(), saving.clone(), failure.clone());
+        let style = CharStyle::from_id(d.style.as_str());
         move || {
             AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
             cu::Spacer().modifier(Modifier::new().width(SP[0]));
-            AppButton("저장", None, ButtonKind::Primary, true, can_save, false, || {});
+            let (patch, project, closed, saving, failure) = (patch.clone(), project.clone(), closed.clone(), saving.clone(), failure.clone());
+            AppButton("저장", None, ButtonKind::Primary, true, can_save, false, move || {
+                save_settings(project.clone(), patch.clone(), style, closed.clone(), saving.clone(), failure.clone())
+            });
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
         }
     };
     EmberSheet(&format!("{} 설정", b.name), true, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_height)).content(|| {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                // TODO(server): rename and repository need a project settings API (FR-L26); the
-                // fields are shown disabled until then.
-                Section("기본", "프로젝트 이름과 저장소", true, || {
+                Section("기본", "프로젝트 이름과 저장소입니다. 비워서 저장하면 저장소와 브랜치 설정이 지워집니다", true, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                         let (d1, d2, d3) = (draft.clone(), draft.clone(), draft.clone());
                         FieldRow("이름", || {
@@ -1073,6 +1121,9 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                         for e in errors.iter() {
                             Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
                         }
+                        if let Some(m) = failure.get() {
+                            Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                        }
                     });
                 });
                 Section("컴퓨터", "이 프로젝트의 팀원이 일할 수 있는 컴퓨터입니다", false, || {
@@ -1095,15 +1146,50 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                         }
                     });
                 });
-                Section("새 팀원 기본값", "하네스, 모델, 권한 모드는 새 팀원에게만 적용됩니다. 준비 중입니다", false, || {
-                    AppButton("기본값 고르기", None, ButtonKind::Default, false, part_supported(SettingsPart::MemberDefaults), false, || {});
+                Section("새 팀원 기본값", "하네스, 모델, 권한 모드는 새 팀원에게만 적용됩니다", false, || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        let agents = agent_options();
+                        let agent_labels: Vec<String> = agents.iter().map(|(_, l)| l.to_string()).collect();
+                        let agent_at = agents.iter().position(|(k, _)| *k == d.agent).unwrap_or(0);
+                        FieldRow("하네스", || {
+                            let (dr, agents) = (draft.clone(), agents.clone());
+                            Select(&agent_labels[agent_at], &agent_labels, agent_at, 260.0, move |i| {
+                                if let Some((k, _)) = agents.get(i) {
+                                    dr.update(|s| s.agent = k.to_string());
+                                }
+                            });
+                        });
+                        FieldRow("모델", || {
+                            let dr = draft.clone();
+                            // TODO(compose-rust#383): the model picker sheet of the new session
+                            // screen needs the harness catalog; the id is typed until it is shared.
+                            EmberField(FieldOptions {
+                                fill_max_width: true,
+                                placeholder: server.member_defaults.as_ref().and_then(|m| m.model.clone()).unwrap_or_else(|| "비워 두면 하네스 기본값을 씁니다".to_string()),
+                                enabled: Some(part_supported(SettingsPart::MemberDefaults)),
+                                on_value_change: Some(Box::new(move |v| dr.update(|s| s.model = v))),
+                                ..Default::default()
+                            });
+                        });
+                        let modes = mode_options();
+                        let mode_labels: Vec<String> = modes.iter().map(|(_, l)| l.to_string()).collect();
+                        let mode_at = modes.iter().position(|(k, _)| *k == d.mode).unwrap_or(0);
+                        FieldRow("권한 모드", || {
+                            let (dr, modes) = (draft.clone(), modes.clone());
+                            Select(&mode_labels[mode_at], &mode_labels, mode_at, 260.0, move |i| {
+                                if let Some((k, _)) = modes.get(i) {
+                                    dr.update(|s| s.mode = k.to_string());
+                                }
+                            });
+                        });
+                    });
                 });
-                Section("팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 이 기기에만 저장됩니다", false, || {
-                    // TODO(server): the style is kept in this device's prefs until the server stores it.
-                    StylePicker(&b.id, &b.name);
+                Section("팀 캐릭터", "팀원이 모두 고른 모양으로 보입니다. 저장하면 서버에 기록됩니다", false, || {
+                    let dr = draft.clone();
+                    StylePicker(&b.name, CharStyle::from_id(&d.style).unwrap_or_default(), move |st| dr.update(|s| s.style = st.id().to_string()));
                 });
                 if leader_choice_visible(&b.id) {
-                    Section("리더 (오케스트레이터)", "리더 지정은 준비 중입니다", false, || match b.leader() {
+                    Section("리더 (오케스트레이터)", "리더 지정은 서버가 아직 지원하지 않습니다", false, || match b.leader() {
                         Some(l) => Label(&format!("현재 리더: {}", l.name), Fs::Md, Weight::Regular, None, Some(1)),
                         None => Label("리더가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1)),
                     });
@@ -1112,13 +1198,13 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                         Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
-                Section("프로필 덮어쓰기", "선택 사항입니다. 이 프로젝트에서만 하네스에 다른 프로필을 씁니다. 준비 중입니다", false, || {
+                Section("프로필 덮어쓰기", "이 프로젝트에서만 하네스에 다른 프로필을 쓰는 설정입니다. 서버가 아직 지원하지 않습니다", false, || {
                     AppButton("프로필 고르기", None, ButtonKind::Default, false, part_supported(SettingsPart::ProfileOverride), false, || {});
                 });
-                Section("연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리는 준비 중입니다", false, || {
+                Section("연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리는 서버가 아직 지원하지 않습니다", false, || {
                     Label("연결된 항목이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
                 });
-                Section("위험 영역", if default_project { "기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "되돌리기 어려운 작업입니다. 준비 중입니다" }, false, || {
+                Section("위험 영역", if default_project { "기본 프로젝트는 보관하거나 지울 수 없습니다" } else { "보관과 삭제는 서버가 아직 지원하지 않습니다" }, false, || {
                     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                         AppButton("프로젝트 보관", None, ButtonKind::Destructive, false, danger_allowed(&b.id, SettingsPart::Archive), false, || {});
                         AppButton("프로젝트 삭제", None, ButtonKind::Destructive, false, danger_allowed(&b.id, SettingsPart::Delete), false, || {});

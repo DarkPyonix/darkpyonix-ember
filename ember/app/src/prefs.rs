@@ -88,6 +88,20 @@ impl Prefs {
             .unwrap_or_default()
     }
 
+    /// The style this device remembers for the project, if any (the fallback of FR-L26).
+    pub fn saved_character_style(&self, project: &str) -> Option<crate::ui::characters::CharStyle> {
+        self.character_styles.get(project).copied()
+    }
+
+    /// A rename moves the remembered style to the new name (FR-L26).
+    pub fn move_character_style(&mut self, old: &str, new: &str) {
+        if old != new {
+            if let Some(st) = self.character_styles.remove(old) {
+                self.character_styles.entry(new.to_string()).or_insert(st);
+            }
+        }
+    }
+
     pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
         self.character_styles.insert(project.to_string(), style);
     }
@@ -198,5 +212,17 @@ mod tests {
             !std::fs::read_to_string(&path).unwrap().contains("pinned"),
             "dropped on save"
         );
+    }
+
+    #[test]
+    fn fr_l26_prefs_key_moves_on_rename() {
+        use crate::ui::characters::CharStyle;
+        let mut p = Prefs::default();
+        p.set_character_style("old", CharStyle::Crew);
+        p.move_character_style("old", "new");
+        assert_eq!(p.saved_character_style("new"), Some(CharStyle::Crew));
+        assert_eq!(p.saved_character_style("old"), None);
+        p.move_character_style("missing", "x");
+        assert_eq!(p.saved_character_style("x"), None);
     }
 }

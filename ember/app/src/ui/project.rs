@@ -20,10 +20,11 @@
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::state::Reachability;
-use ember_client::wire::TeamView;
+use ember_client::wire::{MemberDefaults, Project, ProjectPatch, TeamView};
 use ember_client::{LauncherStatus, State};
 
 use crate::model::status_rank;
+use crate::ui::characters::CharStyle;
 use crate::ui::components::PillTone;
 
 
@@ -39,7 +40,7 @@ pub const DEFAULT_PROJECT_NAME: &str = "기본 프로젝트";
 pub const SOON: &str = "준비 중입니다";
 
 pub fn is_default_project(id: &str) -> bool {
-    id == DEFAULT_PROJECT_ID
+    id == DEFAULT_PROJECT_ID || id == DEFAULT_PROJECT_NAME
 }
 
 /// The name to draw for a project id.
@@ -247,7 +248,7 @@ pub struct ProjectBox {
     pub computers: Vec<String>,
     /// The most urgent status, for the status disc.
     pub top: Option<LauncherStatus>,
-    /// TODO(server): the server has no project repository or branch yet (FR-L26).
+    /// From the server's project record (FR-L26).
     pub repo: Option<String>,
     pub branch: Option<String>,
 }
@@ -348,8 +349,8 @@ pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<Pr
                 waiting: count(LauncherStatus::WaitingForApproval),
                 computers: state.project_computers(&p.name).to_vec(),
                 top,
-                repo: None,
-                branch: None,
+                repo: state.project(&p.name).and_then(|r| r.repository.clone()).filter(|r| !r.is_empty()),
+                branch: state.project(&p.name).and_then(|r| r.default_branch.clone()).filter(|r| !r.is_empty()),
                 members,
             };
             (latest, b)
@@ -432,13 +433,23 @@ pub enum SettingsPart {
     Delete,
 }
 
-/// Whether the main server can save a part today. Only computer assignment has an API
-/// (`assign_computer`, `unassign_computer`, FR-L4). The rest is shown disabled with "준비 중입니다".
-/// TODO(server): project metadata (name, repository, branch, defaults, leader, profile override,
-/// character style) and archive and delete need a project settings API (FR-L26).
+/// Whether the main server can save a part today: computer assignment (FR-L4) and, through
+/// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults and character
+/// style (FR-L26). The rest is shown disabled with an explanation.
+/// TODO(#384): leader, profile override, archive and delete (server answers 400 `not_yet`).
 pub fn part_supported(part: SettingsPart) -> bool {
-    matches!(part, SettingsPart::Computers)
+    matches!(
+        part,
+        SettingsPart::Computers
+            | SettingsPart::Name
+            | SettingsPart::Repository
+            | SettingsPart::CharacterStyle
+            | SettingsPart::MemberDefaults
+    )
 }
+
+/// The short note under a part the server does not save yet.
+pub const NOT_YET: &str = "서버가 아직 지원하지 않습니다";
 
 /// Whether the leader choice is shown at all: never in 기본 프로젝트 (D28).
 pub fn leader_choice_visible(project_id: &str) -> bool {
@@ -450,14 +461,146 @@ pub fn danger_allowed(project_id: &str, part: SettingsPart) -> bool {
     part_supported(part) && !is_default_project(project_id)
 }
 
-/// Whether 저장 can do anything. False until the server saves project metadata.
-pub const SETTINGS_SAVE_AVAILABLE: bool = false;
+/// Whether 저장 can do anything: the server saves project metadata (FR-L26).
+pub const SETTINGS_SAVE_AVAILABLE: bool = true;
 
+/// The form of the settings sheet. Empty strings mean "not set"; `style` is the server's
+/// character style id, empty for none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsDraft {
     pub name: String,
     pub repo: String,
     pub branch: String,
+    pub agent: String,
+    pub model: String,
+    pub mode: String,
+    pub style: String,
+}
+
+impl SettingsDraft {
+    /// The form as the server holds the project now.
+    pub fn from_project(p: &Project) -> SettingsDraft {
+        let d = p.member_defaults.clone().unwrap_or_default();
+        SettingsDraft {
+            name: p.name.clone(),
+            repo: p.repository.clone().unwrap_or_default(),
+            branch: p.default_branch.clone().unwrap_or_default(),
+            agent: d.agent.unwrap_or_default(),
+            model: d.model.unwrap_or_default(),
+            mode: d.mode.unwrap_or_default(),
+            style: p.character_style.clone().unwrap_or_default(),
+        }
+    }
+
+    fn defaults(&self) -> MemberDefaults {
+        let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+        MemberDefaults { agent: some(&self.agent), model: some(&self.model), mode: some(&self.mode) }
+    }
+}
+
+/// The patch that turns `server` into `d`: only changed fields are set (FR-L26). A field the
+/// user emptied is sent empty (or `null` for the defaults), which clears it. Leader, profile
+/// override and archive are never sent. The name of 기본 프로젝트 is never sent.
+pub fn build_patch(server: &Project, d: &SettingsDraft) -> ProjectPatch {
+    let was = SettingsDraft::from_project(server);
+    let mut patch = ProjectPatch::default();
+    let name = d.name.trim();
+    if !is_default_project(&server.name) && name != was.name {
+        patch.name = Some(name.to_string());
+    }
+    if d.repo.trim() != was.repo.trim() {
+        patch.repository = Some(d.repo.trim().to_string());
+    }
+    if d.branch.trim() != was.branch.trim() {
+        patch.default_branch = Some(d.branch.trim().to_string());
+    }
+    let (now, before) = (d.defaults(), was.defaults());
+    if now != before {
+        patch.member_defaults = Some((!now.is_empty()).then_some(now));
+    }
+    if d.style != was.style {
+        patch.character_style = Some(d.style.clone());
+    }
+    patch
+}
+
+/// The project the UI shows as selected after `old` was renamed to `new` (FR-L26): the new name
+/// when `old` was selected, otherwise what was selected.
+pub fn follow_rename(selected: Option<&str>, old: &str, new: &str) -> Option<String> {
+    selected.map(|s| if s == old { new.to_string() } else { s.to_string() })
+}
+
+/// The character style to show: the server's value when it is a known id, else the one this
+/// device remembers, else the default (FR-L26). One source of truth is the server.
+pub fn effective_style(server: Option<&str>, device: Option<CharStyle>) -> CharStyle {
+    server.and_then(CharStyle::from_id).or(device).unwrap_or_default()
+}
+
+/// What closing the settings sheet does (FR-L26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseAction {
+    /// Ignored: a save is in flight.
+    Ignore,
+    /// Ask first: the draft differs from the loaded project.
+    Confirm,
+    Close,
+}
+
+/// The unsaved-changes guard of the settings sheet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SettingsGuard {
+    pub saving: bool,
+    pub dirty: bool,
+}
+
+impl SettingsGuard {
+    /// `dirty` when the patch the draft would send is not empty.
+    pub fn new(saving: bool, patch_is_empty: bool) -> SettingsGuard {
+        SettingsGuard { saving, dirty: !patch_is_empty }
+    }
+
+    /// What 취소, X and the backdrop do.
+    pub fn on_close(self) -> CloseAction {
+        if self.saving {
+            CloseAction::Ignore
+        } else if self.dirty {
+            CloseAction::Confirm
+        } else {
+            CloseAction::Close
+        }
+    }
+}
+
+/// The question of the unsaved-changes confirm.
+pub const DISCARD_QUESTION: &str = "저장하지 않은 변경이 있습니다. 닫을까요?";
+
+/// The harness choices of the new member defaults: server kind and label. The first is "none".
+/// Gemini is left out because the server has no Gemini kind (see `Harness::kind`).
+pub fn agent_options() -> Vec<(&'static str, &'static str)> {
+    vec![("", "기본값 없음"), ("claude-code", "Claude Code"), ("codex", "Codex")]
+}
+
+/// The permission mode choices of the new member defaults: server id and label.
+pub fn mode_options() -> Vec<(&'static str, &'static str)> {
+    use crate::ui::home::PermMode;
+    vec![
+        ("", "기본값 없음"),
+        ("ask", PermMode::Ask.label()),
+        ("edits", PermMode::Edits.label()),
+        ("plan", PermMode::Plan.label()),
+        ("bypass", PermMode::Bypass.label()),
+    ]
+}
+
+/// The sentence a failed save shows. Never the server's raw text.
+pub fn patch_error_message(status: Option<u16>, code: Option<&str>) -> &'static str {
+    match (status, code) {
+        (Some(409), Some("name_taken")) => "이미 있는 이름입니다",
+        (Some(403), Some("protected_project")) => "기본 프로젝트의 이름은 바꿀 수 없습니다",
+        (Some(400), _) => "입력한 값이 올바르지 않습니다",
+        (Some(404), _) => "프로젝트를 찾지 못했습니다",
+        _ => "설정을 저장하지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -702,6 +845,7 @@ mod tests {
             name: name.into(),
             repo: repo.into(),
             branch: branch.into(),
+            ..Default::default()
         }
     }
 
@@ -775,15 +919,19 @@ mod tests {
         }
     }
 
-    // FR-L26: only what the server supports is enabled; the rest is "준비 중입니다".
+    // FR-L26: only what the server supports is enabled; the rest says the server cannot yet.
     #[test]
-    fn only_computer_assignment_is_saved_by_the_server() {
-        assert!(part_supported(SettingsPart::Computers));
+    fn fr_l26_the_server_saves_metadata_but_not_leader_profile_archive_or_delete() {
         for part in [
+            SettingsPart::Computers,
             SettingsPart::Name,
             SettingsPart::Repository,
             SettingsPart::CharacterStyle,
             SettingsPart::MemberDefaults,
+        ] {
+            assert!(part_supported(part), "{part:?}");
+        }
+        for part in [
             SettingsPart::Leader,
             SettingsPart::ProfileOverride,
             SettingsPart::Links,
@@ -793,7 +941,92 @@ mod tests {
             assert!(!part_supported(part), "{part:?}");
         }
         assert_eq!(SOON, "준비 중입니다");
-        assert!(!SETTINGS_SAVE_AVAILABLE);
+        assert!(SETTINGS_SAVE_AVAILABLE);
+    }
+
+    fn server_project() -> Project {
+        Project {
+            name: "ember".into(),
+            repository: Some("github.com/a/b".into()),
+            default_branch: Some("develop".into()),
+            member_defaults: Some(MemberDefaults { agent: Some("codex".into()), model: None, mode: Some("plan".into()) }),
+            character_style: Some("crew".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fr_l26_an_unchanged_form_builds_an_empty_patch() {
+        let p = server_project();
+        assert!(build_patch(&p, &SettingsDraft::from_project(&p)).is_empty());
+        let mut d = SettingsDraft::from_project(&p);
+        d.name = "  ember  ".into();
+        assert!(build_patch(&p, &d).is_empty(), "whitespace around the same name is no change");
+    }
+
+    #[test]
+    fn fr_l26_the_patch_holds_only_the_changed_fields() {
+        let p = server_project();
+        let mut d = SettingsDraft::from_project(&p);
+        d.name = "ember2".into();
+        d.branch = "main".into();
+        let patch = build_patch(&p, &d);
+        assert_eq!(patch.name.as_deref(), Some("ember2"));
+        assert_eq!(patch.default_branch.as_deref(), Some("main"));
+        assert_eq!((patch.repository, patch.member_defaults, patch.character_style), (None, None, None));
+        let mut d = SettingsDraft::from_project(&p);
+        d.model = "opus".into();
+        d.style = "cream".into();
+        let patch = build_patch(&p, &d);
+        let md = patch.member_defaults.clone().flatten().expect("defaults sent");
+        assert_eq!((md.agent.as_deref(), md.model.as_deref(), md.mode.as_deref()), (Some("codex"), Some("opus"), Some("plan")));
+        assert_eq!(patch.character_style.as_deref(), Some("cream"));
+        assert!(patch.name.is_none());
+    }
+
+    #[test]
+    fn fr_l26_emptying_a_field_sends_an_empty_value_or_null() {
+        let p = server_project();
+        let mut d = SettingsDraft::from_project(&p);
+        d.repo.clear();
+        d.agent.clear();
+        d.mode.clear();
+        let patch = build_patch(&p, &d);
+        assert_eq!(patch.repository.as_deref(), Some(""));
+        assert_eq!(patch.member_defaults, Some(None), "all defaults emptied sends null");
+        let json = serde_json::to_value(&patch).unwrap();
+        assert_eq!(json["repository"], "");
+        assert!(json["member_defaults"].is_null() && json.get("member_defaults").is_some());
+    }
+
+    #[test]
+    fn fr_l26_the_default_project_name_is_never_sent() {
+        let p = Project { name: DEFAULT_PROJECT_ID.into(), ..Default::default() };
+        let mut d = SettingsDraft::from_project(&p);
+        d.name = "other".into();
+        assert!(build_patch(&p, &d).name.is_none());
+    }
+
+    #[test]
+    fn fr_l26_pickers_offer_only_ids_the_server_accepts() {
+        assert_eq!(mode_options().iter().map(|m| m.0).collect::<Vec<_>>(), ["", "ask", "edits", "plan", "bypass"]);
+        assert_eq!(agent_options().iter().map(|m| m.0).collect::<Vec<_>>(), ["", "claude-code", "codex"]);
+        for st in crate::ui::characters::CharStyle::ALL {
+            assert_eq!(crate::ui::characters::CharStyle::from_id(st.id()), Some(st));
+        }
+        assert_eq!(crate::ui::characters::CharStyle::from_id("x"), None);
+    }
+
+    #[test]
+    fn fr_l26_failures_read_as_fixed_korean_sentences() {
+        assert_eq!(patch_error_message(Some(409), Some("name_taken")), "이미 있는 이름입니다");
+        assert_eq!(patch_error_message(Some(403), Some("protected_project")), "기본 프로젝트의 이름은 바꿀 수 없습니다");
+        assert_eq!(patch_error_message(Some(400), Some("unknown_field")), "입력한 값이 올바르지 않습니다");
+        assert_eq!(patch_error_message(Some(404), None), "프로젝트를 찾지 못했습니다");
+        for (st, code) in [(None, None), (Some(500), None), (Some(502), Some("x"))] {
+            let m = patch_error_message(st, code);
+            assert!(m.starts_with("설정을 저장하지 못했습니다") && !m.contains("500"), "{m}");
+        }
     }
 
     #[test]
@@ -819,5 +1052,33 @@ mod tests {
         b.repo = Some("github.com/x/y".into());
         b.branch = Some("develop".into());
         assert_eq!(b.repo_line(), "github.com/x/y \u{00b7} develop");
+    }
+
+    #[test]
+    fn fr_l26_rename_updates_selection() {
+        assert_eq!(follow_rename(Some("old"), "old", "new").as_deref(), Some("new"));
+        assert_eq!(follow_rename(Some("other"), "old", "new").as_deref(), Some("other"));
+        assert_eq!(follow_rename(None, "old", "new"), None);
+    }
+
+    #[test]
+    fn fr_l26_style_prefers_server_value() {
+        assert_eq!(effective_style(Some("crew"), Some(CharStyle::Cream)), CharStyle::Crew);
+        assert_eq!(effective_style(None, Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some(""), Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some("neon"), Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some("neon"), None), CharStyle::default());
+    }
+
+    #[test]
+    fn fr_l26_guard_blocks_close_while_saving() {
+        assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
+        assert_eq!(SettingsGuard::new(true, true).on_close(), CloseAction::Ignore);
+    }
+
+    #[test]
+    fn fr_l26_guard_asks_when_dirty() {
+        assert_eq!(SettingsGuard::new(false, false).on_close(), CloseAction::Confirm);
+        assert_eq!(SettingsGuard::new(false, true).on_close(), CloseAction::Close);
     }
 }

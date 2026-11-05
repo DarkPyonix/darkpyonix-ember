@@ -24,6 +24,8 @@ use ember_server::store::Store;
 /// Configuration from the environment.
 /// - `EMBER_DATA_DIR`: where `ember.db`, `secret.key` and `accounts/` live (default `~/.ember`)
 /// - `EMBER_LISTEN`: listen address (default `127.0.0.1:8740`)
+/// - `EMBER_ALLOWED_HOSTS`: extra host names accepted in `Host` (comma-separated, FR-S10); the
+///   token is in `<data dir>/server-token` (FR-S9)
 /// - `EMBER_IDLE_SECS`: release an agent process after this long without activity (default 300)
 /// - `EMBER_CLAUDE_BIN`: the Claude Code CLI (default `claude` on `PATH`)
 /// - `EMBER_CODEX_BIN`: the Codex CLI (default `codex` on `PATH`)
@@ -182,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_registry = Registry::new(store.clone());
     let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let store_for_mcp = store.clone();
+    let store_for_channels = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
@@ -361,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
+        .merge(ember_server::channels::api::router(store_for_channels))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
@@ -389,6 +393,26 @@ async fn main() -> anyhow::Result<()> {
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
         .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
+    // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
+    // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
+    let local_app = {
+        let token = ember_server::auth::load_or_create_token(&data_dir)?;
+        tracing::info!(
+            "server token file: {} (send it as Authorization: Bearer)",
+            ember_server::auth::token_path(&data_dir).display()
+        );
+        let mut hosts: Vec<String> = std::env::var("EMBER_ALLOWED_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::to_string)
+            .collect();
+        if let Ok(u) = std::env::var("EMBER_AGENT_URL") {
+            if let Some((_, rest)) = u.split_once("://") {
+                hosts.push(ember_server::api::origin::host_of(rest.split('/').next().unwrap_or("")));
+            }
+        }
+        ember_server::auth::protect(local_app, ember_server::auth::ServerAuth::new(token, addr, hosts))
+    };
     if let Some(rt) = &shim_runtime {
         let rejoined = sessions.rejoin_shims(rt).await;
         if !rejoined.is_empty() {

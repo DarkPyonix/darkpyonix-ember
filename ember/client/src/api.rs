@@ -41,6 +41,10 @@ pub enum ApiError {
     Peer(String),
     #[error("server answered {status}: {message}")]
     Status { status: u16, message: String },
+    /// The server answered 401: the token is missing or wrong (FR-S11). The client never retries
+    /// on this, because the same token would be refused again.
+    #[error("authentication failed: the server refused the token ({0})")]
+    Unauthorized(String),
     #[error("invalid response: {0}")]
     Decode(String),
     #[error("push connection failed: {0}")]
@@ -61,6 +65,7 @@ impl ApiError {
     pub fn status(&self) -> Option<u16> {
         match self {
             ApiError::Status { status, .. } => Some(*status),
+            ApiError::Unauthorized(_) => Some(401),
             _ => None,
         }
     }
@@ -227,6 +232,10 @@ pub struct Api {
     reach: Reach,
     /// e.g. `http://127.0.0.1:8740`, no trailing slash; `peer:<id>` over the transport.
     base: String,
+    /// The `Authorization` header, sent on the plain HTTP reach only (the transport authenticates
+    /// by device key, FR-N3). The value is marked sensitive, so `{:?}` prints `Sensitive`, never
+    /// the token; the plaintext is not kept.
+    auth: Option<header::HeaderMap>,
 }
 
 /// A status and a fully read body.
@@ -237,18 +246,36 @@ struct Raw {
 
 impl Api {
     pub fn new(base_url: &str) -> ApiResult<Api> {
+        // A server that is not local gets no token and none is read (FR-S11).
+        let token = crate::token::token_allowed_for(base_url).then(crate::token::server_token_from_env).flatten();
+        Api::with_token(base_url, token)
+    }
+
+    /// Like [`Api::new`] with the server token given (`None` sends no `Authorization` header, as
+    /// an older server expects). The token is read once here, never per request (FR-S11).
+    pub fn with_token(base_url: &str, token: Option<String>) -> ApiResult<Api> {
         let base = base_url.trim_end_matches('/').to_string();
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(ApiError::BadUrl(base_url.to_string()));
         }
-        Ok(Api { reach: Reach::Http(reqwest::Client::new()), base })
+        // The token goes only to a loopback or listed host (FR-S11).
+        let auth = token
+            .filter(|_| crate::token::token_allowed_for(&base))
+            .as_deref()
+            .and_then(crate::token::auth_headers);
+        let mut builder = reqwest::Client::builder();
+        if let Some(headers) = auth.clone() {
+            builder = builder.default_headers(headers);
+        }
+        // A build failure is returned, never answered with a client that lacks the header.
+        Ok(Api { reach: Reach::Http(builder.build()?), base, auth })
     }
 
     /// The server reached over the transport at `addr` (dialed through `dialer`, which holds
     /// this device's identity).
     pub fn over_transport(dialer: Dialer, addr: impl Into<PeerAddr>) -> Api {
         let addr = addr.into();
-        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr } }
+        Api { base: format!("peer:{}", addr.peer), reach: Reach::Peer { dialer, addr }, auth: None }
     }
 
     /// The base URL, or `peer:<id>` over the transport.
@@ -337,6 +364,9 @@ impl Api {
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
             .unwrap_or(body);
+        if raw.status == StatusCode::UNAUTHORIZED {
+            return Err(ApiError::Unauthorized(message));
+        }
         Err(ApiError::Status { status: raw.status.as_u16(), message })
     }
 
@@ -370,8 +400,20 @@ impl Api {
             }
             Reach::Peer { dialer, addr } => Box::new(dialer.open_bi(addr, SERVER_SERVICE).await.map_err(peer_err)?),
         };
-        let (ws, _) = tokio_tungstenite::client_async(url, io).await.map_err(|e| ApiError::Push(e.to_string()))?;
+        let request = self.push_request(&url)?;
+        let (ws, _) = tokio_tungstenite::client_async(request, io).await.map_err(|e| ApiError::Push(e.to_string()))?;
         Ok(ws)
+    }
+
+    /// The WebSocket upgrade request for `url`, carrying `Authorization: Bearer` on the plain
+    /// HTTP reach when a token exists (FR-S11).
+    fn push_request(&self, url: &str) -> ApiResult<http::Request<()>> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = url.into_client_request().map_err(|e| ApiError::Push(e.to_string()))?;
+        if let (Reach::Http(_), Some(headers)) = (&self.reach, &self.auth) {
+            request.headers_mut().extend(headers.clone());
+        }
+        Ok(request)
     }
 
     pub async fn health(&self) -> ApiResult<Health> {
@@ -753,6 +795,39 @@ fn usage_path(days: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_s11_http_client_sends_bearer_only_with_a_token() {
+        let with = Api::with_token("http://127.0.0.1:1", Some("tok".into())).unwrap();
+        let req = with.push_request(&with.push_url()).unwrap();
+        let value = req.headers().get(header::AUTHORIZATION).expect("header on the upgrade");
+        assert_eq!(value, "Bearer tok");
+        assert!(value.is_sensitive());
+        let without = Api::with_token("http://127.0.0.1:1", None).unwrap();
+        assert!(without.push_request(&without.push_url()).unwrap().headers().get(header::AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn fr_s11_debug_output_never_holds_the_token() {
+        let api = Api::with_token("http://127.0.0.1:1", Some("secret".into())).unwrap();
+        assert!(!format!("{api:?}").contains("secret"));
+    }
+
+    #[test]
+    fn fr_s11_no_token_is_sent_to_a_remote_host() {
+        let api = Api::with_token("https://example.com", Some("secret".into())).unwrap();
+        assert!(api.push_request(&api.push_url()).unwrap().headers().get(header::AUTHORIZATION).is_none());
+    }
+
+    #[test]
+    fn fr_s11_401_maps_to_the_auth_error() {
+        let raw = Raw { status: StatusCode::UNAUTHORIZED, body: Bytes::from_static(br#"{"error":"unauthorized"}"#) };
+        let err = Api::check(raw).err().expect("401 is an error");
+        assert!(matches!(&err, ApiError::Unauthorized(m) if m == "unauthorized"));
+        assert_eq!(err.status(), Some(401));
+        let other = Raw { status: StatusCode::FORBIDDEN, body: Bytes::from_static(b"no") };
+        assert!(matches!(Api::check(other), Err(ApiError::Status { status: 403, .. })));
+    }
 
     #[test]
     fn fr_u7_usage_path_carries_days() {

@@ -43,6 +43,42 @@ CREATE TABLE IF NOT EXISTS a2a_switches (
 );
 ";
 
+/// Columns added after the first release, as `(name, SQL type)`. Applied by [`migrate`] to a
+/// database that predates them. `origin_channel` and `origin_label` mark a message that a person
+/// typed in a channel (FR-T12): `from_session` then holds `channel:<channel id>`, which is never a
+/// session id.
+const ADDED_COLUMNS: &[(&str, &str)] = &[("origin_channel", "TEXT"), ("origin_label", "TEXT")];
+
+/// Prefix of `from_session` for a message from a person in a channel.
+pub const CHANNEL_SENDER_PREFIX: &str = "channel:";
+
+const MESSAGE_COLUMNS: &str = "id, from_session, to_session, reply_to, text, created_at, delivered_at, \
+     origin_channel, origin_label";
+
+/// Idempotent: adds each missing column of [`ADDED_COLUMNS`] to `a2a_messages`.
+fn migrate(conn: &Connection) -> anyhow::Result<()> {
+    let mut have = Vec::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(a2a_messages)")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for n in names {
+            have.push(n?);
+        }
+    }
+    for (name, ty) in ADDED_COLUMNS {
+        if have.iter().any(|h| h == name) {
+            continue;
+        }
+        if let Err(e) = conn.execute(&format!("ALTER TABLE a2a_messages ADD COLUMN {name} {ty}"), []) {
+            // Another connection to the same file may have added it between check and ALTER.
+            if !e.to_string().contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
+    Ok(())
+}
+
 const GLOBAL_SCOPE: &str = "global";
 
 pub(crate) fn now_ms() -> i64 {
@@ -72,6 +108,12 @@ pub struct A2aMessage {
     pub text: String,
     pub created_at: i64,
     pub delivered_at: Option<i64>,
+    /// The channel a person typed this message in; `None` for a message from a session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_channel: Option<String>,
+    /// The person's name at send time (e.g. `나`); set with `origin_channel`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_label: Option<String>,
 }
 
 pub struct A2aStore {
@@ -84,6 +126,7 @@ impl A2aStore {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(A2aStore {
             conn: Mutex::new(conn),
         })
@@ -92,6 +135,7 @@ impl A2aStore {
     pub fn open_in_memory() -> anyhow::Result<A2aStore> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
         Ok(A2aStore {
             conn: Mutex::new(conn),
         })
@@ -142,20 +186,54 @@ impl A2aStore {
             text: text.into(),
             created_at: now_ms(),
             delivered_at: None,
+            origin_channel: None,
+            origin_label: None,
         };
+        self.insert(&msg)?;
+        Ok(msg)
+    }
+
+    /// Store a message a person typed in `channel_id` (FR-T12). `from_session` becomes
+    /// `channel:<id>`, so it never collides with a session id in the loop-limit counts.
+    pub fn insert_channel_message(
+        &self,
+        channel_id: &str,
+        label: &str,
+        to: &str,
+        text: &str,
+    ) -> anyhow::Result<A2aMessage> {
+        let msg = A2aMessage {
+            id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
+            from_session: format!("{CHANNEL_SENDER_PREFIX}{channel_id}"),
+            to_session: to.into(),
+            reply_to: None,
+            text: text.into(),
+            created_at: now_ms(),
+            delivered_at: None,
+            origin_channel: Some(channel_id.into()),
+            origin_label: Some(label.into()),
+        };
+        self.insert(&msg)?;
+        Ok(msg)
+    }
+
+    fn insert(&self, msg: &A2aMessage) -> anyhow::Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO a2a_messages (id, from_session, to_session, reply_to, text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO a2a_messages
+                 (id, from_session, to_session, reply_to, text, created_at, origin_channel, origin_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 msg.from_session,
                 msg.to_session,
                 msg.reply_to,
                 msg.text,
-                msg.created_at
+                msg.created_at,
+                msg.origin_channel,
+                msg.origin_label
             ],
         )?;
-        Ok(msg)
+        Ok(())
     }
 
     pub fn message(&self, id: &str) -> anyhow::Result<Option<A2aMessage>> {
@@ -164,8 +242,7 @@ impl A2aStore {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT id, from_session, to_session, reply_to, text, created_at, delivered_at
-                 FROM a2a_messages WHERE id = ?1",
+                &format!("SELECT {MESSAGE_COLUMNS} FROM a2a_messages WHERE id = ?1"),
                 params![id],
                 row_to_message,
             )
@@ -175,11 +252,10 @@ impl A2aStore {
     /// Undelivered messages to `to`, oldest first.
     pub fn pending_for(&self, to: &str) -> anyhow::Result<Vec<A2aMessage>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, from_session, to_session, reply_to, text, created_at, delivered_at
-             FROM a2a_messages WHERE to_session = ?1 AND delivered_at IS NULL
-             ORDER BY created_at, rowid",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM a2a_messages WHERE to_session = ?1 AND delivered_at IS NULL
+             ORDER BY created_at, rowid"
+        ))?;
         let rows = stmt.query_map(params![to], row_to_message)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -317,6 +393,8 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<A2aMessage> {
         text: r.get(4)?,
         created_at: r.get(5)?,
         delivered_at: r.get(6)?,
+        origin_channel: r.get(7)?,
+        origin_label: r.get(8)?,
     })
 }
 
@@ -358,6 +436,34 @@ mod tests {
         let mut pending = s.sessions_with_pending().unwrap();
         pending.sort();
         assert_eq!(pending, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn migration_adds_the_origin_columns_to_an_old_database_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("ember-a2a-mig-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ember.db");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE a2a_messages (id TEXT PRIMARY KEY, from_session TEXT NOT NULL,
+                 to_session TEXT NOT NULL, reply_to TEXT, text TEXT NOT NULL,
+                 created_at INTEGER NOT NULL, delivered_at INTEGER);
+                 INSERT INTO a2a_messages VALUES ('m0','a','b',NULL,'old',1,NULL);",
+            )
+            .unwrap();
+        }
+        let s = A2aStore::open(&path).unwrap();
+        let again = A2aStore::open(&path).unwrap();
+        let old = s.message("m0").unwrap().unwrap();
+        assert_eq!(old.origin_channel, None);
+        let m = again.insert_channel_message("c1", "나", "b", "hi").unwrap();
+        assert_eq!(m.from_session, "channel:c1");
+        let got = s.message(&m.id).unwrap().unwrap();
+        assert_eq!(got.origin_channel.as_deref(), Some("c1"));
+        assert_eq!(got.origin_label.as_deref(), Some("나"));
+        assert_eq!(s.sent_since("a", 0).unwrap(), 1, "a channel sender never counts as a session");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

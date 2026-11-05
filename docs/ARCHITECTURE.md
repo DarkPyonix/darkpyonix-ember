@@ -48,7 +48,7 @@
 | **Main server** | Every agent CLI process; every transcript and the agents' native session files; accounts and credentials; projects, computers and assignments; A2A queues; schedules; browser profiles | Project source as a system of record (that lives on the computers) |
 | **Computer** | Project files; the processes tools start (builds, tests, servers); **ember node** (the execution daemon); the VS Code server for an IDE window on that computer | Agent CLIs; transcripts; credentials for agent accounts |
 | **Client** | A cache of what the main server last pushed, for instant cold start | Anything authoritative |
-| **darkpyonix.dev** | Address directory, rendezvous and sign-in (the relay is the main server from letify-link on, FR-N2; iroh-relay until then) | Conversations, files, credentials |
+| **darkpyonix.dev** | Address directory, rendezvous and sign-in (no relay: the main server is the relay on the default letify backend, FR-N2; the legacy iroh backend keeps its hub iroh-relay for one release) | Conversations, files, credentials |
 
 ### 1.2 How a tool call travels
 

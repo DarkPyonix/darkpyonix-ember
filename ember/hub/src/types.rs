@@ -159,7 +159,7 @@ pub struct HubInfo {
     /// The hub deployment's own version (display only).
     #[serde(default)]
     pub hub_version: Option<String>,
-    /// P2P relays for the transport (`https://relay.darkpyonix.dev/`).
+    /// P2P relays for the transport (none by default: the main server is the relay, INTENT D36).
     #[serde(default)]
     pub relay_urls: Vec<String>,
     /// Base URL for the pkarr publisher and resolver (`https://api.darkpyonix.dev/pkarr`).

@@ -6,10 +6,11 @@
 //! a member of every channel as the person `user`. Messages are an append-only log per channel
 //! in the main store (SQLite), and human messages are also appended to a per-channel JSONL file
 //! ([`jsonl`], FR-T16); mentions are parsed and gated ([`mention`], FR-T12, FR-T13) and delivered to
-//! the mentioned agents through A2A ([`api`]); invites (FR-T14) have their store and owner routes ([`invites`]); accepting one and the guest routes are in [`guest`] (not served by any listener yet); guest mention delivery (FR-T15) and allowances (FR-T17) are not built. Read tracking is one
+//! the mentioned agents through A2A ([`api`]); invites (FR-T14) have their store and owner routes ([`invites`]); accepting one and the guest routes are in [`guest`] (not served by any listener yet); a guest's mentions reach agents only under the owner's allowance ([`allowance`], FR-T15, FR-T17). Read tracking is one
 //! cursor per channel for the person `user` ([`READS_MIGRATION`]). Tables: [`MIGRATION`]. The
 //! agent feed (FR-T11) is derived from session events: [`feed`]. Routes: [`api`].
 
+pub mod allowance;
 pub mod api;
 pub mod feed;
 pub mod guest;
@@ -144,6 +145,8 @@ pub struct Channel {
     pub project: String,
     pub default: bool,
     pub members: Vec<Member>,
+    /// Guests present in the channel now, with the end of their allowance (FR-T17). Additive.
+    pub guests: Vec<allowance::ChannelGuest>,
     pub last_message: Option<Message>,
     pub messages: Vec<Message>,
     pub unread: u32,
@@ -337,6 +340,7 @@ impl Store {
 
     fn build(&self, row: Row, with_messages: bool) -> Result<Channel, ChannelError> {
         let members = self.members_of(&row)?;
+        let guests = self.channel_guests(&row.id)?;
         let last_message = self.last_message(&row.id)?;
         let unread = self.unread_count(&row.id)?;
         let messages = if with_messages {
@@ -352,6 +356,7 @@ impl Store {
             project: row.project,
             default: row.default,
             members,
+            guests,
             last_message,
             messages,
             unread,
@@ -388,6 +393,14 @@ impl Store {
         let name = new.name.trim();
         if name.is_empty() {
             return Err(ChannelError::BadRequest("channel name must not be empty".into()));
+        }
+        // A channel name is placed in headers an agent reads (FR-T17): no control, format or
+        // line-separator character, so it cannot carry a line break or a marker.
+        if name.chars().any(invites::is_forbidden_name_char) {
+            return Err(ChannelError::Coded(
+                "invalid_name",
+                "channel name must not contain a control, format or line-separator character".into(),
+            ));
         }
         if self.project(&new.project)?.is_none() {
             return Err(ChannelError::NotFound(format!("project {:?}", new.project)));

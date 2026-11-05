@@ -85,13 +85,24 @@ const RESERVED_NAMES: [&str; 4] = ["user", "나", "system", "agent"];
 /// zero-width and bidi controls), Zl and Zp. No general-category crate is a dependency, so the Cf
 /// ranges are listed here (Unicode 15).
 pub fn is_forbidden_name_char(c: char) -> bool {
+    c.is_control() || is_format_char(c) || is_line_separator(c)
+}
+
+/// U+2028 (Zl) and U+2029 (Zp).
+pub fn is_line_separator(c: char) -> bool {
+    matches!(c as u32, 0x2028 | 0x2029)
+}
+
+/// An invisible Unicode format character (category Cf), from a hand-listed set because no
+/// general-category crate is a dependency: soft hyphen, Arabic marks, zero-width space, joiner
+/// and non-joiner, bidi controls, U+2060..U+2064, U+FEFF, tag characters and the like.
+pub fn is_format_char(c: char) -> bool {
     let u = c as u32;
-    c.is_control()
-        || matches!(u,
-            0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x180E
-            | 0x200B..=0x200F | 0x2028 | 0x2029 | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
-            | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
-            | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+    matches!(u,
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x180E
+        | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+        | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+        | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
 }
 
 /// Check a guest display name (already trimmed) against the shape rules and the reserved names.

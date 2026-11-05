@@ -9,8 +9,8 @@
 //! - #372: container `on_click` is in compose-rust after v0.0.4 (FR-55); Ember pins that revision
 //!   in `Cargo.toml` until the next tag;
 //! - #373: `Button` has no `max_lines`, so the width estimate `label_min_width` stays (#208);
-//! - #374: `Text` and `TextField` have no `font` or `word_break`, so no bundled font and no
-//!   Korean word-keep yet (#216, #208);
+//! - #374: `Text` and `TextField` have no `font`, so no bundled font yet (#216);
+//! - #444: `TextField` has no `word_break`, so no Korean word-keep yet (#208);
 
 #![allow(non_snake_case)]
 

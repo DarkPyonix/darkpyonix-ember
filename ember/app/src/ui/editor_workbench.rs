@@ -18,6 +18,8 @@ struct Shared {
     menu_open: Signal<bool>,
     keymap: Signal<Keymap>,
     folder: String,
+    server_url: String,
+    computer: String,
     project: String,
     project_name: String,
     uris: Rc<RefCell<HashMap<String, ember_editor_conn::uri::UriComponents>>>,
@@ -42,7 +44,7 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 fn join_path(dir: &str, name: &str) -> String {
@@ -88,6 +90,8 @@ pub mod page {
     use dioxus_compose::html::prelude::dioxus_elements::{Key, Modifiers};
     use dioxus_compose::html::prelude::dioxus_signals::{ReadableExt, WritableExt};
     use dioxus_compose::html::prelude::*;
+    use std::sync::Arc;
+    use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
     use super::{editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, breadcrumb_text, tooltip_text, Side, Stripes, ToolWindow,
@@ -384,10 +388,106 @@ pub mod page {
         rsx! { div { style: "height:24px; flex-shrink:0; padding:0 12px; display:flex; align-items:center; color:#9d9d9d; font-size:12px; background:#1e1e1e;", "{text}" } }
     }
 
+    thread_local! {
+        /// The editor's terminal session. Started on first show and kept while the panel is hidden.
+        static TERMINAL: std::cell::RefCell<Option<TerminalHandle>> = const { std::cell::RefCell::new(None) };
+        /// True once this client asked for control after another client took it.
+        static CONTROL_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// The terminal handle, started on first use. `None` when the editor was not given a server
+    /// URL and a computer to attach to.
+    fn terminal_handle(s: &Shared) -> Option<TerminalHandle> {
+        if !can_attach(&s.server_url, &s.computer) {
+            return None;
+        }
+        TERMINAL.with(|t| {
+            let mut slot = t.borrow_mut();
+            if slot.is_none() {
+                let revision = s.revision;
+                let on_change: ChangeCallback = Arc::new(move || {
+                    let mut revision = revision;
+                    *revision.write() += 1;
+                });
+                *slot = Some(terminal_stream::start(&s.server_url, &s.computer, &s.folder, &s.project, Some(on_change)));
+            }
+            slot.clone()
+        })
+    }
+
+    /// What the terminal panel shows for one state.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct PanelView {
+        pub banner: Option<String>,
+        pub lines: Vec<String>,
+        pub notice: Option<String>,
+    }
+
+    pub(super) fn panel_view(state: &TerminalState) -> PanelView {
+        PanelView { banner: state.banner(), lines: state.lines.clone(), notice: state.notice() }
+    }
+
+    /// The editor can attach only with both a server URL and a computer id.
+    pub(super) fn can_attach(server_url: &str, computer: &str) -> bool {
+        !server_url.trim().is_empty() && !computer.trim().is_empty()
+    }
+
+    /// Bytes for a key press in the terminal. The Meta key is the app's, not the shell's.
+    pub(super) fn terminal_input(name: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Option<Vec<u8>> {
+        if meta {
+            return None;
+        }
+        terminal_stream::key_bytes(name, terminal_stream::Modifiers { ctrl, alt, shift })
+    }
+
+    /// True when typing should first take control: another client holds it and it has not been asked for.
+    pub(super) fn should_take_control(state: &TerminalState, already_asked: bool) -> bool {
+        state.controlled_by_other() && !already_asked
+    }
+
+    fn terminal_body(s: &Shared) -> Element {
+        let Some(handle) = terminal_handle(s) else {
+            return rsx! { div { style: "padding:12px; color:#9d9d9d; overflow:auto;", "노드의 터미널에 연결되어 있지 않습니다. 서버 주소와 컴퓨터 정보가 없어 터미널을 열 수 없습니다." } };
+        };
+        let view = panel_view(&handle.snapshot());
+        let key_handle = handle.clone();
+        rsx! {
+            div { tabindex: "0", style: "flex:1; min-height:0; overflow:auto; outline:none; padding:8px 12px; background:#1e1e1e; color:#cccccc;",
+                onkeydown: move |event| {
+                    let m = event.modifiers();
+                    let name = key_name(&event.key());
+                    let bytes = terminal_input(&name, m.contains(Modifiers::CONTROL), m.contains(Modifiers::ALT), m.contains(Modifiers::SHIFT), m.contains(Modifiers::META));
+                    let Some(bytes) = bytes else { return };
+                    event.stop_propagation();
+                    event.prevent_default();
+                    let state = key_handle.snapshot();
+                    if !state.controlled_by_other() {
+                        CONTROL_ASKED.with(|c| c.set(false));
+                    }
+                    if should_take_control(&state, CONTROL_ASKED.with(|c| c.get())) {
+                        CONTROL_ASKED.with(|c| c.set(true));
+                        key_handle.take_control();
+                    }
+                    key_handle.send_input(&bytes);
+                },
+                if let Some(banner) = view.banner {
+                    div { style: "padding:4px 8px; margin-bottom:6px; background:#4d3b00; color:#ffd479; border-radius:4px;", "{banner}" }
+                }
+                div { style: "white-space:pre; font-family:monospace; font-size:12px;",
+                    for (i, line) in view.lines.iter().enumerate() {
+                        div { key: "{i}", "{line}" }
+                    }
+                }
+                if let Some(notice) = view.notice {
+                    div { style: "padding-top:6px; color:#9d9d9d;", "{notice}" }
+                }
+            }
+        }
+    }
+
     fn bottom_window(s: &Shared, w: ToolWindow) -> Element {
         let mut stripes = s.stripes;
         let body = match w {
-            ToolWindow::Terminal => "노드의 터미널에 연결되어 있지 않습니다. 연결되면 이곳에 터미널이 표시됩니다.",
             ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
             _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
         };
@@ -405,7 +505,11 @@ pub mod page {
                     div { style: "width:28px; height:28px; display:flex; align-items:center; justify-content:center; cursor:pointer;",
                         title: "숨기기", onclick: move |_| stripes.write().hide(Side::Bottom), "\u{2304}" }
                 }
-                div { style: "padding:12px; color:#9d9d9d; overflow:auto;", "{body}" }
+                if w == ToolWindow::Terminal {
+                    {terminal_body(s)}
+                } else {
+                    div { style: "padding:12px; color:#9d9d9d; overflow:auto;", "{body}" }
+                }
             }
         }
     }
@@ -450,6 +554,36 @@ mod tests {
         let chord = chord_from_key("s", true, false, false, false);
         assert_eq!(Keymap::VsCode.action_for(&chord, Os::Other), Some(Action::Save));
         assert_eq!(page::key_name(&dioxus_compose::html::prelude::dioxus_elements::Key::Escape), "Esc");
+    }
+    #[test] fn fr_l31_terminal_panel_attaches_only_with_server_and_computer() {
+        assert!(page::can_attach("http://s:1", "node"));
+        assert!(!page::can_attach("", "node"));
+        assert!(!page::can_attach("http://s:1", "  "));
+    }
+    #[test] fn fr_l31_terminal_panel_view_shows_banner_lines_and_notice() {
+        let mut state = crate::terminal_stream::TerminalState::default();
+        let view = page::panel_view(&state);
+        assert_eq!(view.notice.as_deref(), Some("터미널이 연결되지 않았습니다."));
+        assert!(view.banner.is_none() && view.lines.is_empty());
+        state.apply(crate::terminal_stream::TerminalUpdate::Lines(vec!["$ ls".into()]));
+        let view = page::panel_view(&state);
+        assert_eq!(view.lines, ["$ ls"]);
+        assert!(view.notice.is_none());
+    }
+    #[test] fn fr_l31_terminal_keys_map_to_bytes_and_meta_is_not_sent() {
+        assert_eq!(page::terminal_input("Enter", false, false, false, false), Some(b"\r".to_vec()));
+        assert_eq!(page::terminal_input("ArrowUp", false, false, false, false), Some(b"\x1b[A".to_vec()));
+        assert_eq!(page::terminal_input("c", true, false, false, false), Some(vec![3]));
+        assert_eq!(page::terminal_input("c", false, false, false, true), None);
+    }
+    #[test] fn fr_l31_terminal_takes_control_once_when_another_client_holds_it() {
+        use crate::terminal_stream::{TermClient, TerminalState};
+        let mut state = TerminalState::default();
+        assert!(!page::should_take_control(&state, false));
+        state.client = Some(1);
+        state.controller = Some(TermClient { client: 2, device: "d".into(), kind: None, read_only: false });
+        assert!(page::should_take_control(&state, false));
+        assert!(!page::should_take_control(&state, true));
     }
     #[test] fn fr_l31_status_position() { assert_eq!(position_text(2, 3), "2행 3열"); }
 }

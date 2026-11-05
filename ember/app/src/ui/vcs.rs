@@ -1811,6 +1811,45 @@ impl ConflictFile {
     }
 }
 
+/// How many lines of the merged text the preview shows before "... N줄 더 있습니다".
+pub const CONFLICT_PREVIEW_LINES: usize = 40;
+
+/// Which step the conflict editor is on (FR-G7): picking per block, or looking at the merged
+/// text before it is written and staged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictStep {
+    Editing,
+    Preview,
+}
+
+impl ConflictStep {
+    /// The step after tapping 해결 완료: the preview when every block is settled, else unchanged.
+    pub fn enter_preview(self, file: &ConflictFile) -> ConflictStep {
+        if file.is_resolved() { ConflictStep::Preview } else { self }
+    }
+}
+
+/// The first `max` lines of `content` and how many lines were left out.
+pub fn preview_lines(content: &str, max: usize) -> (String, usize) {
+    let total = content.lines().count();
+    if total <= max {
+        return (content.to_string(), 0);
+    }
+    (content.lines().take(max).collect::<Vec<_>>().join("\n"), total - max)
+}
+
+/// A block button's text: the chosen one starts with "선택됨 · ", so the choice is not colour-only.
+pub fn choice_label(text: &str, selected: bool) -> String {
+    if selected { format!("선택됨 · {text}") } else { text.to_string() }
+}
+
+impl ConflictFile {
+    /// The preview of the merged text, `None` while a block is unresolved.
+    pub fn preview(&self, max: usize) -> Option<(String, usize)> {
+        self.resolved_content().map(|c| preview_lines(&c, max))
+    }
+}
+
 /// The state of the conflict editor's file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictLoad {
@@ -2936,6 +2975,32 @@ rename to new.txt
         let again = f.with_choice(0, ConflictChoice::Theirs);
         assert_eq!(again.resolved_count(), 1);
         assert_eq!(f.with_choice(9, ConflictChoice::Both), f);
+    }
+
+    #[test]
+    fn fr_g7_preview_cuts_long_text_and_counts_the_rest() {
+        let long: String = (0..45).map(|i| format!("l{i}\n")).collect();
+        let (text, more) = preview_lines(&long, 40);
+        assert_eq!(text.lines().count(), 40);
+        assert_eq!(more, 5);
+        let (all, none) = preview_lines("a\nb\n", 40);
+        assert_eq!((all.as_str(), none), ("a\nb\n", 0));
+    }
+
+    #[test]
+    fn fr_g7_preview_is_unavailable_while_a_block_is_unresolved() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours);
+        assert!(f.preview(40).is_none());
+        assert_eq!(ConflictStep::Editing.enter_preview(&f), ConflictStep::Editing);
+        let done = f.with_choice(1, ConflictChoice::Theirs);
+        assert!(done.preview(40).is_some());
+        assert_eq!(ConflictStep::Editing.enter_preview(&done), ConflictStep::Preview);
+    }
+
+    #[test]
+    fn fr_g7_the_chosen_button_is_labelled_not_only_coloured() {
+        assert_eq!(choice_label("내 변경", true), "선택됨 · 내 변경");
+        assert_eq!(choice_label("내 변경", false), "내 변경");
     }
 
     #[test]

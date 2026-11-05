@@ -11,9 +11,10 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers}`) |
+//! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers, repository, default_branch, member_defaults, character_style, archived}`) |
 //! | POST   | `/api/projects` | `{name}` → 201 `Project` (200 when it existed) |
 //! | GET    | `/api/projects/{name}` | → `Project` |
+//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?}` → `Project` (FR-L26); errors `{error, code}` |
 //! | PUT    | `/api/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
 //! | DELETE | `/api/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
@@ -72,7 +73,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/usage/summary", get(usage_summary))
         .route("/api/sessions/{id}/usage", get(session_usage))
         .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/{name}", get(get_project))
+        .route("/api/projects/{name}", get(get_project).patch(patch_project))
         .route("/api/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/messages", post(send_message))
@@ -115,6 +116,8 @@ impl From<ProjectError> for ApiError {
         let code = match &e {
             ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => StatusCode::NOT_FOUND,
             ProjectError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ProjectError::Protected(_) => StatusCode::FORBIDDEN,
+            ProjectError::NameTaken(_) => StatusCode::CONFLICT,
             ProjectError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))
@@ -327,6 +330,58 @@ async fn create_project(
 
 async fn get_project(State(s): State<Arc<Sessions>>, Path(name): Path<String>) -> ApiResult<impl IntoResponse> {
     Ok(Json(s.store().project(&name)?.ok_or(ProjectError::NotFound(name))?))
+}
+
+/// A failed project change as `{error, code}` (FR-L26).
+fn coded(status: StatusCode, code: &str, error: impl std::fmt::Display) -> Response {
+    (status, Json(json!({ "error": error.to_string(), "code": code }))).into_response()
+}
+
+fn project_error(e: ProjectError) -> Response {
+    let code = match &e {
+        ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => "not_found",
+        ProjectError::BadRequest(_) => "invalid_field",
+        ProjectError::Protected(_) => "protected_project",
+        ProjectError::NameTaken(_) => "name_taken",
+        ProjectError::Other(_) => "internal",
+    };
+    let message = format!("{e:#}");
+    coded(ApiError::from(e).0, code, message)
+}
+
+/// Fields of the settings sheet whose server side is not built yet. They are refused by name so
+/// the client sees a clean error and not a silent no-op (leader and profile override: #384 PR 3,
+/// archive: PR 4).
+const NOT_YET_PROJECT_FIELDS: [&str; 3] = ["leader_session", "profile_overrides", "archived"];
+
+/// FR-L26: change project settings. Body fields are optional; unknown fields are 400
+/// `unknown_field`, unbuilt ones 400 `not_yet`. Pushes `project_updated` with the new state.
+async fn patch_project(
+    State(s): State<Arc<Sessions>>,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return coded(StatusCode::BAD_REQUEST, "invalid_body", "the body must be a JSON object");
+    };
+    if let Some(field) = NOT_YET_PROJECT_FIELDS.iter().find(|f| map.contains_key(**f)) {
+        return coded(StatusCode::BAD_REQUEST, "not_yet", format!("{field} cannot be changed yet"));
+    }
+    let patch: crate::projects::ProjectPatch = match serde_json::from_value(serde_json::Value::Object(map)) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("unknown field") { "unknown_field" } else { "invalid_field" };
+            return coded(StatusCode::BAD_REQUEST, code, msg);
+        }
+    };
+    match s.store().patch_project(&name, &patch) {
+        Ok(project) => {
+            s.publish(Push::ProjectUpdated { project: project.clone() });
+            Json(project).into_response()
+        }
+        Err(e) => project_error(e),
+    }
 }
 
 /// FR-L4: assign a computer to a project.

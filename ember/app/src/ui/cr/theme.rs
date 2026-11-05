@@ -22,7 +22,7 @@ pub use crate::ui::theme::{Scheme, ThemePref};
 
 /// The scheme the OS reports.
 ///
-/// TODO(compose-rust): the toolkit resolves `FollowSystem` inside the renderer and exposes no
+/// TODO(compose-rust#97): the toolkit resolves `FollowSystem` inside the renderer and exposes no
 /// hook to read the result, so System draws the light palette until one exists. An explicit
 /// Light or Dark choice is exact.
 pub fn system_scheme() -> Scheme {
@@ -274,7 +274,7 @@ pub const CORNER_TAIL: f32 = 6.0;
 pub const PILL: f32 = 999.0;
 
 /// Squircle smoothing (Figma's corner smoothing). Unused until the toolkit can draw it.
-/// TODO(compose-rust): `Modifier::CornerCurve { smoothing }`; until then corners are plain
+/// TODO(compose-rust#294): `Modifier::CornerCurve { smoothing }`; until then corners are plain
 /// arcs of the same fixed radius, so only the curve differs and layout is the same.
 pub const SQUIRCLE_SMOOTHING: f32 = 0.6;
 

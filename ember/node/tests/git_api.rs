@@ -924,3 +924,94 @@ async fn fr_g3_a_configured_ssh_command_is_used_with_batch_mode() {
     assert!(args.contains("BatchMode=yes"), "{args}");
     assert!(args.contains("example.invalid"), "{args}");
 }
+
+#[cfg(unix)]
+fn pid_alive(pid: &str) -> bool {
+    Command::new("kill").args(["-0", pid]).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_g3_a_timeout_kills_the_ssh_child() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    let script = f.root.join("slow-ssh.sh");
+    let record = f.root.join("ssh-pid.txt");
+    std::fs::write(&script, format!("#!/bin/sh\necho $$ > '{}'\nsleep 300\n", s(&record))).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&repo, &["config", "core.sshCommand", &s(&script)]);
+    git(&repo, &["remote", "add", "origin", "ssh://example.invalid/x.git"]);
+    let body = GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) };
+    f.err("fetch", &body, 504, "timeout").await;
+    let pid = std::fs::read_to_string(&record).expect("the ssh stand-in ran").trim().to_string();
+    let mut gone = false;
+    for _ in 0..50 {
+        if !pid_alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(gone, "ssh child {pid} still runs after the timeout");
+}
+
+#[tokio::test]
+async fn fr_g3_pull_from_a_remote_that_is_not_the_upstream_answers_409() {
+    let f = start().await;
+    let r = remote_fixture(&f.root);
+    let other = f.root.join("other.git");
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q", "--bare", "-b", "main"]);
+    git(&r.b, &["remote", "add", "second", &s(&other)]);
+    let body = GitRemoteRequest { repo: s(&r.b), remote: Some("second".into()) };
+    let msg = f.err("pull", &body, 409, "conflict").await;
+    assert!(msg.contains("업스트림은 origin입니다"), "{msg}");
+    // Nothing was fetched from the other remote.
+    assert!(git(&r.b, &["branch", "-r"]).lines().all(|l| !l.contains("second/")));
+    // The upstream's own remote still pulls.
+    let ok = GitRemoteRequest { repo: s(&r.b), remote: Some("origin".into()) };
+    let _: GitOutput = f.ok("pull", &ok).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_g3_a_users_credential_helper_is_used() {
+    let f = start().await;
+    let repo = f.root.join("r");
+    one_commit(&repo);
+    // A server that asks for credentials and nothing else.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    // The user's askpass: records that it ran and gives no answer.
+    let script = f.root.join("askpass.sh");
+    let record = f.root.join("askpass-ran.txt");
+    std::fs::write(&script, format!("#!/bin/sh\necho \"$1\" >> '{}'\nexit 1\n", s(&record))).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&repo, &["config", "core.askPass", &s(&script)]);
+    git(&repo, &["remote", "add", "origin", &format!("http://127.0.0.1:{port}/x.git")]);
+    let t = std::time::Instant::now();
+    let body = GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) };
+    let msg = f.err("fetch", &body, 409, "conflict").await;
+    assert!(has_korean(&msg), "{msg}");
+    assert!(std::fs::metadata(&record).is_ok(), "the user's askpass was not run");
+    assert!(t.elapsed() < std::time::Duration::from_secs(30));
+}

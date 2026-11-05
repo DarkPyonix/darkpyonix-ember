@@ -1645,6 +1645,7 @@ pub fn failure_text(what: &str, e: &ApiError) -> String {
     match e {
         ApiError::Status { message, .. } if is_korean(message) => message.clone(),
         ApiError::Status { message, .. } => format!("{what}하지 못했습니다: {message}"),
+        ApiError::Unauthorized(_) => format!("{what}하지 못했습니다. 서버 인증에 실패했습니다. 서버 토큰을 확인해 주세요"),
         other => format!("{what}하지 못했습니다. 서버에 닿지 않습니다: {other}"),
     }
 }

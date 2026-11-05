@@ -5,6 +5,7 @@
 //! - [`push`]: push-message decoding (with version check) and reconnect backoff.
 //! - [`transcript`] and [`state`]: the pure reducer a UI binds to: projects, sessions with
 //!   launcher status (incl. finished-unread), transcripts, computers, connection state.
+//! - [`token`]: the server token every HTTP and WebSocket call carries (FR-S11).
 //! - [`cache`]: the cold-start snapshot file.
 //! - [`client`]: the sync engine tying them together.
 //!
@@ -16,6 +17,7 @@ pub mod cache;
 pub mod client;
 pub mod push;
 pub mod state;
+pub mod token;
 pub mod transcript;
 pub mod wire;
 

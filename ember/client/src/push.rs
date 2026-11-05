@@ -62,7 +62,7 @@ struct LaggedBody {
 /// Push types the server sends that this client knows about and ignores for now: the
 /// schedule pushes (FR-A8) have no client UI yet. Skipped quietly, unlike an unknown type.
 pub const SKIPPED_TYPES: &[&str] =
-    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run"];
+    &["schedule_created", "schedule_updated", "schedule_deleted", "schedule_run", "channel_message"];
 
 /// Decode one push text frame. 
 pub fn decode(text: &str) -> Result<Push, DecodeError> {
@@ -195,6 +195,11 @@ mod tests {
         assert_eq!(
             decode(r#"{"type":"schedule_run","run":{"id":"r"}}"#),
             Err(DecodeError::Skipped("schedule_run".into()))
+        );
+        // Channel messages (FR-T10) are pushed but the client does not read channels yet.
+        assert_eq!(
+            decode(r#"{"type":"channel_message","channel_id":"c","message":{}}"#),
+            Err(DecodeError::Skipped("channel_message".into()))
         );
     }
 

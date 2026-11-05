@@ -5,14 +5,20 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use ember_server::agents::AgentKind;
+use ember_server::agents::scripted::ScriptedAdapter;
+use ember_server::agents::{AgentAdapter, AgentKind};
+use ember_server::session::{Push, Sessions};
 use ember_server::store::Store;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+fn sessions_of(store: &Arc<Store>) -> Arc<Sessions> {
+    Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>])
+}
+
 fn app(store: &Arc<Store>) -> Router {
-    ember_server::channels::api::router(store.clone())
+    ember_server::channels::api::router(store.clone(), sessions_of(store))
 }
 
 async fn call(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -150,4 +156,111 @@ async fn fr_t16_the_log_survives_a_restart() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(msgs[0]["text"], "kept");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn fr_t10_a_posted_message_is_pushed_to_websocket_clients() {
+    let (store, a, _, _) = fixture();
+    let sessions = sessions_of(&store);
+    let app = ember_server::channels::api::router(store.clone(), sessions.clone());
+    let mut rx = sessions.subscribe();
+    let (_, list) = call(&app, "GET", "/api/channels?project=core", None).await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+    let (st, m) = call(&app, "POST", &format!("/api/channels/{id}/messages"), Some(json!({"text":"hi","from":a}))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let Push::ChannelMessage { channel_id, message } = rx.recv().await.unwrap() else { panic!("not a channel_message") };
+    assert_eq!(channel_id, id);
+    assert_eq!((message.text.as_str(), message.from.as_str()), ("hi", a.as_str()));
+    // The wire form is what /api/push sends.
+    let wire = serde_json::to_value(Push::ChannelMessage { channel_id: id.clone(), message }).unwrap();
+    assert_eq!(wire["type"], "channel_message");
+    assert_eq!(wire["message"]["seq"], m["seq"]);
+}
+
+#[tokio::test]
+async fn fr_t10_a_refused_message_is_not_pushed() {
+    let (store, _, b, _) = fixture();
+    let sessions = sessions_of(&store);
+    let app = ember_server::channels::api::router(store.clone(), sessions.clone());
+    let mut rx = sessions.subscribe();
+    let (_, c) = call(&app, "POST", "/api/channels", Some(json!({"project":"core","name":"r","agents":[]}))).await;
+    let uri = format!("/api/channels/{}/messages", c["id"].as_str().unwrap());
+    let (st, _) = call(&app, "POST", &uri, Some(json!({"text":"hi","from":b}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn fr_t10_router_takes_sessions_and_store() {
+    let (store, _, _, _) = fixture();
+    let (st, _) = call(&app(&store), "GET", "/api/channels", None).await;
+    assert_eq!(st, StatusCode::OK);
+}
+
+async fn default_channel(app: &Router) -> String {
+    let (_, list) = call(app, "GET", "/api/channels?project=core", None).await;
+    list[0]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn fr_t10_unread_counts_messages_from_others_after_posts() {
+    let (store, a, b, _) = fixture();
+    let app = app(&store);
+    let id = default_channel(&app).await;
+    let uri = format!("/api/channels/{id}/messages");
+    call(&app, "POST", &uri, Some(json!({"text":"one","from":a}))).await;
+    let (_, m2) = call(&app, "POST", &uri, Some(json!({"text":"two","from":b}))).await;
+    assert_eq!(m2["unread"], 1);
+    let (_, list) = call(&app, "GET", "/api/channels?project=core", None).await;
+    assert_eq!(list[0]["unread"], 2);
+    assert_eq!(list[0]["last_message"]["unread"], 1);
+    let (_, d) = call(&app, "GET", &format!("/api/channels/{id}"), None).await;
+    assert_eq!(d["unread"], 2);
+    assert_eq!(d["messages"][0]["unread"], 1);
+}
+
+#[tokio::test]
+async fn fr_t10_a_users_own_posts_never_count_as_unread() {
+    let (store, _, _, _) = fixture();
+    let app = app(&store);
+    let id = default_channel(&app).await;
+    let (_, m) = call(&app, "POST", &format!("/api/channels/{id}/messages"), Some(json!({"text":"mine"}))).await;
+    assert_eq!(m["unread"], 0);
+    let (_, d) = call(&app, "GET", &format!("/api/channels/{id}"), None).await;
+    assert_eq!(d["unread"], 0);
+    assert_eq!(d["messages"][0]["unread"], 0);
+}
+
+#[tokio::test]
+async fn fr_t10_mark_read_resets_the_count_and_later_posts_count_again() {
+    let (store, a, _, _) = fixture();
+    let app = app(&store);
+    let id = default_channel(&app).await;
+    let uri = format!("/api/channels/{id}/messages");
+    let (_, m1) = call(&app, "POST", &uri, Some(json!({"text":"one","from":a}))).await;
+    call(&app, "POST", &uri, Some(json!({"text":"two","from":a}))).await;
+    // Reading up to the first leaves the second unread.
+    let (st, c) = call(&app, "POST", &format!("/api/channels/{id}/read"), Some(json!({"seq": m1["seq"]}))).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(c["unread"], 1);
+    // No body reads everything.
+    let (st, c) = call(&app, "POST", &format!("/api/channels/{id}/read"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(c["unread"], 0);
+    let (_, d) = call(&app, "GET", &format!("/api/channels/{id}"), None).await;
+    assert!(d["messages"].as_array().unwrap().iter().all(|m| m["unread"] == 0));
+    // The cursor does not move back, and a new message counts again.
+    let (_, c) = call(&app, "POST", &format!("/api/channels/{id}/read"), Some(json!({"seq": 0}))).await;
+    assert_eq!(c["unread"], 0);
+    call(&app, "POST", &uri, Some(json!({"text":"three","from":a}))).await;
+    let (_, list) = call(&app, "GET", "/api/channels?project=core", None).await;
+    assert_eq!(list[0]["unread"], 1);
+}
+
+#[tokio::test]
+async fn fr_t10_read_of_an_unknown_channel_is_404() {
+    let (store, _, _, _) = fixture();
+    let (st, e) = call(&app(&store), "POST", "/api/channels/nope/read", Some(json!({}))).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(e["code"], "not_found");
 }

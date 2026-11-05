@@ -62,6 +62,16 @@ const WAIT_SERVER: &str = "서버 데이터를 기다리고 있습니다";
 const TIMELINE_TITLE: &str = "에이전트 소통 타임라인";
 
 /// Every sentence this screen shows, checked for plain "~다" endings (NFR-L4).
+/// The summary line of the agent-to-agent timeline card. The figures are demo data; a real
+/// session has no duration comparison and no cost (FR-U7: cost is unknown, never invented).
+pub fn timeline_summary(demo: bool) -> &'static str {
+    if demo {
+        "5명 · 16.4s · 순차 실행보다 2.4배 빠름 · $0.24"
+    } else {
+        "비용은 알 수 없습니다"
+    }
+}
+
 pub const UI_STRINGS: &[&str] = &[
     SOON,
     NO_PROJECT,
@@ -713,14 +723,12 @@ pub fn environment_rows(
 // Status view cards (FR-L18, #324, #349)
 // ---------------------------------------------------------------------------------------------
 
-/// The 오늘 토큰 tile: (value, sub line). Sample numbers only in demo mode, because the server
-/// sends no token usage yet (TODO(server): FR-U7 usage events, #324).
-pub fn token_tile(demo: bool) -> (String, String) {
-    if demo {
-        ("1.2M".to_string(), "$13.20".to_string())
-    } else {
-        ("-".to_string(), NONE_YET.to_string())
-    }
+/// The 오늘 토큰 tile: (value, sub line), today's tokens of the project on the UTC day (FR-U7,
+/// #332). Loading, failed and nothing-reported each say so; the cost is unknown, so no dollar
+/// figure is shown. In demo mode the load holds sample numbers from `demo.rs`.
+pub fn token_tile(load: &crate::ui::usage::Load<ember_client::api::UsageSummary>, today: &str) -> (String, String) {
+    let t = crate::ui::usage::today_tile(load, today);
+    (t.value, t.sub)
 }
 
 /// Card titles and empty states, in grid order.
@@ -1618,6 +1626,13 @@ mod tests {
     }
 
     #[test]
+    fn fr_u7_timeline_cost_is_demo_only() {
+        assert!(timeline_summary(true).contains("$0.24"));
+        assert!(!timeline_summary(false).contains('$'));
+        assert_eq!(timeline_summary(false), "비용은 알 수 없습니다");
+    }
+
+    #[test]
     fn fr_l18_status_data_present() {
         let ms = vec![
             member("a", LauncherStatus::Running, true, 1),
@@ -1636,7 +1651,11 @@ mod tests {
         assert!(token_rows(false, &ms).is_empty());
         assert_eq!(PR_EMPTY, "서버 데이터를 기다리고 있습니다");
         assert_eq!(TOKENS_EMPTY, "아직 없습니다");
-        assert_eq!(token_tile(false), ("-".to_string(), "아직 없습니다".to_string()));
+        use crate::ui::usage::Load;
+        assert_eq!(token_tile(&Load::Loading, "2026-11-06"), ("-".to_string(), "불러오는 중입니다".to_string()));
+        assert_eq!(token_tile(&Load::Failed("x".into()), "2026-11-06").1, "불러오지 못했습니다");
+        let empty = Load::Ready(ember_client::api::UsageSummary::default());
+        assert_eq!(token_tile(&empty, "2026-11-06"), ("-".to_string(), "보고된 사용량이 없습니다".to_string()));
     }
 
     #[test]
@@ -1645,7 +1664,13 @@ mod tests {
         assert!(pr_rows(true).len() >= 2);
         assert!(!subagent_tree(true, &ms).is_empty());
         assert!(!token_rows(true, &ms).is_empty());
-        assert_eq!(token_tile(true).0, "1.2M");
+        let now = crate::demo::now_ms();
+        let mut sample = crate::demo::usage_summary(now);
+        let today = crate::demo::day_string(now);
+        sample.days.retain(|d| d.day == today);
+        let (value, sub) = token_tile(&crate::ui::usage::Load::Ready(sample), &today);
+        assert_ne!(value, "-");
+        assert!(sub.contains("UTC 기준") && !sub.contains('$'));
     }
 
     #[test]

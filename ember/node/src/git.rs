@@ -393,6 +393,15 @@ async fn open(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
     Err(GitError::Conflict(describe(&text)))
 }
 
+/// Resolve the worktree root so root-relative git paths work from any subdirectory.
+pub(crate) async fn worktree_root(policy: &PathPolicy, repo: &str) -> Result<PathBuf, GitError> {
+    let dir = open(policy, repo).await?;
+    let out = run_ok(&dir, &["rev-parse", "--show-toplevel"], None).await?;
+    let root = out.stdout.strip_suffix('
+').unwrap_or(&out.stdout);
+    Ok(policy.resolve_existing(Path::new(root))?)
+}
+
 /// A ref, remote or branch name must not look like an option.
 fn name_arg<'a>(what: &str, v: &'a str) -> Result<&'a str, GitError> {
     if v.is_empty() || v.starts_with('-') || v.contains('\0') {

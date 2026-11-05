@@ -14,6 +14,7 @@ pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod editor;
+pub mod editor_workbench;
 pub mod files;
 pub mod fonts;
 pub mod home;
@@ -121,7 +122,24 @@ impl Ui {
 
     /// Open the Ember 에디터 for a project (FR-L7, FR-L31).
     pub fn open_editor(&self, project: String, folder: String) {
-        let target = Some(editor::EditorTarget { project, folder });
+        // No launch data here, so no connection: the editor window shows its own error.
+        self.open_editor_connection(project, folder, None, None);
+    }
+
+    /// Open the editor with the OSE endpoint and token when the server started a runtime.
+    pub fn open_editor_connection(
+        &self,
+        project: String,
+        folder: String,
+        endpoint: Option<String>,
+        token: Option<String>,
+    ) {
+        let target = Some(editor::EditorTarget {
+            project,
+            folder,
+            endpoint: endpoint.unwrap_or_default(),
+            token: token.unwrap_or_default(),
+        });
         services().ui.editor.set(target.clone());
         let mut e = self.editor;
         e.set(target);

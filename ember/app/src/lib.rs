@@ -15,11 +15,13 @@ pub mod bridge;
 pub mod config;
 pub mod demo;
 pub mod export;
+pub mod editor_host;
 pub mod ide;
 pub mod model;
 pub mod prefs;
 pub mod server;
 pub mod services;
+pub mod terminal_stream;
 pub mod ui;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,7 +33,7 @@ use ember_client::Client;
 use crate::config::AppConfig;
 use crate::model::Outbox;
 use crate::server::ServerApi;
-use crate::services::{install, services, Services};
+use crate::services::{Services, install, services};
 
 /// Build the services, start the client, open the window. Returns when the window closes.
 pub fn launch() {
@@ -70,7 +72,12 @@ pub fn launch() {
     // the push connection and sync workers stay off so nothing waits for a server.
     let demo = demo::active_from_env().then(|| {
         let now = demo::now_ms();
-        let source = demo::DemoSource::new(now);
+        let data_dir = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("ember-demo"));
+        let source =
+            demo::DemoSource::with_data_dir(now, data_dir).expect("데모 폴더를 만들 수 없습니다");
         for input in source.inputs(now) {
             client.apply(input);
         }
@@ -102,12 +109,17 @@ pub fn launch() {
     });
 
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
-        // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the dioxus-compose
-        // EditorScreen in its own process until dioxus-compose#152 (the `window` element on a
+        // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
+        // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
         // shared host) lands.
+        let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
-        launch_builder().launch(ui::app);
+        // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
+        launch_builder()
+            .with_html(ui::workbench::config)
+            .with_window(Window::new().with_title(title).with_size(1280, 820))
+            .launch(ui::editor_workbench::page::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.
         ui::cr::gallery::launch(pref);

@@ -313,8 +313,8 @@ pub fn UserRow(rail: bool) {
             } else {
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
                 cu::Column().spacing(4.0).content(|| {
-                    Label(name, Fs::Sm, Weight::Semibold, None, None);
-                    Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label(name, Fs::Sm, Weight::Semibold, None, Some(1));
+                    Label(handle, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
             }
         });

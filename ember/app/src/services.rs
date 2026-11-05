@@ -268,7 +268,7 @@ pub fn test_services() -> &'static Services {
         let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/test-data");
         let config = crate::config::AppConfig::from_values(
             Some("http://127.0.0.1:9".to_string()),
-            Some(data),
+            Some(data.clone()),
             None,
         );
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -278,7 +278,7 @@ pub fn test_services() -> &'static Services {
             .expect("tokio runtime");
         let client = rt.block_on(ember_client::Client::new(config.client_config())).expect("client");
         let now = crate::demo::now_ms();
-        let source = crate::demo::DemoSource::new(now);
+        let source = crate::demo::DemoSource::new(now, data);
         for input in source.inputs(now) {
             client.apply(input);
         }

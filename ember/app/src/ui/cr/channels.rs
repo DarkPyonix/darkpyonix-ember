@@ -93,7 +93,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
     if rooms.is_empty() {
         cu::Box().alignment(Alignment::Center).modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
             cu::Column().alignment(Alignment::Center).space_role(SpaceRole::Sm).content(|| {
-                Label("채널", Fs::Xl3, Weight::Medium, None, None);
+                Label("채널", Fs::Xl3, Weight::Medium, None, Some(1));
                 Label(SOON, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
             });
         });
@@ -147,7 +147,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             .modifier(Modifier::new().fill_max_width().height(56.0))
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, None);
+                Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 // TODO(FR-T10): creates a channel; disabled until the server has them.
                 cu::Box()
@@ -245,13 +245,13 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
-                        Label(&row.member_count.to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        Label(&row.member_count.to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                     let last = if row.last_text.is_empty() { "메시지가 없습니다".to_string() } else { row.last_text.clone() };
                     Label(&last, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 cu::Column().alignment(Alignment::CenterEnd).content(|| {
-                    Label(&time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    Label(&time, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     if row.unread > 0 {
                         super::shell::RedBadge(row.unread as usize);
                     }
@@ -282,7 +282,7 @@ fn RoomView(room: &Room, show_back: bool, on_back: impl FnMut() + 'static) {
                 cu::Column().content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&room.name, Fs::Md, Weight::Semibold, None, Some(1));
-                        Label(&room.members.len().to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                        Label(&room.members.len().to_string(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         super::compat::Dot(crate::model::Tone::Neutral);

@@ -140,7 +140,7 @@ pub fn merge_messages(messages: &mut Vec<Message>, incoming: Vec<Message>) {
     messages.sort_by_key(|m| (seq_of(m), m.at));
 }
 
-pub fn member_from(m: &ember_client::api::ChannelMember) -> Member {
+pub fn member_from(m: &ember_client::channels::Member) -> Member {
     let is_user = m.id == USER_ID;
     let name = if is_user {
         USER_NAME.to_string()
@@ -152,14 +152,14 @@ pub fn member_from(m: &ember_client::api::ChannelMember) -> Member {
     Member { id: m.id.clone(), name, is_agent: m.is_agent && !is_user, harness: m.harness.clone() }
 }
 
-pub fn message_from(m: &ember_client::api::ChannelMessage) -> Message {
+pub fn message_from(m: &ember_client::channels::ChannelMessage) -> Message {
     let id = if m.id.is_empty() { m.seq.to_string() } else { m.id.clone() };
     Message { id, from: m.from.clone(), text: m.text.clone(), at: m.at, unread: m.unread }
 }
 
 /// A server channel as a room. A list answer has no `messages`; its `last_message` stands in so
 /// the row shows a preview and sorts by activity.
-pub fn room_from(c: &ember_client::api::ChannelRecord) -> Room {
+pub fn room_from(c: &ember_client::channels::Channel) -> Room {
     let mut messages: Vec<Message> = c.messages.iter().map(message_from).collect();
     if messages.is_empty() {
         messages.extend(c.last_message.as_ref().map(message_from));
@@ -177,7 +177,7 @@ pub fn room_from(c: &ember_client::api::ChannelRecord) -> Room {
 
 /// The list answer as rooms, keeping the messages already loaded for an open room (the list
 /// carries only the last one).
-pub fn rooms_from(list: &[ember_client::api::ChannelRecord], old: &[Room]) -> Vec<Room> {
+pub fn rooms_from(list: &[ember_client::channels::Channel], old: &[Room]) -> Vec<Room> {
     list.iter()
         .map(|c| {
             let mut r = room_from(c);
@@ -673,23 +673,36 @@ mod layout_tests {
         assert!(compact_shows_room(&Some("a".into())));
     }
 
-    fn wire_msg(seq: i64, from: &str, at: i64) -> ember_client::api::ChannelMessage {
-        ember_client::api::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0 }
+    fn blank() -> ember_client::channels::Channel {
+        ember_client::channels::Channel {
+            id: String::new(),
+            name: String::new(),
+            project: String::new(),
+            default: false,
+            members: Vec::new(),
+            last_message: None,
+            messages: Vec::new(),
+            unread: 0,
+        }
+    }
+
+    fn wire_msg(seq: i64, from: &str, at: i64) -> ember_client::channels::ChannelMessage {
+        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0 }
     }
 
     #[test]
     fn fr_t10_channel_maps_to_a_room_with_the_user_as_na() {
-        let c = ember_client::api::ChannelRecord {
+        let c = ember_client::channels::Channel {
             id: "c1".into(),
             name: "전체".into(),
             project: "ember".into(),
             default: true,
             members: vec![
-                ember_client::api::ChannelMember { id: "user".into(), name: "user".into(), is_agent: false, harness: String::new() },
-                ember_client::api::ChannelMember { id: "s1".into(), name: "".into(), is_agent: true, harness: "codex".into() },
+                ember_client::channels::Member { id: "user".into(), name: "user".into(), is_agent: false, harness: String::new() },
+                ember_client::channels::Member { id: "s1".into(), name: "".into(), is_agent: true, harness: "codex".into() },
             ],
             messages: vec![wire_msg(2, "s1", 20), wire_msg(1, "user", 10)],
-            ..Default::default()
+            ..blank()
         };
         let r = room_from(&c);
         assert_eq!(r.member("user").unwrap().name, "나");
@@ -703,10 +716,10 @@ mod layout_tests {
 
     #[test]
     fn fr_t10_a_list_answer_shows_the_last_message() {
-        let c = ember_client::api::ChannelRecord {
+        let c = ember_client::channels::Channel {
             id: "c1".into(),
             last_message: Some(wire_msg(5, "user", 50)),
-            ..Default::default()
+            ..blank()
         };
         assert_eq!(room_from(&c).last_message().unwrap().text, "t5");
     }
@@ -731,12 +744,12 @@ mod layout_tests {
 
     #[test]
     fn fr_t10_a_refreshed_list_keeps_the_open_rooms_messages() {
-        let old = vec![room_from(&ember_client::api::ChannelRecord {
+        let old = vec![room_from(&ember_client::channels::Channel {
             id: "c1".into(),
             messages: vec![wire_msg(1, "user", 1), wire_msg(2, "user", 2)],
-            ..Default::default()
+            ..blank()
         })];
-        let list = vec![ember_client::api::ChannelRecord { id: "c1".into(), last_message: Some(wire_msg(3, "s1", 3)), ..Default::default() }];
+        let list = vec![ember_client::channels::Channel { id: "c1".into(), last_message: Some(wire_msg(3, "s1", 3)), ..blank() }];
         let rooms = rooms_from(&list, &old);
         assert_eq!(rooms[0].messages.iter().map(seq_of).collect::<Vec<_>>(), [1, 2, 3]);
     }

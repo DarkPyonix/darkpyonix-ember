@@ -827,6 +827,107 @@ fn usage_path(days: Option<u32>) -> String {
     }
 }
 
+// ---- channels (FR-T10, FR-L12) -----------------------------------------------------------
+
+/// A person or an agent in a channel (server `channels::Member`). Every field defaults, so a
+/// newer or older server still decodes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChannelMember {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_agent: bool,
+    #[serde(default)]
+    pub harness: String,
+}
+
+/// One channel message. `from` is `user` or an agent session id; `at` is Unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChannelMessage {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub seq: i64,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub unread: u32,
+}
+
+/// A channel as the list (no `messages`) and the detail (latest messages) return it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChannelRecord {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(default)]
+    pub members: Vec<ChannelMember>,
+    #[serde(default)]
+    pub last_message: Option<ChannelMessage>,
+    #[serde(default)]
+    pub messages: Vec<ChannelMessage>,
+    #[serde(default)]
+    pub unread: u32,
+}
+
+/// `/channels` path with the optional project filter.
+pub(crate) fn channels_path(project: Option<&str>) -> String {
+    match project {
+        Some(p) => format!("/channels?project={}", seg(p)),
+        None => "/channels".to_string(),
+    }
+}
+
+/// `/channels/{id}/messages` path with the `after` cursor (omitted for 0).
+pub(crate) fn channel_messages_path(id: &str, after: i64) -> String {
+    if after > 0 {
+        format!("/channels/{}/messages?after={after}", seg(id))
+    } else {
+        format!("/channels/{}/messages", seg(id))
+    }
+}
+
+impl Api {
+    /// Every channel, or one project's. The server creates each project's default channel on
+    /// the first read.
+    pub async fn channels(&self, project: Option<&str>) -> ApiResult<Vec<ChannelRecord>> {
+        self.get(&channels_path(project)).await
+    }
+
+    /// One channel with its latest messages (up to 200).
+    pub async fn channel(&self, id: &str) -> ApiResult<ChannelRecord> {
+        self.get(&format!("/channels/{}", seg(id))).await
+    }
+
+    /// Messages with `seq > after`, oldest first.
+    pub async fn channel_messages(&self, id: &str, after: i64) -> ApiResult<Vec<ChannelMessage>> {
+        self.get(&channel_messages_path(id, after)).await
+    }
+
+    /// Posts `text` as the signed-in person (`from` defaults to `user` on the server).
+    pub async fn post_channel_message(&self, id: &str, text: &str) -> ApiResult<ChannelMessage> {
+        let path = format!("/channels/{}/messages", seg(id));
+        Self::decode(self.post(&path, json!({ "text": text })).await?)
+    }
+
+    /// Creates a non-default channel; `agents` are session ids of the project (none: no agent).
+    pub async fn create_channel(&self, project: &str, name: &str, agents: &[String]) -> ApiResult<ChannelRecord> {
+        let body = json!({ "project": project, "name": name, "agents": agents });
+        Self::decode(self.post("/channels", body).await?)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Computer metrics (FR-X7, FR-L21)
 // ---------------------------------------------------------------------------------------------
@@ -1085,6 +1186,29 @@ mod tests {
         assert_eq!(authority_addr("h:1"), ("h".to_string(), 1));
         assert_eq!(authority_addr("h"), ("h".to_string(), 80));
         assert_eq!(authority_addr("[::1]:8740"), ("::1".to_string(), 8740));
+    }
+    #[test]
+    fn fr_t10_channel_paths() {
+        assert_eq!(channels_path(None), "/channels");
+        assert_eq!(channels_path(Some("a b")), "/channels?project=a%20b");
+        assert_eq!(channel_messages_path("c1", 0), "/channels/c1/messages");
+        assert_eq!(channel_messages_path("c1", 42), "/channels/c1/messages?after=42");
+    }
+
+    #[test]
+    fn fr_t10_channel_decodes_tolerantly() {
+        let c: ChannelRecord = serde_json::from_value(json!({
+            "id": "c1", "name": "전체", "project": "ember", "default": true,
+            "members": [{"id": "user", "name": "나", "is_agent": false, "harness": ""}, {"id": "s1"}],
+            "last_message": null,
+            "messages": [{"id": "3", "seq": 3, "from": "user", "text": "hi", "at": 9, "unread": 0, "extra": 1}],
+            "future_field": true
+        }))
+        .unwrap();
+        assert!(c.default && c.members.len() == 2 && c.messages[0].seq == 3);
+        assert!(!c.members[1].is_agent);
+        let bare: ChannelRecord = serde_json::from_value(json!({"id": "c2"})).unwrap();
+        assert!(bare.messages.is_empty() && bare.last_message.is_none());
     }
 }
 

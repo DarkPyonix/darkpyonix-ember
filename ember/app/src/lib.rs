@@ -31,7 +31,7 @@ use ember_client::Client;
 use crate::config::AppConfig;
 use crate::model::Outbox;
 use crate::server::ServerApi;
-use crate::services::{install, services, Services};
+use crate::services::{Services, install, services};
 
 /// Build the services, start the client, open the window. Returns when the window closes.
 pub fn launch() {
@@ -70,7 +70,12 @@ pub fn launch() {
     // the push connection and sync workers stay off so nothing waits for a server.
     let demo = demo::active_from_env().then(|| {
         let now = demo::now_ms();
-        let source = demo::DemoSource::new(now);
+        let data_dir = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| std::env::temp_dir().join("ember-demo"));
+        let source =
+            demo::DemoSource::with_data_dir(now, data_dir).expect("데모 폴더를 만들 수 없습니다");
         for input in source.inputs(now) {
             client.apply(input);
         }

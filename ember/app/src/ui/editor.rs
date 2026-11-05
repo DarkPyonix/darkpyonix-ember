@@ -20,7 +20,7 @@ use ember_client::LauncherStatus;
 
 use crate::ui::components::Label;
 use crate::ui::keymap::{Action, Keymap, Os};
-use crate::ui::project::{display_name, project_boxes, status_pill, SOON};
+use crate::ui::project::{SOON, display_name, project_boxes, status_pill};
 use crate::ui::theme::*;
 use crate::ui::use_ui;
 
@@ -36,36 +36,69 @@ pub struct EditorTarget {
 // Demo files
 // ---------------------------------------------------------------------------------------------
 
-/// The environment switch the demo launch sets (the server reads the same one for its usage).
-pub const DEMO_ENV: &str = "EMBER_DEMO_DATA";
-
-/// Whether the demo switch value turns demo data on. Only `1` does.
-pub fn demo_enabled(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-/// A file of the demo project: its path from the project root and a short content.
-pub type DemoFile = (&'static str, &'static str);
-
-/// Demo only, replaced when the server serves files (#193): the server has no file listing yet,
-/// so the screenshot pass gets a few nested files to open tabs and breadcrumbs on. Empty unless
-/// `value` (the `EMBER_DEMO_DATA` switch) is `1`.
-pub fn demo_files(value: Option<&str>) -> Vec<DemoFile> {
-    if !demo_enabled(value) {
-        return Vec::new();
+/// Read the demo folder for the placeholder tree until the editor core is connected.
+fn demo_files_from_env(folder: &str) -> Vec<(String, String)> {
+    if crate::demo::active_from_env() {
+        demo_files(std::path::Path::new(folder))
+    } else {
+        Vec::new()
     }
-    vec![
-        ("README.md", "# demo\n\nA small project for screenshots.\n"),
-        ("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n"),
-        ("src/main.rs", "mod config;\n\nfn main() {\n    println!(\"hello\");\n}\n"),
-        ("src/config.rs", "pub struct Config {\n    pub port: u16,\n}\n"),
-        ("src/ui/home.rs", "pub fn home() -> &'static str {\n    \"home\"\n}\n"),
-    ]
 }
 
-/// The demo files read from the environment; empty in a normal run.
-fn demo_files_from_env() -> Vec<DemoFile> {
-    demo_files(std::env::var(DEMO_ENV).ok().as_deref())
+fn demo_files(root: &std::path::Path) -> Vec<(String, String)> {
+    use std::io::Read;
+
+    const MAX_DEPTH: usize = 4;
+    const MAX_FILES: usize = 200;
+    const MAX_BYTES: u64 = 256 * 1024;
+
+    fn visit(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        depth: usize,
+        files: &mut Vec<(String, String)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if files.len() >= MAX_FILES {
+                break;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() && depth < MAX_DEPTH {
+                visit(root, &path, depth + 1, files);
+            } else if kind.is_file() {
+                let Ok(file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                if metadata.len() > MAX_BYTES {
+                    continue;
+                }
+                let mut body = String::new();
+                if file.take(MAX_BYTES + 1).read_to_string(&mut body).is_err()
+                    || body.len() as u64 > MAX_BYTES
+                {
+                    continue;
+                }
+                if let Ok(name) = path.strip_prefix(root) {
+                    files.push((name.to_string_lossy().replace('\\', "/"), body));
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, root, 0, &mut files);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -444,7 +477,21 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
     let mut tabs = use_signal(EditorTabs::default);
     let mut stripes = use_signal(Stripes::default);
     let mut menu_open = use_signal(|| false);
-    let files = demo_files_from_env();
+    let cache = use_hook(|| {
+        std::rc::Rc::new(std::cell::RefCell::new(
+            None::<(String, Vec<(String, String)>)>,
+        ))
+    });
+    let files = {
+        let mut cache = cache.borrow_mut();
+        if cache
+            .as_ref()
+            .is_none_or(|(folder, _)| folder != &target.folder)
+        {
+            *cache = Some((target.folder.clone(), demo_files_from_env(&target.folder)));
+        }
+        cache.as_ref().unwrap().1.clone()
+    };
 
     let project = target.project.clone();
     let project_name = display_name(&project);
@@ -586,11 +633,11 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                                     for (path, _) in files.clone() {
                                         Button {
                                             key: "{path}",
-                                            text: path,
+                                            text: path.clone(),
                                             variant: ButtonVariant::Text,
                                             color: paint(p.text),
                                             fill_max_width: true,
-                                            on_click: move |_| tabs.write().open(path),
+                                            on_click: move |_| tabs.write().open(&path),
                                         }
                                     }
                                 }
@@ -691,7 +738,7 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
                             if let Some(path) = current.clone() {
                                 Label { text: base_name(&path).to_string(), fs: Fs::Md, weight: Weight::Semibold }
                                 // demo only, replaced when the server serves files
-                                if let Some((_, body)) = files.iter().find(|(f, _)| *f == path.as_str()) {
+                                if let Some((_, body)) = files.iter().find(|(f, _)| f == &path) {
                                     for (n, line) in body.lines().enumerate() {
                                         Label { key: "{n}", text: format!("{:>3}  {line}", n + 1), fs: Fs::Sm }
                                     }
@@ -796,6 +843,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn demo_files_nested_sorted_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(demo_files(dir.path()).is_empty());
+        std::fs::create_dir_all(dir.path().join("nested/deeper")).unwrap();
+        std::fs::write(dir.path().join("z.txt"), "z").unwrap();
+        std::fs::write(dir.path().join("nested/deeper/a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("nested/b.txt"), "b").unwrap();
+        assert_eq!(
+            demo_files(dir.path()),
+            vec![
+                ("nested/b.txt".into(), "b".into()),
+                ("nested/deeper/a.txt".into(), "a".into()),
+                ("z.txt".into(), "z".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn demo_files_respect_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a/b/c/d/e");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("hidden.txt"), "too deep").unwrap();
+        std::fs::write(dir.path().join("large.txt"), vec![b'x'; 256 * 1024 + 1]).unwrap();
+        for i in 0..201 {
+            std::fs::write(dir.path().join(format!("{i:03}.txt")), "x").unwrap();
+        }
+        let files = demo_files(dir.path());
+        assert_eq!(files.len(), 200);
+        assert_eq!(files[0].0, "000.txt");
+        assert_eq!(files[199].0, "199.txt");
+        assert!(
+            !files
+                .iter()
+                .any(|(name, _)| name == "large.txt" || name.contains("hidden"))
+        );
+        for i in 0..201 {
+            std::fs::remove_file(dir.path().join(format!("{i:03}.txt"))).unwrap();
+        }
+        assert!(demo_files(dir.path()).is_empty());
+    }
+
+    #[test]
     fn actions_toggle_tool_windows_and_close_tabs() {
         let mut tabs = EditorTabs::default();
         let mut stripes = Stripes::default();
@@ -808,20 +898,6 @@ mod tests {
         assert!(apply_action(Action::Close, &mut tabs, &mut stripes));
         assert_eq!(tabs.current_path(), None);
         assert!(!apply_action(Action::Format, &mut tabs, &mut stripes));
-    }
-
-    #[test]
-    fn demo_files_are_empty_unless_the_switch_is_one() {
-        assert!(demo_files(None).is_empty());
-        assert!(demo_files(Some("0")).is_empty());
-        assert!(demo_files(Some("true")).is_empty());
-        let f = demo_files(Some("1"));
-        assert!(f.len() >= 4);
-        assert!(f.iter().any(|(p, _)| p.contains('/')), "nested paths give breadcrumbs");
-        assert!(f.iter().all(|(_, c)| !c.is_empty()));
-        let mut tabs = EditorTabs::default();
-        tabs.open(f[2].0);
-        assert_eq!(tabs.current_path(), Some(f[2].0));
     }
 
     #[test]

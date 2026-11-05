@@ -13,16 +13,18 @@
 //! nothing waits for a server that is not there.
 
 use std::collections::HashMap;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde_json::json;
 
+use ember_client::Client;
 use ember_client::state::{Computer, ConnectionState, Input, Reachability};
 use ember_client::wire::{
-    AgentEvent, ApprovalDecision, DailyUsage, DetectedAgent, Project, Push, SessionPatch, SessionRecord,
-    SessionStatus, StoredEvent, TurnOutcome,
+    AgentEvent, ApprovalDecision, DailyUsage, DetectedAgent, Project, Push, SessionPatch,
+    SessionRecord, SessionStatus, StoredEvent, TurnOutcome,
 };
-use ember_client::Client;
 
 use crate::server::{Account, ChatGptAccount, CreateSession};
 
@@ -63,9 +65,50 @@ pub fn ide_launch(session: &str, project: &str, cwd: &str) -> crate::server::Ide
         session: session.to_string(),
         project: project.to_string(),
         folder: cwd.to_string(),
-        computer: IdeComputer { name: "이 컴퓨터".to_string(), local: true },
-        targets: vec![target("ember", true), target("vscode", false), target("gateway", false)],
+        computer: IdeComputer {
+            name: "이 컴퓨터".to_string(),
+            local: true,
+        },
+        targets: vec![
+            target("ember", true),
+            target("vscode", false),
+            target("gateway", false),
+        ],
     }
+}
+
+/// Seed missing files without replacing files edited in an earlier demo run.
+pub fn prepare_folder(data_dir: &Path, project: &str) -> io::Result<PathBuf> {
+    let folder = data_dir
+        .join("demo")
+        .join(crate::config::safe_file_stem(project));
+    std::fs::create_dir_all(folder.join("src"))?;
+    for (name, contents) in [
+        ("README.md", "# 데모 프로젝트\n\nEmber 편집기 예제입니다.\n"),
+        (
+            "Cargo.toml",
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ),
+        (
+            "src/main.rs",
+            "fn main() {\n    println!(\"안녕하세요!\");\n}\n",
+        ),
+        (
+            "package.json",
+            "{\n  \"name\": \"demo\",\n  \"version\": \"0.1.0\"\n}\n",
+        ),
+    ] {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join(name))
+        {
+            Ok(mut file) => file.write_all(contents.as_bytes())?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(folder)
 }
 
 /// The name for a new demo project: trimmed, not empty, not already taken. Pure, for tests.
@@ -136,8 +179,16 @@ pub fn usage(now: i64) -> Vec<DailyUsage> {
 
 pub fn projects() -> Vec<Project> {
     vec![
-        Project { name: "demo-project".into(), created_at: 0, computers: vec!["local".into()] },
-        Project { name: "second-project".into(), created_at: 0, computers: vec!["local".into()] },
+        Project {
+            name: "demo-project".into(),
+            created_at: 0,
+            computers: vec!["local".into()],
+        },
+        Project {
+            name: "second-project".into(),
+            created_at: 0,
+            computers: vec!["local".into()],
+        },
     ]
 }
 
@@ -160,9 +211,21 @@ pub fn computers() -> Vec<Computer> {
 
 pub fn agents() -> Vec<DetectedAgent> {
     vec![
-        DetectedAgent { kind: "claude-code".into(), installed: true, version: Some("2.1.0".into()) },
-        DetectedAgent { kind: "codex".into(), installed: true, version: Some("0.50.0".into()) },
-        DetectedAgent { kind: "antigravity".into(), installed: false, version: None },
+        DetectedAgent {
+            kind: "claude-code".into(),
+            installed: true,
+            version: Some("2.1.0".into()),
+        },
+        DetectedAgent {
+            kind: "codex".into(),
+            installed: true,
+            version: Some("0.50.0".into()),
+        },
+        DetectedAgent {
+            kind: "antigravity".into(),
+            installed: false,
+            version: None,
+        },
     ]
 }
 
@@ -188,7 +251,10 @@ pub fn accounts() -> Vec<Account> {
 }
 
 pub fn chatgpt_accounts(now: i64) -> Vec<ChatGptAccount> {
-    let today = usage(now).first().map(|u| u.input_tokens + u.output_tokens).unwrap_or(0);
+    let today = usage(now)
+        .first()
+        .map(|u| u.input_tokens + u.output_tokens)
+        .unwrap_or(0);
     vec![ChatGptAccount {
         id: CHATGPT_ID.into(),
         label: "ChatGPT Plus (demo)".into(),
@@ -202,12 +268,25 @@ pub fn chatgpt_accounts(now: i64) -> Vec<ChatGptAccount> {
     }]
 }
 
-fn record(id: &str, project: &str, agent: &str, title: &str, status: SessionStatus, now: i64, last_seq: i64) -> SessionRecord {
+fn record(
+    data_dir: &Path,
+    id: &str,
+    project: &str,
+    agent: &str,
+    title: &str,
+    status: SessionStatus,
+    now: i64,
+    last_seq: i64,
+) -> SessionRecord {
     SessionRecord {
         id: id.into(),
         project: project.into(),
         agent: agent.into(),
-        cwd: format!("C:/demo/{project}"),
+        cwd: data_dir
+            .join("demo")
+            .join(crate::config::safe_file_stem(project))
+            .to_string_lossy()
+            .into_owned(),
         model: None,
         native_id: None,
         status,
@@ -242,8 +321,12 @@ fn script_waiting(now: i64) -> Vec<StoredEvent> {
     stored(
         "demo-s1",
         vec![
-            AgentEvent::UserMessage { text: "src/config.rs 에 포트 설정을 추가하고 테스트를 돌려 줘".into() },
-            AgentEvent::AssistantMessage { text: "먼저 설정 파일을 읽어 보겠습니다.".into() },
+            AgentEvent::UserMessage {
+                text: "src/config.rs 에 포트 설정을 추가하고 테스트를 돌려 줘".into(),
+            },
+            AgentEvent::AssistantMessage {
+                text: "먼저 설정 파일을 읽어 보겠습니다.".into(),
+            },
             AgentEvent::ToolCall {
                 call_id: "c1".into(),
                 name: "Read".into(),
@@ -254,7 +337,9 @@ fn script_waiting(now: i64) -> Vec<StoredEvent> {
                 output: "pub struct Config {\n    pub port: u16,\n}\n".into(),
                 is_error: false,
             },
-            AgentEvent::AssistantMessage { text: "포트 필드가 이미 있습니다. 테스트를 실행해 확인하겠습니다.".into() },
+            AgentEvent::AssistantMessage {
+                text: "포트 필드가 이미 있습니다. 테스트를 실행해 확인하겠습니다.".into(),
+            },
             AgentEvent::ApprovalRequested {
                 approval_id: APPROVAL_ID.into(),
                 tool: "Bash".into(),
@@ -269,10 +354,19 @@ fn script_done(now: i64) -> Vec<StoredEvent> {
     stored(
         "demo-s2",
         vec![
-            AgentEvent::UserMessage { text: "README 에 실행 방법을 한 줄 추가해 줘".into() },
-            AgentEvent::AssistantMessage { text: "README.md 에 실행 방법을 추가했습니다.".into() },
-            AgentEvent::Usage { input_tokens: 1_200, output_tokens: 300 },
-            AgentEvent::TurnEnded { outcome: TurnOutcome::Completed },
+            AgentEvent::UserMessage {
+                text: "README 에 실행 방법을 한 줄 추가해 줘".into(),
+            },
+            AgentEvent::AssistantMessage {
+                text: "README.md 에 실행 방법을 추가했습니다.".into(),
+            },
+            AgentEvent::Usage {
+                input_tokens: 1_200,
+                output_tokens: 300,
+            },
+            AgentEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            },
         ],
         now,
     )
@@ -283,14 +377,26 @@ fn script_done(now: i64) -> Vec<StoredEvent> {
 pub struct DemoSource {
     events: Mutex<HashMap<String, Vec<StoredEvent>>>,
     created: Mutex<u32>,
+    data_dir: PathBuf,
 }
 
 impl DemoSource {
-    pub fn new(now: i64) -> DemoSource {
+    pub fn new(now: i64, data_dir: PathBuf) -> DemoSource {
         let mut events = HashMap::new();
         events.insert("demo-s1".to_string(), script_waiting(now));
         events.insert("demo-s2".to_string(), script_done(now - 600_000));
-        DemoSource { events: Mutex::new(events), created: Mutex::new(0) }
+        DemoSource {
+            events: Mutex::new(events),
+            created: Mutex::new(0),
+            data_dir,
+        }
+    }
+
+    pub fn with_data_dir(now: i64, data_dir: PathBuf) -> io::Result<DemoSource> {
+        for project in ["demo-project", "second-project"] {
+            prepare_folder(&data_dir, project)?;
+        }
+        Ok(Self::new(now, data_dir))
     }
 
     /// Reset all demo transcripts, created-session counter, and client state to the initial seed.
@@ -306,7 +412,10 @@ impl DemoSource {
             client.apply(input);
         }
         for id in ["demo-s1", "demo-s2"] {
-            client.apply(Input::EventsFetched { session_id: id.to_string(), events: self.events_for(id) });
+            client.apply(Input::EventsFetched {
+                session_id: id.to_string(),
+                events: self.events_for(id),
+            });
         }
     }
 
@@ -314,19 +423,104 @@ impl DemoSource {
     pub fn sessions(&self, now: i64) -> Vec<SessionRecord> {
         let ev = self.events.lock().unwrap();
         let n = |id: &str| ev.get(id).map_or(0, |v| v.len() as i64);
-        vec![
-            record("demo-s1", "demo-project", "claude-code", "포트 설정 추가", SessionStatus::WaitingForApproval, now, n("demo-s1")),
-            record("demo-s2", "demo-project", "codex", "README 정리", SessionStatus::Finished, now - 600_000, n("demo-s2")),
+        let sessions = vec![
+            record(
+                &self.data_dir,
+                "demo-s1",
+                "demo-project",
+                "claude-code",
+                "포트 설정 추가",
+                SessionStatus::WaitingForApproval,
+                now,
+                n("demo-s1"),
+            ),
+            record(
+                &self.data_dir,
+                "demo-s2",
+                "demo-project",
+                "codex",
+                "README 정리",
+                SessionStatus::Finished,
+                now - 600_000,
+                n("demo-s2"),
+            ),
             // A fuller team in the second project, so the box's "외 N명" deck, the pinned chips
             // and every status group show in review captures (no transcripts).
-            SessionRecord { pinned: true, ..record("demo-s3", "second-project", "codex", "빌드 스크립트 점검", SessionStatus::Running, now - 60_000, 0) },
-            record("demo-s4", "second-project", "claude-code", "릴리스 노트 초안", SessionStatus::Finished, now - 900_000, 0),
-            record("demo-s5", "second-project", "codex", "테스트 플레이크 조사", SessionStatus::Failed, now - 1_200_000, 0),
-            record("demo-s6", "second-project", "claude-code", "문서 링크 정리", SessionStatus::WaitingForApproval, now - 120_000, 0),
-            record("demo-s7", "second-project", "codex", "의존성 업데이트", SessionStatus::Finished, now - 1_800_000, 0),
-            record("demo-s8", "second-project", "claude-code", "CI 캐시 정리", SessionStatus::Running, now - 240_000, 0),
-            record("demo-s9", "second-project", "codex", "로그 형식 통일", SessionStatus::Finished, now - 2_400_000, 0),
-        ]
+            SessionRecord {
+                pinned: true,
+                ..record(
+                    &self.data_dir,
+                    "demo-s3",
+                    "second-project",
+                    "codex",
+                    "빌드 스크립트 점검",
+                    SessionStatus::Running,
+                    now - 60_000,
+                    0,
+                )
+            },
+            record(
+                &self.data_dir,
+                "demo-s4",
+                "second-project",
+                "claude-code",
+                "릴리스 노트 초안",
+                SessionStatus::Finished,
+                now - 900_000,
+                0,
+            ),
+            record(
+                &self.data_dir,
+                "demo-s5",
+                "second-project",
+                "codex",
+                "테스트 플레이크 조사",
+                SessionStatus::Failed,
+                now - 1_200_000,
+                0,
+            ),
+            record(
+                &self.data_dir,
+                "demo-s6",
+                "second-project",
+                "claude-code",
+                "문서 링크 정리",
+                SessionStatus::WaitingForApproval,
+                now - 120_000,
+                0,
+            ),
+            record(
+                &self.data_dir,
+                "demo-s7",
+                "second-project",
+                "codex",
+                "의존성 업데이트",
+                SessionStatus::Finished,
+                now - 1_800_000,
+                0,
+            ),
+            record(
+                &self.data_dir,
+                "demo-s8",
+                "second-project",
+                "claude-code",
+                "CI 캐시 정리",
+                SessionStatus::Running,
+                now - 240_000,
+                0,
+            ),
+            record(
+                &self.data_dir,
+                "demo-s9",
+                "second-project",
+                "codex",
+                "로그 형식 통일",
+                SessionStatus::Finished,
+                now - 2_400_000,
+                0,
+            ),
+        ];
+        sessions
     }
 
     /// What the client is told at start: projects, sessions, computers, a live connection.
@@ -341,33 +535,65 @@ impl DemoSource {
 
     /// The transcript the server would return for `id`.
     pub fn events_for(&self, id: &str) -> Vec<StoredEvent> {
-        self.events.lock().unwrap().get(id).cloned().unwrap_or_default()
+        self.events
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The UI opened `id`: show its transcript.
     pub fn open(&self, client: &Client, id: &str) {
         client.apply(Input::Opened(id.to_string()));
-        client.apply(Input::EventsFetched { session_id: id.to_string(), events: self.events_for(id) });
+        client.apply(Input::EventsFetched {
+            session_id: id.to_string(),
+            events: self.events_for(id),
+        });
     }
 
     /// Append one event to a session's transcript and tell the client.
     fn emit(&self, client: &Client, id: &str, status: SessionStatus, event: AgentEvent) {
         let seq = client.read(|s| s.session(id).map_or(0, |v| v.record.last_seq)) + 1;
-        let ev = StoredEvent { session_id: id.into(), seq, at: now_ms(), event };
-        self.events.lock().unwrap().entry(id.to_string()).or_default().push(ev.clone());
+        let ev = StoredEvent {
+            session_id: id.into(),
+            seq,
+            at: now_ms(),
+            event,
+        };
+        self.events
+            .lock()
+            .unwrap()
+            .entry(id.to_string())
+            .or_default()
+            .push(ev.clone());
         client.apply(Input::Push(Push::Event { status, event: ev }));
     }
 
     /// A message the user sent: the demo answers with a fixed line.
     pub fn send_message(&self, client: &Client, id: &str, text: &str) {
-        self.emit(client, id, SessionStatus::Running, AgentEvent::UserMessage { text: text.into() });
         self.emit(
             client,
             id,
             SessionStatus::Running,
-            AgentEvent::AssistantMessage { text: format!("{DEMO_NOTICE}: 서버가 없어 답변은 정해진 문장입니다.") },
+            AgentEvent::UserMessage { text: text.into() },
         );
-        self.emit(client, id, SessionStatus::Finished, AgentEvent::TurnEnded { outcome: TurnOutcome::Completed });
+        self.emit(
+            client,
+            id,
+            SessionStatus::Running,
+            AgentEvent::AssistantMessage {
+                text: format!("{DEMO_NOTICE}: 서버가 없어 답변은 정해진 문장입니다."),
+            },
+        );
+        self.emit(
+            client,
+            id,
+            SessionStatus::Finished,
+            AgentEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            },
+        );
     }
 
     /// The user answered an approval card: record the decision, then finish the turn.
@@ -376,14 +602,29 @@ impl DemoSource {
             client,
             id,
             SessionStatus::Running,
-            AgentEvent::ApprovalResolved { approval_id: approval_id.into(), decision },
+            AgentEvent::ApprovalResolved {
+                approval_id: approval_id.into(),
+                decision,
+            },
         );
         let text = match decision {
             ApprovalDecision::Deny => "거부하셨습니다. 명령을 실행하지 않았습니다.".to_string(),
             _ => "테스트가 모두 통과했습니다 (데모).".to_string(),
         };
-        self.emit(client, id, SessionStatus::Running, AgentEvent::AssistantMessage { text });
-        self.emit(client, id, SessionStatus::Finished, AgentEvent::TurnEnded { outcome: TurnOutcome::Completed });
+        self.emit(
+            client,
+            id,
+            SessionStatus::Running,
+            AgentEvent::AssistantMessage { text },
+        );
+        self.emit(
+            client,
+            id,
+            SessionStatus::Finished,
+            AgentEvent::TurnEnded {
+                outcome: TurnOutcome::Completed,
+            },
+        );
     }
 
     /// A new session, kept in this run only.
@@ -394,8 +635,19 @@ impl DemoSource {
             *c
         };
         let title = body.title.clone().unwrap_or_else(|| "새 세션".to_string());
-        let mut rec = record(&format!("demo-new-{n}"), &body.project, &body.agent, &title, SessionStatus::Idle, now_ms(), 0);
-        rec.cwd = body.cwd.clone();
+        let mut rec = record(
+            &self.data_dir,
+            &format!("demo-new-{n}"),
+            &body.project,
+            &body.agent,
+            &title,
+            SessionStatus::Idle,
+            now_ms(),
+            0,
+        );
+        if !body.cwd.is_empty() {
+            rec.cwd = body.cwd.clone();
+        }
         rec.model = body.model.clone();
         client.apply(Input::SessionLoaded(rec.clone()));
         rec
@@ -403,16 +655,25 @@ impl DemoSource {
 
     /// A new project on this computer, kept in this run only (#218).
     pub fn create_project(&self, client: &Client, raw: &str) -> Result<Project, String> {
-        let existing: Vec<String> = client.read(|s| s.projects().into_iter().map(|p| p.name).collect());
+        let existing: Vec<String> =
+            client.read(|s| s.projects().into_iter().map(|p| p.name).collect());
         let name = new_project_name(raw, &existing).map_err(str::to_string)?;
-        let project = Project { name, created_at: now_ms() / 1000, computers: vec!["local".into()] };
-        client.apply(Input::Push(Push::ProjectUpdated { project: project.clone() }));
+        let project = Project {
+            name,
+            created_at: now_ms() / 1000,
+            computers: vec!["local".into()],
+        };
+        client.apply(Input::Push(Push::ProjectUpdated {
+            project: project.clone(),
+        }));
         Ok(project)
     }
 
     /// Rename, pin or archive in this run only.
     pub fn patch_session(&self, client: &Client, id: &str, patch: &SessionPatch) {
-        let Some(mut rec) = client.read(|s| s.session(id).map(|v| v.record.clone())) else { return };
+        let Some(mut rec) = client.read(|s| s.session(id).map(|v| v.record.clone())) else {
+            return;
+        };
         if let Some(t) = &patch.title {
             rec.title.clone_from(t);
         }
@@ -428,14 +689,36 @@ impl DemoSource {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use ember_client::state::State;
+
+    #[test]
+    fn fr_l31_demo_folder_contains_sample_files() {
+        let data = tempfile::tempdir().unwrap();
+        let folder = prepare_folder(data.path(), "demo-project").unwrap();
+        for name in ["README.md", "Cargo.toml", "src/main.rs", "package.json"] {
+            assert!(folder.join(name).is_file(), "missing {name}");
+        }
+        assert!(folder.starts_with(data.path()));
+    }
+
+    #[test]
+    fn fr_l31_demo_folder_creation_preserves_edits() {
+        let data = tempfile::tempdir().unwrap();
+        let folder = prepare_folder(data.path(), "demo-project").unwrap();
+        std::fs::write(folder.join("README.md"), "수정한 내용").unwrap();
+        assert_eq!(prepare_folder(data.path(), "demo-project").unwrap(), folder);
+        assert_eq!(
+            std::fs::read_to_string(folder.join("README.md")).unwrap(),
+            "수정한 내용"
+        );
+    }
+
     #[test]
     fn server_only_actions_are_blocked_only_in_the_demo() {
         assert_eq!(super::unavailable(true), Some("데모에서는 쓸 수 없습니다"));
         assert_eq!(super::unavailable(false), None);
     }
-
-    use super::*;
-    use ember_client::state::State;
 
     #[test]
     fn the_switch_off_means_no_demo() {
@@ -470,9 +753,15 @@ mod tests {
         let l = ide_launch("demo-s1", "demo-project", "C:/demo/demo-project");
         assert!(l.target("ember").unwrap().available);
         assert!(!l.target("vscode").unwrap().available);
-        assert_eq!(l.target("gateway").unwrap().reason.as_deref(), Some(UNAVAILABLE));
+        assert_eq!(
+            l.target("gateway").unwrap().reason.as_deref(),
+            Some(UNAVAILABLE)
+        );
         let (p, f) = crate::server::IdeLaunch::editor_target(Some(&Ok(l)));
-        assert_eq!((p.as_str(), f.as_str()), ("demo-project", "C:/demo/demo-project"));
+        assert_eq!(
+            (p.as_str(), f.as_str()),
+            ("demo-project", "C:/demo/demo-project")
+        );
     }
 
     #[test]
@@ -491,7 +780,10 @@ mod tests {
         let mut days: Vec<_> = u.iter().map(|r| r.day.clone()).collect();
         days.dedup();
         assert_eq!(days.len(), 14);
-        assert!(u.iter().all(|r| r.total_tokens() > 0 && r.account_id.as_deref() == Some(CHATGPT_ID)));
+        assert!(
+            u.iter()
+                .all(|r| r.total_tokens() > 0 && r.account_id.as_deref() == Some(CHATGPT_ID))
+        );
     }
 
     #[test]
@@ -499,7 +791,13 @@ mod tests {
         let p = projects();
         assert_eq!(p[0].name, "demo-project");
         assert_eq!(p.len(), 2);
-        assert_eq!(computers().iter().filter(|c| c.reachability == Reachability::Online).count(), 1);
+        assert_eq!(
+            computers()
+                .iter()
+                .filter(|c| c.reachability == Reachability::Online)
+                .count(),
+            1
+        );
         assert!(agents().iter().any(|a| a.installed));
         let g = chatgpt_accounts(1_788_000_000_000);
         assert_eq!(g.len(), 1);
@@ -510,7 +808,13 @@ mod tests {
 
     #[test]
     fn the_seed_gives_sessions_with_a_pending_approval() {
-        let demo = DemoSource::new(1_788_000_000_000);
+        let data = tempfile::tempdir().unwrap();
+        let demo = DemoSource::new(1_788_000_000_000, data.path().to_path_buf());
+        assert!(
+            demo.sessions(1_788_000_000_000)
+                .iter()
+                .all(|s| !s.cwd.is_empty())
+        );
         let mut st = State::new();
         for i in demo.inputs(1_788_000_000_000) {
             st.apply(i);
@@ -520,12 +824,19 @@ mod tests {
         assert_eq!(s1.status, ember_client::LauncherStatus::WaitingForApproval);
         assert!(st.session("demo-s2").is_some());
         // The second project has more than the five tiles a box shows before its deck.
-        let second = st.projects().into_iter().find(|p| p.name == "second-project").expect("project");
+        let second = st
+            .projects()
+            .into_iter()
+            .find(|p| p.name == "second-project")
+            .expect("project");
         assert!(second.sessions.len() > 5);
         assert_eq!(st.computers().len(), 2);
         let ev = demo.events_for("demo-s1");
         assert_eq!(ev.len() as i64, s1.record.last_seq);
-        assert!(matches!(ev.last().unwrap().event, AgentEvent::ApprovalRequested { .. }));
+        assert!(matches!(
+            ev.last().unwrap().event,
+            AgentEvent::ApprovalRequested { .. }
+        ));
         // Sequence numbers are consecutive from 1, as the transcript requires.
         assert!(ev.iter().enumerate().all(|(i, e)| e.seq == i as i64 + 1));
     }

@@ -283,7 +283,7 @@ async fn fr_s8_shim_killed_mid_turn_triggers_native_resume_on_next_message() {
     sessions.send(&id, "second").await.unwrap();
     wait_for("a resumed agent", || {
         std::fs::read_to_string(work.path().join("args.log"))
-            .is_ok_and(|args| args.contains("--resume fake-session"))
+            .is_ok_and(|args| args.split_whitespace().any(|arg| arg == "--resume=fake-session"))
     }).await;
     sessions.release(&id).await.unwrap();
     clear_runtime();

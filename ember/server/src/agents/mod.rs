@@ -274,6 +274,25 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether the output of an agent that outlived the server mid-turn can be read back without
+    /// rejoining it (FR-S8): [`AgentAdapter::drain_turn_end`] and
+    /// [`AgentAdapter::translate_drained`] are then used before the old process is stopped.
+    /// Default: no.
+    fn drains_shim(&self) -> bool {
+        false
+    }
+
+    /// Whether `line` of drained output ends the draining (the turn finished, or the agent asks
+    /// something nobody can answer any more).
+    fn drain_turn_end(&self, _line: &str) -> bool {
+        false
+    }
+
+    /// The events behind output lines drained from a surviving agent (FR-S8).
+    fn translate_drained(&self, _lines: &[String]) -> Vec<AgentEvent> {
+        Vec::new()
+    }
+
     /// Start (or resume) the agent. Events are sent on `events` until the process exits.
     async fn start(
         &self,
@@ -292,6 +311,11 @@ pub trait AgentRun: Send {
     /// Answer a pending approval.
     async fn answer(&mut self, approval_id: &str, decision: ApprovalDecision)
         -> anyhow::Result<()>;
+
+    /// Prompts that were pending when the previous server died, found in the store after this
+    /// run rejoined its surviving agent (FR-S8). Each is `(approval_id, tool, input)`. An
+    /// adapter that holds its pending approvals in memory rebuilds them here. Default: nothing.
+    async fn restore_pending_approvals(&mut self, _pending: Vec<(String, String, serde_json::Value)>) {}
 
     /// Interrupt the current turn; the adapter emits `TurnEnded { Interrupted }`.
     async fn interrupt(&mut self) -> anyhow::Result<()>;

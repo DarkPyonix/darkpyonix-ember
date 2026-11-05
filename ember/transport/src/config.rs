@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use crate::{AddressDirectory, PeerId, PkarrStore, SecretKey, SignalChannel};
 
-/// Environment variable choosing the transport backend: `iroh` (the default) or `letify`.
+/// Environment variable choosing the transport backend: `letify` (the default) or `iroh`
+/// (kept for one release, then removed; SPEC `FR-N5`).
 /// Every endpoint of a fleet must use the same value until the rollout is complete (SPEC `FR-N5`).
 pub const BACKEND_ENV: &str = "EMBER_TRANSPORT_BACKEND";
 
@@ -21,13 +22,13 @@ pub enum BackendKind {
 }
 
 impl Default for BackendKind {
-    /// iroh stays the default until all endpoints switch together. A build without the `iroh`
-    /// feature has only letify.
+    /// letify-link is the default (INTENT D36). A build without the `letify` feature falls
+    /// back to iroh.
     fn default() -> Self {
-        if cfg!(feature = "iroh") {
-            Self::Iroh
-        } else {
+        if cfg!(feature = "letify") || !cfg!(feature = "iroh") {
             Self::Letify
+        } else {
+            Self::Iroh
         }
     }
 }
@@ -183,7 +184,7 @@ pub enum RelayConfig {
     Default,
     /// No relay: direct paths only (tests, LAN).
     Disabled,
-    /// These relay URLs, e.g. `https://relay.darkpyonix.dev`.
+    /// These relay URLs, e.g. `letify://<server peer id>@host:7443` (the main server).
     Custom(Vec<String>),
 }
 

@@ -129,15 +129,39 @@ pub fn launch() {
         ui::cr::shell::launch(pref);
     }
 
-    // The window is closed: write the cache once more and stop the background tasks.
+    shutdown();
+}
+
+/// Flush the current state before the process exits or the window loop returns.
+pub(crate) fn shutdown() -> i32 {
     let s = services();
-    // Demo data is never written to the cache.
-    if s.demo.is_none() {
-        if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
-            tracing::warn!("final cache write failed: {e}");
+    let _guard = services::prefs_write_lock();
+    let prefs = s.ui.prefs.get_untracked();
+    let path = s.config.prefs_path();
+    let code = flush_before_exit(path.as_deref(), &prefs, || {
+        // Demo data is never written to the cache.
+        if s.demo.is_none() {
+            if let Err(e) = s.rt.block_on(s.client.flush_cache()) {
+                tracing::warn!("final cache write failed: {e}");
+            }
+        }
+        s.client.stop();
+    });
+    code
+}
+
+fn flush_before_exit(
+    path: Option<&std::path::Path>,
+    prefs: &prefs::Prefs,
+    flush_cache: impl FnOnce(),
+) -> i32 {
+    if let Some(path) = path {
+        if let Err(e) = prefs::save(path, prefs) {
+            tracing::warn!("could not save prefs to {}: {e}", path.display());
         }
     }
-    s.client.stop();
+    flush_cache();
+    0
 }
 
 fn launch_builder() -> LaunchBuilder {
@@ -145,8 +169,30 @@ fn launch_builder() -> LaunchBuilder {
     LaunchBuilder::new()
         // The toolkit's own widgets follow the saved System / Light / Dark choice (FR-L28).
         .with_theme(
-            Theme::adaptive(DesignSystem::Material3)
-                .with_color_scheme(services().initial_prefs.theme.color_scheme()),
+            // Inter, then Pretendard, then system fonts for every role but Mono.
+            ui::fonts::app_theme(services().initial_prefs.theme.color_scheme()),
         )
         .with_window(Window::new().with_title("Ember"))
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    #[test]
+    fn fr_l31_1_editor_close_flushes_prefs_and_cache_before_exit() {
+        let scratch = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let path = dir.path().join("prefs.json");
+        let mut prefs = crate::prefs::Prefs::default();
+        prefs.keymap = crate::ui::keymap::Keymap::JetBrains;
+        prefs.ide_target = Some("vscode".into());
+        let mut cache_flushed = false;
+        let code = super::flush_before_exit(Some(&path), &prefs, || {
+            assert_eq!(crate::prefs::load(&path), prefs);
+            cache_flushed = true;
+        });
+        assert_eq!(code, 0);
+        assert!(cache_flushed);
+        assert_eq!(crate::prefs::load(&path), prefs);
+    }
 }

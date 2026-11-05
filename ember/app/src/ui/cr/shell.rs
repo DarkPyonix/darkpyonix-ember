@@ -402,7 +402,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
 }
 
 /// The floating bottom bar: five equal-width tabs, icon above an 11 px label, red badges.
-/// TODO(compose-rust): backdrop blur (Liquid Glass on iOS) and the safe-area inset; only the
+/// TODO(compose-rust#300): backdrop blur (Liquid Glass on iOS) and the safe-area inset; only the
 /// 10 px gap is added.
 pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(BottomTab) + Clone + 'static) {
     let p = ember_theme().palette;
@@ -798,7 +798,7 @@ pub fn launch(pref: ThemePref) {
         _ => shell,
     };
     compose_rust::LaunchBuilder::new()
-        .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
+        .with_theme(crate::ui::fonts::app_theme(scheme))
         .with_window(Window::new().with_title("Ember").with_size(w, h))
         .launch(content);
 }

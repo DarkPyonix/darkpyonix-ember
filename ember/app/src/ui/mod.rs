@@ -16,6 +16,7 @@ pub mod conversation;
 pub mod editor;
 pub mod editor_workbench;
 pub mod files;
+pub mod fonts;
 pub mod home;
 pub mod keymap;
 pub mod monitor;

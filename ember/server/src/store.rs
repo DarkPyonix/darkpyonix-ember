@@ -141,6 +141,7 @@ const MIGRATIONS: &[&str] = &[
     crate::channels::MIGRATION,
     crate::channels::READS_MIGRATION,
     crate::channels::MENTIONS_MIGRATION,
+    crate::channels::invites::MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.

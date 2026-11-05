@@ -34,8 +34,9 @@ pub fn server_token(env_token: Option<&str>, data_dir: Option<&Path>, home: Opti
 
 /// Whether the token file may be read (unix): a regular file, not a symlink, with no group or
 /// other permission bits. A missing file is quietly unusable; a refused one logs why (never the
-/// token). The owner is not compared with the current user: `ember-client` has no `libc`
-/// dependency to ask for the effective uid. The environment variable is not subject to this.
+/// token). The file's owner must be the owner of its folder (the data folder is the user's own);
+/// the current uid is not asked for, so `ember-client` needs no `libc`. The environment variable
+/// is not subject to this.
 fn token_file_usable(path: &Path) -> bool {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -50,12 +51,22 @@ fn token_file_usable(path: &Path) -> bool {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if meta.permissions().mode() & 0o077 != 0 {
             return refuse("group or other can access it, set mode 0600");
         }
+        let dir_uid = path.parent().and_then(|d| std::fs::metadata(d).ok()).map(|m| m.uid());
+        if !owner_matches(meta.uid(), dir_uid) {
+            return refuse("its owner is not the owner of its folder");
+        }
     }
     true
+}
+
+/// The token file's owner matches its folder's owner; an unreadable folder fails the check.
+#[cfg(unix)]
+fn owner_matches(file_uid: u32, dir_uid: Option<u32>) -> bool {
+    dir_uid == Some(file_uid)
 }
 
 /// Whether the token may be sent to `base_url` (FR-S11): its host is loopback (`127.0.0.0/8`,
@@ -209,5 +220,13 @@ mod tests {
     #[test]
     fn fr_s11_bearer_header_format() {
         assert_eq!(bearer_header("abc123"), "Bearer abc123");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_s11_token_file_owner_must_match_its_folder() {
+        assert!(owner_matches(501, Some(501)));
+        assert!(!owner_matches(0, Some(501)));
+        assert!(!owner_matches(501, None));
     }
 }

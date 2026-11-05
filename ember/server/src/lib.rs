@@ -6,6 +6,7 @@ pub mod a2a;
 pub mod accounts;
 pub mod agents;
 pub mod api;
+pub mod auth;
 pub mod browser;
 pub mod channels;
 pub mod chatgpt;

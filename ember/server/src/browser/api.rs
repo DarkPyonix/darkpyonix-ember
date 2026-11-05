@@ -42,6 +42,8 @@ pub fn router(browsers: Arc<BrowserManager>) -> Router {
         .route("/api/browsers/{project}/view", get(view))
         .route("/api/browsers/{project}/cdp", get(cdp))
         .route("/api/browsers/{project}/cdp/json/version", get(cdp_version))
+        // The agent form: the nonce is checked by the server auth layer (FR-S9), not here.
+        .route("/api/browsers/{project}/cdp/{nonce}", get(cdp_agent))
         .route("/api/browsers/{project}/agent-config", get(agent_config))
         .with_state(browsers)
 }
@@ -263,6 +265,15 @@ async fn cdp(
     Ok(ws.on_upgrade(move |socket| relay(socket, b, upstream)))
 }
 
+async fn cdp_agent(
+    State(m): S,
+    Path((project, _nonce)): Path<(String, String)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> ApiResult<impl IntoResponse> {
+    cdp(State(m), Path(project), headers, ws).await
+}
+
 async fn relay(socket: WebSocket, b: Arc<BrowserInstance>, upstream: String) {
     let up = match tokio_tungstenite::connect_async(&upstream).await {
         Ok((up, _)) => up,
@@ -349,6 +360,6 @@ async fn agent_config(
         Some(s) => BrowserMcp::parse(s)
             .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("unknown mcp {s}")))?,
     };
-    let ws = agent::cdp_ws_url(&base_url(&headers), &project);
+    let ws = agent::agent_cdp_ws_url(&base_url(&headers), &project);
     Ok(Json(agent::agent_config(&ws, mcp)))
 }

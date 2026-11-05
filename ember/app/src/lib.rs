@@ -108,12 +108,13 @@ pub fn launch() {
     });
 
     if let Some(target) = ide::parse_editor_args(std::env::args()) {
-        // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the dioxus-compose
-        // EditorScreen in its own process until dioxus-compose#152 (the `window` element on a
+        // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
+        // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
         // shared host) lands.
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
+        // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
         launch_builder()
             .with_html(ui::workbench::config)
             .with_window(Window::new().with_title(title).with_size(1280, 820))

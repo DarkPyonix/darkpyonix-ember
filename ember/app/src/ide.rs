@@ -105,7 +105,7 @@ pub fn open_external(url: &str) -> std::io::Result<()> {
     Command::new(&argv[0]).args(&argv[1..]).spawn().map(|_| ())
 }
 
-/// CLI flag that launches this binary directly into the `dioxus-compose` `EditorScreen` (FR-L31).
+/// CLI flag that launches this binary directly into the editor, which runs as its own HTML-mode window (FR-L31).
 /// TODO(dioxus-compose#152): once the `window` element on a shared host lands, open the editor
 /// window on the same host instead of spawning a second process.
 pub const EDITOR_ARG: &str = "--editor";
@@ -141,7 +141,7 @@ where
 
 /// The `(executable, args)` pair that spawns a separate Ember editor window (FR-L31).
 /// TODO(dioxus-compose#152): replace with an in-process `window` node once #152 lands.
-pub fn editor_command(exe: &Path, project: &str, folder: &str, endpoint: &str, _token: &str) -> (PathBuf, Vec<String>) {
+pub fn editor_command(exe: &Path, project: &str, folder: &str, endpoint: &str) -> (PathBuf, Vec<String>) {
     (
         exe.to_path_buf(),
         vec![
@@ -160,7 +160,7 @@ pub fn spawn_editor_with(exe: &Path, project: &str, folder: &str) -> std::io::Re
 
 /// Spawn an editor with the token in the child environment, never in argv.
 pub fn spawn_editor_target(exe: &Path, target: &EditorTarget) -> std::io::Result<std::process::Child> {
-    let (bin, args) = editor_command(exe, &target.project, &target.folder, &target.endpoint, &target.token);
+    let (bin, args) = editor_command(exe, &target.project, &target.folder, &target.endpoint);
     Command::new(bin).args(args).env("EMBER_EDITOR_TOKEN", &target.token).spawn()
 }
 
@@ -249,7 +249,7 @@ mod tests {
             })
         );
 
-        let (exe, args) = editor_command(Path::new("/usr/local/bin/ember"), "ember-core", "/repo", "", "");
+        let (exe, args) = editor_command(Path::new("/usr/local/bin/ember"), "ember-core", "/repo", "");
         assert_eq!(exe, PathBuf::from("/usr/local/bin/ember"));
         assert_eq!(args, vec!["--editor", "ember-core", "/repo", ""]);
         assert_eq!(
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn fr_l31_editor_connection_arguments_round_trip() {
-        let (_, args) = editor_command(Path::new("ember"), "project", "/work", "localhost:8000", "secret");
+        let (_, args) = editor_command(Path::new("ember"), "project", "/work", "localhost:8000");
         assert!(!args.iter().any(|arg| arg == "secret"));
         let target = parse_editor_args_with_token(std::iter::once("ember".to_owned()).chain(args), "secret".into()).unwrap();
         assert_eq!(target.endpoint, "localhost:8000");

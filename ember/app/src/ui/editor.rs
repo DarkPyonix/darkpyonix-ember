@@ -1,7 +1,7 @@
 //! Editor target and tab state.
 
 use dioxus_compose::prelude::*;
-use crate::ui::keymap::Action;
+use crate::ui::keymap::{Action, Chord};
 
 
 /// What the editor was opened for.
@@ -88,6 +88,37 @@ impl EditorTabs {
     pub fn current_path(&self) -> Option<&str> {
         self.current.map(|i| self.tabs[i].0.as_str())
     }
+}
+
+/// The path segments the breadcrumbs show: the path below the project folder when it lies
+/// inside it, split on `/` with empty segments dropped.
+pub fn breadcrumb_segments(path: &str, folder: &str) -> Vec<String> {
+    let folder = folder.trim_end_matches('/');
+    let rest = match path.strip_prefix(folder) {
+        Some(r) if !folder.is_empty() && r.starts_with('/') => r,
+        _ => path,
+    };
+    rest.split('/')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The breadcrumb line: segments joined with a right-angle quote.
+pub fn breadcrumb_text(path: &str, folder: &str) -> String {
+    breadcrumb_segments(path, folder).join(" \u{203A} ")
+}
+
+/// The status bar's agent field.
+pub fn agent_status_text(state: &str) -> String {
+    format!("에이전트 {state}")
+}
+
+/// The chord a pressed key makes. `key` is the key's name as the keymap table writes it
+/// (`P`, `F12`, `Esc`); a single letter is upper-cased so Shift does not change the match.
+pub fn chord_from_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Chord {
+    let key = if key.chars().count() == 1 { key.to_uppercase() } else { key.to_string() };
+    Chord::Keys { ctrl, shift, alt, meta, key }
 }
 
 pub fn tooltip_text(label: &str, hint: &str) -> String {

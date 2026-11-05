@@ -1078,7 +1078,7 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                                 Label(reach_pill(c.reachability).0, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
                                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                                 let (pr, id) = (b.id.clone(), c.id.clone());
-                                // TODO(compose-rust): a switch; a toggle button stands in.
+                                // TODO(compose-rust#426): a switch; a toggle button stands in.
                                 AppButton(if on { "할당됨" } else { "할당" }, None, if on { ButtonKind::Primary } else { ButtonKind::Default }, true, true, false, move || {
                                     set_assignment(pr.clone(), id.clone(), !on)
                                 });

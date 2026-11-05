@@ -782,7 +782,7 @@ pub fn SheetHeader(
 }
 
 /// A responsive modal with the shared header and a scrim (#212).
-/// TODO(compose-rust): `corner-xl` squircle corners; plain arcs for now.
+/// TODO(compose-rust#294): `corner-xl` squircle corners; plain arcs for now.
 pub fn EmberSheet(
     title: &str,
     open: bool,

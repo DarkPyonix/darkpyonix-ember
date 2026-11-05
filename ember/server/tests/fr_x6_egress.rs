@@ -12,7 +12,10 @@ use ember_node::api::{self as node_api, Node};
 use ember_node::client::NodeClient;
 use ember_node::config::NodeConfig;
 use ember_node::egress::EgressPolicy;
+use ember_server::agents::{AcpName, AgentKind};
 use ember_server::egress_proxy::{Route, SessionEgress};
+use ember_server::events::SessionStatus;
+use ember_server::store::SessionRecord;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -54,6 +57,11 @@ fn split(url: &str) -> (String, String) {
 
 /// CONNECT `target` through the proxy; returns the status line and the open stream.
 async fn connect(proxy_url: &str, target: SocketAddr) -> (String, TcpStream) {
+    connect_to(proxy_url, &target.to_string()).await
+}
+
+/// CONNECT an authority string (`host:port`, a domain or an address).
+async fn connect_to(proxy_url: &str, target: &str) -> (String, TcpStream) {
     let (cred, addr) = split(proxy_url);
     let mut s = TcpStream::connect(addr).await.unwrap();
     let auth = base64::engine::general_purpose::STANDARD.encode(cred);
@@ -177,4 +185,79 @@ async fn fr_x6_ending_a_session_refuses_its_proxy_port() {
     })
     .await
     .expect("the ended session's proxy port still accepts connections");
+}
+
+fn record(id: &str, agent: AgentKind) -> SessionRecord {
+    SessionRecord {
+        id: id.into(),
+        project: "acme".into(),
+        agent,
+        cwd: "/tmp".into(),
+        model: None,
+        native_id: None,
+        status: SessionStatus::Idle,
+        title: "t".into(),
+        created_at: 0,
+        updated_at: 0,
+        last_seq: 0,
+        account_id: None,
+        account_reason: None,
+        pinned: false,
+        archived: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_x6_proxy_env_injected_for_all_supported_agents() {
+    let eg = SessionEgress::new(route_to(Arc::new(Mutex::new(None))));
+    let hook = eg.clone().start_hook();
+    let acp = AcpName::register("fr-x6-acp").expect("a valid ACP name");
+    let agents = [AgentKind::ClaudeCode, AgentKind::Codex, AgentKind::Antigravity, AgentKind::Acp(acp)];
+    for (i, agent) in agents.into_iter().enumerate() {
+        let env = hook(&record(&format!("agent{i}"), agent));
+        let url = env.iter().find(|(k, _)| k == "HTTPS_PROXY").map(|(_, v)| v.clone());
+        let url = url.unwrap_or_else(|| panic!("{agent:?} gets no HTTPS_PROXY"));
+        assert!(url.starts_with("http://ember:"), "{url}");
+        assert!(env.iter().any(|(k, v)| k == "NO_PROXY" && v.contains("127.0.0.1")));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_x6_domain_target_resolves_on_node_not_server() {
+    // A domain is sent to the node unresolved; the node resolves `localhost` and applies its
+    // loopback deny list, so the 403 shows the node (not this server) did the lookup and dial.
+    let echo_addr = echo().await;
+    let denying = start_node(true).await;
+    let eg = SessionEgress::new(route_to(Arc::new(Mutex::new(Some(denying)))));
+    let (status, _) = connect_to(&eg.proxy_url("s1").unwrap(), &format!("localhost:{}", echo_addr.port())).await;
+    assert!(status.contains("403"), "{status}");
+    // A name that resolves nowhere is a node-side failure too, never a server-side dial.
+    let (status, _) = connect_to(&eg.proxy_url("s1").unwrap(), "ember-fr-x6.invalid:443").await;
+    assert!(status.contains("502") || status.contains("403"), "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fr_x6_ending_a_session_closes_its_open_tunnels() {
+    for node in [None, Some(start_node(false).await)] {
+        let target = echo().await;
+        let eg = SessionEgress::new(route_to(Arc::new(Mutex::new(node))));
+        let url = eg.proxy_url("s1").unwrap();
+        let (status, mut tunnel) = connect(&url, target).await;
+        assert!(status.contains("200"), "{status}");
+        echoes(&mut tunnel).await;
+
+        eg.clone().end_hook()("s1");
+        // The open tunnel is torn down: reads see EOF or a reset, not a live echo.
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut b = [0u8; 1];
+            loop {
+                match tunnel.read(&mut b).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the ended session's tunnel stayed open");
+    }
 }

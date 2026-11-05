@@ -402,7 +402,7 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
 }
 
 /// The floating bottom bar: five equal-width tabs, icon above an 11 px label, red badges.
-/// TODO(compose-rust): backdrop blur (Liquid Glass on iOS) and the safe-area inset; only the
+/// TODO(compose-rust#300): backdrop blur (Liquid Glass on iOS) and the safe-area inset; only the
 /// 10 px gap is added.
 pub fn BottomBar(active: NavMenu, counts: NavCounts, on_choose: impl FnMut(BottomTab) + Clone + 'static) {
     let p = ember_theme().palette;

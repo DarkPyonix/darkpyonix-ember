@@ -172,14 +172,10 @@ async fn fake_cli_turns_with_hook_approvals_resume_and_interrupt() {
 async fn a_hook_that_was_not_loaded_fails_the_turn() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
-    // A fake that lists no hooks.
-    let bin = cwd.path().join("agy-without-hooks.sh");
-    std::fs::write(&bin, "#!/bin/sh\necho \"$*\" >> args.log\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    // A checked-in fake that lists no hooks. The test must not write the script itself: a script
+    // written and exec'd at once fails with ETXTBSY ("Text file busy") when another test thread
+    // forks while the write fd is open, and the turn then fails with that error, not the hook one.
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agy/fake-agy-without-hooks.sh");
     let adapter = AntigravityAdapter::new(&bin, home.path(), serve_hooks().await);
     let (tx, mut rx) = mpsc::channel(16);
     let mut run =

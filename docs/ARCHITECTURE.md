@@ -76,7 +76,7 @@ accounts or computer switching.
 | ---- | ---- |
 | `ember/server/` | ember server (Rust) |
 | `ember/node/` | ember node, the execution daemon (Rust) |
-| `ember/transport/` | the transport interface and its iroh backend, with a letify-link backend to follow (FR-N5, D36); see §1.5 |
+| `ember/transport/` | the transport interface with letify-link as default and a legacy iroh backend (FR-N5, D36); see §1.5 |
 | `ember/client/` | the client core below the dioxus-compose UI |
 | `ember/proxy/` | the IDE window wrapping layer (Python) |
 | `ember/bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |
@@ -123,6 +123,14 @@ backend; tests use the in-memory `MemNetwork`.
 | Computers by peer | `ember/server/src/computers/` | `peer_json` column (migration 5); probes, exec relay and the shim bridge dial through the server's `Dialer` |
 | `Api` | `ember/client/src/api.rs` | Same API and push socket over HTTP (`new`) or the transport (`over_transport`) |
 
+On the default letify backend, the main server runs the TCP relay and UDP QAD address
+observer by default on port 7443 (FR-N2). Devices discover signed addresses and exchange relay
+pairing offers through the hub directory; they connect directly when possible and otherwise meet
+at the main server relay. The relay admits gated devices and carries end-to-end encrypted traffic.
+The main server must be reachable from each device. UDP hole punching and the real two-NAT run
+remain open (#229, #10); the current paths are TCP and relay. The legacy iroh backend retains its
+hub-provided relay during the overlap.
+
 Both daemons keep their TCP listener for local use (`ember-term`, the VS Code companion,
 loopback admin). Bearer tokens (node API) are kept as a second factor on top of the peer
 allow-list for now. Peers find each other beyond address hints through the hub (`FR-N2`,
@@ -130,8 +138,7 @@ allow-list for now. Peers find each other beyond address hints through the hub (
 `ember-hub` crate, and `ember_transport::HubDirectory` (an `AddressDirectory`) publishes and
 resolves signed address records at the hub's `/pkarr`. Tested against `ember_hub::fake::FakeHub`
 in CI; not yet run against the real hub. The hub paths are unversioned like the real hub's
-(`/config`, `/devices`; checked against the vendored `hub.openapi.yaml`). The default hub address
-(`https://darkpyonix.dev`) is to change (#62, draft PR #75).
+(`/config`, `/devices`; checked against the vendored `hub.openapi.yaml`). The default hub address is `https://api.darkpyonix.dev` (#62).
 
 ---
 

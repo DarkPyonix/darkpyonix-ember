@@ -244,6 +244,19 @@ impl ProcHandle {
     }
 }
 
+/// Attach to an existing session without starting a new process (FR-S8).
+pub async fn reattach_agent(env: &[(String, String)]) -> anyhow::Result<Option<AgentProc>> {
+    let Some(rt) = active_runtime() else { return Ok(None) };
+    let Some(session) = env.iter().find(|(k, _)| k == SESSION_ENV).map(|(_, v)| v.clone()) else { return Ok(None) };
+    if !safe_id(&session) { return Ok(None) }
+    let stored = rt.store.shim_offset(&session)?;
+    let Ok(client) = session_shim::attach(&rt.dir, &session, stored).await else {
+        return Ok(None);
+    };
+    let pid = agent_pid(&rt.dir, &session).await;
+    Ok(Some(bridge(rt, session, client, pid, true, stored)))
+}
+
 /// Start (or reattach) an agent process.
 pub async fn spawn_agent(mut cmd: AgentCommand) -> anyhow::Result<AgentProc> {
     let session = cmd.env.iter().find(|(k, _)| k == SESSION_ENV).map(|(_, v)| v.clone());

@@ -9,9 +9,8 @@
 //! - #372: container `on_click` is in compose-rust after v0.0.4 (FR-55); Ember pins that revision
 //!   in `Cargo.toml` until the next tag;
 //! - #373: `Button` has no `max_lines`, so the width estimate `label_min_width` stays (#208);
-//! - #374: `Text` and `TextField` have no `font` or `word_break`, so no bundled font and no
-//!   Korean word-keep yet (#216, #208);
-//! - #375: no `Modifier.shadow`, so one `elevation` stands in for the layered shadow (#214).
+//! - #374: `Text` and `TextField` have no `font`, so no bundled font yet (#216);
+//! - #444: `TextField` has no `word_break`, so no Korean word-keep yet (#208);
 
 #![allow(non_snake_case)]
 
@@ -162,10 +161,11 @@ pub fn OptionSheet(
     on_dismiss: impl FnMut() + Clone + 'static,
     on_choose: impl FnMut(usize) + Clone + 'static,
 ) {
-    let p = ember_theme().palette;
+    let theme = ember_theme();
+    let p = theme.palette;
     cu::Dialog(open)
         .modifier(
-            Modifier::new()
+            with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(width + 2.0 * SP[0])
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
@@ -645,8 +645,6 @@ pub fn card_colors(selected: bool, p: &Palette) -> (Color, Color) {
 /// A card: `surface`, 1 px `line`, the `corner-lg` radius, the card shadow.
 /// TODO(compose-rust#378): corner radii render at about 0.55x the dp value on macOS, so the
 /// card, inset and field corners look tighter than the mockup until that is fixed.
-/// TODO(compose-rust#375): one elevation stands in for the layered shadow (#214); plain arc
-/// corners instead of the squircle.
 pub fn EmberCard(
     selected: bool,
     fill_max_width: bool,
@@ -658,12 +656,10 @@ pub fn EmberCard(
     let theme = ember_theme();
     let (fill, line) = card_colors(selected, theme.palette);
     let border = border.unwrap_or(line);
-    let m = with_weight(Modifier::new(), weight)
+    let m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
         .fill_max_width_if(fill_max_width)
         .background(paint(fill))
         .border(1.0, paint(border))
-        // TODO(compose-rust#375): no `elevation`: under Material 3 it tints the fill and paints a
-        // lighter band along the top edge; the card shadow comes with `Modifier.shadow`.
         .corner_radius(CORNER_LG);
     // A Box rather than `Card`, whose design-system shape ignores `corner_radius`.
     // TODO(compose-rust): the mockup's 16/20 padding is asymmetric; `Modifier.padding` is
@@ -806,10 +802,9 @@ pub fn EmberSheetSized(
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    // TODO(compose-rust#375): no `elevation` here. Under Material 3 it paints a tinted shadow
-    // ring inside the dialog's own frame, which showed as a band at the top and sides.
     // TODO(compose-rust#384): expose modal scrim color; the mockup uses rgba(0, 0, 0, 0.3).
-    let modifier = Modifier::new().background(paint(theme.palette.surface));
+    // The layered card shadow (#214) replaces the Material tint ring that `elevation` painted.
+    let modifier = with_shadows(Modifier::new(), theme.shadow_sm()).background(paint(theme.palette.surface));
     let dismiss = on_dismiss.clone();
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {

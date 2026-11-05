@@ -287,7 +287,7 @@ pub fn AgentsScreenWith(
                                 }
                             });
                     } else {
-                        // Desktop: 200px Nav on the left + 917px Body on the right (ends at 1408)
+                        // Desktop: navigation on the left and the remaining width for the body
                         cu::Row()
                             .spacing(25.0)
                             .modifier(Modifier::new().fill_max_width())
@@ -297,7 +297,7 @@ pub fn AgentsScreenWith(
                                 });
                                 cu::Column()
                                     .spacing(20.0)
-                                    .modifier(Modifier::new().width(917.0))
+                                    .modifier(Modifier::new().weight(1.0))
                                     .content(|| {
                                         match cur_sec {
                                             Section::Harness => HarnessSection(&store, &live, compact),
@@ -2316,10 +2316,33 @@ pub fn sample_bars() -> Vec<crate::ui::home::HarnessBar> {
     ]
 }
 
+// Models the harness card's share of the shell and section layout with expanded navigation.
+#[cfg(test)]
+fn agent_card_width(window_width: f32) -> f32 {
+    use crate::ui::shell::{nav_mode, ShellMode};
+    let nav = match nav_mode(window_width, false) {
+        ShellMode::BottomTabs => 0.0,
+        ShellMode::Rail => RAIL_W,
+        ShellMode::Sidebar => SIDE_W,
+    };
+    if window_width <= 900.0 {
+        (window_width - nav - 2.0 * SP[3]).max(0.0)
+    } else {
+        ((window_width - nav - 2.0 * SP[6] - 200.0 - 25.0 - SP[3]) / 2.0).max(0.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_l20a_agent_card_width_fills_available_content() {
+        assert_eq!(agent_card_width(390.0), 358.0);
+        assert_eq!(agent_card_width(768.0), 664.0);
+        assert_eq!(agent_card_width(1440.0), 450.5);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

@@ -1042,7 +1042,7 @@ mod tests {
     fn fr_l10_1_monitor_descriptions_wrap_and_diff_lines_ellipsize() {
         let monitor = include_str!("monitor.rs");
         assert_eq!(monitor.matches("Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(3))").count(), 2);
-        assert!(monitor.contains("Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3))"));
+        assert!(monitor.contains(r#"Label("할당된 프로젝트가 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(3))"#));
         let vcs = include_str!("vcs.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!vcs.contains("TextOverflow::Clip"));
         assert!(vcs.contains(".word_break(compose_rust::WordBreak::KeepAll)"));

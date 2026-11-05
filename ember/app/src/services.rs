@@ -284,7 +284,7 @@ pub fn test_services() -> &'static Services {
             client.apply(input);
         }
         let initial_prefs = crate::prefs::Prefs::default();
-        let server = crate::server::ServerApi::new(&config.server_url);
+        let server = crate::server::ServerApi::new(&config.server_url).expect("server api");
         install(Services {
             config,
             rt,

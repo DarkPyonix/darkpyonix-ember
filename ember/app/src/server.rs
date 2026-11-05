@@ -23,6 +23,9 @@ pub enum ServerError {
     /// The server answered 401: the token is missing or wrong (FR-S11). Not retried.
     #[error("authentication failed: the server refused the token ({0})")]
     Unauthorized(String),
+    /// The HTTP client could not be built (for example the TLS backend failed to initialise).
+    #[error("cannot build the HTTP client: {0}")]
+    Client(String),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -299,7 +302,8 @@ pub struct ServerApi {
 
 impl ServerApi {
     /// Reads the server token once from the environment (FR-S11, `ember_client::token`).
-    pub fn new(base_url: &str) -> ServerApi {
+    /// Fails when the HTTP client cannot be built.
+    pub fn new(base_url: &str) -> ServerResult<ServerApi> {
         // A server that is not local gets no token and none is read (FR-S11).
         let token = ember_client::token::token_allowed_for(base_url)
             .then(ember_client::token::server_token_from_env)
@@ -308,9 +312,9 @@ impl ServerApi {
     }
 
     /// Like [`ServerApi::new`] with the token given; `None` sends no `Authorization` header, and
-    /// so does a base URL that is not loopback or listed in `EMBER_TOKEN_HOSTS`. Panics if the
-    /// HTTP client cannot be built, rather than continuing without the header.
-    pub fn with_token(base_url: &str, token: Option<String>) -> ServerApi {
+    /// so does a base URL that is not loopback or listed in `EMBER_TOKEN_HOSTS`. Returns an error
+    /// when the HTTP client cannot be built, rather than continuing without the header.
+    pub fn with_token(base_url: &str, token: Option<String>) -> ServerResult<ServerApi> {
         let auth = token
             .filter(|_| ember_client::token::token_allowed_for(base_url))
             .as_deref()
@@ -319,8 +323,17 @@ impl ServerApi {
         if let Some(headers) = auth {
             builder = builder.default_headers(headers);
         }
-        let http = builder.build().expect("cannot build the HTTP client for the server API (TLS backend failed to initialise)");
-        ServerApi { http, base: base_url.trim_end_matches('/').to_string() }
+        Self::from_built(builder.build(), base_url)
+    }
+
+    /// Wraps the result of building the HTTP client; a build failure becomes
+    /// [`ServerError::Client`].
+    fn from_built<E: std::fmt::Display>(
+        built: Result<reqwest::Client, E>,
+        base_url: &str,
+    ) -> ServerResult<ServerApi> {
+        let http = built.map_err(|e| ServerError::Client(e.to_string()))?;
+        Ok(ServerApi { http, base: base_url.trim_end_matches('/').to_string() })
     }
 
     fn url(&self, path: &str) -> String {
@@ -420,8 +433,15 @@ mod tests {
 
     #[test]
     fn fr_s11_server_api_debug_output_never_holds_the_token() {
-        let api = ServerApi::with_token("http://127.0.0.1:1", Some("secret".into()));
+        let api = ServerApi::with_token("http://127.0.0.1:1", Some("secret".into())).unwrap();
         assert!(!format!("{api:?}").contains("secret"));
+    }
+
+    #[test]
+    fn fr_s11_server_api_client_build_failure_is_an_error() {
+        let e = ServerApi::from_built(Err("tls backend failed"), "http://127.0.0.1:1").unwrap_err();
+        assert!(matches!(&e, ServerError::Client(m) if m == "tls backend failed"));
+        assert!(ServerApi::with_token("http://127.0.0.1:1", None).is_ok());
     }
 
     #[test]

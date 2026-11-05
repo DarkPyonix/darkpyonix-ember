@@ -152,6 +152,17 @@ pub fn agent_cdp_ws_url(base: &str, project: &str) -> String {
     format!("{}/{}", cdp_ws_url(base, project), crate::auth::agent_cdp_nonce())
 }
 
+/// The DevTools discovery document (`/json/version`) for `project`. Its `webSocketDebuggerUrl` is
+/// the nonce URL ([`agent_cdp_ws_url`]), never the bare relay URL, because the bare one needs the
+/// server token and a tool that discovers the relay sends none (FR-S9).
+pub fn cdp_version_doc(base: &str, project: &str) -> Value {
+    json!({
+        "Browser": "ember-remote-browser",
+        "Protocol-Version": "1.3",
+        "webSocketDebuggerUrl": agent_cdp_ws_url(base, project),
+    })
+}
+
 /// Ready-to-use configuration for each agent CLI.
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentBrowserConfig {

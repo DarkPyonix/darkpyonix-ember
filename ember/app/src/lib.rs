@@ -21,6 +21,7 @@ pub mod model;
 pub mod prefs;
 pub mod server;
 pub mod services;
+pub mod terminal_stream;
 pub mod ui;
 
 use std::sync::{Arc, Mutex, OnceLock};

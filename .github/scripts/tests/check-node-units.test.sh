@@ -20,15 +20,15 @@ ok "real tree passes"
 
 # 2. missing files fail
 rm -rf "$work/r"; mkdir -p "$work/r/ember/node"
-run && fail "missing dist/ should fail"
+run && fail "missing service/ should fail"
 ok "missing files fail"
 
 # 3. each key removed in turn fails
 for pair in "ember-node.service:KillMode=process" "ember.node.plist:AbandonProcessGroup"; do
     f="${pair%%:*}"; key="${pair##*:}"
-    mkdir -p "$work/r/ember/node/dist"
-    cp "$root/ember/node/dist/ember-node.service" "$root/ember/node/dist/ember.node.plist" "$work/r/ember/node/dist/"
-    grep -v "$key" "$root/ember/node/dist/$f" > "$work/r/ember/node/dist/$f"
+    mkdir -p "$work/r/ember/node/service"
+    cp "$root/ember/node/service/ember-node.service" "$root/ember/node/service/ember.node.plist" "$work/r/ember/node/service/"
+    grep -v "$key" "$root/ember/node/service/$f" > "$work/r/ember/node/service/$f"
     run && fail "$f without $key should fail"
     ok "$f without $key fails"
 done

@@ -68,7 +68,7 @@ someone kills it. Attaching and detaching never start or stop it.
     including keepers and shells). launchd: `AbandonProcessGroup=true` in the plist, so stopping
     the job does not kill what remains of its process group (keepers and shells are in their
     own sessions already; this guards against launchd versions that track descendants). Both
-    units are in `ember/node/dist/` (`ember-node.service`, `ember.node.plist`), and
+    units are in `ember/node/service/` (`ember-node.service`, `ember.node.plist`), and
     `.github/scripts/checks/check-node-units.sh` fails CI when a file or one of these keys is
     missing. Whether a real systemd or launchd keeps the keepers alive is not yet verified.
   - Disable with `EMBER_NODE_KEEP_PTY=0` (sessions then end with the daemon). Without a state dir

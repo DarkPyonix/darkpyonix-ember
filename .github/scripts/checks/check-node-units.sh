@@ -8,8 +8,8 @@ need() { # file pattern message
     [ -f "$1" ] || { echo "error: $1 missing" >&2; fail=1; return; }
     grep -Eq -e "$2" "$1" || { echo "error: $1: $3" >&2; fail=1; }
 }
-svc=ember/node/dist/ember-node.service
-plist=ember/node/dist/ember.node.plist
+svc=ember/node/service/ember-node.service
+plist=ember/node/service/ember.node.plist
 need "$svc" '^KillMode=process[[:space:]]*$' 'KillMode=process missing (control-group kills the keepers)'
 need "$svc" '^ExecStart=.*ember-node' 'ExecStart for ember-node missing'
 need "$svc" '^EnvironmentFile=' 'EnvironmentFile (EMBER_NODE_TOKEN) missing'

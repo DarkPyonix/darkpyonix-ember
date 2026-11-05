@@ -10,8 +10,9 @@
 //! - `GET /api/health`, so a launcher can tell whether a server is up *[provisional]*;
 //! - the agent routes, which carry the session's runtime token in the same header and check it
 //!   themselves: `/api/a2a/*` except `/api/a2a/settings`, and the Antigravity hook;
-//! - `GET /api/browsers/<project>/cdp/<nonce>` with the per-run nonce from [`agent_cdp_nonce`], the
-//!   agent browser relay (agent MCP servers send no header);
+//! - `GET /api/browsers/<project>/cdp/<nonce>` and `.../cdp/<nonce>/json/version` with the per-run
+//!   nonce from [`agent_cdp_nonce`], the agent browser relay and its discovery document (agent MCP
+//!   servers send no header);
 //! - `GET /auth/callback`, the browser redirect of Sign in with ChatGPT, which cannot carry a
 //!   header (the `state` value in it is checked by the handler).
 //!
@@ -107,12 +108,18 @@ pub fn agent_cdp_nonce() -> &'static str {
     NONCE.get_or_init(new_token)
 }
 
-/// True for `GET /api/browsers/<project>/cdp/<nonce>` with the right nonce (constant time).
+/// True for `GET /api/browsers/<project>/cdp/<nonce>` and for the discovery document under it,
+/// `GET /api/browsers/<project>/cdp/<nonce>/json/version`, with the right nonce (constant time).
+/// A tool that discovers the relay through `json/version` (an HTTP endpoint instead of a ws URL)
+/// sends no header either, and the document it gets must lead to a URL that opens.
 pub fn agent_cdp_path_ok(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/api/browsers/") else { return false };
     let mut it = rest.split('/');
-    match (it.next(), it.next(), it.next(), it.next()) {
-        (Some(p), Some("cdp"), Some(n), None) if !p.is_empty() => token_eq(n, agent_cdp_nonce()),
+    match (it.next(), it.next(), it.next(), it.next(), it.next(), it.next()) {
+        (Some(p), Some("cdp"), Some(n), None, ..) if !p.is_empty() => token_eq(n, agent_cdp_nonce()),
+        (Some(p), Some("cdp"), Some(n), Some("json"), Some("version"), None) if !p.is_empty() => {
+            token_eq(n, agent_cdp_nonce())
+        }
         _ => false,
     }
 }

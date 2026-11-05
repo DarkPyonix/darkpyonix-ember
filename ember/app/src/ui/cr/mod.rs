@@ -24,3 +24,4 @@ pub mod session;
 pub mod routines;
 pub mod agents;
 pub mod vcs;
+pub mod settings;

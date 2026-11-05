@@ -1,4 +1,4 @@
-//! Press feedback (FR-L32): the pure logic behind `Clickable`. The state machine, the minimum
+//! Press feedback (FR-L32): the pure logic for press feedback, not wired into `Clickable` yet (the renderer drops `on_pointer`, compose-rust#417). The state machine, the minimum
 //! visible time, the scale and the tint alpha are plain functions so they are unit-tested
 //! without a toolkit. All numbers come from the `PRESS_*` constants in `theme.rs`.
 //!

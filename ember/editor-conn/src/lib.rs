@@ -58,13 +58,21 @@ pub const PINNED_VERSION: &str = "1.139.1";
 pub const PINNED_COMMIT: &str = "04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1";
 
 /// Refuse any server commit other than [`PINNED_COMMIT`]. A server without a commit (a dev build
-/// answers `GET /version` with an empty body) is refused too: its proxy numbering is unknown.
+/// answers `GET /version` with an empty body) or a server returning non-version text (such as an
+/// HTML page from a reverse proxy) is refused with `server: None`: its commit and proxy numbering
+/// are unknown.
 pub fn check_server_commit(server_commit: &str) -> Result<()> {
     let server_commit = server_commit.trim();
     if server_commit == PINNED_COMMIT {
         Ok(())
     } else {
-        Err(Error::UnsupportedServerVersion { server: Some(server_commit.to_owned()) })
+        let server = (!server_commit.is_empty()
+            && server_commit.len() <= 64
+            && server_commit
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+        .then(|| server_commit.to_owned());
+        Err(Error::UnsupportedServerVersion { server })
     }
 }
 
@@ -172,6 +180,10 @@ mod tests {
         assert!(check_server_commit(&format!("{PINNED_COMMIT}\n")).is_ok());
         let err = check_server_commit("0036dcb6c18a603d2168c00fa578be600987ac7b").unwrap_err();
         assert!(matches!(err, Error::UnsupportedServerVersion { server: Some(ref c) } if c.starts_with("0036dcb6")));
-        assert!(matches!(check_server_commit(""), Err(Error::UnsupportedServerVersion { .. })));
+        assert!(matches!(check_server_commit(""), Err(Error::UnsupportedServerVersion { server: None })));
+        assert!(matches!(
+            check_server_commit("<!DOCTYPE html><html><body>not a version</body></html>"),
+            Err(Error::UnsupportedServerVersion { server: None })
+        ));
     }
 }

@@ -245,9 +245,9 @@ async fn fr_t14_a_guest_credential_is_401_on_the_owner_door() {
         let (status, _) = call(&owner, m, &u, Some(&cred), Some(json!({"text": "hi"}))).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{m} {u}");
     }
-    // The guest family is exempt from the server-token check, but the owner app has no such route.
+    // The guest family is not exempt on the owner door: a guest credential there is 401 too.
     let (status, _) = call(&owner, "GET", &format!("/api/guest/channels/{ch}/messages"), Some(&cred), None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "the owner app does not carry the guest routes");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the owner door does not exempt /api/guest");
 }
 
 #[tokio::test]
@@ -288,7 +288,8 @@ async fn fr_t15_a_guest_post_is_attributed_to_the_guest_whatever_the_body_says()
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{m}");
-    assert_eq!(m["author"], format!("guest:{gid}"));
+    assert_eq!(m["author"], "guest");
+    assert_eq!(m["you"], true);
     assert_eq!(m["name"], "Mina");
     assert_eq!(m["kind"], "guest");
     // The log (owner's view) holds the same author.
@@ -298,7 +299,9 @@ async fn fr_t15_a_guest_post_is_attributed_to_the_guest_whatever_the_body_says()
     // The guest reads it back.
     let (_, list) = call(&fx.guest, "GET", &uri, Some(&cred), None).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
-    assert_eq!(list[0]["author"], format!("guest:{gid}"));
+    assert_eq!(list[0]["author"], "guest");
+    assert_eq!(list[0]["you"], true);
+    assert!(!list.to_string().contains(&gid), "a guest id leaked");
     assert_eq!(list[0]["text"], "hello");
     let (_, after) = call(&fx.guest, "GET", &format!("{uri}?after={}", log[0].seq), Some(&cred), None).await;
     assert_eq!(after.as_array().unwrap().len(), 0);
@@ -348,6 +351,20 @@ async fn fr_t14_a_guest_cannot_reach_the_feed_or_answer_an_approval() {
         let (status, _) = call(&fx.guest, m, &uri, Some(&cred), Some(json!({"text": "x"}))).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{m}");
     }
+    // Owner-door rows: the routes exist there, so the absence above is not vacuous. A guest
+    // credential is 401, and the server token reaches the owner handler.
+    let owner = owner_app(&fx);
+    let feed = format!("/api/channels/{ch}/feed");
+    let answer = format!("/api/channels/{ch}/feed/a1/answer");
+    assert_eq!(call(&owner, "GET", &feed, Some(&cred), None).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        call(&owner, "POST", &answer, Some(&cred), Some(json!({"decision": "allow_once"}))).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(call(&owner, "GET", &feed, Some(SERVER_TOKEN), None).await.0, StatusCode::OK);
+    let (status, _) = call(&owner, "POST", &answer, Some(SERVER_TOKEN), Some(json!({"decision": "allow_once"}))).await;
+    assert_ne!(status, StatusCode::UNAUTHORIZED, "the server token passes the auth layer");
+    assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "the owner route exists");
 }
 
 #[tokio::test]

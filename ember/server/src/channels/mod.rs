@@ -89,6 +89,10 @@ pub enum ChannelError {
     /// A mention names no member agent (FR-T13); carries the names.
     #[error("not a member of this channel: {}", .0.join(", "))]
     NotAMember(Vec<String>),
+    /// A refusal with its own machine code: `invalid_name` (400), `rate_limited` and
+    /// `quota_exceeded` (429).
+    #[error("{1}")]
+    Coded(&'static str, String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

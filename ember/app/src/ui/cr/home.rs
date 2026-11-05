@@ -34,6 +34,7 @@ use crate::prefs::LastUsed;
 use crate::server::CreateSession;
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{shared_ui, SharedUi};
+use crate::ui::usage;
 use crate::ui::shell::{NavMenu, ShellMode, DEMO_USER};
 
 pub type Part<'a> = Box<dyn FnOnce() + 'a>;
@@ -354,7 +355,7 @@ impl Skip {
         let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
             Some("bottom") => (total_est - window_h).max(0.0),
             // Named starts: the first block in view. `status` shows the 팀원 상태 card with its
-            // legend at the top, `usage` the 하네스별 사용량 and 지금 일하는 팀원 row.
+            // legend at the top, `usage` the 하네스별 세션 and 지금 일하는 팀원 row.
             Some("status") => EST_HERO + EST_HEAD,
             Some("usage") => EST_HERO + EST_HEAD + EST_TREND,
             Some("efficiency") => EST_HERO + EST_HEAD + EST_TREND + EST_USAGE,
@@ -987,19 +988,18 @@ fn UnavailableH(icon: &'static str, title: &str, height: Option<f32>) {
     });
 }
 
-/// Token bars per day for the ChatGPT plan accounts, 7 or 14 days (FR-U7). Cost and the other
-/// harnesses are not reported yet and say so.
-/// The hatched bars (Ember #190) are a `Canvas` at the card's width; the cost line needs a path
-/// and the cost is not reported yet.
+/// Token bars per day for every harness, 7 or 14 UTC days (FR-U7, #332), from
+/// `GET /api/usage/summary`. The cost is not priced (no table in the SPEC) and the tile says so.
+/// The hatched bars (Ember #190) are a `Canvas` at the card's width.
 fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     let p = ember_theme().palette;
     let days = remember(|| mutable_state_of(7usize));
-    let rows = ui.live.usage.get();
-    let ids: Vec<String> = ui.live.chatgpt.get().iter().map(|a| a.id.clone()).collect();
-    if ids.is_empty() {
-        return Unavailable(shell::ICON_GAUGE_SVG, "비용과 토큰 추이");
-    }
-    let series = crate::ui::home::chatgpt_token_days(&rows, &ids, &crate::ui::home::today_utc(), days.get());
+    let _requested = remember(|| {
+        crate::bridge::request_usage_summary();
+        0u8
+    });
+    let load = ui.live.usage_summary.get();
+    let series = usage::trend_days(&load, days.get());
     let values: Vec<u64> = series.iter().map(|(_, t)| *t).collect();
     const H: f32 = 160.0;
     let usize_values: Vec<usize> = values.iter().map(|v| *v as usize).collect();
@@ -1016,7 +1016,6 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         }
     }
     let commands = list.build();
-    let total: u64 = values.iter().sum();
     let first = series.first().map(|(d, _)| d.clone()).unwrap_or_default();
     let last = series.last().map(|(d, _)| d.clone()).unwrap_or_default();
     Tile(|| {
@@ -1033,8 +1032,8 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             Label(&last, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
-        Label(&format!("ChatGPT 토큰 합계 {}", crate::ui::agents::format_tokens(total)), Fs::Sm, Weight::Regular, None, None);
-        Label(&format!("비용과 다른 하네스의 토큰은 {UNAVAILABLE}"), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
+        Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, None, None);
+        Label(usage::COST_UNKNOWN, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
     });
 }
 
@@ -1138,7 +1137,7 @@ pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
     days
 }
 
-/// 하네스별 사용량 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
+/// 하네스별 세션 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
 /// bars per harness, one ring per harness with its share, and a "자세히" button to 에이전트.
 /// The width of one weekday bar.
 const BAR_W: f32 = 28.0;
@@ -1152,7 +1151,7 @@ fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
     const H: f32 = 100.0;
     let heights = bar_heights(&totals, H);
     Tile(|| {
-        CardHead(ICON_CHART, "하네스별 사용량", || {
+        CardHead(ICON_CHART, "하네스별 세션", || {
             let u = ui.clone();
             AppButton("자세히", None, ButtonKind::Default, true, true, false, move || shell::choose(&u, NavMenu::Agents));
         });

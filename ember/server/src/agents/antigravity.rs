@@ -131,6 +131,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use super::proc::{reattach_agent, spawn_agent, AgentCommand, AgentProc};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, McpServer, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 
@@ -309,6 +310,10 @@ impl AgentAdapter for AntigravityAdapter {
         AgentKind::Antigravity
     }
 
+    fn rejoins_shim(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -353,7 +358,8 @@ impl AgentAdapter for AntigravityAdapter {
         let approvals = Arc::new(RunApprovals::new(events.clone(), APPROVAL_TIMEOUT, &root, Policy::ReadOnly));
         // A fresh token per run (session (re)creation); revoked in `shutdown` / `Drop`.
         self.hooks.register(&token, approvals.clone());
-        Ok(Box::new(AgyRun {
+        let reattached = reattach_agent(&req.env).await?;
+        let mut run = AgyRun {
             bin: self.bin.clone(),
             home: self.home.clone(),
             root,
@@ -367,7 +373,12 @@ impl AgentAdapter for AntigravityAdapter {
             state: Arc::new(StdMutex::new(TurnState::default())),
             turn_task: None,
             policy: None,
-        }))
+        };
+        if let Some(proc) = reattached {
+            run.approvals.open();
+            run.start_reader(proc);
+        }
+        Ok(Box::new(run))
     }
 }
 
@@ -904,6 +915,23 @@ struct AgyRun {
 }
 
 impl AgyRun {
+    fn start_reader(&mut self, proc: AgentProc) {
+        let seq = {
+            let mut st = self.state.lock().unwrap();
+            st.active = true;
+            st.seq += 1;
+            st.interrupted = false;
+            st.pid = proc.pid;
+            st.seq
+        };
+        let turn = Turn {
+            events: self.events.clone(), state: self.state.clone(),
+            approvals: self.approvals.clone(), home: self.home.clone(),
+            root: self.new_root.then(|| self.root.clone()), seq,
+        };
+        self.turn_task = Some(tokio::spawn(turn.run(proc)));
+    }
+
     /// End a turn that could not start: `Error` then `TurnEnded { Failed }`.
     async fn fail(&self, message: String) -> anyhow::Result<()> {
         self.events.send(AgentEvent::Error { message }).await?;
@@ -1018,41 +1046,17 @@ impl AgentRun for AgyRun {
             self.sandbox,
         );
         self.approvals.open();
-        let spawned = Command::new(&self.bin)
-            .envs(self.req.env.iter().map(|(k, v)| (k, v)))
-            .args(&args)
-            .current_dir(&self.req.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
-        let mut child = match spawned {
-            Ok(c) => c,
+        let proc = match spawn_agent(AgentCommand {
+            program: self.bin.clone(), args, env: self.req.env.clone(),
+            cwd: self.req.cwd.clone(), reattachable: true,
+        }).await {
+            Ok(proc) => proc,
             Err(e) => {
                 self.approvals.close();
                 return self.fail(format!("failed to start {}: {e}", self.bin.display())).await;
             }
         };
-        let seq = {
-            let mut st = self.state.lock().unwrap();
-            st.active = true;
-            st.seq += 1;
-            st.interrupted = false;
-            st.pid = child.id();
-            st.seq
-        };
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
-        let turn = Turn {
-            events: self.events.clone(),
-            state: self.state.clone(),
-            approvals: self.approvals.clone(),
-            home: self.home.clone(),
-            root: self.new_root.then(|| self.root.clone()),
-            seq,
-        };
-        self.turn_task = Some(tokio::spawn(turn.run(child, stdout, stderr)));
+        self.start_reader(proc);
         Ok(())
     }
 
@@ -1123,19 +1127,16 @@ struct Turn {
 }
 
 impl Turn {
-    async fn run(
-        mut self,
-        mut child: tokio::process::Child,
-        stdout: tokio::process::ChildStdout,
-        stderr: tokio::process::ChildStderr,
-    ) {
-        let pid = child.id();
+    async fn run(mut self, proc: AgentProc) {
+        let AgentProc { stdin: _stdin, stdout, stderr, pid, handle, .. } = proc;
         let stderr_task = tokio::spawn(async move {
             let mut errors = StderrErrors::default();
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::warn!(target: "ember::agy", pid, "stderr: {line}");
-                errors.push(&line);
+            if let Some(stderr) = stderr {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(target: "ember::agy", pid, "stderr: {line}");
+                    errors.push(&line);
+                }
             }
             errors
         });
@@ -1177,10 +1178,10 @@ impl Turn {
             }
         }
         let errors = stderr_task.await.unwrap_or_default();
-        let status = child.wait().await;
+        let status = handle.shutdown(Duration::from_secs(1)).await;
         if end.is_none() {
             let reason = errors.message().unwrap_or_else(|| match &status {
-                Ok(s) => format!("agy exited ({s}) without a result"),
+                Ok(()) => "agy exited without a result".to_string(),
                 Err(e) => format!("agy failed: {e}"),
             });
             if let Some(limit) = errors.rate_limit() {

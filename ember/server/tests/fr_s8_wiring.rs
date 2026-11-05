@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ember_server::agents::antigravity::{AntigravityAdapter, HookBroker};
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::codex::CodexAdapter;
 use ember_server::agents::proc::{
@@ -565,5 +566,40 @@ async fn fr_s8_update_server_with_three_sessions_running_none_stops_or_loses_tur
     for id in &ids {
         sessions.release(id).await.unwrap();
     }
+    clear_runtime();
+}
+
+/// A per-turn Antigravity process survives a server restart and its remaining output is stored.
+#[tokio::test]
+async fn fr_s8_antigravity_turn_survives_server_restart() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let bin = crate_dir().join("tests/fixtures/agy/fake-agy-ticks.sh");
+    let id = store.create_session("p", AgentKind::Antigravity, work.path().to_str().unwrap(), None, "t").unwrap().id;
+    {
+        let (store, bin, id, home) = (store.clone(), bin.clone(), id.clone(), home.path().to_path_buf());
+        run_server1(async move {
+            let hooks = HookBroker::new();
+            hooks.set_base_url("http://127.0.0.1:1");
+            let sessions = Sessions::new(store.clone(), vec![Arc::new(AntigravityAdapter::new(bin, home, hooks)) as Arc<dyn AgentAdapter>]);
+            sessions.send(&id, "go").await.unwrap();
+            wait_for("Antigravity output", || events_of(&store, &id).iter().filter(|e| matches!(e, AgentEvent::AssistantDelta { .. })).count() >= 3).await;
+        });
+    }
+    let meta = scan(shims.path()).into_iter().find(|m| m.session == id).expect("shim survives");
+    assert!(pid_alive(meta.shim_pid) && pid_alive(meta.agent_pid));
+    let hooks = HookBroker::new();
+    hooks.set_base_url("http://127.0.0.1:1");
+    let sessions = Sessions::new(store.clone(), vec![Arc::new(AntigravityAdapter::new(bin, home.path(), hooks)) as Arc<dyn AgentAdapter>]);
+    assert_eq!(sessions.rejoin_shims(&runtime(shims.path(), &store)).await, vec![id.clone()]);
+    wait_for("Antigravity turn end", || ended(&store, &id)).await;
+    let text: String = events_of(&store, &id).iter().filter_map(|e| match e { AgentEvent::AssistantDelta { text } => Some(text.clone()), _ => None }).collect();
+    assert!(text.contains("tick 25 "), "{text}");
+    assert!(events_of(&store, &id).contains(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
+    sessions.release(&id).await.unwrap();
     clear_runtime();
 }

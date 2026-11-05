@@ -3415,6 +3415,14 @@ fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     }
 }
 
+/// Whether the stat tiles, the timeline card and the kanban card are drawn above the status cards.
+/// `EMBER_CR_SCROLL=cards` hides them for review captures: the toolkit cannot scroll a column from
+/// code (TODO(compose-rust#385)), so the blocks that would have scrolled out are left out and the
+/// cards (PR과 CI, 서브 에이전트 스레드, 부하) start at the top at 390 dp.
+fn status_blocks_above_cards(scroll: Option<&str>) -> bool {
+    scroll != Some("cards")
+}
+
 /// The kanban of member status, with the cards fed by the view-model (#324).
 pub fn StatusView(
     project: &str,
@@ -3505,91 +3513,94 @@ pub fn StatusView(
                         .padding(if window.width_dp <= 560.0 { SP[2] } else { SP[4] }),
                 )
                 .content(move || {
-                    // 1. 6 KPI cards grid (.skpis)
-                    let kpi_rows: Vec<Vec<(String, String, String, Option<Color>)>> = kpis
-                        .chunks(kpi_per_row)
-                        .map(|c| c.to_vec())
-                        .collect();
-                    for row in kpi_rows {
-                        cu::Row()
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
-                                for (t, v, s, tone) in row {
-                                    KpiCard(&t, &v, &s, tone);
-                                }
-                            });
-                    }
+                    // Review captures: `EMBER_CR_SCROLL=cards` leaves out the blocks above the cards.
+                    if status_blocks_above_cards(std::env::var("EMBER_CR_SCROLL").ok().as_deref()) {
+                        // 1. 6 KPI cards grid (.skpis)
+                        let kpi_rows: Vec<Vec<(String, String, String, Option<Color>)>> = kpis
+                            .chunks(kpi_per_row)
+                            .map(|c| c.to_vec())
+                            .collect();
+                        for row in kpi_rows {
+                            cu::Row()
+                                .space_role(SpaceRole::Sm)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
+                                    for (t, v, s, tone) in row {
+                                        KpiCard(&t, &v, &s, tone);
+                                    }
+                                });
+                        }
 
-                    // 2. Agent-to-agent communication timeline card (.tlcard)
-                    TimelineCard(&proj_owned);
+                        // 2. Agent-to-agent communication timeline card (.tlcard)
+                        TimelineCard(&proj_owned);
 
-                    // 3. Outer Kanban card (.skan) with 5 columns
-                    let cols_c = columns.clone();
-                    let proj_k = proj_owned.clone();
-                    let open_k = on_open.clone();
-                    EmberCard(false, true, None, None, None, move || {
-                        cu::Column()
-                            .space_role(SpaceRole::Sm)
-                            .modifier(Modifier::new().fill_max_width())
-                            .content(move || {
-                                cu::Row()
-                                    .alignment(Alignment::CenterStart)
-                                    .space_role(SpaceRole::Sm)
-                                    .modifier(Modifier::new().fill_max_width())
-                                    .content(|| {
-                                        NavIcon(ICON_GRID_SVG, p.text_2.to_argb(), 16.0);
-                                        Label("칸반", Fs::Md, Weight::Semibold, None, Some(1));
-                                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                                        Label(
-                                            &format!("팀원 {total_cnt}"),
-                                            Fs::Xs,
-                                            Weight::Regular,
-                                            Some(paint(p.muted)),
-                                            Some(1),
-                                        );
-                                    });
-
-                                if wide_kanban {
+                        // 3. Outer Kanban card (.skan) with 5 columns
+                        let cols_c = columns.clone();
+                        let proj_k = proj_owned.clone();
+                        let open_k = on_open.clone();
+                        EmberCard(false, true, None, None, None, move || {
+                            cu::Column()
+                                .space_role(SpaceRole::Sm)
+                                .modifier(Modifier::new().fill_max_width())
+                                .content(move || {
                                     cu::Row()
-                                        .alignment(Alignment::TopStart)
+                                        .alignment(Alignment::CenterStart)
                                         .space_role(SpaceRole::Sm)
                                         .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
-                                            for (col, ms) in cols_c.iter() {
-                                                KanbanColView(
-                                                    col.label(),
-                                                    ms.clone(),
-                                                    proj_k.clone(),
-                                                    None,
-                                                    Some(1.0),
-                                                    open_k.clone(),
-                                                );
-                                            }
+                                        .content(|| {
+                                            NavIcon(ICON_GRID_SVG, p.text_2.to_argb(), 16.0);
+                                            Label("칸반", Fs::Md, Weight::Semibold, None, Some(1));
+                                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                                            Label(
+                                                &format!("팀원 {total_cnt}"),
+                                                Fs::Xs,
+                                                Weight::Regular,
+                                                Some(paint(p.muted)),
+                                                Some(1),
+                                            );
                                         });
-                                } else {
-                                    cu::ScrollRow()
-                                        .modifier(Modifier::new().fill_max_width())
-                                        .content(move || {
-                                            cu::Row()
-                                                .alignment(Alignment::TopStart)
-                                                .space_role(SpaceRole::Sm)
-                                                .content(move || {
-                                                    for (col, ms) in cols_c.iter() {
-                                                        KanbanColView(
-                                                            col.label(),
-                                                            ms.clone(),
-                                                            proj_k.clone(),
-                                                            Some(220.0),
-                                                            None,
-                                                            open_k.clone(),
-                                                        );
-                                                    }
-                                                });
-                                        });
-                                }
-                            });
-                    });
+
+                                    if wide_kanban {
+                                        cu::Row()
+                                            .alignment(Alignment::TopStart)
+                                            .space_role(SpaceRole::Sm)
+                                            .modifier(Modifier::new().fill_max_width())
+                                            .content(move || {
+                                                for (col, ms) in cols_c.iter() {
+                                                    KanbanColView(
+                                                        col.label(),
+                                                        ms.clone(),
+                                                        proj_k.clone(),
+                                                        None,
+                                                        Some(1.0),
+                                                        open_k.clone(),
+                                                    );
+                                                }
+                                            });
+                                    } else {
+                                        cu::ScrollRow()
+                                            .modifier(Modifier::new().fill_max_width())
+                                            .content(move || {
+                                                cu::Row()
+                                                    .alignment(Alignment::TopStart)
+                                                    .space_role(SpaceRole::Sm)
+                                                    .content(move || {
+                                                        for (col, ms) in cols_c.iter() {
+                                                            KanbanColView(
+                                                                col.label(),
+                                                                ms.clone(),
+                                                                proj_k.clone(),
+                                                                Some(220.0),
+                                                                None,
+                                                                open_k.clone(),
+                                                            );
+                                                        }
+                                                    });
+                                            });
+                                    }
+                                });
+                        });
+                    }
 
                     // 4. Bottom 3-column grid (.sgrid): PR과 CI, 서브 에이전트 스레드, 부하
                     // Rows come from the pure view-model; no data shows an honest empty state (#324).
@@ -4694,6 +4705,13 @@ pub fn SessionScreen(focus: Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_status_capture_scroll_cards_hides_the_blocks_above() {
+        assert!(super::status_blocks_above_cards(None));
+        assert!(!super::status_blocks_above_cards(Some("cards")));
+        assert!(super::status_blocks_above_cards(Some("other")));
+    }
+
     use super::*;
     use compose_rust::protocol::{HostEvent, Mutation, PropertyValue, decode_batch};
     use compose_rust::{

@@ -4309,6 +4309,12 @@ pub fn SessionScreen(focus: Option<String>) {
                                             || {},
                                         );
                                     }
+                                    if is_phone {
+                                        // Keep the trailing group clear of the shell's floating menu button.
+                                        cu::Spacer().modifier(
+                                            Modifier::new().width(super::project::PHONE_MENU_ROOM),
+                                        );
+                                    }
                                 });
 
                             if chips_below {

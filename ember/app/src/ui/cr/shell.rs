@@ -336,6 +336,8 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let side = if rail { 0.0 } else { SP[2] };
     // Spacers include the column's 2 px gap on either side.
     let top = if rail { 14.0 } else { SP[4] };
+    // macOS: the traffic lights float over the sidebar's top-left, so the first row starts below them.
+    let top = top + crate::ui::safe_area::sidebar_top_inset(crate::ui::safe_area::safe_area());
     let below_brand = if rail { 10.0 } else { 20.0 };
     let bottom = if rail { 26.0 } else { 30.0 };
     let demo_tools = show_demo_tools();
@@ -619,6 +621,15 @@ pub fn shell() {
                         cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
                     });
             }
+            // macOS without a sidebar or rail (bottom tabs): the content touches the left edge,
+            // where the traffic lights float, so it starts below them (FR-L33).
+            let strip = crate::ui::safe_area::title_strip_height(
+                crate::ui::safe_area::safe_area(),
+                mode == ShellMode::BottomTabs,
+            );
+            if strip > 0.0 {
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(strip));
+            }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
                 if matches!(screen, Screen::Search) {
@@ -739,6 +750,16 @@ fn requested_size() -> (u16, u16) {
         .unwrap_or((1440, 900))
 }
 
+/// On macOS the window opens with content under the traffic lights (FR-L33, compose-rust
+/// v0.0.6 `Chrome::FullSize`); other systems keep their chrome.
+pub fn window_chrome(window: Window) -> Window {
+    if cfg!(target_os = "macos") {
+        window.with_chrome(compose_rust::schema::Chrome::FullSize)
+    } else {
+        window
+    }
+}
+
 /// Opens the compose-rust shell instead of the app and returns when it is closed.
 /// `services` must be installed.
 pub fn launch(pref: ThemePref) {
@@ -798,7 +819,7 @@ pub fn launch(pref: ThemePref) {
     };
     compose_rust::LaunchBuilder::new()
         .with_theme(crate::ui::fonts::app_theme(scheme))
-        .with_window(Window::new().with_title("Ember").with_size(w, h))
+        .with_window(crate::ui::cr::shell::window_chrome(Window::new().with_title("Ember").with_size(w, h)))
         .launch(content);
 }
 

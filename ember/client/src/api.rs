@@ -893,6 +893,170 @@ impl Api {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Computer metrics (FR-X7, FR-L21)
+// ---------------------------------------------------------------------------------------------
+
+/// `GET /api/computers/{id}/metrics` answer: one sample of a computer's status. Decoded
+/// tolerantly: a field an older node leaves out becomes its empty value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct MetricsSample {
+    /// Wall clock of the sample, milliseconds since the Unix epoch.
+    #[serde(default)]
+    pub at_ms: u64,
+    #[serde(default)]
+    pub cpu: CpuMetrics,
+    #[serde(default)]
+    pub memory: Option<MemoryMetrics>,
+    #[serde(default)]
+    pub disks: Vec<DiskMetrics>,
+    /// Cumulative byte counters per interface; rates come from two samples.
+    #[serde(default)]
+    pub network: Vec<NetMetrics>,
+    #[serde(default)]
+    pub temperatures: Vec<TempMetrics>,
+    #[serde(default)]
+    pub gpu: GpuReport,
+    #[serde(default)]
+    pub processes: Vec<ProcessMetrics>,
+    #[serde(default)]
+    pub process_count: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CpuMetrics {
+    #[serde(default)]
+    pub total_percent: Option<f32>,
+    #[serde(default)]
+    pub cores: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct MemoryMetrics {
+    #[serde(default)]
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub used_bytes: u64,
+    #[serde(default)]
+    pub swap_total_bytes: u64,
+    #[serde(default)]
+    pub swap_used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct DiskMetrics {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mount: String,
+    #[serde(default)]
+    pub total_bytes: u64,
+    #[serde(default)]
+    pub available_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct NetMetrics {
+    #[serde(default)]
+    pub interface: String,
+    #[serde(default)]
+    pub rx_bytes: u64,
+    #[serde(default)]
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct TempMetrics {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub celsius: f32,
+}
+
+/// GPU status; `devices` is empty with a `reason` when the node cannot read it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct GpuReport {
+    #[serde(default)]
+    pub devices: Vec<GpuMetrics>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct GpuMetrics {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub utilization_percent: Option<f32>,
+    #[serde(default)]
+    pub memory_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub memory_used_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct ProcessMetrics {
+    #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub cpu_percent: f32,
+    #[serde(default)]
+    pub memory_bytes: u64,
+}
+
+impl Api {
+    /// One metrics sample of a computer, with at most `top` processes (FR-X7).
+    pub async fn metrics(&self, computer_id: &str, top: u32) -> ApiResult<MetricsSample> {
+        self.get(&metrics_path(computer_id, top)).await
+    }
+}
+
+fn metrics_path(computer_id: &str, top: u32) -> String {
+    format!("/computers/{}/metrics?top={top}", seg(computer_id))
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+
+    #[test]
+    fn fr_x7_the_metrics_path_escapes_the_computer_id() {
+        assert_eq!(metrics_path("a b", 20), "/computers/a%20b/metrics?top=20");
+    }
+
+    #[test]
+    fn fr_x7_a_full_sample_decodes() {
+        let s: MetricsSample = serde_json::from_value(json!({
+            "at_ms": 5,
+            "cpu": {"total_percent": 12.5, "cores": [10.0, 15.0]},
+            "memory": {"total_bytes": 16, "used_bytes": 8, "swap_total_bytes": 4, "swap_used_bytes": 1},
+            "disks": [{"name": "d", "mount": "/", "total_bytes": 100, "available_bytes": 40}],
+            "network": [{"interface": "en0", "rx_bytes": 7, "tx_bytes": 9}],
+            "temperatures": [{"label": "cpu", "celsius": 51.5}],
+            "gpu": {"devices": [], "reason": "not readable"},
+            "processes": [{"pid": 1, "name": "init", "cpu_percent": 0.5, "memory_bytes": 1024}],
+            "process_count": 300
+        }))
+        .unwrap();
+        assert_eq!(s.cpu.cores.len(), 2);
+        assert_eq!(s.memory.as_ref().unwrap().used_bytes, 8);
+        assert_eq!(s.gpu.reason.as_deref(), Some("not readable"));
+        assert_eq!(s.processes[0].pid, 1);
+        assert_eq!(s.process_count, 300);
+    }
+
+    #[test]
+    fn fr_x7_a_sample_with_missing_fields_decodes_to_empty_values() {
+        let s: MetricsSample = serde_json::from_value(json!({"at_ms": 1, "cpu": {"total_percent": null}})).unwrap();
+        assert_eq!(s.cpu.total_percent, None);
+        assert!(s.memory.is_none() && s.disks.is_empty() && s.processes.is_empty());
+        let s: MetricsSample = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(s, MetricsSample::default());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,5 +1174,139 @@ mod tests {
         assert!(!c.members[1].is_agent);
         let bare: ChannelRecord = serde_json::from_value(json!({"id": "c2"})).unwrap();
         assert!(bare.messages.is_empty() && bare.last_message.is_none());
+    }
+}
+
+// ---- token usage summary (FR-U7, #332) ---------------------------------------------------------
+
+/// The period a usage summary covers. A day is a UTC calendar day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsagePeriod {
+    /// The last N UTC days including today (the server clamps to 1..=366).
+    Days(u32),
+    /// One UTC day, `YYYY-MM-DD`.
+    Day(String),
+}
+
+/// Tokens one harness reported. Missing fields decode as zero or `None`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct AgentUsageRow {
+    pub agent: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+}
+
+/// One UTC day of a summary.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct UsageDayRow {
+    pub day: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+    pub sessions: u64,
+    pub by_agent: Vec<AgentUsageRow>,
+}
+
+/// `GET /api/usage/summary`. `cost_usd` is `null` today: the SPEC has no price table.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct UsageSummary {
+    pub from: String,
+    pub to: String,
+    pub days: Vec<UsageDayRow>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+    pub by_agent: Vec<AgentUsageRow>,
+    pub cost_note: Option<String>,
+}
+
+/// `GET /api/sessions/{id}/usage`. `reported: false` means the harness sent no token counts:
+/// the totals are then unknown, not zero.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+    pub reported: bool,
+    pub cost_note: Option<String>,
+}
+
+fn usage_summary_path(period: &UsagePeriod, project: Option<&str>) -> String {
+    let mut q: Vec<(&str, String)> = match period {
+        UsagePeriod::Days(n) => vec![("days", n.to_string())],
+        UsagePeriod::Day(d) => vec![("day", d.clone())],
+    };
+    if let Some(p) = project {
+        q.push(("project", p.to_string()));
+    }
+    let q = serde_urlencoded::to_string(q).unwrap_or_default();
+    format!("/usage/summary?{q}")
+}
+
+impl Api {
+    /// Tokens per UTC day and per harness (FR-U7), for the last N days or one day, optionally
+    /// of one project. Cost is `None` until a price table is specified.
+    pub async fn usage_summary(&self, period: &UsagePeriod, project: Option<&str>) -> ApiResult<UsageSummary> {
+        self.get(&usage_summary_path(period, project)).await
+    }
+
+    /// Tokens one session's harness reported (FR-U7).
+    pub async fn session_usage(&self, id: &str) -> ApiResult<SessionUsage> {
+        self.get(&format!("/sessions/{}/usage", seg(id))).await
+    }
+}
+
+#[cfg(test)]
+mod usage_summary_tests {
+    use super::*;
+
+    #[test]
+    fn fr_u7_summary_path_carries_days_day_and_project() {
+        assert_eq!(usage_summary_path(&UsagePeriod::Days(7), None), "/usage/summary?days=7");
+        assert_eq!(
+            usage_summary_path(&UsagePeriod::Day("2026-11-06".into()), Some("a b")),
+            "/usage/summary?day=2026-11-06&project=a+b"
+        );
+    }
+
+    #[test]
+    fn fr_u7_summary_decodes_server_shape_and_null_cost() {
+        let s: UsageSummary = serde_json::from_value(json!({
+            "from": "2026-11-05", "to": "2026-11-06",
+            "days": [{"day": "2026-11-06", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                      "turns": 2, "cost_usd": null, "sessions": 1,
+                      "by_agent": [{"agent": "codex", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "turns": 2, "cost_usd": null}]}],
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "turns": 2, "cost_usd": null,
+            "by_agent": [], "cost_note": "no price table"
+        }))
+        .unwrap();
+        assert_eq!(s.days[0].by_agent[0].agent, "codex");
+        assert_eq!(s.total_tokens, 15);
+        assert_eq!(s.cost_usd, None);
+        assert_eq!(s.cost_note.as_deref(), Some("no price table"));
+    }
+
+    #[test]
+    fn fr_u7_summary_decode_is_tolerant_of_missing_fields() {
+        let s: UsageSummary = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(s, UsageSummary::default());
+        let u: SessionUsage = serde_json::from_value(json!({"session_id": "s"})).unwrap();
+        assert!(!u.reported, "a missing flag is unknown, not reported");
+        let u: SessionUsage = serde_json::from_value(json!({"session_id": "s", "total_tokens": 9, "reported": true})).unwrap();
+        assert!(u.reported && u.total_tokens == 9);
     }
 }

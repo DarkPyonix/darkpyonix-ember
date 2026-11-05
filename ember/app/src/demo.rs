@@ -207,6 +207,51 @@ pub fn usage(now: i64) -> Vec<DailyUsage> {
         .collect()
 }
 
+/// The 14-day token summary of `GET /api/usage/summary` for the demo, oldest day first, with
+/// sample numbers. The cost stays unknown, as on the server.
+pub fn usage_summary(now: i64) -> ember_client::api::UsageSummary {
+    use ember_client::api::{AgentUsageRow, UsageDayRow, UsageSummary};
+    let row = |agent: &str, input: u64, output: u64, turns: u64| AgentUsageRow {
+        agent: agent.into(),
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: input + output,
+        turns,
+        cost_usd: None,
+    };
+    let mut days: Vec<UsageDayRow> = usage(now)
+        .into_iter()
+        .map(|u| {
+            let codex = row("codex", u.input_tokens, u.output_tokens, u.reports);
+            let claude = row("claude-code", u.input_tokens * 2, u.output_tokens * 2, u.reports + 1);
+            UsageDayRow {
+                day: u.day,
+                input_tokens: codex.input_tokens + claude.input_tokens,
+                output_tokens: codex.output_tokens + claude.output_tokens,
+                total_tokens: codex.total_tokens + claude.total_tokens,
+                turns: codex.turns + claude.turns,
+                cost_usd: None,
+                sessions: 2,
+                by_agent: vec![claude, codex],
+            }
+        })
+        .collect();
+    days.reverse();
+    let sum = |f: fn(&UsageDayRow) -> u64| days.iter().map(f).sum::<u64>();
+    UsageSummary {
+        from: days.first().map(|d| d.day.clone()).unwrap_or_default(),
+        to: days.last().map(|d| d.day.clone()).unwrap_or_default(),
+        input_tokens: sum(|d| d.input_tokens),
+        output_tokens: sum(|d| d.output_tokens),
+        total_tokens: sum(|d| d.total_tokens),
+        turns: sum(|d| d.turns),
+        cost_usd: None,
+        by_agent: Vec::new(),
+        cost_note: Some("no price table".into()),
+        days,
+    }
+}
+
 pub fn projects() -> Vec<Project> {
     vec![
         Project {
@@ -220,6 +265,50 @@ pub fn projects() -> Vec<Project> {
             computers: vec!["local".into()],
         },
     ]
+}
+
+/// A plausible metrics sample for the demo computer (FR-L21, `GET /api/computers/{id}/metrics`).
+/// The values move with `now_ms` so the cards and rates change on screen; the network counters
+/// grow steadily, so two samples give a rate. Nothing here is measured.
+pub fn metrics_sample(now_ms: u64) -> ember_client::api::MetricsSample {
+    use ember_client::api::*;
+    let t = (now_ms / 1000) as f32;
+    let wave = |period: f32, lo: f32, hi: f32, phase: f32| lo + (hi - lo) * (0.5 + 0.5 * ((t / period) + phase).sin());
+    let cores: Vec<f32> = (0..8).map(|i| wave(7.0 + i as f32, 4.0, 80.0, i as f32)).collect();
+    let total = cores.iter().sum::<f32>() / cores.len() as f32;
+    const GB: u64 = 1 << 30;
+    let procs = [("ember-server", 14.0, 420u64), ("claude", 9.5, 880), ("rust-analyzer", 6.0, 1500), ("node", 3.2, 310), ("Code Helper", 2.1, 640)];
+    MetricsSample {
+        at_ms: now_ms,
+        cpu: CpuMetrics { total_percent: Some(total), cores },
+        memory: Some(MemoryMetrics {
+            total_bytes: 16 * GB,
+            used_bytes: (9.0 * GB as f32 + wave(30.0, 0.0, 2.0, 0.0) * GB as f32) as u64,
+            swap_total_bytes: 4 * GB,
+            swap_used_bytes: GB / 2,
+        }),
+        disks: vec![DiskMetrics { name: "Macintosh HD".into(), mount: "/".into(), total_bytes: 500 * GB, available_bytes: 210 * GB }],
+        network: vec![NetMetrics { interface: "en0".into(), rx_bytes: now_ms / 1000 * 2_400_000, tx_bytes: now_ms / 1000 * 380_000 }],
+        temperatures: vec![TempMetrics { label: "CPU".into(), celsius: wave(20.0, 48.0, 62.0, 1.0) }],
+        gpu: GpuReport { devices: vec![], reason: Some("이 컴퓨터에서는 GPU 값을 읽지 못했습니다".into()) },
+        processes: procs
+            .iter()
+            .enumerate()
+            .map(|(i, (name, cpu, mb))| ProcessMetrics {
+                pid: 100 + i as u32 * 37,
+                name: (*name).into(),
+                cpu_percent: *cpu + wave(5.0, 0.0, 2.0, i as f32),
+                memory_bytes: mb << 20,
+            })
+            .collect(),
+        process_count: 412,
+    }
+}
+
+/// The sample one poll interval before `now_ms`. The monitor feed takes it first in demo mode,
+/// so the network card shows a rate from the first frame instead of waiting for a second poll.
+pub fn metrics_previous(now_ms: u64) -> ember_client::api::MetricsSample {
+    metrics_sample(now_ms.saturating_sub(crate::ui::monitor::POLL_SECS * 1000))
 }
 
 pub fn computers() -> Vec<Computer> {
@@ -1255,6 +1344,31 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn fr_l21_demo_metrics_are_plausible_and_give_a_network_rate() {
+        let a = metrics_sample(1_000_000);
+        let b = metrics_sample(1_003_000);
+        assert!(a.cpu.total_percent.unwrap() <= 100.0 && !a.cpu.cores.is_empty());
+        let m = a.memory.as_ref().unwrap();
+        assert!(m.used_bytes < m.total_bytes);
+        assert!(a.gpu.devices.is_empty() && a.gpu.reason.is_some());
+        let (rx, _) = crate::ui::monitor::net_rates(&a, &b).unwrap();
+        assert_eq!(rx, 2_400_000);
+    }
+
+    #[test]
+    fn fr_l21_demo_feed_has_a_network_rate_after_the_first_poll() {
+        let now = 1_000_000u64;
+        let mut f = crate::ui::monitor::MonitorFeed::default();
+        f.push(metrics_previous(now));
+        f.push(metrics_sample(now));
+        let (rx, tx) = f.rates().unwrap();
+        assert!(rx > 1 << 20 && tx > 0);
+        let net = crate::ui::monitor::card_view(crate::ui::monitor::Metric::Network, &f).unwrap();
+        assert!(net.headline.contains("MB/s"), "{}", net.headline);
+        assert!(metrics_previous(0).at_ms == 0);
+    }
     use ember_client::state::State;
 
     #[test]

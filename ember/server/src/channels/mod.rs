@@ -5,8 +5,8 @@
 //! channels are created with a chosen subset of the project's sessions. The signed-in person is
 //! a member of every channel as the person `user`. Messages are an append-only log per channel
 //! in the main store (SQLite); the per-channel JSONL file of FR-T16, mentions (FR-T12, FR-T13),
-//! the agent feed (FR-T11), invites (FR-T14, FR-T15, FR-T17), read tracking and push are not
-//! built. Tables: [`MIGRATION`]. Routes: [`api`].
+//! the agent feed (FR-T11) and invites (FR-T14, FR-T15, FR-T17) are not built. Read tracking is
+//! one cursor per channel for the person `user` ([`READS_MIGRATION`]). Tables: [`MIGRATION`]. Routes: [`api`].
 
 pub mod api;
 
@@ -40,6 +40,17 @@ CREATE TABLE channel_messages (
     at          INTEGER NOT NULL
 );
 CREATE INDEX channel_messages_by_channel ON channel_messages(channel_id, seq);
+";
+
+/// Store migration (appended after [`MIGRATION`]): the read cursor per channel and reader.
+/// `reader` is `user` for the one local person; per-person readers wait on FR-T14.
+pub const READS_MIGRATION: &str = "
+CREATE TABLE channel_reads (
+    channel_id  TEXT NOT NULL REFERENCES channels(id),
+    reader      TEXT NOT NULL,
+    last_seq    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel_id, reader)
+);
 ";
 
 /// The person every channel includes.
@@ -78,7 +89,8 @@ pub struct Member {
     pub harness: String,
 }
 
-/// One log entry. `at` is Unix seconds; `unread` is 0 until read tracking exists.
+/// One log entry. `at` is Unix seconds; `unread` is 1 when the message is after the
+/// `user` read cursor and was not written by `user`, else 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Message {
     /// The log sequence number as text.
@@ -120,8 +132,9 @@ struct Row {
     default: bool,
 }
 
-fn msg(seq: i64, author: String, body: String, at_ms: i64) -> Message {
-    Message { id: seq.to_string(), seq, from: author, text: body, at: at_ms / 1000, unread: 0 }
+fn msg(seq: i64, author: String, body: String, at_ms: i64, last_seq: i64) -> Message {
+    let unread = u32::from(seq > last_seq && author != USER);
+    Message { id: seq.to_string(), seq, from: author, text: body, at: at_ms / 1000, unread }
 }
 
 impl Store {
@@ -168,13 +181,59 @@ impl Store {
         Ok(out)
     }
 
+    /// The `user` read cursor of a channel (0 when never marked).
+    fn read_cursor(&self, channel: &str) -> Result<i64, ChannelError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT last_seq FROM channel_reads WHERE channel_id = ?1 AND reader = ?2",
+                params![channel, USER],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    /// Messages after the cursor that `user` did not write.
+    fn unread_count(&self, channel: &str) -> Result<u32, ChannelError> {
+        let last = self.read_cursor(channel)?;
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM channel_messages WHERE channel_id = ?1 AND seq > ?2 AND author != ?3",
+            params![channel, last, USER],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
+    /// Mark messages up to `seq` (default the latest) as read by `user`. The cursor never moves
+    /// back and never passes the latest message. Returns the channel without its log.
+    pub fn mark_channel_read(&self, channel: &str, seq: Option<i64>) -> Result<Channel, ChannelError> {
+        let row = self.channel_row(channel)?;
+        {
+            let conn = self.conn();
+            let latest: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM channel_messages WHERE channel_id = ?1",
+                params![channel],
+                |r| r.get(0),
+            )?;
+            let to = seq.unwrap_or(latest).clamp(0, latest);
+            conn.execute(
+                "INSERT INTO channel_reads (channel_id, reader, last_seq) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(channel_id, reader) DO UPDATE SET last_seq = MAX(last_seq, excluded.last_seq)",
+                params![channel, USER, to],
+            )?;
+        }
+        self.build(row, false)
+    }
+
     fn last_message(&self, channel: &str) -> Result<Option<Message>, ChannelError> {
+        let last = self.read_cursor(channel)?;
         Ok(self
             .conn()
             .query_row(
                 "SELECT seq, author, body, at FROM channel_messages WHERE channel_id = ?1 ORDER BY seq DESC LIMIT 1",
                 params![channel],
-                |r| Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last)),
             )
             .optional()?)
     }
@@ -182,6 +241,7 @@ impl Store {
     fn build(&self, row: Row, with_messages: bool) -> Result<Channel, ChannelError> {
         let members = self.members_of(&row)?;
         let last_message = self.last_message(&row.id)?;
+        let unread = self.unread_count(&row.id)?;
         let messages = if with_messages {
             let mut m = self.channel_messages_after(&row.id, 0, Some(DETAIL_LIMIT), true)?;
             m.reverse();
@@ -197,7 +257,7 @@ impl Store {
             members,
             last_message,
             messages,
-            unread: 0,
+            unread,
         })
     }
 
@@ -279,12 +339,13 @@ impl Store {
             return Err(ChannelError::Forbidden(format!("{from} is not a member of channel {channel}")));
         }
         let at = now_ms();
+        let last = self.read_cursor(channel)?;
         let conn = self.conn();
         conn.execute(
             "INSERT INTO channel_messages (channel_id, author, body, at) VALUES (?1, ?2, ?3, ?4)",
             params![channel, from, text, at],
         )?;
-        Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at))
+        Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last))
     }
 
     /// Messages with `seq > after`, oldest first (or the newest `limit` when `newest`).
@@ -295,6 +356,7 @@ impl Store {
         limit: Option<i64>,
         newest: bool,
     ) -> Result<Vec<Message>, ChannelError> {
+        let last = self.read_cursor(channel)?;
         let conn = self.conn();
         let sql = format!(
             "SELECT seq, author, body, at FROM channel_messages WHERE channel_id = ?1 AND seq > ?2 ORDER BY seq {} LIMIT ?3",
@@ -303,7 +365,7 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let v = stmt
             .query_map(params![channel, after, limit.unwrap_or(-1)], |r| {
-                Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last))
             })?
             .collect::<Result<_, _>>()?;
         Ok(v)

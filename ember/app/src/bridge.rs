@@ -259,6 +259,95 @@ async fn refresh_once(s: &'static Services, live: Option<Live>, first: bool, ful
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Token usage (FR-U7, #332)
+// ---------------------------------------------------------------------------------------------
+
+use std::sync::Mutex;
+
+use crate::ui::usage::Load;
+use ember_client::api::{UsagePeriod, UsageSummary};
+
+/// Projects whose day tile was asked for; the slow timer refreshes them.
+static WATCHED_PROJECTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Ask for the 14-day summary now (a screen opened). Cheap to call once per mount; the slow
+/// timer keeps it current after that.
+pub fn request_usage_summary() {
+    let s = services();
+    s.spawn(async move { fetch_usage_summary(services()).await });
+}
+
+/// Ask for today's tokens of `project` (the Session status tile). Only the first call per
+/// project starts a request; the slow timer refreshes it.
+pub fn request_project_day(project: &str) {
+    {
+        let mut w = WATCHED_PROJECTS.lock().unwrap();
+        if w.iter().any(|p| p == project) {
+            return;
+        }
+        w.push(project.to_string());
+    }
+    let project = project.to_string();
+    services().spawn(async move { fetch_project_day(services(), &project).await });
+}
+
+/// What to show after a fetch: the new data, or the failure unless older data is held (a
+/// refresh that fails keeps the last good figures and logs).
+fn settle(old: &Load<UsageSummary>, got: Result<UsageSummary, String>) -> Load<UsageSummary> {
+    match got {
+        Ok(u) => Load::Ready(u),
+        Err(e) if matches!(old, Load::Ready(_)) => {
+            tracing::debug!("usage refresh failed: {e}");
+            old.clone()
+        }
+        Err(e) => Load::Failed(e),
+    }
+}
+
+async fn fetch_usage_summary(s: &'static Services) {
+    let got = match &s.demo {
+        Some(_) => Ok(crate::demo::usage_summary(crate::demo::now_ms())),
+        None => s.client.api().usage_summary(&UsagePeriod::Days(14), None).await.map_err(|e| e.to_string()),
+    };
+    let old = s.ui.live.usage_summary.get_untracked();
+    let new = settle(&old, got);
+    if new != old {
+        s.ui.live.usage_summary.set(new);
+    }
+}
+
+async fn fetch_project_day(s: &'static Services, project: &str) {
+    let today = crate::ui::home::today_utc();
+    let got = match &s.demo {
+        Some(_) => {
+            let mut u = crate::demo::usage_summary(crate::demo::now_ms());
+            u.days.retain(|d| d.day == today);
+            Ok(u)
+        }
+        None => s
+            .client
+            .api()
+            .usage_summary(&UsagePeriod::Day(today), Some(project))
+            .await
+            .map_err(|e| e.to_string()),
+    };
+    let old = s.ui.live.project_day.get_untracked().get(project).cloned().unwrap_or_default();
+    let new = settle(&old, got);
+    if new != old {
+        s.ui.live.project_day.update(|m| {
+            m.insert(project.to_string(), new);
+        });
+    }
+}
+
+async fn fetch_project_days(s: &'static Services) {
+    let projects = WATCHED_PROJECTS.lock().unwrap().clone();
+    for p in projects {
+        fetch_project_day(s, &p).await;
+    }
+}
+
 async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
     let live = live.or_else(|| s.live.get().copied());
     // Demo only (#199): the same signals, filled from the demo source; no request is made.
@@ -272,6 +361,8 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
         s.ui.live.chatgpt.set(gpt.clone());
         s.ui.live.usage.set(usg.clone());
         s.ui.live.agents.set(agt.clone());
+        fetch_usage_summary(s).await;
+        fetch_project_days(s).await;
         if let Some(mut live) = live {
             live.accounts.set(acc);
             live.chatgpt.set(gpt);
@@ -317,6 +408,8 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
         }
         Err(e) => tracing::debug!("usage refresh failed: {e}"),
     }
+    fetch_usage_summary(s).await;
+    fetch_project_days(s).await;
     match s.client.agents().await {
         Ok(a) => {
             s.ui.live.agents.set(a.clone());

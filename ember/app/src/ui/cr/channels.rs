@@ -348,7 +348,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                     let _ = why;
                     Label("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
                 }
-                if sections.is_empty() {
+                if sections.is_empty() && *load == Load::Ready {
                     Label(&empty_text(&Load::Ready, 0).unwrap_or_default(), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
                 }
                 // The mockup list is flat, one row per room, newest first; the project is a chip.

@@ -856,6 +856,17 @@ impl NodeStatus {
             NodeStatus::Unknown => None,
         }
     }
+
+    /// The status as text, so the marker's colour is not the only carrier (FR-L18).
+    pub fn label(self) -> &'static str {
+        match self {
+            NodeStatus::Run => "실행 중",
+            NodeStatus::Wait => "대기",
+            NodeStatus::Done => "완료",
+            NodeStatus::Fail => "실패",
+            NodeStatus::Unknown => "",
+        }
+    }
 }
 
 /// Side padding of the status page: 12 dp up to 560 dp, 20 dp above.
@@ -1855,5 +1866,14 @@ mod tests {
         // 1440 dp: three cards and two gaps fill the row exactly.
         let w = status_card_width(1440.0, 3, 20.0);
         assert!((3.0 * w + 40.0 - (1440.0 - 40.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn fr_l18_tree_status_has_a_text_label_besides_the_colour() {
+        assert_eq!(NodeStatus::Run.label(), "실행 중");
+        assert_eq!(NodeStatus::Wait.label(), "대기");
+        assert_eq!(NodeStatus::Done.label(), "완료");
+        assert_eq!(NodeStatus::Fail.label(), "실패");
+        assert_eq!(NodeStatus::Unknown.label(), "");
     }
 }

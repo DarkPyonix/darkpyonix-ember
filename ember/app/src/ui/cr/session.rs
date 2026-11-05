@@ -3272,6 +3272,10 @@ fn TreeNodeView(node: SubNode, project: String) {
                 },
             }
             Label(&node.name, Fs::Sm, Weight::Semibold, None, Some(1));
+            // The status as text too, so it does not rest on the marker's colour alone.
+            if !node.status.label().is_empty() {
+                Label(node.status.label(), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+            }
             Label(&node.task, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
         if !node.children.is_empty() {
@@ -3396,6 +3400,9 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
 /// (the third card below), one under that. Every card fills its share of the page width
 /// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
 /// content shrank the cards to about 308 dp at 390 dp.
+/// TODO(compose-rust): the cards of a row keep their own heights; the mockup stretches them to the
+/// tallest. The pinned toolkit has no intrinsic-size measurement (`IntrinsicSize.Max`), and
+/// `fill_max_height` in a row of unbounded height collapses, so no fixed heights are faked.
 fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     let (d1, d2, d3) = (d.clone(), d.clone(), d);
     match status_grid_columns(width_dp) {

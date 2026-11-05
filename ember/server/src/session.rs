@@ -46,6 +46,8 @@ pub enum Push {
     ScheduleRun { run: ScheduleRun },
     /// A session's approve-everything mode was switched (FR-A5).
     ApproveAll { session_id: String, enabled: bool },
+    /// A message was appended to a channel's log (FR-T10, FR-L12).
+    ChannelMessage { channel_id: String, message: crate::channels::Message },
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -364,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
-        .merge(ember_server::channels::api::router(store_for_channels))
+        .merge(ember_server::channels::api::router(store_for_channels, sessions.clone()))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))

@@ -5,14 +5,20 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use ember_server::agents::AgentKind;
+use ember_server::agents::scripted::ScriptedAdapter;
+use ember_server::agents::{AgentAdapter, AgentKind};
+use ember_server::session::{Push, Sessions};
 use ember_server::store::Store;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+fn sessions_of(store: &Arc<Store>) -> Arc<Sessions> {
+    Sessions::new(store.clone(), vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>])
+}
+
 fn app(store: &Arc<Store>) -> Router {
-    ember_server::channels::api::router(store.clone())
+    ember_server::channels::api::router(store.clone(), sessions_of(store))
 }
 
 async fn call(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -150,4 +156,43 @@ async fn fr_t16_the_log_survives_a_restart() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(msgs[0]["text"], "kept");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn fr_t10_a_posted_message_is_pushed_to_websocket_clients() {
+    let (store, a, _, _) = fixture();
+    let sessions = sessions_of(&store);
+    let app = ember_server::channels::api::router(store.clone(), sessions.clone());
+    let mut rx = sessions.subscribe();
+    let (_, list) = call(&app, "GET", "/api/channels?project=core", None).await;
+    let id = list[0]["id"].as_str().unwrap().to_string();
+    let (st, m) = call(&app, "POST", &format!("/api/channels/{id}/messages"), Some(json!({"text":"hi","from":a}))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let Push::ChannelMessage { channel_id, message } = rx.recv().await.unwrap() else { panic!("not a channel_message") };
+    assert_eq!(channel_id, id);
+    assert_eq!((message.text.as_str(), message.from.as_str()), ("hi", a.as_str()));
+    // The wire form is what /api/push sends.
+    let wire = serde_json::to_value(Push::ChannelMessage { channel_id: id.clone(), message }).unwrap();
+    assert_eq!(wire["type"], "channel_message");
+    assert_eq!(wire["message"]["seq"], m["seq"]);
+}
+
+#[tokio::test]
+async fn fr_t10_a_refused_message_is_not_pushed() {
+    let (store, _, b, _) = fixture();
+    let sessions = sessions_of(&store);
+    let app = ember_server::channels::api::router(store.clone(), sessions.clone());
+    let mut rx = sessions.subscribe();
+    let (_, c) = call(&app, "POST", "/api/channels", Some(json!({"project":"core","name":"r","agents":[]}))).await;
+    let uri = format!("/api/channels/{}/messages", c["id"].as_str().unwrap());
+    let (st, _) = call(&app, "POST", &uri, Some(json!({"text":"hi","from":b}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn fr_t10_router_takes_sessions_and_store() {
+    let (store, _, _, _) = fixture();
+    let (st, _) = call(&app(&store), "GET", "/api/channels", None).await;
+    assert_eq!(st, StatusCode::OK);
 }

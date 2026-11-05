@@ -120,13 +120,15 @@ cargo build --release --locked
 <span class="c"># {"ok":true}</span></code></pre>
     </figure>
     <div class="warn">
-      <span class="label">HTTP 리스너에는 로그인이 없습니다</span>
+      <span class="label">HTTP 리스너에는 아직 로그인이 없습니다</span>
       <p>
         <code>EMBER_LISTEN</code> 에 닿을 수 있는 사람은 계정, 장치, 허브 등록을 포함한 모든 경로를
         쓸 수 있습니다. 기본값인 루프백이나 믿을 수 있는 네트워크에만 두세요. 인증되는 경로는 서버의
         허용 목록에 있는 장치만 받아들이는 P2P 전송입니다(<a href="computers.html#peer">컴퓨터와 허브</a>).
         지금 다른 기계에서 클라이언트를 쓰려면 SSH로 포트를 전달합니다:
         <code>ssh -N -L 8740:127.0.0.1:8740 you@mini.local</code>.
+        이 부분은 막기로 정했습니다. 원격 장치는 기기 키를 그대로 쓰고, 같은 컴퓨터의 앱과 도구는
+        로컬 토큰을 보내게 됩니다(이슈 #338). 진행 중이며 아직 구현되지 않았습니다.
       </p>
     </div>
 

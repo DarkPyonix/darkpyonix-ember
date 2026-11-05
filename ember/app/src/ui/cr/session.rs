@@ -18,7 +18,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{
-    current_window_size, launched_effect, mutable_state_of, remember, remember_with_key,
+    MutableState, current_window_size, launched_effect, mutable_state_of, remember,
+    remember_with_key,
 };
 use compose_rust::ui::{self as cu, Modifier};
 use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole};
@@ -445,6 +446,58 @@ pub fn ComposerChips(session: &str) {
         });
 }
 
+/// What the main part of an "IDE 열기" button does (FR-L7): launch the remembered IDE directly,
+/// or open the chooser when none is remembered yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeClick {
+    Launch(IdeKind),
+    Choose,
+}
+
+/// The decision behind every header's "IDE 열기" button (session, project, conversation, phone).
+pub fn ide_click(remembered: Option<IdeKind>) -> IdeClick {
+    match remembered {
+        Some(kind) => IdeClick::Launch(kind),
+        None => IdeClick::Choose,
+    }
+}
+
+/// Run the main-button click: `launch` for a remembered IDE, otherwise open the chooser.
+pub fn ide_main_click(
+    remembered: Option<IdeKind>,
+    open: &MutableState<bool>,
+    launch: impl FnOnce(IdeKind),
+) {
+    match ide_click(remembered) {
+        IdeClick::Launch(kind) => launch(kind),
+        IdeClick::Choose => open.set(true),
+    }
+}
+
+/// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
+/// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
+pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
+    let p = ember_theme().palette;
+    let (tint, m) = if on_ink {
+        (p.ink_text.to_argb(), Modifier::new().size(26.0, 32.0))
+    } else {
+        (
+            p.text_2.to_argb(),
+            Modifier::new()
+                .size(26.0, 32.0)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full),
+        )
+    };
+    Clickable(
+        m,
+        Alignment::Center,
+        move || open.set(true),
+        move || NavIcon(ICON_CHEVRON_DOWN_SVG, tint, 13.0),
+    );
+}
+
 /// "IDE 열기" split button with the three-entry chooser (`.idesplit`, FR-L7).
 pub fn IdeMenu(session: &str) {
     let ui = shared_ui().clone();
@@ -503,21 +556,26 @@ pub fn IdeMenu(session: &str) {
         let ui_main = ui.clone();
         let launch_main = ide.get();
         if is_phone {
-            Clickable(
-                Modifier::new()
-                    .size(32.0, 32.0)
-                    .background(paint(p.ink))
-                    .shape_role(ShapeRole::Full),
-                Alignment::Center,
-                move || {
-                    if let Some(kind) = remembered {
-                        launch_ide_shared(&ui_main, kind, launch_main.clone());
-                    } else {
-                        o.set(true);
-                    }
-                },
-                || NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0),
-            );
+            let o_chev = open.clone();
+            cu::Row()
+                .alignment(Alignment::Center)
+                .spacing(4.0)
+                .content(move || {
+                    Clickable(
+                        Modifier::new()
+                            .size(32.0, 32.0)
+                            .background(paint(p.ink))
+                            .shape_role(ShapeRole::Full),
+                        Alignment::Center,
+                        move || {
+                            ide_main_click(remembered, &o, |kind| {
+                                launch_ide_shared(&ui_main, kind, launch_main.clone())
+                            })
+                        },
+                        || NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0),
+                    );
+                    IdeChevron(o_chev, false);
+                });
         } else {
             cu::Row()
                 .alignment(Alignment::Center)
@@ -532,11 +590,9 @@ pub fn IdeMenu(session: &str) {
                         Modifier::new().fill_max_height(),
                         Alignment::Center,
                         move || {
-                            if let Some(kind) = remembered {
-                                launch_ide_shared(&ui_main, kind, launch_main.clone());
-                            } else {
-                                o_main.set(true);
-                            }
+                            ide_main_click(remembered, &o_main, |kind| {
+                                launch_ide_shared(&ui_main, kind, launch_main.clone())
+                            })
                         },
                         move || {
                             cu::Row()
@@ -572,12 +628,7 @@ pub fn IdeMenu(session: &str) {
                             .size(1.0, 18.0)
                             .background(paint(p.muted)),
                     );
-                    Clickable(
-                        Modifier::new().size(26.0, 32.0),
-                        Alignment::Center,
-                        move || o.set(true),
-                        || NavIcon(ICON_CHEVRON_DOWN_SVG, p.ink_text.to_argb(), 13.0),
-                    );
+                    IdeChevron(o, true);
                 });
         }
 
@@ -4445,6 +4496,70 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    thread_local! {
+        static CHEVRON_OPEN: RefCell<Option<MutableState<bool>>> = const { RefCell::new(None) };
+    }
+
+    #[composable]
+    fn host_ide_chevron() {
+        let open = remember(|| mutable_state_of(false));
+        CHEVRON_OPEN.with(|c| *c.borrow_mut() = Some(open.clone()));
+        IdeChevron(open.clone(), false);
+    }
+
+    /// FR-L7, #270: with an IDE remembered, every header's main button launches it and leaves
+    /// the chooser closed; with none, it opens the chooser and launches nothing.
+    #[test]
+    fn fr_l7_header_main_button_launches_the_remembered_ide_and_opens_the_chooser_when_unset() {
+        assert_eq!(ide_click(Some(IdeKind::VsCode)), IdeClick::Launch(IdeKind::VsCode));
+        assert_eq!(ide_click(None), IdeClick::Choose);
+
+        let _guard = crate::services::test_guard();
+        for kind in IdeKind::ALL {
+            let open = mutable_state_of(false);
+            let mut launched = Vec::new();
+            ide_main_click(Some(kind), &open, |k| launched.push(k));
+            assert_eq!(launched, vec![kind]);
+            assert!(!open.get_untracked(), "a remembered IDE opens without the chooser");
+        }
+        let open = mutable_state_of(false);
+        let mut launched = Vec::new();
+        ide_main_click(None, &open, |k| launched.push(k));
+        assert!(launched.is_empty(), "nothing is launched without a default");
+        assert!(open.get_untracked(), "an unset default opens the chooser");
+    }
+
+    /// FR-L7, #271: the chevron offered beside the default IDE carries a click handler that
+    /// opens the chooser, as the renderer would click it.
+    #[test]
+    fn fr_l7_ide_chevron_beside_the_default_opens_the_chooser_when_clicked() {
+        let _guard = crate::services::test_guard();
+        CHEVRON_OPEN.with(|c| *c.borrow_mut() = None);
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_ide_chevron)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let clicks: Vec<(u32, u64)> = batch
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: compose_rust::PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } => Some((*node_id, *h as u64)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(clicks.len(), 1, "the chevron is one clickable: {clicks:?}");
+        let open = CHEVRON_OPEN.with(|c| c.borrow().clone()).expect("state captured");
+        assert!(!open.get_untracked());
+        host.dispatch(HostEvent {
+            node_id: clicks[0].0,
+            handler_id: clicks[0].1,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch");
+        assert!(open.get_untracked(), "the chevron opened the chooser");
     }
 
     #[composable]

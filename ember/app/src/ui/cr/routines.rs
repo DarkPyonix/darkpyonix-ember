@@ -77,6 +77,13 @@ pub fn should_use_sample_entries(route_env: Option<&str>, demo_active: bool) -> 
     route_env == Some("routines") || demo_active
 }
 
+fn sample_mode() -> bool {
+    should_use_sample_entries(
+        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
+    )
+}
+
 /// What the server last answered: `online` is false until a load succeeds.
 #[derive(Default)]
 pub struct Remote {
@@ -94,9 +101,13 @@ pub fn with_remote<R>(f: impl FnOnce(&mut Remote) -> R) -> R {
     f(&mut guard)
 }
 
+fn remote_schedule_allowed(sample: bool, online: bool) -> bool {
+    !sample && online
+}
+
 /// Whether `id` is a server schedule (else it is on this device).
 pub fn is_remote(id: &str) -> bool {
-    with_remote(|r| r.online && r.entries.iter().any(|e| e.routine.id == id))
+    with_remote(|r| remote_schedule_allowed(sample_mode(), r.online) && r.entries.iter().any(|e| e.routine.id == id))
 }
 
 /// The server's schedules with their recent runs.
@@ -223,6 +234,23 @@ fn detail_state() -> Option<MutableState<bool>> {
     try_services().map(|s| s.ui.detail_open.clone())
 }
 
+/// The room a phone keeps below the content so the floating tab bar (`TABBAR_H` plus its
+/// `TABBAR_BOTTOM_GAP`, `shell.rs`) never covers the last row: the bar, its gap and one `SP[3]`.
+pub fn compact_bottom_clearance() -> f32 {
+    TABBAR_H + TABBAR_BOTTOM_GAP + SP[3]
+}
+
+/// The search field's width in the list pane, from the layout rules in `ListPane`: the screen
+/// content (window minus the page padding twice) minus the list box's padding and border twice,
+/// minus the search row's fixed parts (12 leading, 18 icon, `SP[1]` after the icon and `SP[1]`
+/// trailing). The field is laid out by weight, so this is the share it receives, not a width it
+/// is given.
+pub fn search_field_width(width_dp: f32, compact: bool) -> f32 {
+    let page_pad = if compact { SP[3] } else { SP[6] };
+    let pane = if compact { width_dp - 2.0 * page_pad } else { list_pane_width(width_dp) };
+    (pane - 2.0 * (13.0 + 1.0) - (12.0 + 18.0 + SP[1] + SP[1])).max(0.0)
+}
+
 /// The list panel's width: 400 above 1279 dp, 320 up to 1279, 300 up to 900.
 pub fn list_pane_width(width_dp: f32) -> f32 {
     if width_dp > 1279.0 {
@@ -250,10 +278,7 @@ pub enum Panel {
 pub fn RoutinesScreen() {
     let tick = remember(|| mutable_state_of(0_u32));
     let _ = try_services().map(|s| s.ui.live.launcher.get());
-    let is_demo = should_use_sample_entries(
-        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
-        crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
-    );
+    let is_demo = sample_mode();
     if !is_demo {
         let tick_refresh = tick.clone();
         launched_effect((), move || async move {
@@ -423,6 +448,10 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 });
                 return;
             }
+            if sample_mode() && sample_entries().iter().any(|e| e.routine.id == id) {
+                notice::post(RUN_NOTICE);
+                return;
+            }
             match with_store(|s| s.run_now(&id)) {
                 Err(StoreError::Unavailable) => notice::post(RUN_NOTICE),
                 Err(StoreError::NotFound) => notice::post("루틴을 찾을 수 없습니다"),
@@ -454,7 +483,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 panel_ref.set(Panel::View);
                 return;
             }
-            if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| r.online) {
+            if editing.is_none() && draft.trigger == Trigger::Time && with_remote(|r| remote_schedule_allowed(sample_mode(), r.online)) {
                 let cwd = try_services().and_then(|svc| {
                     svc.client.read(|s| crate::model::latest_cwd(s, &draft.sel.project))
                 });
@@ -682,6 +711,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                 on_toggle.clone(),
                             );
                         }
+                    }
+                    if compact {
+                        cu::Spacer().modifier(Modifier::new().height(compact_bottom_clearance()));
                     }
                 });
         });
@@ -989,6 +1021,8 @@ fn HeroCardContent(
         });
 }
 
+// TODO(compose-rust#443): `Text` has no `overflow_wrap`, so a KPI label stays on one line with
+// `max_lines(Some(1))` instead of being allowed to wrap in a narrow column.
 fn RoutineKpiView(kpi: &RoutineKpi, index: usize) {
     let p = ember_theme().palette;
     cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(|| {
@@ -1071,15 +1105,20 @@ fn ListPane(
                         cu::Spacer().modifier(Modifier::new().width(12.0));
                         NavIcon(ICON_SEARCH_SVG, p.muted.to_argb(), 18.0);
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        EmberField(FieldOptions {
-                            bare: true,
-                            background: Some(Paint::Literal(Color::argb(0))),
-                            border_width: Some(0.0),
-                            height: Some(H_BTN),
-                            weight: Some(1.0),
-                            placeholder: "루틴 검색".to_string(),
-                            on_value_change: Some(Box::new(move |v| q_set.set(v))),
-                            ..Default::default()
+                        // The field takes the row's remaining width by weight (a box with
+                        // `weight(1.0)`, the field filling it), so it shrinks with the row and
+                        // never carries a width estimate that can overrun the 390 dp content.
+                        cu::Box().modifier(Modifier::new().weight(1.0).height(H_BTN)).content(move || {
+                            EmberField(FieldOptions {
+                                bare: true,
+                                background: Some(Paint::Literal(Color::argb(0))),
+                                border_width: Some(0.0),
+                                height: Some(H_BTN),
+                                fill_max_width: true,
+                                placeholder: "루틴 검색".to_string(),
+                                on_value_change: Some(Box::new(move |v| q_set.set(v))),
+                                ..Default::default()
+                            });
                         });
                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
                     });
@@ -1978,6 +2017,17 @@ mod tests {
     // ---- calendar ---------------------------------------------------------------------------
 
     #[test]
+    fn fr_l25_search_field_fits_the_content_width_at_390() {
+        let content = 390.0 - 2.0 * SP[3];
+        let w = search_field_width(390.0, true);
+        assert!(w > 0.0 && w <= content, "search field {w} exceeds content {content}");
+        for width in [320.0, 360.0, 390.0, 430.0] {
+            assert!(search_field_width(width, true) <= width - 2.0 * SP[3]);
+        }
+        assert!(compact_bottom_clearance() >= TABBAR_H + TABBAR_BOTTOM_GAP);
+    }
+
+    #[test]
     fn fr_l25_calendar_round_trips_and_knows_the_weekday() {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         let d = days_from_civil(2026, 10, 25);
@@ -2765,6 +2815,14 @@ mod tests {
             );
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l25_demo_routines_do_not_use_stale_remote_state() {
+        assert!(!remote_schedule_allowed(true, true));
+        assert!(!remote_schedule_allowed(true, false));
+        assert!(remote_schedule_allowed(false, true));
+        assert!(!remote_schedule_allowed(false, false));
     }
 
     #[test]

@@ -388,12 +388,13 @@ async fn fr_t17_a_guest_gets_at_most_twenty_deliveries_an_hour() {
 async fn fr_t17_a_revoke_between_two_sends_stops_the_second() {
     let w = world().await;
     let (gid, cred) = w.join("Mina").await;
-    w.allow(&gid, json!(5)).await;
-    // Post with no allowance in force for the live path: store the message directly.
-    let (st, _) = call(&w.owner, "DELETE", &w.allow_uri(&gid), None, None).await;
-    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, _) = w.allow(&gid, json!(5)).await;
+    assert_eq!(st, StatusCode::OK);
+    // Post under an active allowance and let the live delivery finish, then re-deliver the stored
+    // message by hand (the same setup as the expiry test below).
     assert_eq!(w.guest_post(&cred, "@alpha @beta both").await.0, StatusCode::CREATED);
-    let _ = w.wait_notes(1).await; // the live path found no allowance
+    w.wait_user_messages(&w.alpha, 1).await;
+    w.wait_user_messages(&w.beta, 1).await;
     let msg = w
         .store
         .read_channel_messages(&w.channel, 0)
@@ -401,8 +402,9 @@ async fn fr_t17_a_revoke_between_two_sends_stops_the_second() {
         .into_iter()
         .find(|m| m.from.starts_with("guest:"))
         .unwrap();
-    w.allow(&gid, json!(5)).await;
+    assert!(w.system_notes().is_empty());
     let rows_before = w.a2a_rows();
+    assert_eq!(rows_before, 2);
     let (store, channel, g) = (w.store.clone(), w.channel.clone(), gid.clone());
     let hook = move |i: usize| {
         if i == 1 {
@@ -411,12 +413,10 @@ async fn fr_t17_a_revoke_between_two_sends_stops_the_second() {
     };
     deliver_guest_mentions_hooked(&w.store, &w.sessions, &w.a2a, &gid, &msg, now_ms(), &hook).await;
     assert_eq!(w.a2a_rows(), rows_before + 1, "only the first send went out");
-    assert_eq!(w.user_messages(&w.alpha).len(), 1);
-    assert!(w.user_messages(&w.beta).is_empty());
     let notes = w.system_notes();
-    assert_eq!(notes.len(), 2, "{notes:?}");
-    assert!(notes[1].ends_with("was not delivered (the allowance ended)"), "{notes:?}");
-    assert!(notes[1].contains("@beta"), "{notes:?}");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].ends_with("was not delivered (the allowance ended)"), "{notes:?}");
+    assert!(notes[0].contains("@beta") && !notes[0].contains("@alpha"), "{notes:?}");
 }
 
 #[tokio::test]

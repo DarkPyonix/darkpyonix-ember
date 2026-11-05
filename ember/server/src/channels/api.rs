@@ -14,7 +14,13 @@
 //! moves forward. `unread` on a channel counts messages after the cursor not written by `user`;
 //! on a message it is 1 or 0 the same way.
 //!
+//! | GET    | `/api/channels/{id}/feed` | → `[FeedItem]`, newest first (FR-T11) |
+//! | POST   | `/api/channels/{id}/feed/{approval_id}/answer` | `{decision}` → 204 |
 //! | POST   | `/api/channels/{id}/mentions/preview` | `{text}` → `{reaches: [{id, name}], unknown: [name]}` |
+//!
+//! The feed holds the pending approvals and the last-turn reports of the channel's member agents
+//! (see [`super::feed`]). `decision` is `allow_once`, `allow_always` or `deny`; an approval that
+//! is not pending in this channel is 404.
 //!
 //! A message from `user` with `@name` of a name that is not a member agent is refused 400 with
 //! `code`/`reason` `not_a_member` and `unknown: [name]`; nothing is stored or pushed (FR-T13).
@@ -65,6 +71,8 @@ fn build(ctx: ChannelsCtx) -> Router {
         .route("/api/channels/{id}/messages", get(messages).post(post_message))
         .route("/api/channels/{id}/read", post(mark_read))
         .route("/api/channels/{id}/mentions/preview", post(preview))
+        .route("/api/channels/{id}/feed", get(feed))
+        .route("/api/channels/{id}/feed/{approval_id}/answer", post(answer_feed))
         .with_state(ctx)
 }
 
@@ -175,4 +183,28 @@ async fn preview(
     let m = c.store.preview_channel_mentions(&id, &b.text)?;
     let reaches: Vec<_> = m.mentioned.iter().map(|a| json!({ "id": a.id, "name": a.name })).collect();
     Ok(Json(json!({ "reaches": reaches, "unknown": m.unknown })))
+}
+
+async fn feed(State(c): State<ChannelsCtx>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(c.store.channel_feed(&id)?))
+}
+
+#[derive(Deserialize)]
+struct FeedAnswer {
+    decision: crate::events::ApprovalDecision,
+}
+
+/// Answer a member session's pending approval from the feed (FR-T11, FR-A5). The session records
+/// the resolution and pushes its event, so the feed and the session clear together.
+async fn answer_feed(
+    State(c): State<ChannelsCtx>,
+    Path((id, approval_id)): Path<(String, String)>,
+    Json(b): Json<FeedAnswer>,
+) -> ApiResult<impl IntoResponse> {
+    let item = c.store.channel_feed_approval(&id, &approval_id)?;
+    c.sessions
+        .answer(&item.session_id, &approval_id, b.decision)
+        .await
+        .map_err(|e| ChannelError::Other(anyhow::anyhow!("{e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }

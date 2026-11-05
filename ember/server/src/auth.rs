@@ -10,6 +10,8 @@
 //! - `GET /api/health`, so a launcher can tell whether a server is up *[provisional]*;
 //! - the agent routes, which carry the session's runtime token in the same header and check it
 //!   themselves: `/api/a2a/*` except `/api/a2a/settings`, and the Antigravity hook;
+//! - `GET /api/browsers/<project>/cdp/<nonce>` with the per-run nonce from [`agent_cdp_nonce`], the
+//!   agent browser relay (agent MCP servers send no header);
 //! - `GET /auth/callback`, the browser redirect of Sign in with ChatGPT, which cannot carry a
 //!   header (the `state` value in it is checked by the handler).
 //!
@@ -95,6 +97,26 @@ pub fn token_eq(a: &str, b: &str) -> bool {
     da.iter().zip(db.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The per-run nonce of the agent browser relay. The MCP servers an agent runs (chrome-devtools-mcp,
+/// Playwright MCP) connect to the CDP relay with a bare URL and no way this repository could
+/// verify to add a header, so the URL itself carries a random path segment,
+/// `/api/browsers/<project>/cdp/<nonce>`. The nonce lives in memory only, is new on every server
+/// start, is given only to agent configs, and opens exactly that one route (never a query string).
+pub fn agent_cdp_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(new_token)
+}
+
+/// True for `GET /api/browsers/<project>/cdp/<nonce>` with the right nonce (constant time).
+pub fn agent_cdp_path_ok(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/browsers/") else { return false };
+    let mut it = rest.split('/');
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(p), Some("cdp"), Some(n), None) if !p.is_empty() => token_eq(n, agent_cdp_nonce()),
+        _ => false,
+    }
+}
+
 /// What the middleware checks against.
 pub struct ServerAuth {
     token: String,
@@ -155,6 +177,9 @@ fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::GET
         && (path == "/api/health" || path == crate::chatgpt::oauth::CALLBACK_PATH)
     {
+        return true;
+    }
+    if method == axum::http::Method::GET && agent_cdp_path_ok(path) {
         return true;
     }
     (path.starts_with("/api/a2a/") && path != "/api/a2a/settings")

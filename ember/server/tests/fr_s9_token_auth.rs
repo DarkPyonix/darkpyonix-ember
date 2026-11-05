@@ -351,3 +351,73 @@ async fn fr_s9_protocol_entry_is_not_a_token_on_plain_http() {
     let (st, _) = call(&f.app, Method::GET, "/api/sessions", &[("sec-websocket-protocol", &h)]).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
+
+// The agent browser relay (FR-S9): the MCP servers an agent runs send no header, so the config
+// carries a per-run nonce path segment that opens exactly one route.
+
+const WS_UPGRADE: &[(&str, &str)] = &[
+    ("connection", "upgrade"),
+    ("upgrade", "websocket"),
+    ("sec-websocket-version", "13"),
+    ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+];
+
+#[test]
+fn fr_s9_agent_config_carries_the_cdp_nonce() {
+    use ember_server::browser::agent::{agent_cdp_ws_url, agent_config, BrowserMcp};
+    let nonce = auth::agent_cdp_nonce();
+    assert!(nonce.len() >= 32);
+    let ws = agent_cdp_ws_url("http://127.0.0.1:8740", "acme");
+    assert_eq!(ws, format!("ws://127.0.0.1:8740/api/browsers/acme/cdp/{nonce}"));
+    assert!(!ws.contains('?'), "never a query string");
+    let cfg = agent_config(&ws, BrowserMcp::ChromeDevtools);
+    assert!(cfg.claude_code_mcp_config.to_string().contains(nonce));
+    assert!(cfg.codex_toml.contains(nonce));
+}
+
+#[tokio::test]
+async fn fr_s9_cdp_route_with_the_right_nonce_passes_the_middleware() {
+    let f = fx();
+    let path = format!("/api/browsers/acme/cdp/{}", auth::agent_cdp_nonce());
+    let (st, _) = call(&f.app, Method::GET, &path, WS_UPGRADE).await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED, "{path}");
+    assert_ne!(st, StatusCode::FORBIDDEN, "{path}");
+}
+
+#[tokio::test]
+async fn fr_s9_cdp_route_with_a_wrong_nonce_is_401() {
+    let f = fx();
+    for p in [
+        "/api/browsers/acme/cdp/wrong",
+        "/api/browsers/acme/cdp/",
+        "/api/browsers/acme/cdp",
+        "/api/browsers/acme/view",
+    ] {
+        let (st, _) = call(&f.app, Method::GET, p, WS_UPGRADE).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}");
+    }
+    // The nonce opens only the cdp route, and only for GET.
+    let n = auth::agent_cdp_nonce();
+    for (method, p) in [
+        (Method::POST, format!("/api/browsers/acme/cdp/{n}")),
+        (Method::GET, format!("/api/browsers/acme/view/{n}")),
+        (Method::GET, format!("/api/sessions/{n}")),
+    ] {
+        let (st, _) = call(&f.app, method.clone(), &p, &[]).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{method} {p}");
+    }
+}
+
+#[tokio::test]
+async fn fr_s10_cdp_nonce_route_still_checks_origin_and_host() {
+    let f = fx();
+    let path = format!("/api/browsers/acme/cdp/{}", auth::agent_cdp_nonce());
+    let mut h = WS_UPGRADE.to_vec();
+    h.push(("origin", "https://evil.example"));
+    let (st, _) = call(&f.app, Method::GET, &path, &h).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let mut h = WS_UPGRADE.to_vec();
+    h.push(("host", "evil.example"));
+    let (st, _) = call(&f.app, Method::GET, &path, &h).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}

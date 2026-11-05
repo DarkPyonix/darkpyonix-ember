@@ -139,6 +139,23 @@ use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
 pub const HOOK_ROUTE: &str = "/api/agents/antigravity/hook";
 /// Name of Ember's hook in `hooks.json`; also what the pre-flight check looks for.
 pub const HOOK_NAME: &str = "ember-approvals";
+/// Spawn env that points agy at a model proxy (SPEC FR-U6, #146; `members::proxy_env`). agy reads
+/// it itself, but only in its Gemini API mode, so [`proxy_args`] adds `modelProvider: "gemini"`.
+pub const PROXY_BASE_ENV: &str = "GOOGLE_GEMINI_BASE_URL";
+/// The key agy sends to the proxy (as `x-goog-api-key`) in that mode.
+pub const PROXY_KEY_ENV: &str = "GEMINI_API_KEY";
+
+/// Extra agy arguments when the spawn env carries a proxy base URL: a per-session `--settings`
+/// (never saved to `~/.gemini`) that switches agy from its Google sign-in to the Gemini API route.
+/// Without it agy ignores both variables and asks for a login (probed on agy 1.5.1).
+pub fn proxy_args(env: &[(String, String)]) -> Vec<String> {
+    if env.iter().any(|(k, v)| k == PROXY_BASE_ENV && !v.is_empty()) {
+        vec!["--settings".into(), r#"{"modelProvider":"gemini"}"#.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// The agy version the SPEC §A Antigravity hook tests passed on. Any other version runs read-only.
 pub const PINNED_VERSION: &str = "1.2.16";
 /// agy's own timeout for the hook command, in seconds (agy's default is 30). Measured on 1.2.16:
@@ -1037,7 +1054,7 @@ impl AgentRun for AgyRun {
             let st = self.state.lock().unwrap();
             st.native_id.clone().or_else(|| self.req.resume_native_id.clone())
         };
-        let args = AntigravityAdapter::turn_args(
+        let mut args = AntigravityAdapter::turn_args(
             text,
             conversation.as_deref(),
             self.req.model.as_deref(),
@@ -1045,6 +1062,7 @@ impl AgentRun for AgyRun {
             policy,
             self.sandbox,
         );
+        args.extend(proxy_args(&self.req.env));
         self.approvals.open();
         let proc = match spawn_agent(AgentCommand {
             program: self.bin.clone(), args, env: self.req.env.clone(),
@@ -1646,6 +1664,14 @@ mod tests {
         let args = AntigravityAdapter::turn_args("-x", None, None, Path::new("/r"), Policy::Gated, false);
         assert_eq!(args[1], " -x");
         assert!(!args.iter().any(|a| a.starts_with("--conversation") || a == "--model" || a == "--sandbox"));
+    }
+
+    #[test]
+    fn fr_u6_proxy_args_switch_agy_to_the_gemini_api_route_only_with_a_base_url() {
+        let env = vec![(PROXY_BASE_ENV.to_string(), "http://127.0.0.1:1".to_string())];
+        assert_eq!(proxy_args(&env), ["--settings", r#"{"modelProvider":"gemini"}"#]);
+        assert!(proxy_args(&[]).is_empty());
+        assert!(proxy_args(&[("OTHER".into(), "x".into())]).is_empty());
     }
 
     #[test]

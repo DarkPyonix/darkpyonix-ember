@@ -60,9 +60,142 @@ impl Room {
     }
 }
 
-/// The rooms the server has pushed. None yet: FR-T10 is not built.
+/// The rooms before anything is loaded: none. The screen's own load state says why
+/// (loading, failed, empty); nothing here invents rooms.
 pub fn rooms_snapshot() -> Vec<Room> {
     Vec::new()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Server data (FR-T10): the wire types become rooms
+// ---------------------------------------------------------------------------------------------
+
+/// The person's member id on the server (`user`); the screen shows it as 나.
+pub const USER_ID: &str = "user";
+/// What the person is called in a room.
+pub const USER_NAME: &str = "나";
+
+/// Whether a message is on its way to the server (FR-T10). One send at a time, so a double
+/// click or a second Enter cannot post the same text twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SendState {
+    #[default]
+    Idle,
+    Sending,
+}
+
+impl SendState {
+    /// A send may start only when idle and the text is not blank.
+    pub fn can_send(self, text: &str) -> bool {
+        self == SendState::Idle && !text.trim().is_empty()
+    }
+}
+
+/// The draft after the server answered: cleared on success (if the person did not type on
+/// meanwhile), kept as typed on failure so nothing is lost.
+pub fn draft_after_send(ok: bool, draft: &str, sent: &str) -> String {
+    if ok && draft == sent { String::new() } else { draft.to_string() }
+}
+
+/// What the channel list shows while and after it loads.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Load {
+    /// The first request has not answered.
+    #[default]
+    Loading,
+    /// The request failed; the text is the reason. The last good rooms stay on screen.
+    Failed(String),
+    Ready,
+}
+
+/// The one line for a state with no rooms to draw, or `None` when rooms are shown.
+pub fn empty_text(load: &Load, rooms: usize) -> Option<String> {
+    match load {
+        Load::Loading if rooms == 0 => Some("채널을 불러오는 중입니다".to_string()),
+        Load::Failed(_) if rooms == 0 => Some("채널을 불러오지 못했습니다. 잠시 뒤 다시 시도합니다.".to_string()),
+        Load::Ready if rooms == 0 => Some("채널이 없습니다".to_string()),
+        _ => None,
+    }
+}
+
+/// The sequence number of a message (the server's `id` is the seq as text); 0 when unreadable.
+pub fn seq_of(m: &Message) -> i64 {
+    m.id.parse().unwrap_or(0)
+}
+
+/// The highest seq in `messages`: the `after` cursor of the next poll.
+pub fn last_seq(messages: &[Message]) -> i64 {
+    messages.iter().map(seq_of).max().unwrap_or(0)
+}
+
+/// Adds `incoming` to `messages` without duplicates (by id) and keeps the log order (seq, then
+/// time). A message already there is replaced by the newer copy.
+pub fn merge_messages(messages: &mut Vec<Message>, incoming: Vec<Message>) {
+    for m in incoming {
+        match messages.iter_mut().find(|x| x.id == m.id) {
+            Some(x) => *x = m,
+            None => messages.push(m),
+        }
+    }
+    messages.sort_by_key(|m| (seq_of(m), m.at));
+}
+
+pub fn member_from(m: &ember_client::api::ChannelMember) -> Member {
+    let is_user = m.id == USER_ID;
+    let name = if is_user {
+        USER_NAME.to_string()
+    } else if m.name.is_empty() {
+        m.id.clone()
+    } else {
+        m.name.clone()
+    };
+    Member { id: m.id.clone(), name, is_agent: m.is_agent && !is_user, harness: m.harness.clone() }
+}
+
+pub fn message_from(m: &ember_client::api::ChannelMessage) -> Message {
+    let id = if m.id.is_empty() { m.seq.to_string() } else { m.id.clone() };
+    Message { id, from: m.from.clone(), text: m.text.clone(), at: m.at, unread: m.unread }
+}
+
+/// A server channel as a room. A list answer has no `messages`; its `last_message` stands in so
+/// the row shows a preview and sorts by activity.
+pub fn room_from(c: &ember_client::api::ChannelRecord) -> Room {
+    let mut messages: Vec<Message> = c.messages.iter().map(message_from).collect();
+    if messages.is_empty() {
+        messages.extend(c.last_message.as_ref().map(message_from));
+    }
+    messages.sort_by_key(|m| (seq_of(m), m.at));
+    Room {
+        id: c.id.clone(),
+        name: c.name.clone(),
+        project: c.project.clone(),
+        members: c.members.iter().map(member_from).collect(),
+        messages,
+        unread: c.unread,
+    }
+}
+
+/// The list answer as rooms, keeping the messages already loaded for an open room (the list
+/// carries only the last one).
+pub fn rooms_from(list: &[ember_client::api::ChannelRecord], old: &[Room]) -> Vec<Room> {
+    list.iter()
+        .map(|c| {
+            let mut r = room_from(c);
+            if let Some(o) = old.iter().find(|o| o.id == r.id) {
+                if o.messages.len() > r.messages.len() {
+                    let incoming = std::mem::take(&mut r.messages);
+                    r.messages = o.messages.clone();
+                    merge_messages(&mut r.messages, incoming);
+                }
+            }
+            r
+        })
+        .collect()
+}
+
+/// The member id that is the person in `room`: `user` for a server room, `me` in the samples.
+pub fn me_id(room: &Room) -> &str {
+    if room.member(USER_ID).is_some() { USER_ID } else { "me" }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -251,7 +384,7 @@ pub fn time_label(at: i64, tz: i64) -> String {
 /// of messages from one sender in one minute shares a single picture and name.
 pub fn feed(room: &Room, me: &str, tz: i64) -> Vec<FeedItem> {
     let mut msgs: Vec<&Message> = room.messages.iter().collect();
-    msgs.sort_by_key(|m| m.at);
+    msgs.sort_by_key(|m| (m.at, seq_of(m)));
     let mut out = Vec::new();
     let mut prev: Option<&Message> = None;
     for m in msgs {
@@ -292,6 +425,20 @@ pub fn compact_shows_room(open: &Option<String>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_t10_send_blocks_while_in_flight() {
+        assert!(SendState::Idle.can_send("hi"));
+        assert!(!SendState::Sending.can_send("hi"));
+        assert!(!SendState::Idle.can_send("  "));
+    }
+
+    #[test]
+    fn fr_t10_draft_kept_on_failure() {
+        assert_eq!(draft_after_send(false, "hello", "hello"), "hello");
+        assert_eq!(draft_after_send(true, "hello", "hello"), "");
+        assert_eq!(draft_after_send(true, "hello more", "hello"), "hello more");
+    }
+
     use super::*;
 
     const ME: &str = "me";
@@ -524,5 +671,88 @@ mod layout_tests {
         assert!(split_view(WindowSizeClass::Expanded));
         assert!(!compact_shows_room(&None));
         assert!(compact_shows_room(&Some("a".into())));
+    }
+
+    fn wire_msg(seq: i64, from: &str, at: i64) -> ember_client::api::ChannelMessage {
+        ember_client::api::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0 }
+    }
+
+    #[test]
+    fn fr_t10_channel_maps_to_a_room_with_the_user_as_na() {
+        let c = ember_client::api::ChannelRecord {
+            id: "c1".into(),
+            name: "전체".into(),
+            project: "ember".into(),
+            default: true,
+            members: vec![
+                ember_client::api::ChannelMember { id: "user".into(), name: "user".into(), is_agent: false, harness: String::new() },
+                ember_client::api::ChannelMember { id: "s1".into(), name: "".into(), is_agent: true, harness: "codex".into() },
+            ],
+            messages: vec![wire_msg(2, "s1", 20), wire_msg(1, "user", 10)],
+            ..Default::default()
+        };
+        let r = room_from(&c);
+        assert_eq!(r.member("user").unwrap().name, "나");
+        assert_eq!(r.member("s1").unwrap().name, "s1");
+        assert!(r.member("s1").unwrap().is_agent);
+        assert_eq!(r.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["1", "2"]);
+        assert_eq!(me_id(&r), "user");
+        let items = feed(&r, me_id(&r), 0);
+        assert!(items.iter().any(|i| matches!(i, FeedItem::Bubble(b) if b.side == Side::Right && b.from == "user")));
+    }
+
+    #[test]
+    fn fr_t10_a_list_answer_shows_the_last_message() {
+        let c = ember_client::api::ChannelRecord {
+            id: "c1".into(),
+            last_message: Some(wire_msg(5, "user", 50)),
+            ..Default::default()
+        };
+        assert_eq!(room_from(&c).last_message().unwrap().text, "t5");
+    }
+
+    #[test]
+    fn fr_t10_after_seq_merge_has_no_duplicates_and_keeps_order() {
+        let mut v: Vec<Message> = [1, 2, 3].iter().map(|s| message_from(&wire_msg(*s, "user", *s * 10))).collect();
+        assert_eq!(last_seq(&v), 3);
+        merge_messages(&mut v, vec![message_from(&wire_msg(3, "user", 30)), message_from(&wire_msg(4, "s1", 40))]);
+        assert_eq!(v.iter().map(seq_of).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        merge_messages(&mut v, vec![]);
+        assert_eq!(v.len(), 4);
+        assert_eq!(last_seq(&[]), 0);
+    }
+
+    #[test]
+    fn fr_t10_same_second_messages_keep_seq_order() {
+        let mut v = Vec::new();
+        merge_messages(&mut v, vec![message_from(&wire_msg(9, "s1", 5)), message_from(&wire_msg(8, "user", 5))]);
+        assert_eq!(v.iter().map(seq_of).collect::<Vec<_>>(), [8, 9]);
+    }
+
+    #[test]
+    fn fr_t10_a_refreshed_list_keeps_the_open_rooms_messages() {
+        let old = vec![room_from(&ember_client::api::ChannelRecord {
+            id: "c1".into(),
+            messages: vec![wire_msg(1, "user", 1), wire_msg(2, "user", 2)],
+            ..Default::default()
+        })];
+        let list = vec![ember_client::api::ChannelRecord { id: "c1".into(), last_message: Some(wire_msg(3, "s1", 3)), ..Default::default() }];
+        let rooms = rooms_from(&list, &old);
+        assert_eq!(rooms[0].messages.iter().map(seq_of).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn fr_l12_empty_loading_and_failed_states_are_honest() {
+        assert_eq!(empty_text(&Load::Loading, 0).unwrap(), "채널을 불러오는 중입니다");
+        assert!(!empty_text(&Load::Failed("503".into()), 0).unwrap().contains("503"));
+        assert_eq!(empty_text(&Load::Ready, 0).unwrap(), "채널이 없습니다");
+        // Rooms already loaded stay on screen through a later failure.
+        assert!(empty_text(&Load::Failed("x".into()), 2).is_none());
+        assert!(empty_text(&Load::Ready, 2).is_none());
+    }
+
+    #[test]
+    fn fr_l12_unread_zero_has_no_badge() {
+        assert_eq!(badge_text(0), None);
     }
 }

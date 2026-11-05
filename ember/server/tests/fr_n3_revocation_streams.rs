@@ -347,6 +347,9 @@ async fn fr_n3_revoked_device_terminal_attach_closes_and_the_terminal_keeps_runn
     assert!(first.contains("attached"), "{first}");
     assert_eq!(node.direct.term(&tid).await.unwrap().clients.len(), 1);
     wait_live(|| f.devices.gate().live_connections(&phone_t.peer_id()), 1).await;
+    // The shell's snapshot and prompt follow the attached frame at an unpredictable moment; read
+    // them out first, or one of them is taken for a frame sent after the revoke.
+    drain(&mut ws).await;
 
     let started = Instant::now();
     f.devices.remove(&phone_t.peer_id()).unwrap();

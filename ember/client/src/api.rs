@@ -172,6 +172,71 @@ pub enum GitLogRefKind {
     Head,
 }
 
+/// Pull requests of the repository's GitHub remote (`POST /projects/{id}/git/prs`, FR-G8).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitPrs {
+    #[serde(default)]
+    pub prs: Vec<GitPr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPr {
+    pub number: u64,
+    pub title: String,
+    pub state: GitPrState,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub base: String,
+    /// ISO 8601 (`2026-11-05T10:00:00Z`).
+    #[serde(default)]
+    pub updated_at: String,
+    pub review: GitPrReview,
+    pub checks: GitPrChecks,
+    pub merge: GitPrMerge,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrState {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReview {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitPrChecks {
+    #[serde(default)]
+    pub passed: u32,
+    #[serde(default)]
+    pub failed: u32,
+    #[serde(default)]
+    pub pending: u32,
+}
+
+/// The merge gate: `reason` is the node's Korean text, also when `can_merge` is true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrMerge {
+    pub can_merge: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitStashEntry {
     pub index: u32,
@@ -624,6 +689,12 @@ impl Api {
     /// Read a page of repository history.
     pub async fn git_log(&self, project: &str, limit: u32, skip: u64, branch: Option<&str>) -> ApiResult<GitLog> {
         Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
+    }
+
+    /// List pull requests (`state` is `open`, `closed`, `merged` or `all`). The node runs the
+    /// computer's own `gh`; a missing or logged-out `gh` answers 409 with a Korean message.
+    pub async fn git_prs(&self, project: &str, state: &str, limit: u32) -> ApiResult<GitPrs> {
+        Self::decode(self.git_post(project, "prs", json!({ "state": state, "limit": limit })).await?)
     }
 
     pub async fn git_stash_list(&self, project: &str) -> ApiResult<Vec<GitStashEntry>> {

@@ -18,6 +18,10 @@
 //! - `GET /auth/callback`, the browser redirect of Sign in with ChatGPT, which cannot carry a
 //!   header (the `state` value in it is checked by the handler).
 //!
+//! `/api/guest/*` is deliberately not exempt: the guest router (`channels::guest`) is never served
+//! under this layer; its door is the separate `EMBER_GUEST_LISTEN` listener. Merged here by
+//! mistake, its routes would answer 401 without the server token, which fails loudly.
+//!
 //! A WebSocket upgrade takes the token from the header, or from a `Sec-WebSocket-Protocol` entry
 //! `ember.token.<token>`. Never from the query string, which ends up in logs and history. When
 //! the client also offers `ember.v1`, the server answers with that one, so the token is not
@@ -289,6 +293,16 @@ mod tests {
         for p in ["/api/channels", "/api/channels/c1", "/api/channels/c1/messages", "/api/channels//post",
             "/api/channels/c1/post/x", "/api/channels/c1/x/post", "/api/channels/post"] {
             assert!(!token_exempt(&Method::POST, p), "{p}");
+        }
+    }
+
+    #[test]
+    fn fr_t14_the_guest_family_is_not_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST] {
+            for p in ["/api/guest/accept", "/api/guest/channels/c1/messages", "/api/guest/", "/api/guest"] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
         }
     }
 

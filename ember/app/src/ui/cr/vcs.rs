@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, CONFLICT_PREVIEW_LINES, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, CONFLICT_PREVIEW_LINES, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -96,7 +96,7 @@ fn text_after_success(current: &str, submitted: &str) -> String {
 fn screen_subtitle(project: &ProjectBox, snap: Option<&RepoSnapshot>, sample: bool) -> String {
     if sample {
         if let Some(s) = snap {
-            return format!("darkpyonix-ember · {} · 변경 {} · PR 4", s.branch, s.changes.len());
+            return format!("darkpyonix-ember · {} · 변경 {} · PR {}", s.branch, s.changes.len(), sample_pr_count());
         }
     }
     match snap {
@@ -279,9 +279,6 @@ pub fn Unavailable(section: Section) {
             cu::Spacer().modifier(Modifier::new().height(SP[0]));
             // TODO(server, #168): this section needs the repository endpoints listed there.
             Label(&soon_line(section.label()), Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
-            if section == Section::PullRequests {
-                Label("병합 조건: CI 통과와 승인이 필요합니다.", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-            }
         });
     });
 }
@@ -675,11 +672,11 @@ pub fn SectionList(
     snap: Option<&RepoSnapshot>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
-    SectionListWithSample(active, snap, false, None, on_pick);
+    SectionListWithSample(active, snap, false, None, None, on_pick);
 }
 
 fn SectionListWithSample(
-    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>,
+    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
@@ -688,10 +685,10 @@ fn SectionListWithSample(
             let is_active = sec == active;
             let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
             let fg = if is_active { p.text } else { p.muted };
-            let count = section_count_with_stash(sec, snap, stash_count).or_else(|| {
+            let count = section_count_with(sec, snap, stash_count, pr_count).or_else(|| {
                 if is_sample {
                     match sec {
-                        Section::PullRequests => Some(4),
+                        Section::PullRequests => Some(sample_pr_count()),
                         Section::Stash => Some(2),
                         Section::Conflicts => Some(2),
                         Section::Team => Some(6),
@@ -1363,6 +1360,7 @@ fn SectionContent(
     tab: &MutableState<PaneTab>,
     actions: Option<Actions>,
     stash_count: MutableState<Option<usize>>,
+    pr_count: MutableState<Option<usize>>,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -1378,6 +1376,7 @@ fn SectionContent(
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
         (Some(_), Section::Stash) => StashPane(actions, stash_count, layout),
+        (Some(_), Section::PullRequests) => PullRequestsPane(actions, pr_count, layout),
         _ => Unavailable(sec),
     }
 }
@@ -1803,6 +1802,179 @@ fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
     }
 }
 
+/// Pull requests for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+/// How many pull requests the sample list holds (the header and the tab count follow it).
+fn sample_pr_count() -> usize {
+    match sample_prs() {
+        PrLoad::Ready(list) => list.len(),
+        _ => 0,
+    }
+}
+
+fn sample_prs() -> PrLoad {
+    use ember_client::api::{GitPrReview::*, GitPrState::*};
+    let e = |number: u64, title: &str, author: &str, head: &str, time: &str, state, draft: bool, review, checks: (u32, u32, u32), gate: (bool, &str)| PrEntry {
+        number,
+        title: title.to_string(),
+        author: author.to_string(),
+        head: head.to_string(),
+        base: "develop".to_string(),
+        time_text: time.to_string(),
+        state,
+        state_text: crate::ui::vcs::pr_state_text(state),
+        draft,
+        review,
+        review_text: crate::ui::vcs::pr_review_text(review),
+        checks_text: crate::ui::vcs::pr_checks_text(checks.0, checks.1, checks.2),
+        checks_failed: checks.1,
+        checks_pending: checks.2,
+        can_merge: gate.0,
+        gate_text: gate.1.to_string(),
+        url: format!("https://github.com/DarkPyonix/darkpyonix-ember/pull/{number}"),
+    };
+    PrLoad::Ready(vec![
+        e(412, "Feat: attach the session shim before routing", "BREW", "feat/session-shim", "12분 전", Open, false, Approved, (4, 0, 0), (true, "병합할 수 있습니다")),
+        e(409, "Fix: stop egress when a session detaches", "Minji Kim", "fix/egress-stop", "5시간 전", Open, false, ReviewRequired, (3, 1, 0), (false, "CI 체크가 실패했습니다 (실패 1개). 통과해야 병합할 수 있습니다.")),
+        e(405, "Feat: channel feed with mentions", "Jisoo Park", "feat/channel-feed", "1일 전", Open, true, None, (1, 0, 2), (false, "초안 상태라 병합할 수 없습니다. 검토 준비 후 초안을 해제하세요.")),
+        e(398, "Docs: describe the commit message rules", "Minji Kim", "docs/commit-rules", "3일 전", Merged, false, Approved, (4, 0, 0), (false, "이미 병합되었습니다.")),
+    ])
+}
+
+/// The meta line of a pull request row: author, head branch to base branch, and time.
+fn pr_meta(e: &PrEntry) -> String {
+    format!("{} \u{00b7} {} \u{2192} {} \u{00b7} {}", e.author, e.head, e.base, e.time_text)
+}
+
+fn pr_state_tone(e: &PrEntry) -> PillTone {
+    use ember_client::api::GitPrState::*;
+    match e.state {
+        Open => PillTone::Green,
+        Merged => PillTone::Blue,
+        Closed => PillTone::Grey,
+    }
+}
+
+fn pr_review_tone(e: &PrEntry) -> PillTone {
+    use ember_client::api::GitPrReview::*;
+    match e.review {
+        Approved => PillTone::Green,
+        ChangesRequested => PillTone::Red,
+        ReviewRequired => PillTone::Orange,
+        None => PillTone::Grey,
+    }
+}
+
+/// Red when a check failed, orange while some run, green when all passed, grey with none.
+fn pr_checks_tone(e: &PrEntry) -> PillTone {
+    if e.checks_failed > 0 {
+        PillTone::Red
+    } else if e.checks_pending > 0 {
+        PillTone::Orange
+    } else if e.checks_text == "체크 없음" {
+        PillTone::Grey
+    } else {
+        PillTone::Green
+    }
+}
+
+/// One pull request: number and title, meta line, the pills and the merge gate line. The row has
+/// no click yet (a 상세 pane and the merge button are not built).
+fn PullRequestRow(e: &PrEntry) {
+    let p = ember_theme().palette;
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        Txt(&format!("#{} {}", e.number, e.title), TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+        Txt(&pr_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            Pill(e.state_text, pr_state_tone(e), true);
+            if e.draft {
+                Pill("초안", PillTone::Grey, true);
+            }
+            Pill(e.review_text, pr_review_tone(e), true);
+            Pill(&e.checks_text, pr_checks_tone(e), true);
+        });
+        let gate = if e.can_merge { paint(p.green.strong) } else { paint(p.text_2) };
+        Label(&e.gate_text, Fs::Sm, Weight::Regular, Some(gate), None);
+    });
+}
+
+/// 풀 리퀘스트: the repository's pull requests with checks, review and the merge gate. `actions`
+/// is the project and the screen's reload counter; `None` shows sample pull requests. `count` is
+/// written for the section list (the open ones).
+fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    let key_project = actions.as_ref().map(|a| a.project.clone());
+    let state = remember_with_key(key_project, || mutable_state_of(PrLoad::Loading));
+    let filter = remember(|| mutable_state_of(PrFilter::Open));
+    let retry = remember(|| mutable_state_of(0_u64));
+    if let Some(a) = actions.clone() {
+        let (st, cnt, shown) = (state.clone(), count.clone(), filter.get());
+        launched_effect((a.project.clone(), a.reload.get(), retry.get(), shown.arg()), move || async move {
+            if crate::services::try_services().is_some() {
+                st.set(PrLoad::Loading);
+                let (name, now) = (a.project.clone(), crate::demo::now_ms() / 1000);
+                crate::services::run_shared(async move { prs_from(fetch_prs(&name, shown).await, now) }, move |result| {
+                    if shown == PrFilter::Open {
+                        cnt.set(if let PrLoad::Ready(list) = &result { Some(list.len()) } else { None });
+                    }
+                    st.set(result);
+                });
+            } else {
+                st.set(PrLoad::Failed("서버에 연결되어 있지 않아 풀 리퀘스트를 불러올 수 없습니다.".to_string()));
+            }
+        });
+    }
+    let shown = filter.get();
+    let current = if actions.is_some() { state.get() } else { sample_prs() };
+
+    let chips = {
+        let filter = filter.clone();
+        move || {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                for f in PrFilter::ALL {
+                    let filter = filter.clone();
+                    PickChip(f.label(), None, f == shown, false, move || filter.set(f));
+                }
+            });
+        }
+    };
+    let retry_state = retry.clone();
+    let list = move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            chips();
+            match current {
+                PrLoad::Loading => {
+                    Label("풀 리퀘스트를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                }
+                PrLoad::Failed(text) => {
+                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry_state.set(retry_state.get() + 1));
+                }
+                PrLoad::Ready(entries) => {
+                    if entries.is_empty() {
+                        EmberCard(false, true, None, Some(SP[3]), None, || {
+                            Label(shown.empty_text(), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        });
+                        return;
+                    }
+                    VcsCard(|| {
+                        for (i, e) in entries.iter().enumerate() {
+                            if i > 0 {
+                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            }
+                            PullRequestRow(e);
+                        }
+                    });
+                }
+            }
+        });
+    };
+    if layout == PaneLayout::Two {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+    } else {
+        list();
+    }
+}
+
 /// Stashes for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
 fn sample_stashes() -> StashLoad {
     let e = |index: u32, message: &str, branch: &str, time: &str| StashEntry {
@@ -2066,6 +2238,7 @@ fn VcsScreenWithLoad(
     let tab = remember(|| mutable_state_of(PaneTab::Files));
     let selected_proj = remember(|| mutable_state_of(current_id));
     let stash_count = remember(|| mutable_state_of(None::<usize>));
+    let pr_count = remember(|| mutable_state_of(None::<usize>));
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
@@ -2115,10 +2288,10 @@ fn VcsScreenWithLoad(
                         cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
                             cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
-                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), move |s| sec_state.set(s));
+                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone());
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone());
                             });
                         });
                     } else {
@@ -2129,7 +2302,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone());
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone());
                         });
                     }
                 } else {
@@ -2178,8 +2351,8 @@ mod tests {
         let snap = RepoSnapshot { branch: "main".into(), ahead: 3, behind: 2, ..Default::default() };
         assert_eq!(screen_subtitle(&project, Some(&snap), false), "프로젝트 · main · 앞섬 3 · 뒤처짐 2 · 변경 0");
         assert_eq!(screen_subtitle(&project, None, false), "프로젝트");
-        assert!(screen_subtitle(&sample_project_box(), Some(&sample_snapshot()), true).contains("PR 4"));
-        assert!(!screen_subtitle(&project, Some(&snap), false).contains("PR 4"));
+        assert!(screen_subtitle(&sample_project_box(), Some(&sample_snapshot()), true).contains(&format!("PR {}", sample_pr_count())));
+        assert!(!screen_subtitle(&project, Some(&snap), false).contains("PR "));
     }
 
     #[test]
@@ -2616,6 +2789,66 @@ mod tests {
         assert_eq!(chip_limit(PaneLayout::Two), 4);
         let HistoryLoad::Ready { entries, .. } = sample_history() else { panic!() };
         assert_eq!(history_meta(&entries[0]), "a1b2c3d \u{00b7} BREW \u{00b7} 12분 전");
+    }
+
+    #[compose_rust::runtime::composable]
+    fn prs_sample_wide() {
+        PullRequestsPane(None, mutable_state_of(None), PaneLayout::Two);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn prs_sample_compact() {
+        PullRequestsPane(None, mutable_state_of(None), PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_g8_pull_request_list_shows_title_meta_pills_and_the_gate_at_both_widths() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [prs_sample_wide as fn(), prs_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("#412 Feat: attach the session shim before routing"));
+            assert!(text.contains("BREW"));
+            assert!(text.contains("feat/session-shim"));
+            assert!(text.contains("12분 전"));
+            assert!(text.contains("열림"));
+            assert!(text.contains("병합됨"));
+            assert!(text.contains("초안"));
+            assert!(text.contains("승인됨"));
+            assert!(text.contains("체크 4/4 통과"));
+            assert!(text.contains("체크 3/4 통과"));
+            assert!(text.contains("병합할 수 있습니다"));
+            assert!(text.contains("CI 체크가 실패했습니다"));
+            assert!(!text.contains(SOON));
+            assert!(!text.contains("병합 조건: CI 통과와 승인이 필요합니다."), "the placeholder is gone");
+        }
+    }
+
+    #[test]
+    fn fr_g8_the_meta_line_and_the_tones_follow_the_row() {
+        let PrLoad::Ready(list) = sample_prs() else { panic!() };
+        assert_eq!(pr_meta(&list[0]), "BREW \u{00b7} feat/session-shim \u{2192} develop \u{00b7} 12분 전");
+        assert_eq!(pr_state_tone(&list[0]), PillTone::Green);
+        assert_eq!(pr_state_tone(&list[3]), PillTone::Blue);
+        assert_eq!(pr_review_tone(&list[0]), PillTone::Green);
+        assert_eq!(pr_review_tone(&list[1]), PillTone::Orange);
+        assert_eq!(pr_review_tone(&list[2]), PillTone::Grey);
+        assert_eq!(pr_checks_tone(&list[0]), PillTone::Green);
+        assert_eq!(pr_checks_tone(&list[1]), PillTone::Red);
+        assert_eq!(pr_checks_tone(&list[2]), PillTone::Orange);
+    }
+
+    #[test]
+    fn fr_g8_the_filter_chips_and_the_loaded_count_replace_the_placeholder() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(prs_sample_wide);
+        for label in ["열림", "닫힘", "병합됨", "전체"] {
+            assert!(text.contains(label), "{label}");
+        }
+        // Read by the section (not the sample), the count is the open ones; unread, there is none.
+        assert_eq!(section_count_with(Section::PullRequests, None, None, None), None);
+        assert_eq!(section_count_with(Section::PullRequests, None, None, Some(3)), Some(3));
     }
 
     #[compose_rust::runtime::composable]

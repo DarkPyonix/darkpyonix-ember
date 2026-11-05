@@ -40,6 +40,7 @@ use tokio::task::JoinHandle;
 
 use crate::coords::WidgetPos;
 use crate::engine::{CoreOptions, Effect, Input, SessionCore, SessionUpdate, Token};
+use crate::fallback::{ConnectOutcome, FallbackTarget};
 use crate::languages::LanguageRegistry;
 use crate::widget::WidgetEvent;
 use crate::Error;
@@ -61,6 +62,9 @@ pub struct SessionConfig {
     /// User settings, dotted keys (`"json.validate.enable"`).
     pub user_settings: Vec<(String, Value)>,
     pub core: CoreOptions,
+    /// Optional VS Code Web target URL (or base URL) used when the server version is unsupported
+    /// or unknown and the session falls back to the VS Code target.
+    pub vscode_url: Option<String>,
 }
 
 impl SessionConfig {
@@ -77,7 +81,13 @@ impl SessionConfig {
             app_language: "en".into(),
             user_settings: Vec::new(),
             core: CoreOptions::default(),
+            vscode_url: None,
         }
+    }
+
+    pub fn with_vscode_url(mut self, url: impl Into<String>) -> Self {
+        self.vscode_url = Some(url.into());
+        self
     }
 }
 
@@ -91,6 +101,8 @@ enum Command {
 pub struct EditorSession {
     tx: mpsc::UnboundedSender<Command>,
     authority: String,
+    workspace_path: String,
+    fs: Arc<RemoteFs>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -109,6 +121,44 @@ impl EditorSession {
         .await
     }
 
+    /// Connect over plain TCP, returning [`ConnectOutcome::Fallback`] if the server's version is
+    /// unsupported or unknown.
+    pub async fn connect_tcp_or_fallback(config: SessionConfig) -> Result<ConnectOutcome, Error> {
+        let addr = config.host.clone();
+        Self::connect_or_fallback(config, move || {
+            let addr = addr.clone();
+            async move {
+                let s = tokio::net::TcpStream::connect(addr).await?;
+                let _ = s.set_nodelay(true);
+                Ok::<_, std::io::Error>(s)
+            }
+        })
+        .await
+    }
+
+    /// Connect with `dial`, checking the server version at connect time and falling back to the VS
+    /// Code target ([`ConnectOutcome::Fallback`]) when the server commit differs from
+    /// [`ember_editor_conn::PINNED_COMMIT`] or is unknown.
+    pub async fn connect_or_fallback<D, F, S>(config: SessionConfig, dial: D) -> Result<ConnectOutcome, Error>
+    where
+        D: Fn() -> F,
+        F: Future<Output = std::io::Result<S>>,
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let vscode_url = config.vscode_url.clone();
+        let workspace_path = config.workspace_path.clone();
+        match Self::connect(config, dial).await {
+            Ok((session, updates)) => Ok(ConnectOutcome::Connected { session, updates }),
+            Err(err) => {
+                if let Some(target) = FallbackTarget::from_error(&err, vscode_url.as_deref(), &workspace_path) {
+                    Ok(ConnectOutcome::Fallback(target))
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
     /// Connect with `dial` opening a fresh byte stream to the server each time it is called (three
     /// times: `GET /version`, management, extension host). TCP, TLS or an ember-transport stream.
     pub async fn connect<D, F, S>(config: SessionConfig, dial: D) -> Result<(Self, mpsc::UnboundedReceiver<SessionUpdate>), Error>
@@ -118,6 +168,7 @@ impl EditorSession {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let authority = config.remote_authority.clone();
+        let workspace_path = config.workspace_path.clone();
         let mut base = ConnectOptions::new(config.host.clone());
         base.connection_token = config.connection_token.clone();
 
@@ -181,7 +232,7 @@ impl EditorSession {
         let driver = Driver {
             core,
             peer: peer.clone(),
-            fs,
+            fs: Arc::clone(&fs),
             ipc,
             updates: updates_tx,
             reqs: HashMap::new(),
@@ -200,7 +251,7 @@ impl EditorSession {
             call.start(&peer)?.wait().await?;
         }
 
-        Ok((Self { tx, authority, task: Some(task) }, updates_rx))
+        Ok((Self { tx, authority, workspace_path, fs, task: Some(task) }, updates_rx))
     }
 
     /// The remote authority URIs of this session use.
@@ -211,6 +262,21 @@ impl EditorSession {
     /// `vscode-remote://<authority><path>` for a server path.
     pub fn uri(&self, path: &str) -> UriComponents {
         UriComponents::remote(&self.authority, path)
+    }
+
+    /// `vscode-remote://<authority><workspace_path>` for the root workspace folder.
+    pub fn workspace_uri(&self) -> UriComponents {
+        self.uri(&self.workspace_path)
+    }
+
+    /// List entries `(name, FileType)` in a directory on the remote server.
+    pub async fn read_dir(&self, uri: &UriComponents) -> Result<Vec<(String, u32)>, Error> {
+        self.fs.readdir(uri).await.map_err(Error::Conn)
+    }
+
+    /// Stat a file or directory on the remote server.
+    pub async fn stat(&self, uri: &UriComponents) -> Result<ember_editor_conn::remote_fs::Stat, Error> {
+        self.fs.stat(uri).await.map_err(Error::Conn)
     }
 
     fn send(&self, c: Command) -> Result<(), Error> {

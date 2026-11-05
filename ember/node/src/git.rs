@@ -221,6 +221,25 @@ async fn run_net(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
     run_with(repo, args, None, Some(network_timeout())).await
 }
 
+/// The `core.sshCommand` git would use here (repository, then global config), if any.
+async fn configured_ssh_command(repo: &Path) -> Option<String> {
+    let out = tokio::process::Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(repo)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// The ssh command for a network operation: the configured one (or plain `ssh`) in batch mode.
+fn batch_ssh_command(configured: Option<&str>) -> String {
+    format!("{} -o BatchMode=yes", configured.unwrap_or("ssh"))
+}
+
 async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
     let mut cmd = tokio::process::Command::new("git");
     // Non-ASCII paths stay raw (not octal-quoted), pathspecs are literal (`a[1].txt`, `*.rs`),
@@ -246,8 +265,11 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
     if !args.starts_with(&["stash", "push"]) {
         cmd.env("GIT_LITERAL_PATHSPECS", "1");
     }
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    // Network operations never ask for an ssh password. GIT_SSH_COMMAND outranks the user's
+    // `core.sshCommand` (keys, proxy jump), so when the variable is unset the configured command
+    // is read and kept, with BatchMode appended.
+    if deadline.is_some() && std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", batch_ssh_command(configured_ssh_command(repo).await.as_deref()));
     }
     let mut child = cmd.spawn().map_err(|e| GitError::Internal(format!("cannot run git: {e}")))?;
     let pipe = child.stdin.take();

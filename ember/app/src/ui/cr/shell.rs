@@ -710,11 +710,7 @@ pub fn shell() {
                 });
             });
             let close = settings_open.clone();
-            EmberSheet("설정", settings_open.get(), move || close.set(false), None, || {
-                cu::Column().modifier(Modifier::new().fill_max_width().padding_role(SpaceRole::Md)).content(|| {
-                    Label(PLACEHOLDER_TEXT, Fs::Md, Weight::Regular, Some(paint(theme.palette.muted)), None);
-                });
-            });
+            super::settings::SettingsSheet(settings_open.get(), move || close.set(false));
             super::new_session::NewSessionDialog();
         });
 }
@@ -802,7 +798,7 @@ pub fn launch(pref: ThemePref) {
     };
     compose_rust::LaunchBuilder::new()
         .with_theme(Theme::adaptive(DesignSystem::Material3).with_color_scheme(scheme))
-        .with_window(Window::new().with_title("Ember shell (compose-rust)").with_size(w, h))
+        .with_window(Window::new().with_title("Ember").with_size(w, h))
         .launch(content);
 }
 
@@ -914,5 +910,22 @@ mod tests {
         assert!(len_after_send > 6);
         assert!(s.reset_demo());
         assert_eq!(d.events_for("demo-s1").len(), 6);
+    }
+
+    #[test]
+    fn fr_l28_shell_composes_settings_sheet_and_every_screen() {
+        use compose_rust::protocol::decode_batch;
+        use compose_rust::{Host, Recomposer};
+
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(shell)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        // The shell mounts SettingsSheet (with theme, keymap, default IDE and archived toggle)
+        // instead of the old "준비 중입니다" placeholder.
+        assert!(has_text(&batch, "설정"));
+        assert!(has_text(&batch, "화면 테마"));
+        assert!(has_text(&batch, "에디터 단축키"));
+        assert!(has_text(&batch, "기본 IDE"));
+        assert!(has_text(&batch, "보관된 세션 표시"));
     }
 }

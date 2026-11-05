@@ -15,11 +15,11 @@ use std::time::Duration;
 use compose_rust::runtime::{mutable_state_of, remember};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{ColorRole, Paint, SpaceRole, TextOverflow, TypeRole};
+use compose_rust::{Alignment, ColorRole, IconRole, Paint, SpaceRole, TextOverflow, TypeRole};
 
 use ember_client::wire::SearchHit;
 
-use super::components::{EmberField, FieldOptions, Label, Txt};
+use super::components::{AppButton, ButtonKind, EmberField, FieldOptions, Label, Txt};
 use super::theme::*;
 use super::launcher::{ConnectionBanner, SessionRowView};
 use crate::model::{self, SearchResult};
@@ -137,6 +137,23 @@ pub fn SearchScreen() {
         .modifier(Modifier::new().fill_max_width().fill_max_height().padding_role(SpaceRole::Md))
         .content(|| {
             ConnectionBanner();
+            cu::Row()
+                .spacing(SP[1])
+                .alignment(Alignment::CenterStart)
+                .modifier(Modifier::new().fill_max_width())
+                .content(|| {
+                    let back_ui = ui.clone();
+                    AppButton(
+                        "프로젝트",
+                        Some(IconRole::Back),
+                        ButtonKind::Default,
+                        true,
+                        true,
+                        false,
+                        move || back_ui.go(crate::ui::Route::Projects),
+                    );
+                    Label("전체 검색", Fs::Lg, Weight::Semibold, None, Some(1));
+                });
             EmberField(FieldOptions {
                 fill_max_width: true,
                 placeholder: "세션 검색".to_string(),
@@ -237,5 +254,6 @@ mod tests {
         };
         assert!(has("세션 검색"));
         assert!(has("모든 대화"));
+        assert!(has("프로젝트"));
     }
 }

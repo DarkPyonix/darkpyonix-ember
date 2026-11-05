@@ -1011,8 +1011,10 @@ pub fn sheet_scroll_dp(value: Option<&str>) -> f32 {
 struct SheetSkip(std::cell::Cell<f32>);
 
 impl SheetSkip {
+    /// Review captures only: release builds ignore `EMBER_CR_SHEET_SCROLL`.
     fn from_env() -> SheetSkip {
-        SheetSkip(std::cell::Cell::new(sheet_scroll_dp(std::env::var("EMBER_CR_SHEET_SCROLL").ok().as_deref())))
+        let value = if cfg!(debug_assertions) { std::env::var("EMBER_CR_SHEET_SCROLL").ok() } else { None };
+        SheetSkip(std::cell::Cell::new(sheet_scroll_dp(value.as_deref())))
     }
 
     /// Whether a section of about `est` dp is still in view.

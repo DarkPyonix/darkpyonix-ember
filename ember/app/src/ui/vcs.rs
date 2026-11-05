@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitCommitted, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStashEntry, GitStatus,
+    ApiError, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -1696,6 +1696,152 @@ pub fn repo_card_line(project: &ProjectBox, snap: Option<&RepoSnapshot>) -> Stri
     }
 }
 
+/// How one conflict block is settled (FR-G7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictChoice {
+    Unresolved,
+    Ours,
+    Theirs,
+    /// Ours first, then theirs.
+    Both,
+}
+
+/// One piece of a conflicted file: text both sides share, or a block to settle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictSegment {
+    Common(String),
+    Block { ours_label: String, theirs_label: String, ours: String, theirs: String, choice: ConflictChoice },
+}
+
+/// A conflicted file as the editor shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictFile {
+    pub path: String,
+    pub segments: Vec<ConflictSegment>,
+}
+
+impl ConflictFile {
+    /// The node's blocks as segments, every block still unresolved.
+    pub fn from_node(path: &str, c: &GitConflict) -> ConflictFile {
+        let segments = c
+            .blocks
+            .iter()
+            .map(|b| match b {
+                GitConflictBlock::Common { text } => ConflictSegment::Common(text.clone()),
+                GitConflictBlock::Conflict { ours, theirs, ours_label, theirs_label } => ConflictSegment::Block {
+                    ours_label: ours_label.clone(),
+                    theirs_label: theirs_label.clone(),
+                    ours: ours.clone(),
+                    theirs: theirs.clone(),
+                    choice: ConflictChoice::Unresolved,
+                },
+            })
+            .collect();
+        ConflictFile { path: path.to_string(), segments }
+    }
+
+    /// How many conflict blocks the file has.
+    pub fn block_count(&self) -> usize {
+        self.segments.iter().filter(|s| matches!(s, ConflictSegment::Block { .. })).count()
+    }
+
+    /// How many blocks have a choice.
+    pub fn resolved_count(&self) -> usize {
+        self.segments.iter().filter(|s| matches!(s, ConflictSegment::Block { choice, .. } if *choice != ConflictChoice::Unresolved)).count()
+    }
+
+    /// True when every block has a choice.
+    pub fn is_resolved(&self) -> bool {
+        self.resolved_count() == self.block_count()
+    }
+
+    /// The same file with block number `block` (counting blocks only) set to `choice`. An index
+    /// past the last block changes nothing.
+    pub fn with_choice(&self, block: usize, choice: ConflictChoice) -> ConflictFile {
+        let mut n = 0;
+        let segments = self
+            .segments
+            .iter()
+            .map(|seg| match seg {
+                ConflictSegment::Block { ours_label, theirs_label, ours, theirs, choice: old } => {
+                    let this = n;
+                    n += 1;
+                    ConflictSegment::Block {
+                        ours_label: ours_label.clone(),
+                        theirs_label: theirs_label.clone(),
+                        ours: ours.clone(),
+                        theirs: theirs.clone(),
+                        choice: if this == block { choice } else { *old },
+                    }
+                }
+                other => other.clone(),
+            })
+            .collect();
+        ConflictFile { path: self.path.clone(), segments }
+    }
+
+    /// The file text with each block replaced by its choice (Both is ours, then theirs). `None`
+    /// while a block is unresolved, so a half-settled file is never sent. Text is joined as it
+    /// came, so a missing trailing newline stays missing.
+    pub fn resolved_content(&self) -> Option<String> {
+        if !self.is_resolved() {
+            return None;
+        }
+        let mut out = String::new();
+        for seg in &self.segments {
+            match seg {
+                ConflictSegment::Common(t) => out.push_str(t),
+                ConflictSegment::Block { ours, theirs, choice, .. } => match choice {
+                    ConflictChoice::Ours => out.push_str(ours),
+                    ConflictChoice::Theirs => out.push_str(theirs),
+                    ConflictChoice::Both => {
+                        out.push_str(ours);
+                        out.push_str(theirs);
+                    }
+                    ConflictChoice::Unresolved => return None,
+                },
+            }
+        }
+        Some(out)
+    }
+
+    /// "N/M 블록 해결".
+    pub fn progress_text(&self) -> String {
+        format!("{}/{} 블록 해결", self.resolved_count(), self.block_count())
+    }
+}
+
+/// The state of the conflict editor's file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictLoad {
+    Loading,
+    Ready(ConflictFile),
+    /// The Korean line with the node's message (shown with a retry button).
+    Failed(String),
+}
+
+/// The editor state from the node's answer.
+pub fn conflict_from(path: &str, result: Result<GitConflict, ApiError>) -> ConflictLoad {
+    match result {
+        Ok(c) => ConflictLoad::Ready(ConflictFile::from_node(path, &c)),
+        Err(e) => ConflictLoad::Failed(failure_text("충돌 내용을 확인", &e)),
+    }
+}
+
+/// Read one unmerged file's blocks. Runs on the runtime, not the UI thread.
+pub async fn fetch_conflict(project: &str, path: &str) -> ConflictLoad {
+    conflict_from(path, git_call::<GitConflict>(project, "conflict", json!({ "path": path })).await)
+}
+
+/// Write the settled content and stage the file. `Err` is the Korean line to show (the node's
+/// message when it sent one; a file that is not unmerged answers 409).
+pub async fn run_resolve(project: &str, path: &str, content: &str) -> Result<(), String> {
+    git_call::<Value>(project, "resolve", json!({ "path": path, "content": content }))
+        .await
+        .map(|_| ())
+        .map_err(|e| failure_text("충돌 해결을 ", &e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2732,5 +2878,82 @@ rename to new.txt
     fn fr_g6_a_non_korean_failure_gets_a_korean_prefix() {
         let e = ApiError::Status { status: 500, message: "boom".into() };
         assert_eq!(failure_text(StashAction::Apply.what(), &e), "스태시를 적용하지 못했습니다: boom");
+    }
+
+    fn block(ours: &str, theirs: &str) -> GitConflictBlock {
+        GitConflictBlock::Conflict { ours: ours.into(), theirs: theirs.into(), ours_label: "HEAD".into(), theirs_label: "origin/main".into() }
+    }
+
+    fn two_blocks() -> ConflictFile {
+        let c = GitConflict {
+            blocks: vec![
+                GitConflictBlock::Common { text: "top\n".into() },
+                block("o1\n", "t1\n"),
+                GitConflictBlock::Common { text: "mid\n".into() },
+                block("o2\n", "t2\n"),
+                GitConflictBlock::Common { text: "end".into() },
+            ],
+        };
+        ConflictFile::from_node("a.rs", &c)
+    }
+
+    #[test]
+    fn fr_g7_blocks_parse_into_unresolved_segments_with_labels() {
+        let f = two_blocks();
+        assert_eq!(f.block_count(), 2);
+        assert_eq!(f.resolved_count(), 0);
+        assert!(!f.is_resolved());
+        assert_eq!(f.progress_text(), "0/2 블록 해결");
+        let ConflictSegment::Block { ours_label, theirs_label, choice, .. } = &f.segments[1] else { panic!() };
+        assert_eq!((ours_label.as_str(), theirs_label.as_str()), ("HEAD", "origin/main"));
+        assert_eq!(*choice, ConflictChoice::Unresolved);
+    }
+
+    #[test]
+    fn fr_g7_all_ours_all_theirs_and_both_join_the_segments() {
+        let f = two_blocks();
+        let ours = f.with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Ours);
+        assert_eq!(ours.resolved_content().unwrap(), "top\no1\nmid\no2\nend");
+        let theirs = f.with_choice(0, ConflictChoice::Theirs).with_choice(1, ConflictChoice::Theirs);
+        assert_eq!(theirs.resolved_content().unwrap(), "top\nt1\nmid\nt2\nend");
+        let both = f.with_choice(0, ConflictChoice::Both).with_choice(1, ConflictChoice::Theirs);
+        assert_eq!(both.resolved_content().unwrap(), "top\no1\nt1\nmid\nt2\nend");
+        assert_eq!(both.progress_text(), "2/2 블록 해결");
+    }
+
+    #[test]
+    fn fr_g7_an_unresolved_block_refuses_to_produce_content() {
+        let f = two_blocks().with_choice(1, ConflictChoice::Ours);
+        assert!(!f.is_resolved());
+        assert_eq!(f.resolved_count(), 1);
+        assert_eq!(f.resolved_content(), None);
+        assert_eq!(two_blocks().resolved_content(), None);
+    }
+
+    #[test]
+    fn fr_g7_a_choice_can_change_and_a_bad_index_changes_nothing() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours);
+        let again = f.with_choice(0, ConflictChoice::Theirs);
+        assert_eq!(again.resolved_count(), 1);
+        assert_eq!(f.with_choice(9, ConflictChoice::Both), f);
+    }
+
+    #[test]
+    fn fr_g7_text_without_a_trailing_newline_is_kept_as_is() {
+        let c = GitConflict { blocks: vec![block("a", "b")] };
+        let f = ConflictFile::from_node("x", &c).with_choice(0, ConflictChoice::Both);
+        assert_eq!(f.resolved_content().unwrap(), "ab");
+        let none = ConflictFile::from_node("x", &GitConflict { blocks: vec![GitConflictBlock::Common { text: "plain".into() }] });
+        assert!(none.is_resolved());
+        assert_eq!(none.resolved_content().unwrap(), "plain");
+    }
+
+    #[test]
+    fn fr_g7_a_failed_read_shows_the_nodes_korean_message() {
+        let e = ApiError::Status { status: 409, message: "병합 충돌 중인 파일이 아닙니다.".into() };
+        assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("병합 충돌 중인 파일이 아닙니다.".into()));
+        let e = ApiError::Status { status: 500, message: "boom".into() };
+        assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("충돌 내용을 확인하지 못했습니다: boom".into()));
+        assert!(matches!(conflict_from("a", Ok(GitConflict { blocks: vec![] })), ConflictLoad::Ready(_)));
     }
 }

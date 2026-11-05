@@ -292,6 +292,17 @@ impl A2aStore {
         )?)
     }
 
+    /// True when a person's mention of `to` in `channel` was stored at or after `since_ms`.
+    pub fn channel_mention_since(&self, to: &str, channel: &str, since_ms: i64) -> anyhow::Result<bool> {
+        let n: i64 = self.conn.lock().unwrap().query_row(
+            "SELECT COUNT(*) FROM a2a_messages
+             WHERE to_session = ?1 AND origin_channel = ?2 AND created_at >= ?3",
+            params![to, channel, since_ms],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
     /// Messages between `a` and `b`, in either direction, since `since_ms`.
     pub fn pair_since(&self, a: &str, b: &str, since_ms: i64) -> anyhow::Result<u32> {
         Ok(self.conn.lock().unwrap().query_row(

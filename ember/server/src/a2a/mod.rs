@@ -36,6 +36,12 @@ pub use store::{A2aMessage, A2aStore};
 
 /// Name of the agent-side command (a bin target of this crate).
 pub const CLI_NAME: &str = "ember-a2a";
+
+/// How many posts one session may make into one channel per minute (FR-T12, `channel post`).
+pub const CHANNEL_POSTS_PER_MINUTE: u32 = 6;
+
+/// How long after a person's mention an agent may post in that channel (FR-T12).
+pub const CHANNEL_MENTION_WINDOW: Duration = Duration::from_secs(30 * 60);
 /// Marks the first line of every delivered message.
 pub const HEADER_TAG: &str = "[ember a2a]";
 /// Marks the first line of every scheduled prompt (FR-A8).
@@ -157,6 +163,8 @@ pub struct A2a {
     /// transcripts.
     last_notice: StdMutex<HashMap<(String, String), Instant>>,
     computer_setter: StdMutex<Option<ComputerSetter>>,
+    /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
+    channel_posts: StdMutex<HashMap<(String, String), std::collections::VecDeque<Instant>>>,
 }
 
 const NOTICE_EVERY: Duration = Duration::from_secs(60);
@@ -179,6 +187,7 @@ impl A2a {
             awaiting: StdMutex::new(HashMap::new()),
             last_notice: StdMutex::new(HashMap::new()),
             computer_setter: StdMutex::new(None),
+            channel_posts: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -316,7 +325,19 @@ impl A2a {
              <schedule-id>` deletes one.\n\
              \n\
              Scheduled prompts arrive as user messages whose first line starts with \
-             `{SCHEDULE_TAG}`. Create schedules only when the user asked for one."
+             `{SCHEDULE_TAG}`. Create schedules only when the user asked for one.\n\
+             \n\
+             # Channels (Ember channels)\n\
+             \n\
+             A person can mention you with `@name` in a channel. That message reaches you as a \
+             user message whose first line starts with `{HEADER_TAG}` and names the person, the \
+             channel and the channel id. A plain reply in your own session is not shown in the \
+             channel. To answer there, run `{CLI_NAME} channel post <channel-id> \"<text>\"` \
+             (use `-` to read the text from stdin). Reply only when you were addressed, and keep \
+             it short. You may post only in a channel you belong to, for 30 minutes after a \
+             person mentioned you there, at most {CHANNEL_POSTS_PER_MINUTE} posts a minute. \
+             Your post is shown to the people in the channel; `@name` in it does not reach \
+             another agent."
         )
     }
 
@@ -666,7 +687,8 @@ impl A2a {
                 };
                 parts.push(format!(
                     "{HEADER_TAG} Message {} from {who} ({place})\n\
-                     This message is from a person in a channel, not from another agent.\n\n{}",
+                     This message is from a person in a channel, not from another agent.\n\
+                     To reply in the channel: {CLI_NAME} channel post {channel_id} \"...\"\n\n{}",
                     m.id, m.text
                 ));
                 continue;

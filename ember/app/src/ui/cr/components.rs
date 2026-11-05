@@ -250,7 +250,7 @@ pub fn SheetFooter(content: impl FnOnce()) {
 pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines: Option<u32>) {
     let theme = ember_theme();
     let color = color.unwrap_or_else(|| paint(theme.palette.text));
-    // TODO(compose-rust): Text has no overflow_wrap builder in v0.0.5, so a single
+    // TODO(compose-rust#443): Text has no overflow_wrap builder in v0.0.5, so a single
     // word wider than its container can still be clipped by the renderer.
     let mut t = cu::Text(text)
         .word_break(WordBreak::KeepAll)
@@ -356,7 +356,7 @@ pub fn EmberField(o: FieldOptions) {
     // TODO(compose-rust#376): the renderer paints the design system's field frame over these
     // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
     // appear once the node's own are honored. 14 px text needs #374.
-    // TODO(compose-rust): TextField has no word_break or overflow builder; its
+    // TODO(compose-rust#444): TextField has no word_break or overflow builder; its
     // multiline placeholder can break Korean words inside a line.
     let mut f = cu::TextField()
         .modifier(modifier)
@@ -958,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l10_chips_and_pills_emit_single_line_max_lines() {
+    fn fr_l10_1_chips_and_pills_emit_single_line_max_lines() {
         use compose_rust::protocol::{decode_batch, Mutation, PropertyValue};
         use compose_rust::{Host, PropertyKind, Recomposer};
         let mut host = Host::new(|| {

@@ -310,7 +310,15 @@ fn section_svg(sec: Section) -> &'static str {
     }
 }
 
-/// A 32 px circle icon button named for assistive tech via `FocusOverlay`.
+/// Minimum hit and touch target of an icon-only control, in dp (FR-L19, #293).
+pub const ICON_TOUCH_TARGET: f32 = 44.0;
+
+/// The labels of the remote icon buttons and the stash button, in the order shown.
+pub fn remote_button_labels() -> [&'static str; 4] {
+    ["가져오기", "내려받기", "올리기", "스태시"]
+}
+
+/// A 32 px circle icon button with a 44 dp hit target, named for assistive tech via `FocusOverlay`.
 fn CircleIconButton(
     icon: &'static str,
     label: &str,
@@ -318,16 +326,21 @@ fn CircleIconButton(
 ) {
     let p = ember_theme().palette;
     cu::Box()
-        .modifier(
-            Modifier::new()
-                .size(32.0, 32.0)
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .shape_role(ShapeRole::Full),
-        )
+        .modifier(Modifier::new().size(ICON_TOUCH_TARGET, ICON_TOUCH_TARGET))
         .alignment(Alignment::Center)
         .content(move || {
-            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            cu::Box()
+                .modifier(
+                    Modifier::new()
+                        .size(32.0, 32.0)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .shape_role(ShapeRole::Full),
+                )
+                .alignment(Alignment::Center)
+                .content(move || {
+                    NavIcon(icon, p.text_2.to_argb(), 16.0);
+                });
             FocusOverlay(label, on_click);
         });
 }
@@ -336,7 +349,7 @@ fn CircleIconButton(
 fn RepoSelector(name: &str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     cu::Box()
-        .modifier(Modifier::new().fill_max_width().height(36.0))
+        .modifier(Modifier::new().fill_max_width().height(ICON_TOUCH_TARGET))
         .content(move || {
             cu::Row()
                 .alignment(Alignment::CenterStart)
@@ -659,7 +672,8 @@ fn RemoteControls(action: RemoteAction, enabled: bool, actions: Option<Actions>)
     let main = actions.clone();
     RemoteMainButton(action, enabled, move || { if let Some(a) = &main { a.remote(action); } });
     cu::Row().spacing(4.0).content(move || {
-        for (icon, label, action) in [(ICON_FETCH_SVG, "가져오기", RemoteAction::Fetch), (ICON_ARROW_DOWN_SVG, "내려받기", RemoteAction::Pull(0)), (ICON_ARROW_UP_SVG, "올리기", RemoteAction::Push(0))] {
+        let labels = remote_button_labels();
+        for (icon, label, action) in [(ICON_FETCH_SVG, labels[0], RemoteAction::Fetch), (ICON_ARROW_DOWN_SVG, labels[1], RemoteAction::Pull(0)), (ICON_ARROW_UP_SVG, labels[2], RemoteAction::Push(0))] {
             let a = actions.clone();
             CircleIconButton(icon, label, move || { if let Some(a) = &a { a.remote(action); } });
         }
@@ -936,7 +950,7 @@ fn FilesHeader(
         cu::Spacer().modifier(Modifier::new().width(SP[0]));
         Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
         cu::Spacer().modifier(Modifier::new().weight(1.0));
-        CircleIconButton(ICON_STASH_SVG, "스태시", move || {
+        CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
             notice::post(soon_line("스태시"));
         });
     });
@@ -1281,16 +1295,19 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 .alignment(Alignment::TopStart)
                 .spacing(GAP_CARD)
                 .content(move || {
-                    // Left card: file tree + commit box directly under tree
-                    cu::ScrollColumn().modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
-                        VcsCard(move || {
-                            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                                FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                                FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
-                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-                                CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
+                    // Left column: the tree scrolls, the commit box stays pinned below it (#290)
+                    cu::Column().spacing(GAP_CARD).modifier(Modifier::new().width(320.0).fill_max_height()).content(move || {
+                        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(move || {
+                            VcsCard(move || {
+                                cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                                    FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                    FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
+                                });
                             });
+                        });
+                        VcsCard(move || {
+                            CommitBox(&branch, staged_files, &sum_files, &body_files, &am_files, commit.clone());
                         });
                     });
 
@@ -1336,7 +1353,10 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                 PaneTabs(Section::Changes, tab, move |t| on_tab_pick(t));
                 match tab.unwrap_or(PaneTab::Files) {
                     PaneTab::Diff => DiffPane(&diffs, sel, &staging),
-                    PaneTab::Commit => CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone()),
+                    PaneTab::Commit => {
+                        CommitPane(&snap.branch, staged_files, &summary, &body, &amend, commit.clone());
+                        cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+                    }
                     _ => {
                         VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -2988,6 +3008,43 @@ mod tests {
         assert!(text.contains("Pull 1"));
         assert!(text.contains("변경 파일 5"));
         assert!(text.contains("shim.rs"));
+    }
+
+    #[test]
+    fn fr_l19_commit_box_is_pinned_below_the_tree_at_the_wide_layout() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(sample_screen)));
+        let mut text: String = decode_batch(host.rebuild().expect("rebuild"))
+            .expect("decode")
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect();
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 1440.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Expanded,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        text.extend(decode_batch(bytes).expect("decode").iter().map(|m| format!("{m:?}")));
+        assert!(text.contains("커밋"), "the commit button is in the wide layout");
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l19_icon_buttons_have_a_44_touch_target_and_a_label() {
+        assert_eq!(ICON_TOUCH_TARGET, 44.0);
+        let labels = remote_button_labels();
+        assert_eq!(labels, ["가져오기", "내려받기", "올리기", "스태시"]);
+        assert!(labels.iter().all(|l| !l.is_empty()));
     }
 
     #[test]

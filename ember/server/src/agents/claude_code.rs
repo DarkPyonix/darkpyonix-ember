@@ -270,6 +270,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             cwd: req.cwd.clone(),
             // stream-json has no handshake state, so a running agent can be rejoined (FR-S8).
             reattachable: true,
+            mem_limit_mb: req.mem_limit_mb,
         })
         .await?;
         let pid = proc.pid;
@@ -965,6 +966,7 @@ mod tests {
             mcp_servers: Vec::new(),
             computer: None,
             fork_from: None,
+            mem_limit_mb: None,
         };
         let args = ClaudeCodeAdapter::args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")));

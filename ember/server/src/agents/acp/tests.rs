@@ -527,3 +527,77 @@ fn message_ids_split_messages() {
         ]
     );
 }
+
+fn chunk(text: &str) -> String {
+    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{
+        "sessionUpdate":"agent_message_chunk","messageId":"m1","content":{"type":"text","text":text}}}})
+    .to_string()
+}
+
+#[test]
+fn fr_s8_drain_ends_on_the_prompt_response_or_an_unanswerable_request() {
+    assert!(!drain_ends_turn(&chunk("a")));
+    assert!(!drain_ends_turn("not json"));
+    assert!(drain_ends_turn(r#"{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}"#));
+    assert!(drain_ends_turn(r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"x"}}"#));
+    assert!(drain_ends_turn(r#"{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{}}"#));
+    assert!(drain_ends_turn(r#"{"jsonrpc":"2.0","id":9,"method":"fs/read_text_file","params":{}}"#));
+}
+
+#[test]
+fn fr_s8_drained_acp_turn_becomes_deltas_a_message_usage_and_the_turn_end() {
+    let lines = vec![
+        chunk("tick 1 "),
+        chunk("tick 2 "),
+        r#"{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn","usage":{"inputTokens":3,"outputTokens":4}}}"#
+            .to_string(),
+    ];
+    let out = translate_drained_lines(&lines);
+    assert_eq!(
+        out,
+        vec![
+            AgentEvent::AssistantDelta { text: "tick 1 ".into() },
+            AgentEvent::AssistantDelta { text: "tick 2 ".into() },
+            AgentEvent::AssistantMessage { text: "tick 1 tick 2 ".into() },
+            AgentEvent::Usage { input_tokens: 3, output_tokens: 4 },
+            AgentEvent::TurnEnded { outcome: TurnOutcome::Completed },
+        ]
+    );
+}
+
+#[test]
+fn fr_s8_drained_acp_turn_without_an_end_flushes_the_message_and_leaves_the_turn_open() {
+    let lines = vec![
+        chunk("half "),
+        r#"{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"toolCall":{}}}"#.to_string(),
+        chunk("never read"),
+    ];
+    let out = translate_drained_lines(&lines);
+    assert_eq!(
+        out,
+        vec![
+            AgentEvent::AssistantDelta { text: "half ".into() },
+            AgentEvent::AssistantMessage { text: "half ".into() },
+        ]
+    );
+}
+
+#[test]
+fn fr_s8_drained_acp_error_response_fails_the_turn() {
+    let lines = vec![r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"boom"}}"#.to_string()];
+    let out = translate_drained_lines(&lines);
+    assert_eq!(
+        out,
+        vec![
+            AgentEvent::Error { message: "ACP session/prompt failed: boom".into() },
+            AgentEvent::TurnEnded { outcome: TurnOutcome::Failed },
+        ]
+    );
+}
+
+#[test]
+fn fr_s8_acp_adapter_drains_a_surviving_agent_and_does_not_rejoin_it() {
+    let adapter = AcpAdapter::new(AcpConfig::preset("omp", None).unwrap()).unwrap();
+    assert!(adapter.drains_shim());
+    assert!(!adapter.rejoins_shim());
+}

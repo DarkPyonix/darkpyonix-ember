@@ -10,6 +10,10 @@
 //! [`network_timeout`] ([`GitError::Timeout`]); output beyond [`max_output`] is
 //! [`GitError::TooLarge`].
 
+
+#[path = "git_log.rs"]
+pub mod git_log;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -311,6 +315,8 @@ pub fn korean_message(git_text: &str) -> Option<&'static str> {
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
     if has(&["dubious ownership"]) {
         Some("저장소 소유자가 현재 사용자와 달라 git이 접근을 거부했습니다 (safe.directory 설정이 필요합니다).")
+    } else if has(&["bad revision", "unknown revision or path not in the working tree"]) {
+        Some("브랜치를 찾을 수 없습니다. 브랜치 이름을 확인하세요.")
     } else if has(&["not currently on a branch"]) {
         Some("HEAD가 브랜치에 있지 않습니다 (detached HEAD). 브랜치로 전환한 뒤 다시 시도하세요.")
     } else if has(&["no tracking information", "no upstream", "has no upstream"]) {

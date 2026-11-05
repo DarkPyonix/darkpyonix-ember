@@ -19,6 +19,7 @@
 //! | POST | `/fs/pwrite` | [`PwriteRequest`] → [`Stat`] (in-place positional write) |
 //! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
+//! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
 //! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
 //! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
@@ -153,6 +154,9 @@ pub fn router(node: Node) -> Router {
         .route("/fs/pwrite", post(pwrite))
         .route("/fs/glob", post(glob))
         .route("/fs/grep", post(grep))
+        // FR-G5: history route.
+        .route("/git/log", post(git_log_handler))
+        // End FR-G5.
         .route("/git/status", post(git_status))
         .route("/git/diff", post(git_diff))
         .route("/git/stage", post(git_stage))
@@ -362,6 +366,12 @@ async fn rename(State(n): State<Node>, Json(r): Json<RenameRequest>) -> Result<S
 // Git handlers: each resolves the repository through the path policy, then runs the `git` CLI
 // ([`crate::git`]). Operations that change the index or work tree take the write lock like the file writes do;
 // fetch, push and the network half of pull do not, because they can take a long time.
+
+// FR-G5: history handler.
+async fn git_log_handler(State(n): State<Node>, Json(r): Json<git_log::GitLogRequest>) -> ApiResult<git_log::GitLogResponse> {
+    Ok(Json(git_log::log(&n.0.policy, &r).await?))
+}
+// End FR-G5.
 
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))

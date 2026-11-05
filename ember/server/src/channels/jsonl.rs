@@ -2,10 +2,11 @@
 //!
 //! `<data dir>/channels/<channel id>.jsonl`, one JSON object per line:
 //! `{"seq":N,"channel_id":"...","from":"user","text":"...","at":S}` (`at` is Unix seconds, as in
-//! the API). The file is append-only: each line is one `write_all` on a handle opened in append
+//! the API). A guest's line (a guest is a human, FR-T15) has `from` = `guest:<id>` and one more
+//! field, `name`, the display name at the time of writing; no other line has `name`. The file is append-only: each line is one `write_all` on a handle opened in append
 //! mode, and nothing is ever rewritten or truncated. There is no fsync (the SQLite log is the
-//! read index; this file is the human-only record). Only messages from [`USER`] are written;
-//! agent messages stay in SQLite alone.
+//! read index; this file is the human-only record). Only messages from [`USER`] and guests are
+//! written; agent and system messages stay in SQLite alone.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,21 +48,25 @@ impl JsonlLog {
         Ok(self.dir.join(format!("{channel_id}.jsonl")))
     }
 
-    /// Append one line for a human message; a message from anyone but `user` is skipped
-    /// (`Ok(false)`), so agent messages never reach the file.
+    /// Append one line for a human message (`user` or a guest); anything else is skipped
+    /// (`Ok(false)`), so agent and system messages never reach the file.
     pub fn append(&self, channel_id: &str, message: &Message) -> Result<bool, ChannelError> {
-        if message.from != USER {
+        let guest = message.from.starts_with(super::guest::AUTHOR_PREFIX);
+        if message.from != USER && !guest {
             return Ok(false);
         }
         let path = self.path_of(channel_id)?;
-        let mut line = json!({
+        let mut value = json!({
             "seq": message.seq,
             "channel_id": channel_id,
             "from": message.from,
             "text": message.text,
             "at": message.at,
-        })
-        .to_string();
+        });
+        if guest {
+            value["name"] = json!(message.author_name);
+        }
+        let mut line = value.to_string();
         line.push('\n');
         let io = |e: std::io::Error| ChannelError::Other(anyhow::anyhow!("channel log {}: {e}", path.display()));
         std::fs::create_dir_all(&self.dir).map_err(io)?;

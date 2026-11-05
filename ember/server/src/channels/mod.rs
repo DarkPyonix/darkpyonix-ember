@@ -128,6 +128,12 @@ pub struct Message {
     /// Session ids of the member agents this message mentions (FR-T12); empty for human
     /// conversation.
     pub mentions: Vec<String>,
+    /// Who wrote it, for display (FR-T15): `나` for `user`, the member name for an agent, the
+    /// guest's display name for `guest:<id>`, `system` for `system`. Derived at read time (a
+    /// rename shows at once); `from` stays the stable id. Additive.
+    pub author_name: String,
+    /// `person`, `agent`, `guest` or `system`. Additive.
+    pub author_kind: String,
 }
 
 /// A channel as the list and detail routes return it. `messages` is empty in a list.
@@ -162,7 +168,27 @@ struct Row {
 
 fn msg(seq: i64, author: String, body: String, at_ms: i64, last_seq: i64, mentions: &str) -> Message {
     let unread = u32::from(seq > last_seq && author != USER);
-    Message { id: seq.to_string(), seq, from: author, text: body, at: at_ms / 1000, unread, mentions: serde_json::from_str(mentions).unwrap_or_default() }
+    // Names of agents and guests need the channel's members and guests; `Store::annotate` fills them.
+    let (author_name, author_kind) = if author == USER {
+        (USER_LABEL, "person")
+    } else if author == SYSTEM {
+        (SYSTEM, "system")
+    } else if author.starts_with(guest::AUTHOR_PREFIX) {
+        ("guest", "guest")
+    } else {
+        ("agent", "agent")
+    };
+    Message {
+        id: seq.to_string(),
+        seq,
+        from: author,
+        text: body,
+        at: at_ms / 1000,
+        unread,
+        mentions: serde_json::from_str(mentions).unwrap_or_default(),
+        author_name: author_name.to_string(),
+        author_kind: author_kind.to_string(),
+    }
 }
 
 impl Store {
@@ -256,14 +282,57 @@ impl Store {
 
     fn last_message(&self, channel: &str) -> Result<Option<Message>, ChannelError> {
         let last = self.read_cursor(channel)?;
-        Ok(self
+        let found = self
             .conn()
             .query_row(
                 "SELECT seq, author, body, at, mentions FROM channel_messages WHERE channel_id = ?1 ORDER BY seq DESC LIMIT 1",
                 params![channel],
                 |r| Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last, &r.get::<_, String>(4)?)),
             )
-            .optional()?)
+            .optional()?;
+        let mut found: Vec<Message> = found.into_iter().collect();
+        self.annotate(channel, &mut found)?;
+        Ok(found.pop())
+    }
+
+    /// Fill `author_name` of agent and guest messages (FR-T15): the member list is read once and
+    /// the guest names in one query, and only when the page holds a guest message. Must not be
+    /// called with the connection held.
+    pub(crate) fn annotate(&self, channel: &str, messages: &mut [Message]) -> Result<(), ChannelError> {
+        if !messages.iter().any(|m| m.author_kind == "agent" || m.author_kind == "guest") {
+            return Ok(());
+        }
+        let members = if messages.iter().any(|m| m.author_kind == "agent") {
+            self.members_of(&self.channel_row(channel)?)?
+        } else {
+            Vec::new()
+        };
+        let mut guests: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if messages.iter().any(|m| m.author_kind == "guest") {
+            let conn = self.conn();
+            let mut stmt = conn.prepare("SELECT id, name FROM channel_guests WHERE channel_id = ?1")?;
+            let rows = stmt.query_map(params![channel], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (id, name) = row?;
+                guests.insert(id, name);
+            }
+        }
+        for m in messages.iter_mut() {
+            match m.author_kind.as_str() {
+                "agent" => {
+                    if let Some(x) = members.iter().find(|x| x.id == m.from) {
+                        m.author_name = x.name.clone();
+                    }
+                }
+                "guest" => {
+                    if let Some(name) = m.from.strip_prefix(guest::AUTHOR_PREFIX).and_then(|id| guests.get(id)) {
+                        m.author_name = name.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn build(&self, row: Row, with_messages: bool) -> Result<Channel, ChannelError> {
@@ -380,12 +449,18 @@ impl Store {
         let mentions = serde_json::to_string(&mentions).map_err(anyhow::Error::from)?;
         let at = now_ms();
         let last = self.read_cursor(channel)?;
-        let conn = self.conn();
-        conn.execute(
-            "INSERT INTO channel_messages (channel_id, author, body, at, mentions) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![channel, from, text, at, mentions],
-        )?;
-        Ok(msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last, &mentions))
+        let message = {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT INTO channel_messages (channel_id, author, body, at, mentions) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![channel, from, text, at, mentions],
+            )?;
+            msg(conn.last_insert_rowid(), from.to_string(), text.to_string(), at, last, &mentions)
+        };
+        let mut one = [message];
+        self.annotate(channel, &mut one)?;
+        let [message] = one;
+        Ok(message)
     }
 
     /// Append a message from [`SYSTEM`], e.g. "not reached" (FR-T13). It skips the member check
@@ -428,6 +503,7 @@ impl Store {
         newest: bool,
     ) -> Result<Vec<Message>, ChannelError> {
         let last = self.read_cursor(channel)?;
+        let mut v: Vec<Message> = {
         let conn = self.conn();
         let sql = format!(
             "SELECT seq, author, body, at, mentions FROM channel_messages WHERE channel_id = ?1 AND seq > ?2 ORDER BY seq {} LIMIT ?3",
@@ -439,6 +515,9 @@ impl Store {
                 Ok(msg(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, last, &r.get::<_, String>(4)?))
             })?
             .collect::<Result<_, _>>()?;
+        v
+        };
+        self.annotate(channel, &mut v)?;
         Ok(v)
     }
 

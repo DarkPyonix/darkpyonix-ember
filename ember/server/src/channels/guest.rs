@@ -31,6 +31,9 @@
 //! author's display name and the mentioned names. Session ids, harnesses and the project's
 //! working directory never appear.
 //!
+//! A guest's post is also appended to the channel's JSONL file when the router is built with a data
+//! dir ([`guest_router_with_dir`], FR-T16): `from` is `guest:<id>` and the line gains `name`.
+//!
 //! [`guest_router`] is built apart from the owner router and is not merged into any listener yet
 //! (the guest listener `EMBER_GUEST_LISTEN` is a later step), so nothing here is reachable.
 
@@ -51,7 +54,7 @@ use serde_json::json;
 
 use super::invites::{Guest, CREDENTIAL_PREFIX};
 use super::{mention, ChannelError, SYSTEM, USER, USER_LABEL};
-use crate::session::{Push, Sessions};
+use crate::session::Sessions;
 use crate::store::{now_ms, Store};
 
 /// Longest message text a guest may post, in bytes.
@@ -165,7 +168,9 @@ impl Store {
             "INSERT INTO channel_messages (channel_id, author, body, at, mentions) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![guest.channel_id, from, text, at, mentions],
         )?;
-        Ok(super::msg(conn.last_insert_rowid(), from, text.to_string(), at, 0, &mentions))
+        let mut message = super::msg(conn.last_insert_rowid(), from, text.to_string(), at, 0, &mentions);
+        message.author_name = guest.name.clone();
+        Ok(message)
     }
 }
 
@@ -175,6 +180,8 @@ struct Ctx {
     sessions: Arc<Sessions>,
     /// Recent post times per guest id, for the rate limit (in memory, like the A2A channel post).
     posts: Arc<std::sync::Mutex<HashMap<String, VecDeque<Instant>>>>,
+    /// The human-message JSONL file (FR-T16); a guest is a human, so its posts are written too.
+    jsonl: Option<Arc<super::jsonl::JsonlLog>>,
 }
 
 impl Ctx {
@@ -198,7 +205,17 @@ impl Ctx {
 /// The guest router: `accept` without a credential, the channel routes behind the guest check.
 /// Separate from the owner router; the caller decides where it is served.
 pub fn guest_router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
-    let ctx = Ctx { store: store.clone(), sessions, posts: Arc::default() };
+    build(store, sessions, None)
+}
+
+/// As [`guest_router`], and a guest's posts are also appended under `<data_dir>/channels/`
+/// (FR-T16), with the same insert-append-rollback as the owner route.
+pub fn guest_router_with_dir(store: Arc<Store>, sessions: Arc<Sessions>, data_dir: &std::path::Path) -> Router {
+    build(store, sessions, Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))))
+}
+
+fn build(store: Arc<Store>, sessions: Arc<Sessions>, jsonl: Option<Arc<super::jsonl::JsonlLog>>) -> Router {
+    let ctx = Ctx { store: store.clone(), sessions, posts: Arc::default(), jsonl };
     let protected = Router::new()
         .route("/api/guest/channels/{id}", get(summary))
         .route("/api/guest/channels/{id}/messages", get(messages).post(post_message))
@@ -344,12 +361,14 @@ async fn post_message(
         Ok(_) => {}
         Err(e) => return fail(e),
     }
-    let message = match c.store.post_guest_message(&guest, &b.text) {
+    // Row, JSONL line and push as for the owner route (FR-T16, FR-L12); a failed append rolls the
+    // row back and is 500. No delivery to agents runs (FR-T15, FR-T17).
+    let message = match super::api::persist_and_publish(&c.store, &c.sessions, c.jsonl.as_deref(), &guest.channel_id, || {
+        c.store.post_guest_message(&guest, &b.text)
+    }) {
         Ok(m) => m,
         Err(e) => return fail(e),
     };
-    // The owner's clients hear of it (FR-L12). No delivery to agents runs (FR-T15, FR-T17).
-    c.sessions.publish(Push::ChannelMessage { channel_id: guest.channel_id.clone(), message: message.clone() });
     let view = c
         .store
         .channel_members(&guest.channel_id)

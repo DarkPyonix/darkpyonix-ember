@@ -3218,7 +3218,9 @@ pub fn StatusView(
             Some(p.red.strong),
         ),
         {
-            let (value, sub) = token_tile(services().demo.is_some());
+            crate::bridge::request_project_day(&proj_owned);
+            let load = services().ui.live.project_day.get().get(&proj_owned).cloned().unwrap_or_default();
+            let (value, sub) = token_tile(&load, &crate::ui::home::today_utc());
             ("오늘 토큰".to_string(), value, sub, None)
         },
         (

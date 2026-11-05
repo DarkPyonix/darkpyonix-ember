@@ -25,6 +25,7 @@ pub mod routines;
 pub mod session;
 pub mod shell;
 pub mod theme;
+pub mod usage;
 pub mod vcs;
 pub mod workbench;
 

@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 
 use compose_rust::runtime::{mutable_state_of, MutableState};
 use dioxus_compose::prelude::*;
+use ember_client::api::UsageSummary;
 use ember_client::wire::{DailyUsage, DetectedAgent};
 
 use crate::bridge::Live;
@@ -50,6 +51,10 @@ pub struct SharedLive {
     pub agents: MutableState<Vec<DetectedAgent>>,
     /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
     pub usage: MutableState<Vec<DailyUsage>>,
+    /// Tokens per UTC day over the last 14 days, all harnesses (FR-U7, #332).
+    pub usage_summary: MutableState<crate::ui::usage::Load<UsageSummary>>,
+    /// Today's tokens per project, keyed by project name (the Session status tile, FR-L18).
+    pub project_day: MutableState<std::collections::HashMap<String, crate::ui::usage::Load<UsageSummary>>>,
 }
 
 impl Default for SharedLive {
@@ -69,6 +74,8 @@ impl SharedLive {
             chatgpt: mutable_state_of(Vec::new()),
             agents: mutable_state_of(Vec::new()),
             usage: mutable_state_of(Vec::new()),
+            usage_summary: mutable_state_of(Default::default()),
+            project_day: mutable_state_of(Default::default()),
         }
     }
 

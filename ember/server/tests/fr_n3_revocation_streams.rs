@@ -134,6 +134,21 @@ async fn assert_ends_within_heartbeat(ws: &mut DeviceWs, started: Instant) {
     }
 }
 
+/// Like [`assert_ends_within_heartbeat`], but frames the server had already sent when the device
+/// was revoked may still be read before the end (a terminal's snapshot and prompt travel on the
+/// same stream). The invariant is that the socket ends within one heartbeat of the revoke.
+async fn assert_ends_tolerating_in_flight(ws: &mut DeviceWs, started: Instant) {
+    let deadline = started + HEARTBEAT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match next_text(ws, left).await {
+            Ok(None) => return,
+            Ok(Some(_)) => continue,
+            Err(e) => panic!("the revoked device's websocket is {e} after {HEARTBEAT:?}"),
+        }
+    }
+}
+
 async fn wait_live(count: impl Fn() -> usize, want: usize) {
     let deadline = Instant::now() + WAIT;
     while count() != want && Instant::now() < deadline {
@@ -353,7 +368,7 @@ async fn fr_n3_revoked_device_terminal_attach_closes_and_the_terminal_keeps_runn
 
     let started = Instant::now();
     f.devices.remove(&phone_t.peer_id()).unwrap();
-    assert_ends_within_heartbeat(&mut ws, started).await;
+    assert_ends_tolerating_in_flight(&mut ws, started).await;
 
     // The relay notices the lost stream and detaches the client on the node.
     let deadline = Instant::now() + HEARTBEAT;

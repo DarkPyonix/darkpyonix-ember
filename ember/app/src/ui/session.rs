@@ -55,6 +55,10 @@ const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const COMPUTER_LOADING: &str = "확인하는 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const PR_TITLE: &str = "PR과 CI";
+const SUBAGENT_TITLE: &str = "서브 에이전트 스레드";
+const LOAD_TITLE: &str = "부하";
+const NONE_YET: &str = "아직 없습니다";
+const WAIT_SERVER: &str = "서버 데이터를 기다리고 있습니다";
 const TIMELINE_TITLE: &str = "에이전트 소통 타임라인";
 
 /// Every sentence this screen shows, checked for plain "~다" endings (NFR-L4).
@@ -69,6 +73,8 @@ pub const UI_STRINGS: &[&str] = &[
     WEB_SOON,
     COMPUTER_LOADING,
     NO_SESSION,
+    NONE_YET,
+    WAIT_SERVER,
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -703,6 +709,78 @@ pub fn environment_rows(
     ]
 }
 
+// ---------------------------------------------------------------------------------------------
+// Status view cards (FR-L18, #324)
+// ---------------------------------------------------------------------------------------------
+
+/// One card of the status view's bottom grid, or the 오늘 토큰 tile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusCard {
+    pub title: &'static str,
+    /// Rows to draw; empty means the card shows `empty`.
+    pub rows: Vec<String>,
+    /// The honest empty state.
+    pub empty: &'static str,
+}
+
+/// The 오늘 토큰 tile: (value, sub line). Sample numbers only in demo mode, because the server
+/// sends no token usage yet (TODO(server): FR-U7 usage events, #324).
+pub fn token_tile(demo: bool) -> (String, String) {
+    if demo {
+        ("1.2M".to_string(), "$13.20".to_string())
+    } else {
+        ("-".to_string(), NONE_YET.to_string())
+    }
+}
+
+/// PR과 CI. No PR API exists yet (TODO(server): PR list with CI state, #324), so only the demo
+/// shows sample rows.
+pub fn pr_card(demo: bool) -> StatusCard {
+    let rows = if demo {
+        vec![
+            "#212 센터 시트와 스크림 · CI 통과".to_string(),
+            "#273 모니터 폭 1360 dp · CI 진행 중".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    StatusCard { title: PR_TITLE, rows, empty: WAIT_SERVER }
+}
+
+/// 서브 에이전트 스레드. The server does not report sub-agent threads yet (TODO(server): FR-U7,
+/// #324); team members are not threads, so nothing is derived from them.
+pub fn subagent_card(demo: bool) -> StatusCard {
+    let rows = if demo {
+        vec![
+            "리더 > 구현 · 파일 검색".to_string(),
+            "리더 > 리뷰 · 테스트 읽기".to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    StatusCard { title: SUBAGENT_TITLE, rows, empty: NONE_YET }
+}
+
+/// 부하. Session counts come from the members; CPU and memory need a server metric
+/// (TODO(server): host load, #324) and show only in demo mode.
+pub fn load_card(demo: bool, members: &[Member]) -> StatusCard {
+    let mut rows = Vec::new();
+    if !members.is_empty() {
+        let n = |s: LauncherStatus| members.iter().filter(|m| m.status == s).count();
+        rows.push(format!("실행 중 세션 {}개", n(LauncherStatus::Running)));
+        rows.push(format!("승인 대기 세션 {}개", n(LauncherStatus::WaitingForApproval)));
+    }
+    if demo {
+        rows.push("CPU 38% · 메모리 5.1 GB".to_string());
+    }
+    StatusCard { title: LOAD_TITLE, rows, empty: NONE_YET }
+}
+
+/// The three cards in grid order.
+pub fn status_cards(demo: bool, members: &[Member]) -> [StatusCard; 3] {
+    [pr_card(demo), subagent_card(demo), load_card(demo, members)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,5 +1336,37 @@ mod tests {
             assert!(!t.contains('\u{2014}'), "no em-dash: {t}");
         }
         assert!(UI_STRINGS.contains(&"준비 중입니다"));
+    }
+
+    #[test]
+    fn fr_l18_status_data_present() {
+        let ms = vec![
+            member("a", LauncherStatus::Running, true, 1),
+            member("b", LauncherStatus::WaitingForApproval, false, 2),
+            member("c", LauncherStatus::Running, false, 3),
+        ];
+        let load = load_card(false, &ms);
+        assert_eq!(load.rows, vec!["실행 중 세션 2개", "승인 대기 세션 1개"]);
+        assert!(!load.rows.iter().any(|r| r.contains("CPU")));
+    }
+
+    #[test]
+    fn fr_l18_status_no_data_is_honest() {
+        let cards = status_cards(false, &[]);
+        for c in &cards {
+            assert!(c.rows.is_empty(), "{} must not invent rows", c.title);
+        }
+        assert_eq!(cards[0].empty, "서버 데이터를 기다리고 있습니다");
+        assert_eq!(cards[1].empty, "아직 없습니다");
+        assert_eq!(cards[2].empty, "아직 없습니다");
+        assert_eq!(token_tile(false), ("-".to_string(), "아직 없습니다".to_string()));
+    }
+
+    #[test]
+    fn fr_l18_status_demo_mode_shows_samples() {
+        let cards = status_cards(true, &[]);
+        assert!(cards[0].rows.len() >= 1 && cards[1].rows.len() >= 1);
+        assert_eq!(cards[2].rows, vec!["CPU 38% · 메모리 5.1 GB"]);
+        assert_eq!(token_tile(true).0, "1.2M");
     }
 }

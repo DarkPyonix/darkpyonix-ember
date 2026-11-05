@@ -705,23 +705,41 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
 // Sheet header
 // ---------------------------------------------------------------------------------------------
 
-/// The default maximum width of an Ember sheet (560 dp, #212).
-pub const SHEET_WIDTH_DEFAULT: f32 = 560.0;
+/// The default maximum width of an Ember sheet (760 dp, #212).
+pub const SHEET_WIDTH_DEFAULT: f32 = 760.0;
 
 /// The maximum width of the computer monitor sheet (1360 dp, #212, FR-L21).
 pub const SHEET_WIDTH_MONITOR: f32 = 1360.0;
 
-/// Width of a centered sheet, leaving a 16 dp margin on each side when possible.
+/// Width of a centered sheet, capped by the window width.
 pub fn sheet_width(window_width_dp: f32, max_width: f32) -> f32 {
     if window_width_dp <= 0.0 {
         max_width
     } else {
-        (window_width_dp - 32.0).max(0.0).min(max_width)
+        window_width_dp.min(max_width)
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SheetPresentation {
+    Bottom,
+    Dialog,
+}
+
+fn sheet_presentation(window_width_dp: f32) -> SheetPresentation {
+    if window_width_dp > 0.0 && window_width_dp < 560.0 {
+        SheetPresentation::Bottom
+    } else {
+        SheetPresentation::Dialog
+    }
+}
+
+fn bottom_sheet_height(window_height_dp: f32) -> f32 {
+    window_height_dp.max(0.0) * 0.85
+}
+
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
-/// TODO(compose-rust#372): a pointer-up subscription; the toolkit's Dialog calls on_dismiss for Escape and the scrim (not yet checked on a display).
+/// TODO(compose-rust#372): a pointer-up subscription; the toolkit's modal calls on_dismiss for Escape and the scrim (not yet checked on a display).
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     Clickable(
@@ -758,7 +776,7 @@ pub fn SheetHeader(
         });
 }
 
-/// A centered modal with the shared header and a scrim (#212).
+/// A responsive modal with the shared header and a scrim (#212).
 /// TODO(compose-rust): `corner-xl` squircle corners; plain arcs for now.
 pub fn EmberSheet(
     title: &str,
@@ -770,7 +788,7 @@ pub fn EmberSheet(
     EmberSheetSized(title, open, SHEET_WIDTH_DEFAULT, on_dismiss, actions, content);
 }
 
-/// [`EmberSheet`] with the dialog's width (`min(560px, 100%)` for most sheets, `min(1360px,
+/// [`EmberSheet`] with the dialog's width (`min(760px, 100%)` for most sheets, `min(1360px,
 /// 100%)` for the computer monitor). Without a width the dialog takes the whole window,
 /// because its content asks for the full width.
 pub fn EmberSheetSized(
@@ -782,11 +800,10 @@ pub fn EmberSheetSized(
     content: impl FnOnce(),
 ) {
     let theme = ember_theme();
-    let modifier = Modifier::new()
-        .background(paint(theme.palette.surface))
-        // TODO(compose-rust#375): no `elevation` here. Under Material 3 it paints a tinted shadow
-        // ring inside the dialog's own frame, which showed as a band at the top and sides.
-        .corner_radius(CORNER_XL);
+    // TODO(compose-rust#375): no `elevation` here. Under Material 3 it paints a tinted shadow
+    // ring inside the dialog's own frame, which showed as a band at the top and sides.
+    // TODO(compose-rust): expose modal scrim color; the mockup uses rgba(0, 0, 0, 0.3).
+    let modifier = Modifier::new().background(paint(theme.palette.surface));
     let dismiss = on_dismiss.clone();
     let body = move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
@@ -796,10 +813,20 @@ pub fn EmberSheetSized(
         });
     };
     let window = compose_rust::runtime::current_window_size();
-    cu::Dialog(open)
-        .modifier(modifier.width(sheet_width(window.width_dp, width)))
-        .on_dismiss(on_dismiss)
-        .content(body);
+    if sheet_presentation(window.width_dp) == SheetPresentation::Bottom {
+        // TODO(compose-rust): expose a maximum height constraint so short sheets can wrap
+        // their content instead of occupying the full 85 percent height.
+        cu::Sheet(open)
+            .modifier(modifier.fill_max_width().height(bottom_sheet_height(window.height_dp))
+                .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
+            .on_dismiss(on_dismiss)
+            .content(body);
+    } else {
+        cu::Dialog(open)
+            .modifier(modifier.corner_radius(CORNER_XL).width(sheet_width(window.width_dp, width)))
+            .on_dismiss(on_dismiss)
+            .content(body);
+    }
 }
 
 /// A filter chip (`.chip`): 32 px, `--ink` when selected, `--surface-2` otherwise, 12 px medium.
@@ -1015,14 +1042,58 @@ mod tests {
 
     #[test]
     fn fr_l32_sheet_width_for_each_sheet() {
-        for name in ["설정", "새 세션", "프로젝트 설정", "새 프로젝트", "새 루틴", "파일 보내기"] {
-            assert_eq!(sheet_width(1440.0, SHEET_WIDTH_DEFAULT), 560.0, "{name}");
-            assert_eq!(sheet_width(390.0, SHEET_WIDTH_DEFAULT), 358.0, "{name}");
-        }
+        assert_eq!(SHEET_WIDTH_DEFAULT, 760.0);
+        assert_eq!(SHEET_WIDTH_MONITOR, 1360.0);
+        assert_eq!(sheet_width(1440.0, SHEET_WIDTH_DEFAULT), 760.0);
         assert_eq!(sheet_width(1440.0, SHEET_WIDTH_MONITOR), 1360.0);
-        assert_eq!(sheet_width(768.0, SHEET_WIDTH_MONITOR), 736.0);
-        assert_eq!(sheet_width(0.0, SHEET_WIDTH_DEFAULT), 560.0);
-        assert_eq!(sheet_width(20.0, SHEET_WIDTH_DEFAULT), 0.0);
+        assert_eq!(sheet_width(600.0, SHEET_WIDTH_MONITOR), 600.0);
+        assert_eq!(sheet_width(0.0, SHEET_WIDTH_DEFAULT), 760.0);
+        // These call sites use EmberSheet, which selects SHEET_WIDTH_DEFAULT.
+        for (source, call) in [
+            (include_str!("settings.rs"), "EmberSheet(\"설정\""),
+            (include_str!("new_session.rs"), "EmberSheet(\"새 세션\""),
+            (include_str!("project.rs"), "EmberSheet(\"새 프로젝트\""),
+            (include_str!("project.rs"), "EmberSheet(&format!"),
+            (include_str!("routines.rs"), "EmberSheet(title"),
+            (include_str!("files.rs"), "EmberSheet(\"파일 보내기\""),
+        ] {
+            assert!(source.contains(call), "missing {call}");
+        }
+        assert!(include_str!("monitor.rs").contains("EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR"));
+    }
+
+    #[test]
+    fn fr_l32_compact_sheet_presentation_and_height() {
+        assert_eq!(sheet_presentation(390.0), SheetPresentation::Bottom);
+        assert_eq!(sheet_presentation(600.0), SheetPresentation::Dialog);
+        assert_eq!(sheet_presentation(559.0), SheetPresentation::Bottom);
+        assert_eq!(sheet_presentation(560.0), SheetPresentation::Dialog);
+        assert_eq!(bottom_sheet_height(1000.0), 850.0);
+    }
+
+    static DISMISSES: AtomicUsize = AtomicUsize::new(0);
+
+    #[composable]
+    fn host_sheet() {
+        EmberSheet("설정", true, || { DISMISSES.fetch_add(1, Ordering::SeqCst); }, None, || {});
+    }
+
+    #[test]
+    fn fr_l32_renderer_dismiss_reaches_sheet_callback() {
+        let _guard = crate::services::test_guard();
+        DISMISSES.store(0, Ordering::SeqCst);
+        let mut host = Host::new(|| Box::new(Recomposer::new(host_sheet)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        let (node_id, handler_id) = batch.iter().find_map(|m| match m {
+            Mutation::SetProp { node_id, property: PropertyKind::OnDismiss, value: PropertyValue::Integer(h) } => Some((*node_id, *h as u64)),
+            _ => None,
+        }).expect("modal dismiss handler");
+        // Escape and scrim are interpreted by the renderer, which sends the same
+        // dismissal event for both. Host cannot synthesize those physical inputs.
+        for expected in 1..=2 {
+            host.dispatch(HostEvent { node_id, handler_id, payload: EventPayload::Clicked }).expect("dispatch dismiss");
+            assert_eq!(DISMISSES.load(Ordering::SeqCst), expected);
+        }
     }
 
     // ---- FR-L10: a navigation row is a control the renderer can click -----------------------

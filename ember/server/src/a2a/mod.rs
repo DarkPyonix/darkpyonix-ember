@@ -13,6 +13,7 @@
 //! runs a team of teammate sessions with a shared task list and mailbox ([`team`], FR-T7).
 
 pub mod api;
+pub mod channel;
 pub mod client;
 pub mod mention;
 pub mod store;
@@ -656,6 +657,20 @@ impl A2a {
     fn render(&self, msgs: &[A2aMessage]) -> anyhow::Result<String> {
         let mut parts = Vec::new();
         for m in msgs {
+            if let Some(channel_id) = &m.origin_channel {
+                // A person in a channel (FR-T12): no sender session, so no A2A reply hint.
+                let who = m.origin_label.as_deref().unwrap_or("a person");
+                let place = match self.sessions.store().channel_name(channel_id) {
+                    Some(name) => format!("channel #{name}, id {channel_id}"),
+                    None => format!("channel {channel_id}"),
+                };
+                parts.push(format!(
+                    "{HEADER_TAG} Message {} from {who} ({place})\n\
+                     This message is from a person in a channel, not from another agent.\n\n{}",
+                    m.id, m.text
+                ));
+                continue;
+            }
             let sender = match self.sessions.store().session(&m.from_session)? {
                 Some(s) => format!(
                     "\"{}\" (project {}, agent {})",

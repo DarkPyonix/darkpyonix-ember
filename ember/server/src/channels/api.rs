@@ -26,6 +26,12 @@
 //! `code`/`reason` `not_a_member` and `unknown: [name]`; nothing is stored or pushed (FR-T13).
 //! Resolved mentions are stored and returned as `mentions: [session_id]` (FR-T12).
 //!
+//! A person's message with `@name` mentions is then delivered to each mentioned agent through
+//! A2A, once per agent, behind a header naming the person, channel name and channel id
+//! (FR-T12). A refusal (A2A off server-wide or for the agent, FR-T6; an active teammate, FR-T7) is
+//! posted back into the channel as a message from `system` (not written to the JSONL, FR-T16).
+//! A message authored by an agent never triggers delivery.
+//!
 //! A posted message is also pushed as `channel_message` on `/api/push` (FR-L12).
 //!
 //! `from` defaults to `user`; otherwise it is a member agent's session id. Errors are
@@ -53,15 +59,33 @@ pub struct ChannelsCtx {
     pub sessions: Arc<Sessions>,
     /// The human-message JSONL file (FR-T16); `None` writes no file (routers built without a data dir).
     pub jsonl: Option<Arc<super::jsonl::JsonlLog>>,
+    /// Delivers a person's mentions to the mentioned agents (FR-T12); `None` delivers nothing.
+    pub a2a: Option<Arc<crate::a2a::A2a>>,
 }
 
 pub fn router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
-    build(ChannelsCtx { store, sessions, jsonl: None })
+    build(ChannelsCtx { store, sessions, jsonl: None, a2a: None })
 }
 
 /// As [`router`], and human messages are also appended under `<data_dir>/channels/` (FR-T16).
 pub fn router_with_dir(store: Arc<Store>, sessions: Arc<Sessions>, data_dir: &std::path::Path) -> Router {
-    build(ChannelsCtx { store, sessions, jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))) })
+    build(ChannelsCtx { store, sessions, jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))), a2a: None })
+}
+
+/// As [`router_with_dir`], and a person's `@name` mentions are delivered to the mentioned agents
+/// through `a2a` (FR-T12, FR-T13).
+pub fn router_with_a2a(
+    store: Arc<Store>,
+    sessions: Arc<Sessions>,
+    data_dir: &std::path::Path,
+    a2a: Arc<crate::a2a::A2a>,
+) -> Router {
+    build(ChannelsCtx {
+        store,
+        sessions,
+        jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))),
+        a2a: Some(a2a),
+    })
 }
 
 fn build(ctx: ChannelsCtx) -> Router {
@@ -151,8 +175,40 @@ async fn post_message(
         }
     }
     // Every attached client hears of it (FR-L12); no receiver is not an error.
-    c.sessions.publish(Push::ChannelMessage { channel_id: id, message: message.clone() });
+    c.sessions.publish(Push::ChannelMessage { channel_id: id.clone(), message: message.clone() });
+    deliver_mentions(&c, &id, &message);
     Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// Deliver a person's message to each mentioned agent (FR-T12). It runs after the message is
+/// stored, logged and pushed, so a failure never un-posts it, and in a task per agent so the 201
+/// does not wait for a sleeping agent to start. A message with no mention, or from an agent,
+/// reaches no one. A refusal is written into the channel as a `system` message (FR-T13).
+fn deliver_mentions(c: &ChannelsCtx, channel: &str, message: &super::Message) {
+    let Some(a2a) = &c.a2a else { return };
+    if message.from != USER || message.mentions.is_empty() {
+        return;
+    }
+    let members = c.store.channel_members(channel).unwrap_or_default();
+    for session_id in &message.mentions {
+        let name = members
+            .iter()
+            .find(|m| &m.id == session_id)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| session_id.clone());
+        let (c, a2a) = (c.clone(), a2a.clone());
+        let (channel, session_id, text) = (channel.to_string(), session_id.clone(), message.text.clone());
+        tokio::spawn(async move {
+            let Err(e) = a2a.send_from_person(&channel, super::USER_LABEL, &session_id, &text).await else {
+                return;
+            };
+            let note = format!("@{name} not reached: {e}");
+            match c.store.post_channel_system_message(&channel, &note) {
+                Ok(m) => c.sessions.publish(Push::ChannelMessage { channel_id: channel, message: m }),
+                Err(err) => tracing::warn!(channel = %channel, "recording a delivery failure failed: {err:#}"),
+            }
+        });
+    }
 }
 
 #[derive(Deserialize, Default)]

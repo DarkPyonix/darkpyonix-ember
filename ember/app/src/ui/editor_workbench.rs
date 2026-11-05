@@ -193,7 +193,7 @@ pub mod page {
         let (agent_state, branch) = project_status(&s.project);
         let key_s = s.clone();
         rsx! {
-            div { class: "monaco-workbench", tabindex: "0", style: "width:100vw; height:100vh; display:flex; flex-direction:column; background:#1e1e1e; color:#cccccc; font-size:13px;",
+            div { class: "monaco-workbench", tabindex: "0", style: "width:100vw; height:calc(100vh - 76px); display:flex; flex-direction:column; background:#1e1e1e; color:#cccccc; font-size:13px;",
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let chord = chord_from_key(

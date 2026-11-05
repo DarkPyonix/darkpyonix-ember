@@ -3164,12 +3164,10 @@ pub fn StatusView(
             },
             Some(p.red.strong),
         ),
-        (
-            "오늘 토큰".to_string(),
-            token_tile(services().demo.is_some()).0,
-            token_tile(services().demo.is_some()).1,
-            None,
-        ),
+        {
+            let (value, sub) = token_tile(services().demo.is_some());
+            ("오늘 토큰".to_string(), value, sub, None)
+        },
         (
             "성공률".to_string(),
             format!("{ok_pct}%"),

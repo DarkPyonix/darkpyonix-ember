@@ -1355,8 +1355,10 @@ mod tests {
         let cards = status_cards(false, &[]);
         for c in &cards {
             assert!(c.rows.is_empty(), "{} must not invent rows", c.title);
-            assert!(c.empty.contains("없습니다") || c.empty.contains("있습니다"));
         }
+        assert_eq!(cards[0].empty, "서버 데이터를 기다리고 있습니다");
+        assert_eq!(cards[1].empty, "아직 없습니다");
+        assert_eq!(cards[2].empty, "아직 없습니다");
         assert_eq!(token_tile(false), ("-".to_string(), "아직 없습니다".to_string()));
     }
 

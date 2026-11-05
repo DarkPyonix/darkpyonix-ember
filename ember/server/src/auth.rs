@@ -10,6 +10,8 @@
 //! - `GET /api/health`, so a launcher can tell whether a server is up *[provisional]*;
 //! - the agent routes, which carry the session's runtime token in the same header and check it
 //!   themselves: `/api/a2a/*` except `/api/a2a/settings`, and the Antigravity hook;
+//! - `POST /api/channels/<id>/post`, where an agent answers a mention with its runtime token
+//!   (exactly this path, nothing else under `/api/channels/`; the handler checks the token);
 //! - `GET /api/browsers/<project>/cdp/<nonce>` and `.../cdp/<nonce>/json/version` with the per-run
 //!   nonce from [`agent_cdp_nonce`], the agent browser relay and its discovery document (agent MCP
 //!   servers send no header);
@@ -179,6 +181,17 @@ fn refuse(status: StatusCode, msg: &str) -> Response {
     r
 }
 
+/// True for exactly `/api/channels/<id>/post` (four segments, a non-empty id): the route where an
+/// agent answers a mention with its runtime token (FR-T12). The rest of `/api/channels/*` carries
+/// the user routes and keeps the server token.
+fn agent_channel_post_path(path: &str) -> bool {
+    let mut it = path.split('/');
+    matches!(
+        (it.next(), it.next(), it.next(), it.next(), it.next(), it.next(), it.next()),
+        (Some(""), Some("api"), Some("channels"), Some(id), Some("post"), None, None) if !id.is_empty()
+    )
+}
+
 /// True for the routes that check a session's runtime token themselves, and `GET /auth/callback`.
 fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::GET
@@ -187,6 +200,9 @@ fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
         return true;
     }
     if method == axum::http::Method::GET && agent_cdp_path_ok(path) {
+        return true;
+    }
+    if method == axum::http::Method::POST && agent_channel_post_path(path) {
         return true;
     }
     (path.starts_with("/api/a2a/") && path != "/api/a2a/settings")
@@ -264,6 +280,17 @@ async fn guard(State(auth): State<Arc<ServerAuth>>, req: Request<Body>, next: Ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_s9_only_the_channel_post_route_is_exempt_under_channels() {
+        use axum::http::Method;
+        assert!(token_exempt(&Method::POST, "/api/channels/c1/post"));
+        assert!(!token_exempt(&Method::GET, "/api/channels/c1/post"));
+        for p in ["/api/channels", "/api/channels/c1", "/api/channels/c1/messages", "/api/channels//post",
+            "/api/channels/c1/post/x", "/api/channels/c1/x/post", "/api/channels/post"] {
+            assert!(!token_exempt(&Method::POST, p), "{p}");
+        }
+    }
 
     #[test]
     fn fr_s9_token_eq_compares_whole_values() {

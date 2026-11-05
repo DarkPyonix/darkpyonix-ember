@@ -32,6 +32,14 @@
 //! posted back into the channel as a message from `system` (not written to the JSONL, FR-T16).
 //! A message authored by an agent never triggers delivery.
 //!
+//! | POST   | `/api/channels/{id}/post` | `{text}` → 201 `Message` from the calling session (FR-T12) |
+//!
+//! `post` is how an agent answers a mention (`ember-a2a channel post <id> "text"`). It carries
+//! the session's runtime token, not the server token; `auth.rs` exempts exactly this path and
+//! the handler checks the token (401), that the session is a member and was mentioned in this
+//! channel in the last 30 minutes (403), and at most 6 posts a minute per session and channel
+//! (429). The session's own A2A switch is not consulted. The message never parses mentions.
+//!
 //! A posted message is also pushed as `channel_message` on `/api/push` (FR-L12).
 //!
 //! `from` defaults to `user`; otherwise it is a member agent's session id. Errors are
@@ -93,6 +101,7 @@ fn build(ctx: ChannelsCtx) -> Router {
         .route("/api/channels", get(list).post(create))
         .route("/api/channels/{id}", get(one))
         .route("/api/channels/{id}/messages", get(messages).post(post_message))
+        .route("/api/channels/{id}/post", post(agent_post))
         .route("/api/channels/{id}/read", post(mark_read))
         .route("/api/channels/{id}/mentions/preview", post(preview))
         .route("/api/channels/{id}/feed", get(feed))
@@ -161,12 +170,19 @@ async fn post_message(
     Json(b): Json<NewMessage>,
 ) -> ApiResult<impl IntoResponse> {
     let from = b.from.unwrap_or_else(|| USER.to_string());
+    let message = append_and_publish(&c, &id, &from, &b.text)?;
+    deliver_mentions(&c, &id, &message);
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// Store a message, append it to the JSONL file and push it (FR-T16, FR-L12).
+fn append_and_publish(c: &ChannelsCtx, id: &str, from: &str, text: &str) -> ApiResult<super::Message> {
     // FR-T16: insert the row, then append the line, both under the log's lock so lines reach the
     // file in seq order; if the append fails the row is deleted and the caller gets 500.
     let _guard = c.jsonl.as_ref().map(|j| j.guard());
-    let message = c.store.post_channel_message(&id, &from, &b.text)?;
+    let message = c.store.post_channel_message(id, from, text)?;
     if let Some(j) = &c.jsonl {
-        if let Err(e) = j.append(&id, &message) {
+        if let Err(e) = j.append(id, &message) {
             let _ = c.store.delete_channel_message(message.seq);
             return Err(match e {
                 ChannelError::Other(_) => e,
@@ -175,9 +191,44 @@ async fn post_message(
         }
     }
     // Every attached client hears of it (FR-L12); no receiver is not an error.
-    c.sessions.publish(Push::ChannelMessage { channel_id: id.clone(), message: message.clone() });
-    deliver_mentions(&c, &id, &message);
-    Ok((StatusCode::CREATED, Json(message)))
+    c.sessions.publish(Push::ChannelMessage { channel_id: id.to_string(), message: message.clone() });
+    Ok(message)
+}
+
+#[derive(Deserialize)]
+struct AgentPost {
+    text: String,
+}
+
+/// `POST /api/channels/{id}/post`: an agent answers in a channel (FR-T12). The bearer is the
+/// session's runtime token, which `auth.rs` lets through for exactly this path, so the handler
+/// is the only check: token (401), member and recent mention (403), rate limit (429). The
+/// message is authored by the session, parses no mentions and delivers to no one, so agents
+/// cannot start a chain through a channel.
+async fn agent_post(
+    State(c): State<ChannelsCtx>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(a2a) = c.a2a.clone() else {
+        return ChannelError::NotFound("agent posting".into()).into_response();
+    };
+    let session = match crate::a2a::api::caller(&a2a, &headers) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    let text = match serde_json::from_slice::<AgentPost>(&body) {
+        Ok(b) if !b.text.trim().is_empty() => b.text,
+        _ => return ChannelError::BadRequest("body must be {\"text\": \"...\"} with text".into()).into_response(),
+    };
+    if let Err(e) = a2a.check_channel_post(&session, &id) {
+        return e.into_response();
+    }
+    match append_and_publish(&c, &id, &session, &text) {
+        Ok(m) => (StatusCode::CREATED, Json(m)).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 /// Deliver a person's message to each mentioned agent (FR-T12). It runs after the message is

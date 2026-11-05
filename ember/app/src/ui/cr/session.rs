@@ -3397,18 +3397,18 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
     });
 }
 
-/// The bottom grid (`.grid.g3.sgrid`), gap 20: three columns from 1280 dp, two from 900 dp
-/// (the third card below), one under that. Every card fills its share of the page width
-/// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
-/// content shrank the cards to about 308 dp at 390 dp.
-/// The rows of the multi-column layouts use `equal_height(true)` and the cards `fill_max_height`, so
-/// the cards stretch to the tallest, as in the mockup (FR-L18, compose-rust#389).
 /// Whether a layout of `columns` columns stretches its cards to the tallest (FR-L18): only the
 /// multi-column rows do; the single column keeps each card's own height.
 fn status_cards_equal_height(columns: usize) -> bool {
     columns >= 2
 }
 
+/// The bottom grid (`.grid.g3.sgrid`), gap 20: three columns from 1280 dp, two from 900 dp
+/// (the third card below), one under that. Every card fills its share of the page width
+/// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
+/// content shrank the cards to about 308 dp at 390 dp.
+/// The rows of the multi-column layouts use `equal_height(true)` and the cards `fill_max_height`, so
+/// the cards stretch to the tallest, as in the mockup (FR-L18, compose-rust#389).
 fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     let (d1, d2, d3) = (d.clone(), d.clone(), d);
     match status_grid_columns(width_dp) {

@@ -452,6 +452,22 @@ pub fn Pill(text: &str, tone: PillTone, small: bool) {
         });
 }
 
+/// A single-line bar: `pct` (0 to 100) of the track in `fill`. Drawn here rather than with the
+/// toolkit indicator, whose colours are the design system's (compose-rust#377). Hoisted from the
+/// files screen's `Bar` for the status cards (FR-L18, #349).
+pub fn TrackBar(pct: f32, height: f32, fill: Color) {
+    let p = ember_theme().palette;
+    let pct = pct.clamp(0.0, 100.0);
+    cu::Row()
+        .modifier(Modifier::new().fill_max_width().height(height).background(paint(p.track)).shape_role(ShapeRole::Full))
+        .content(move || {
+            if pct > 0.0 {
+                cu::Spacer().modifier(Modifier::new().weight(pct).height(height).background(paint(fill)).shape_role(ShapeRole::Full));
+            }
+            cu::Spacer().modifier(Modifier::new().weight((100.0 - pct) + 0.001));
+        });
+}
+
 // ---------------------------------------------------------------------------------------------
 // Buttons
 // ---------------------------------------------------------------------------------------------
@@ -634,7 +650,8 @@ pub fn EmberCard(
     // The 4 dp spacers raise the uniform 16 to the mockup's 20 on the sides (`--pad-card`).
     let side = if padding.is_some() { 0.0 } else { PAD_CARD_H - PAD_CARD_V };
     cu::Box().modifier(m.padding(padding.unwrap_or(PAD_CARD_V))).content(|| {
-        cu::Row().content(|| {
+        // The row fills the card, so the card does not shrink to its content (FR-L18).
+        cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width || weight.is_some())).content(|| {
             cu::Spacer().modifier(Modifier::new().width(side));
             cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
             cu::Spacer().modifier(Modifier::new().width(side));

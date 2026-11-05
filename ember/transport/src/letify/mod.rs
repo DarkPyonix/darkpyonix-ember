@@ -53,6 +53,7 @@ pub use pkarr::HttpPkarrStore;
 
 use link::{run_demux, run_path_watch, Cmd, OpenError, PeerLink};
 use pkarr::PkarrNode;
+pub use pkarr::{direct_addresses_from_txt, is_record_label};
 use relay_url::{parse_relay_url, RelayTarget};
 
 use crate::{

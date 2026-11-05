@@ -12,9 +12,10 @@
 //! plain constants passed as `Paint::Literal`.
 //! TODO(compose-rust#374): bundled Inter + Pretendard need a font stack per role; the theme
 //! only takes one asset per `TypeRole` (`Theme::with_font`), so the fonts of #216 land after.
-//! TODO(compose-rust#375): the layered card/sheet shadow (#214) needs `Modifier.shadow`.
+//! Layered card and sheet shadow tokens follow the mockup (#214).
 
 use compose_rust::{Color, Paint};
+use compose_rust::ui::{Modifier, Shadow};
 
 // `Scheme` and `ThemePref` are plain enums that `SharedUi` and `Prefs` already hold, so the
 // Dioxus module's definitions are the single source until phase 8 moves them here.
@@ -22,7 +23,7 @@ pub use crate::ui::theme::{Scheme, ThemePref};
 
 /// The scheme the OS reports.
 ///
-/// TODO(compose-rust): the toolkit resolves `FollowSystem` inside the renderer and exposes no
+/// TODO(compose-rust#97): the toolkit resolves `FollowSystem` inside the renderer and exposes no
 /// hook to read the result, so System draws the light palette until one exists. An explicit
 /// Light or Dark choice is exact.
 pub fn system_scheme() -> Scheme {
@@ -134,6 +135,30 @@ impl EmberTheme {
         match self.scheme {
             Scheme::Light => Color::argb(0x12_000000),
             Scheme::Dark => Color::argb(0x1a_000000),
+        }
+    }
+
+    /// `--shadow`: cards and the composer.
+    pub fn shadow_sm(&self) -> Vec<Shadow> {
+        match self.scheme {
+            Scheme::Light => SHADOW_SM_LIGHT.to_vec(),
+            Scheme::Dark => SHADOW_SM_DARK.to_vec(),
+        }
+    }
+
+    /// The floating tab bar's shadow.
+    pub fn shadow_md(&self) -> Vec<Shadow> {
+        match self.scheme {
+            Scheme::Light => SHADOW_MD_LIGHT.to_vec(),
+            Scheme::Dark => SHADOW_MD_DARK.to_vec(),
+        }
+    }
+
+    /// `--shadow-lg`: composer, popovers and toasts.
+    pub fn shadow_lg(&self) -> Vec<Shadow> {
+        match self.scheme {
+            Scheme::Light => SHADOW_LG_LIGHT.to_vec(),
+            Scheme::Dark => SHADOW_LG_DARK.to_vec(),
         }
     }
 }
@@ -274,7 +299,7 @@ pub const CORNER_TAIL: f32 = 6.0;
 pub const PILL: f32 = 999.0;
 
 /// Squircle smoothing (Figma's corner smoothing). Unused until the toolkit can draw it.
-/// TODO(compose-rust): `Modifier::CornerCurve { smoothing }`; until then corners are plain
+/// TODO(compose-rust#294): `Modifier::CornerCurve { smoothing }`; until then corners are plain
 /// arcs of the same fixed radius, so only the curve differs and layout is the same.
 pub const SQUIRCLE_SMOOTHING: f32 = 0.6;
 
@@ -286,11 +311,56 @@ pub const PRESS_IN_MS: u32 = 180;
 pub const PRESS_HOLD_MS: u32 = 120;
 pub const PRESS_OUT_MS: u32 = 200;
 
-/// Elevation (dp) standing in for the card shadow, "0 1px 2px / 3 %" plus "0 1px 4px / 3 %".
-/// TODO(GAPS: 그림자 2겹): the toolkit has a single `elevation`; the nearest value is used.
-pub const ELEVATION_CARD: f32 = 1.0;
-/// Popover and sheet shadow, "0 10px 32px / 10 %". TODO(GAPS: 그림자 2겹).
-pub const ELEVATION_LARGE: f32 = 8.0;
+/// The shadow tokens of the mockup, two layers where it has two. Each is a list in CSS order
+/// (the first layer is on top). The toolkit draws its first layer at the bottom.
+///
+/// `sm` is the mockup's `--shadow` (cards and sheets), `lg` is `--shadow-lg` (composer,
+/// popovers and toasts) and `md` is the floating tab bar's shadow, which the mockup writes inline.
+/// Colour is black or the warm ink at the alpha the mockup gives, rounded to 8 bits.
+pub const SHADOW_SM_LIGHT: [Shadow; 2] = [
+    Shadow::new(0.0, 1.0, 2.0, 0.0, Paint::Literal(Color::argb(0x08_1c1b19))),
+    Shadow::new(0.0, 1.0, 4.0, 0.0, Paint::Literal(Color::argb(0x08_1c1b19))),
+];
+pub const SHADOW_SM_DARK: [Shadow; 2] = [
+    Shadow::new(0.0, 1.0, 2.0, 0.0, Paint::Literal(Color::argb(0x4d_000000))),
+    Shadow::new(0.0, 2.0, 8.0, 0.0, Paint::Literal(Color::argb(0x33_000000))),
+];
+pub const SHADOW_MD_LIGHT: [Shadow; 2] = [
+    Shadow::new(
+        0.0,
+        10.0,
+        30.0,
+        0.0,
+        Paint::Literal(Color::argb(0x24_1c1b19)),
+    ),
+    Shadow::new(0.0, 2.0, 6.0, 0.0, Paint::Literal(Color::argb(0x0f_1c1b19))),
+];
+pub const SHADOW_MD_DARK: [Shadow; 1] = [Shadow::new(
+    0.0,
+    10.0,
+    30.0,
+    0.0,
+    Paint::Literal(Color::argb(0x80_000000)),
+)];
+pub const SHADOW_LG_LIGHT: [Shadow; 1] = [Shadow::new(
+    0.0,
+    10.0,
+    32.0,
+    0.0,
+    Paint::Literal(Color::argb(0x1a_1c1b19)),
+)];
+pub const SHADOW_LG_DARK: [Shadow; 1] = [Shadow::new(
+    0.0,
+    10.0,
+    32.0,
+    0.0,
+    Paint::Literal(Color::argb(0x73_000000)),
+)];
+
+/// Apply CSS-ordered layers in the toolkit's bottom-to-top drawing order.
+pub fn with_shadows(modifier: Modifier, layers: Vec<Shadow>) -> Modifier {
+    modifier.shadows(layers.into_iter().rev())
+}
 
 // ---------------------------------------------------------------------------------------------
 // Theme state
@@ -520,5 +590,42 @@ mod tests {
         assert_eq!(ember_theme().scheme, Scheme::Light);
         assert_eq!(EmberTheme::select(ThemePref::Dark, system_scheme()).scheme, Scheme::Dark);
         assert_eq!(EmberTheme::select(ThemePref::System, system_scheme()).scheme, Scheme::Light);
+    }
+
+    /// The tokens are the mockup's `--shadow` and `--shadow-lg`, light and dark.
+    #[test]
+    fn nfr_l3_shadow_tokens_match_the_mockup() {
+        let light = EmberTheme::new(Scheme::Light);
+        let dark = EmberTheme::new(Scheme::Dark);
+        let rows = |layers: Vec<Shadow>| -> Vec<(f32, f32, f32, f32, u32)> {
+            layers
+                .iter()
+                .map(|l| match l.paint {
+                    Paint::Literal(c) => (l.x, l.y, l.blur, l.spread, c.to_argb()),
+                    _ => panic!("shadows are literal colours"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            rows(light.shadow_sm()),
+            [(0.0, 1.0, 2.0, 0.0, 0x08_1c1b19), (0.0, 1.0, 4.0, 0.0, 0x08_1c1b19)]
+        );
+        assert_eq!(
+            rows(dark.shadow_sm()),
+            [(0.0, 1.0, 2.0, 0.0, 0x4d_000000), (0.0, 2.0, 8.0, 0.0, 0x33_000000)]
+        );
+        assert_eq!(
+            rows(light.shadow_md()),
+            [(0.0, 10.0, 30.0, 0.0, 0x24_1c1b19), (0.0, 2.0, 6.0, 0.0, 0x0f_1c1b19)]
+        );
+        assert_eq!(rows(dark.shadow_md()), [(0.0, 10.0, 30.0, 0.0, 0x80_000000)]);
+        assert_eq!(rows(light.shadow_lg()), [(0.0, 10.0, 32.0, 0.0, 0x1a_1c1b19)]);
+        assert_eq!(rows(dark.shadow_lg()), [(0.0, 10.0, 32.0, 0.0, 0x73_000000)]);
+        // Modifier::shadow stores layers in insertion order, with the first at the bottom.
+        // CSS puts its first layer on top, so the second CSS layer must be inserted first.
+        let css = light.shadow_sm();
+        let expected = Modifier::new().shadow(css[1]).shadow(css[0]);
+        assert_eq!(with_shadows(Modifier::new(), css.clone()), expected);
+        assert_ne!(expected, Modifier::new().shadow(css[0]).shadow(css[1]));
     }
 }

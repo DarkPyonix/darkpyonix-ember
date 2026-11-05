@@ -777,7 +777,7 @@ silhouette rounder. It is not scheduled; it starts only when the owner asks agai
 
 ### D36: The main server is the relay; the transport moves to letify-link
 
-**Decision.** [user, 2026-10-30, answering "채택, SPEC에 반영"; the opinion was relayed from the letify side] "Ember에 relay가 필요하면 main server가 그 역할을 하면 됩니다. main server는 관리하는 기기이고, 위치가 바뀌지 않습니다. 각 기기는 main server와 홀펀칭으로 연결합니다. 기기끼리 직결이 안 될 때는 main server가 중계합니다. 그래서 relay.darkpyonix.dev 같은 별도 relay VPS를 운영할 필요가 없어집니다." The transport moves from iroh (QUIC) to **letify-link**, a Rust/tokio crate: Noise IK sessions over TCP subflows and UDP, TCP hole punching, path migration between TCP and UDP, its own stream multiplexing, ed25519 node keys reusable from the iroh NodeId, version negotiation, rendezvous as a trait, relay as a role any node can run, and relay-to-direct promotion with hysteresis. Spec draft: DarkPyonix/letify#76. **Until letify-link ships, Ember keeps iroh** (D8, Q7).
+**Decision.** [user, 2026-10-30, answering "채택, SPEC에 반영"; the opinion was relayed from the letify side] "Ember에 relay가 필요하면 main server가 그 역할을 하면 됩니다. main server는 관리하는 기기이고, 위치가 바뀌지 않습니다. 각 기기는 main server와 홀펀칭으로 연결합니다. 기기끼리 직결이 안 될 때는 main server가 중계합니다. 그래서 relay.darkpyonix.dev 같은 별도 relay VPS를 운영할 필요가 없어집니다." The transport moves from iroh (QUIC) to **letify-link**, a Rust/tokio crate: Noise IK sessions over TCP subflows and UDP, TCP hole punching, path migration between TCP and UDP, its own stream multiplexing, ed25519 node keys reusable from the iroh NodeId, version negotiation, rendezvous as a trait, relay as a role any node can run, and relay-to-direct promotion with hysteresis. Spec draft: DarkPyonix/letify#76. **Update 2026-11-04 (#229)**: letify-link has shipped and is the default backend [provisional]; iroh stays behind its feature for one release [provisional], then is removed (follow-up issue).
 
 **Previous design.** D8 and `FR-N2`: `darkpyonix.dev` ran an iroh-relay (`relay.darkpyonix.dev`) and an address directory, and iroh's QUIC hole punching fell back to that relay.
 
@@ -790,4 +790,6 @@ silhouette rounder. It is not scheduled; it starts only when the owner asks agai
 - The `darkpyonix.dev` hub keeps browser ash sharing and the pkarr rendezvous (account directory); it no longer relays Ember traffic once the swap is done.
 - Switching is staged: both transports exist behind `FR-N5`, and the swap uses version negotiation so devices on either side keep working during the rollout.
 
-**Rejected.** Running `relay.darkpyonix.dev` as a separate relay VPS (the previous design).
+**Rejected.** Running `relay.darkpyonix.dev` as a separate relay VPS (the previous design). Deleting the iroh backend in the same release that makes letify the default *[provisional]*: one release of overlap keeps a rollback path.
+
+**Main server defaults** *[provisional, #229]*. The relay and the address observer start with the server on port 7443 (TCP and UDP), overridable by environment; nodes read the relay URL from the main server's hub device record first, with `EMBER_RELAY_URL` as the explicit override; `derive_relay_url` and the `relay.<host>` derivation are removed from `ember-hub`.

@@ -858,6 +858,11 @@ async fn device_addresses(State(st): State<Shared>, headers: HeaderMap, Path(id)
     let mut relays = Vec::new();
     let mut direct = Vec::new();
     for (name, txt) in answers {
+        // The letify backend publishes one signed binary record under `_letify.<key>`.
+        if ember_transport::is_record_label(&name) {
+            direct.extend(ember_transport::direct_addresses_from_txt(&txt).unwrap_or_default().iter().map(|a| a.to_string()));
+            continue;
+        }
         if name != own && name != "_iroh" {
             continue;
         }

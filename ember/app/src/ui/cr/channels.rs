@@ -298,6 +298,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 // TODO(FR-T10): `POST /api/channels` and `Api::create_channel` work, but the screen
                 // has no sheet to ask for the name, the project and the agents yet, so the button
                 // stays disabled rather than creating a channel with guessed values.
+                // TODO(compose-rust#429): accessible name (new channel).
                 cu::Box()
                     .alignment(Alignment::Center)
                     .modifier(
@@ -429,6 +430,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 if show_back {
+                    // TODO(compose-rust#429): accessible name (back).
                     AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
                 }
                 RoomIcon(&room.project, 36.0);
@@ -443,6 +445,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                     });
                 });
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
+                // TODO(compose-rust#429): accessible name (members, menu).
                 for svg in [super::shell::ICON_USERS_SVG, super::shell::ICON_MORE_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
@@ -537,6 +540,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
             .content(|| {
                 let _generation = generation.get();
                 cu::Spacer().modifier(Modifier::new().width(6.0));
+                // TODO(compose-rust#429): accessible name (attach (+)).
                 for svg in [super::shell::ICON_PLUS_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
@@ -557,6 +561,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                     })),
                     ..Default::default()
                 });
+                // TODO(compose-rust#429): accessible name (emoji).
                 cu::Box()
                     .alignment(Alignment::Center)
                     .modifier(Modifier::new().size(H_CTL, H_CTL))
@@ -565,6 +570,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                 let sending = state.get() == SendState::Sending;
                 let can_send = live.is_some() && !sending && !draft.get().trim().is_empty();
                 let (draft, send) = (draft.clone(), send.clone());
+                // TODO(compose-rust#429): accessible name (send, icon-less label only, no icon role).
                 AppButton(if sending { "전송 중" } else { "전송" }, None, ButtonKind::Primary, false, can_send, false, move || send(draft.get_untracked()));
                 cu::Spacer().modifier(Modifier::new().width(6.0));
             });

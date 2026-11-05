@@ -185,6 +185,8 @@ fn SmallNote(text: &str) {
     Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
 }
 
+// TODO(compose-rust#425, #429): an invisible `Button(label)` over a painted row, only to get focus,
+// role and the accessible name. Remove when Button takes content or a semantics modifier exists.
 /// An accessible invisible button overlay for a painted row or pill.
 /// Gives assistive tech the item's label and provides keyboard focus and click handling.
 fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
@@ -586,7 +588,7 @@ pub fn SectionList(
                 .background(bg)
                 .corner_radius(CORNER_SM);
             if is_active {
-                m = m.border(1.0, paint(p.line)).elevation(ELEVATION_CARD);
+                m = with_shadows(m.border(1.0, paint(p.line)), ember_theme().shadow_sm());
             }
 
             cu::Box()
@@ -1063,6 +1065,7 @@ fn CommitBox(
             // Amend checkbox
             cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                 let am = amend_state.clone();
+                // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so staging looks hollow.
                 cu::Checkbox(is_amend)
                     .modifier(Modifier::new().size(18.0, 18.0))
                     .on_change(move |v| am.set(v));

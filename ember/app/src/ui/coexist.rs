@@ -270,7 +270,7 @@ impl SharedUi {
     }
 
     pub fn close_editor(&self) {
-        self.close_editor_with(|| std::process::exit(0));
+        self.close_editor_with(|| std::process::exit(crate::shutdown()));
     }
 
     /// Close the Ember 에디터 screen; when this process was launched directly with

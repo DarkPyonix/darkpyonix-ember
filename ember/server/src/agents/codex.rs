@@ -139,6 +139,36 @@ impl AgentAdapter for CodexAdapter {
         NativeFork::AtTurn
     }
 
+    /// A turn in flight when the server died is read back from the surviving app-server (FR-S8).
+    fn drains_shim(&self) -> bool {
+        true
+    }
+
+    fn drain_turn_end(&self, line: &str) -> bool {
+        let Ok(msg) = serde_json::from_str::<Value>(line) else { return false };
+        match (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+            (Some("turn/completed"), None) => true,
+            // A request to the client (an approval): nobody is there to answer it.
+            (Some(_), Some(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn translate_drained(&self, lines: &[String]) -> Vec<AgentEvent> {
+        let mut mapper = Mapper::default();
+        let mut out = Vec::new();
+        for line in lines {
+            let Ok(msg) = serde_json::from_str::<Value>(line) else { continue };
+            let null = Value::Null;
+            let params = msg.get("params").unwrap_or(&null);
+            // Only notifications: replies and requests belong to a connection that is gone.
+            if let (Some(method), None) = (msg.get("method").and_then(Value::as_str), msg.get("id")) {
+                out.extend(mapper.on_notification(method, params));
+            }
+        }
+        out
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),

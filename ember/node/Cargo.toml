@@ -39,7 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [features]
-# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). The default backend is unchanged.
+# The letify transport backend (EMBER_TRANSPORT_BACKEND=letify; SPEC FR-N5). Already on through ember-transport's default features (INTENT D36).
 letify = ["ember-transport/letify"]
 
 [dev-dependencies]

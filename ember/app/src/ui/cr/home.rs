@@ -771,7 +771,8 @@ fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, wei
 }
 
 fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
-    let p = ember_theme().palette;
+    let theme = ember_theme();
+    let p = theme.palette;
     let sel = c.selection.get();
     let (_, computers) = c.live(ui);
     let message = effective_message(&c.typed.get(), c.suggestion.get().as_deref());
@@ -808,7 +809,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     // `.bigcomposer`: surface, 1 px line, the xl radius, 16 / 16 / 12 padding.
     cu::Box()
         .modifier(
-            Modifier::new()
+            with_shadows(Modifier::new(), theme.shadow_lg())
                 .width(w)
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))

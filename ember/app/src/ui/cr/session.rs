@@ -3560,7 +3560,7 @@ fn NewMemberSheet(
         }
     };
 
-    let modifier = Modifier::new()
+    let modifier = with_shadows(Modifier::new(), ember_theme().shadow_sm())
         .background(paint(p.surface))
         .border(1.0, paint(p.line))
         .corner_radius(CORNER_XL);

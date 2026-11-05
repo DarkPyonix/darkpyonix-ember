@@ -12,7 +12,7 @@ use ember_node::proto::{EnvInfo, Health};
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
 use ember_server::computers::{
-    self, Computer, ComputerError, Computers, Connector, NodeApi, Registry, LOCAL,
+    self, observations::FileState, Computer, ComputerError, Computers, Connector, NodeApi, Registry, LOCAL,
 };
 use ember_server::events::{AgentEvent, ApprovalDecision, SessionStatus};
 use ember_server::session::{NewSession, Sessions};
@@ -163,6 +163,126 @@ fn assistant_text(events: &[AgentEvent]) -> String {
             _ => None,
         })
         .unwrap()
+}
+
+// Hash responses are keyed by computer name and path. An absent response simulates a read failure.
+struct HashNode {
+    name: String,
+    states: Arc<BTreeMap<(String, String), FileState>>,
+    calls: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait]
+impl NodeApi for HashNode {
+    async fn health(&self) -> anyhow::Result<Health> {
+        Ok(Health { ok: true, version: "test".into() })
+    }
+
+    async fn env(&self) -> anyhow::Result<EnvInfo> {
+        Ok(env_for(&self.name))
+    }
+
+    async fn file_state(&self, path: &str) -> anyhow::Result<FileState> {
+        self.calls.lock().unwrap().push((self.name.clone(), path.into()));
+        self.states.get(&(self.name.clone(), path.into())).cloned()
+            .ok_or_else(|| anyhow::anyhow!("hash failed"))
+    }
+}
+
+fn hash_fixture(states: BTreeMap<(String, String), FileState>) -> (Fixture, Arc<Mutex<Vec<(String, String)>>>) {
+    let states = Arc::new(states);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let connector: Connector = Arc::new(move |c: Option<&Computer>| {
+        Ok(Arc::new(HashNode {
+            name: c.map(|c| c.name.as_str()).unwrap_or("server").into(),
+            states: states.clone(),
+            calls: recorded.clone(),
+        }) as Arc<dyn NodeApi>)
+    });
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(Capturing { starts: starts.clone() })];
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let sessions = Sessions::new(store.clone(), adapters);
+    let computers = Computers::with_shim(Registry::new(store), connector, None);
+    computers.install(&sessions);
+    (Fixture { sessions, computers, starts }, calls)
+}
+
+fn observe(s: &Sessions, id: &str, tool: &str, input: Value) {
+    s.record_event(id, &AgentEvent::ToolCall {
+        call_id: format!("call-{tool}"), name: tool.into(), input,
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn fr_s7_switch_compares_observed_files_and_delivers_notice() {
+    let mut states = BTreeMap::new();
+    for (computer, path, hash) in [
+        ("alpha", "/same", "same"), ("beta", "/same", "same"),
+        ("alpha", "/different", "old"), ("beta", "/different", "new"),
+        ("alpha", "/missing", "old"), ("alpha", "/failed", "old"),
+    ] {
+        states.insert((computer.into(), path.into()), FileState::Hash(hash.into()));
+    }
+    states.insert(("beta".into(), "/missing".into()), FileState::Missing);
+    let (f, calls) = hash_fixture(states);
+    let (s, c) = (&f.sessions, &f.computers);
+    let a = c.register("alpha", "http://alpha:8741", "tok").unwrap();
+    let b = c.register("beta", "http://beta:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.switch(s, &id, &a.id).await.unwrap();
+    turn(s, &id, "hello").await;
+    observe(s, &id, "Read", json!({"file_path": "/same"}));
+    observe(s, &id, "Edit", json!({"file_path": "/different"}));
+    observe(s, &id, "Write", json!({"file_path": "/missing"}));
+    observe(s, &id, "NotebookEdit", json!({"notebook_path": "/failed"}));
+    observe(s, &id, "Bash", json!({"file_path": "/ignored"}));
+
+    let notice = c.switch(s, &id, &b.id).await.unwrap().notice.unwrap();
+    assert!(notice.contains("moved from \"alpha\""), "{notice}");
+    for path in ["/different", "/missing", "/failed"] {
+        assert!(notice.contains(path), "{notice}");
+    }
+    assert!(!notice.contains("/same") && !notice.contains("/ignored"), "{notice}");
+    assert!(notice.contains("other 1 file(s)"), "{notice}");
+    let mut actual = calls.lock().unwrap().clone();
+    actual.sort();
+    let mut expected: Vec<_> = ["alpha", "beta"].iter().flat_map(|computer| {
+        ["/same", "/different", "/missing", "/failed"].iter()
+            .map(move |path| (computer.to_string(), path.to_string()))
+    }).collect();
+    expected.sort();
+    assert_eq!(actual, expected);
+    let events = turn(s, &id, "continue").await;
+    assert!(events.contains(&AgentEvent::SystemNotice { text: notice.clone() }));
+    assert_eq!(assistant_text(&events), format!("echo: {notice}\n\ncontinue"));
+    assert!(!c.current(s, &id).unwrap().notice_pending);
+}
+
+#[tokio::test]
+async fn fr_s7_pending_notice_uses_general_fallback_without_hashing_again() {
+    let mut states = BTreeMap::new();
+    for computer in ["alpha", "beta", "gamma"] {
+        states.insert((computer.into(), "/same".into()), FileState::Hash("same".into()));
+    }
+    let (f, calls) = hash_fixture(states);
+    let (s, c) = (&f.sessions, &f.computers);
+    let a = c.register("alpha", "http://alpha:8741", "tok").unwrap();
+    let b = c.register("beta", "http://beta:8741", "tok").unwrap();
+    let g = c.register("gamma", "http://gamma:8741", "tok").unwrap();
+    let id = new_session(s);
+    c.switch(s, &id, &a.id).await.unwrap();
+    turn(s, &id, "hello").await;
+    observe(s, &id, "MultiEdit", json!({"file_path": "/same"}));
+    let first = c.switch(s, &id, &b.id).await.unwrap().notice.unwrap();
+    assert!(first.contains("need no re-read"), "{first}");
+    calls.lock().unwrap().clear();
+    let notice = c.switch(s, &id, &g.id).await.unwrap().notice.unwrap();
+    assert_eq!(notice, computers::switch_notice("alpha", "gamma"));
+    assert!(calls.lock().unwrap().is_empty());
+    let events = turn(s, &id, "continue").await;
+    assert_eq!(assistant_text(&events), format!("echo: {notice}\n\ncontinue"));
 }
 
 // ---------------------------------------------------------------------------------------------

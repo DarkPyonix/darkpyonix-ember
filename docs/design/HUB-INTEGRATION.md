@@ -67,8 +67,8 @@ minutes; 5 s timeout):
   `RelayConfig::Custom`, trailing `/` trimmed); `EMBER_HUB_RELAY_URL` still wins, and
   `EMBER_RELAY_URL` wins over both. `pkarr_url` replaces `<hub>/pkarr`. `link_url` is where Ember
   sends a person to approve codes it may not approve itself.
-- `404` / `405` / `501`, an unreachable hub, or an undecodable answer: the derived values, as
-  before.
+- `404` / `405` / `501`, an unreachable hub, or an undecodable answer: the default directory
+  values remain; no relay is derived from the hub host.
 - When it is asked: ember server at start only when registered (or `EMBER_HUB_URL` is set), and
   when a registration completes, so an unregistered server does not contact the hub; ember node
   when it binds the transport (registered or `EMBER_HUB_URL`), on SIGHUP after a new
@@ -156,8 +156,7 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
 
 ### When the hub is used
 
-- Server: only with `EMBER_TRANSPORT=1`. The transport is bound with the hub's relay and
-  directory when registered, or when `EMBER_HUB_URL` is set explicitly; otherwise it starts as
+- Server: only with `EMBER_TRANSPORT=1`. The transport uses the hub directory and, for legacy iroh, any hub-provided relay when registered, or when `EMBER_HUB_URL` is set explicitly; otherwise it starts as
   before (no address is sent to darkpyonix.dev by an unregistered server) and switches when
   registration completes.
 - Node: same rule, from `hub.json`.
@@ -195,7 +194,7 @@ A revoked registration answers `410 Gone`; the hub being off (no `EMBER_TRANSPOR
   (`?local=1` does not); a link pending at restart is resumed; a removed server relinks after
   readmission; 503 when off.
 - `ember/node/tests/hub.rs`: `register` writes 0600 `hub.json` and configures the transport (and the
-  discovered relay, or the derived one when `/config` is `404`), resolving with the resolve
+  discovered legacy relay, with no derived relay when `/config` is `404`), resolving with the resolve
   token, reporting its app; removal marks `revoked_at` and drops hub-admitted servers (through
   the long-poll); re-registering is refused until readmitted, then works; an old registration
   gets a resolve token on bind; `forget` leaves the account (`--local` does not); an interrupted

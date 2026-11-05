@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, CONFLICT_PREVIEW_LINES, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -1375,21 +1375,272 @@ fn SectionContent(
                 actions,
             );
         }
-        (Some(s), Section::Conflicts) => {
-            EmberCard(false, true, None, Some(SP[3]), None, || {
-                Label("충돌", Fs::Lg, Weight::Semibold, None, None);
-                if s.conflicts.is_empty() {
-                    Label("충돌이 없습니다", Fs::Sm, Weight::Regular, None, None);
-                }
-                for path in &s.conflicts {
-                    Label(path, Fs::Sm, Weight::Regular, None, None);
-                }
-            });
-        }
+        (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
         (Some(_), Section::Stash) => StashPane(actions, stash_count, layout),
         _ => Unavailable(sec),
     }
+}
+
+/// A conflict file for the review captures and a screen without a server.
+fn sample_conflict() -> ConflictFile {
+    use ember_client::api::{GitConflict, GitConflictBlock};
+    let block = |ours: &str, theirs: &str| GitConflictBlock::Conflict {
+        ours: ours.into(),
+        theirs: theirs.into(),
+        ours_label: "HEAD (feat/git-api)".into(),
+        theirs_label: "origin/main".into(),
+    };
+    let c = GitConflict {
+        blocks: vec![
+            GitConflictBlock::Common { text: "use compose_rust::ui as cu;\n".into() },
+            block("use crate::ui::vcs::Section;\n", "use crate::ui::vcs::{Section, SectionNav};\n"),
+            GitConflictBlock::Common { text: "\npub fn shell() {\n".into() },
+            block("    let pad = 16.0;\n", "    let pad = 24.0;\n"),
+            GitConflictBlock::Common { text: "}\n".into() },
+        ],
+    };
+    ConflictFile::from_node("ember/app/src/ui/cr/shell.rs", &c)
+}
+
+/// 충돌: the unmerged files, and (after a tap) the editor of one file. `paths` is the list from
+/// the repository snapshot; resolving a file bumps the screen's reload counter so the list and
+/// 변경 사항 read again. `actions` is `None` for the sample screen, which edits a sample file.
+fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    // `EMBER_CR_VCS_CONFLICT=<path>` opens that file's editor directly, for captures without clicks.
+    let open = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_CONFLICT").ok().filter(|p| !p.is_empty())));
+    let state = remember(|| mutable_state_of(ConflictLoad::Loading));
+    let local = remember(|| mutable_state_of(0_u64));
+    let busy = remember(|| mutable_state_of(false));
+
+    if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
+        let st = state.clone();
+        launched_effect((a.project.clone(), path.clone(), local.get()), move || async move {
+            if crate::services::try_services().is_some() {
+                st.set(ConflictLoad::Loading);
+                let name = a.project.clone();
+                crate::services::run_shared(async move { fetch_conflict(&name, &path).await }, move |result| st.set(result));
+            } else {
+                st.set(ConflictLoad::Failed("서버에 연결되어 있지 않아 충돌 파일을 불러올 수 없습니다.".to_string()));
+            }
+        });
+    }
+
+    let Some(path) = open.get() else {
+        // The file list: a tap opens the editor.
+        if paths.is_empty() {
+            EmberCard(false, true, None, Some(SP[3]), None, || {
+                Label("충돌", Fs::Lg, Weight::Semibold, None, None);
+                Label("충돌이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            });
+            return;
+        }
+        let paths = paths.to_vec();
+        EmberCard(false, true, None, Some(SP[3]), None, move || {
+            Label("충돌", Fs::Lg, Weight::Semibold, None, None);
+            Label("파일을 눌러 충돌을 해결합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            for path in paths {
+                let (open, state, has_server) = (open.clone(), state.clone(), actions.is_some());
+                let target = path.clone();
+                AppButton(&path, None, ButtonKind::Default, true, true, true, move || {
+                    state.set(if has_server { ConflictLoad::Loading } else { ConflictLoad::Ready(sample_conflict()) });
+                    open.set(Some(target.clone()));
+                });
+            }
+        });
+        return;
+    };
+
+    let step = remember(|| mutable_state_of(ConflictStep::Editing));
+    let back = {
+        let (open, busy, step) = (open.clone(), busy.clone(), step.clone());
+        move || {
+            open.set(None);
+            busy.set(false);
+            step.set(ConflictStep::Editing);
+        }
+    };
+    let two = layout == PaneLayout::Two;
+    // The scrolling part: the path, then the blocks, or the preview of the merged text.
+    let content = {
+        let (state, local, busy, step, path) = (state.clone(), local.clone(), busy.clone(), step.clone(), path.clone());
+        move || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                Txt(&path, TypeRole::Mono, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+                match state.get() {
+                    ConflictLoad::Loading => {
+                        Label("충돌 내용을 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    }
+                    ConflictLoad::Failed(text) => {
+                        Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        let retry = local.clone();
+                        AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                    }
+                    ConflictLoad::Ready(file) => {
+                        if step.get() == ConflictStep::Preview {
+                            ConflictPreview(&file);
+                        } else {
+                            ConflictBlocks(&file, layout, busy.get(), &state);
+                        }
+                    }
+                }
+            });
+        }
+    };
+    // The action bar: always visible below the scroll area at the wide layout, after the blocks
+    // (with room for the floating tab bar) at the compact one.
+    let bar = {
+        let (state, busy, open, actions, path, step) = (state.clone(), busy.clone(), open.clone(), actions.clone(), path.clone(), step.clone());
+        move || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                if let ConflictLoad::Ready(file) = state.get() {
+                    ConflictActions(&file, busy.get(), &step, &busy, &open, &actions, &path);
+                }
+                let back = back.clone();
+                AppButton("목록으로", None, ButtonKind::Default, true, !busy.get(), false, back);
+                if !two {
+                    cu::Spacer().modifier(Modifier::new().height(super::routines::compact_bottom_clearance()));
+                }
+            });
+        }
+    };
+    if two {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().fill_max_height()).content(move || {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(content.clone());
+            bar();
+        });
+    } else {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            content();
+            bar();
+        });
+    }
+}
+
+/// The blocks of one file as cards, each with its three choices.
+fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state: &MutableState<ConflictLoad>) {
+    let p = ember_theme().palette;
+    let mut index = 0;
+    for seg in &file.segments {
+        match seg {
+            ConflictSegment::Common(text) => {
+                if !text.trim().is_empty() {
+                    VcsCard(|| {
+                        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                            Txt(text, TypeRole::Mono, Some(paint(p.text_2)), None, None, None, None);
+                        });
+                    });
+                }
+            }
+            ConflictSegment::Block { ours_label, theirs_label, ours, theirs, choice } => {
+                let n = index;
+                index += 1;
+                let (choice, file, state) = (*choice, file.clone(), state.clone());
+                VcsCard(|| {
+                    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                        Label(&format!("충돌 {}", n + 1), Fs::Sm, Weight::Semibold, None, Some(1));
+                        let two = layout == PaneLayout::Two;
+                        let side = |label: &str, text: &str, ours_side: bool| {
+                            let (bg, fg) = if ours_side { (p.green.soft, p.green.strong) } else { (p.blue.soft, p.blue.strong) };
+                            let size = if two { Modifier::new().weight(1.0) } else { Modifier::new().fill_max_width() };
+                            cu::Column().spacing(SP[1]).modifier(size.background(paint(bg)).corner_radius(CORNER_LG).padding(SP[2])).content(|| {
+                                Txt(&chip_text(label), TypeRole::Caption, Some(paint(fg)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                                Txt(text, TypeRole::Mono, Some(paint(p.text)), None, None, None, None);
+                            });
+                        };
+                        if two {
+                            cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                                side(ours_label, ours, true);
+                                side(theirs_label, theirs, false);
+                            });
+                        } else {
+                            side(ours_label, ours, true);
+                            side(theirs_label, theirs, false);
+                        }
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                            for (text, pick) in [("내 변경", ConflictChoice::Ours), ("상대 변경", ConflictChoice::Theirs), ("둘 다", ConflictChoice::Both)] {
+                                let (file, state) = (file.clone(), state.clone());
+                                let selected = choice == pick;
+                                let kind = if selected { ButtonKind::Primary } else { ButtonKind::Default };
+                                AppButton(&choice_label(text, selected), None, kind, true, !is_busy, false, move || {
+                                    state.set(ConflictLoad::Ready(file.with_choice(n, pick)));
+                                });
+                            }
+                        });
+                    });
+                });
+            }
+        }
+    }
+}
+
+/// The merged text as it will be written, cut to `CONFLICT_PREVIEW_LINES` lines.
+fn ConflictPreview(file: &ConflictFile) {
+    let p = ember_theme().palette;
+    let Some((text, more)) = file.preview(CONFLICT_PREVIEW_LINES) else {
+        Label("아직 해결하지 않은 충돌이 있습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+        return;
+    };
+    VcsCard(|| {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+            Label("해결 결과 미리 보기", Fs::Sm, Weight::Semibold, None, Some(1));
+            Txt(&text, TypeRole::Mono, Some(paint(p.text)), None, None, None, None);
+            if more > 0 {
+                Label(&format!("... {more}줄 더 있습니다"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+        });
+    });
+}
+
+/// The progress text and the buttons of the current step: 해결 완료 while editing, 취소 and
+/// 해결하고 스테이징 while previewing. Only the second writes the file.
+fn ConflictActions(
+    file: &ConflictFile,
+    is_busy: bool,
+    step: &MutableState<ConflictStep>,
+    busy: &MutableState<bool>,
+    open: &MutableState<Option<String>>,
+    actions: &Option<Actions>,
+    path: &str,
+) {
+    let p = ember_theme().palette;
+    let content = file.resolved_content();
+    if step.get() == ConflictStep::Editing {
+        Label(&file.progress_text(), Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+        let (step, file) = (step.clone(), file.clone());
+        AppButton("해결 완료", None, ButtonKind::Primary, false, content.is_some() && !is_busy, true, move || {
+            step.set(ConflictStep::Editing.enter_preview(&file));
+        });
+        return;
+    }
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+        let cancel = step.clone();
+        AppButton("취소", None, ButtonKind::Default, true, !is_busy, false, move || cancel.set(ConflictStep::Editing));
+        let (step, busy, open, actions, path, content) = (step.clone(), busy.clone(), open.clone(), actions.clone(), path.to_string(), content.clone());
+        AppButton("해결하고 스테이징", None, ButtonKind::Primary, true, content.is_some() && !is_busy, false, move || {
+            let Some(text) = content.clone() else { return };
+            let Some(a) = actions.clone() else {
+                open.set(None);
+                step.set(ConflictStep::Editing);
+                return;
+            };
+            busy.set(true);
+            let (name, target, busy, open, step, reload) = (a.project.clone(), path.clone(), busy.clone(), open.clone(), step.clone(), a.reload.clone());
+            crate::services::run_shared(async move { run_resolve(&name, &target, &text).await }, move |result| {
+                match &result {
+                    Ok(()) => {
+                        notice::post("충돌을 해결했습니다".to_string());
+                        open.set(None);
+                        step.set(ConflictStep::Editing);
+                        reload.set(reload.get() + 1);
+                    }
+                    Err(line) => notice::post(line.clone()),
+                }
+                busy.set(false);
+            });
+        });
+    });
 }
 
 /// How many ref chips a history row shows before "+N".
@@ -2375,6 +2626,64 @@ mod tests {
     #[compose_rust::runtime::composable]
     fn stash_sample_compact() {
         StashPane(None, mutable_state_of(None), PaneLayout::Tabs);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn conflicts_sample_wide() {
+        ConflictsPane(&["a.rs".to_string()], None, PaneLayout::Two);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn conflicts_sample_compact() {
+        ConflictsPane(&["a.rs".to_string()], None, PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_g7_conflicts_sample_file_has_two_blocks_to_settle() {
+        let f = sample_conflict();
+        assert_eq!(f.block_count(), 2);
+        assert!(f.resolved_content().is_none());
+    }
+
+    #[test]
+    fn fr_g7_conflicts_editor_wide_and_compact_show_blocks_and_choices() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [conflicts_sample_wide as fn(), conflicts_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("a.rs"));
+        }
+    }
+
+    #[test]
+    fn fr_g7_conflicts_preview_shows_the_merged_text_and_both_buttons() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(conflicts_preview_composed);
+        assert!(text.contains("해결 결과 미리 보기"));
+        assert!(text.contains("취소"));
+        assert!(text.contains("해결하고 스테이징"));
+        assert!(!text.contains("해결 완료"));
+    }
+
+    #[compose_rust::runtime::composable]
+    fn conflicts_preview_composed() {
+        let f = sample_conflict().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
+        let step = mutable_state_of(ConflictStep::Preview);
+        ConflictPreview(&f);
+        ConflictActions(&f, false, &step, &mutable_state_of(false), &mutable_state_of(None), &None, "a.rs");
+    }
+
+    #[test]
+    fn fr_g7_conflicts_pane_lists_the_files_at_both_widths() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [conflicts_sample_wide as fn(), conflicts_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("a.rs"));
+            assert!(!text.contains("충돌이 없습니다"));
+            assert!(!text.contains(SOON));
+        }
     }
 
     #[test]

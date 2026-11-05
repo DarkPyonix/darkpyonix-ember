@@ -413,6 +413,8 @@ impl State {
                     ch.sessions.insert(session_id);
                 }
             }
+            // Channels are read through the API by the channels UI, not held in the reducer.
+            Input::Push(Push::ChannelMessage { .. }) => {}
             Input::Push(Push::TeamUpdated { team }) => self.put_team(team, &mut ch),
             Input::TeamLoaded { session_id, team: Some(team) } => {
                 if team.member(&session_id).is_none() {

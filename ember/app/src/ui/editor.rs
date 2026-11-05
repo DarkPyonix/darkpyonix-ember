@@ -5,13 +5,25 @@ use crate::ui::keymap::{Action, Chord};
 
 
 /// What the editor was opened for.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct EditorTarget {
     pub project: String,
     /// The project's folder on its computer, when the server said (`IdeLaunch.folder`).
     pub folder: String,
     pub endpoint: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for EditorTarget {
+    // The token authorizes the editor connection, so it never reaches logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditorTarget")
+            .field("project", &self.project)
+            .field("folder", &self.folder)
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// The status bar's cursor position, "N행 M열".
@@ -119,6 +131,20 @@ pub fn agent_status_text(state: &str) -> String {
 pub fn chord_from_key(key: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> Chord {
     let key = if key.chars().count() == 1 { key.to_uppercase() } else { key.to_string() };
     Chord::Keys { ctrl, shift, alt, meta, key }
+}
+
+/// The action a pressed key triggers under a keymap, if any. `key` is the key's name as the
+/// keymap table writes it.
+pub fn action_for_key(
+    keymap: crate::ui::keymap::Keymap,
+    os: crate::ui::keymap::Os,
+    key: &str,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+) -> Option<Action> {
+    keymap.action_for(&chord_from_key(key, ctrl, shift, alt, meta), os)
 }
 
 pub fn tooltip_text(label: &str, hint: &str) -> String {
@@ -304,3 +330,78 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
     rsx! {}
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::keymap::{Keymap, Os};
+
+    #[test]
+    fn fr_l31_actions_toggle_tool_windows_and_close_tabs() {
+        let mut tabs = EditorTabs::default();
+        let mut stripes = Stripes::default();
+        assert!(apply_action(Action::Terminal, &mut tabs, &mut stripes));
+        assert_eq!(stripes.selected(Side::Bottom), None);
+        assert!(apply_action(Action::Problems, &mut tabs, &mut stripes));
+        assert!(stripes.is_selected(ToolWindow::Problems));
+        assert!(!apply_action(Action::Close, &mut tabs, &mut stripes));
+        tabs.open("a.rs");
+        assert!(apply_action(Action::Close, &mut tabs, &mut stripes));
+        assert_eq!(tabs.current_path(), None);
+        assert!(!apply_action(Action::Format, &mut tabs, &mut stripes));
+    }
+
+    #[test]
+    fn fr_l31_tooltip_and_base_name() {
+        assert_eq!(tooltip_text("저장", ""), "저장");
+        assert_eq!(tooltip_text("저장", "Ctrl+S"), "저장  Ctrl+S");
+        assert_eq!(base_name("ember/app/src/lib.rs"), "lib.rs");
+        assert_eq!(base_name("lib.rs"), "lib.rs");
+    }
+
+    #[test]
+    fn fr_l31_every_stripe_window_belongs_to_one_list() {
+        for w in ToolWindow::ALL {
+            let n = [&ToolWindow::LEFT[..], &ToolWindow::RIGHT[..], &ToolWindow::BOTTOM[..]]
+                .iter()
+                .filter(|l| l.contains(&w))
+                .count();
+            assert_eq!(n, 1, "{w:?}");
+        }
+    }
+
+    #[test]
+    fn fr_l31_key_chords_drive_tabs_and_stripes() {
+        let mut tabs = EditorTabs::default();
+        let mut stripes = Stripes::default();
+        tabs.open("a.rs");
+        tabs.open("b.rs");
+
+        let close = action_for_key(Keymap::VsCode, Os::Other, "w", true, false, false, false);
+        assert_eq!(close, Some(Action::Close));
+        assert!(apply_action(close.unwrap(), &mut tabs, &mut stripes));
+        assert_eq!(tabs.paths(), vec!["a.rs"]);
+
+        assert!(stripes.is_selected(ToolWindow::Terminal));
+        let terminal = action_for_key(Keymap::VsCode, Os::Other, "`", true, false, false, false);
+        assert_eq!(terminal, Some(Action::Terminal));
+        assert!(apply_action(terminal.unwrap(), &mut tabs, &mut stripes));
+        assert_eq!(stripes.selected(Side::Bottom), None);
+
+        assert_eq!(action_for_key(Keymap::VsCode, Os::Other, "w", false, false, false, false), None);
+    }
+
+    #[test]
+    fn fr_l31_editor_target_debug_redacts_the_token() {
+        let target = EditorTarget {
+            project: "p".into(),
+            folder: "/f".into(),
+            endpoint: "127.0.0.1:9000".into(),
+            token: "s3cret-token".into(),
+        };
+        let text = format!("{target:?}");
+        assert!(!text.contains("s3cret-token"), "{text}");
+        assert!(text.contains("[REDACTED]"));
+        assert!(text.contains("127.0.0.1:9000"));
+    }
+}

@@ -195,6 +195,10 @@ pub fn launch_ide_shared(
         ),
         IdeAction::EmberPlaceholder => {
             let c = IdeLaunch::editor_connection(launch.as_ref());
+            if c.endpoint.as_deref().map_or(true, str::is_empty) {
+                notice::post("Ember 에디터: 서버가 OSE 런타임을 시작하지 못했습니다");
+                return;
+            }
             ui.open_editor_connection(c.project, c.folder, c.endpoint, c.token);
         }
         IdeAction::Unavailable(why) => {

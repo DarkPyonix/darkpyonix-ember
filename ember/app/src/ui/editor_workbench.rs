@@ -90,7 +90,7 @@ pub mod page {
     use dioxus_compose::html::prelude::*;
     use super::{editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
     use crate::ui::editor::{
-        agent_status_text, apply_action, breadcrumb_text, chord_from_key, tooltip_text, Side, Stripes, ToolWindow,
+        action_for_key, agent_status_text, apply_action, breadcrumb_text, tooltip_text, Side, Stripes, ToolWindow,
     };
     use crate::ui::keymap::{Action, Keymap, Os};
     use crate::ui::project::{project_boxes, status_pill, SOON};
@@ -196,15 +196,16 @@ pub mod page {
             div { class: "monaco-workbench", tabindex: "0", style: "width:100vw; height:calc(100vh - 76px); display:flex; flex-direction:column; background:#1e1e1e; color:#cccccc; font-size:13px;",
                 onkeydown: move |event| {
                     let m = event.modifiers();
-                    let chord = chord_from_key(
+                    let keymap = *key_s.keymap.read();
+                    if let Some(action) = action_for_key(
+                        keymap,
+                        Os::current(),
                         &key_name(&event.key()),
                         m.contains(Modifiers::CONTROL),
                         m.contains(Modifiers::SHIFT),
                         m.contains(Modifiers::ALT),
                         m.contains(Modifiers::META),
-                    );
-                    let keymap = *key_s.keymap.read();
-                    if let Some(action) = keymap.action_for(&chord, Os::current()) {
+                    ) {
                         run_action(&key_s, action);
                     }
                 },

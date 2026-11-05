@@ -68,13 +68,50 @@ pub fn hash_secret(secret: &str) -> String {
     Sha256::digest(secret.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A fresh secret: `prefix` plus 256 random bits (two v4 UUIDs, as the server token) in hex.
+/// A fresh secret: `prefix` plus 244 random bits in hex (two v4 UUIDs, 122 random bits each, from
+/// the OS CSPRNG, as the server token).
 pub fn new_secret(prefix: &str) -> String {
     format!("{prefix}{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
 }
 
 /// Longest guest name in characters.
 pub const MAX_NAME_CHARS: usize = 64;
+
+/// Names a guest may not take, compared trimmed and lowercased: they are the labels of the owner,
+/// the server and agents in the log.
+const RESERVED_NAMES: [&str; 4] = ["user", "나", "system", "agent"];
+
+/// True for a character a name may not contain: Unicode categories Cc (controls), Cf (format:
+/// zero-width and bidi controls), Zl and Zp. No general-category crate is a dependency, so the Cf
+/// ranges are listed here (Unicode 15).
+pub fn is_forbidden_name_char(c: char) -> bool {
+    let u = c as u32;
+    c.is_control()
+        || matches!(u,
+            0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x180E
+            | 0x200B..=0x200F | 0x2028 | 0x2029 | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+            | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// Check a guest display name (already trimmed) against the shape rules and the reserved names.
+/// `member_names` are the names of the channel's members; a name equal to one (case-insensitive)
+/// is refused so a guest cannot pass as an agent. No Unicode normaliser is a dependency, so the
+/// comparison is plain lowercase.
+pub fn check_guest_name(name: &str, member_names: &[String]) -> Result<(), ChannelError> {
+    let chars = name.chars().count();
+    if chars == 0 || chars > MAX_NAME_CHARS || name.chars().any(is_forbidden_name_char) {
+        return Err(ChannelError::Coded(
+            "invalid_name",
+            format!("name must be 1 to {MAX_NAME_CHARS} characters with no control, format or line-separator character"),
+        ));
+    }
+    let lower = name.to_lowercase();
+    if RESERVED_NAMES.contains(&lower.as_str()) || member_names.iter().any(|m| m.trim().to_lowercase() == lower) {
+        return Err(ChannelError::Coded("invalid_name", "that name is reserved in this channel".into()));
+    }
+    Ok(())
+}
 
 /// A guest as the server knows it. Never carries the credential or its hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -196,8 +233,7 @@ impl Store {
     /// Accept an invite (FR-T14): checks that the invite is unexpired, unused and unrevoked, marks
     /// it used, and makes the guest with a fresh credential whose expiry is the invite's. Returns
     /// the guest and the plaintext credential, which exists nowhere else. `name` is trimmed and
-    /// must be 1..=64 characters with no control character (else `BadRequest`, and the invite
-    /// stays usable). Every other failure is the same `NotFound`, so a caller cannot tell an
+    /// must pass [`check_guest_name`] (else 400 `invalid_name`, and the invite stays usable). Every other failure is the same `NotFound`, so a caller cannot tell an
     /// unknown token from a used, expired or revoked one.
     pub fn accept_invite(&self, token: &str, name: &str) -> Result<(Guest, String), ChannelError> {
         self.accept_invite_at(token, name, now_ms())
@@ -206,11 +242,22 @@ impl Store {
     /// As [`Store::accept_invite`] with the clock given.
     pub fn accept_invite_at(&self, token: &str, name: &str, now: i64) -> Result<(Guest, String), ChannelError> {
         let name = name.trim();
-        let chars = name.chars().count();
-        if chars == 0 || chars > MAX_NAME_CHARS || name.chars().any(char::is_control) {
-            return Err(ChannelError::BadRequest(format!(
-                "name must be 1 to {MAX_NAME_CHARS} characters with no control character"
-            )));
+        // Shape rules first, so a bad name is 400 whatever the token is (no oracle on the token).
+        check_guest_name(name, &[])?;
+        // Then the channel's member names, before the invite is burned. A failure here means the
+        // token named a live channel; the secret is 244 bits, so that leaks nothing usable.
+        let channel_of: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT channel_id FROM channel_invites WHERE token_hash = ?1",
+                params![hash_secret(token)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(cid) = channel_of {
+            let names: Vec<String> =
+                self.channel_members(&cid).map(|m| m.into_iter().map(|x| x.name).collect()).unwrap_or_default();
+            check_guest_name(name, &names)?;
         }
         let gone = || ChannelError::NotFound("invite".into());
         let mut conn = self.conn();

@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{fetch_history, history_append, history_from, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use crate::ui::vcs::{fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -25,7 +25,7 @@ pub use crate::ui::vcs::{
     ahead_behind_text, bar_fractions, build_tree, check_glyph, check_of, commit_enabled,
     commit_label, effective_tab, fetched_text, folder_check, merge_gate, pane_layout, pane_tabs,
     parse_hunk_header, parse_unified, pick_project, remote_action, repo_projects, route_section,
-    section_count, section_nav, soon_line, tab_after_select, upstream_text, Check,
+    section_count, section_count_with_stash, section_nav, soon_line, tab_after_select, upstream_text, Check,
     CiState, DiffLine, FileDiff, FileStaging, FileStatus, Hunk, LineKind, PaneLayout, PaneTab,
     RemoteAction, RepoSnapshot, ReviewState, Section, SectionNav, Staging, TreeRow, SOON,
 };
@@ -675,11 +675,11 @@ pub fn SectionList(
     snap: Option<&RepoSnapshot>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
-    SectionListWithSample(active, snap, false, on_pick);
+    SectionListWithSample(active, snap, false, None, on_pick);
 }
 
 fn SectionListWithSample(
-    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool,
+    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
@@ -688,7 +688,7 @@ fn SectionListWithSample(
             let is_active = sec == active;
             let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
             let fg = if is_active { p.text } else { p.muted };
-            let count = section_count(sec, snap).or_else(|| {
+            let count = section_count_with_stash(sec, snap, stash_count).or_else(|| {
                 if is_sample {
                     match sec {
                         Section::PullRequests => Some(4),
@@ -1362,6 +1362,7 @@ fn SectionContent(
     active_tab: Option<PaneTab>,
     tab: &MutableState<PaneTab>,
     actions: Option<Actions>,
+    stash_count: MutableState<Option<usize>>,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -1386,6 +1387,7 @@ fn SectionContent(
             });
         }
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
+        (Some(_), Section::Stash) => StashPane(actions, stash_count, layout),
         _ => Unavailable(sec),
     }
 }
@@ -1550,6 +1552,196 @@ fn HistoryPane(project: Option<(String, u64)>, layout: PaneLayout) {
     }
 }
 
+/// Stashes for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+fn sample_stashes() -> StashLoad {
+    let e = |index: u32, message: &str, branch: &str, time: &str| StashEntry {
+        index,
+        label: format!("stash@{{{index}}}"),
+        message: message.to_string(),
+        branch: branch.to_string(),
+        time_text: time.to_string(),
+    };
+    StashLoad::Ready(vec![
+        e(0, "세션 shim 작업 중", "feat/session-shim", "40분 전"),
+        e(1, "릴리스 문서 초안", "main", "2일 전"),
+    ])
+}
+
+/// The meta line of a stash row: label, branch and time.
+fn stash_meta(e: &StashEntry) -> String {
+    format!("{} \u{00b7} {} \u{00b7} {}", e.label, e.branch, e.time_text)
+}
+
+/// The label of a stash's delete button: the first tap asks, the second deletes.
+fn drop_label(confirming: bool) -> &'static str {
+    if confirming { "정말 삭제합니다" } else { "삭제" }
+}
+
+/// 스태시: make a stash, and apply, pop or drop the saved ones. `actions` is the project and the
+/// screen's reload counter (an action bumps it so 변경 사항 reads the work tree again); `None`
+/// shows sample stashes. `count` is written for the section list.
+fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    let key_project = actions.as_ref().map(|a| a.project.clone());
+    let state = remember_with_key(key_project, || mutable_state_of(StashLoad::Loading));
+    let local = remember(|| mutable_state_of(0_u64));
+    let busy = remember(|| mutable_state_of(false));
+    let confirm = remember(|| mutable_state_of(None::<u32>));
+    let message = remember(|| mutable_state_of(String::new()));
+    let untracked = remember(|| mutable_state_of(false));
+    let generation = remember(|| mutable_state_of(0_u64));
+
+    if let Some(a) = actions.clone() {
+        let (st, cnt) = (state.clone(), count.clone());
+        launched_effect((a.project.clone(), a.reload.get(), local.get()), move || async move {
+            if crate::services::try_services().is_some() {
+                if !matches!(st.get(), StashLoad::Ready(_)) {
+                    st.set(StashLoad::Loading);
+                }
+                let (name, now) = (a.project.clone(), crate::demo::now_ms() / 1000);
+                crate::services::run_shared(async move { stash_from(fetch_stashes(&name).await, now) }, move |result| {
+                    cnt.set(if let StashLoad::Ready(list) = &result { Some(list.len()) } else { None });
+                    st.set(result);
+                });
+            }
+        });
+    }
+    let current = if actions.is_some() { state.get() } else { sample_stashes() };
+    let is_busy = busy.get();
+
+    // One finished action: say what happened, read the list again after a success.
+    let run = {
+        let (actions, busy, confirm, local) = (actions.clone(), busy.clone(), confirm.clone(), local.clone());
+        move |action: StashAction, index: u32| {
+            let Some(a) = actions.clone() else { return };
+            busy.set(true);
+            let (name, busy, confirm, local, reload) = (a.project.clone(), busy.clone(), confirm.clone(), local.clone(), a.reload.clone());
+            crate::services::run_shared(async move { run_stash_action(&name, action, index).await }, move |result| {
+                notice::post(stash_action_notice(action, &result));
+                if result.is_ok() {
+                    local.set(local.get() + 1);
+                    reload.set(reload.get() + 1);
+                }
+                confirm.set(None);
+                busy.set(false);
+            });
+        }
+    };
+    let make = {
+        let (actions, busy, local, message, untracked, generation) =
+            (actions.clone(), busy.clone(), local.clone(), message.clone(), untracked.clone(), generation.clone());
+        move || {
+            let Some(a) = actions.clone() else { return };
+            busy.set(true);
+            let (name, text, with_untracked) = (a.project.clone(), message.get(), untracked.get());
+            let (busy, local, message, generation, reload) = (busy.clone(), local.clone(), message.clone(), generation.clone(), a.reload.clone());
+            crate::services::run_shared(async move { run_stash_push(&name, &text, with_untracked).await }, move |result| {
+                match &result {
+                    Ok(()) => {
+                        notice::post("스태시를 만들었습니다".to_string());
+                        message.set(String::new());
+                        generation.set(generation.get() + 1);
+                        local.set(local.get() + 1);
+                        reload.set(reload.get() + 1);
+                    }
+                    Err(line) => notice::post(line.clone()),
+                }
+                busy.set(false);
+            });
+        }
+    };
+
+    let creator = {
+        let (message, untracked, generation) = (message.clone(), untracked.clone(), generation.clone());
+        move || {
+            VcsCard(|| {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                    Label("스태시 만들기", Fs::Md, Weight::Semibold, None, Some(1));
+                    let value = message.clone();
+                    key(generation.get(), || {
+                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
+                            .text(message.get()).placeholder("메시지 (선택)")
+                            .on_value_change(move |v| value.set(v));
+                    });
+                    cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                        let flag = untracked.clone();
+                        // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so it looks hollow.
+                        cu::Checkbox(untracked.get())
+                            .modifier(Modifier::new().size(18.0, 18.0))
+                            .on_change(move |v| flag.set(v));
+                        Label("추적하지 않는 파일 포함", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                    });
+                    AppButton("스태시 만들기", None, ButtonKind::Primary, false, !is_busy, true, make);
+                });
+            });
+        }
+    };
+
+    let (retry, status) = (local.clone(), current.clone());
+    let list = move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            creator();
+            match status {
+                StashLoad::Loading => {
+                    Label("스태시를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                }
+                StashLoad::Failed(text) => {
+                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                }
+                StashLoad::Ready(entries) => {
+                    if entries.is_empty() {
+                        EmberCard(false, true, None, Some(SP[3]), None, || {
+                            Label("스태시가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        });
+                        return;
+                    }
+                    VcsCard(|| {
+                        for (i, e) in entries.iter().enumerate() {
+                            if i > 0 {
+                                cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                            }
+                            let (run, confirm) = (run.clone(), confirm.clone());
+                            StashRow(e, layout, is_busy, confirm, run);
+                        }
+                    });
+                }
+            }
+        });
+    };
+    if layout == PaneLayout::Two {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+    } else {
+        list();
+    }
+}
+
+/// One stash: message, meta line and the 적용, 꺼내기, 삭제 buttons. 삭제 needs a second tap on
+/// the same button, which then reads "정말 삭제합니다".
+fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, confirm: MutableState<Option<u32>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
+    let p = ember_theme().palette;
+    let index = e.index;
+    let confirming = confirm.get() == Some(index);
+    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        Txt(&e.message, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+        Txt(&stash_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+        cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+            let apply = run.clone();
+            AppButton("적용", None, ButtonKind::Default, true, !busy, false, move || apply(StashAction::Apply, index));
+            let pop = run.clone();
+            AppButton("꺼내기", None, ButtonKind::Default, true, !busy, false, move || pop(StashAction::Pop, index));
+            let (ask, del) = (confirm.clone(), run.clone());
+            AppButton(drop_label(confirming), None, ButtonKind::Destructive, true, !busy, false, move || {
+                if ask.get() == Some(index) {
+                    del(StashAction::Drop, index);
+                } else {
+                    ask.set(Some(index));
+                }
+            });
+        });
+    });
+}
+
 /// The screen wired as 버전 관리.
 pub fn VcsScreen() {
     let is_sample_route = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("vcs");
@@ -1619,6 +1811,7 @@ fn VcsScreenWithLoad(
     let section = remember(|| mutable_state_of(Section::Changes));
     let tab = remember(|| mutable_state_of(PaneTab::Files));
     let selected_proj = remember(|| mutable_state_of(current_id));
+    let stash_count = remember(|| mutable_state_of(None::<usize>));
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
@@ -1668,10 +1861,10 @@ fn VcsScreenWithLoad(
                         cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
                             cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
-                                SectionListWithSample(sec, snap.as_ref(), sample, move |s| sec_state.set(s));
+                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone());
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone());
                             });
                         });
                     } else {
@@ -1682,7 +1875,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone());
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone());
                         });
                     }
                 } else {
@@ -2082,7 +2275,10 @@ mod tests {
         };
         assert_eq!(section_count(Section::Changes, Some(&snap)), Some(1));
         assert_eq!(section_count(Section::Branches, Some(&snap)), Some(2));
-        assert_eq!(section_count(Section::Stash, Some(&snap)), None);
+        assert_eq!(section_count(Section::Stash, Some(&snap)), None, "no stash read yet");
+        assert_eq!(section_count_with_stash(Section::Stash, Some(&snap), Some(3)), Some(3));
+        assert_eq!(section_count_with_stash(Section::Stash, None, Some(0)), Some(0));
+        assert_eq!(section_count_with_stash(Section::Changes, Some(&snap), Some(3)), Some(1));
         assert_eq!(SOON, "준비 중입니다");
     }
 
@@ -2166,6 +2362,42 @@ mod tests {
         assert_eq!(chip_limit(PaneLayout::Two), 4);
         let HistoryLoad::Ready { entries, .. } = sample_history() else { panic!() };
         assert_eq!(history_meta(&entries[0]), "a1b2c3d \u{00b7} BREW \u{00b7} 12분 전");
+    }
+
+    #[compose_rust::runtime::composable]
+    fn stash_sample_wide() {
+        StashPane(None, mutable_state_of(None), PaneLayout::Two);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn stash_sample_compact() {
+        StashPane(None, mutable_state_of(None), PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_g6_stash_section_shows_the_creator_and_the_buttons_of_each_entry() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [stash_sample_wide as fn(), stash_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("스태시 만들기"));
+            assert!(text.contains("추적하지 않는 파일 포함"));
+            assert!(text.contains("세션 shim 작업 중"));
+            assert!(text.contains("stash@{0}"));
+            assert!(text.contains("적용"));
+            assert!(text.contains("꺼내기"));
+            assert!(text.contains("삭제"));
+            assert!(!text.contains("정말 삭제합니다"), "no delete is asked before the first tap");
+            assert!(!text.contains(SOON));
+        }
+    }
+
+    #[test]
+    fn fr_g6_the_delete_button_asks_once_and_the_meta_line_joins_label_branch_time() {
+        assert_eq!(drop_label(false), "삭제");
+        assert_eq!(drop_label(true), "정말 삭제합니다");
+        let StashLoad::Ready(list) = sample_stashes() else { panic!() };
+        assert_eq!(stash_meta(&list[0]), "stash@{0} \u{00b7} feat/session-shim \u{00b7} 40분 전");
     }
 
     #[compose_rust::runtime::composable]

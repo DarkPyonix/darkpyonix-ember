@@ -38,6 +38,8 @@ use super::components::{
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
 use crate::ui::home::UNAVAILABLE;
+use crate::ui::usage::{self, Load};
+use ember_client::api::UsageSummary;
 
 const ICON_USER_SVG: &str = include_str!("../../../assets/nav/user.svg");
 const ICON_GLOBE_SVG: &str = include_str!("../../../assets/nav/globe.svg");
@@ -164,8 +166,8 @@ fn effective_profiles(store: &LocalStore, live: &AgentsLive) -> Vec<Profile> {
 /// The main Agents screen, called from the shell.
 pub fn AgentsScreen() {
     let is_sample = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("agents");
-    let (live, computers, bars, week_tokens) = if is_sample {
-        (sample_live(), sample_computers(), sample_bars(), 8_765_432u64)
+    let (live, computers, bars, usage_load) = if is_sample {
+        (sample_live(), sample_computers(), sample_bars(), Load::Ready(crate::demo::usage_summary(crate::demo::now_ms())))
     } else if let Some(s) = crate::services::try_services() {
         let _ = s.ui.live.launcher.get();
         let accounts_raw = s.ui.live.accounts.get();
@@ -190,20 +192,10 @@ pub fn AgentsScreen() {
                 .collect()
         });
         let bars = s.client.read(|st| crate::ui::home::harness_usage(st));
-        let ids: Vec<String> = chatgpt.iter().map(|a| a.id.clone()).collect();
-        let usage_raw = s.ui.live.usage.get();
-        let week: u64 = crate::ui::home::chatgpt_token_days(
-            &usage_raw,
-            &ids,
-            &crate::ui::home::today_utc(),
-            7,
-        )
-        .iter()
-        .map(|(_, t)| *t)
-        .sum();
+        let week = s.ui.live.usage_summary.get();
         (live, computers, bars, week)
     } else {
-        (AgentsLive::default(), Vec::new(), Vec::new(), 0)
+        (AgentsLive::default(), Vec::new(), Vec::new(), Load::Loading)
     };
 
     let initial_section = std::env::var("EMBER_CR_AGENTS_SECTION")
@@ -211,14 +203,20 @@ pub fn AgentsScreen() {
         .map(|sec| resolve_section(&sec))
         .unwrap_or(Section::Harness);
 
-    AgentsScreenWith(live, computers, bars, week_tokens, initial_section);
+    let _requested = remember(|| {
+        if !is_sample {
+            crate::bridge::request_usage_summary();
+        }
+        0u8
+    });
+    AgentsScreenWith(live, computers, bars, usage_load, initial_section);
 }
 
 pub fn AgentsScreenWith(
     live: AgentsLive,
     computers: Vec<(String, Reachability)>,
     bars: Vec<crate::ui::home::HarnessBar>,
-    week_tokens: u64,
+    usage_load: Load<UsageSummary>,
     initial_section: Section,
 ) {
     let p = ember_theme().palette;
@@ -283,7 +281,7 @@ pub fn AgentsScreenWith(
                                     Section::Models => ModelsSection(&store, compact),
                                     Section::Profiles => ProfilesSection(&store, &live, compact),
                                     Section::Network => NetworkSection(&computers, compact),
-                                    Section::Usage => UsageSection(&live, &bars, week_tokens, compact),
+                                    Section::Usage => UsageSection(&live, &bars, &usage_load, compact),
                                 }
                             });
                     } else {
@@ -304,7 +302,7 @@ pub fn AgentsScreenWith(
                                             Section::Models => ModelsSection(&store, compact),
                                             Section::Profiles => ProfilesSection(&store, &live, compact),
                                             Section::Network => NetworkSection(&computers, compact),
-                                            Section::Usage => UsageSection(&live, &bars, week_tokens, compact),
+                                            Section::Usage => UsageSection(&live, &bars, &usage_load, compact),
                                         }
                                     });
                             });
@@ -762,73 +760,38 @@ fn draw_ring(percent: Option<u8>, size: f32, stroke_width: f32, p: &Palette) -> 
     builder.build()
 }
 
-fn draw_donut(p: &Palette) -> DrawList {
-    let half = 66.0;
-    let stroke_width = 12.0;
-    let radius = half - stroke_width / 2.0;
-    let claude_col = Color::rgb(0xe49b55);
-    let codex_col = Color::rgb(0x3f74d4);
-    let gemini_col = Color::rgb(0x9dbde9);
-    // Total $174: Claude $120 (69%), Codex $46 (26.4%), Gemini $8 (4.6%)
-    let sweep1 = 360.0 * 120.0 / 174.0;
-    let sweep2 = 360.0 * 46.0 / 174.0;
-    let sweep3 = 360.0 * 8.0 / 174.0;
-    DrawList::builder()
-        .circle(paint(p.surface_2), half, half, radius, stroke_width)
-        .arc(paint(claude_col), half, half, radius, -90.0, sweep1, stroke_width)
-        .arc(paint(codex_col), half, half, radius, -90.0 + sweep1, sweep2, stroke_width)
-        .arc(paint(gemini_col), half, half, radius, -90.0 + sweep1 + sweep2, sweep3, stroke_width)
-        .build()
-}
-
-fn draw_usage_bars(p: &Palette) -> DrawList {
+fn draw_usage_bars(p: &Palette, bars: &[usage::DayBar]) -> DrawList {
     const W: f32 = 440.0;
     const H: f32 = 130.0;
     let claude_col = Color::rgb(0xe49b55);
     let codex_col = Color::rgb(0x3f74d4);
-    let gemini_col = Color::rgb(0x9dbde9);
-    let sample_days: [(f32, f32, f32); 14] = [
-        (2.1, 1.1, 0.3), (2.8, 1.3, 0.4), (2.4, 1.2, 0.3), (1.5, 0.8, 0.3),
-        (1.9, 0.9, 0.3), (3.3, 1.5, 0.4), (2.6, 1.3, 0.4), (2.8, 1.2, 0.4),
-        (3.3, 1.5, 0.5), (2.8, 1.3, 0.4), (3.2, 1.5, 0.5), (3.2, 1.5, 0.5),
-        (3.2, 1.4, 0.5), (3.3, 1.5, 0.4),
-    ];
-    let max_tot = 5.5f32;
+    let other_col = Color::rgb(0x9dbde9);
+    let max_tot = bars.iter().map(|b| b.total()).max().unwrap_or(0).max(1) as f32;
     let mut builder = DrawList::builder().rect(paint(p.line), 0.0, H, W, 1.0, 0.0);
-    let bar_w = 24.0;
-    let pitch = 31.0;
-    for (i, (c, x, g)) in sample_days.iter().enumerate() {
+    let pitch = W / bars.len().max(1) as f32;
+    let bar_w = (pitch - 7.0).max(2.0);
+    for (i, b) in bars.iter().enumerate() {
         let x_pos = i as f32 * pitch;
-        let c_h = (c / max_tot * H).round();
-        let x_h = (x / max_tot * H).round();
-        let g_h = (g / max_tot * H).round();
-        let tot_h = c_h + x_h + g_h;
-        let y_top = H - tot_h;
+        let h = |n: u64| (n as f32 / max_tot * H).round();
+        let (c_h, x_h, g_h) = (h(b.claude), h(b.codex), h(b.other));
         builder = builder.round_rect(paint(p.surface_2), x_pos, 0.0, bar_w, H, 4.0, 0.0);
         builder = builder.round_rect(paint(claude_col), x_pos, H - c_h, bar_w, c_h, 4.0, 0.0);
         builder = builder.round_rect(paint(codex_col), x_pos, H - c_h - x_h, bar_w, x_h, 0.0, 0.0);
-        builder = builder.round_rect(paint(gemini_col), x_pos, y_top, bar_w, g_h, 4.0, 0.0);
+        builder = builder.round_rect(paint(other_col), x_pos, H - c_h - x_h - g_h, bar_w, g_h, 4.0, 0.0);
     }
     builder.build()
 }
 
-fn draw_split_bar(_p: &Palette, w: f32) -> DrawList {
+/// A bar split into input and output by their counts; a grey track when there are none.
+fn draw_split_bar(p: &Palette, w: f32, input: u64, output: u64) -> DrawList {
     let h = 14.0;
     let r = 7.0;
-    let w1 = (w * 0.28).round();
-    let w2 = (w * 0.10).round();
-    let w3 = (w * 0.56).round();
-    let w4 = w - w1 - w2 - w3;
-    let blue = Color::rgb(0x3f74d4);
-    let orange = Color::rgb(0xe49b55);
-    let sky = Color::rgb(0x9dbde9);
-    let green = Color::rgb(0x4f9a6c);
-
+    let total = (input + output).max(1) as f32;
+    let w1 = (w * input as f32 / total).round();
     DrawList::builder()
-        .round_rect(paint(blue), 0.0, 0.0, w1 + r, h, r, 0.0)
-        .rect(paint(orange), w1, 0.0, w2, h, 0.0)
-        .rect(paint(sky), w1 + w2, 0.0, w3, h, 0.0)
-        .round_rect(paint(green), w1 + w2 + w3 - r, 0.0, w4 + r, h, r, 0.0)
+        .round_rect(paint(p.surface_2), 0.0, 0.0, w, h, r, 0.0)
+        .round_rect(paint(Color::rgb(0x3f74d4)), 0.0, 0.0, w1.max(0.0), h, r, 0.0)
+        .round_rect(paint(Color::rgb(0xe49b55)), w1, 0.0, if input + output == 0 { 0.0 } else { w - w1 }, h, r, 0.0)
         .build()
 }
 
@@ -2014,47 +1977,45 @@ fn ComputerTile(name: &str, r: Reachability) {
 fn UsageSection(
     live: &AgentsLive,
     bars: &[crate::ui::home::HarnessBar],
-    week_tokens: u64,
+    load: &Load<UsageSummary>,
     compact: bool,
 ) {
     let p = ember_theme().palette;
-    let tokens = chatgpt_tokens_today(&live.chatgpt);
+    let window = remember(|| mutable_state_of(14u32));
 
     // Period Seg: 7일 / 14일
     const PERIOD_OPTIONS: [(u32, &'static str); 2] = [(7, "7일"), (14, "14일")];
-    SegGroup(&PERIOD_OPTIONS, 14, |_| {});
+    let pick = window.clone();
+    SegGroup(&PERIOD_OPTIONS, window.get(), move |v| pick.set(v));
+    let m = usage::section_model(load, &crate::ui::home::today_utc(), window.get() as usize);
 
     cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
-    // Hero Card: 오늘 사용량 / 오늘 토큰
+    // Hero Card: 오늘 토큰, the harnesses and the daily bars
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            let figures = || {
+                Label("오늘 토큰", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&m.today, Fs::Xl3, Weight::Semibold, None, Some(1));
+                Label(&m.today_sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                if let Some(n) = &m.notice {
+                    Label(n, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                }
+                cu::Spacer().modifier(Modifier::new().height(SP[2]));
+                for (kind, value) in &m.harness {
+                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+                        VendorDot(AgentHarness::of_kind(kind).unwrap_or(AgentHarness::Acp));
+                        Label(&format!("{} {}", usage::agent_label(kind), value), Fs::Xs, Weight::Regular, None, Some(1));
+                    });
+                }
+            };
             if compact {
-                cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
-                    Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    let tok_str = tokens.map(format_tokens).unwrap_or_else(|| "1,234,567".to_string());
-                    Label(&tok_str, Fs::Xl3, Weight::Semibold, None, Some(1));
-                    Label(&format!("토큰 · 14일 평균 3.5M (최근 7일 {})", format_tokens(week_tokens)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                });
+                cu::Column().modifier(Modifier::new().fill_max_width()).content(figures);
             } else {
                 cu::Row().alignment(Alignment::CenterEnd).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    cu::Column().modifier(Modifier::new().width(320.0)).content(|| {
-                        Label("오늘 사용량 (오늘 토큰)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-                        let tok_str = tokens.map(format_tokens).unwrap_or_else(|| "1,234,567".to_string());
-                        Label(&tok_str, Fs::Xl3, Weight::Semibold, None, Some(1));
-                        Label(&format!("토큰 · 14일 평균 3.5M (최근 7일 {})", format_tokens(week_tokens)), Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
-                        cu::Spacer().modifier(Modifier::new().height(SP[2]));
-                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                            VendorDot(AgentHarness::ClaudeCode);
-                            Label("Claude 28.5M", Fs::Xs, Weight::Regular, None, Some(1));
-                            VendorDot(AgentHarness::Codex);
-                            Label("Codex 15.2M", Fs::Xs, Weight::Regular, None, Some(1));
-                            VendorDot(AgentHarness::Gemini);
-                            Label("Gemini 5.1M", Fs::Xs, Weight::Regular, None, Some(1));
-                        });
-                    });
+                    cu::Column().modifier(Modifier::new().width(320.0)).content(figures);
                     cu::Box().modifier(Modifier::new().width(440.0).height(150.0)).content(|| {
-                        let bars_draw = draw_usage_bars(p);
+                        let bars_draw = draw_usage_bars(p, &m.bars);
                         cu::Canvas(bars_draw).modifier(Modifier::new().size(440.0, 150.0));
                     });
                 });
@@ -2064,18 +2025,18 @@ fn UsageSection(
 
     cu::Spacer().modifier(Modifier::new().height(SP[3]));
 
-    // 2-Column row: 오늘 토큰 종류 & 하네스와 모델별 비용
+    // 2-Column row: 토큰 종류 & 하네스별 토큰과 비용
     if compact {
-        TokenKindsCard(compact);
+        TokenKindsCard(&m, compact);
         cu::Spacer().modifier(Modifier::new().height(SP[3]));
-        HarnessCostCard(bars);
+        HarnessCostCard(&m, bars);
     } else {
         cu::Row().spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                TokenKindsCard(compact);
+                TokenKindsCard(&m, compact);
             });
             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                HarnessCostCard(bars);
+                HarnessCostCard(&m, bars);
             });
         });
     }
@@ -2105,42 +2066,34 @@ fn UsageSection(
     });
 }
 
-fn TokenKindsCard(compact: bool) {
+fn TokenKindsCard(m: &usage::SectionModel, compact: bool) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, None, None, move || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label("오늘 토큰 종류", Fs::Lg, Weight::Semibold, None, Some(1));
+                Label("토큰 종류", Fs::Lg, Weight::Semibold, None, Some(1));
             });
             let bar_w = if compact { 326.0 } else { 409.0 };
-            let split_draw = draw_split_bar(p, bar_w);
+            let split_draw = draw_split_bar(p, bar_w, m.input_n, m.output_n);
             cu::Canvas(split_draw).modifier(Modifier::new().size(bar_w, 14.0));
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
             cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("입력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    Label("1.1M", Fs::Lg, Weight::Semibold, None, Some(1));
-                    Label("28%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("출력", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    Label("0.4M", Fs::Lg, Weight::Semibold, None, Some(1));
-                    Label("10%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("캐시 읽기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    Label("2.2M", Fs::Lg, Weight::Semibold, None, Some(1));
-                    Label("56%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    Label("캐시 쓰기", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    Label("0.2M", Fs::Lg, Weight::Semibold, None, Some(1));
-                    Label("5%", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                });
+                for (name, value, share) in [
+                    ("입력", m.input.as_str(), m.input_share.as_str()),
+                    ("출력", m.output.as_str(), m.output_share.as_str()),
+                    ("캐시 읽기", usage::UNKNOWN, ""),
+                    ("캐시 쓰기", usage::UNKNOWN, ""),
+                ] {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                        Label(name, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        Label(value, Fs::Lg, Weight::Semibold, None, Some(1));
+                        Label(share, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    });
+                }
             });
             cu::Spacer().modifier(Modifier::new().height(SP[1]));
             Label(
-                "하네스가 알려 준 실제 토큰 수입니다. 알려 주지 않는 하네스는 추정하지 않고 모름으로 표시됩니다.",
+                "하네스가 알려 준 실제 토큰 수입니다. 알려 주지 않은 값은 추정하지 않고 알 수 없음으로 표시합니다. 캐시 토큰은 서버가 아직 모으지 않습니다.",
                 Fs::Xs,
                 Weight::Regular,
                 Some(paint(p.muted)),
@@ -2150,60 +2103,28 @@ fn TokenKindsCard(compact: bool) {
     });
 }
 
-fn HarnessCostCard(bars: &[crate::ui::home::HarnessBar]) {
+fn HarnessCostCard(m: &usage::SectionModel, bars: &[crate::ui::home::HarnessBar]) {
     let p = ember_theme().palette;
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label("하네스와 모델별 비용", Fs::Lg, Weight::Semibold, None, Some(1));
+                Label("하네스별 토큰과 비용", Fs::Lg, Weight::Semibold, None, Some(1));
             });
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(|| {
-                cu::Box().modifier(Modifier::new().size(132.0, 132.0)).alignment(Alignment::Center).content(|| {
-                    let donut_draw = draw_donut(p);
-                    cu::Canvas(donut_draw).modifier(Modifier::new().size(132.0, 132.0));
-                    cu::Column().content(|| {
-                        Label("$174", Fs::Lg, Weight::Semibold, None, Some(1));
-                        Label("이번 달", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                    });
-                });
-                cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        VendorDot(AgentHarness::ClaudeCode);
-                        Label("Claude $120", Fs::Sm, Weight::Regular, None, Some(1));
-                    });
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        VendorDot(AgentHarness::Codex);
-                        Label("Codex $46", Fs::Sm, Weight::Regular, None, Some(1));
-                    });
-                    cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
-                        VendorDot(AgentHarness::Gemini);
-                        Label("Gemini $8", Fs::Sm, Weight::Regular, None, Some(1));
-                    });
-                });
-            });
-            cu::Spacer().modifier(Modifier::new().height(SP[1]));
-            for (model, cost, h) in [
-                ("Opus 5.5", "$96.2", AgentHarness::ClaudeCode),
-                ("Sonnet 5.5", "$24.1", AgentHarness::ClaudeCode),
-                ("GPT-5", "$31.5", AgentHarness::Codex),
-                ("GPT-5 Codex", "$14.8", AgentHarness::Codex),
-                ("Gemini Pro", "$6.9", AgentHarness::Gemini),
-            ] {
+            for (kind, value) in &m.harness {
                 cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
-                    VendorDot(h);
+                    VendorDot(AgentHarness::of_kind(kind).unwrap_or(AgentHarness::Acp));
                     cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                    Label(model, Fs::Sm, Weight::Medium, None, Some(1));
+                    Label(&usage::agent_label(kind), Fs::Sm, Weight::Medium, None, Some(1));
                     cu::Spacer().modifier(Modifier::new().weight(1.0));
-                    Label(cost, Fs::Sm, Weight::Medium, None, Some(1));
+                    Label(value, Fs::Sm, Weight::Medium, None, Some(1));
                 });
             }
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
-                VendorDot(AgentHarness::Antigravity);
-                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                Label("보고 안 함", Fs::Sm, Weight::Medium, None, Some(1));
+                Label("비용", Fs::Sm, Weight::Medium, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                Label("모름", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(usage::UNKNOWN, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             });
+            Label("가격표가 정해지지 않아 비용은 계산하지 않습니다.", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
             for b in bars {
                 cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(28.0)).content(|| {
                     Label(&b.label, Fs::Sm, Weight::Regular, None, Some(1));
@@ -2397,7 +2318,7 @@ mod tests {
                     sample_live(),
                     sample_computers(),
                     sample_bars(),
-                    12_345_678,
+                    Load::Ready(crate::demo::usage_summary(crate::demo::now_ms())),
                     section,
                 )
             }))
@@ -2908,7 +2829,7 @@ mod tests {
     #[test]
     fn fr_u7_usage_section_renders_tokens_and_bars() {
         let text = screen_text_at(1440.0, compose_rust::WindowSizeClass::Expanded, Section::Usage);
-        for want in ["오늘 토큰", "1,234,567", "하네스와 모델별 비용", "계정별 남은 구독량"] {
+        for want in ["오늘 토큰", "UTC 기준", "토큰 종류", "하네스별 토큰과 비용", "알 수 없음", "계정별 남은 구독량"] {
             assert!(text.contains(want), "missing usage content {want}");
         }
     }
@@ -2946,7 +2867,7 @@ mod tests {
         compose_rust::window::reset_window_size();
         let mut host = Host::new(move || {
             Box::new(Recomposer::new(move || {
-                AgentsScreenWith(sample_live(), sample_computers(), sample_bars(), 12_345_678, section)
+                AgentsScreenWith(sample_live(), sample_computers(), sample_bars(), Load::Ready(crate::demo::usage_summary(crate::demo::now_ms())), section)
             }))
         });
         let mut nodes: HashSet<u32> = HashSet::new();

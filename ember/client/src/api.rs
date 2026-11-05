@@ -1052,3 +1052,137 @@ mod tests {
         assert_eq!(authority_addr("[::1]:8740"), ("::1".to_string(), 8740));
     }
 }
+
+// ---- token usage summary (FR-U7, #332) ---------------------------------------------------------
+
+/// The period a usage summary covers. A day is a UTC calendar day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsagePeriod {
+    /// The last N UTC days including today (the server clamps to 1..=366).
+    Days(u32),
+    /// One UTC day, `YYYY-MM-DD`.
+    Day(String),
+}
+
+/// Tokens one harness reported. Missing fields decode as zero or `None`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct AgentUsageRow {
+    pub agent: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+}
+
+/// One UTC day of a summary.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct UsageDayRow {
+    pub day: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+    pub sessions: u64,
+    pub by_agent: Vec<AgentUsageRow>,
+}
+
+/// `GET /api/usage/summary`. `cost_usd` is `null` today: the SPEC has no price table.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct UsageSummary {
+    pub from: String,
+    pub to: String,
+    pub days: Vec<UsageDayRow>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+    pub by_agent: Vec<AgentUsageRow>,
+    pub cost_note: Option<String>,
+}
+
+/// `GET /api/sessions/{id}/usage`. `reported: false` means the harness sent no token counts:
+/// the totals are then unknown, not zero.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SessionUsage {
+    pub session_id: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turns: u64,
+    pub cost_usd: Option<f64>,
+    pub reported: bool,
+    pub cost_note: Option<String>,
+}
+
+fn usage_summary_path(period: &UsagePeriod, project: Option<&str>) -> String {
+    let mut q: Vec<(&str, String)> = match period {
+        UsagePeriod::Days(n) => vec![("days", n.to_string())],
+        UsagePeriod::Day(d) => vec![("day", d.clone())],
+    };
+    if let Some(p) = project {
+        q.push(("project", p.to_string()));
+    }
+    let q = serde_urlencoded::to_string(q).unwrap_or_default();
+    format!("/usage/summary?{q}")
+}
+
+impl Api {
+    /// Tokens per UTC day and per harness (FR-U7), for the last N days or one day, optionally
+    /// of one project. Cost is `None` until a price table is specified.
+    pub async fn usage_summary(&self, period: &UsagePeriod, project: Option<&str>) -> ApiResult<UsageSummary> {
+        self.get(&usage_summary_path(period, project)).await
+    }
+
+    /// Tokens one session's harness reported (FR-U7).
+    pub async fn session_usage(&self, id: &str) -> ApiResult<SessionUsage> {
+        self.get(&format!("/sessions/{}/usage", seg(id))).await
+    }
+}
+
+#[cfg(test)]
+mod usage_summary_tests {
+    use super::*;
+
+    #[test]
+    fn fr_u7_summary_path_carries_days_day_and_project() {
+        assert_eq!(usage_summary_path(&UsagePeriod::Days(7), None), "/usage/summary?days=7");
+        assert_eq!(
+            usage_summary_path(&UsagePeriod::Day("2026-11-06".into()), Some("a b")),
+            "/usage/summary?day=2026-11-06&project=a+b"
+        );
+    }
+
+    #[test]
+    fn fr_u7_summary_decodes_server_shape_and_null_cost() {
+        let s: UsageSummary = serde_json::from_value(json!({
+            "from": "2026-11-05", "to": "2026-11-06",
+            "days": [{"day": "2026-11-06", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                      "turns": 2, "cost_usd": null, "sessions": 1,
+                      "by_agent": [{"agent": "codex", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "turns": 2, "cost_usd": null}]}],
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "turns": 2, "cost_usd": null,
+            "by_agent": [], "cost_note": "no price table"
+        }))
+        .unwrap();
+        assert_eq!(s.days[0].by_agent[0].agent, "codex");
+        assert_eq!(s.total_tokens, 15);
+        assert_eq!(s.cost_usd, None);
+        assert_eq!(s.cost_note.as_deref(), Some("no price table"));
+    }
+
+    #[test]
+    fn fr_u7_summary_decode_is_tolerant_of_missing_fields() {
+        let s: UsageSummary = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(s, UsageSummary::default());
+        let u: SessionUsage = serde_json::from_value(json!({"session_id": "s"})).unwrap();
+        assert!(!u.reported, "a missing flag is unknown, not reported");
+        let u: SessionUsage = serde_json::from_value(json!({"session_id": "s", "total_tokens": 9, "reported": true})).unwrap();
+        assert!(u.reported && u.total_tokens == 9);
+    }
+}

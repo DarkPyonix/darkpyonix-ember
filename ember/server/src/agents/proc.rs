@@ -176,6 +176,15 @@ fn active_runtime() -> Option<Arc<ShimRuntime>> {
     RUNTIME.read().unwrap().clone()
 }
 
+/// Whether recorded metadata identifies a shim that has died while its server is still running.
+pub fn shim_died(session: &str) -> bool {
+    active_runtime().is_some_and(|rt| {
+        session_shim::scan(&rt.dir)
+            .into_iter()
+            .any(|meta| meta.session == session && !session_shim::pid_alive(meta.shim_pid))
+    })
+}
+
 /// The `ember-shim` binary next to the running server (or `EMBER_SHIM_BIN`).
 pub fn find_shim_bin() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("EMBER_SHIM_BIN") {

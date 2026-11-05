@@ -257,6 +257,38 @@ fn runtime(dir: &Path, store: &Arc<Store>) -> ShimRuntime {
     }
 }
 
+/// A shim that dies during a turn must not leave a stale live run blocking native resume.
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_s8_shim_killed_mid_turn_triggers_native_resume_on_next_message() {
+    let _g = LOCK.lock().await;
+    std::env::remove_var("EMBER_SESSION_SHIM");
+    let shims = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let store = install(shims.path());
+    let bin = crate_dir().join("tests/fixtures/claude/fake-claude.sh");
+    let id = store
+        .create_session("p", AgentKind::ClaudeCode, work.path().to_str().unwrap(), None, "t")
+        .unwrap()
+        .id;
+    let sessions = Sessions::new(store.clone(), vec![Arc::new(ClaudeCodeAdapter::new(bin)) as Arc<dyn AgentAdapter>]);
+    sessions.send(&id, "first").await.unwrap();
+    wait_for("native id and an active approval", || {
+        store.session(&id).unwrap().unwrap().native_id.is_some()
+            && events_of(&store, &id).iter().any(|e| matches!(e, AgentEvent::ApprovalRequested { .. }))
+    }).await;
+    let meta = scan(shims.path()).into_iter().find(|m| m.session == id).unwrap();
+    unsafe { libc::kill(meta.shim_pid as libc::pid_t, libc::SIGKILL); }
+    wait_for("the interrupted turn to end", || ended(&store, &id)).await;
+    sessions.send(&id, "second").await.unwrap();
+    wait_for("a resumed agent", || {
+        std::fs::read_to_string(work.path().join("args.log"))
+            .is_ok_and(|args| args.split_whitespace().any(|arg| arg == "--resume=fake-session"))
+    }).await;
+    sessions.release(&id).await.unwrap();
+    clear_runtime();
+}
+
 /// Offsets are acknowledged only after the event they cover was committed: a server that dies
 /// between reading a line and storing its event leaves that line to the next server.
 #[tokio::test]

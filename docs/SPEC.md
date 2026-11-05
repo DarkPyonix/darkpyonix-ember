@@ -76,7 +76,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-B1–B4 | `detach.js` and `ember/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
 | NFR-B1, NFR-B2 | Not measured. | #30 |
 | FR-K1, NFR-K1 | Rules for review, no code. | |
-| FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. The client's "Open IDE → Ember" opens the separate `--editor <project> <folder>` window (`ember/app/src/ui/editor.rs`, FR-L31, #181, #220; closing the editor exits that window process) and does not link these crates yet, so its code area says "준비 중입니다"; the widget bridge and an unmodified extension on screen are not verified. | #32 |
+| FR-E1–E5 | Connection layer (`ember/editor-conn`, #33, #35, #40) and session layer (`ember/editor`, #46), CI. The client's "Open IDE → Ember" opens the separate `--editor <project> <folder> <endpoint>` window (`ember/app/src/ui/editor_workbench.rs`, `ember/app/src/editor_host.rs`, FR-L31, #32; closing the editor exits that window process). The window links these crates: `EditorSession` runs on the app runtime against the OSE runtime the server starts for the folder, and the code area is a `CodeEditor` bound through the widget bridge. The session layer (diagnostics, save, reload) is verified against a real OSE server (`ember/editor/tests/live_session.rs`, ignored by default); opening, editing and saving through the window, and an unmodified extension showing on screen, are not yet verified by hand. | #32 |
 
 Cross-cutting: releases (`NFR-R1`, workflow written, no tag run yet) and
 installers (#72); the documents in the house writing style (#68).

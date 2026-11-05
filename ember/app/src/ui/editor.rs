@@ -153,6 +153,37 @@ pub fn action_for_key(
     keymap.action_for(&chord_from_key(key, ctrl, shift, alt, meta), os)
 }
 
+/// How long after a Shift press a second one still counts as a double press.
+pub const DOUBLE_SHIFT_MS: u64 = 500;
+
+/// Finds Shift pressed twice in quick succession, the JetBrains chord for search everywhere.
+/// Feed it every key down event; it answers true on the second press of a pair.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DoubleShift {
+    last_press_ms: Option<u64>,
+}
+
+impl DoubleShift {
+    /// One key down event at `now_ms`. `repeat` is the operating system's auto repeat for a held
+    /// key, which is not a new press. Any key but a bare Shift breaks a pair that was started.
+    pub fn press(&mut self, key: &str, repeat: bool, ctrl: bool, alt: bool, meta: bool, now_ms: u64) -> bool {
+        if key != "Shift" || ctrl || alt || meta {
+            self.last_press_ms = None;
+            return false;
+        }
+        if repeat {
+            return false;
+        }
+        match self.last_press_ms.take() {
+            Some(first) if now_ms.saturating_sub(first) <= DOUBLE_SHIFT_MS => true,
+            _ => {
+                self.last_press_ms = Some(now_ms);
+                false
+            }
+        }
+    }
+}
+
 pub fn tooltip_text(label: &str, hint: &str) -> String {
     if hint.is_empty() {
         label.to_string()

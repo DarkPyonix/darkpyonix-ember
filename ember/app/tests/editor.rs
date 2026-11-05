@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ember_app::prefs::{self, Prefs};
-use ember_app::ui::editor::{position_text, EditorTabs, Side, Stripes, ToolWindow};
+use ember_app::ui::editor::{position_text, DoubleShift, EditorTabs, Side, Stripes, ToolWindow};
 use ember_app::ui::keymap::{Action, Chord, Keymap, Os};
 
 const OSES: [Os; 2] = [Os::Mac, Os::Other];
@@ -233,4 +233,41 @@ fn fr_l31_editor_target_is_empty_until_the_launch_arrives() {
     assert_eq!(IdeLaunch::editor_target(None), none);
     let err = Err("down".to_string());
     assert_eq!(IdeLaunch::editor_target(Some(&err)), none);
+}
+
+// FR-L30: JetBrains' search everywhere is Shift pressed twice, so two Shift presses close together make
+// that chord and nothing else does.
+#[test]
+fn fr_l30_two_shift_presses_close_together_are_double_shift() {
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, false, false, false, 1_000));
+    assert!(d.press("Shift", false, false, false, false, 1_300));
+    // The pair is used up: a third press starts a new one.
+    assert!(!d.press("Shift", false, false, false, false, 1_400));
+    assert_eq!(
+        Keymap::JetBrains.action_for(&Chord::DoubleShift, Os::Mac),
+        Some(Action::Find)
+    );
+    assert_eq!(Keymap::VsCode.action_for(&Chord::DoubleShift, Os::Mac), None);
+}
+
+#[test]
+fn fr_l30_double_shift_needs_two_bare_shift_presses_within_the_window() {
+    let mut d = DoubleShift::default();
+    // Too slow.
+    assert!(!d.press("Shift", false, false, false, false, 0));
+    assert!(!d.press("Shift", false, false, false, false, 900));
+    // Another key in between breaks the pair, as typing a capital letter would.
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, false, false, false, 0));
+    assert!(!d.press("P", false, false, false, false, 100));
+    assert!(!d.press("Shift", false, false, false, false, 200));
+    // Holding Shift repeats the key down event; that is one press.
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, false, false, false, 0));
+    assert!(!d.press("Shift", true, false, false, false, 100));
+    // Shift with another modifier is not a bare Shift.
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, true, false, false, 0));
+    assert!(!d.press("Shift", false, true, false, false, 100));
 }

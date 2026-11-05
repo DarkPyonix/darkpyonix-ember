@@ -561,6 +561,7 @@ pub fn IdeMenu(session: &str) {
                 .alignment(Alignment::Center)
                 .spacing(4.0)
                 .content(move || {
+                    IdeChevron(o_chev, false);
                     Clickable(
                         Modifier::new()
                             .size(32.0, 32.0)
@@ -574,7 +575,6 @@ pub fn IdeMenu(session: &str) {
                         },
                         || NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0),
                     );
-                    IdeChevron(o_chev, false);
                 });
         } else {
             cu::Row()

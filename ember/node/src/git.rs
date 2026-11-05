@@ -13,6 +13,8 @@
 
 #[path = "git_log.rs"]
 pub mod git_log;
+#[path = "git_stash.rs"]
+pub mod git_stash;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

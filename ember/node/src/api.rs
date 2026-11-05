@@ -28,6 +28,7 @@
 //! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
 //! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
 //! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
+//! | POST | `/git/stash/{list,push,apply,pop,drop}` | FR-G6 stash list and operations (409 on conflicts) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
 //! | GET (WS) | `/exec` | send [`ExecRequest`], then [`ExecInput`]s; receive [`ExecEvent`]s |
 //! | GET (WS) | `/exec-server` | raw byte relay to `codex exec-server --listen stdio` ([`crate::exec_server`]) |
@@ -76,6 +77,7 @@ use crate::config::NodeConfig;
 use crate::exec::{self, kill_group};
 use crate::fs::{self, FsError};
 use crate::git::{self, *};
+use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
 use crate::jobs::{Jobs, Removal};
 use crate::policy::{PathPolicy, PolicyError};
 use crate::proto::*;
@@ -169,6 +171,13 @@ pub fn router(node: Node) -> Router {
         .route("/git/pull", post(git_pull))
         .route("/git/push", post(git_push))
         .route("/git/conflicts", post(git_conflicts))
+        // FR-G6 stash routes.
+        .route("/git/stash/list", post(git_stash_list))
+        .route("/git/stash/push", post(git_stash_push))
+        .route("/git/stash/apply", post(git_stash_apply))
+        .route("/git/stash/pop", post(git_stash_pop))
+        .route("/git/stash/drop", post(git_stash_drop))
+        // End FR-G6 stash routes.
         .route("/exec", get(exec_ws))
         .route("/exec-server", get(crate::exec_server::ws))
         .route("/egress", get(crate::egress::ws))
@@ -436,6 +445,36 @@ async fn git_push(State(n): State<Node>, Json(r): Json<GitRemoteRequest>) -> Api
 async fn git_conflicts(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitConflicts> {
     Ok(Json(git::conflicts(&n.0.policy, &r).await?))
 }
+
+// FR-G6 stash handlers.
+async fn git_stash_list(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<Vec<GitStashEntry>> {
+    Ok(Json(git_stash::list(&n.0.policy, &r).await?))
+}
+
+async fn git_stash_push(State(n): State<Node>, Json(r): Json<GitStashPushRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::push(&n.0.policy, &r).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_apply(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Apply).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_pop(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Pop).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn git_stash_drop(State(n): State<Node>, Json(r): Json<GitStashIndexRequest>) -> Result<StatusCode, ApiError> {
+    let _guard = n.0.write_lock.lock().await;
+    git_stash::change(&n.0.policy, &r, GitStashOperation::Drop).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+// End FR-G6 stash handlers.
 
 async fn setattr(State(n): State<Node>, Json(r): Json<SetAttrRequest>) -> ApiResult<Stat> {
     let _guard = n.0.write_lock.lock().await;

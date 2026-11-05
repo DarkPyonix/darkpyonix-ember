@@ -329,7 +329,7 @@ pub fn ModelChip(session: &str, compact_label: bool) {
 }
 
 /// The permission mode chip of a composer (`.pickchip.modechip`).
-pub fn ModeChip(session: &str, compact_label: bool) {
+pub fn ModeChip(session: &str, _compact_label: bool) {
     let ui = shared_ui().clone();
     let p = ember_theme().palette;
     let sid = session.to_string();
@@ -351,11 +351,6 @@ pub fn ModeChip(session: &str, compact_label: bool) {
     }
 
     let mode_text = mode_chip_label(approve_all);
-    let shown_text = if compact_label && mode_text.chars().count() > 6 {
-        "확인".to_string()
-    } else {
-        mode_text.to_string()
-    };
     let warns = mode_chip_warns(approve_all);
     let rows = mode_rows(&agent);
     let (bg, fg) = if warns {
@@ -381,7 +376,7 @@ pub fn ModeChip(session: &str, compact_label: bool) {
                         cu::Spacer().modifier(Modifier::new().width(4.0));
                         NavIcon(ICON_SHIELD_SVG, fg.to_argb(), 13.0);
                         Label(
-                            &shown_text,
+                            mode_text,
                             Fs::Xs,
                             Weight::Medium,
                             Some(paint(fg)),
@@ -1611,13 +1606,13 @@ pub fn MultiView(
                                     .alignment(Alignment::Center)
                                     .space_role(SpaceRole::Sm)
                                     .content(|| {
-                                        Label(NO_MEMBERS, Fs::Lg, Weight::Medium, None, None);
+                                        Label(NO_MEMBERS, Fs::Lg, Weight::Medium, None, Some(1));
                                         Label(
                                             PICK_FROM_LIST,
                                             Fs::Md,
                                             Weight::Regular,
                                             Some(paint(p.muted)),
-                                            None,
+                                            Some(1),
                                         );
                                     });
                             });
@@ -3295,7 +3290,7 @@ pub fn StatusView(
                                                     NavIcon(ICON_GIT_SVG, p.text_2.to_argb(), 16.0);
                                                     Label(PR_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                                                 });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                         });
                                 });
                                 EmberCard(false, false, Some(1.0), None, None, || {
@@ -3310,7 +3305,7 @@ pub fn StatusView(
                                                     NavIcon(ICON_USERS_SVG, p.text_2.to_argb(), 16.0);
                                                     Label(SUBAGENT_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                                                 });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                         });
                                 });
                                 EmberCard(false, false, Some(1.0), None, None, || {
@@ -3325,7 +3320,7 @@ pub fn StatusView(
                                                     NavIcon(ICON_CPU_SVG, p.text_2.to_argb(), 16.0);
                                                     Label(LOAD_TITLE, Fs::Md, Weight::Semibold, None, Some(1));
                                                 });
-                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                            Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                         });
                                 });
                             });
@@ -3347,7 +3342,7 @@ pub fn StatusView(
                                                 NavIcon(ico, p.text_2.to_argb(), 16.0);
                                                 Label(title, Fs::Md, Weight::Semibold, None, Some(1));
                                             });
-                                        Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
+                                        Label(SOON, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                                     });
                             });
                         }
@@ -3950,7 +3945,7 @@ pub fn SessionScreen(focus: Option<String>) {
                     .alignment(Alignment::Center)
                     .space_role(SpaceRole::Sm)
                     .content(|| {
-                        Label(NO_PROJECT, Fs::Xl, Weight::Medium, None, None);
+                        Label(NO_PROJECT, Fs::Xl, Weight::Medium, None, Some(1));
                         let u = ui.clone();
                         AppButton(
                             "새 세션",

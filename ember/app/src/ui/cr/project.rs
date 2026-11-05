@@ -446,8 +446,8 @@ fn TeamDonut(members: &[Member], size: f32) {
     cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(size, size)).content(|| {
         ring_image(size, 6.0, &parts);
         cu::Column().alignment(Alignment::Center).content(|| {
-            Label(&members.len().to_string(), Fs::Lg, Weight::Semibold, None, None);
-            Label("팀원", Fs::Xs2, Weight::Regular, Some(paint(p.muted)), None);
+            Label(&members.len().to_string(), Fs::Lg, Weight::Semibold, None, Some(1));
+            Label("팀원", Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
     });
 }
@@ -497,7 +497,7 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                     .content(|| {
                         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             if total == 0 {
-                                Label("아직 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                                Label("아직 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                             }
                             let tiles: Vec<Part> = b
                                 .members
@@ -575,7 +575,7 @@ fn Stats(b: &ProjectBox, inner: f32) {
                             }
                             None => NavIcon(shell::ICON_CPU_SVG, p.muted.to_argb(), 14.0),
                         }
-                        Label(&n.to_string(), Fs::Md, Weight::Semibold, None, None);
+                        Label(&n.to_string(), Fs::Md, Weight::Semibold, None, Some(1));
                         Label(label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                     });
                 }
@@ -1100,12 +1100,12 @@ fn SettingsSheet(b: &ProjectBox, chips: &[ComputerChip], on_close: impl FnMut() 
                 });
                 if leader_choice_visible(&b.id) {
                     Section("리더 (오케스트레이터)", "리더 지정은 준비 중입니다", false, || match b.leader() {
-                        Some(l) => Label(&format!("현재 리더: {}", l.name), Fs::Md, Weight::Regular, None, None),
-                        None => Label("리더가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None),
+                        Some(l) => Label(&format!("현재 리더: {}", l.name), Fs::Md, Weight::Regular, None, Some(1)),
+                        None => Label("리더가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1)),
                     });
                 } else {
                     Section("리더 (오케스트레이터)", "기본 프로젝트는 리더를 두지 않습니다", false, || {
-                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
+                        Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
                 Section("프로필 덮어쓰기", "선택 사항입니다. 이 프로젝트에서만 하네스에 다른 프로필을 씁니다. 준비 중입니다", false, || {

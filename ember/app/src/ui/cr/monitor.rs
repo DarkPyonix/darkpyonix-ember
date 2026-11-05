@@ -19,7 +19,9 @@ pub use crate::ui::monitor::{
     sort_rows, toggle_sort, ComputerMetrics, Metric, NoMetrics, ProcessRow, SortKey, SortState,
 };
 use super::characters::{Character, CharState};
-use super::components::{EmberCard, EmberSheetSized, Label, Pill, PillTone};
+use super::components::{
+    EmberCard, EmberSheetSized, Label, Pill, PillTone, SHEET_WIDTH_MONITOR,
+};
 use super::theme::*;
 use crate::ui::coexist::shared_ui;
 use crate::ui::project::{display_name, reach_pill, ComputerChip, ProjectBox, SOON};
@@ -56,11 +58,6 @@ pub fn mon_columns(width_dp: f32) -> usize {
     }
 }
 
-/// The sheet's width: `min(1360px, 100%)` less the dialog's margin.
-pub fn sheet_width(window_dp: f32) -> f32 {
-    (window_dp - 32.0).clamp(280.0, 1360.0)
-}
-
 /// Column widths of the process table (dp): the name takes the rest.
 const PID_W: f32 = 72.0;
 const PWR_W: f32 = 72.0;
@@ -77,7 +74,11 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
     let title = chip.map(|c| c.name.clone()).unwrap_or_else(|| "컴퓨터".to_string());
     let window = compose_rust::runtime::current_window_size();
     let columns = mon_columns(window.width_dp);
-    let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 1200.0);
+    let body_height = if window.width_dp > 0.0 && window.width_dp <= 560.0 {
+        (window.height_dp - 60.0).max(0.0)
+    } else {
+        (window.height_dp - 32.0 - 60.0).clamp(240.0, 1200.0)
+    };
     let state = chip.map(|c| reach_pill(c.reachability));
 
     // The state pill sits in the header, beside the close button (`.mon-state`).
@@ -87,7 +88,7 @@ pub fn MonitorSheet(chip: Option<&ComputerChip>, boxes: &[ProjectBox], on_close:
             cu::Spacer().modifier(Modifier::new().width(SP[2]));
         }
     };
-    EmberSheetSized(&title, true, sheet_width(window.width_dp), on_close.clone(), Some(&mut actions), || {
+    EmberSheetSized(&title, true, SHEET_WIDTH_MONITOR, true, on_close.clone(), Some(&mut actions), || {
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height).background(paint(p.bg)))
             .content(|| {
@@ -199,6 +200,7 @@ fn MonCard(icon: &'static str, label: &str, body: impl FnOnce()) {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().height(168.0)).content(|| {
             cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).modifier(Modifier::new().fill_max_width()).content(|| {
                 super::shell::NavIcon(icon, p.muted.to_argb(), 16.0);
+                // TODO(compose-rust#443): no overflow_wrap on Text, so a long label clips with an ellipsis.
                 Label(label, Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
             });
             body();

@@ -31,7 +31,7 @@ pub use crate::ui::files::{
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
 use super::characters::{CharState, Character};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheetSized, FilterChip, IconButton, Label, Pill, PillTone};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
 use super::notice;
 use super::project::{HeaderGap, ThemeButton};
@@ -1205,7 +1205,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         blocker = Some("이 장비는 지금 연결되어 있지 않습니다");
     }
     let can_send = blocker.is_none() && target_device.is_some();
-    let sheet_w = (w - 32.0).clamp(280.0, 620.0);
+    let sheet_w = super::components::sheet_width(w, super::components::SHEET_WIDTH_DEFAULT);
     let inner = sheet_w - 2.0 * SP[4];
     let close = {
         let s = st.sheet.clone();
@@ -1227,7 +1227,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         .map(|(l, icon, ..)| target_chip_width(&fit_label(l, 160.0, Fs::Sm.size()), if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 }))
         .collect();
     let lines = super::project::wrap_lines(&widths, SP[1], inner);
-    EmberSheetSized("파일 보내기", open, sheet_w, close.clone(), None, || {
+    EmberSheet("파일 보내기", open, close.clone(), None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             if chips.is_empty() {

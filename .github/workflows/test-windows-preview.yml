@@ -45,3 +45,4 @@ jobs:
         with:
           name: ember-preview-windows-x64
           path: dist/ember-preview-windows-x64.zip
+          retention-days: 7

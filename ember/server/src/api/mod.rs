@@ -22,6 +22,15 @@
 //! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
 //! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
 //!
+//! Tokens (FR-U7; cost is always `null`, the response says why in `cost_note`):
+//!
+//! | Method | Path | Response |
+//! | ------ | ---- | -------- |
+//! | GET    | `/api/usage/summary?days=7&project=` or `?day=YYYY-MM-DD` | `{from, to, days:[{day, input_tokens, output_tokens, total_tokens, turns, cost_usd, sessions, by_agent:[{agent, ...}]}], input_tokens, output_tokens, total_tokens, turns, cost_usd, by_agent, cost_note}` |
+//! | GET    | `/api/sessions/{id}/usage` | `{session_id, input_tokens, output_tokens, total_tokens, turns, cost_usd, reported, cost_note}`; also `usage` in `GET /sessions/{id}` |
+//!
+//! (`GET /api/usage` is per account, in `crate::accounts::api`.)
+//!
 //! Git per project (FR-G4) is in [`git`]: `POST /api/projects/{name}/git/<op>`.
 //!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
@@ -59,6 +68,8 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/sessions/{id}/export", get(export_session))
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/search", get(search))
+        .route("/api/usage/summary", get(usage_summary))
+        .route("/api/sessions/{id}/usage", get(session_usage))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/{name}", get(get_project))
         .route("/api/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
@@ -172,7 +183,43 @@ async fn get_session(
         "fork_turns": turns,
         "fork_of": s.store().fork_origin(&id)?,
         "approve_all": s.approve_all(&id),
+        "usage": s.store().session_usage(&id)?,
     })))
+}
+
+/// FR-U7: tokens one session's harness reported.
+async fn session_usage(
+    State(s): State<Arc<Sessions>>,
+    Path(id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let u = s.store().session_usage(&id)?.ok_or_else(|| SessionError::NotFound(id.clone()))?;
+    Ok(Json(u))
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    /// One UTC day, `YYYY-MM-DD`; wins over `days`.
+    day: Option<String>,
+    /// The last N UTC days including today (default 7, 1..=366).
+    days: Option<i64>,
+    project: Option<String>,
+}
+
+/// FR-U7: tokens per UTC day (and per harness), from the usage events the agents reported.
+async fn usage_summary(
+    State(s): State<Arc<Sessions>>,
+    Query(q): Query<UsageQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let (now, days) = match &q.day {
+        Some(day) => {
+            let start = s.store().day_start_ms(day)?.ok_or_else(|| {
+                ApiError(StatusCode::BAD_REQUEST, format!("day must be a date like 2026-11-06, got {day:?}"))
+            })?;
+            (start, 1)
+        }
+        None => (now_ms(), q.days.unwrap_or(7)),
+    };
+    Ok(Json(s.store().usage_summary(now, days, q.project.as_deref())?))
 }
 
 /// FR-L9: rename, pin, archive.

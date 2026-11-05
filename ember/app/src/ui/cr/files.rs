@@ -12,6 +12,9 @@
 
 #![allow(non_snake_case)]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -751,20 +754,24 @@ pub fn agent_host(project: &str) -> String {
 }
 
 /// An agent's tile: its character (48 px, as the mockup's `.fl-dev-ic.bot`), name, computer and
-/// task, and its status. The tile sends to the computer the agent works on.
+/// task, its status, and actions to open its conversation (`ui.open_conversation`) or send files
+/// to the computer it works on.
 /// TODO(compose-rust#372): a pointer-up `Clickable`.
 fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
-    let mut on_send = on_send;
     let send_id = m.id.clone();
-    let _ = ui;
+    let open_id = m.id.clone();
+    let ui_open = ui.clone();
     let name = crate::ui::project::member_name(None, &m.project, &m.agent, &m.title);
     let state = if m.waiting { CharState::Wait } else { CharState::Run };
     let host = agent_host(&m.project);
+    let send = Rc::new(RefCell::new(on_send));
+    let send_card = send.clone();
+    let send_card_id = send_id.clone();
     Clickable(
         Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_LG).padding(SP[3]),
         Alignment::TopStart,
-        move || on_send(send_id.clone()),
+        move || (send_card.borrow_mut())(send_card_id.clone()),
         || {
             cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
                 Character(&m.agent, false, 48.0, &name, &m.project, state, None);
@@ -778,8 +785,19 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'stati
                 } else {
                     Pill("실행 중", PillTone::Blue, false);
                 }
-                // The measured card is 183 px; see the device tile.
-                cu::Spacer().modifier(Modifier::new().height(5.0));
+                cu::Spacer().modifier(Modifier::new().height(SP[1]));
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    let u = ui_open.clone();
+                    let oid = open_id.clone();
+                    AppButton("대화 열기", None, ButtonKind::Default, true, true, false, move || {
+                        u.open_conversation(&oid);
+                    });
+                    let send_btn = send.clone();
+                    let sid = send_id.clone();
+                    AppButton("보내기", None, ButtonKind::Default, true, true, false, move || {
+                        (send_btn.borrow_mut())(sid.clone());
+                    });
+                });
             });
         },
     );
@@ -1379,5 +1397,102 @@ mod tests {
             assert!(has(want), "missing {want}: {all:?}");
         }
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l27_agent_tile_renders_open_conversation_and_send_buttons_and_opens_conversation() {
+        use compose_rust::{EventPayload, PropertyKind};
+        use std::sync::{Arc, Mutex};
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.go(crate::ui::Route::Projects);
+        let sent_to: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sent_cb = sent_to.clone();
+        let mut host = Host::new(move || {
+            let sent_cb = sent_cb.clone();
+            Box::new(Recomposer::new(move || {
+                let member = CrewMember {
+                    id: "demo-s1".into(),
+                    title: "프록시 리팩토링".into(),
+                    project: "demo-project".into(),
+                    agent: "claude".into(),
+                    waiting: false,
+                };
+                let sent_cb = sent_cb.clone();
+                AgentTile(&member, shared_ui(), move |id| {
+                    *sent_cb.lock().expect("lock") = Some(id);
+                });
+            }))
+        });
+        let raw = host.rebuild().expect("rebuild").to_vec();
+        let batch = decode_batch(&raw).expect("decode");
+        let all = texts(&batch);
+        assert!(all.iter().any(|t| t == "대화 열기"), "missing 대화 열기: {all:?}");
+        assert!(all.iter().any(|t| t == "보내기"), "missing 보내기: {all:?}");
+
+        // Find the Button node labeled "대화 열기" and its OnClick handler_id, then click it.
+        let open_node = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String("대화 열기"),
+                } => Some(*node_id),
+                _ => None,
+            })
+            .expect("대화 열기 button node");
+        let open_handler = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } if *node_id == open_node => Some(*h as u64),
+                _ => None,
+            })
+            .expect("대화 열기 OnClick handler");
+        host.dispatch(HostEvent {
+            node_id: open_node,
+            handler_id: open_handler,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch click");
+        assert_eq!(
+            ui.route.get_untracked(),
+            crate::ui::Route::Conversation("demo-s1".into())
+        );
+
+        // Find the Button node labeled "보내기" and click it.
+        let send_node = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::Text,
+                    value: PropertyValue::String("보내기"),
+                } => Some(*node_id),
+                _ => None,
+            })
+            .expect("보내기 button node");
+        let send_handler = batch
+            .iter()
+            .find_map(|m| match m {
+                Mutation::SetProp {
+                    node_id,
+                    property: PropertyKind::OnClick,
+                    value: PropertyValue::Integer(h),
+                } if *node_id == send_node => Some(*h as u64),
+                _ => None,
+            })
+            .expect("보내기 OnClick handler");
+        host.dispatch(HostEvent {
+            node_id: send_node,
+            handler_id: send_handler,
+            payload: EventPayload::Clicked,
+        })
+        .expect("dispatch send click");
+        assert_eq!(sent_to.lock().expect("lock").as_deref(), Some("demo-s1"));
     }
 }

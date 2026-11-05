@@ -111,7 +111,7 @@ impl IntoResponse for A2aError {
 
 type ApiResult<T> = Result<T, A2aError>;
 
-fn caller(a2a: &A2a, headers: &HeaderMap) -> ApiResult<String> {
+pub(crate) fn caller(a2a: &A2a, headers: &HeaderMap) -> ApiResult<String> {
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

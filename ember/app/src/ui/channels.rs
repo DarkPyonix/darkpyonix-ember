@@ -687,7 +687,7 @@ mod layout_tests {
     }
 
     fn wire_msg(seq: i64, from: &str, at: i64) -> ember_client::channels::ChannelMessage {
-        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0 }
+        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0, mentions: Vec::new() }
     }
 
     #[test]

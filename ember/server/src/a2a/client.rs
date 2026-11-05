@@ -58,6 +58,11 @@ Schedules (FR-A8):
   ember-a2a schedule rm <schedule-id>
       Delete a schedule of this project.
 
+Channels (FR-T12):
+  ember-a2a channel post <channel-id> <text...>
+      Answer in a channel where a person mentioned you (within 30 minutes; 6 posts a minute at
+      most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
+
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
 
@@ -219,6 +224,11 @@ impl Client {
         self.ok("GET", &path, None)
     }
 
+    /// `POST /api/channels/{id}/post`: answer in a channel (FR-T12).
+    pub fn channel_post(&self, channel: &str, text: &str) -> anyhow::Result<Value> {
+        self.ok("POST", &channel_post_path(channel), Some(&json!({ "text": text })))
+    }
+
     pub fn schedules(&self) -> anyhow::Result<Value> {
         self.ok("GET", "/api/a2a/schedules", None)
     }
@@ -233,6 +243,11 @@ impl Client {
 }
 
 /// Percent-encode one path segment.
+/// The route `channel post` calls for `channel`.
+pub fn channel_post_path(channel: &str) -> String {
+    format!("/api/channels/{}/post", path_seg(channel))
+}
+
 fn path_seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -486,6 +501,8 @@ fn run_inner(args: &[String]) -> Result<String, CliError> {
             Ok(serde_json::to_string_pretty(&v).unwrap_or_default())
         }
         "schedule" => run_schedule(&args[1..]),
+        "channel" => run_channel(&args[1..]),
+        "channel_post" => run_channel_post(&args[1..]),
         other => Err(CliError::Usage(format!("unknown command {other}"))),
     }
 }
@@ -622,6 +639,28 @@ fn run_task(args: &[String]) -> Result<String, CliError> {
         }
         other => Err(CliError::Usage(format!("unknown task command {other}"))),
     }
+}
+
+fn run_channel(args: &[String]) -> Result<String, CliError> {
+    match args.first().map(String::as_str) {
+        Some("post") => run_channel_post(&args[1..]),
+        Some(other) => Err(CliError::Usage(format!("unknown channel command {other} (post)"))),
+        None => Err(CliError::Usage("missing channel command (post)".into())),
+    }
+}
+
+fn run_channel_post(args: &[String]) -> Result<String, CliError> {
+    let a = parse_args(args, &[], &[])?;
+    let (channel, words) = a
+        .positional
+        .split_first()
+        .ok_or_else(|| CliError::Usage("missing <channel-id>".into()))?;
+    let text = text_or_stdin(words)?;
+    if text.trim().is_empty() {
+        return Err(CliError::Usage("missing <text>".into()));
+    }
+    let v = Client::from_env()?.channel_post(channel, &text)?;
+    Ok(format!("Posted message {} in channel {channel}.", v["id"].as_str().unwrap_or("?")))
 }
 
 fn run_mail(args: &[String]) -> Result<String, CliError> {
@@ -913,6 +952,17 @@ mod tests {
         assert_eq!(parse_duration_secs("15m"), Some(900));
         assert_eq!(parse_duration_secs("1d"), Some(86_400));
         assert_eq!(parse_duration_secs("1w"), None);
+    }
+
+    #[test]
+    fn fr_t12_cli_channel_post_builds_request() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(channel_post_path("c1"), "/api/channels/c1/post");
+        assert_eq!(channel_post_path("a/b"), "/api/channels/a%2Fb/post");
+        assert!(USAGE.contains("ember-a2a channel post <channel-id>"));
+        assert!(matches!(run_inner(&args(&["channel"])), Err(CliError::Usage(_))));
+        assert!(matches!(run_inner(&args(&["channel", "shout"])), Err(CliError::Usage(_))));
+        assert!(matches!(run_inner(&args(&["channel", "post"])), Err(CliError::Usage(_))));
     }
 
     #[test]

@@ -164,6 +164,10 @@ async fn fr_t12_header_names_person_channel_name_and_id() {
         "{text}"
     );
     assert!(text.contains("from a person in a channel, not from another agent"), "{text}");
+    assert!(
+        text.contains(&format!("To reply in the channel: ember-a2a channel post {} \"...\"\n", w.channel)),
+        "{text}"
+    );
     assert!(text.ends_with("ship it"), "{text}");
     assert!(!text.contains("--reply-to"), "no session to reply to by A2A: {text}");
     let m = w.a2a.store().pending_for(&w.beta).unwrap();

@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use dioxus_compose::prelude::*;
+use compose_rust::{asset, AssetKind, ColorScheme, DesignSystem, FontStack, Theme};
 
 /// One bundled face: its file name under `assets/fonts/` and its bytes.
 pub struct Face {

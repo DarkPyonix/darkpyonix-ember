@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use dioxus_compose::prelude::*;
+use compose_rust::{ColorScheme, TypeRole};
 use ember_app::ui::fonts::{app_theme, INTER, LICENSES, PRETENDARD};
 
 fn fonts_dir() -> &'static Path {

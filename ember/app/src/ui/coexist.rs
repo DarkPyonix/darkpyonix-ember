@@ -49,6 +49,10 @@ pub struct SharedLive {
     /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
     pub chatgpt: MutableState<Vec<ChatGptAccount>>,
     pub agents: MutableState<Vec<DetectedAgent>>,
+    /// The 다시 찾기 state of the 에이전트 screen (FR-L21).
+    pub agents_rescan: MutableState<crate::ui::agents::Rescan>,
+    /// When the agent detection last answered (ms since epoch); `None` before the first answer.
+    pub agents_checked_ms: MutableState<Option<u64>>,
     /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
     pub usage: MutableState<Vec<DailyUsage>>,
     /// Tokens per UTC day over the last 14 days, all harnesses (FR-U7, #332).
@@ -73,6 +77,8 @@ impl SharedLive {
             accounts: mutable_state_of(Vec::new()),
             chatgpt: mutable_state_of(Vec::new()),
             agents: mutable_state_of(Vec::new()),
+            agents_rescan: mutable_state_of(Default::default()),
+            agents_checked_ms: mutable_state_of(None),
             usage: mutable_state_of(Vec::new()),
             usage_summary: mutable_state_of(Default::default()),
             project_day: mutable_state_of(Default::default()),

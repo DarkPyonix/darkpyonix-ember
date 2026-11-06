@@ -133,6 +133,8 @@ pub const MAX_TTL: Duration = Duration::from_secs(10 * 60);
 pub const CONFIRM_WINDOW_MS: i64 = MAX_TTL.as_millis() as i64;
 /// How long a confirmed credential waits for the node to take it before the enrolment expires.
 pub const DELIVERY_GRACE_MS: i64 = 10 * 60 * 1000;
+/// Longest limiter key, in characters (see [`Enrol::source_key`]).
+const SOURCE_KEY_CHARS: usize = 64;
 /// Failed redeems one source key may make within [`FAIL_WINDOW_MS`] before it is rate-limited.
 pub const MAX_FAILURES: usize = 10;
 /// The per-source failure window in milliseconds.
@@ -612,7 +614,16 @@ impl Registrar for ComputersRegistrar {
     }
 
     fn remove(&self, computer_id: &str) {
-        let _ = self.computers.remove(computer_id);
+        // Idempotent: a computer that is already gone is not a failure. Any other failure is
+        // logged with the computer id and the error text, which holds no token (the call carries none).
+        match self.computers.remove(computer_id) {
+            Ok(()) | Err(super::ComputerError::NotFound(_)) => {}
+            Err(e) => tracing::warn!(
+                computer = %computer_id,
+                error = %e,
+                "could not remove the computer of an expired enrolment"
+            ),
+        }
     }
 }
 
@@ -703,6 +714,12 @@ pub struct Enrol {
     /// Node tokens minted at confirm and not yet delivered, by enrol id. MEMORY ONLY, never in
     /// SQLite; lost on restart (the enrolment then reads `expired`).
     pending: Mutex<HashMap<String, Secret>>,
+    /// The registry used to remove the computer of a `confirmed` enrolment that expired
+    /// undelivered. Set by [`Enrol::set_registrar`] (the router does it).
+    registrar: Mutex<Option<Arc<dyn Registrar>>>,
+    /// Computer ids whose enrolment expired undelivered and that are not removed yet (no
+    /// registrar was set at the time). Ids only, never a secret.
+    orphans: Mutex<Vec<String>>,
     /// Serializes every state change after the redeem (confirm, deny, delivery, expiry), so
     /// exactly one of two racing calls wins and no registration is made for the loser.
     gate: Mutex<()>,
@@ -720,8 +737,24 @@ impl Enrol {
             failures: Mutex::new(HashMap::new()),
             global_failures: Mutex::new(VecDeque::new()),
             pending: Mutex::new(HashMap::new()),
+            registrar: Mutex::new(None),
+            orphans: Mutex::new(Vec::new()),
             gate: Mutex::new(()),
         })
+    }
+
+    /// Give the service the registry, so a computer registered by a confirm whose credential was
+    /// never delivered (the node did not poll in time, or the server restarted) is removed when
+    /// the enrolment expires. Orphans found before this call are removed at the next settle.
+    pub fn set_registrar(&self, registrar: Arc<dyn Registrar>) {
+        *self.registrar.lock().unwrap_or_else(|e| e.into_inner()) = Some(registrar);
+    }
+
+    /// Settle every enrolment at `now_ms` without reading one. The router calls it at startup so
+    /// a `confirmed` row left by a restart is expired and its computer removed at once.
+    pub fn sweep(&self, now_ms: i64) -> Result<(), EnrolError> {
+        let g = self.gate();
+        self.settle(&g, now_ms)
     }
 
     fn gate(&self) -> MutexGuard<'_, ()> {
@@ -789,6 +822,14 @@ impl Enrol {
         }
     }
 
+    /// The limiter key of a source: its first [`SOURCE_KEY_CHARS`] characters. Lookup and record
+    /// both use it, so a long source is limited per source too. Two sources that share their
+    /// first 64 characters share one bucket, on purpose: the door passes an IP address, so keys
+    /// are short in practice, and a bound on key length bounds memory per entry.
+    fn source_key(source: &str) -> String {
+        source.chars().take(SOURCE_KEY_CHARS).collect()
+    }
+
     fn rate_limited(&self, source: &str, now_ms: i64) -> bool {
         {
             let mut g = self.global_failures.lock().unwrap_or_else(|e| e.into_inner());
@@ -800,7 +841,7 @@ impl Enrol {
             }
         }
         let mut all = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        match all.get_mut(source) {
+        match all.get_mut(&Self::source_key(source)) {
             Some(q) => {
                 while q.front().is_some_and(|t| now_ms - *t >= self.limits.per_source_window_ms) {
                     q.pop_front();
@@ -821,8 +862,9 @@ impl Enrol {
             }
         }
         let window = self.limits.per_source_window_ms;
+        let key = Self::source_key(source);
         let mut all = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        if !all.contains_key(source) && all.len() >= self.limits.max_tracked_sources {
+        if !all.contains_key(&key) && all.len() >= self.limits.max_tracked_sources {
             all.retain(|_, q| q.back().is_some_and(|t| now_ms - *t < window));
             if all.len() >= self.limits.max_tracked_sources {
                 if let Some(oldest) = all.iter().min_by_key(|(_, q)| q.back().copied()).map(|(k, _)| k.clone()) {
@@ -830,8 +872,6 @@ impl Enrol {
                 }
             }
         }
-        // Keys are bounded in length so an attacker cannot grow memory per entry.
-        let key: String = source.chars().take(64).collect();
         all.entry(key).or_default().push_back(now_ms);
     }
 
@@ -865,6 +905,9 @@ impl Enrol {
     /// Persist the expiries that time has caused and drop credentials that can no longer be
     /// delivered. The `_gate` argument proves the caller holds the gate.
     fn settle(&self, _gate: &MutexGuard<'_, ()>, now_ms: i64) -> Result<(), EnrolError> {
+        // Computer ids of confirmed enrolments that expire in this call. `UPDATE ... RETURNING`
+        // makes each row leave `confirmed` exactly once, so each id is queued exactly once.
+        let mut orphaned: Vec<String> = Vec::new();
         let confirmed_ids: Vec<String> = {
             let conn = self.store.conn();
             // Every statement below is a move of the table: waiting, awaiting and confirmed to expired.
@@ -873,10 +916,14 @@ impl Enrol {
                 "UPDATE enrol_codes SET state = 'expired' WHERE state = 'awaiting_confirmation' AND confirm_deadline_ms <= ?1",
                 params![now_ms],
             )?;
-            conn.execute(
-                "UPDATE enrol_codes SET state = 'expired' WHERE state = 'confirmed' AND confirmed_ms + ?2 <= ?1",
-                params![now_ms, DELIVERY_GRACE_MS],
+            let mut late = conn.prepare(
+                "UPDATE enrol_codes SET state = 'expired' WHERE state = 'confirmed' AND confirmed_ms + ?2 <= ?1
+                 RETURNING computer_id",
             )?;
+            let ids = late
+                .query_map(params![now_ms, DELIVERY_GRACE_MS], |r| r.get::<_, Option<String>>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            orphaned.extend(ids.into_iter().flatten());
             let mut stmt = conn.prepare("SELECT id FROM enrol_codes WHERE state = 'confirmed'")?;
             let ids = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
             ids
@@ -888,15 +935,39 @@ impl Enrol {
             confirmed_ids.iter().filter(|id| !p.contains_key(*id)).cloned().collect()
         };
         for id in &lost {
-            self.store.conn().execute(
-                "UPDATE enrol_codes SET state = 'expired' WHERE id = ?1 AND state = 'confirmed'",
-                params![id],
-            )?;
+            let conn = self.store.conn();
+            let computer: Option<Option<String>> = conn
+                .query_row(
+                    "UPDATE enrol_codes SET state = 'expired' WHERE id = ?1 AND state = 'confirmed' RETURNING computer_id",
+                    params![id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            orphaned.extend(computer.flatten());
         }
         // Wipe every pending credential whose enrolment is no longer confirmed (expired, or
         // joined elsewhere). The gate is held, so no confirm is half done.
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| confirmed_ids.contains(id));
+        self.reap(orphaned);
         Ok(())
+    }
+
+    /// Remove the computers of enrolments that expired undelivered (nobody can ever use their
+    /// credential). A `joined` enrolment never reaches here. Ids wait in `orphans` until a
+    /// registrar is set. The state change has already happened, and a failing removal is the
+    /// registrar's to log (without any secret); it never undoes the state.
+    fn reap(&self, found: Vec<String>) {
+        let mut queue = self.orphans.lock().unwrap_or_else(|e| e.into_inner());
+        queue.extend(found);
+        if queue.is_empty() {
+            return;
+        }
+        let registrar = self.registrar.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(registrar) = registrar {
+            for id in queue.drain(..) {
+                registrar.remove(&id);
+            }
+        }
     }
 
     /// Move `id` from `from` to `to` if it is still in `from`. An illegal pair is an error;
@@ -966,6 +1037,12 @@ impl Enrol {
     /// registered through `registrar`, and the enrolment records it (`confirmed`, shown as
     /// `awaiting_confirmation` until the node takes the credential). If recording fails the
     /// registration is removed again.
+    ///
+    /// The registry name check and `register` are separate steps, and another writer to the
+    /// registry can take the name in between. [`Registrar::register`] answering
+    /// [`RegisterError::NameTaken`] is the authoritative answer: it is [`EnrolError::NameTaken`]
+    /// (409 `name_taken`) with the state unchanged, and the owner can confirm again with a new
+    /// name. The early check only saves minting a token in the common case.
     pub fn confirm(
         &self,
         enrol_id: &str,
@@ -1042,18 +1119,6 @@ impl Enrol {
         }
     }
 
-    /// Record that the computer `computer_id` was registered for `enrol_id` (the owner's confirm
-    /// calls this through [`Enrol::confirm`]). Works once, and only from `awaiting_confirmation`.
-    pub fn complete(&self, enrol_id: &str, computer_id: &str, now_ms: i64) -> Result<(), EnrolError> {
-        let g = self.gate();
-        self.settle(&g, now_ms)?;
-        if self.transition(enrol_id, State::AwaitingConfirmation, State::Confirmed, now_ms, Some(computer_id), None)? {
-            Ok(())
-        } else {
-            Err(EnrolError::NotFound(enrol_id.into()))
-        }
-    }
-
     /// The node asks for its credential with its poll secret. The presented secret is hashed and
     /// compared in constant effort, and an unknown enrol id does the same work, so every bad
     /// secret and every unknown id is [`Delivery::Unknown`]. The token is returned once and
@@ -1125,6 +1190,12 @@ struct AppState {
 /// server's externally reachable URL for the printed command; `registrar` registers a confirmed
 /// computer. There is no redeem route. Merge it only into the token-protected local router.
 pub fn router(enrol: Arc<Enrol>, base_url: String, registrar: Arc<dyn Registrar>) -> Router {
+    // The registry is needed to remove the computer of an enrolment that expires undelivered.
+    // The first sweep covers a `confirmed` row left by a restart.
+    enrol.set_registrar(registrar.clone());
+    if enrol.sweep(crate::store::now_ms()).is_err() {
+        tracing::warn!("the startup sweep of enrol codes failed");
+    }
     Router::new()
         .route("/api/computers/enrol-codes", post(mint))
         .route("/api/computers/enrol-codes/{id}", get(status).delete(cancel))
@@ -1293,6 +1364,12 @@ mod tests {
         }
         fn remove(&self, computer_id: &str) {
             self.removed.lock().unwrap().push(computer_id.to_string());
+            // Idempotent: the name is freed once, a second call finds nothing.
+            let idx: Option<usize> = computer_id.strip_prefix("computer-").and_then(|n| n.parse().ok());
+            let name = idx.and_then(|n| self.registered.lock().unwrap().get(n - 1).map(|r| r.0.clone()));
+            if let Some(name) = name {
+                self.names.lock().unwrap().retain(|n| !n.eq_ignore_ascii_case(&name));
+            }
         }
     }
 
@@ -1500,14 +1577,6 @@ mod tests {
             assert!(rd(&e, m.code.expose(), T0 + 1_000_001, "ok-source").is_ok());
         }
         assert_eq!(rd(&e, "dpe_wrong", T0 + 1_000_002, "x"), Err(Refused::Generic));
-    }
-
-    #[test]
-    fn fr_c1_complete_needs_a_redeemed_code() {
-        let (_, e) = svc();
-        let m = mint(&e, T0);
-        assert!(e.complete(&m.id, "c", T0).is_err());
-        assert!(e.complete("nope", "c", T0).is_err());
     }
 
     #[test]
@@ -1941,8 +2010,162 @@ mod tests {
         assert_eq!(e1.status(&id, T0 + 13).unwrap(), EnrolStatus::Expired);
         assert!(e1.pending.lock().unwrap().is_empty());
         assert!(matches!(e1.take_delivery(&id, &secret, T0 + 14).unwrap(), Delivery::Expired));
-        // The computer stays registered; the owner removes it and mints again.
+        // These services have no registrar, so nothing was removed (the orphan waits for one;
+        // see the fr_c2_*_removes_the_computer tests for the cleanup).
         assert_eq!(fake.count(), 1);
+        assert!(fake.removed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fr_c2_confirmed_then_expired_removes_the_computer() {
+        let (_, e) = svc();
+        let fake = Arc::new(Fake::default());
+        e.set_registrar(fake.clone());
+        let (id, _secret) = open(&e, T0);
+        e.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        assert!(fake.removed.lock().unwrap().is_empty());
+        // Inside the grace nothing happens.
+        assert_eq!(e.status(&id, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+        assert!(fake.removed.lock().unwrap().is_empty());
+        // Past the grace the node never polled: expired, and the computer is removed.
+        let late = T0 + 10 + DELIVERY_GRACE_MS;
+        assert_eq!(e.status(&id, late).unwrap(), EnrolStatus::Expired);
+        assert_eq!(fake.removed.lock().unwrap().as_slice(), ["computer-1"]);
+        assert!(!fake.name_taken("laptop"));
+        // A second sweep neither removes again nor fails.
+        e.sweep(late + 1).unwrap();
+        assert_eq!(e.status(&id, late + 2).unwrap(), EnrolStatus::Expired);
+        assert_eq!(fake.removed.lock().unwrap().len(), 1);
+        // The same name can be enrolled again.
+        let (id2, _) = open(&e, late + 3);
+        assert!(e.confirm(&id2, None, late + 10, &*fake).is_ok());
+    }
+
+    #[test]
+    fn fr_c2_a_restart_expires_the_confirmed_row_and_removes_its_computer() {
+        let (store, e1) = svc();
+        let fake = Arc::new(Fake::default());
+        let (id, _secret) = open(&e1, T0);
+        e1.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        // A new service over the same store: no token in memory. The first read settles.
+        let e2 = Enrol::new(store.clone());
+        e2.set_registrar(fake.clone());
+        assert_eq!(e2.status(&id, T0 + 11).unwrap(), EnrolStatus::Expired);
+        assert_eq!(fake.removed.lock().unwrap().as_slice(), ["computer-1"]);
+        assert!(!fake.name_taken("laptop"));
+        assert_eq!(e2.status(&id, T0 + 12).unwrap(), EnrolStatus::Expired);
+        assert_eq!(fake.removed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fr_c2_a_startup_sweep_removes_the_orphan_without_any_read() {
+        let (store, e1) = svc();
+        let fake = Arc::new(Fake::default());
+        let (id, _) = open(&e1, T0);
+        e1.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        let e2 = Enrol::new(store.clone());
+        e2.set_registrar(fake.clone());
+        e2.sweep(T0 + 11).unwrap();
+        assert_eq!(fake.removed.lock().unwrap().as_slice(), ["computer-1"]);
+    }
+
+    #[test]
+    fn fr_c2_an_orphan_found_before_the_registrar_is_set_is_removed_later() {
+        let (store, e1) = svc();
+        let fake = Arc::new(Fake::default());
+        let (id, _) = open(&e1, T0);
+        e1.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        let e2 = Enrol::new(store.clone());
+        e2.sweep(T0 + 11).unwrap();
+        assert!(fake.removed.lock().unwrap().is_empty());
+        e2.set_registrar(fake.clone());
+        e2.sweep(T0 + 12).unwrap();
+        assert_eq!(fake.removed.lock().unwrap().as_slice(), ["computer-1"]);
+    }
+
+    #[test]
+    fn fr_c2_a_joined_enrolment_is_never_removed() {
+        let (_, e) = svc();
+        let fake = Arc::new(Fake::default());
+        e.set_registrar(fake.clone());
+        let (id, secret) = open(&e, T0);
+        e.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        assert!(matches!(e.take_delivery(&id, &secret, T0 + 11).unwrap(), Delivery::Joined { .. }));
+        let far = T0 + 10 * DELIVERY_GRACE_MS;
+        assert_eq!(e.status(&id, far).unwrap(), EnrolStatus::Joined);
+        e.sweep(far + 1).unwrap();
+        // A restart does not touch it either.
+        let e2 = Enrol::new(e.store.clone());
+        e2.set_registrar(fake.clone());
+        assert_eq!(e2.status(&id, far + 2).unwrap(), EnrolStatus::Joined);
+        assert!(fake.removed.lock().unwrap().is_empty());
+        assert!(fake.name_taken("laptop"));
+    }
+
+    #[test]
+    fn fr_c2_denied_and_unconfirmed_expiry_remove_nothing() {
+        let (_, e) = svc();
+        let fake = Arc::new(Fake::default());
+        e.set_registrar(fake.clone());
+        let (id, _) = open(&e, T0);
+        let (id2, _) = open(&e, T0);
+        e.deny(&id, T0 + 5).unwrap();
+        e.sweep(T0 + CONFIRM_WINDOW_MS + 100).unwrap();
+        assert_eq!(e.status(&id2, T0 + CONFIRM_WINDOW_MS + 101).unwrap(), EnrolStatus::Expired);
+        assert!(fake.removed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fr_c2_a_rate_limit_key_longer_than_64_chars_is_limited_per_source() {
+        let (_, e) = svc();
+        let long = "a".repeat(200);
+        for i in 0..MAX_FAILURES {
+            assert_eq!(rd(&e, "dpe_wrong", T0 + i as i64, &long), Err(Refused::Generic));
+        }
+        assert_eq!(rd(&e, "dpe_wrong", T0 + 100, &long), Err(Refused::RateLimited));
+        // Another source is not limited.
+        assert_eq!(rd(&e, "dpe_wrong", T0 + 101, "9.9.9.9"), Err(Refused::Generic));
+    }
+
+    #[test]
+    fn fr_c2_sources_sharing_their_first_64_chars_share_one_bucket() {
+        // Intended: the door passes an IP address, so keys are short in practice, and the cut
+        // bounds memory per entry.
+        let (_, e) = svc();
+        let (a, b) = (format!("{}x", "k".repeat(64)), format!("{}y", "k".repeat(64)));
+        for i in 0..MAX_FAILURES {
+            let _ = rd(&e, "dpe_wrong", T0 + i as i64, &a);
+        }
+        assert_eq!(rd(&e, "dpe_wrong", T0 + 100, &b), Err(Refused::RateLimited));
+    }
+
+    #[test]
+    fn fr_c2_register_saying_name_taken_after_a_clear_check_is_409_and_the_state_stays() {
+        // Another registry writer takes the name between the check and `register`.
+        struct Lying(Fake);
+        impl Registrar for Lying {
+            fn name_taken(&self, _n: &str) -> bool {
+                false
+            }
+            fn register(&self, n: &str, t: &str, i: &NodeInfo, o: &str) -> Result<String, RegisterError> {
+                if n == "laptop" {
+                    return Err(RegisterError::NameTaken);
+                }
+                self.0.register(n, t, i, o)
+            }
+            fn remove(&self, id: &str) {
+                self.0.remove(id)
+            }
+        }
+        let (_, e) = svc();
+        let reg = Lying(Fake::default());
+        let (id, secret) = open(&e, T0);
+        let r = e.confirm(&id, None, T0 + 10, &reg);
+        assert!(matches!(r, Err(EnrolError::NameTaken(ref n)) if n == "laptop"), "{r:?}");
+        assert_eq!(e.status(&id, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+        assert!(e.pending.lock().unwrap().is_empty());
+        assert!(matches!(e.take_delivery(&id, &secret, T0 + 12).unwrap(), Delivery::Pending));
+        assert!(e.confirm(&id, Some("laptop-2"), T0 + 13, &reg).is_ok());
     }
 
     #[test]

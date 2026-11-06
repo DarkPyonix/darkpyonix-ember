@@ -308,7 +308,7 @@ impl SharedUi {
         project: String,
         folder: String,
         spawner: impl FnOnce(&str, &str) -> std::io::Result<()>,
-    ) {
+    ) -> Option<String> {
         let target = Some(EditorTarget {
             project: project.clone(),
             folder: folder.clone(),
@@ -320,8 +320,12 @@ impl SharedUi {
         }
         if crate::services::try_services().is_some() {
             let notice = crate::ide::spawn_editor_notice(&project, &folder, spawner);
-            crate::ui::cr::notice::post(notice);
+            crate::ui::cr::notice::post(notice.clone());
+            // The text that was posted: the shared notice signal is written by worker threads too, so a
+            // reader of the signal can see someone else's message instead.
+            return Some(notice);
         }
+        None
     }
 
     pub fn close_editor(&self) {
@@ -495,7 +499,7 @@ mod tests {
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         let mut spawned: Option<(String, String)> = None;
-        ui.open_editor_with("demo-project".into(), "/work/demo".into(), |p, f| {
+        let posted = ui.open_editor_with("demo-project".into(), "/work/demo".into(), |p, f| {
             spawned = Some((p.to_string(), f.to_string()));
             Ok(())
         });
@@ -503,18 +507,16 @@ mod tests {
             spawned,
             Some(("demo-project".to_string(), "/work/demo".to_string()))
         );
-        assert_eq!(
-            ui.notice.get_untracked().map(|(_, s)| s),
-            Some("Ember 에디터: 새 창에서 여는 중입니다".to_string())
-        );
+        assert_eq!(posted, Some("Ember 에디터: 새 창에서 여는 중입니다".to_string()));
 
-        ui.open_editor_with("demo-project".into(), "/work/demo".into(), |_, _| {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no binary"))
-        });
-        let err_notice = ui.notice.get_untracked().map(|(_, s)| s).unwrap_or_default();
+        let posted = ui
+            .open_editor_with("demo-project".into(), "/work/demo".into(), |_, _| {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no binary"))
+            })
+            .unwrap_or_default();
         assert!(
-            err_notice.starts_with("Ember 에디터: 열지 못했습니다:"),
-            "unexpected error notice: {err_notice}"
+            posted.starts_with("Ember 에디터: 열지 못했습니다:"),
+            "unexpected error notice: {posted}"
         );
         ui.close_editor();
     }

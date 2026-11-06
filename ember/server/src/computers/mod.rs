@@ -58,6 +58,7 @@ pub mod egress;
 pub mod metrics;
 pub mod mount;
 pub mod observations;
+pub mod ports;
 pub mod relay;
 pub mod schema;
 pub mod shim;

@@ -41,6 +41,7 @@
 //! | POST | `/jobs/{id}/kill` | [`KillRequest`] → 204 |
 //! | DELETE | `/jobs/{id}` | → 204 (409 while running) |
 //! | GET (WS) | `/events?after=<seq>` | receive [`NodeEvent`]s |
+//! | GET  | `/ports` | → [`PortsResponse`] (FR-P7: listening TCP ports of processes under node-owned terms and jobs) |
 //! | POST | `/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
 //! | GET  | `/terms?project=&origin=&running=` | → `[TermInfo]` |
 //! | GET  | `/terms/{id}` | → [`TermInfo`] |
@@ -194,6 +195,7 @@ pub fn router(node: Node) -> Router {
         .route("/jobs/{id}", get(get_job).delete(remove_job))
         .route("/jobs/{id}/kill", post(kill_job))
         .route("/events", get(events_ws))
+        .route("/ports", get(list_ports))
         .route("/terms", get(list_terms).post(create_term))
         .route("/terms/{id}", get(get_term).delete(remove_term))
         .route("/terms/{id}/snapshot", get(term_snapshot))
@@ -739,6 +741,23 @@ async fn create_term(
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, format!("{e:#}")))?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(res)))
+}
+
+/// FR-P7: best effort, never an error. The owned roots are the running terms and jobs.
+async fn list_ports(State(n): State<Node>) -> Json<PortsResponse> {
+    let mut roots = Vec::new();
+    for t in n.0.terms.list(&TermListQuery::default()) {
+        if let (Some(pid), TermState::Running) = (t.pid, t.state) {
+            roots.push(crate::ports::Root { pid, owner: PortOwner { kind: PortOwnerKind::Term, id: t.id } });
+        }
+    }
+    for j in n.0.jobs.list() {
+        if let (Some(pid), JobState::Running) = (j.pid, j.state) {
+            roots.push(crate::ports::Root { pid, owner: PortOwner { kind: PortOwnerKind::Job, id: j.id } });
+        }
+    }
+    let ports = crate::ports::listening(roots).await;
+    Json(PortsResponse { ports, supported: crate::ports::ports_supported() })
 }
 
 async fn list_terms(State(n): State<Node>, Query(q): Query<TermListQuery>) -> Json<Vec<TermInfo>> {

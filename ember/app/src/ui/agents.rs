@@ -1175,6 +1175,23 @@ pub fn add_account_kinds() -> [AddKind; 4] {
     ]
 }
 
+/// The Korean sentence for a disabled harness row. The UI is Korean only (NFR-L4), so the
+/// server's English note is never drawn; unknown notes get the generic sentence.
+pub fn account_note_ko(kind: &str, server_note: &str) -> String {
+    match (kind, server_note) {
+        ("antigravity", ANTIGRAVITY_NOTE) => "지원 준비 중입니다. 지금은 계정을 만들 수 없습니다".to_string(),
+        ("acp", ACP_NOTE) => "이 에이전트는 자신의 명령줄 도구로 로그인합니다. 서버가 계정을 만들지 않습니다".to_string(),
+        _ => "지금은 만들 수 없습니다".to_string(),
+    }
+}
+
+/// The note line of the login block: the sample note once (the sheet header draws it for the
+/// example already, so the block draws it only when the header did not); a server note is
+/// English, so it is not drawn.
+pub fn login_block_note(c: &CreatedLogin, header_has_sample_note: bool) -> Option<String> {
+    (c.note == DEMO_ADD_NOTE && !header_has_sample_note).then(|| c.note.clone())
+}
+
 /// What the server returned for a new account: the command to run, never logged.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CreatedLogin {
@@ -2095,6 +2112,29 @@ mod tests {
         let mut store = LocalStore::new();
         assert!(!apply_pick(&mut store, disabled));
         assert_eq!(store.default_harness, None);
+    }
+
+    #[test]
+    fn fr_l17_account_notes_are_korean_only() {
+        for k in add_account_kinds() {
+            if let Some(n) = k.note {
+                let ko = account_note_ko(k.kind, n);
+                assert!(ko.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)));
+                assert!(!ko.chars().any(|c| c.is_ascii_alphabetic()), "{ko}");
+            }
+        }
+        assert_eq!(account_note_ko("antigravity", ANTIGRAVITY_NOTE), "지원 준비 중입니다. 지금은 계정을 만들 수 없습니다");
+        assert_eq!(account_note_ko("acp", ACP_NOTE), "이 에이전트는 자신의 명령줄 도구로 로그인합니다. 서버가 계정을 만들지 않습니다");
+        assert_eq!(account_note_ko("acp", "Something new."), "지금은 만들 수 없습니다");
+    }
+
+    #[test]
+    fn fr_l17_login_block_sample_note_once() {
+        let AddPhase::Created(c) = sample_created() else { panic!() };
+        // the header draws the sample note in example mode, so the block draws none
+        let drawn = usize::from(true) + login_block_note(&c, true).iter().count();
+        assert_eq!(drawn, 1);
+        assert_eq!(login_block_note(&c, false).as_deref(), Some(DEMO_ADD_NOTE));
     }
 
     #[test]

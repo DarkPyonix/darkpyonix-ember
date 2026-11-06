@@ -1409,8 +1409,8 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
                     Label(crate::ui::agents::DEMO_ADD_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                 }
                 if let AddPhase::Created(c) = &cur.phase {
-                    if !c.note.is_empty() {
-                        Label(&c.note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    if let Some(note) = crate::ui::agents::login_block_note(c, example) {
+                        Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                     }
                     // Selectable plain text; edits are dropped. Never logged.
                     EmberField(FieldOptions {
@@ -1443,7 +1443,8 @@ fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: b
                                 a.set(n);
                             });
                             if let Some(note) = k.note {
-                                Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                                let ko = crate::ui::agents::account_note_ko(k.kind, note);
+                                Label(&ko, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
                             }
                         });
                     }

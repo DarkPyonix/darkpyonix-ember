@@ -169,9 +169,12 @@ async fn refresh(s: &State_) -> anyhow::Result<(Value, bool)> {
     let slots: std::sync::Mutex<Vec<Option<Outcome>>> = std::sync::Mutex::new((0..targets.len()).map(|_| None).collect());
     {
         let slots = &slots;
-        let run = futures::stream::iter(targets.iter().enumerate())
-            .map(|(i, ((computer_id, cwd), _))| async move {
-                let outcome = call_node(s, computer_id, cwd).await;
+        // Owned inputs, so the closure takes no reference argument (a borrowed tuple pattern here
+        // fails with "implementation of FnOnce is not general enough").
+        let jobs: Vec<(usize, String, String)> = targets.iter().enumerate().map(|(i, ((c, d), _))| (i, c.clone(), d.clone())).collect();
+        let run = futures::stream::iter(jobs)
+            .map(|(i, computer_id, cwd)| async move {
+                let outcome = call_node(s, &computer_id, &cwd).await;
                 slots.lock().unwrap_or_else(|e| e.into_inner())[i] = Some(outcome);
             })
             .buffer_unordered(CONCURRENCY)

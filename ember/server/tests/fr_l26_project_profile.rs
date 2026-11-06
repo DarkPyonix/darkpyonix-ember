@@ -260,3 +260,49 @@ async fn fr_l26_override_decides_the_account_of_a_pipeline_member() {
     // Existing sessions never change account.
     assert_eq!(f.sessions.store().sessions(Some("acme")).unwrap().iter().filter(|s| s.account_id.as_deref() == Some(a.id.as_str())).count(), 2);
 }
+
+/// The project routes sit behind the server token like every owner route (FR-S9): no token, a
+/// wrong token and a guest credential are all 401 and change nothing.
+#[tokio::test]
+async fn fr_l26_project_patch_needs_the_server_token() {
+    use ember_server::auth::{self, ServerAuth};
+    const LISTEN: &str = "127.0.0.1:8740";
+    let f = fixture();
+    make_project(&f, "p");
+    let claude = f.accounts.create(AgentKind::ClaudeCode, "work").unwrap();
+    f.store
+        .patch_project(
+            "p",
+            &serde_json::from_value(json!({ "profile_overrides": { "claude-code": claude.id } })).unwrap(),
+        )
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let token = auth::load_or_create_token(dir.path()).unwrap();
+    let app = auth::protect(f.app.clone(), ServerAuth::new(token.clone(), LISTEN.parse().unwrap(), []));
+
+    let send = |bearer: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut b = Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/projects/p")
+                .header("host", LISTEN)
+                .header("content-type", "application/json");
+            if let Some(t) = bearer {
+                b = b.header("authorization", format!("Bearer {t}"));
+            }
+            app.oneshot(b.body(Body::from(json!({ "profile_overrides": {} }).to_string())).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    let guest = ember_server::channels::invites::new_secret("dpg_");
+    for bearer in [None, Some("wrong-token".to_string()), Some(guest)] {
+        assert_eq!(send(bearer.clone()).await, StatusCode::UNAUTHORIZED, "{bearer:?}");
+        let p = f.store.project("p").unwrap().unwrap();
+        assert_eq!(p.profile_overrides.len(), 1, "a refused patch changes nothing");
+    }
+    assert_eq!(send(Some(token)).await, StatusCode::OK);
+    assert!(f.store.project("p").unwrap().unwrap().profile_overrides.is_empty());
+}

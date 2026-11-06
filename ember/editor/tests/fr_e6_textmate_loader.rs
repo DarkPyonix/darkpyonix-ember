@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use ember_editor::textmate::{
-    parse_grammar, read_grammar, GrammarCatalog, GrammarError, MAX_DEPTH, MAX_GRAMMAR_BYTES, MAX_RULES,
+    parse_grammar, read_grammar, GrammarCatalog, GrammarError, MAX_GRAMMAR_BYTES, MAX_RULES,
 };
 use serde_json::{json, Value};
 
@@ -276,9 +276,19 @@ fn nested(depth: usize) -> String {
 #[test]
 fn fr_e6_nesting_is_capped_and_deeper_input_is_an_error_not_a_crash() {
     assert!(parse_grammar("a.json", &nested(60)).is_ok(), "a sane nesting loads");
-    for depth in [MAX_DEPTH + 5, 400, 5000] {
+    for depth in [70, 400, 5000] {
         assert!(parse_grammar("a.json", &nested(depth)).is_err(), "depth {depth} must be refused");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn fr_e6_a_named_pipe_in_the_extension_folder_is_refused_without_waiting_for_a_writer() {
+    let root = scratch("fifo");
+    let fifo = root.join("pipe.json");
+    let status = std::process::Command::new("mkfifo").arg(&fifo).status().expect("mkfifo");
+    assert!(status.success());
+    assert!(matches!(read_grammar(&root, &fifo), Err(GrammarError::Io(_))));
 }
 
 #[test]

@@ -116,8 +116,16 @@ struct Fx {
 }
 
 fn fx_with(vars: &[(&str, &str)]) -> Fx {
+    fx_with_server_id(vars, None)
+}
+
+/// A fixture whose `Enrol` knows the server's transport peer id (C3b), as `main.rs` builds it.
+fn fx_with_server_id(vars: &[(&str, &str)], server_peer_id: Option<&str>) -> Fx {
     let store = Arc::new(Store::open_in_memory().unwrap());
-    let enrol = Enrol::new(store);
+    let enrol = match server_peer_id {
+        Some(id) => Enrol::with_server_peer_id(store, Some(id.to_string())),
+        None => Enrol::new(store),
+    };
     let fake = Arc::new(Fake::default());
     let owner = computers::enrol::router(enrol.clone(), BASE.into(), fake.clone());
     Fx { d: door(vars), enrol, owner, fake }
@@ -770,7 +778,7 @@ async fn fr_c2_poll_after_confirm_delivers_the_credential_exactly_once_then_deli
     let (st, c) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
     assert_eq!(st, StatusCode::OK, "{c}");
     let token = f.fake.token(0);
-    // First poll: the credential, exactly name, computer id and token (no server peer id yet: C3b).
+    // First poll: the credential, exactly name, computer id and token (no server peer id: this fixture has no transport).
     let (st, h, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(h["cache-control"], "no-store");
@@ -1152,4 +1160,103 @@ async fn fr_c2_the_eleventh_redeem_in_a_minute_from_one_address_is_429() {
     assert_eq!(r.0, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(json_of(&r.2), json!({ "error": "too many requests", "code": "rate_limited" }));
     assert!(r.1.contains_key("retry-after"));
+}
+
+// ---- C3b: the server peer id in the joined answer ----
+
+/// 64 lowercase hex chars, the shape of a transport peer id.
+const SERVER_ID: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0";
+
+#[tokio::test]
+async fn fr_c2_joined_answer_has_server_peer_id_when_the_transport_is_on() {
+    assert_eq!(SERVER_ID.len(), 64);
+    let f = fx_with_server_id(&[], Some(SERVER_ID));
+    let o = open(&f, "laptop", PEER).await;
+    let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let token = f.fake.token(0);
+    let (st, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    let b = json_of(&body);
+    assert_eq!(b["status"], "joined");
+    let sid = b["credential"]["server_peer_id"].as_str().expect("the key is present and a string");
+    assert_eq!(sid.len(), 64);
+    assert!(sid.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)), "{sid}");
+    assert_eq!(sid, SERVER_ID);
+    assert_eq!(
+        b["credential"],
+        json!({ "node_token": token, "name": "laptop", "computer_id": "computer-1", "server_peer_id": SERVER_ID })
+    );
+}
+
+#[tokio::test]
+async fn fr_c2_joined_answer_omits_the_key_when_the_transport_is_off() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    let b = json_of(&body);
+    assert_eq!(b["status"], "joined");
+    assert!(b["credential"].is_object());
+    assert!(b["credential"].get("server_peer_id").is_none(), "absent, not null: {b}");
+    assert!(!text(&body).contains("server_peer_id"), "{}", text(&body));
+    // A malformed configured id is dropped by the core, so the key is absent too.
+    let bad = "zz".repeat(32);
+    let f = fx_with_server_id(&[], Some(&bad));
+    let o = open(&f, "laptop", PEER).await;
+    let (st, _) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert!(!text(&body).contains("server_peer_id") && !text(&body).contains(&bad), "{}", text(&body));
+}
+
+#[tokio::test]
+async fn fr_c2_the_other_answers_never_carry_the_server_peer_id() {
+    let f = fx_with_server_id(&[], Some(SERVER_ID));
+    let clean = |what: &str, body: &[u8]| {
+        let t = text(body);
+        assert!(!t.contains(SERVER_ID) && !t.contains("server_peer_id"), "{what}: {t}");
+    };
+    // Redeem answer.
+    let (id, code) = mint(&f, "waiting").await;
+    let (st, _, body) = redeem(&f.open_app(), PEER, &code).await;
+    assert_eq!(st, StatusCode::OK);
+    clean("redeem", &body);
+    let secret = json_of(&body)["poll_secret"].as_str().unwrap().to_string();
+    // Waiting.
+    let (st, _, body) = poll(&f.open_app(), &id, Some(&secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(json_of(&body), json!({ "status": "waiting" }));
+    clean("waiting", &body);
+    // Delivered, after the first (joined) delivery.
+    let (st, _) = owner(&f, "POST", &api(&id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, _, first) = poll(&f.open_app(), &id, Some(&secret)).await;
+    assert!(text(&first).contains(SERVER_ID), "the joined answer is the one that carries it");
+    let (_, _, body) = poll(&f.open_app(), &id, Some(&secret)).await;
+    assert_eq!(json_of(&body), json!({ "status": "delivered" }));
+    clean("delivered", &body);
+    // Denied.
+    let o = open(&f, "denied", "203.0.113.51").await;
+    let (st, _) = owner(&f, "POST", &api(&o.id, "/deny"), None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(json_of(&body), json!({ "status": "denied" }));
+    clean("denied", &body);
+    // Expired.
+    let past = now_ms() - 700_000;
+    let minted = f.enrol.mint("old", past, None, BASE).unwrap();
+    let r = f.enrol.redeem(minted.code.expose(), &NodeInfo::minimal("old-host"), past + 1, "192.0.2.77").unwrap();
+    let (_, _, body) = poll(&f.open_app(), &minted.id, Some(r.poll_secret.expose())).await;
+    assert_eq!(json_of(&body), json!({ "status": "expired" }));
+    clean("expired", &body);
+    // Unknown id and wrong secret: the 404.
+    let (st, _, body) = poll(&f.open_app(), "no-such-enrol", Some(&secret)).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    clean("unknown id", &body);
+    let (st, _, body) = poll(&f.open_app(), &id, Some("dps_wrong")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    clean("wrong secret", &body);
 }

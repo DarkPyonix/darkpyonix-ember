@@ -539,16 +539,16 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
         Delivery::Denied => status("denied"),
         Delivery::Expired => status("expired"),
         Delivery::Unknown => poll_not_found(),
-        Delivery::Joined { token, name, computer_id } => {
+        Delivery::Joined { token, name, computer_id, server_peer_id } => {
             tracing::info!(enrol = %log_id(&id), "enrol credential delivered");
-            let mut res = (
-                StatusCode::OK,
-                axum::Json(json!({
-                    "status": "joined",
-                    "credential": { "node_token": token.expose(), "name": name, "computer_id": computer_id },
-                })),
-            )
-                .into_response();
+            let mut credential = json!({ "node_token": token.expose(), "name": name, "computer_id": computer_id });
+            // The server's public transport id, only when the transport is on: the key is absent
+            // otherwise, never null and never empty (FR-C2). No other answer carries it.
+            if let (Some(sid), Some(map)) = (server_peer_id, credential.as_object_mut()) {
+                map.insert("server_peer_id".into(), json!(sid));
+            }
+            let mut res =
+                (StatusCode::OK, axum::Json(json!({ "status": "joined", "credential": credential }))).into_response();
             res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             res
         }

@@ -1,4 +1,4 @@
-use ember_transport::{PeerId, SecretKey};
+use ember_transport::{fingerprint_hex, PeerId, SecretKey};
 
 #[test]
 fn key_file_is_created_0600_and_reloaded() {
@@ -174,4 +174,33 @@ fn fr_n6_alias_of_a_revoked_key_cannot_connect() {
     gate.revoke(&revoked);
     assert!(!gate.is_allowed(&revoked));
     assert!(PeerId::from_bytes(alias).is_err());
+}
+
+#[test]
+fn fingerprint_hex_is_four_groups_of_four() {
+    let id = format!("0123456789abcdef{}", "f".repeat(48));
+    assert_eq!(fingerprint_hex(&id).as_deref(), Some("0123 4567 89ab cdef"));
+    assert_eq!(fingerprint_hex(&"ab".repeat(32)).as_deref(), Some("abab abab abab abab"));
+}
+
+#[test]
+fn fingerprint_hex_refuses_anything_but_64_lowercase_hex() {
+    assert!(fingerprint_hex("").is_none());
+    assert!(fingerprint_hex(&"a".repeat(63)).is_none());
+    assert!(fingerprint_hex(&"a".repeat(65)).is_none());
+    assert!(fingerprint_hex(&"zz".repeat(32)).is_none());
+    assert!(fingerprint_hex(&"AB".repeat(32)).is_none());
+    assert!(fingerprint_hex(&format!(" {}", "a".repeat(63))).is_none());
+    // Multi-byte text of 64 bytes must not panic on a char boundary.
+    assert!(fingerprint_hex(&"\u{e9}".repeat(32)).is_none());
+}
+
+#[test]
+fn fingerprint_hex_accepts_a_real_peer_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let k = SecretKey::load_or_generate(&dir.path().join("k")).unwrap();
+    let id = k.peer_id().to_string();
+    let fp = fingerprint_hex(&id).expect("a real id");
+    assert_eq!(fp.len(), 19);
+    assert_eq!(fp.replace(' ', ""), id[..16]);
 }

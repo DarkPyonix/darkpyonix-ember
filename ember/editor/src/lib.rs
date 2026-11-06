@@ -50,7 +50,7 @@ pub use crate::bridge::{BridgeAction, DocumentWidgetState, WidgetBridge};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
-pub use crate::session::{EditorSession, SessionConfig};
+pub use crate::session::{DirLister, EditorSession, SessionConfig};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
     DECORATION_RECORD_LEN,

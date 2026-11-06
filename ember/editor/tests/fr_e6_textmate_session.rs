@@ -315,3 +315,40 @@ fn fr_e6_a_panic_in_the_worker_is_contained_and_reported_as_colours_off() {
     // The thread survives with a fresh worker: a later job works.
     assert_eq!(guard(&mut worker, vec![build_job("k2", 2, "let b;")], Worker::run).len(), 1);
 }
+
+#[test]
+fn fr_e6_a_rebuild_answer_makes_the_session_send_a_new_build_with_a_new_seq() {
+    let mut d = Driver::new();
+    d.open("/w/a.ts", "let a;\n");
+    let seqs = |d: &Driver| -> Vec<u64> { d.jobs.iter().filter_map(|j| match j { HighlightJob::Build { seq, .. } => Some(*seq), _ => None }).collect() };
+    let first = seqs(&d);
+    assert_eq!(first.len(), 1);
+    d.feed(Input::Highlighted(HighlightOutput::rebuild(&uri("/w/a.ts").key(), first[0])));
+    let all = seqs(&d);
+    assert_eq!(all.len(), 2, "one more build");
+    assert!(all[1] > all[0], "the new build has a new seq, so answers to the old one are ignored");
+    assert_eq!(role_at(d.last_runs(), 0, 0), Some(SyntaxRole::Keyword), "and the file is coloured again");
+}
+
+#[test]
+fn fr_e6_a_grammar_that_failed_to_read_is_tried_again_when_the_next_file_opens() {
+    let t0 = Instant::now();
+    let mut core = core(t0);
+    let reads = |effects: &[Effect]| -> Vec<(UriComponents, String)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::ReadFile { uri, purpose: ReadPurpose::Grammar { scope } } => Some((uri.clone(), scope.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let effects = core.handle(t0, Input::FileRead { uri: uri("/w/a.ts"), purpose: ReadPurpose::Open, result: Ok(b"let a;\n".to_vec()) });
+    let first = reads(&effects);
+    assert_eq!(first.len(), 1);
+    // The read fails.
+    core.handle(t0, Input::FileRead { uri: first[0].0.clone(), purpose: ReadPurpose::Grammar { scope: first[0].1.clone() }, result: Err("busy".into()) });
+    // The next file of the language asks again.
+    let effects = core.handle(t0, Input::FileRead { uri: uri("/w/b.ts"), purpose: ReadPurpose::Open, result: Ok(b"let b;\n".to_vec()) });
+    assert_eq!(reads(&effects).len(), 1, "the failed grammar is requested again");
+}

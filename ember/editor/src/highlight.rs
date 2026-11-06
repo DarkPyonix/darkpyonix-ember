@@ -84,12 +84,33 @@ pub struct Worker {
     docs: HashMap<String, WorkDoc>,
 }
 
+impl HighlightJob {
+    /// The document and build a job belongs to (a drop has none).
+    pub fn target(&self) -> Option<(&str, u64)> {
+        match self {
+            HighlightJob::Build { key, seq, .. } | HighlightJob::Edit { key, seq, .. } | HighlightJob::Window { key, seq, .. } => Some((key, *seq)),
+            HighlightJob::Drop { .. } => None,
+        }
+    }
+}
+
+impl HighlightOutput {
+    /// The answer that says "build this document again".
+    pub fn rebuild(key: &str, seq: u64) -> Self {
+        Self { key: key.to_owned(), seq, version: 0, window: (0, 0), runs: Vec::new(), problem: Some(Problem::Rebuild) }
+    }
+}
+
 impl Worker {
     pub fn new() -> Self {
         Self::default()
     }
 
     fn grammar_for(&mut self, root: &str, sources: &[(String, String, Arc<str>)]) -> Result<Arc<Grammar>, String> {
+        // A language compiled once serves every document of it: the sources are not parsed again.
+        if let Some(g) = self.grammars.get(root) {
+            return Ok(g.clone());
+        }
         let mut set = GrammarSet::new();
         for (scope, path, text) in sources {
             match parse_grammar(path, text) {
@@ -99,10 +120,6 @@ impl Worker {
         }
         if !set.contains(root) {
             return Err(format!("the grammar {root} could not be read"));
-        }
-        // Compiled once per root scope while the same sources serve: a second document of the language reuses it.
-        if let Some(g) = self.grammars.get(root) {
-            return Ok(g.clone());
         }
         let grammar = Grammar::new(&set, root).ok_or_else(|| format!("the grammar {root} could not be compiled"))?;
         for problem in grammar.problems() {
@@ -327,6 +344,11 @@ impl Highlights {
         let Some(root) = self.catalog.for_language(language).map(|e| e.scope_name.clone()) else {
             return (actions, false);
         };
+        // A grammar that failed to read is tried again when a document of a language opens: the server may have
+        // been busy, and one failure should not leave a language uncoloured for the whole session.
+        for scope in self.failed.drain() {
+            self.requested.remove(&scope);
+        }
         self.next_seq += 1;
         let ready = self.need(&root, &mut actions);
         let phase = if ready { Phase::Active } else { Phase::Loading };

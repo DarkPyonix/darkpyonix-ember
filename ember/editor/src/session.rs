@@ -400,7 +400,7 @@ impl Drop for EditorSession {
 struct Driver {
     core: SessionCore,
     /// Jobs for the highlighting thread (started in [`Driver::run`]).
-    highlight: Option<std::sync::mpsc::Sender<HighlightJob>>,
+    highlight: Option<std::sync::mpsc::SyncSender<HighlightJob>>,
     peer: RpcPeer,
     fs: Arc<RemoteFs>,
     ipc: IpcClient,
@@ -411,10 +411,16 @@ struct Driver {
     watches: Arc<Mutex<HashMap<String, String>>>,
 }
 
+/// How many jobs may wait for the highlighting thread. A job that does not fit is not lost silently: its
+/// document is rebuilt from the session's text.
+const HIGHLIGHT_QUEUE: usize = 1024;
+/// How long a grammar file may take to arrive.
+const GRAMMAR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// The thread that tokenizes documents: a first pass over a long file takes a second, which the session's own
 /// task must not spend. Jobs arrive in order; the ones that queued up while it worked are run as one batch.
-fn spawn_highlighter(answers: mpsc::UnboundedSender<Input>) -> std::sync::mpsc::Sender<HighlightJob> {
-    let (tx, rx) = std::sync::mpsc::channel::<HighlightJob>();
+fn spawn_highlighter(answers: mpsc::UnboundedSender<Input>) -> std::sync::mpsc::SyncSender<HighlightJob> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HighlightJob>(HIGHLIGHT_QUEUE);
     let spawned = std::thread::Builder::new().name("ember-highlight".into()).spawn(move || {
         let mut worker = Worker::new();
         while let Ok(first) = rx.recv() {
@@ -556,7 +562,14 @@ impl Driver {
                 Effect::Respond { req, result } => self.peer.respond(req, result),
                 Effect::Highlight(job) => {
                     if let Some(tx) = &self.highlight {
-                        let _ = tx.send(job);
+                        if let Err(std::sync::mpsc::TrySendError::Full(job)) = tx.try_send(job) {
+                            // The thread is far behind: drop the job and have the document built again from the
+                            // session's text instead of leaving the colours wrong.
+                            if let Some((key, seq)) = job.target() {
+                                let rebuild = crate::highlight::HighlightOutput::rebuild(key, seq);
+                                let _ = internal.send(Input::Highlighted(rebuild));
+                            }
+                        }
                     }
                 }
                 Effect::ReadFile { uri, purpose } => {
@@ -564,17 +577,23 @@ impl Driver {
                     // A grammar file comes from an extension on the server: ask how big it is before reading it.
                     let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
-                        let too_big = match cap {
-                            Some(cap) => match fs.stat(&uri).await {
-                                Ok(st) if st.size > cap => Some("the grammar file is too large".to_owned()),
-                                Ok(_) => None,
-                                Err(e) => Some(e.to_string()),
-                            },
-                            None => None,
+                        let read = async {
+                            if let Some(cap) = cap {
+                                match fs.stat(&uri).await {
+                                    Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
+                                    Ok(_) => {}
+                                    Err(e) => return Err(e.to_string()),
+                                }
+                            }
+                            fs.read_file(&uri).await.map_err(|e| e.to_string())
                         };
-                        let result = match too_big {
-                            Some(why) => Err(why),
-                            None => fs.read_file(&uri).await.map_err(|e| e.to_string()),
+                        // A grammar read is bounded in time as well as in size.
+                        let result = match cap {
+                            Some(_) => match tokio::time::timeout(GRAMMAR_READ_TIMEOUT, read).await {
+                                Ok(r) => r,
+                                Err(_) => Err("reading the grammar file timed out".to_owned()),
+                            },
+                            None => read.await,
                         };
                         let _ = tx.send(Input::FileRead { uri, purpose, result });
                     });

@@ -16,7 +16,7 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, Paint, IconRole, S
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, mode_header, mode_picker_rows, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
@@ -43,22 +43,59 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 const POPUP_WIDTH: f32 = 280.0;
 /// The permission popup is wider: each row carries a description line.
 const MODE_POPUP_WIDTH: f32 = 340.0;
+/// The permission popover (mockup `.mp-pop.mp-mode`).
+const MODE_POPOVER_WIDTH: f32 = 340.0;
 /// The model popover: a rail of harnesses beside the search and the rows.
 const MODEL_POPOVER_WIDTH: f32 = 560.0;
 const MODEL_RAIL_WIDTH: f32 = 128.0;
 
-/// The permission-mode popup (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
-/// one row per mode with a shield, the title, a one-line description and a check on the chosen
-/// row. The bypass row is drawn in red. A modal, as the other option lists, until the toolkit
-/// can place a popup below its anchor (TODO(compose-rust#383), see `OptionSheet`).
-#[allow(clippy::too_many_arguments)]
+/// The permission-mode rows (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
+/// one row per mode with a shield (a warning triangle on the danger row), the title, a
+/// one-line description and a check on the chosen row. The bypass row is red. Tapping calls
+/// `on_tap(i)`; closing and the bypass confirmation belong to the caller.
+fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
+    let p = ember_theme().palette;
+    cu::Column().modifier(Modifier::new().width(width)).content(|| {
+        cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
+            Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+        });
+        for (i, r) in rows.iter().enumerate() {
+            let mut tap = on_tap.clone();
+            let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+            let tone = if r.danger { p.red.strong } else { p.muted };
+            let title = if r.danger { p.red.strong } else { p.text };
+            let icon = if r.danger { ICON_WARN } else { ICON_SHIELD };
+            Clickable(
+                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
+                Alignment::CenterStart,
+                move || tap(i),
+                || {
+                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        NavIcon(icon, tone.to_argb(), 16.0);
+                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            Label(r.title, Fs::Sm, Weight::Medium, Some(paint(title)), Some(1));
+                            Label(r.description, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        });
+                        if r.chosen {
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            NavIcon(ICON_CHECK, p.text.to_argb(), 16.0);
+                        }
+                    });
+                },
+            );
+        }
+    });
+}
+
+/// The permission picker as a modal (compact widths: the spec's bottom sheet).
 fn ModeSheet(
     open: bool,
     header: &str,
     rows: &[ModeRow],
     width: f32,
     on_dismiss: impl FnMut() + Clone + 'static,
-    on_choose: impl FnMut(usize) + Clone + 'static,
+    on_tap: impl FnMut(usize) + Clone + 'static,
 ) {
     let theme = ember_theme();
     let p = theme.palette;
@@ -71,42 +108,8 @@ fn ModeSheet(
                 .corner_radius(CORNER_MD)
                 .padding(SP[0]),
         )
-        .on_dismiss(on_dismiss.clone())
-        .content(|| {
-            cu::Column().content(|| {
-                cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
-                    Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
-                });
-                for (i, r) in rows.iter().enumerate() {
-                    let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
-                    let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
-                    let tone = if r.danger { p.red.strong } else { p.muted };
-                    let title = if r.danger { p.red.strong } else { p.text };
-                    Clickable(
-                        Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
-                        Alignment::CenterStart,
-                        move || {
-                            dismiss();
-                            choose(i);
-                        },
-                        || {
-                            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                                NavIcon(ICON_SHIELD, tone.to_argb(), 16.0);
-                                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                    Label(r.title, Fs::Sm, Weight::Medium, Some(paint(title)), Some(1));
-                                    Label(r.description, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                                });
-                                if r.chosen {
-                                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                                    NavIcon(ICON_CHECK, p.text.to_argb(), 16.0);
-                                }
-                            });
-                        },
-                    );
-                }
-            });
-        });
+        .on_dismiss(on_dismiss)
+        .content(|| ModeBody(header, rows, width, on_tap));
 }
 
 macro_rules! line_icon {
@@ -121,6 +124,7 @@ macro_rules! line_icon {
 
 const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
 const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
+const ICON_WARN: &str = line_icon!("M12 9.5v4M12 16.75h.01M10.3 3.9L2.4 17.6a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
 const ICON_ZAP: &str = line_icon!("M13 3L5 13.5h6L10 21l8-10.5h-6z");
@@ -491,6 +495,8 @@ struct Composer {
     suggestion: MutableState<Option<String>>,
     busy: MutableState<bool>,
     open: MutableState<Option<Pick>>,
+    /// The mode that waits for its confirming tap (bypass), if any.
+    mode_pending: MutableState<Option<PermMode>>,
     harness_filter: MutableState<Option<Harness>>,
     query: MutableState<String>,
 }
@@ -503,6 +509,7 @@ impl Composer {
             suggestion: mutable_state_of(initial_suggestion()),
             busy: mutable_state_of(false),
             open: mutable_state_of(initial_pick()),
+            mode_pending: mutable_state_of(None),
             harness_filter: mutable_state_of(None),
             query: mutable_state_of(String::new()),
         }
@@ -635,20 +642,19 @@ impl Composer {
                 }
             });
         }
-        let modes = modes_for(sel.option.harness);
-        {
-            let selection = self.selection.clone();
+        // Compact widths keep the modal; wider ones use the popover under the chip, drawn in
+        // the composer card (`mode_popover`).
+        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        if compact {
+            let me = self.clone();
+            let dismiss = self.dismiss_mode();
             ModeSheet(
                 open == Some(Pick::Mode),
                 &mode_header(sel.option.harness),
-                &mode_picker_rows(sel.option.harness, sel.mode),
+                &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get()),
                 MODE_POPUP_WIDTH,
-                close.clone(),
-                move |i| {
-                    if let Some(m) = modes.get(i) {
-                        selection.set(selection.get_untracked().with_mode(*m));
-                    }
-                },
+                dismiss,
+                move |i| me.tap_mode(i),
             );
         }
         let mut labels = vec![self.local_name(ui)];
@@ -666,6 +672,52 @@ impl Composer {
         // under the chip, drawn in the composer card.
         let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
         self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
+    }
+
+    /// Closing the permission picker also withdraws a waiting bypass confirmation.
+    fn dismiss_mode(&self) -> impl FnMut() + Clone + 'static {
+        let (o, pending) = (self.open.clone(), self.mode_pending.clone());
+        move || {
+            pending.set(None);
+            if o.get_untracked() == Some(Pick::Mode) {
+                o.set(None);
+            }
+        }
+    }
+
+    /// A tap on row `i` of the permission picker: bypass needs a second tap (`mode_tap`).
+    fn tap_mode(&self, i: usize) {
+        let sel = self.selection.get_untracked();
+        let Some(m) = modes_for(sel.option.harness).get(i).copied() else { return };
+        let (pending, applied) = mode_tap(sel.mode, self.mode_pending.get_untracked(), m);
+        self.mode_pending.set(pending);
+        if let Some(m) = applied {
+            self.selection.set(sel.with_mode(m));
+            self.open.set(None);
+        }
+    }
+
+    /// The permission picker as a popover under the mode chip (mockup `.mp-pop.mp-mode`, 340 dp).
+    fn mode_popover(&self, sel: &Selection, anchor: impl FnOnce()) {
+        let theme = ember_theme();
+        let p = theme.palette;
+        let open = self.open.get() == Some(Pick::Mode);
+        let width = MODE_POPOVER_WIDTH;
+        let rows = mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get());
+        let header = mode_header(sel.option.harness);
+        cu::Menu(open).on_dismiss(self.dismiss_mode()).anchor(anchor).content(|| {
+            let me = self.clone();
+            cu::Box()
+                .modifier(
+                    with_shadows(Modifier::new(), theme.shadow_lg())
+                        .width(width)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_MD)
+                        .padding(SP[1]),
+                )
+                .content(|| ModeBody(&header, &rows, width - 2.0 * SP[1], move |i| me.tap_mode(i)));
+        });
     }
 
     /// The model picker as a modal (compact widths, where the spec asks for a bottom sheet):
@@ -783,7 +835,7 @@ impl Composer {
         };
         if rail {
             let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
-                .width(MODEL_POPOVER_WIDTH)
+                .width(popover_width(MODEL_POPOVER_WIDTH, compose_rust::runtime::current_window_size().width_dp))
                 .background(paint(p.surface))
                 .border(1.0, paint(p.line))
                 .corner_radius(CORNER_MD)
@@ -891,6 +943,27 @@ fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, wei
         .on_click(on_click);
 }
 
+/// The composer's mode chip while bypass is on: `red-soft` fill, red text, the warning triangle.
+fn WarnChip(text: &str, icon_only: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new().height(H_CTL).background(paint(p.red.soft)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
+                NavIcon(ICON_WARN, p.red.strong.to_argb(), 16.0);
+                if !icon_only {
+                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(1));
+                }
+                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
+            });
+        },
+    );
+}
+
 fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let theme = ember_theme();
     let p = theme.palette;
@@ -973,7 +1046,20 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                             };
                             c.model_popover(ui, &sel, || chip(&model_text, IconRole::Compose, Pick::Model, false), close);
                         }
-                        chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
+                        // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
+                        let mode_chip = || {
+                            if sel.mode.is_bypass() {
+                                let open = c.open.clone();
+                                WarnChip(&mode_text, icon_only, move || open.set(Some(Pick::Mode)));
+                            } else {
+                                chip(&mode_text, IconRole::Settings, Pick::Mode, false);
+                            }
+                        };
+                        if l.compact {
+                            mode_chip();
+                        } else {
+                            c.mode_popover(&sel, mode_chip);
+                        }
                         chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
                     });
                     if c.busy.get() {

@@ -140,18 +140,68 @@ pub fn mode_header(h: Harness) -> String {
     format!("권한 모드 \u{b7} {}", h.label())
 }
 
+/// The title of the bypass row while it waits for the second tap.
+pub const BYPASS_CONFIRM_TITLE: &str = "다시 눌러 바이패스 적용";
+/// The description of the bypass row while it waits for the second tap.
+pub const BYPASS_CONFIRM_TEXT: &str = "한 번 더 누르면 모든 작업을 묻지 않고 실행합니다";
+
 /// The rows of the permission picker for a harness, in menu order, with `current` marked.
 pub fn mode_picker_rows(h: Harness, current: PermMode) -> Vec<ModeRow> {
+    mode_picker_rows_pending(h, current, None)
+}
+
+/// [`mode_picker_rows`] with the mode that waits for its confirming tap: that row (only bypass
+/// ever waits) says so in its title and description.
+pub fn mode_picker_rows_pending(h: Harness, current: PermMode, pending: Option<PermMode>) -> Vec<ModeRow> {
     modes_for(h)
         .iter()
-        .map(|m| ModeRow {
-            mode: *m,
-            title: m.label(),
-            description: m.description(),
-            danger: m.is_bypass(),
-            chosen: *m == current,
+        .map(|m| {
+            let confirming = pending == Some(*m) && m.is_bypass();
+            ModeRow {
+                mode: *m,
+                title: if confirming { BYPASS_CONFIRM_TITLE } else { m.label() },
+                description: if confirming { BYPASS_CONFIRM_TEXT } else { m.description() },
+                danger: m.is_bypass(),
+                chosen: *m == current,
+            }
         })
         .collect()
+}
+
+/// A tap on a mode row (FR-L16): `(pending, applied)`. Bypass is applied only by a second tap
+/// on the row that is already waiting; any other row applies at once and clears the wait.
+/// Tapping the mode that is already current applies nothing new and needs no confirmation.
+pub fn mode_tap(current: PermMode, pending: Option<PermMode>, tapped: PermMode) -> (Option<PermMode>, Option<PermMode>) {
+    if !tapped.is_bypass() || tapped == current {
+        return (None, Some(tapped));
+    }
+    if pending == Some(tapped) {
+        (None, Some(tapped))
+    } else {
+        (Some(tapped), None)
+    }
+}
+
+/// Pointing at another row withdraws the confirmation.
+pub fn mode_hover(pending: Option<PermMode>, hovered: PermMode) -> Option<PermMode> {
+    pending.filter(|p| *p == hovered)
+}
+
+/// Width of the shell's navigation at a window width, by the layout that width asks for.
+pub fn nav_width_for(window_dp: f32) -> f32 {
+    use crate::ui::shell::{nav_mode, ShellMode};
+    match nav_mode(window_dp, false) {
+        ShellMode::BottomTabs => 0.0,
+        ShellMode::Rail => crate::ui::theme::RAIL_W,
+        ShellMode::Sidebar => crate::ui::theme::SIDE_W,
+    }
+}
+
+/// The width a popover gets: what it wants, but never more than the window leaves beside the
+/// navigation, less a 24 dp margin (and not below 280). The toolkit keeps a popup's start
+/// edge inside the window, so a popover that fits never crosses the window's edge.
+pub fn popover_width(want: f32, window_dp: f32) -> f32 {
+    want.min(window_dp - nav_width_for(window_dp) - 24.0).max(280.0)
 }
 
 pub fn default_mode(_h: Harness) -> PermMode {
@@ -988,6 +1038,66 @@ mod tests {
         }
         // A mode the harness lacks marks nothing.
         assert!(mode_picker_rows(Harness::Codex, PermMode::Plan).iter().all(|r| !r.chosen));
+    }
+
+    #[test]
+    fn fr_l16_first_tap_on_bypass_only_asks_for_confirmation() {
+        let (pending, applied) = mode_tap(PermMode::Ask, None, PermMode::Bypass);
+        assert_eq!((pending, applied), (Some(PermMode::Bypass), None));
+    }
+
+    #[test]
+    fn fr_l16_second_tap_on_bypass_applies_it() {
+        let (pending, applied) = mode_tap(PermMode::Ask, Some(PermMode::Bypass), PermMode::Bypass);
+        assert_eq!((pending, applied), (None, Some(PermMode::Bypass)));
+    }
+
+    #[test]
+    fn fr_l16_tapping_another_row_applies_it_and_clears_the_wait() {
+        for m in [PermMode::Ask, PermMode::Edits, PermMode::Plan] {
+            assert_eq!(mode_tap(PermMode::Ask, Some(PermMode::Bypass), m), (None, Some(m)));
+            assert_eq!(mode_tap(PermMode::Ask, None, m), (None, Some(m)));
+        }
+    }
+
+    #[test]
+    fn fr_l16_tapping_the_current_bypass_needs_no_confirmation() {
+        assert_eq!(mode_tap(PermMode::Bypass, None, PermMode::Bypass), (None, Some(PermMode::Bypass)));
+    }
+
+    #[test]
+    fn fr_l16_pointing_at_another_row_withdraws_the_confirmation() {
+        assert_eq!(mode_hover(Some(PermMode::Bypass), PermMode::Ask), None);
+        assert_eq!(mode_hover(Some(PermMode::Bypass), PermMode::Bypass), Some(PermMode::Bypass));
+        assert_eq!(mode_hover(None, PermMode::Ask), None);
+    }
+
+    #[test]
+    fn fr_l16_a_waiting_bypass_row_says_so() {
+        let rows = mode_picker_rows_pending(Harness::ClaudeCode, PermMode::Ask, Some(PermMode::Bypass));
+        let b = rows.iter().find(|r| r.mode == PermMode::Bypass).unwrap();
+        assert_eq!(b.title, "다시 눌러 바이패스 적용");
+        assert_eq!(b.description, "한 번 더 누르면 모든 작업을 묻지 않고 실행합니다");
+        assert!(b.danger);
+        let others = rows.iter().filter(|r| r.mode != PermMode::Bypass);
+        assert!(others.clone().all(|r| r.title == r.mode.label()));
+        let idle = mode_picker_rows(Harness::ClaudeCode, PermMode::Ask);
+        assert_eq!(idle.iter().find(|r| r.danger).unwrap().title, PermMode::Bypass.label());
+    }
+
+    #[test]
+    fn fr_l15_popover_width_fits_the_window_beside_the_navigation() {
+        // 561: rail 72 + margin 24 leaves 465. 700: 604 leaves room for 560. 900 and 1024: rail.
+        // 1440: sidebar 234.
+        assert_eq!(popover_width(560.0, 561.0), 465.0);
+        assert_eq!(popover_width(560.0, 700.0), 560.0);
+        assert_eq!(popover_width(560.0, 900.0), 560.0);
+        assert_eq!(popover_width(560.0, 1024.0), 560.0);
+        assert_eq!(popover_width(560.0, 1440.0), 560.0);
+        assert_eq!(popover_width(340.0, 561.0), 340.0);
+        for w in [561.0_f32, 600.0, 700.0, 900.0, 1024.0, 1440.0] {
+            assert!(popover_width(560.0, w) + nav_width_for(w) <= w);
+        }
     }
 
     #[test]

@@ -86,5 +86,15 @@ fn concurrent_writers_beside_a_forking_thread_never_see_text_file_busy() {
     }
     stop.store(true, Ordering::Relaxed);
     let forks = forker.join().unwrap();
-    eprintln!("script_ready: 200 scripts, {forks} concurrent forks, {} busy retries", busy.load(Ordering::Relaxed));
+    let line = format!("script_ready: 200 scripts, {forks} concurrent forks, {} busy retries", busy.load(Ordering::Relaxed));
+    eprintln!("{line}");
+    // `cargo test` hides stderr of a passing test, which would throw away the only measurement of
+    // the ETXTBSY hypothesis (#546, #555). On GitHub Actions the line is appended to the job summary
+    // instead; without the variable (local runs) nothing is written.
+    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }

@@ -157,7 +157,8 @@ impl Default for LimitConfig {
 /// Which budget a request spends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitKind {
-    /// `POST /api/guest/accept`, counted whatever the answer.
+    /// `POST /api/guest/accept`, counted whatever the answer. `Accept` means "the strict class":
+    /// the request is `POST` to the door's `strict_path` (`ACCEPT_PATH` for the guest door).
     Accept,
     /// Everything else.
     Other,
@@ -271,15 +272,23 @@ pub struct DoorLimits {
     pub bucket: TokenBucket,
     in_flight: Arc<tokio::sync::Semaphore>,
     trusted: Vec<IpAddr>,
+    /// The path of the strict class (`LimitKind::Accept`), `POST` only.
+    strict_path: &'static str,
 }
 
 impl DoorLimits {
     pub fn new(cfg: LimitConfig, trusted: Vec<IpAddr>) -> Self {
+        Self::with_strict_path(cfg, trusted, ACCEPT_PATH)
+    }
+
+    /// As [`DoorLimits::new`] with the path of the strict class chosen by the door.
+    pub fn with_strict_path(cfg: LimitConfig, trusted: Vec<IpAddr>, strict_path: &'static str) -> Self {
         Self {
             bucket: TokenBucket::new_at(cfg.global_per_second, cfg.global_burst, Instant::now()),
             in_flight: Arc::new(tokio::sync::Semaphore::new(cfg.max_in_flight)),
             addr: AddrLimiter::new(cfg),
             trusted: trusted.into_iter().map(normalize_ip).collect(),
+            strict_path,
         }
     }
 }
@@ -294,7 +303,7 @@ pub(crate) async fn limit_layer(State(l): State<Arc<DoorLimits>>, req: Request, 
     };
     let now = Instant::now();
     let ip = client_ip(peer.ip(), req.headers(), &l.trusted);
-    let kind = if req.method() == axum::http::Method::POST && req.uri().path() == ACCEPT_PATH {
+    let kind = if req.method() == axum::http::Method::POST && req.uri().path() == l.strict_path {
         LimitKind::Accept
     } else {
         LimitKind::Other

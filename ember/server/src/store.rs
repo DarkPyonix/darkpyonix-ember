@@ -116,6 +116,18 @@ CREATE TABLE IF NOT EXISTS shim_offsets (
 );
 ";
 
+/// Per-harness settings stored on the main server (FR-L20, FR-S8, #311). One row per harness and
+/// key; the only key today is `mem_limit_mb` (decimal MiB). No row means unset.
+const HARNESS_SETTINGS_MIGRATION: &str = "
+CREATE TABLE IF NOT EXISTS harness_settings (
+    harness    TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    PRIMARY KEY (harness, key)
+);
+";
+
 /// Migrations, in order: entry `i` brings `PRAGMA user_version` from `i` to `i + 1`. Each runs in
 /// its own transaction together with the version bump. Append only; never edit a shipped entry.
 const MIGRATIONS: &[&str] = &[
@@ -146,6 +158,7 @@ const MIGRATIONS: &[&str] = &[
     crate::projects::schema::PROFILE_OVERRIDES_MIGRATION,
     crate::computers::enrol::MIGRATION,
     crate::computers::enrol::CONFIRM_MIGRATION,
+    HARNESS_SETTINGS_MIGRATION,
 ];
 
 /// The position of a registered migration (tests locate migrations by position, never by length).
@@ -220,6 +233,48 @@ impl Store {
     /// `PRAGMA user_version` of the open database.
     pub fn schema_version(&self) -> anyhow::Result<i64> {
         Ok(self.conn().query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// One stored setting of a harness (`harness` is the agent's wire name), if set.
+    pub fn harness_setting(&self, harness: &str, key: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT value FROM harness_settings WHERE harness = ?1 AND key = ?2",
+                params![harness, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Store (or replace) a setting of a harness. Validation belongs to the caller.
+    pub fn set_harness_setting(&self, harness: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        self.conn().execute(
+            "INSERT INTO harness_settings (harness, key, value, updated_ms) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (harness, key) DO UPDATE SET value = excluded.value, updated_ms = excluded.updated_ms",
+            params![harness, key, value, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a setting of a harness; removing one that is not set is not an error.
+    pub fn clear_harness_setting(&self, harness: &str, key: &str) -> anyhow::Result<()> {
+        self.conn().execute(
+            "DELETE FROM harness_settings WHERE harness = ?1 AND key = ?2",
+            params![harness, key],
+        )?;
+        Ok(())
+    }
+
+    /// Every `(harness, value)` stored under `key`, ordered by harness name.
+    pub fn harness_settings_with_key(&self, key: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT harness, value FROM harness_settings WHERE key = ?1 ORDER BY harness")?;
+        let rows = stmt
+            .query_map(params![key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn create_session(
@@ -691,6 +746,43 @@ mod tests {
         assert!(store.search("( - *", 5).unwrap().is_empty());
         assert!(store.search("absent", 5).unwrap().is_empty());
         assert_eq!(fts_query("a \"b"), Some("\"a\"* \"\"\"b\"*".to_string()));
+    }
+
+    #[test]
+    fn fr_l20_harness_setting_roundtrip() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.harness_setting("codex", "mem_limit_mb").unwrap(), None);
+        store.set_harness_setting("codex", "mem_limit_mb", "2048").unwrap();
+        assert_eq!(store.harness_setting("codex", "mem_limit_mb").unwrap().as_deref(), Some("2048"));
+        store.set_harness_setting("codex", "mem_limit_mb", "4096").unwrap();
+        assert_eq!(store.harness_setting("codex", "mem_limit_mb").unwrap().as_deref(), Some("4096"));
+        assert_eq!(store.harness_setting("claude-code", "mem_limit_mb").unwrap(), None, "per harness");
+        store.clear_harness_setting("codex", "mem_limit_mb").unwrap();
+        assert_eq!(store.harness_setting("codex", "mem_limit_mb").unwrap(), None);
+        store.clear_harness_setting("codex", "mem_limit_mb").unwrap();
+    }
+
+    #[test]
+    fn fr_l20_harness_setting_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        Store::open(&path).unwrap().set_harness_setting("antigravity", "mem_limit_mb", "1024").unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.harness_setting("antigravity", "mem_limit_mb").unwrap().as_deref(), Some("1024"));
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn fr_l20_harness_settings_with_key_lists_only_that_key() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_harness_setting("codex", "mem_limit_mb", "2048").unwrap();
+        store.set_harness_setting("claude-code", "mem_limit_mb", "1024").unwrap();
+        store.set_harness_setting("codex", "other", "x").unwrap();
+        assert_eq!(
+            store.harness_settings_with_key("mem_limit_mb").unwrap(),
+            vec![("claude-code".to_string(), "1024".to_string()), ("codex".to_string(), "2048".to_string())]
+        );
+        assert!(store.harness_settings_with_key("none").unwrap().is_empty());
     }
 
     #[test]

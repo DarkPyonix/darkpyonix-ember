@@ -476,7 +476,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::enrol::router(
             enrol.clone(),
             enrol_door_url,
-            Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
+            Arc::new(
+                computers::enrol::ComputersRegistrar::new(computers.clone())
+                    .with_server_peer_id(enrol.server_peer_id().map(String::from)),
+            ),
         ));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).

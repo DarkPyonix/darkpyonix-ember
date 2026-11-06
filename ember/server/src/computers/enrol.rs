@@ -589,14 +589,65 @@ pub trait Registrar: Send + Sync {
     fn remove(&self, computer_id: &str);
 }
 
+/// Where a confirmed node is registered: by HTTP URL, or by its transport peer id.
+#[derive(Debug, PartialEq)]
+pub enum Target {
+    Url(String),
+    Peer(ember_transport::PeerId),
+}
+
+/// The address rule for a confirmed node (FR-C2c), pure so it is testable without a transport.
+/// 1. `info.url` present: by URL (it wins over a peer id).
+/// 2. No url, a peer id, and `transport_on`: by peer.
+/// 3. No url, a peer id, no transport: the observed URL (a LAN node enrolled with `--transport`
+///    against a server without the transport still works).
+/// 4. Neither: the observed URL, or the "no address" error when none can be derived.
+///
+/// A peer id equal to `server_id` (the node claims to be this server) is refused in every case.
+/// The peer id is the node's own claim; the owner compares its fingerprint at confirm.
+fn register_target(
+    info: &NodeInfo,
+    observed: &str,
+    transport_on: bool,
+    server_id: Option<&str>,
+) -> Result<Target, RegisterError> {
+    let peer = info.peer_id.as_ref().map(|p| p.parse::<ember_transport::PeerId>().ok());
+    if let (Some(Some(p)), Some(own)) = (&peer, server_id) {
+        if p.to_string() == own.to_ascii_lowercase() {
+            return Err(RegisterError::Failed("the node's peer id is this server's own".into()));
+        }
+    }
+    if let Some(url) = &info.url {
+        return Ok(Target::Url(url.clone()));
+    }
+    if transport_on {
+        match peer {
+            Some(Some(p)) => return Ok(Target::Peer(p)),
+            Some(None) => return Err(RegisterError::Failed("the node's peer id is not valid".into())),
+            None => {}
+        }
+    }
+    observed_node_url(observed)
+        .map(Target::Url)
+        .ok_or_else(|| RegisterError::Failed("the node reported no address and none could be derived".into()))
+}
+
 /// [`Registrar`] over the computers registry.
 pub struct ComputersRegistrar {
     computers: Arc<Computers>,
+    /// This server's own transport peer id, `None` when the transport is off.
+    server_peer_id: Option<String>,
 }
 
 impl ComputersRegistrar {
     pub fn new(computers: Arc<Computers>) -> ComputersRegistrar {
-        ComputersRegistrar { computers }
+        ComputersRegistrar { computers, server_peer_id: None }
+    }
+
+    /// With the server's own peer id, so a node that claims it is refused at register.
+    pub fn with_server_peer_id(mut self, server_peer_id: Option<String>) -> ComputersRegistrar {
+        self.server_peer_id = server_peer_id;
+        self
     }
 }
 
@@ -611,10 +662,12 @@ impl Registrar for ComputersRegistrar {
     }
 
     fn register(&self, name: &str, token: &str, info: &NodeInfo, observed_addr: &str) -> Result<String, RegisterError> {
-        let Some(url) = info.url.clone().or_else(|| observed_node_url(observed_addr)) else {
-            return Err(RegisterError::Failed("the node reported no address and none could be derived".into()));
+        let target = register_target(info, observed_addr, self.computers.dialer().is_some(), self.server_peer_id.as_deref())?;
+        let result = match target {
+            Target::Url(url) => self.computers.register(name, &url, token),
+            Target::Peer(peer) => self.computers.register_peer(name, &ember_transport::PeerAddr::from(peer), token),
         };
-        match self.computers.register(name, &url, token) {
+        match result {
             Ok(c) => Ok(c.id),
             Err(_) if self.name_taken(name) => Err(RegisterError::NameTaken),
             Err(_) => Err(RegisterError::Failed("the computer could not be registered at that address".into())),
@@ -2760,5 +2813,114 @@ mod tests {
         assert_eq!(reg.hits.load(Ordering::SeqCst), 1);
         assert_eq!(reg.inner.removed.lock().unwrap().as_slice(), ["computer-1"]);
         assert!(e.pending.lock().unwrap().is_empty());
+    }
+
+    // ---- C4: register by the node's peer id (FR-C2c) ----
+
+    fn real_id() -> String {
+        ember_transport::SecretKey::generate().peer_id().to_string()
+    }
+
+    fn node(url: Option<&str>, peer: Option<&str>) -> NodeInfo {
+        let mut i = info();
+        i.url = url.map(String::from);
+        i.peer_id = peer.map(String::from);
+        i
+    }
+
+    #[test]
+    fn fr_c2_target_url_wins_over_a_peer_id() {
+        let id = real_id();
+        let i = node(Some("http://10.1.1.1:8741"), Some(&id));
+        for on in [true, false] {
+            assert_eq!(register_target(&i, SRC, on, None).unwrap(), Target::Url("http://10.1.1.1:8741".into()));
+        }
+    }
+
+    #[test]
+    fn fr_c2_target_peer_only_with_transport_registers_by_peer() {
+        let id = real_id();
+        let i = node(None, Some(&id));
+        let want: ember_transport::PeerId = id.parse().unwrap();
+        assert_eq!(register_target(&i, SRC, true, Some(&real_id())).unwrap(), Target::Peer(want));
+        // Upper-case hex from the node parses to the same peer.
+        let up = node(None, Some(&id.to_ascii_uppercase()));
+        assert_eq!(register_target(&up, SRC, true, None).unwrap(), Target::Peer(want));
+    }
+
+    #[test]
+    fn fr_c2_target_peer_only_without_transport_falls_back_to_the_observed_url() {
+        let i = node(None, Some(&real_id()));
+        assert_eq!(register_target(&i, "192.168.0.9:5000", false, None).unwrap(), Target::Url("http://192.168.0.9:8741".into()));
+    }
+
+    #[test]
+    fn fr_c2_target_neither_uses_the_observed_url_or_the_old_error() {
+        let i = node(None, None);
+        for on in [true, false] {
+            assert_eq!(register_target(&i, "10.0.0.7:5000", on, None).unwrap(), Target::Url("http://10.0.0.7:8741".into()));
+            match register_target(&i, "unknown", on, None) {
+                Err(RegisterError::Failed(m)) => {
+                    assert_eq!(m, "the node reported no address and none could be derived")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fr_c2_target_refuses_the_servers_own_peer_id() {
+        let own = real_id();
+        for i in [node(None, Some(&own)), node(None, Some(&own.to_ascii_uppercase())), node(Some("http://10.1.1.1:8741"), Some(&own))] {
+            match register_target(&i, SRC, true, Some(&own)) {
+                Err(RegisterError::Failed(m)) => assert_eq!(m, "the node's peer id is this server's own"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fr_c2_target_an_invalid_peer_id_is_an_error_not_a_panic() {
+        // 64 hex digits that are not an Ed25519 point of large order (all 0xff: y >= p, refused).
+        for bad in ["ff".repeat(32), "zz".repeat(32), "ab".repeat(31)] {
+            let i = node(None, Some(&bad));
+            match register_target(&i, SRC, true, None) {
+                Err(RegisterError::Failed(m)) => assert_eq!(m, "the node's peer id is not valid", "{bad}"),
+                other => panic!("{other:?}"),
+            }
+            // Without the transport the peer id is not used at all.
+            assert!(matches!(register_target(&i, SRC, false, None), Ok(Target::Url(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn fr_c2_redeem_registers_nothing_only_confirm_does() {
+        let (_, e) = svc();
+        let fake = Fake::default();
+        let m = mint(&e, T0);
+        let r = e.redeem(m.code.expose(), &node(None, Some(&real_id())), T0 + 1, SRC).unwrap();
+        e.status_detail(&r.enrol_id, T0 + 2).unwrap();
+        assert_eq!(fake.count(), 0);
+        e.deny(&r.enrol_id, T0 + 3).unwrap();
+        assert_eq!(fake.count(), 0);
+        let (id, _) = open(&e, T0 + 10);
+        assert_eq!(fake.count(), 0);
+        e.confirm(&id, None, T0 + 12, &fake).unwrap();
+        assert_eq!(fake.count(), 1);
+    }
+
+    #[test]
+    fn fr_c2_confirm_view_carries_the_node_reported_fingerprint_only_while_awaiting() {
+        let (_, e) = svc();
+        let id = real_id();
+        let m = mint(&e, T0);
+        let r = e.redeem(m.code.expose(), &node(None, Some(&id)), T0 + 1, SRC).unwrap();
+        let d = e.status_detail(&r.enrol_id, T0 + 2).unwrap();
+        assert_eq!(d.status, EnrolStatus::AwaitingConfirmation);
+        assert_eq!(d.fingerprint, ember_transport::fingerprint_hex(&id));
+        assert_eq!(d.node_info.unwrap().peer_id.as_deref(), Some(id.as_str()));
+        e.deny(&r.enrol_id, T0 + 3).unwrap();
+        let d = e.status_detail(&r.enrol_id, T0 + 4).unwrap();
+        assert!(d.fingerprint.is_none() && d.node_info.is_none());
     }
 }

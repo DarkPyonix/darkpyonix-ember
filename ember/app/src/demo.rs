@@ -965,7 +965,7 @@ impl DemoSource {
                     projects: vec!["notes".into()],
                 },
             ],
-            totals: GithubTotals { repos: 2, open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(75) },
+            totals: GithubTotals { repos: 2, open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(80) },
             checked_at: 0,
         }
     }

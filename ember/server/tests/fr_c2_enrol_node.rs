@@ -147,7 +147,7 @@ impl Harness {
         let (enrol, fake, id) = (self.enrol.clone(), self.fake.clone(), id.to_string());
         tokio::spawn(async move {
             wait_redeemed(&enrol, &id).await;
-            enrol.confirm(&id, None, now_ms(), &*fake).unwrap();
+            enrol.confirm(&id, None, None, now_ms(), &*fake).unwrap();
         })
     }
 
@@ -334,7 +334,7 @@ async fn fr_c2_node_enrol_a_refused_write_after_delivery_says_the_token_is_lost(
         tokio::spawn(async move {
             wait_redeemed(&enrol, &id).await;
             std::os::unix::fs::symlink(&target, &link).unwrap();
-            enrol.confirm(&id, None, now_ms(), &*fake).unwrap();
+            enrol.confirm(&id, None, None, now_ms(), &*fake).unwrap();
         })
     };
     let mut o = h.opts(&code, dir.path());
@@ -528,7 +528,7 @@ async fn fr_c2_node_enrol_reports_a_credential_that_was_already_delivered() {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let secret = cap.secrets.lock().unwrap()[0].clone();
-        enrol.confirm(&eid, None, now_ms(), &*fake).unwrap();
+        enrol.confirm(&eid, None, None, now_ms(), &*fake).unwrap();
         let d = enrol.take_delivery(&eid, &secret, now_ms()).unwrap();
         assert!(matches!(d, Delivery::Joined { .. }));
     });

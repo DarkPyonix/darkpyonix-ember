@@ -216,18 +216,25 @@ pub enum CreateMemberError {
 }
 
 /// Create the session of a member from its definition. A fixed account is passed to the
-/// router as requested; the pipeline lets the router choose (FR-U3).
+/// router as requested; the pipeline lets the router choose (FR-U3), unless the member's project
+/// has a profile override for the harness (FR-L20, FR-L26), which is then requested instead.
 pub fn create_member_session(
     sessions: &Sessions,
     def: &MemberDef,
     new: impl FnOnce(AgentKind) -> NewSession,
 ) -> Result<SessionRecord, CreateMemberError> {
     let r = def.resolve()?;
+    let new = new(r.agent);
+    // FR-L20: with no fixed account, the project's override for this harness (when its account
+    // still exists) decides before the router does.
     let requested = match &r.account {
-        AccountChoice::Fixed(id) => Some(id.as_str()),
-        AccountChoice::Pipeline => None,
+        AccountChoice::Fixed(id) => Some(id.clone()),
+        AccountChoice::Pipeline => sessions
+            .store()
+            .project_account_override(&new.project, r.agent)
+            .map_err(SessionError::Other)?,
     };
-    let rec = sessions.create_with_account(new(r.agent), requested)?;
+    let rec = sessions.create_with_account(new, requested.as_deref())?;
     if let Some(p) = &r.proxy {
         if let Err(e) = sessions.store().set_session_proxy(&rec.id, p) {
             return Err(SessionError::Other(e).into());

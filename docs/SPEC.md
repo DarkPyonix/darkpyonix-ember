@@ -79,7 +79,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-W6 | Extensions are in `extensions/` (#69). Staging into OSE (`ember/ose/stage-extensions.sh`) and the proxy default list (`DEFAULT_EXTENSIONS`) are written (#117), unverified on a real build. `.vsix` packaging into `extensions/dist` is not yet produced. Notebook criteria are open. | #15 |
 | NFR-W1 | Harness `ember/ose/regress.sh` (install, activation log parse, compare with `ember/ose/regression/expected.json`); self-test in CI. Extension list unconfirmed, no real run, no activation client. | #84 |
 | FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `ember/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
-| FR-P7 | `GET /ports` on the node and `/api/computers/{id}/ports` on the server are written, not compiled by the author. The client call `computer_ports` is written; the Session web page list (#326) is not wired. | #386 |
+| FR-P7 | `GET /ports` on the node and `/api/computers/{id}/ports` on the server are written and tested (node 130, server 605, client 107, CI green on #435). On macOS lsof runs from a fixed path with its output capped, answers are reused for 1 s, and platforms other than Linux and macOS answer an empty list that is not marked as unsupported. The client call `computer_ports` is written; the Session web page list (#326) is not wired. | #386 |
 | NFR-P1 | Not measured. | #26 |
 | FR-B1–B4 | `detach.js` and `ember/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
 | NFR-B1, NFR-B2 | Not measured. | #30 |

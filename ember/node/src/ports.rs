@@ -256,6 +256,28 @@ pub async fn listening(roots: Vec<Root>) -> Vec<ListeningPort> {
     if roots.is_empty() {
         return Vec::new();
     }
+    // Every call walks the process list (and runs lsof on macOS): repeated polls inside a second
+    // for the same roots reuse the last answer.
+    let key: Vec<(u32, String)> = roots.iter().map(|r| (r.pid, format!("{:?}{}", r.owner.kind, r.owner.id))).collect();
+    if let Some((at, k, ports)) = PORTS_CACHE.lock().ok().and_then(|g| g.clone()) {
+        if k == key && at.elapsed() < PORTS_CACHE_TTL {
+            return ports;
+        }
+    }
+    let ports = listening_uncached(roots).await;
+    if let Ok(mut g) = PORTS_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), key, ports.clone()));
+    }
+    ports
+}
+
+/// How long the last answer is reused.
+const PORTS_CACHE_TTL: Duration = Duration::from_secs(1);
+
+type PortsCache = Option<(std::time::Instant, Vec<(u32, String)>, Vec<ListeningPort>)>;
+static PORTS_CACHE: std::sync::Mutex<PortsCache> = std::sync::Mutex::new(None);
+
+async fn listening_uncached(roots: Vec<Root>) -> Vec<ListeningPort> {
     let owned = tokio::task::spawn_blocking(move || snapshot_owned(&roots)).await.unwrap_or_default();
     if owned.is_empty() {
         return Vec::new();
@@ -322,19 +344,34 @@ fn linux_ports(owned: &HashMap<u32, Owned>) -> Vec<ListeningPort> {
     from_proc(&listeners, &inode_pid, owned)
 }
 
+/// Where lsof lives on macOS. A fixed path, never a PATH lookup, so a planted `lsof` cannot run.
+const LSOF_PATHS: [&str; 2] = ["/usr/sbin/lsof", "/usr/bin/lsof"];
+
+/// The most lsof output that is read (the pid list already bounds it).
+const LSOF_MAX_BYTES: u64 = 1 << 20;
+
 /// `lsof` limited to `pids`; `None` when it is missing, fails to start or times out.
 pub async fn run_lsof(pids: &[u32]) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+    let bin = LSOF_PATHS.iter().find(|p| std::path::Path::new(p).exists())?;
     let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-    let mut cmd = tokio::process::Command::new("lsof");
+    let mut cmd = tokio::process::Command::new(bin);
     cmd.args(["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn", "-a", "-p", &list])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let child = cmd.spawn().ok()?;
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
     // lsof exits 1 when nothing matches; its stdout is still the answer.
-    let out = tokio::time::timeout(LSOF_TIMEOUT, child.wait_with_output()).await.ok()?.ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    let read = async {
+        let mut buf = Vec::new();
+        stdout.take(LSOF_MAX_BYTES).read_to_end(&mut buf).await.ok()?;
+        let _ = child.kill().await;
+        Some(buf)
+    };
+    let buf = tokio::time::timeout(LSOF_TIMEOUT, read).await.ok()??;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 #[cfg(test)]

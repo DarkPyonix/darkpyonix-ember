@@ -37,13 +37,13 @@ pub const PICK_FILES: &str = "보낼 파일을 선택합니다";
 pub const LOCK_LINE: &str = "연결된 장비 사이에서 암호화되어 전송됩니다";
 
 /// Why the "파일 고르기" button is disabled.
-pub const FILE_PICK_REASON: &str = "파일 선택은 준비 중입니다 (파일 대화상자 API 대기)";
+pub const FILE_PICK_REASON: &str = "파일 선택은 준비 중입니다";
 /// Shown when the chosen receiver is an agent: the service sends to a device id only.
 pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되지 않습니다";
 /// Shown beside an offline device chip.
 pub const OFFLINE_TAG: &str = "오프라인";
 
-/// TODO(compose-rust#483): flip when the toolkit has a file dialog API (requested for v0.0.7),
+/// TODO(compose-rust#483): flip when the toolkit has a file dialog API,
 /// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#166.
 pub const FILE_PICKER_AVAILABLE: bool = false;
 

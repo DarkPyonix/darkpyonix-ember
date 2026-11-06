@@ -38,6 +38,7 @@ use ember_transport::PeerGate;
 ///
 /// `ember-node __keep-pty …` is the internal PTY keeper (see `ember_node::term::pty`).
 /// `ember-node hub <register [--name N] | status | forget>` manages the hub registration.
+/// `ember-node enrol <code> --server <url>` joins this computer to an ember server (`enrol_cli`).
 /// `ember-node exec-server` instead becomes `codex exec-server --listen stdio` on this process's
 /// stdio, the same command the daemon starts for each `/exec-server` connection.
 fn main() -> anyhow::Result<()> {
@@ -54,6 +55,17 @@ fn main() -> anyhow::Result<()> {
             .enable_all()
             .build()?
             .block_on(ember_node::hub::cli(&args[2..]));
+    }
+    if args.get(1).map(String::as_str) == Some("enrol") {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(ember_node::enrol_cli::cli(&args[2..]));
+        if let Err(e) = result {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve())
 }

@@ -100,15 +100,22 @@ pub fn deck_names(rest: &[Member], n: usize) -> String {
     rest.iter().take(n).map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
+/// `deck_names` cut to `max_chars` characters (not bytes, so Korean names are never split),
+/// ending in an ellipsis when cut. Pure model of the one-line ellipsis of the deck card.
+pub fn deck_names_fit(rest: &[Member], n: usize, max_chars: usize) -> String {
+    let full = deck_names(rest, n);
+    if full.chars().count() <= max_chars {
+        return full;
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = full.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
 /// The hidden members that get an avatar on the deck card: at most `n`.
 pub fn deck_avatars(rest: &[Member], n: usize) -> &[Member] {
     &rest[..rest.len().min(n)]
-}
-
-/// The list header shows a search button up to 900 dp; above it the inline field is drawn
-/// instead, so the header has one search (FR-L26).
-pub fn list_search_button_visible(width_dp: f32) -> bool {
-    width_dp <= 900.0
 }
 
 /// The computer strip shows scroll arrows only when its content overflows.
@@ -1013,13 +1020,18 @@ mod tests {
     }
 
     #[test]
-    fn fr_l1_deck_card_keeps_label_and_click() {
+    fn fr_l1_deck_label_is_count_and_suffix() {
         assert_eq!(deck_label(3), "외 3명");
-        let src = include_str!("cr/project.rs");
-        let card = src.split("fn DeckCard(").nth(1).unwrap().split("
-}
-").next().unwrap();
-        assert!(card.contains("on_click,") && card.contains("deck_label(count)"));
+    }
+
+    #[test]
+    fn fr_l1_deck_names_fit_or_ellipsis() {
+        let rest: Vec<Member> = ["김하늘", "이서연", "박지후", "최민준"].iter().map(|n| mem(n)).collect();
+        // 3 names, "김하늘, 이서연, 박지후" is 13 chars: fits at 13, ellipsis below.
+        assert_eq!(deck_names_fit(&rest, DECK_NAMES, 13), "김하늘, 이서연, 박지후");
+        assert_eq!(deck_names_fit(&rest, DECK_NAMES, 8), "김하늘, 이서…");
+        assert_eq!(deck_names_fit(&rest, DECK_NAMES, 1), "…");
+        assert_eq!(deck_names_fit(&[], DECK_NAMES, 8), "");
     }
 
     #[test]

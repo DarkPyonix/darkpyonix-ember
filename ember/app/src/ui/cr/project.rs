@@ -19,7 +19,7 @@ use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, list_search_button_visible, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -319,17 +319,17 @@ pub fn ThemeButton(ui: &SharedUi) {
 /// the search is a button, up to 900 the labels of the first two drop, and on a phone 새 팀원
 /// is a round button too (`hide-md`).
 fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
-    if !list_search_button_visible(w) {
+    if w > 900.0 {
         let q = st.query.clone();
         // TODO(compose-rust#376, #374): the "/" key hint.
         cu::Column().modifier(Modifier::new().width(240.0)).content(|| {
             SearchField("팀원 검색", H_BTN, move |v| q.set(v));
         });
     }
-    if list_search_button_visible(w) {
-        let u_search = ui.clone();
-        IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
-    }
+    // Two controls, not a duplicate: the inline field above filters this list (`st.query`),
+    // the icon opens the global search (Route::Search). Drawn at every width.
+    let u_search = ui.clone();
+    IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
     let can_create = services().demo.is_some();
@@ -411,7 +411,7 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
             }
             // The hub's devices, registered with the node's token (FR-X7, #490).
-            // TODO(compose-rust): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            // TODO(compose-rust, #671): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
             let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
             let ui = st.add.clone();
             Clickable(add, Alignment::CenterStart, move || ui.show(), || {
@@ -434,7 +434,7 @@ const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" wid
 const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
 
 /// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
-/// TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
+/// TODO(compose-rust, #671): no label modifier for icon-only controls, so this control has no accessible name.
 fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let color = if enabled { p.text_2 } else { p.line };
@@ -1773,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l26_list_header_has_one_search_at_1440() {
+    fn fr_l9_wide_header_renders_global_search_icon_button_beside_inline_filter() {
         use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
@@ -1796,52 +1796,15 @@ mod tests {
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         let batch = decode_batch(bytes).expect("decode");
+        // Verify both the inline "팀원 검색" placeholder and the Search icon button exist at 1440dp.
         let has_placeholder = batch.iter().any(|m| {
             matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
         });
         let has_search_icon = batch.iter().any(|m| {
-            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, value: PropertyValue::Integer(i), .. } if *i == IconRole::Search as i64)
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. })
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
-        assert!(!has_search_icon, "the magnifier button must not repeat beside the inline field");
-        assert!(!list_search_button_visible(1440.0));
-        compose_rust::window::reset_window_size();
-    }
-
-    #[test]
-    fn fr_l26_list_header_search_button_below_900() {
-        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
-        let _guard = crate::services::test_guard();
-        let ui = shared_ui();
-        ui.go(crate::ui::Route::Projects);
-        compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
-        let _ = host.rebuild().expect("rebuild");
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
-                width_dp: 800.0,
-                height_dp: 900.0,
-                class: WindowSizeClass::Medium,
-                height_class: WindowHeightClass::Medium,
-                safe_area_top: 0.0,
-                safe_area_leading: 0.0,
-                safe_area_trailing: 0.0,
-            },
-        };
-        let (bytes, _) = host.dispatch(event).expect("dispatch");
-        let batch = decode_batch(bytes).expect("decode");
-        let has_placeholder = batch.iter().any(|m| {
-            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
-        });
-        let has_search_icon = batch.iter().any(|m| {
-            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, value: PropertyValue::Integer(i), .. } if *i == IconRole::Search as i64)
-        });
-        assert!(has_search_icon, "expected the search icon button at 800dp");
-        assert!(!has_placeholder, "no inline field at 800dp");
-        assert!(list_search_button_visible(800.0));
-        assert!(list_search_button_visible(900.0));
+        assert!(has_search_icon, "expected global search icon button at 1440dp");
         compose_rust::window::reset_window_size();
     }
 

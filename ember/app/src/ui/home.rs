@@ -168,23 +168,33 @@ pub fn mode_picker_rows_pending(h: Harness, current: PermMode, pending: Option<P
         .collect()
 }
 
-/// A tap on a mode row (FR-L16): `(pending, applied)`. Bypass is applied only by a second tap
-/// on the row that is already waiting; any other row applies at once and clears the wait.
-/// Tapping the mode that is already current applies nothing new and needs no confirmation.
-pub fn mode_tap(current: PermMode, pending: Option<PermMode>, tapped: PermMode) -> (Option<PermMode>, Option<PermMode>) {
+/// A mode waiting for its confirming tap: the mode and the time (ms) of the first tap.
+pub type ModePending = Option<(PermMode, i64)>;
+
+/// A tap on a mode row at `now` ms (FR-L16): `(pending, applied)`. Bypass is applied only by a
+/// second tap on the row that is already waiting and only `AMEND_CONFIRM_DELAY_MS` after the
+/// first, so a fast double tap cannot skip the question (the rule of #424); an earlier second
+/// tap keeps waiting. Any other row applies at once and clears the wait. Tapping the mode that
+/// is already current applies nothing new and needs no confirmation.
+pub fn mode_tap(current: PermMode, pending: ModePending, tapped: PermMode, now: i64) -> (ModePending, Option<PermMode>) {
     if !tapped.is_bypass() || tapped == current {
         return (None, Some(tapped));
     }
-    if pending == Some(tapped) {
-        (None, Some(tapped))
-    } else {
-        (Some(tapped), None)
+    match pending {
+        Some((m, at)) if m == tapped => {
+            if now - at >= crate::ui::vcs::AMEND_CONFIRM_DELAY_MS {
+                (None, Some(tapped))
+            } else {
+                (pending, None)
+            }
+        }
+        _ => (Some((tapped, now)), None),
     }
 }
 
 /// Pointing at another row withdraws the confirmation.
-pub fn mode_hover(pending: Option<PermMode>, hovered: PermMode) -> Option<PermMode> {
-    pending.filter(|p| *p == hovered)
+pub fn mode_hover(pending: ModePending, hovered: PermMode) -> ModePending {
+    pending.filter(|(p, _)| *p == hovered)
 }
 
 /// Width of the shell's navigation at a window width, by the layout that width asks for.
@@ -1090,35 +1100,51 @@ mod tests {
         assert!(mode_picker_rows(Harness::Codex, PermMode::Plan).iter().all(|r| !r.chosen));
     }
 
+    const T0: i64 = 10_000;
+
     #[test]
     fn fr_l16_first_tap_on_bypass_only_asks_for_confirmation() {
-        let (pending, applied) = mode_tap(PermMode::Ask, None, PermMode::Bypass);
-        assert_eq!((pending, applied), (Some(PermMode::Bypass), None));
+        let (pending, applied) = mode_tap(PermMode::Ask, None, PermMode::Bypass, T0);
+        assert_eq!((pending, applied), (Some((PermMode::Bypass, T0)), None));
     }
 
     #[test]
-    fn fr_l16_second_tap_on_bypass_applies_it() {
-        let (pending, applied) = mode_tap(PermMode::Ask, Some(PermMode::Bypass), PermMode::Bypass);
-        assert_eq!((pending, applied), (None, Some(PermMode::Bypass)));
+    fn fr_l16_a_fast_second_tap_keeps_waiting() {
+        let armed = Some((PermMode::Bypass, T0));
+        let (pending, applied) = mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + 100);
+        assert_eq!((pending, applied), (armed, None));
+        let last = crate::ui::vcs::AMEND_CONFIRM_DELAY_MS - 1;
+        assert_eq!(mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + last).1, None);
+    }
+
+    #[test]
+    fn fr_l16_second_tap_after_600_ms_applies_bypass() {
+        let armed = Some((PermMode::Bypass, T0));
+        assert_eq!(mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + 700), (None, Some(PermMode::Bypass)));
+        assert_eq!(
+            mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + crate::ui::vcs::AMEND_CONFIRM_DELAY_MS).1,
+            Some(PermMode::Bypass)
+        );
     }
 
     #[test]
     fn fr_l16_tapping_another_row_applies_it_and_clears_the_wait() {
         for m in [PermMode::Ask, PermMode::Edits, PermMode::Plan] {
-            assert_eq!(mode_tap(PermMode::Ask, Some(PermMode::Bypass), m), (None, Some(m)));
-            assert_eq!(mode_tap(PermMode::Ask, None, m), (None, Some(m)));
+            assert_eq!(mode_tap(PermMode::Ask, Some((PermMode::Bypass, T0)), m, T0 + 50), (None, Some(m)));
+            assert_eq!(mode_tap(PermMode::Ask, None, m, T0), (None, Some(m)));
         }
     }
 
     #[test]
     fn fr_l16_tapping_the_current_bypass_needs_no_confirmation() {
-        assert_eq!(mode_tap(PermMode::Bypass, None, PermMode::Bypass), (None, Some(PermMode::Bypass)));
+        assert_eq!(mode_tap(PermMode::Bypass, None, PermMode::Bypass, T0), (None, Some(PermMode::Bypass)));
     }
 
     #[test]
     fn fr_l16_pointing_at_another_row_withdraws_the_confirmation() {
-        assert_eq!(mode_hover(Some(PermMode::Bypass), PermMode::Ask), None);
-        assert_eq!(mode_hover(Some(PermMode::Bypass), PermMode::Bypass), Some(PermMode::Bypass));
+        let armed = Some((PermMode::Bypass, T0));
+        assert_eq!(mode_hover(armed, PermMode::Ask), None);
+        assert_eq!(mode_hover(armed, PermMode::Bypass), armed);
         assert_eq!(mode_hover(None, PermMode::Ask), None);
     }
 

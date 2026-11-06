@@ -487,7 +487,7 @@ struct Composer {
     busy: MutableState<bool>,
     open: MutableState<Option<Pick>>,
     /// The mode that waits for its confirming tap (bypass), if any.
-    mode_pending: MutableState<Option<PermMode>>,
+    mode_pending: MutableState<crate::ui::home::ModePending>,
     harness_filter: MutableState<Option<Harness>>,
     query: MutableState<String>,
 }
@@ -642,7 +642,7 @@ impl Composer {
             ModeSheet(
                 open == Some(Pick::Mode),
                 &mode_header(sel.option.harness),
-                &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get()),
+                &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)),
                 dismiss,
                 move |i| me.tap_mode(i),
             );
@@ -679,7 +679,7 @@ impl Composer {
     fn tap_mode(&self, i: usize) {
         let sel = self.selection.get_untracked();
         let Some(m) = modes_for(sel.option.harness).get(i).copied() else { return };
-        let (pending, applied) = mode_tap(sel.mode, self.mode_pending.get_untracked(), m);
+        let (pending, applied) = mode_tap(sel.mode, self.mode_pending.get_untracked(), m, now_ms());
         self.mode_pending.set(pending);
         if let Some(m) = applied {
             self.selection.set(sel.with_mode(m));
@@ -693,7 +693,7 @@ impl Composer {
         let p = theme.palette;
         let open = self.open.get() == Some(Pick::Mode);
         let width = MODE_POPOVER_WIDTH;
-        let rows = mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get());
+        let rows = mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m));
         let header = mode_header(sel.option.harness);
         cu::Menu(open).on_dismiss(self.dismiss_mode()).anchor(anchor).content(|| {
             let me = self.clone();

@@ -558,6 +558,67 @@ async fn fr_c2_head_on_the_poll_route_is_405() {
     }
 }
 
+/// MEASUREMENT (Q1): does the Host and Origin guard also cover the method-not-allowed path? One
+/// `GUARD_MATRIX` line per request goes to the real stdout (the only way a line of a passing test
+/// reaches the CI log). Asserts only what the code makes certain: the two requests that reach a
+/// handler with a good Host and no Origin. Everything else is printed, not pinned, until read.
+#[tokio::test]
+async fn fr_c2_guard_matrix_is_measured() {
+    use std::io::Write;
+    let f = fx();
+    let app = f.open_app();
+    let body = json!({ "code": unknown_code('q'), "node_public_info": node_info() }).to_string();
+    let redeem_methods = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+    let status_methods = ["POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
+    let mut cases: Vec<(&str, &str)> = Vec::new();
+    for m in redeem_methods {
+        cases.push((m, "/enrol/redeem"));
+    }
+    for m in status_methods {
+        cases.push((m, "/enrol/status/x"));
+    }
+    // Controls: the two requests that reach a handler.
+    cases.push(("POST", "/enrol/redeem"));
+    cases.push(("GET", "/enrol/status/x"));
+    let variants: [(&str, &str, Option<&str>); 3] = [
+        ("good_host", HOST, None),
+        ("foreign_host", "evil.example", None),
+        ("good_host_foreign_origin", HOST, Some("http://evil.example")),
+    ];
+    for (method, uri) in &cases {
+        for (variant, host, origin) in variants {
+            let mut req = Request::builder()
+                .method(*method)
+                .uri(*uri)
+                .header("host", host)
+                .header("content-type", "application/json");
+            if let Some(o) = origin {
+                req = req.header("origin", o);
+            }
+            let mut req = req.body(Body::from(body.clone())).unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::new(PEER.parse::<IpAddr>().unwrap(), 40000)));
+            let res = app.clone().oneshot(req).await.unwrap();
+            let (parts, _) = res.into_parts();
+            let mut names: Vec<String> = parts.headers.keys().map(|k| k.as_str().to_string()).collect();
+            names.sort();
+            names.dedup();
+            let allow = parts.headers.get("allow").and_then(|v| v.to_str().ok()).unwrap_or("-");
+            let _ = writeln!(
+                std::io::stdout(),
+                "GUARD_MATRIX|{method}|{uri}|{variant}|{}|{names:?}|allow={allow}",
+                parts.status.as_u16()
+            );
+            // Only the pairs that reach a handler are pinned.
+            if variant == "good_host" && *method == "POST" && *uri == "/enrol/redeem" {
+                assert_eq!(parts.status, StatusCode::FORBIDDEN, "unknown code: the generic 403");
+            }
+            if variant == "good_host" && *method == "GET" && *uri == "/enrol/status/x" {
+                assert_eq!(parts.status, StatusCode::NOT_FOUND, "no secret: the poll 404");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn fr_c2_redeem_bad_node_info_is_400_and_does_not_burn_the_code() {
     let f = fx();

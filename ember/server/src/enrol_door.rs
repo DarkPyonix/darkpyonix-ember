@@ -426,7 +426,16 @@ fn is_length_limit(e: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
+/// Calls of the two handlers, counted in unit tests only (compiled out of production), so a test
+/// can prove a wrong method never reaches a handler.
+#[cfg(test)]
+pub(crate) static REDEEM_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) static POLL_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
+    #[cfg(test)]
+    REDEEM_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // 1. The content type, before the body is read or parsed and before the code is looked at.
     if !is_json(req.headers()) {
         return unsupported();
@@ -493,6 +502,8 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathRejection>, headers: HeaderMap) -> Response {
+    #[cfg(test)]
+    POLL_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The query string is never read: this handler has no extractor for it.
     let Ok(Path(id)) = id else { return poll_not_found() };
     if id.chars().count() > ENROL_MAX_ID_CHARS {
@@ -604,5 +615,73 @@ mod tests {
         }
         assert!(!w.due(a, t0), "full of recent addresses: nothing more is logged");
         assert!(w.due(a, t0 + Duration::from_secs(60)), "they aged out");
+    }
+
+    /// A HEAD, or any wrong method, never runs the redeem or poll handler (`take_delivery`
+    /// delivers and wipes the credential in one call). The handlers count their calls in test
+    /// builds; a legitimate request of each route must count exactly once, so the zero of the
+    /// others is meaningful. Driven through the full stack, real limits and open limits, one fresh
+    /// app per request so no limiter answers in place of the router.
+    #[tokio::test]
+    async fn no_wrong_method_runs_a_handler() {
+        use std::sync::atomic::Ordering::SeqCst;
+        use tower::ServiceExt;
+
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let enrol = Enrol::new(store);
+        let owner: SocketAddr = "127.0.0.1:8740".parse().unwrap();
+        let d = EnrolDoor::from_lookup(
+            |k| (k == ENROL_LISTEN_VAR).then(|| "127.0.0.1:9300".to_string()),
+            owner,
+            None,
+        )
+        .unwrap()
+        .expect("door on");
+        let big = LimitConfig {
+            accept_per_minute: 100_000,
+            accept_per_hour: 100_000,
+            other_per_minute: 100_000,
+            global_per_second: 1_000_000.0,
+            global_burst: 1_000_000.0,
+            max_in_flight: ENROL_MAX_IN_FLIGHT,
+            max_addrs: ENROL_MAX_TRACKED_ADDRS,
+        };
+        let real = |d: &EnrolDoor, e: &Arc<Enrol>| d.app(e.clone());
+        let open = |d: &EnrolDoor, e: &Arc<Enrol>| {
+            d.wrap_limited(
+                d.routes_for(e.clone()),
+                Arc::new(DoorLimits::with_strict_path(big.clone(), Vec::new(), ENROL_REDEEM_PATH)),
+            )
+        };
+        let send = |app: Router, method: &str, uri: &str| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("host", "127.0.0.1:9300")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 50], 40000))));
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let calls = || (REDEEM_CALLS.load(SeqCst), POLL_CALLS.load(SeqCst));
+
+        let builders: [(&str, &dyn Fn() -> Router); 2] =
+            [("app", &|| real(&d, &enrol)), ("open_app", &|| open(&d, &enrol))];
+        for (name, build) in builders {
+            let before = calls();
+            for m in ["HEAD", "GET", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE"] {
+                let _ = send(build(), m, "/enrol/redeem").await;
+            }
+            for m in ["HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "TRACE"] {
+                let _ = send(build(), m, "/enrol/status/x").await;
+            }
+            assert_eq!(calls(), before, "{name}: a wrong method ran a handler");
+            // The counters are alive: the legitimate request of each route counts exactly once.
+            let _ = send(build(), "POST", "/enrol/redeem").await;
+            assert_eq!(calls(), (before.0 + 1, before.1), "{name}: POST /enrol/redeem counts once");
+            let _ = send(build(), "GET", "/enrol/status/x").await;
+            assert_eq!(calls(), (before.0 + 1, before.1 + 1), "{name}: GET /enrol/status/x counts once");
+        }
     }
 }

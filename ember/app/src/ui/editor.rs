@@ -179,6 +179,18 @@ pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
     style
 }
 
+/// The page's height rule: macOS opens the window FullSize, so the page is the window's height;
+/// elsewhere the native chrome stays and the page keeps its 76px allowance.
+pub fn editor_page_height(full_size: bool) -> &'static str {
+    if full_size { "100vh" } else { "calc(100vh - 76px)" }
+}
+
+/// The top bar's left padding past the window controls: under FullSize the traffic lights float
+/// over its left end, so it starts after their footprint; otherwise nothing is added.
+pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
+    if full_size { format!("padding-left:{leading}px;") } else { String::new() }
+}
+
 /// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row
 /// is 0 high and the bottom window takes its row and the one below.
 pub fn editor_grid_style_maximized() -> String {

@@ -384,3 +384,40 @@ mod status {
         assert_eq!(status_crumbs("/w/p", Some("/w/p/README.md")), "p");
     }
 }
+
+// FR-L31 (D38): the window opens FullSize on macOS, the top bar is the title strip.
+mod title_strip {
+    use ember_app::ui::editor::{editor_page_height, editor_strip_padding};
+
+    #[test]
+    fn fr_l31_full_size_page_is_the_window_height_and_other_chrome_keeps_its_allowance() {
+        assert_eq!(editor_page_height(true), "100vh");
+        assert_eq!(editor_page_height(false), "calc(100vh - 76px)");
+    }
+
+    #[test]
+    fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {
+        assert_eq!(editor_strip_padding(true, 98.0), "padding-left:98px;");
+        assert_eq!(editor_strip_padding(false, 98.0), "");
+    }
+
+    #[test]
+    fn fr_l31_top_bar_is_a_drag_region_and_its_controls_are_cut_out_in_the_stylesheets() {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(".ed-top{-webkit-app-region:drag}"), "no drag rule for the top bar");
+        assert!(
+            compact.contains(".ed-topbutton,.ed-top.ed-menu{-webkit-app-region:no-drag}"),
+            "the top bar's buttons and menu are not cut out of the drag region"
+        );
+    }
+
+    #[test]
+    fn fr_l31_editor_window_opens_full_size_on_macos() {
+        use compose_rust::schema::{Chrome, Window};
+        // The chrome the editor window is given is the shell's: FullSize on macOS, untouched elsewhere.
+        let given = ember_app::ui::cr::shell::window_chrome(Window::new()).chrome;
+        let plain = Window::new().chrome;
+        assert_eq!(given, if cfg!(target_os = "macos") { Chrome::FullSize } else { plain });
+    }
+}

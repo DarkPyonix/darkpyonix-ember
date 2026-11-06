@@ -212,6 +212,74 @@ pub struct GitBranchInfo {
     pub worktree: Option<String>,
 }
 
+/// The Home GitHub card (`GET /api/integrations/github`, FR-G13). A number is `None` when its
+/// call failed; the card shows that as 알 수 없음.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GithubSummary {
+    #[serde(default)]
+    pub state: GithubState,
+    /// Korean reason when `state` is not `On`.
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub repos: Vec<GithubRepo>,
+    #[serde(default)]
+    pub totals: GithubTotals,
+    /// Epoch seconds of the check.
+    #[serde(default)]
+    pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubState {
+    On,
+    Warn,
+    #[default]
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GithubRepo {
+    #[serde(default)]
+    pub name_with_owner: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub open_prs: Option<u64>,
+    #[serde(default)]
+    pub review_requested: Option<u64>,
+    /// `open_prs` stopped at the 100 limit.
+    #[serde(default)]
+    pub capped: bool,
+    /// Last workflow runs, newest first: `success`, `failure`, `cancelled`, `pending`.
+    #[serde(default)]
+    pub ci: Option<Vec<String>>,
+    /// Korean text of the repository's first failed call.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GithubTotals {
+    /// Repositories listed; null when the state is `off` or none is listed.
+    #[serde(default)]
+    pub repos: Option<u64>,
+    /// Sum of the known values; null when no repository gave one (never an invented 0).
+    #[serde(default)]
+    pub open_prs: Option<u64>,
+    /// Sum of the known values; null when no repository gave one.
+    #[serde(default)]
+    pub review_requested: Option<u64>,
+    /// Null when no run is known.
+    #[serde(default)]
+    pub ci_pass_percent: Option<u64>,
+}
+
 /// Pull requests of the repository's GitHub remote (`POST /projects/{id}/git/prs`, FR-G8).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GitPrs {
@@ -724,6 +792,12 @@ impl Api {
     }
 
     // ---- projects and computer assignment (FR-L4) ------------------------------------------
+
+    /// The GitHub card: connection state, account, repositories and totals (FR-G13). The server
+    /// caches its answer for 90 seconds.
+    pub async fn github_summary(&self) -> ApiResult<GithubSummary> {
+        self.get("/integrations/github").await
+    }
 
     /// Every project with its assigned computers.
     pub async fn projects(&self) -> ApiResult<Vec<Project>> {

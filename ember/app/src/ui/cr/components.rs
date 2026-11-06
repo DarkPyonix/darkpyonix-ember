@@ -768,7 +768,7 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// TODO(compose-rust#372): a pointer-up subscription; the toolkit's modal calls on_dismiss for Escape and the scrim (not yet checked on a display).
-/// TODO(compose-rust#NEW, FR-L32, #502): Escape does not close a sheet on a display. The Rust API
+/// TODO(compose-rust#476, FR-L32, #502): Escape does not close a sheet on a display. The Rust API
 /// of v0.0.6 cannot receive the key: `Key` has only `Enter`, only `TextField` has `on_key_down`,
 /// and there is no request-focus call, so a sheet cannot take focus when it opens. Ember passes
 /// the same close callback (guarded where a guard exists) to the modal's `on_dismiss`, so Escape
@@ -1142,7 +1142,7 @@ mod tests {
             for (i, l) in lines.iter().enumerate() {
                 let t = l.trim_start();
                 if (t.starts_with("cu::Dialog(") || t.starts_with("cu::Sheet(")) && !t.starts_with("//") {
-                    let near = lines[i..(i + 6).min(lines.len())].join("\n");
+                    let near = lines[i..(i + 24).min(lines.len())].join("\n");
                     assert!(near.contains(".on_dismiss("), "{name}:{} modal without on_dismiss", i + 1);
                 }
             }

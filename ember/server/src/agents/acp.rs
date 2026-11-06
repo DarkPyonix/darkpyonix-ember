@@ -617,7 +617,10 @@ pub(crate) fn translate_drained_lines(lines: &[String]) -> Vec<AgentEvent> {
 /// own wording is unverified.
 pub(crate) fn rejects_acp_flag(output: &str) -> bool {
     let t = output.to_ascii_lowercase();
-    let names_flag = t.contains("--acp") || t.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "acp");
+    // The flag we passed is `--acp`; yargs prints it as the bare word `acp` ("Unknown argument: acp").
+    // Split on whitespace and strip quotes and punctuation, so `--experimental-acp-foo` is not `acp`.
+    let names_flag = t.contains("--acp")
+        || t.split_whitespace().any(|w| w.trim_matches(|c: char| "'\"`,:;()[].".contains(c)) == "acp");
     names_flag
         && ["unknown", "unrecognized", "unrecognised", "invalid", "bad"].iter().any(|w| {
             ["option", "flag", "argument"].iter().any(|n| t.contains(&format!("{w} {n}")))

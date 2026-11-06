@@ -28,7 +28,7 @@ pub use crate::ui::channels::{
     should_mark_read, Side,
 };
 use super::components::{
-    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone,
+    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone, SearchField,
 };
 use super::theme::*;
 use super::notice;
@@ -339,20 +339,14 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             });
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
         cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2])).content(|| {
-            // TODO(compose-rust#376, #374): the field frame and the leading magnifier; the
-            // field is uncontrolled and has no initial value.
+            // TODO(compose-rust#376, #374): the field is uncontrolled and has no initial value.
             // `.searchbox{display:none}` up to 900 dp: no search field on a phone.
             if !narrow {
                 let query = filter.clone();
-                EmberField(FieldOptions {
-                    fill_max_width: true,
-                    placeholder: "채널, 메시지 검색".to_string(),
-                    on_value_change: Some(Box::new(move |v| {
-                        let mut f = query.get_untracked();
-                        f.query = v;
-                        query.set(f);
-                    })),
-                    ..Default::default()
+                SearchField("채널, 메시지 검색", H_BTN, move |v| {
+                    let mut f = query.get_untracked();
+                    f.query = v;
+                    query.set(f);
                 });
             }
             cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {

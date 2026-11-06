@@ -36,8 +36,15 @@ pub const PICK_RECEIVER: &str = "받는 곳을 선택합니다";
 pub const PICK_FILES: &str = "보낼 파일을 선택합니다";
 pub const LOCK_LINE: &str = "연결된 장비 사이에서 암호화되어 전송됩니다";
 
-/// TODO(dioxus-compose): flip when the toolkit has a file picker (and drag and drop), then fill
-/// [`SendDraft::files`] from it.
+/// Why the "파일 고르기" button is disabled.
+pub const FILE_PICK_REASON: &str = "파일 선택은 준비 중입니다";
+/// Shown when the chosen receiver is an agent: the service sends to a device id only.
+pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되지 않습니다";
+/// Shown beside an offline device chip.
+pub const OFFLINE_TAG: &str = "오프라인";
+
+/// TODO(compose-rust#483): flip when the toolkit has a file dialog API,
+/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#166.
 pub const FILE_PICKER_AVAILABLE: bool = false;
 
 // ---------------------------------------------------------------------------------------------
@@ -709,6 +716,289 @@ pub fn send_blocker(
     None
 }
 
+// ---------------------------------------------------------------------------------------------
+// The share sheet (FR-L27.7)
+// ---------------------------------------------------------------------------------------------
+
+/// The share sheet's title text for the shared file when nothing can be shared yet.
+pub const SHARE_NO_FILE: &str = "공유할 파일이 없습니다";
+
+/// The explanation under the share sheet (the mockup's note).
+pub const SHARE_NOTE: &str =
+    "파일 전송 서비스(#487)가 준비되면 휴대폰에서 공유 버튼을 눌러 이 시트로 보낼 수 있습니다. 받는 장비에서 수락하면 전송이 시작됩니다.";
+
+/// Under "에이전트에게": agents work in the folder of one of the user's own computers (D24).
+pub const SHARE_AGENTS_NOTE: &str = "에이전트가 일하는 내 컴퓨터의 작업 폴더로 보냅니다";
+
+/// A tile name wraps to this many lines before it is cut with an ellipsis.
+pub const SHARE_NAME_LINES: u32 = 2;
+
+/// The sheet's own actions (the mockup's list); none of them exists without the transfer
+/// service, so each says [`UNAVAILABLE`].
+pub const SHARE_ACTIONS: [&str; 3] = ["파일에 저장", "채널에 올리기", "프로젝트에 넣기"];
+
+/// What the sheet says when the chosen device is not connected.
+pub const SHARE_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";
+
+/// The mockup shows at most three agents under "에이전트에게".
+pub const SHARE_AGENTS_MAX: usize = 3;
+
+/// A device in the sheet's "Ember로 보내기" row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareDevice {
+    pub id: String,
+    pub name: String,
+    pub kind: DeviceKind,
+    pub online: bool,
+    /// The small line under the name: the path when known, else the kind; "꺼짐" when not online.
+    pub caption: String,
+}
+
+/// Every device for the row, online ones first (then by name), so the reachable ones are
+/// at the left. An offline device stays in the row, dimmed, as in the mockup.
+pub fn share_devices(devices: &[Device]) -> Vec<ShareDevice> {
+    let mut rows: Vec<&Device> = devices.iter().collect();
+    rows.sort_by(|a, b| {
+        (a.presence != Presence::Online)
+            .cmp(&(b.presence != Presence::Online))
+            .then_with(|| a.presence.rank().cmp(&b.presence.rank()))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows.into_iter()
+        .map(|d| {
+            let online = d.presence == Presence::Online;
+            let caption = if online {
+                path_label(d.path, None).unwrap_or_else(|| d.kind.label().to_string())
+            } else {
+                "꺼짐".to_string()
+            };
+            ShareDevice {
+                id: d.id.clone(),
+                name: d.name.clone(),
+                kind: d.kind,
+                online,
+                caption,
+            }
+        })
+        .collect()
+}
+
+/// The agents shown under "에이전트에게": the first [`SHARE_AGENTS_MAX`], in the order given.
+pub fn share_agents<T: Clone>(agents: &[T]) -> Vec<T> {
+    agents.iter().take(SHARE_AGENTS_MAX).cloned().collect()
+}
+
+/// What a tap on a receiver does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareTap {
+    /// Nothing is sent; the sheet says why.
+    Blocked(&'static str),
+    /// Hand the files to the service for this receiver.
+    Send(SendTarget),
+}
+
+/// A tap on a device or an agent. An offline device and a missing service or file are
+/// blocked with their reason; nothing reports success without the service.
+pub fn share_tap(
+    target: &SendTarget,
+    devices: &[Device],
+    files: &[String],
+    picker_available: bool,
+    service_ready: bool,
+) -> ShareTap {
+    if let SendTarget::Device(id) = target {
+        let online = devices
+            .iter()
+            .find(|d| d.id == *id)
+            .is_some_and(|d| d.presence == Presence::Online);
+        if !online {
+            return ShareTap::Blocked(SHARE_OFFLINE);
+        }
+    }
+    let draft = SendDraft {
+        target: Some(target.clone()),
+        files: files.to_vec(),
+    };
+    match send_blocker(&draft, picker_available, service_ready) {
+        Some(why) => ShareTap::Blocked(why),
+        None => ShareTap::Send(target.clone()),
+    }
+}
+
+/// What the file card of the sheet shows: the title, and the reason when it has no file.
+pub fn share_file_card(files: &[String], picker_available: bool) -> (String, Option<&'static str>) {
+    match files {
+        [] => (
+            SHARE_NO_FILE.to_string(),
+            Some(if picker_available {
+                PICK_FILES
+            } else {
+                FILE_PICK_UNAVAILABLE
+            }),
+        ),
+        [one] => (one.clone(), None),
+        [first, rest @ ..] => (format!("{first} 외 {}개", rest.len()), None),
+    }
+}
+
+/// Shown when the chosen device is not online.
+pub const TARGET_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";
+
+/// The files line of the send sheet: says what to do when nothing is chosen.
+pub fn files_line(count: usize, picker_available: bool) -> String {
+    match (count, picker_available) {
+        (0, true) => "선택한 파일이 없습니다. 파일 고르기를 눌러 추가합니다".to_string(),
+        (0, false) => "선택한 파일이 없습니다. 파일을 고르는 기능은 준비 중입니다".to_string(),
+        (n, _) => format!("파일 {n}개 선택됨"),
+    }
+}
+
+/// A target can be chosen when it is an agent or an online device (an unknown id cannot).
+pub fn target_selectable(devices: &[Device], target: &SendTarget) -> bool {
+    match target {
+        SendTarget::Agent(_) => true,
+        SendTarget::Device(id) => devices
+            .iter()
+            .any(|x| x.id == *id && x.presence == Presence::Online),
+    }
+}
+
+/// The draft after choosing `target`, or the notice to show when it cannot be chosen.
+pub fn choose_target(
+    d: &SendDraft,
+    devices: &[Device],
+    target: SendTarget,
+) -> Result<SendDraft, String> {
+    if target_selectable(devices, &target) {
+        let mut next = d.clone();
+        next.target = Some(target);
+        Ok(next)
+    } else {
+        let name = match &target {
+            SendTarget::Device(id) => devices
+                .iter()
+                .find(|x| x.id == *id)
+                .map(|x| x.name.clone())
+                .unwrap_or_else(|| id.clone()),
+            SendTarget::Agent(id) => id.clone(),
+        };
+        Err(format!("{name}은(는) 지금 연결되어 있지 않습니다"))
+    }
+}
+
+/// The send state from the real draft: the reason it cannot send (`None` when it can) and
+/// whether the button is enabled. A chosen device that went offline blocks, and so does an agent
+/// target, because the service sends to a device id only.
+pub fn send_state(
+    d: &SendDraft,
+    devices: &[Device],
+    picker_available: bool,
+    service_ready: bool,
+) -> (Option<&'static str>, bool) {
+    let mut blocker = send_blocker(d, picker_available, service_ready);
+    if blocker.is_none() {
+        if let Some(t) = &d.target {
+            if !target_selectable(devices, t) {
+                blocker = Some(TARGET_OFFLINE);
+            }
+        }
+    }
+    if blocker.is_none() && !matches!(d.target, Some(SendTarget::Device(_))) {
+        blocker = Some(AGENT_SEND_UNSUPPORTED);
+    }
+    let can = blocker.is_none();
+    (blocker, can)
+}
+
+/// Space the sheet frame takes at each side besides the content padding (measured at 390 dp:
+/// the chips start at x 44 and the frame clips at x 346).
+pub const SHEET_FRAME_INSET: f32 = 24.0;
+/// The content padding of the send sheet at each side.
+pub const SEND_SHEET_PAD: f32 = 20.0;
+
+/// The width the chips may use in a sheet `sheet_w` wide.
+pub fn chip_avail(sheet_w: f32) -> f32 {
+    sheet_w - 2.0 * (SEND_SHEET_PAD + SHEET_FRAME_INSET)
+}
+
+/// Greedy rows of chips: the indices of `widths` per row, `gap` apart, so that no row is wider
+/// than `avail`. A chip wider than `avail` gets a row of its own.
+pub fn chip_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        match rows.last_mut() {
+            Some(row) if used + gap + w <= avail => {
+                row.push(i);
+                used += gap + w;
+            }
+            _ => {
+                rows.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    rows
+}
+
+/// A pessimistic text width for the chips: 16 dp per Korean (non-ASCII) glyph and 9 dp per ASCII
+/// char, so a chip is never wider on screen than modelled and the rows wrap early, not late.
+pub fn chip_text_px(text: &str) -> f32 {
+    text.chars().map(|c| if c.is_ascii() { 9.0 } else { 16.0 }).sum()
+}
+
+/// `text` cut with an ellipsis so [`chip_text_px`] stays within `max_px`.
+pub fn fit_chip_text(text: &str, max_px: f32) -> String {
+    if chip_text_px(text) <= max_px {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        let next = format!("{out}{c}\u{2026}");
+        if chip_text_px(&next) > max_px {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// A chip's modelled width: 12 padding, the glyph, 8, the text, 12 padding.
+pub fn chip_width_est(label: &str, glyph: f32) -> f32 {
+    12.0 + glyph + 8.0 + chip_text_px(label) + 12.0
+}
+
+/// The widest a chip's text may be in a row `avail` wide: the mockup's 200 px cap, and also so that
+/// two chips always fit one row (each at most `(avail - 8) / 2` wide, the gap being 8).
+pub fn chip_text_max_for(avail: f32, glyph: f32) -> f32 {
+    chip_text_max(glyph).min((avail - 8.0) / 2.0 - 12.0 - glyph - 8.0 - 12.0)
+}
+
+/// The text of a receiver chip: the name, cut to fit, plus the offline tag for an offline device
+/// so the state is read as text and not only as a dimmed look. `fit` cuts a name to a pixel width.
+pub fn chip_label(
+    name: &str,
+    offline: bool,
+    max_px: f32,
+    fit: impl Fn(&str, f32) -> String,
+) -> String {
+    if offline {
+        let tag = format!(" {OFFLINE_TAG}");
+        let room = (max_px - chip_text_px(&tag)).max(24.0);
+        format!("{}{tag}", fit(name, room))
+    } else {
+        fit(name, max_px)
+    }
+}
+
+/// The widest a chip's text may be so the whole chip stays within the mockup's 200 px
+/// (`.fl-tg{max-width:200px}`): 12 padding, the glyph, 8, the text, 12 padding.
+pub fn chip_text_max(glyph: f32) -> f32 {
+    200.0 - 12.0 - glyph - 8.0 - 12.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1141,6 +1431,156 @@ mod tests {
         assert_eq!(send_blocker(&d, true, true), None);
     }
 
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_an_offline_device_cannot_be_chosen() {
+        let devs = vec![
+            dev("on", "a", Presence::Online),
+            dev("off", "스튜디오 PC", Presence::Offline),
+            dev("zz", "b", Presence::Sleeping),
+        ];
+        let d = SendDraft::default();
+        let ok = choose_target(&d, &devs, SendTarget::Device("on".into())).unwrap();
+        assert_eq!(ok.target, Some(SendTarget::Device("on".into())));
+        let err = choose_target(&d, &devs, SendTarget::Device("off".into())).unwrap_err();
+        assert_eq!(err, "스튜디오 PC은(는) 지금 연결되어 있지 않습니다");
+        assert!(choose_target(&d, &devs, SendTarget::Device("zz".into())).is_err());
+        assert!(choose_target(&d, &devs, SendTarget::Device("missing".into())).is_err());
+        assert!(choose_target(&d, &devs, SendTarget::Agent("s1".into())).is_ok());
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_the_send_button_follows_the_real_selection() {
+        let devs = vec![
+            dev("on", "a", Presence::Online),
+            dev("off", "b", Presence::Offline),
+        ];
+        let mut d = SendDraft::default();
+        assert_eq!(send_state(&d, &devs, true, true), (Some(PICK_RECEIVER), false));
+        d.target = Some(SendTarget::Device("on".into()));
+        assert_eq!(send_state(&d, &devs, true, true), (Some(PICK_FILES), false));
+        d.files.push("/a.txt".into());
+        assert_eq!(send_state(&d, &devs, true, true), (None, true));
+        assert_eq!(send_state(&d, &devs, true, false), (Some(UNAVAILABLE), false));
+        // The device went offline after it was chosen.
+        d.target = Some(SendTarget::Device("off".into()));
+        assert_eq!(send_state(&d, &devs, true, true), (Some(TARGET_OFFLINE), false));
+        // An agent target has files but the service sends to a device id only.
+        d.target = Some(SendTarget::Agent("s1".into()));
+        assert_eq!(send_state(&d, &devs, true, true), (Some(AGENT_SEND_UNSUPPORTED), false));
+        // Without a picker the draft never has files, so it never sends.
+        let d = SendDraft { target: Some(SendTarget::Device("on".into())), files: vec![] };
+        assert_eq!(send_state(&d, &devs, false, true), (Some(FILE_PICK_UNAVAILABLE), false));
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_zero_files_says_what_to_do() {
+        assert_eq!(files_line(0, true), "선택한 파일이 없습니다. 파일 고르기를 눌러 추가합니다");
+        assert!(files_line(0, false).contains("준비 중"));
+        assert_eq!(files_line(3, true), "파일 3개 선택됨");
+        for t in [files_line(0, true), files_line(0, false), files_line(2, false), TARGET_OFFLINE.to_string()] {
+            assert!(t.ends_with("니다") || t.ends_with("됨"), "{t}");
+            assert!(!t.contains('\u{2014}'));
+        }
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_a_chip_never_exceeds_the_mockup_width() {
+        assert_eq!(chip_text_max(16.0), 152.0);
+        assert_eq!(chip_text_max(22.0), 146.0);
+        assert_eq!(12.0 + 16.0 + 8.0 + chip_text_max(16.0) + 12.0, 200.0);
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_a_disabled_send_always_has_a_reason() {
+        let devs = vec![dev("on", "a", Presence::Online), dev("off", "b", Presence::Offline)];
+        let targets = [
+            None,
+            Some(SendTarget::Device("on".into())),
+            Some(SendTarget::Device("off".into())),
+            Some(SendTarget::Device("zz".into())),
+            Some(SendTarget::Agent("s1".into())),
+        ];
+        for target in targets {
+            for files in [vec![], vec!["/a".to_string()]] {
+                for picker in [false, true] {
+                    for ready in [false, true] {
+                        let d = SendDraft { target: target.clone(), files: files.clone() };
+                        let (reason, can) = send_state(&d, &devs, picker, ready);
+                        assert_eq!(reason.is_none(), can, "{d:?} {picker} {ready}");
+                        if let Some(r) = reason {
+                            assert!(r.ends_with("니다") && !r.contains('\u{2014}'), "{r}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_an_offline_chip_says_so_in_text() {
+        let cut = |t: &str, px: f32| if t.chars().count() as f32 * 7.0 > px { format!("{}...", &t[..1]) } else { t.to_string() };
+        assert_eq!(chip_label("PC", false, 100.0, cut), "PC");
+        assert_eq!(chip_label("PC", true, 150.0, cut), "PC 오프라인");
+        assert!(chip_label("긴이름", true, 150.0, |t, _| t.to_string()).ends_with(OFFLINE_TAG));
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_chips_wrap_before_they_overflow() {
+        let widths = [100.0, 160.0, 120.0, 200.0, 200.0];
+        let gap = 4.0;
+        for sheet_w in [390.0, 700.0] {
+            let avail = chip_avail(sheet_w);
+            let rows = chip_rows(&widths, gap, avail);
+            assert_eq!(rows.concat(), vec![0, 1, 2, 3, 4]);
+            for r in &rows {
+                let w: f32 = r.iter().map(|&i| widths[i]).sum::<f32>() + gap * (r.len() as f32 - 1.0);
+                assert!(w <= avail || r.len() == 1, "{sheet_w}: {w} > {avail}");
+            }
+        }
+        assert_eq!(chip_avail(390.0), 302.0);
+        assert_eq!(chip_rows(&widths, gap, chip_avail(390.0)), vec![vec![0, 1], vec![2], vec![3], vec![4]]);
+        assert_eq!(chip_rows(&widths, gap, chip_avail(700.0)), vec![vec![0, 1, 2, 3], vec![4]]);
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_pessimistic_chip_rows_never_overflow_and_two_always_fit() {
+        let avail = chip_avail(390.0);
+        assert_eq!(chip_text_max_for(avail, 16.0), 99.0);
+        assert_eq!(chip_text_max_for(avail, 22.0), 93.0);
+        assert_eq!(chip_text_max_for(chip_avail(1440.0), 16.0), chip_text_max(16.0));
+        let names = ["이 컴퓨터", "스튜디오 PC", "second-project-codex", "second-project-claude", "a"];
+        for (width, expect_more) in [(390.0, false), (700.0, true)] {
+            let avail = chip_avail(width);
+            let mut widths = Vec::new();
+            for (i, n) in names.iter().enumerate() {
+                let glyph = if i >= 2 { 22.0 } else { 16.0 };
+                let label = chip_label(n, i == 1, chip_text_max_for(avail, glyph), fit_chip_text);
+                let w = chip_width_est(&label, glyph);
+                assert!(w <= (avail - 8.0) / 2.0 + 0.01, "{width} {n}: {w}");
+                widths.push(w);
+            }
+            let rows = chip_rows(&widths, 8.0, avail);
+            for r in &rows {
+                let sum: f32 = r.iter().map(|&i| widths[i]).sum::<f32>() + 8.0 * (r.len() as f32 - 1.0);
+                assert!(sum <= avail, "{width}: {sum}");
+                assert!(r.len() >= 2 || rows.len() == 1 || r != &rows[0], "{width}");
+            }
+            assert_eq!(rows.iter().any(|r| r.len() >= 3), expect_more, "{width}: {rows:?}");
+        }
+        // Three chips whose pessimistic widths exceed the row never share the first row.
+        let widths = [chip_width_est("이 컴퓨터", 16.0), chip_width_est("스튜디오 PC 오프라인", 16.0), 147.0];
+        assert!(widths.iter().sum::<f32>() > 302.0);
+        assert!(chip_rows(&widths, 8.0, 302.0)[0].len() < 3);
+    }
+
     #[test]
     fn the_toolkit_has_no_file_picker_yet() {
         assert!(!FILE_PICKER_AVAILABLE);
@@ -1182,6 +1622,75 @@ mod tests {
                 "plain ending: {text}"
             );
             assert!(!text.contains('\u{2014}'), "em-dash: {text}");
+        }
+    }
+
+    #[test]
+    fn fr_l27_7_share_devices_list_online_first_and_dim_the_rest() {
+        let mut a = dev("a", "Zeta", Presence::Online);
+        a.path = Some(PathKind::Direct);
+        let b = dev("b", "alpha", Presence::Offline);
+        let c = dev("c", "Beta", Presence::Online);
+        let d = dev("d", "mid", Presence::Sleeping);
+        let rows = share_devices(&[b, a, d, c]);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["c", "a", "d", "b"]);
+        assert_eq!(rows[0].caption, "컴퓨터");
+        assert_eq!(rows[1].caption, "직접 연결");
+        assert!(!rows[2].online && rows[2].caption == "꺼짐");
+        assert!(share_devices(&[]).is_empty());
+    }
+
+    #[test]
+    fn fr_l27_7_share_agents_are_capped_at_three_in_order() {
+        let v: Vec<u32> = (1..=6).collect();
+        assert_eq!(share_agents(&v), vec![1, 2, 3]);
+        assert_eq!(share_agents(&v[..2]), vec![1, 2]);
+    }
+
+    #[test]
+    fn fr_l27_7_a_tap_never_sends_without_the_service_or_a_file() {
+        let on = dev("on", "맥", Presence::Online);
+        let off = dev("off", "PC", Presence::Offline);
+        let devs = [on, off];
+        let t_on = SendTarget::Device("on".into());
+        let t_off = SendTarget::Device("off".into());
+        let file = vec!["a.png".to_string()];
+        assert_eq!(share_tap(&t_off, &devs, &file, true, true), ShareTap::Blocked(SHARE_OFFLINE));
+        assert_eq!(share_tap(&SendTarget::Device("none".into()), &devs, &file, true, true), ShareTap::Blocked(SHARE_OFFLINE));
+        assert_eq!(share_tap(&t_on, &devs, &file, true, false), ShareTap::Blocked(UNAVAILABLE));
+        assert_eq!(share_tap(&t_on, &devs, &[], false, true), ShareTap::Blocked(FILE_PICK_UNAVAILABLE));
+        assert_eq!(share_tap(&t_on, &devs, &file, true, true), ShareTap::Send(t_on.clone()));
+        // An agent is always online, the other blockers still apply.
+        let ag = SendTarget::Agent("s1".into());
+        assert_eq!(share_tap(&ag, &devs, &[], false, false), ShareTap::Blocked(UNAVAILABLE));
+        assert_eq!(share_tap(&ag, &devs, &file, true, true), ShareTap::Send(ag.clone()));
+    }
+
+    #[test]
+    fn fr_l27_7_the_file_card_says_why_it_is_empty() {
+        let (t, why) = share_file_card(&[], false);
+        assert_eq!(t, SHARE_NO_FILE);
+        assert_eq!(why, Some(FILE_PICK_UNAVAILABLE));
+        assert_eq!(share_file_card(&["a.png".into()], true), ("a.png".to_string(), None));
+        assert_eq!(share_file_card(&["a.png".into(), "b".into(), "c".into()], true).0, "a.png 외 2개");
+    }
+
+    #[test]
+    fn fr_l27_7_the_note_does_not_state_unbuilt_behaviour_as_fact() {
+        assert!(SHARE_NOTE.contains("#487"), "names the service it depends on");
+        assert!(SHARE_NOTE.contains("준비되면"), "says it is not ready");
+        assert_eq!(SHARE_NAME_LINES, 2);
+        assert!(SHARE_AGENTS_NOTE.contains("내 컴퓨터"));
+    }
+
+    #[test]
+    fn fr_l27_7_the_share_texts_are_polite_and_have_no_em_dash() {
+        let mut all: Vec<&str> = vec![SHARE_NO_FILE, SHARE_NOTE, SHARE_OFFLINE, SHARE_AGENTS_NOTE];
+        all.extend(SHARE_ACTIONS);
+        for t in all {
+            assert!(!t.ends_with('다') || t.ends_with("니다"), "plain ending: {t}");
+            assert!(!t.contains('\u{2014}'), "em-dash: {t}");
         }
     }
 }

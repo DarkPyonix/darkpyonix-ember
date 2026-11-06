@@ -139,6 +139,8 @@ pub enum SessionUpdate {
     Closed { uri: UriComponents },
     /// The extension-host or management connection is gone.
     ConnectionLost { reason: String },
+    /// The problems list changed: every marker of every file, errors first.
+    Problems { problems: Vec<crate::diagnostics::Problem> },
 }
 
 #[derive(Debug, Clone)]
@@ -890,11 +892,13 @@ impl SessionCore {
             Ok(MainThreadCall::DiagnosticsChangeMany { owner, entries }) => {
                 let keys = self.diagnostics.change_many(&owner, entries);
                 self.touched.extend(keys);
+                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
                 self.respond(r.req, Ok(Reply::Empty));
             }
             Ok(MainThreadCall::DiagnosticsClear { owner }) => {
                 let keys = self.diagnostics.clear(&owner);
                 self.touched.extend(keys);
+                self.ui(SessionUpdate::Problems { problems: self.diagnostics.problems() });
                 self.respond(r.req, Ok(Reply::Empty));
             }
             Ok(MainThreadCall::ExecuteCommand { id, args }) => {

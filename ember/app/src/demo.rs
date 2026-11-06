@@ -351,16 +351,19 @@ pub fn agents() -> Vec<DetectedAgent> {
             kind: "claude-code".into(),
             installed: true,
             version: Some("2.1.0".into()),
+            ..Default::default()
         },
         DetectedAgent {
             kind: "codex".into(),
             installed: true,
             version: Some("0.50.0".into()),
+            ..Default::default()
         },
         DetectedAgent {
             kind: "antigravity".into(),
             installed: false,
             version: None,
+            ..Default::default()
         },
     ]
 }

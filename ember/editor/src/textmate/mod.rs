@@ -17,5 +17,5 @@ pub use catalog::{GrammarCatalog, GrammarEntry};
 pub use selector::{Matcher, Selector, MAX_SELECTOR_CHARS, MAX_SELECTOR_DEPTH, MAX_SELECTOR_TOKENS};
 pub use roles::{role_for_scopes, SyntaxRole};
 pub use tokens::{Changed, ColorRun, DocRun, DocumentTokens, EditError, TooLarge, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES};
-pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token, MAX_COMPILED_RULES, MAX_INJECTIONS, MAX_LINE_BYTES, MAX_STACK_DEPTH};
+pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token, MAX_COMPILED_RULES, MAX_INJECTIONS, MAX_LINE_BYTES, MAX_SEARCH_BUDGET, MAX_STACK_DEPTH};
 pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_GRAMMAR_BYTES, MAX_RULES};

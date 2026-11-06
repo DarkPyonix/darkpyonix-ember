@@ -12,6 +12,7 @@
     "comment.block - comment.line": { "patterns": [ { "match": "TODO|FIXME", "name": "keyword.todo.host" } ] },
     "R:source.host": { "patterns": [ { "match": "let", "name": "late.let.host" } ] },
     "string.quoted.host, comment.block.host": { "patterns": [ { "match": "@\\w+", "name": "entity.tag.host" } ] },
+    "comment.line.host | string.quoted.host": { "patterns": [ { "match": "NOTE", "name": "bar.host" } ] },
     "L:(string.quoted.host | comment.block.host) -keyword.todo.host": { "patterns": [ { "match": "ERROR", "name": "invalid.host" } ] }
   }
 }

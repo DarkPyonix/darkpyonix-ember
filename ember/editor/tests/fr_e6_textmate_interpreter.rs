@@ -1,7 +1,7 @@
 //! FR-E6: the interpreter's rules on small grammars, one behaviour at a time (the golden tests cover the
 //! real grammars).
 
-use ember_editor::textmate::{parse_grammar, Grammar, GrammarSet, StateStack, Token, MAX_LINE_BYTES, MAX_STACK_DEPTH};
+use ember_editor::textmate::{parse_grammar, Grammar, GrammarSet, StateStack, Token, MAX_LINE_BYTES, MAX_SEARCH_BUDGET, MAX_STACK_DEPTH};
 
 fn grammar(json: &str) -> Grammar {
     let mut set = GrammarSet::new();
@@ -272,4 +272,46 @@ fn fr_e6_emoji_and_crlf_keep_their_offsets() {
     let r = g.tokenize_line("ab\r", None);
     assert_eq!(r.tokens.last().map(|t| t.end), Some(3));
     assert_eq!(r.tokens.last().and_then(|t| t.scopes.last()).map(|s| s.to_string()), Some("cr".to_owned()));
+}
+
+// ---- injections: limits ------------------------------------------------------------------------------
+
+/// A grammar whose root has `n` injections that all apply everywhere and match every character.
+fn crowded_grammar(n: usize) -> String {
+    // Each key is a different selector (a JSON object keeps one entry per key) that holds for every scope.
+    let injections: Vec<String> = (0..n).map(|i| format!(r#""source.crowd -nope{i}": {{"patterns":[{{"match":"a","name":"hit{i}"}}]}}"#)).collect();
+    format!(r#"{{"scopeName":"source.crowd","patterns":[],"injections":{{{}}}}}"#, injections.join(","))
+}
+
+#[test]
+fn fr_e6_a_line_that_runs_out_of_search_budget_is_cut_short_and_reported() {
+    let mut set = GrammarSet::new();
+    set.add(parse_grammar("crowd.json", &crowded_grammar(150)).unwrap());
+    let g = Grammar::new(&set, "source.crowd").unwrap();
+    // Every injection matches each `a` but only one wins at a time: the others are searched again after every hit,
+    // which is 150 searches for each of the 3000 hits.
+    let line = "a ".repeat(3000);
+    let started = std::time::Instant::now();
+    let r = g.tokenize_line(&line, None);
+    assert!(r.skipped, "the budget ran out and the line says so");
+    assert!(r.tokens.iter().all(|t| t.end <= line.len()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(30), "bounded work: {:?}", started.elapsed());
+    assert!(MAX_SEARCH_BUDGET >= 1_000_000);
+    // A short ordinary line is not affected.
+    assert!(!g.tokenize_line("aaa", None).skipped);
+}
+
+#[test]
+fn fr_e6_many_injections_in_the_root_do_not_push_out_the_injected_grammars_and_the_cut_is_reported() {
+    let mut set = GrammarSet::new();
+    let injections: Vec<String> = (0..300).map(|i| format!(r#""source.many -nope{i}": {{"patterns":[{{"match":"q{i}","name":"root{i}"}}]}}"#)).collect();
+    set.add(parse_grammar("many.json", &format!(r#"{{"scopeName":"source.many","patterns":[],"injections":{{{}}}}}"#, injections.join(","))).unwrap());
+    set.add(
+        parse_grammar("guest.json", r#"{"scopeName":"source.guest","injectionSelector":"source.many","patterns":[{"match":"ZZ","name":"from.guest"}]}"#).unwrap(),
+    );
+    set.add_injector("source.many", "source.guest");
+    let g = Grammar::new(&set, "source.many").unwrap();
+    assert!(g.problems().iter().any(|p| p.contains("more than") && p.contains("injections")), "{:?}", g.problems());
+    let r = g.tokenize_line("xx ZZ yy", None);
+    assert!(r.tokens.iter().any(|t| t.scopes.last().map(|s| &**s) == Some("from.guest")), "the injected grammar still applies: {:?}", r.tokens);
 }

@@ -210,6 +210,9 @@ struct Injection {
 
 /// The most injections one grammar may have (selector alternatives count one each).
 pub const MAX_INJECTIONS: usize = 256;
+/// Of those, at most this many come from the root grammar's own `injections`; the rest are kept for the grammars
+/// injected into it, so a root grammar with many injections cannot push them out.
+const MAX_ROOT_INJECTIONS: usize = 192;
 
 /// A grammar ready to tokenize.
 pub struct Grammar {
@@ -515,6 +518,7 @@ impl Grammar {
         };
         let root_id = builder.root_of(root)?;
         let mut injections: Vec<Injection> = Vec::new();
+        let (mut dropped_root, mut dropped_injectors) = (false, false);
         {
             let root_grammar = set.grammars.get(root)?;
             let ctx = Ctx { grammar: &root_grammar.scope_name, locals: Vec::new() };
@@ -526,8 +530,11 @@ impl Grammar {
                 };
                 let Some(rule) = builder.rule(raw, &ctx) else { continue };
                 for (matcher, priority) in parsed.alternatives {
-                    if injections.len() < MAX_INJECTIONS {
+                    if injections.len() < MAX_ROOT_INJECTIONS {
                         injections.push(Injection { matcher, priority, rule });
+                    } else if !dropped_root {
+                        dropped_root = true;
+                        builder.problems.push(format!("{root}: more than {MAX_ROOT_INJECTIONS} injections in the grammar; the rest were left out"));
                     }
                 }
             }
@@ -543,6 +550,9 @@ impl Grammar {
                 for (matcher, priority) in parsed.alternatives {
                     if injections.len() < MAX_INJECTIONS {
                         injections.push(Injection { matcher, priority, rule });
+                    } else if !dropped_injectors {
+                        dropped_injectors = true;
+                        builder.problems.push(format!("{root}: more than {MAX_INJECTIONS} injections in all; the rest were left out"));
                     }
                 }
             }
@@ -669,7 +679,7 @@ impl Grammar {
         let mut out = Out { tokens: Vec::new(), last_end: 0, stack_limit_hit: false };
         let mut guard = Guard { steps: 0, limit: 20 * (text.len() + 1) + 2000 };
         self.trim_dynamic();
-        let mut cache = SearchCache::new();
+        let mut cache = SearchCache::new(text.len());
         self.tokenize_string(&text, first_line, 0, &mut stack, &mut out, true, &mut guard, &mut cache);
         let out_limit = out.stack_limit_hit;
         // The appended line break is not part of the line.
@@ -681,7 +691,7 @@ impl Grammar {
                 tokens.push(Token { start, end, scopes });
             }
         }
-        LineTokens { tokens, end_state: stack, skipped: out_limit }
+        LineTokens { tokens, end_state: stack, skipped: out_limit || cache.exhausted }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -859,7 +869,7 @@ impl Grammar {
                 }
             }
             let Some(found) = local else { continue };
-            let Some(region) = cache.get(&found.key).and_then(|e| e.hit.as_ref()) else { continue };
+            let Some(region) = cache.map.get(&found.key).and_then(|e| e.hit.as_ref()) else { continue };
             let caps: Vec<Option<(usize, usize)>> = (0..region.len()).map(|i| region.pos(i)).collect();
             let start = found.start;
             if best.as_ref().is_some_and(|(s, _)| start >= *s) {
@@ -912,7 +922,7 @@ impl Grammar {
             consider(cache, text, pos, allow, p, shared, END_RULE, order, &mut best);
         }
         let best = best?;
-        let region = cache.get(&best.key).and_then(|e| e.hit.as_ref())?;
+        let region = cache.map.get(&best.key).and_then(|e| e.hit.as_ref())?;
         Some(Found { rule: best.rule, caps: (0..region.len()).map(|i| region.pos(i)).collect() })
     }
 
@@ -1019,7 +1029,7 @@ impl Grammar {
                     begin_captured_eol: false,
                 });
                 // A shorter text is a different search: the results kept for the whole line do not apply to it.
-                let mut sub_cache = SearchCache::new();
+                let mut sub_cache = SearchCache::new(end);
                 self.tokenize_string(&text[..end], is_first_line && start == 0, start, &mut inner, out, false, guard, &mut sub_cache);
                 continue;
             }
@@ -1050,8 +1060,27 @@ struct CacheEntry {
     hit: Option<Region>,
 }
 
-/// By the address of the compiled regular expression.
-type SearchCache = HashMap<usize, CacheEntry>;
+/// The results kept for one line, by the address of the compiled regular expression, and how many searches the
+/// line may still run: injections multiply the patterns tried at every step, so a line has a budget.
+struct SearchCache {
+    map: HashMap<usize, CacheEntry>,
+    searches: usize,
+    budget: usize,
+    /// The budget ran out: from then on nothing more is found on the line.
+    exhausted: bool,
+}
+
+impl SearchCache {
+    fn new(text_len: usize) -> Self {
+        Self { map: HashMap::new(), searches: 0, budget: (MIN_SEARCH_BUDGET + SEARCHES_PER_BYTE * text_len).min(MAX_SEARCH_BUDGET), exhausted: false }
+    }
+}
+
+/// Regular expression searches a line may run: this many plus [`SEARCHES_PER_BYTE`] per byte, at most
+/// [`MAX_SEARCH_BUDGET`]. A line over it is left uncoloured from where the budget ran out (`skipped`).
+const MIN_SEARCH_BUDGET: usize = 5_000;
+const SEARCHES_PER_BYTE: usize = 50;
+pub const MAX_SEARCH_BUDGET: usize = 2_000_000;
 
 struct Best {
     start: usize,
@@ -1079,14 +1108,20 @@ fn consider(
     let cacheable = shared && !(pattern.uses_g && allow_g);
     let valid = cacheable
         && cache
+            .map
             .get(&key)
             .is_some_and(|e| e.from <= pos && e.hit.as_ref().is_none_or(|r| r.pos(0).is_some_and(|(start, _)| start >= pos)));
     if !valid {
+        if cache.searches >= cache.budget {
+            cache.exhausted = true;
+            return;
+        }
+        cache.searches += 1;
         let mut region = Region::new();
         let hit = search(regex, text, pos, &mut region).map(|_| region);
-        cache.insert(key, CacheEntry { from: pos, hit });
+        cache.map.insert(key, CacheEntry { from: pos, hit });
     }
-    if let Some(CacheEntry { hit: Some(region), .. }) = cache.get(&key) {
+    if let Some(CacheEntry { hit: Some(region), .. }) = cache.map.get(&key) {
         if let Some((start, _)) = region.pos(0) {
             let better = match best {
                 Some(b) => start < b.start || (start == b.start && order < b.order),

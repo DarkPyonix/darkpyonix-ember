@@ -2743,7 +2743,7 @@ rename to new.txt
 
     #[test]
     fn fr_g3_a_413_on_untracked_keeps_the_tracked_changes_and_notes_it() {
-        let too_big = ApiError::Status { status: 413, message: "출력이 너무 큽니다".into() };
+        let too_big = ApiError::Status { status: 413, message: "출력이 너무 큽니다".into(), code: None };
         let (patch, note) = merge_untracked_diff(Ok(SAMPLE.to_string()), Err(too_big)).unwrap();
         assert_eq!(patch, SAMPLE);
         assert_eq!(note, Some("추적하지 않는 파일이 너무 많아 내용을 건너뛰었습니다. 파일 목록만 표시합니다."));
@@ -2757,10 +2757,10 @@ rename to new.txt
 
     #[test]
     fn fr_g3_other_untracked_errors_still_fail() {
-        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert!(merge_untracked_diff(Ok(String::new()), Err(boom)).is_err());
-        let tracked_fail = ApiError::Status { status: 413, message: "x".into() };
-        let too_big = ApiError::Status { status: 413, message: "y".into() };
+        let tracked_fail = ApiError::Status { status: 413, message: "x".into(), code: None };
+        let too_big = ApiError::Status { status: 413, message: "y".into(), code: None };
         assert!(merge_untracked_diff(Err(tracked_fail), Err(too_big)).is_err(), "no tracked diff to keep");
     }
 

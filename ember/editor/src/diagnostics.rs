@@ -31,6 +31,18 @@ pub struct TrackedMarker {
     pub range: WidgetRange,
 }
 
+/// One entry of the problems list: a marker of some file, in widget coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Problem {
+    pub uri: UriComponents,
+    pub owner: String,
+    pub severity: Severity,
+    pub message: String,
+    pub source: Option<String>,
+    pub code: Option<String>,
+    pub range: WidgetRange,
+}
+
 /// What a hover shows for a diagnostic under the pointer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoverDiagnostic {
@@ -45,6 +57,8 @@ pub struct HoverDiagnostic {
 pub struct Diagnostics {
     /// uri key → owner → markers
     by_doc: HashMap<String, BTreeMap<String, Vec<TrackedMarker>>>,
+    /// uri key → the uri, for the problems list.
+    uris: HashMap<String, UriComponents>,
     /// decoration id → (doc key, clamped range) from the latest `decorations` call
     by_id: HashMap<u64, (String, WidgetRange)>,
 }
@@ -69,6 +83,7 @@ impl Diagnostics {
         let mut touched = Vec::new();
         for (uri, markers) in entries {
             let key = uri.key();
+            self.uris.insert(key.clone(), uri.clone());
             let doc = self.by_doc.entry(key.clone()).or_default();
             match markers {
                 Some(ms) if !ms.is_empty() => {
@@ -92,10 +107,38 @@ impl Diagnostics {
             }
             if doc.is_empty() {
                 self.by_doc.remove(&key);
+                self.uris.remove(&key);
             }
             touched.push(key);
         }
         touched
+    }
+
+    /// Every marker of every file as a problem: errors first, then warnings, information and
+    /// hints, each group by file path and position.
+    pub fn problems(&self) -> Vec<Problem> {
+        let mut out = Vec::new();
+        for (key, owners) in &self.by_doc {
+            let Some(uri) = self.uris.get(key) else { continue };
+            for (owner, markers) in owners {
+                for t in markers {
+                    out.push(Problem {
+                        uri: uri.clone(),
+                        owner: owner.clone(),
+                        severity: Severity::from_marker(t.marker.severity),
+                        message: t.marker.message.clone(),
+                        source: t.marker.source.clone(),
+                        code: code_string(&t.marker.code),
+                        range: t.range,
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            (a.severity as u8, &a.uri.path, a.range.start.line, a.range.start.col, &a.message)
+                .cmp(&(b.severity as u8, &b.uri.path, b.range.start.line, b.range.start.col, &b.message))
+        });
+        out
     }
 
     /// `$clear(owner)`. Returns the uri keys that had markers from `owner`.
@@ -107,6 +150,8 @@ impl Diagnostics {
             }
         }
         self.by_doc.retain(|_, d| !d.is_empty());
+        let by_doc = &self.by_doc;
+        self.uris.retain(|key, _| by_doc.contains_key(key));
         touched
     }
 

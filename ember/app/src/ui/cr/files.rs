@@ -27,10 +27,10 @@ pub use crate::ui::files::{
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
     user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
-    Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE,
+    Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
-use crate::ui::files::{choose_target, chip_text_max, files_line, send_state};
+use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state};
 use super::characters::{CharState, Character};
 use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
@@ -731,14 +731,20 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                 );
             }
             if tray {
-                // `.fl-tray`: the files to send. TODO(#166, compose-rust): no file picker or drag
+                // `.fl-tray`: the files to send. TODO(compose-rust#483 file dialog, #166 dropped files): no file picker or drag
                 // and drop yet, so the tray is empty and its button says so.
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                 cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     Label("보낼 파일", Fs::Md, Weight::Semibold, None, Some(1));
                     Label(if w > 560.0 { "장비를 누르면 받는 곳을 고르고 파일을 보냅니다." } else { "장비를 누르면 보낼 파일을 고릅니다." }, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 });
-                AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, true, false, || notice::post(FILE_PICK_UNAVAILABLE));
+                // Disabled with its reason beside it while the toolkit has no file dialog (compose-rust#483).
+                cu::Column().spacing(SP[1]).content(|| {
+                    AppButton("파일 고르기", Some(IconRole::Add), ButtonKind::Default, true, FILE_PICKER_AVAILABLE, false, || notice::post(FILE_PICK_UNAVAILABLE));
+                    if !FILE_PICKER_AVAILABLE {
+                        Label(FILE_PICK_REASON, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
+                    }
+                });
             }
         });
     });
@@ -1209,12 +1215,12 @@ fn HistoryRow(h: &HistoryEntry) {
 /// A receiver chip of the send sheet (`.fl-tg`): an outlined pill with the device glyph or the
 /// agent's character; the selected one takes the `ink` border, an offline one is dimmed.
 /// TODO(compose-rust#372): a pointer-up `Clickable`.
-fn TargetChip(label: &str, icon: TargetIcon, selected: bool, dim: bool, on_click: impl FnMut() + 'static) {
+fn TargetChip(label: &str, icon: TargetIcon, selected: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface };
     let border = if selected { p.ink } else { p.line };
     let m = Modifier::new().height(H_CTL).background(paint(fill)).border(1.0, paint(border)).shape_role(ShapeRole::Full);
-    Clickable(if dim { m.alpha(0.55) } else { m }, Alignment::CenterStart, on_click, || {
+    Clickable(m, Alignment::CenterStart, on_click, || {
         cu::Row().alignment(Alignment::CenterStart).content(|| {
             cu::Spacer().modifier(Modifier::new().width(12.0));
             match &icon {
@@ -1229,6 +1235,11 @@ fn TargetChip(label: &str, icon: TargetIcon, selected: bool, dim: bool, on_click
             cu::Spacer().modifier(Modifier::new().width(12.0));
         });
     });
+}
+
+/// The chip text: the name cut to fit, with the offline tag for an offline device.
+fn shown_label(name: &str, offline: bool, glyph: f32, avail: f32) -> String {
+    chip_label(name, offline, chip_text_max_for(avail, glyph), fit_chip_text)
 }
 
 enum TargetIcon {
@@ -1262,7 +1273,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         None => None,
     };
     let sheet_w = super::components::sheet_width(w, super::components::SHEET_WIDTH_DEFAULT);
-    let inner = sheet_w - 2.0 * SP[4];
+    let inner = chip_avail(sheet_w);
     let close = {
         let s = st.sheet.clone();
         move || s.set(None)
@@ -1280,15 +1291,19 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
     }
     let widths: Vec<f32> = chips
         .iter()
-        .map(|(l, icon, ..)| {
+        .map(|(l, icon, _, dim, _)| {
             let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
-            target_chip_width(&fit_label(l, chip_text_max(glyph), Fs::Sm.size()), glyph)
+            chip_width_est(&shown_label(l, *dim, glyph, inner), glyph)
         })
         .collect();
-    let lines = super::project::wrap_lines(&widths, SP[1], inner);
+    let lines = chip_rows(&widths, SP[1], inner);
     EmberSheet("파일 보내기", open, close.clone(), None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+            // The full name below the chips, only when the chosen chip had to cut it.
+            if let Some(name) = chosen_name.as_ref().filter(|n| fit_chip_text(n, chip_text_max_for(inner, 22.0)) != **n) {
+                Label(&format!("선택한 이름: {name}"), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
+            }
             if chips.is_empty() {
                 Label("보낼 수 있는 장비가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
@@ -1299,13 +1314,13 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                         let (s, base) = (st.sheet.clone(), d.clone());
                         let target = target.clone();
                         let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
-                        let shown = fit_label(label, chip_text_max(glyph), Fs::Sm.size());
+                        let shown = shown_label(label, *dim, glyph, inner);
                         let devs: Vec<Device> = devices.to_vec();
                         let icon = match icon {
                             TargetIcon::Kind(k) => TargetIcon::Kind(*k),
                             TargetIcon::Agent(m) => TargetIcon::Agent(m.clone()),
                         };
-                        TargetChip(&shown, icon, *sel, *dim, move || {
+                        TargetChip(&shown, icon, *sel, move || {
                             match choose_target(&base, &devs, target.clone()) {
                                 Ok(next) => s.set(Some(next)),
                                 Err(note) => notice::post(note),
@@ -1315,10 +1330,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                 });
             }
             Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-            // TODO(compose-rust#166): a file picker and drag and drop; until then the files stay empty.
-            if let Some(name) = &chosen_name {
-                Label(&format!("받는 곳: {name}"), Fs::Sm, Weight::Regular, None, Some(2));
-            }
+            // TODO(compose-rust#483): a file dialog (dropped files stay with compose-rust#166); until then the files stay empty.
             Label(&files_line(d.files.len(), FILE_PICKER_AVAILABLE), Fs::Sm, Weight::Regular, None, Some(2));
             if let Some(text) = blocker {
                 Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));

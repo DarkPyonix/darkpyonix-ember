@@ -1,7 +1,6 @@
 //! FR-A6.1: per-computer harness detection that never invents a version. The adapters take the
 //! CLI path in their constructor, so the tests point them at fake shell scripts in a temp dir.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,27 +19,15 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
+mod common;
+
 const DETECT: &str = "/api/computers/local/harnesses/detect";
 const LISTEN: &str = "127.0.0.1:8740";
 
-/// Write an executable script: flush to disk and close the handle before chmod and use, because a
-/// script still open for writing is "text file busy" (ETXTBSY) when executed (#546).
-fn write_exec(path: &Path, content: &str) {
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(path).unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f.sync_all().unwrap();
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// Replace `path` with an executable script (written aside and renamed, so a running copy is
-/// never written to).
+/// Replace `path` with an executable script that can be executed when this returns (see
+/// `common::write_exec_ready`).
 fn script(path: &Path, body: &str) {
-    let tmp = path.with_extension("new");
-    write_exec(&tmp, &format!("#!/bin/sh\n{body}\n"));
-    std::fs::rename(&tmp, path).unwrap();
+    common::write_exec_ready(path, &format!("#!/bin/sh\n{body}\n"));
 }
 
 struct Fx {

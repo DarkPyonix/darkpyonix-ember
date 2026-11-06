@@ -631,7 +631,9 @@ pub fn shell() {
             }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
-                if matches!(screen, Screen::Search) {
+                if ui.characters.get().is_some() {
+                    super::characters_screen::CharactersScreen();
+                } else if matches!(screen, Screen::Search) {
                     super::search::SearchScreen();
                 } else if matches!(screen, Screen::Channels) {
                     super::channels::ChannelsScreen();
@@ -808,6 +810,11 @@ pub fn launch(pref: ThemePref) {
         }
         Some("session") | Some("sessions") => {
             ui.set_menu(NavMenu::Sessions);
+            shell
+        }
+        Some("characters") => {
+            ui.set_menu(NavMenu::Projects);
+            ui.open_characters("");
             shell
         }
         Some("conversation") => {

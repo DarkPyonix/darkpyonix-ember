@@ -806,3 +806,238 @@ async fn fr_a10f_instructions_go_in_front_of_the_first_prompt_only() {
     assert_eq!(last_message(&second), "echo two");
     run.shutdown().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Redaction of upstream text (FR-A10), the env allow-list, the flag probe
+
+const FAKE_KEY: &str = "AIzaSyD-FAKEFAKEFAKEFAKEFAKEFAKEFAKE123";
+
+#[test]
+fn fr_a10_redact_a_google_api_key() {
+    assert_eq!(FAKE_KEY.len(), 39);
+    let out = redact_upstream(&format!("request failed for key {FAKE_KEY}, retry"));
+    assert_eq!(out, "request failed for key [redacted], retry");
+    // Letters only: the generic rule (it needs a digit) cannot be what caught it.
+    let letters = format!("AIza{}", "a".repeat(35));
+    assert_eq!(redact_upstream(&format!("key={letters}")), "key=[redacted]");
+    // One character short is not a key.
+    let short = format!("AIza{}", "a".repeat(34));
+    assert_eq!(redact_upstream(&short), short);
+}
+
+#[test]
+fn fr_a10_redact_bearer_and_authorization_values() {
+    let out = redact_upstream("401 with header Authorization: Bearer abc.def.ghi and more");
+    assert!(!out.contains("abc.def.ghi") && out.contains("Authorization:") && out.contains("and more"), "{out}");
+    let out = redact_upstream("sent bearer sometoken123 to server");
+    assert_eq!(out, "sent [redacted] to server");
+    let out = redact_upstream(r#"{"Authorization":"Basic dXNlcjpwYXNz"}"#);
+    assert!(!out.contains("dXNlcjpwYXNz"), "{out}");
+    let out = redact_upstream("authorization = Token plainsecret");
+    assert!(!out.contains("plainsecret"), "{out}");
+}
+
+#[test]
+fn fr_a10_redact_an_email_address() {
+    let out = redact_upstream("quota for dev.person+x@mail.example.co.uk is exhausted.");
+    assert_eq!(out, "quota for [redacted] is exhausted.");
+    assert_eq!(redact_upstream("a @ b and user@localhost"), "a @ b and user@localhost");
+}
+
+#[test]
+fn fr_a10_redact_a_long_hex_like_secret() {
+    let hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b";
+    assert_eq!(hex.len(), 40);
+    assert_eq!(redact_upstream(&format!("token {hex} rejected")), "token [redacted] rejected");
+    // 32 letters only, or 31 mixed characters, are left alone (known gap and known limit).
+    let letters = "a".repeat(32);
+    assert_eq!(redact_upstream(&letters), letters);
+    let short = format!("{}1", "a".repeat(30));
+    assert_eq!(redact_upstream(&short), short);
+}
+
+#[test]
+fn fr_a10_redact_prefixed_tokens() {
+    for secret in ["sk-proj-abcdEFGH1234", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", "ya29.a0AfH6SMBxyz-123_abc"] {
+        let out = redact_upstream(&format!("bad credential {secret} used"));
+        assert_eq!(out, "bad credential [redacted] used", "{secret}");
+    }
+    assert_eq!(redact_upstream("the task-based flow"), "the task-based flow");
+}
+
+#[test]
+fn fr_a10_redact_leaves_a_normal_sentence_unchanged() {
+    for s in [
+        "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'requests per minute'",
+        "Authentication required (-32000)",
+        "boom",
+        "Request failed with status 429 Too Many Requests; retry in 30 seconds.",
+    ] {
+        assert_eq!(redact_upstream(s), s);
+    }
+}
+
+#[test]
+fn fr_a10_redact_caps_a_long_message_at_300_characters_with_an_ellipsis() {
+    let out = redact_upstream(&"word ".repeat(200));
+    assert_eq!(out.chars().count(), 300);
+    assert!(out.ends_with("..."));
+    let exact = "x".repeat(300);
+    assert_eq!(redact_upstream(&exact), exact, "300 characters fit");
+    assert_eq!(redact_upstream(&"y ".repeat(1000)).chars().count(), 300);
+}
+
+#[test]
+fn fr_a10_redact_removes_newlines_and_control_characters() {
+    let out = redact_upstream("line one\nline two\r\n\ttabbed\u{0}\u{1b}[31mred\u{7}\u{2028}end");
+    assert!(!out.chars().any(|c| c.is_control()), "{out:?}");
+    assert!(!out.contains('\u{2028}'));
+    assert_eq!(out, "line one line two tabbed [31mred end");
+}
+
+#[test]
+fn fr_a10_redact_a_multibyte_character_at_the_cap_boundary_does_not_panic() {
+    for lead in [0, 1, 2, 3] {
+        let text = format!("{}{}", "a".repeat(296 + lead), "한".repeat(50));
+        let out = redact_upstream(&text);
+        assert_eq!(out.chars().count(), 300, "{lead}");
+        assert!(out.ends_with("..."));
+    }
+    let out = redact_upstream(&"🙂".repeat(400));
+    assert_eq!(out.chars().count(), 300);
+}
+
+#[test]
+fn fr_a10_redact_rpc_error_display_and_debug_hide_the_secret() {
+    let e = RpcError { data: Some(format!("{{\"key\":\"{FAKE_KEY}\"}}")), ..RpcError::new(-32603, format!("bad {FAKE_KEY}")) };
+    assert!(!e.to_string().contains("FAKEFAKE") && !format!("{e:?}").contains("FAKEFAKE"));
+    assert!(!format!("{:#}", anyhow::Error::new(AcpRequestError { method: "m".into(), rpc: e.clone() })).contains("FAKEFAKE"));
+    // The fields stay raw for the classifier.
+    assert_eq!(classify_rpc_error(&RpcError::new(-32603, "RESOURCE_EXHAUSTED AIza")), Some(ErrorClass::QuotaExceeded));
+}
+
+#[test]
+fn fr_a10_redact_the_failure_events_carry_no_raw_upstream_text() {
+    let e = RpcError::new(-32603, format!("RESOURCE_EXHAUSTED for dev.person@example.com {FAKE_KEY}"));
+    let events = turn_failure_events("gemini", &e);
+    let AgentEvent::TurnError { code, message } = &events[0] else { panic!("{events:?}") };
+    assert_eq!(code, "quota_exceeded");
+    assert_eq!(message, "RESOURCE_EXHAUSTED for [redacted] [redacted]");
+    let plain = turn_failure_events("gemini", &RpcError::new(-32603, format!("boom {FAKE_KEY}")));
+    let AgentEvent::Error { message } = &plain[0] else { panic!("{plain:?}") };
+    assert!(!message.contains("FAKEFAKE"), "{message}");
+    let empty = RpcError { data: Some("429".into()), ..RpcError::new(-32603, "  ") };
+    let AgentEvent::TurnError { message, .. } = turn_failure_events("gemini", &empty).remove(0) else { panic!() };
+    assert_eq!(message, "quota or rate limit reached");
+}
+
+#[tokio::test]
+async fn fr_a10_redact_a_quota_error_through_the_fake_agent_has_neither_key_nor_email() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut run, mut rx) = start(FakeOptions::default(), gemini_setup(dir.path())).await.unwrap();
+    assert!(matches!(next(&mut rx).await, AgentEvent::NativeSession { .. }));
+    let events = turn(&mut run, &mut rx, "quota-secret", ApprovalDecision::AllowOnce).await;
+    let (code, message) = typed(&events).expect("a typed error");
+    assert_eq!(code, "quota_exceeded");
+    assert!(message.contains("RESOURCE_EXHAUSTED"), "{message}");
+    assert!(!message.contains("AIza") && !message.contains("example.com"), "{message}");
+    run.shutdown().await.unwrap();
+}
+
+#[test]
+fn fr_a10_env_only_gemini_has_an_allow_list_and_omp_inherits() {
+    assert_eq!(AcpConfig::preset("omp", None).unwrap().env_policy, EnvPolicy::Inherit);
+    let g = AcpConfig::preset("gemini", None).unwrap();
+    assert_eq!(g.env_policy, EnvPolicy::Allowlist(GEMINI_ENV_ALLOW));
+    let o = parse_configs(r#"[{"name": "gemini", "env": {"X": "1"}}]"#, |_| None).unwrap();
+    assert_eq!(o[0].env_policy, EnvPolicy::Allowlist(GEMINI_ENV_ALLOW), "an override keeps the policy");
+    let c = parse_configs(r#"[{"name": "mine", "command": "/bin/x"}]"#, |_| None).unwrap();
+    assert_eq!(c[0].env_policy, EnvPolicy::Inherit);
+    // Nothing the server holds for another purpose is on the list.
+    assert!(!GEMINI_ENV_ALLOW.iter().any(|n| n.starts_with("EMBER_") || n.starts_with("CARGO_")));
+}
+
+#[test]
+fn fr_a10_env_child_env_starts_clear_and_keeps_only_allowed_variables() {
+    // cargo sets CARGO_MANIFEST_DIR for every test: a stand-in for a server secret.
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let mut g = AcpConfig::preset("gemini", None).unwrap();
+    g.env = vec![("EXTRA".into(), "1".into())];
+    let env = g.child_env();
+    assert_eq!(env[0].0, ENV_CLEAR);
+    assert!(!env.iter().any(|(k, _)| k == "CARGO_MANIFEST_DIR"));
+    assert!(env.iter().any(|(k, _)| k == "PATH"));
+    assert_eq!(env.last(), Some(&("EXTRA".to_string(), "1".to_string())));
+    let omp = AcpConfig::preset("omp", None).unwrap();
+    assert!(omp.child_env().is_empty(), "omp inherits: nothing is cleared or listed");
+}
+
+#[test]
+fn fr_a10_flag_rejection_needs_the_flag_and_not_just_an_invalid_option() {
+    assert!(!rejects_acp_flag("Error: invalid API key option"));
+    assert!(!rejects_acp_flag("bad argument in request body"));
+    assert!(!rejects_acp_flag("unknown option '--model'"));
+    assert!(!rejects_acp_flag("Invalid argument: --experimental-acp-foo\nunknown flag"));
+    assert!(rejects_acp_flag("error: unknown option '--acp'"));
+    assert!(rejects_acp_flag("Unknown argument: acp"));
+}
+
+fn probe_adapter(script_body: &str) -> (tempfile::TempDir, AcpAdapter) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("probe.sh");
+    std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = AcpConfig::preset("gemini", Some(path)).unwrap();
+    config.env_policy = EnvPolicy::Inherit;
+    (dir, AcpAdapter::new(config).unwrap())
+}
+
+#[tokio::test]
+async fn fr_a10_probe_a_script_that_exits_at_once_is_reaped_and_reported() {
+    let (_dir, a) = probe_adapter("echo 'Unknown argument: acp' >&2; exit 1");
+    let (ok, text) = a.probe_start_args().await.expect("it exited within the window");
+    assert!(!ok && rejects_acp_flag(&text), "{text:?}");
+    let (_dir, a) = probe_adapter("exit 0");
+    assert_eq!(a.probe_start_args().await.map(|(ok, _)| ok), Some(true));
+}
+
+#[tokio::test]
+async fn fr_a10_probe_a_script_that_keeps_running_is_killed_after_the_window() {
+    let (dir, a) = probe_adapter(&format!("echo $$ > {}/pid; exec sleep 30", "$(dirname \"$0\")"));
+    let began = std::time::Instant::now();
+    assert!(a.probe_start_args().await.is_none(), "still running after the window: the flag is accepted");
+    assert!(began.elapsed() < Duration::from_secs(10));
+    let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap().trim().to_string();
+    let alive = std::process::Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+    assert!(!alive, "the probe child {pid} was left running");
+}
+
+#[tokio::test]
+async fn fr_a10b_an_omp_authentication_error_on_session_new_is_auth_required_with_the_generic_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = FakeOptions { require_auth: true, key_ok: false, ..Default::default() };
+    let setup = Setup { agent: "omp".into(), ..setup(dir.path()) };
+    let (mut run, mut rx) = start(opts, setup).await.expect("the start no longer fails on an auth error");
+    let events = turn(&mut run, &mut rx, "hello", ApprovalDecision::AllowOnce).await;
+    assert_eq!(
+        typed(&events),
+        Some(("auth_required".into(), "sign in needed: the omp agent reported that authentication is missing or failed".into()))
+    );
+    assert!(!typed(&events).unwrap().1.contains("GEMINI_API_KEY"));
+    assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Failed }));
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10b_a_normal_omp_turn_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = Setup { agent: "omp".into(), ..setup(dir.path()) };
+    let (mut run, mut rx) = start(FakeOptions::default(), setup).await.unwrap();
+    assert_eq!(next(&mut rx).await, AgentEvent::NativeSession { native_id: "fake-session-1".into() });
+    let events = turn(&mut run, &mut rx, "echo plain", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "echo plain");
+    assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
+    assert!(typed(&events).is_none());
+    run.shutdown().await.unwrap();
+}

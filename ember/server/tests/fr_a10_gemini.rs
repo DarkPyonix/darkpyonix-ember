@@ -199,3 +199,99 @@ async fn fr_a10c_a_quota_error_is_typed_and_the_next_turn_runs() {
     assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
     assert!(events.iter().any(|e| matches!(e, AgentEvent::AssistantMessage { text } if text == "ok")));
 }
+
+// ---- upstream text never reaches the user, the store or the logs unredacted ----------------
+
+const FAKE_KEY: &str = "AIzaSyD-FAKEFAKEFAKEFAKEFAKEFAKEFAKE123";
+const FAKE_EMAIL: &str = "dev.person@example.com";
+const FAKE_BEARER: &str = "FAKEbearerTOKEN9876543210";
+
+/// A `tracing` writer that keeps what the default-level subscriber printed.
+#[derive(Clone, Default)]
+struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+    fn make_writer(&'a self) -> Capture {
+        self.clone()
+    }
+}
+
+/// Install a thread-local subscriber at the default level (INFO); `#[tokio::test]` runs the
+/// whole test on this thread.
+fn capture_logs() -> (Capture, tracing::subscriber::DefaultGuard) {
+    let cap = Capture::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(cap.clone())
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .finish();
+    (cap.clone(), tracing::subscriber::set_default(sub))
+}
+
+fn logged(cap: &Capture) -> String {
+    String::from_utf8(cap.0.lock().unwrap().clone()).unwrap()
+}
+
+#[tokio::test]
+async fn fr_a10_redact_a_quota_error_with_a_key_and_an_email_reaches_neither_the_event_nor_the_logs() {
+    assert_eq!(FAKE_KEY.len(), 39);
+    let (cap, _guard) = capture_logs();
+    let f = session(&[("FAKE_GEMINI_MODE", "quota-secret")]);
+    let events = turn(&f, "hi").await;
+    let quota = typed(&events, "quota_exceeded");
+    assert_eq!(quota.len(), 1, "{events:?}");
+    assert!(quota[0].contains("RESOURCE_EXHAUSTED") && quota[0].contains("[redacted]"), "{quota:?}");
+    let stored = serde_json::to_string(&f.sessions.store().events_after(&f.id, 0).unwrap().into_iter().map(|e| e.event).collect::<Vec<_>>()).unwrap();
+    let logs = logged(&cap);
+    for text in [&quota[0], &stored, &logs] {
+        for secret in [FAKE_KEY, FAKE_EMAIL, FAKE_BEARER, "AIzaSy"] {
+            assert!(!text.contains(secret), "{secret} leaked into {text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn fr_a10_redact_an_auth_error_on_session_new_is_warned_redacted_and_the_turn_text_is_fixed() {
+    let (cap, _guard) = capture_logs();
+    let f = session(&[("FAKE_GEMINI_MODE", "auth-secret")]);
+    let events = turn(&f, "hi").await;
+    assert_eq!(typed(&events, "auth_required"), [AUTH_TEXT]);
+    let stored = serde_json::to_string(&f.sessions.store().events_after(&f.id, 0).unwrap().into_iter().map(|e| e.event).collect::<Vec<_>>()).unwrap();
+    let logs = logged(&cap);
+    assert!(logs.contains("needs authentication"), "the warning is emitted: {logs}");
+    for text in [&stored, &logs] {
+        for secret in [FAKE_KEY, FAKE_EMAIL, FAKE_BEARER] {
+            assert!(!text.contains(secret), "{secret} leaked into {text}");
+        }
+    }
+}
+
+// ---- the gemini child gets an allow-listed environment -------------------------------------
+
+#[tokio::test]
+async fn fr_a10_env_the_gemini_child_does_not_inherit_the_server_environment() {
+    // cargo sets CARGO_MANIFEST_DIR for every test: it stands in for a server secret.
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("env.txt");
+    let f = session(&[("FAKE_GEMINI_ENV_DUMP", dump.to_str().unwrap())]);
+    let events = turn(&f, "hi").await;
+    assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
+    let env = std::fs::read_to_string(&dump).unwrap();
+    let names: Vec<&str> = env.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
+    assert!(!names.contains(&"CARGO_MANIFEST_DIR"), "a server variable reached the child: {names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("CARGO_")), "{names:?}");
+    assert!(names.contains(&"PATH") && names.contains(&"HOME"), "{names:?}");
+    assert!(names.contains(&"FAKE_GEMINI_ENV_DUMP"), "the config's own env is kept: {names:?}");
+}

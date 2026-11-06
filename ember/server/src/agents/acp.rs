@@ -122,6 +122,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use super::proc::{spawn_agent, AgentCommand, ProcHandle};
 use super::{AcpName, AgentAdapter, AgentKind, AgentRun, Detected, ForkFrom, McpServer, NativeFork, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
+use crate::session_shim::{apply_env, ENV_CLEAR};
 
 /// The Gemini CLI's ACP flag, and the older one it replaced (FR-A10, SPEC "Gemini CLI facts").
 const GEMINI_ACP_FLAG: &str = "--acp";
@@ -151,6 +152,36 @@ const RESOURCE_NOT_FOUND: i64 = -32002;
 // ---------------------------------------------------------------------------------------------
 // Configuration
 
+/// Variables the `gemini` child may inherit from the server (FR-A10). Everything else in the
+/// server's environment (tokens, other agents' keys, Ember's own settings) stays out.
+///
+/// - Process basics: `HOME` (the CLI reads `~/.gemini`), `PATH` (it is a Node script that finds
+///   `node` and tools), `LANG`, `LC_ALL` (text encoding), `TMPDIR`, `USER`, `TERM`.
+/// - XDG directories: `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` (where it keeps config
+///   and caches when they are set).
+/// - The CLI's own credentials and mode: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`,
+///   `GOOGLE_CLOUD_LOCATION`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_APPLICATION_CREDENTIALS`. Ember
+///   never reads their values; they are passed through as they are.
+/// - Network: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (both cases) and the CA bundle variables
+///   `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, so a proxied or inspected connection still works.
+pub const GEMINI_ENV_ALLOW: &[&str] = &[
+    "HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER", "TERM",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS",
+];
+
+/// Which part of the server's environment an agent process inherits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvPolicy {
+    /// All of it (`omp`, and any configured agent).
+    Inherit,
+    /// Only the listed variables (those the server has), then the config's and the request's own.
+    Allowlist(&'static [&'static str]),
+}
+
 /// One configured ACP agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpConfig {
@@ -168,6 +199,8 @@ pub struct AcpConfig {
     pub version_args: Vec<String>,
     /// Extra environment for the agent process.
     pub env: Vec<(String, String)>,
+    /// How much of the server's environment the process inherits (`Allowlist` for `gemini`).
+    pub env_policy: EnvPolicy,
 }
 
 impl AcpConfig {
@@ -182,6 +215,7 @@ impl AcpConfig {
                 instructions_args: vec!["--append-system-prompt".into(), "{instructions}".into()],
                 version_args: vec!["--version".into()],
                 env: Vec::new(),
+                env_policy: EnvPolicy::Inherit,
             }),
             // Gemini CLI (FR-A10): `-m <model>` for the model; no instructions argument, so the
             // instructions go in front of the first prompt and the user's GEMINI.md is untouched.
@@ -193,9 +227,26 @@ impl AcpConfig {
                 instructions_args: Vec::new(),
                 version_args: vec!["--version".into()],
                 env: Vec::new(),
+                env_policy: EnvPolicy::Allowlist(GEMINI_ENV_ALLOW),
             }),
             _ => None,
         }
+    }
+
+    /// The environment entries for a process of this agent: for an allow-list, the
+    /// [`ENV_CLEAR`] marker and the allowed variables the server has; then the config's `env`.
+    pub fn child_env(&self) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        if let EnvPolicy::Allowlist(names) = self.env_policy {
+            env.push((ENV_CLEAR.to_string(), "1".to_string()));
+            for name in names {
+                if let Ok(v) = std::env::var(name) {
+                    env.push((name.to_string(), v));
+                }
+            }
+        }
+        env.extend(self.env.iter().cloned());
+        env
     }
 
     /// The arguments of the one retry of a start that failed fast, when the failure may be the
@@ -269,6 +320,7 @@ pub fn parse_configs(
                     instructions_args: Vec::new(),
                     version_args: vec!["--version".into()],
                     env: Vec::new(),
+                    env_policy: EnvPolicy::Inherit,
                 });
                 AcpConfig {
                     name: spec.name,
@@ -281,6 +333,7 @@ pub fn parse_configs(
                         Some(env) => env.into_iter().collect(),
                         None => base.env,
                     },
+                    env_policy: base.env_policy,
                 }
             }
         };
@@ -372,14 +425,11 @@ impl AgentAdapter for AcpAdapter {
     }
 
     async fn detect(&self) -> Detected {
+        let mut cmd = Command::new(&self.config.command);
+        apply_env(&mut cmd, &self.config.child_env());
         let out = tokio::time::timeout(
             Duration::from_secs(10),
-            Command::new(&self.config.command)
-                .args(&self.config.version_args)
-                .envs(self.config.env.iter().map(|(k, v)| (k, v)))
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output(),
+            cmd.args(&self.config.version_args).stdin(Stdio::null()).kill_on_drop(true).output(),
         )
         .await;
         match out {
@@ -414,7 +464,9 @@ impl AgentAdapter for AcpAdapter {
                     "the CLI rejected {GEMINI_ACP_FLAG}; retrying once with {GEMINI_ACP_FALLBACK_FLAG}"
                 );
                 self.start_with(&fallback, req, events).await.map_err(|second| {
-                    second.context(format!("{GEMINI_ACP_FLAG} was rejected by the CLI ({first:#})"))
+                    // The first error can carry the agent's own words: redacted (FR-A10).
+                    let first = redact_upstream(&format!("{first:#}"));
+                    second.context(format!("{GEMINI_ACP_FLAG} was rejected by the CLI ({first})"))
                 })
             }
         }
@@ -426,22 +478,33 @@ impl AcpAdapter {
     /// `(exited successfully, stdout and stderr)`, or `None` if it was still running after
     /// [`FLAG_PROBE_WINDOW`] (so the flag was accepted).
     async fn probe_start_args(&self) -> Option<(bool, String)> {
-        let out = tokio::time::timeout(
-            FLAG_PROBE_WINDOW,
-            Command::new(&self.config.command)
-                .args(&self.config.args)
-                .envs(self.config.env.iter().map(|(k, v)| (k, v)))
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .ok()?
-        .ok()?;
-        let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
+        let mut cmd = Command::new(&self.config.command);
+        apply_env(&mut cmd, &self.config.child_env());
+        let mut child = cmd
+            .args(&self.config.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let (mut stdout, mut stderr) = (child.stdout.take()?, child.stderr.take()?);
+        let finished = tokio::time::timeout(FLAG_PROBE_WINDOW, async {
+            let (mut o, mut e) = (Vec::new(), Vec::new());
+            let _ = tokio::join!(stdout.read_to_end(&mut o), stderr.read_to_end(&mut e));
+            let status = child.wait().await;
+            (status, o, e)
+        })
+        .await;
+        // Explicit cleanup, whatever happened: the probe never outlives this call. Errors (the
+        // child already exited and was reaped) are of no interest and nothing is logged.
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        let (status, out, err) = finished.ok()?;
+        let mut text = String::from_utf8_lossy(&err).into_owned();
         text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&out.stdout));
-        Some((out.status.success(), text))
+        text.push_str(&String::from_utf8_lossy(&out));
+        Some((status.ok()?.success(), text))
     }
 
     async fn start_with(
@@ -452,7 +515,7 @@ impl AcpAdapter {
     ) -> anyhow::Result<Box<dyn AgentRun>> {
         // On another computer the project path need not exist here (without a mount).
         let spawn_dir = if req.cwd.is_dir() { req.cwd.clone() } else { std::env::temp_dir() };
-        let mut env: Vec<(String, String)> = self.config.env.iter().cloned().collect();
+        let mut env = self.config.child_env();
         env.extend(req.env.iter().cloned());
         let proc = spawn_agent(AgentCommand {
             program: self.config.command.clone(),
@@ -472,6 +535,7 @@ impl AcpAdapter {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    // Raw agent text: debug only, debug logs are not for sharing.
                     tracing::debug!(target: "acp", agent = %name, "{line}");
                 }
             });
@@ -545,14 +609,19 @@ pub(crate) fn translate_drained_lines(lines: &[String]) -> Vec<AgentEvent> {
     out
 }
 
-/// Whether the output of a command that exited non-zero says it does not know an option or flag.
-/// Used for the one `--experimental-acp` retry; the wording is that of common argument parsers
-/// (yargs: "Unknown argument", getopt: "unrecognized option"), the Gemini CLI's own is unverified.
+/// Whether the output of a command that exited non-zero says it does not know the `--acp` flag.
+/// Used for the one `--experimental-acp` retry. Both parts are required: the output names the
+/// flag (`--acp`, or the word `acp` as yargs prints "Unknown argument: acp"), and it says an
+/// option, flag or argument is unknown, unrecognized, invalid or bad ("unknown option",
+/// "unrecognized argument"...). "Invalid API key option" alone does not retry. The Gemini CLI's
+/// own wording is unverified.
 pub(crate) fn rejects_acp_flag(output: &str) -> bool {
     let t = output.to_ascii_lowercase();
-    ["unknown", "unrecognized", "unrecognised", "invalid", "bad"].iter().any(|w| {
-        ["option", "flag", "argument"].iter().any(|n| t.contains(&format!("{w} {n}")))
-    })
+    let names_flag = t.contains("--acp") || t.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "acp");
+    names_flag
+        && ["unknown", "unrecognized", "unrecognised", "invalid", "bad"].iter().any(|w| {
+            ["option", "flag", "argument"].iter().any(|n| t.contains(&format!("{w} {n}")))
+        })
 }
 
 /// `omp 18.5.0` / `18.5.0` → `18.5.0`: the last word of the first non-empty line.
@@ -685,7 +754,8 @@ where
                 // Authentication is needed: the session opens at the first prompt that finds it
                 // done, and until then each turn ends with `auth_required` (FR-A10b).
                 Err(e) if classify_rpc_error(&e) == Some(ErrorClass::AuthRequired) => {
-                    tracing::warn!(target: "acp", agent = %setup.agent, "session/new needs authentication: {e}");
+                    tracing::warn!(target: "acp", agent = %setup.agent, "session/new needs authentication: {}", redact_upstream(&e.message));
+                    tracing::debug!(target: "acp", agent = %setup.agent, code = e.code, data = ?e.data, "raw session/new error (not for sharing): {}", e.message);
                     None
                 }
                 Err(rpc) => {
@@ -763,7 +833,7 @@ fn mcp_servers_param(servers: &[McpServer]) -> Value {
 
 type Reply = Result<Value, RpcError>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct RpcError {
     code: i64,
     message: String,
@@ -792,6 +862,13 @@ impl RpcError {
     fn node(e: &ember_node::client::ClientError, what: &str) -> RpcError {
         let code = if e.errno() == Some("ENOENT") { RESOURCE_NOT_FOUND } else { INTERNAL_ERROR };
         RpcError::new(code, format!("{what}: {e}"))
+    }
+}
+
+/// `Debug` shows the redacted message and no `data`, so no `{:?}` of an error leaks upstream text.
+impl std::fmt::Debug for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcError").field("code", &self.code).field("message", &redact_upstream(&self.message)).finish()
     }
 }
 
@@ -857,6 +934,218 @@ fn auth_message(agent: &str) -> String {
     }
 }
 
+const REDACTED: &str = "[redacted]";
+/// The longest upstream text shown or stored, in characters, ellipsis included.
+const UPSTREAM_CAP: usize = 300;
+
+fn is_secret_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Text from an agent or its provider (an error message) made safe to show, store or log
+/// (FR-A10): whitespace and control characters collapse to single spaces; Google API keys
+/// (`AIza` + 35 characters), `Bearer` and `Authorization` values, `sk-` / `ghp_` / `ya29.` style
+/// tokens, e-mail addresses and any run of 32 or more `[A-Za-z0-9_-]` characters holding both a
+/// letter and a digit become `[redacted]`; the result is capped at 300 characters (the last three
+/// are `...` when cut). A heuristic: a secret that looks like an ordinary word, or a long run of
+/// letters only, passes. Raw text may be logged only at `debug`, which is not for sharing.
+pub(crate) fn redact_upstream(text: &str) -> String {
+    let flat = text
+        .split(|c: char| c.is_whitespace() || c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let out = redact_auth_values(&flat);
+    let out = redact_prefixed_tokens(&out);
+    let out = redact_google_keys(&out);
+    let out = redact_emails(&out);
+    let out = redact_long_secrets(&out);
+    if out.chars().count() > UPSTREAM_CAP {
+        let mut cut: String = out.chars().take(UPSTREAM_CAP - 3).collect();
+        cut.push_str("...");
+        cut
+    } else {
+        out
+    }
+}
+
+/// The value after `Authorization:` (and a scheme word such as `Bearer`), and the token after a
+/// bare `Bearer`.
+fn redact_auth_values(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let lower: Vec<char> = c.iter().map(|x| x.to_ascii_lowercase()).collect();
+    let starts = |i: usize, w: &str| lower.get(i..i + w.len()).is_some_and(|x| x.iter().copied().eq(w.chars()));
+    let value_char = |x: char| !x.is_whitespace() && !matches!(x, '"' | '\'' | ',' | ';');
+    let token_end = |mut i: usize| {
+        while i < c.len() && value_char(c[i]) {
+            i += 1;
+        }
+        i
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        let boundary = i == 0 || !c[i - 1].is_ascii_alphanumeric();
+        if boundary && starts(i, "authorization") {
+            let mut j = i + "authorization".len();
+            while j < c.len() && (c[j].is_whitespace() || matches!(c[j], '"' | '\'')) {
+                j += 1;
+            }
+            if j < c.len() && matches!(c[j], ':' | '=') {
+                j += 1;
+                while j < c.len() && (c[j].is_whitespace() || matches!(c[j], '"' | '\'')) {
+                    j += 1;
+                }
+                let mut end = token_end(j);
+                let scheme: String = lower[j..end].iter().collect();
+                if ["bearer", "basic", "token", "digest", "negotiate"].contains(&scheme.as_str()) {
+                    let mut k = end;
+                    while k < c.len() && c[k] == ' ' {
+                        k += 1;
+                    }
+                    end = token_end(k).max(end);
+                }
+                if end > j {
+                    out.extend(&c[i..j]);
+                    out.push_str(REDACTED);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        if boundary && starts(i, "bearer") && c.get(i + 6) == Some(&' ') {
+            let mut k = i + 6;
+            while k < c.len() && c[k] == ' ' {
+                k += 1;
+            }
+            let end = token_end(k);
+            if end > k {
+                out.push_str(REDACTED);
+                i = end;
+                continue;
+            }
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `sk-`, `ghp_` (and the other GitHub prefixes), `github_pat_` and `ya29.` tokens at a word
+/// start, with at least 8 more token characters.
+fn redact_prefixed_tokens(s: &str) -> String {
+    const PREFIXES: &[&str] = &["sk-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "ya29."];
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        if i == 0 || !c[i - 1].is_ascii_alphanumeric() {
+            let hit = PREFIXES.iter().find(|p| c.get(i..i + p.len()).is_some_and(|x| x.iter().copied().eq(p.chars())));
+            if let Some(p) = hit {
+                let mut end = i + p.len();
+                while end < c.len() && (is_secret_char(c[end]) || c[end] == '.') {
+                    end += 1;
+                }
+                if end - i - p.len() >= 8 {
+                    out.push_str(REDACTED);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `AIza` followed by 35 key characters (and any further key characters glued to it).
+fn redact_google_keys(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        if c.get(i..i + 4).is_some_and(|x| x == ['A', 'I', 'z', 'a'])
+            && c.get(i + 4..i + 39).is_some_and(|x| x.iter().all(|&k| is_secret_char(k)))
+        {
+            let mut end = i + 39;
+            while end < c.len() && is_secret_char(c[end]) {
+                end += 1;
+            }
+            out.push_str(REDACTED);
+            i = end;
+            continue;
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `local@domain.tld`.
+fn redact_emails(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let local = |x: char| x.is_ascii_alphanumeric() || matches!(x, '.' | '_' | '%' | '+' | '-');
+    let domain = |x: char| x.is_ascii_alphanumeric() || matches!(x, '.' | '-');
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let floor_of = |ranges: &Vec<(usize, usize)>| ranges.last().map_or(0, |r| r.1);
+    for (k, &ch) in c.iter().enumerate() {
+        if ch != '@' || k < floor_of(&ranges) {
+            continue;
+        }
+        let mut l = k;
+        while l > floor_of(&ranges) && local(c[l - 1]) {
+            l -= 1;
+        }
+        let mut r = k + 1;
+        while r < c.len() && domain(c[r]) {
+            r += 1;
+        }
+        while r > k + 1 && matches!(c[r - 1], '.' | '-') {
+            r -= 1;
+        }
+        let dom = &c[k + 1..r];
+        if l < k && dom.first().is_some_and(|x| x.is_ascii_alphanumeric()) && dom.contains(&'.') {
+            ranges.push((l, r));
+        }
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    for (l, r) in ranges {
+        out.extend(&c[i..l]);
+        out.push_str(REDACTED);
+        i = r;
+    }
+    out.extend(&c[i..]);
+    out
+}
+
+/// A run of 32 or more key characters with a letter and a digit in it.
+fn redact_long_secrets(s: &str) -> String {
+    let c: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < c.len() {
+        if !is_secret_char(c[i]) {
+            out.push(c[i]);
+            i += 1;
+            continue;
+        }
+        let mut end = i;
+        while end < c.len() && is_secret_char(c[end]) {
+            end += 1;
+        }
+        let run = &c[i..end];
+        if run.len() >= 32 && run.iter().any(|x| x.is_ascii_alphabetic()) && run.iter().any(|x| x.is_ascii_digit()) {
+            out.push_str(REDACTED);
+        } else {
+            out.extend(run);
+        }
+        i = end;
+    }
+    out
+}
+
 /// The events of a turn that failed with `e`: a typed error for the classes above, else the plain
 /// error; always a failed turn.
 fn turn_failure_events(agent: &str, e: &RpcError) -> Vec<AgentEvent> {
@@ -865,17 +1154,23 @@ fn turn_failure_events(agent: &str, e: &RpcError) -> Vec<AgentEvent> {
             AgentEvent::TurnError { code: "auth_required".into(), message: auth_message(agent) }
         }
         Some(ErrorClass::QuotaExceeded) => {
-            let message = if e.message.trim().is_empty() { "quota or rate limit reached".to_string() } else { e.message.clone() };
+            tracing::debug!(target: "acp", code = e.code, data = ?e.data, "raw quota error (not for sharing): {}", e.message);
+            let message = redact_upstream(&e.message);
+            let message = if message.is_empty() { "quota or rate limit reached".to_string() } else { message };
             AgentEvent::TurnError { code: "quota_exceeded".into(), message }
         }
-        None => AgentEvent::Error { message: format!("ACP session/prompt failed: {e}") },
+        None => {
+            tracing::debug!(target: "acp", code = e.code, data = ?e.data, "raw prompt error (not for sharing): {}", e.message);
+            // `Display` of the error redacts its message.
+            AgentEvent::Error { message: format!("ACP session/prompt failed: {e}") }
+        }
     };
     vec![event, AgentEvent::TurnEnded { outcome: TurnOutcome::Failed }]
 }
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.message, self.code)
+        write!(f, "{} ({})", redact_upstream(&self.message), self.code)
     }
 }
 
@@ -985,7 +1280,8 @@ async fn read_loop<R: AsyncRead + Unpin + Send + 'static>(conn: Arc<Conn>, reade
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            tracing::warn!(target: "acp", "ignoring non-JSON line from the agent: {line}");
+            tracing::warn!(target: "acp", "ignoring a non-JSON line from the agent ({} bytes)", line.len());
+            tracing::debug!(target: "acp", "raw non-JSON line (debug logs are not for sharing): {line}");
             continue;
         };
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -1005,6 +1301,10 @@ async fn read_loop<R: AsyncRead + Unpin + Send + 'static>(conn: Arc<Conn>, reade
             (None, Some(id)) => {
                 let waiter = id.as_i64().and_then(|id| conn.pending.lock().unwrap().remove(&id));
                 if let Some(waiter) = waiter {
+                    if let Some(err) = msg.get("error") {
+                        // Raw upstream text: debug only, debug logs are not for sharing.
+                        tracing::debug!(target: "acp", "raw error reply (not for sharing): {err}");
+                    }
                     let reply = match msg.get("error") {
                         Some(err) => Err(RpcError {
                             data: err.get("data").map(|d| d.as_str().map(str::to_string).unwrap_or_else(|| d.to_string())),

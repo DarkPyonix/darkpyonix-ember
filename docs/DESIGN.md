@@ -531,7 +531,7 @@ Server side is written (not compiled yet). The app still has to change two thing
 
 #### Gemini harness card (hand-off to the app session, `FR-A10`)
 
-Server side is written (not compiled, real CLI never run: `FR-A10g` UNVERIFIED), so the card stays
+Server side is written (CI compiled and ran its fake-agent tests green at 68ad53c; the real CLI never ran: `FR-A10g` UNVERIFIED), so the card stays
 "preparing" in the app until the owner or a runner has run `ember/server/tests/acp_gemini.rs`.
 `gemini` is opt-in (`EMBER_ACP_AGENTS=["gemini"]`) and then appears in `GET /api/agents` and in the
 detect route like the other harnesses. The app has to render:
@@ -541,6 +541,8 @@ detect route like the other harnesses. The app has to render:
 - A new event kind `{"kind": "turn_error", "code": "auth_required" | "quota_exceeded", "message": ...}`,
   always followed by `turn_ended` with `outcome: "failed"`. Until the client knows it, an older client
   decodes it as `Unknown` and shows only the failed turn.
+  **The app reducer must render `auth_required` and `quota_exceeded`:** today it ignores `Unknown`, so
+  without this work the user sees only a failed turn. Messages are redacted and at most 300 characters.
   - `auth_required`: show the message verbatim, `sign in needed: set GEMINI_API_KEY (individual Google
     accounts are no longer served by the Gemini CLI, use Antigravity)`, with a "use Antigravity" action.
   - `quota_exceeded`: show the agent's message as a quota or rate-limit notice. The session stays usable

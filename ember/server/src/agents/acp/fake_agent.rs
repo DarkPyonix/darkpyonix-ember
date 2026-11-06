@@ -18,6 +18,7 @@
 //! - `elicit`: an `elicitation/create` request; answers `elicitation error <code>`.
 //! - `exit`: the agent goes away mid-turn.
 //! - `auth-fail`: the prompt fails with JSON-RPC error `-32000` "Authentication required".
+//! - `quota-secret`: like `quota`, with a fake API key and an e-mail address in the message.
 //! - `quota`: the prompt fails with `RESOURCE_EXHAUSTED: Quota exceeded ...` (code `-32603`).
 //! - `boom`: the prompt fails with an unclassified error (`-32603` "boom").
 //!
@@ -394,9 +395,13 @@ impl Fake {
                 self.say("bye").await;
                 return false;
             }
-            "auth-fail" | "quota" | "boom" => {
+            "auth-fail" | "quota" | "quota-secret" | "boom" => {
                 let (code, message) = match first {
                     "auth-fail" => (-32000, "Authentication required"),
+                    "quota-secret" => (
+                        -32603,
+                        "RESOURCE_EXHAUSTED: quota for key AIzaSyD-FAKEFAKEFAKEFAKEFAKEFAKEFAKE123 of dev.person@example.com",
+                    ),
                     "quota" => (-32603, "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'requests per minute'"),
                     _ => (-32603, "boom"),
                 };

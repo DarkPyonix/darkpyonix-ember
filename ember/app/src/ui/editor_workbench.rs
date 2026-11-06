@@ -649,11 +649,46 @@ pub mod page {
         }
     }
 
+    /// The problems list: a row per marker, errors first; a click opens the file.
+    fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String)>) -> Element {
+        use ember_editor::widget::Severity;
+        let mut tabs = s.tabs;
+        if rows.is_empty() {
+            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
+        }
+        rsx! {
+            div { class: "ed-plist", role: "list",
+                for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
+                    {
+                        let host = s.host.clone();
+                        let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
+                        rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", onclick: move |_| {
+                            tabs.write().open(&path);
+                            host.send(HostCommand::Open(path.clone()));
+                        },
+                            span { class: "{dot}" }
+                            span { style: "flex:1; min-width:0; overflow:hidden; white-space:nowrap;", "{message}" }
+                            span { style: "color:var(--muted); font-size:var(--fs-xs); white-space:nowrap;", "{source} {location}" }
+                        } }
+                    }
+                }
+            }
+        }
+    }
+
     fn bottom_window(s: &Shared, w: ToolWindow) -> Element {
         let mut stripes = s.stripes;
         let mut bottom_max = s.bottom_max;
         let max = *bottom_max.read();
         let has_left = s.stripes.read().selected(Side::Left).is_some();
+        let problem_rows: Vec<(String, ember_editor::widget::Severity, String, String, String)> = s
+            .bridge
+            .borrow()
+            .problems()
+            .iter()
+            .map(|p| (p.uri.path.clone(), p.severity, p.message.clone(), crate::ui::editor::problem_location(&p.uri.path, &s.folder, p.range.start.line), p.source.clone().unwrap_or_default()))
+            .collect();
+        let problem_count = problem_rows.len();
         let body = match w {
             ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
             _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
@@ -665,7 +700,8 @@ pub mod page {
                         for b in ToolWindow::BOTTOM {
                             {
                                 let class = if b == w { "on" } else { "" };
-                                rsx! { button { key: "{b.label()}", class, role: "tab", onclick: move |_| { if !stripes.read().is_selected(b) { stripes.write().toggle(b); } }, "{b.label()}" } }
+                                let label = if b == ToolWindow::Problems { crate::ui::editor::problems_tab_label(problem_count) } else { b.label().to_string() };
+                                rsx! { button { key: "{b.label()}", class, role: "tab", onclick: move |_| { if !stripes.read().is_selected(b) { stripes.write().toggle(b); } }, "{label}" } }
                             }
                         }
                     }
@@ -675,6 +711,8 @@ pub mod page {
                 }
                 if w == ToolWindow::Terminal {
                     {terminal_body(s)}
+                } else if w == ToolWindow::Problems {
+                    {problems_body(s, problem_rows)}
                 } else {
                     div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }

@@ -191,8 +191,8 @@ async fn main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
     let store_for_guest = store.clone();
-    // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and, from step C3
-    // on, the enrol door share its failure windows and its pending-token map, which live per instance.
+    // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
+    // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
     let enrol = computers::enrol::Enrol::new(store.clone());
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
@@ -423,7 +423,7 @@ async fn main() -> anyhow::Result<()> {
     });
     // The enrol door's router is built only when the door is on, wrapped only by the door's
     // guards, and never merged into `app` or `local_app` (not under auth::protect either).
-    let enrol_app = enrol_door.as_ref().map(|d| d.app());
+    let enrol_app = enrol_door.as_ref().map(|d| d.app(enrol.clone()));
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))

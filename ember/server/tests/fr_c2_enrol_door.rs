@@ -1,5 +1,8 @@
-//! FR-C2e, FR-C2f: the enrol door skeleton (step C2, all [provisional]). The door has an EMPTY
-//! route table: it answers 404 to everything. The redeem and poll routes are step C3.
+//! FR-C2e, FR-C2f: the enrol door's guards and limits (step C2, all [provisional]), and its route
+//! table (step C3a: exactly `POST /enrol/redeem` and `GET /enrol/status/{enrol_id}`, 404 for the
+//! rest). The tests of the layers drive them over an EMPTY router (`Router::new()`), so what they
+//! count and refuse does not depend on the handlers; the routes themselves are tested in
+//! `fr_c2_enrol_redeem.rs`.
 //!
 //! NONE of these tests has been run (nothing was compiled when this file was written). Every
 //! expected value was read from `ember/server/src/enrol_door.rs` and the shared `door/` code.
@@ -16,10 +19,11 @@
 //!   `main.rs` (a `tokio::spawn` whose error is only logged, on the stop watch of the guest task).
 //!   It is not testable without running the binary; it is covered by review of `main.rs`.
 //! - A log test for the startup lines: the lines are in `main.rs`, not in the library.
-//! - The body limit for a body with no `Content-Length`: with an empty route table nothing reads a
-//!   body, so only the declared-size guard is observable until C3 adds the handlers.
+//! - The body limit for a body with no `Content-Length` is observed in `fr_c2_enrol_redeem.rs`
+//!   (the redeem handler reads the body; here only the declared-size guard is observable).
 //!
-//! C3 changes `fr_c2_enrol_door_serves_exactly_the_route_table` when it adds the two routes.
+//! C3a changed `fr_c2_enrol_door_serves_exactly_the_route_table` and the inventory test for the
+//! two routes and the `Arc<Enrol>` argument. Not run: nothing was compiled.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -35,6 +39,7 @@ use axum::Router;
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::AgentAdapter;
 use ember_server::auth::{self, ServerAuth};
+use ember_server::computers::enrol::Enrol;
 use ember_server::computers::{self, Computers, Registry};
 use ember_server::enrol_door::{
     DoorLimits, EnrolDoor, LimitConfig, ENROL_ACCEPT_PER_HOUR, ENROL_ACCEPT_PER_MINUTE, ENROL_ALLOWED_HOSTS_VAR,
@@ -68,6 +73,11 @@ fn door(extra: &[(&str, &str)]) -> EnrolDoor {
     let mut v = vec![(ENROL_LISTEN_VAR, LISTEN)];
     v.extend_from_slice(extra);
     lookup(&v, None).unwrap().expect("door on")
+}
+
+/// A door service over an in-memory store, for tests that need a router and nothing else.
+fn test_enrol() -> Arc<Enrol> {
+    Enrol::new(Arc::new(Store::open_in_memory().unwrap()))
 }
 
 type Reply = (StatusCode, HeaderMap, Vec<u8>);
@@ -282,16 +292,16 @@ fn fr_c2_an_invalid_trusted_proxy_or_public_url_is_a_startup_error() {
 async fn fr_c2_enrol_door_does_not_read_the_guest_variables_and_the_guest_door_does_not_read_its() {
     // Guest variables set, enrol ones not: a bad guest trusted-proxy entry is not an enrol error.
     let d = door(&[("EMBER_GUEST_TRUSTED_PROXIES", "not-an-ip"), ("EMBER_GUEST_ALLOWED_HOSTS", "evil.example")]);
-    let a = unlimited(&d, EnrolDoor::routes());
+    let a = unlimited(&d, Router::new());
     // The guest allowed host is not accepted by the enrol door ...
     assert_eq!(call(&a, "GET", "/", &[("host", "evil.example")], None).await.0, StatusCode::FORBIDDEN);
     // ... and the enrol one is.
     let d = door(&[(ENROL_ALLOWED_HOSTS_VAR, "enrol.example")]);
-    let a = unlimited(&d, EnrolDoor::routes());
+    let a = unlimited(&d, Router::new());
     assert_eq!(call(&a, "GET", "/", &[("host", "enrol.example")], None).await.0, StatusCode::NOT_FOUND);
     // The public URL's host is accepted too.
     let d = door(&[(ENROL_PUBLIC_URL_VAR, "https://pub.example.com")]);
-    let a = unlimited(&d, EnrolDoor::routes());
+    let a = unlimited(&d, Router::new());
     assert_eq!(call(&a, "GET", "/", &[("host", "pub.example.com")], None).await.0, StatusCode::NOT_FOUND);
     // The guest door does not read the enrol hosts variable either.
     let m: HashMap<String, String> = [
@@ -309,12 +319,14 @@ async fn fr_c2_enrol_door_does_not_read_the_guest_variables_and_the_guest_door_d
 
 // ---- the route table is empty ----
 
-/// C2: the table is EMPTY, so every method on every path is 404 with an empty body and exactly the
-/// two door headers. C3 changes this test when it adds `POST /enrol/redeem` and
-/// `GET /enrol/status/{enrol_id}`.
+/// C3a: the table is exactly `POST /enrol/redeem` and `GET /enrol/status/{enrol_id}`. Everything
+/// else is 404 with an empty body and exactly the two door headers: every other path, and every
+/// other method on those two paths (the router's 405 is turned into the plain 404). The two
+/// routes themselves answer something else (415 for a redeem with no content type, 404 with a JSON
+/// body for a poll), which `fr_c2_enrol_redeem.rs` pins in detail.
 #[tokio::test]
 async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
-    let a = unlimited(&door(&[]), EnrolDoor::routes());
+    let a = unlimited(&door(&[]), EnrolDoor::routes(test_enrol()));
     let want: BTreeSet<&str> = ["cache-control", "x-content-type-options"].into_iter().collect();
     let paths = [
         "/",
@@ -331,7 +343,15 @@ async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
     ];
     for m in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"] {
         for p in paths {
+            let is_route = (m == "POST" && p == "/enrol/redeem") || (m == "GET" && p == "/enrol/status/x");
             let (s, h, body) = call(&a, m, p, &[("host", HOST)], None).await;
+            if is_route {
+                // Reaches the handler: no content type is 415 for the redeem; an unknown id is the
+                // JSON 404 for the poll. (No ConnectInfo on this unlimited router: the redeem
+                // refuses the content type first.)
+                assert!(!body.is_empty(), "{m} {p}");
+                continue;
+            }
             assert_eq!(s, StatusCode::NOT_FOUND, "{m} {p}");
             assert!(body.is_empty(), "{m} {p}: {:?}", String::from_utf8_lossy(&body));
             // `content-length` is added by whoever serializes the response; it is not a door header.
@@ -347,7 +367,7 @@ async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
 
 #[tokio::test]
 async fn fr_c2_every_owner_route_is_404_on_the_enrol_door() {
-    let a = unlimited(&door(&[]), EnrolDoor::routes());
+    let a = unlimited(&door(&[]), EnrolDoor::routes(test_enrol()));
     let owner_paths = [
         "/api/health",
         "/api/computers",
@@ -442,7 +462,7 @@ async fn fr_c2_redeem_is_not_token_exempt() {
 
 #[tokio::test]
 async fn fr_c2_foreign_host_and_origin_are_refused() {
-    let a = unlimited(&door(&[]), EnrolDoor::routes());
+    let a = unlimited(&door(&[]), Router::new());
     for host in ["evil.example.com", "10.0.0.7:9300", "127.0.0.2:9300", "user@127.0.0.1", ""] {
         let (s, _, body) = call(&a, "POST", "/enrol/redeem", &[("host", host)], None).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "host {host:?}");
@@ -470,7 +490,7 @@ async fn fr_c2_foreign_host_and_origin_are_refused() {
 
 #[tokio::test]
 async fn fr_c2_trace_connect_head_and_upgrade_are_refused() {
-    let a = unlimited(&door(&[]), EnrolDoor::routes());
+    let a = unlimited(&door(&[]), Router::new());
     for m in ["HEAD", "TRACE", "CONNECT"] {
         let (s, _, _) = call(&a, m, "/enrol/redeem", &[("host", HOST)], None).await;
         assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "{m}");
@@ -482,7 +502,7 @@ async fn fr_c2_trace_connect_head_and_upgrade_are_refused() {
 
 #[tokio::test]
 async fn fr_c2_oversized_body_is_413() {
-    let a = unlimited(&door(&[]), EnrolDoor::routes());
+    let a = unlimited(&door(&[]), Router::new());
     let ok = ENROL_MAX_BODY_BYTES.to_string();
     let big = (ENROL_MAX_BODY_BYTES + 1).to_string();
     for p in ["/", "/enrol/redeem", "/enrol/status/x", "/anything/else"] {
@@ -507,7 +527,7 @@ async fn fr_c2_oversized_body_is_413() {
 async fn fr_c2_the_enrol_door_uses_with_strict_path() {
     // The strict class: 10 redeems pass, the 11th is 429 with Retry-After.
     let d = door(&[]);
-    let a = d.wrap_limited(EnrolDoor::routes(), d.limits());
+    let a = d.wrap_limited(Router::new(), d.limits());
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         assert_eq!(at(&a, "203.0.113.1", "POST", ENROL_REDEEM_PATH, &[]).await.0, StatusCode::NOT_FOUND, "{i}");
     }
@@ -522,7 +542,7 @@ async fn fr_c2_the_enrol_door_uses_with_strict_path() {
     // The guest door's accept path is NOT strict on this door: ten POSTs are all 404 (the guest
     // budget is 5 a minute, so a 429 among them would mean the guest path was wired in).
     let d = door(&[]);
-    let a = d.wrap_limited(EnrolDoor::routes(), d.limits());
+    let a = d.wrap_limited(Router::new(), d.limits());
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         assert_eq!(at(&a, "203.0.113.2", "POST", ACCEPT_PATH, &[]).await.0, StatusCode::NOT_FOUND, "{i}");
     }
@@ -531,7 +551,7 @@ async fn fr_c2_the_enrol_door_uses_with_strict_path() {
 #[tokio::test]
 async fn fr_c2_per_address_limit_and_another_address_unaffected() {
     let d = door(&[]);
-    let a = with_cfg(&d, cfg_big_bucket(), EnrolDoor::routes());
+    let a = with_cfg(&d, cfg_big_bucket(), Router::new());
     // Strict: 10 a minute, counted whatever the answer (all 404 here).
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         assert_eq!(at(&a, "203.0.113.1", "POST", ENROL_REDEEM_PATH, &[]).await.0, StatusCode::NOT_FOUND, "{i}");
@@ -560,7 +580,7 @@ async fn fr_c2_an_empty_global_bucket_or_no_in_flight_permit_is_503_after_the_ad
     let d = door(&[]);
     // The bucket: burst 2, no refill. The third request, from a fresh address, is 503 with Retry-After: 1.
     let cfg = LimitConfig { global_per_second: 0.0, global_burst: 2.0, ..cfg_big_bucket() };
-    let a = with_cfg(&d, cfg, EnrolDoor::routes());
+    let a = with_cfg(&d, cfg, Router::new());
     assert_eq!(at(&a, "203.0.113.1", "GET", "/x", &[]).await.0, StatusCode::NOT_FOUND);
     assert_eq!(at(&a, "203.0.113.2", "GET", "/x", &[]).await.0, StatusCode::NOT_FOUND);
     let (s, h, body) = at(&a, "203.0.113.3", "GET", "/x", &[]).await;
@@ -572,7 +592,7 @@ async fn fr_c2_an_empty_global_bucket_or_no_in_flight_permit_is_503_after_the_ad
     // are served, 20 more are 429, and the bucket (burst 70, no refill) still has 10 tokens for
     // ten other addresses; the eleventh is 503.
     let cfg = LimitConfig { global_per_second: 0.0, global_burst: 70.0, ..cfg_big_bucket() };
-    let a = with_cfg(&d, cfg, EnrolDoor::routes());
+    let a = with_cfg(&d, cfg, Router::new());
     for i in 0..ENROL_OTHER_PER_MINUTE {
         assert_eq!(at(&a, "203.0.113.9", "GET", "/x", &[]).await.0, StatusCode::NOT_FOUND, "{i}");
     }
@@ -625,7 +645,7 @@ async fn fr_c2_an_empty_global_bucket_or_no_in_flight_permit_is_503_after_the_ad
 #[tokio::test]
 async fn fr_c2_a_limited_enrol_door_without_a_peer_address_refuses() {
     let d = door(&[]);
-    let a = d.app();
+    let a = d.app(test_enrol());
     let (s, h, body) = call(&a, "GET", "/", &[("host", HOST)], None).await;
     assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(json_of(&body), json!({ "error": "no peer address", "code": "internal" }));
@@ -647,7 +667,7 @@ async fn fr_c2_trusted_proxy_xff_is_read_only_from_a_trusted_peer() {
 
     // 1. Trusted proxy: the forwarded address is the key.
     let d = door(&[(ENROL_TRUSTED_PROXIES_VAR, proxy)]);
-    let a = d.wrap_limited(EnrolDoor::routes(), d.limits());
+    let a = d.wrap_limited(Router::new(), d.limits());
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         assert_eq!(redeem(&a, "198.51.100.7".into()).await, StatusCode::NOT_FOUND, "{i}");
     }
@@ -657,7 +677,7 @@ async fn fr_c2_trusted_proxy_xff_is_read_only_from_a_trusted_peer() {
 
     // 2. The same peer with NO trusted proxies: the header is ignored, the key is the peer.
     let d = door(&[]);
-    let a = d.wrap_limited(EnrolDoor::routes(), d.limits());
+    let a = d.wrap_limited(Router::new(), d.limits());
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         assert_eq!(redeem(&a, format!("198.51.100.{i}")).await, StatusCode::NOT_FOUND, "{i}");
     }
@@ -665,7 +685,7 @@ async fn fr_c2_trusted_proxy_xff_is_read_only_from_a_trusted_peer() {
 
     // 3. The GUEST variable has no effect on the enrol door: still keyed on the peer.
     let d = door(&[("EMBER_GUEST_TRUSTED_PROXIES", proxy)]);
-    let a = d.wrap_limited(EnrolDoor::routes(), d.limits());
+    let a = d.wrap_limited(Router::new(), d.limits());
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         assert_eq!(redeem(&a, format!("198.51.100.{i}")).await, StatusCode::NOT_FOUND, "{i}");
     }
@@ -673,7 +693,7 @@ async fn fr_c2_trusted_proxy_xff_is_read_only_from_a_trusted_peer() {
 
     // 4. An untrusted peer behind a trusted-proxy list cannot forge a key either.
     let d = door(&[(ENROL_TRUSTED_PROXIES_VAR, proxy)]);
-    let a = d.wrap_limited(EnrolDoor::routes(), d.limits());
+    let a = d.wrap_limited(Router::new(), d.limits());
     for i in 0..ENROL_ACCEPT_PER_MINUTE {
         let xff = format!("198.51.100.{i}");
         assert_eq!(at(&a, "203.0.113.9", "POST", ENROL_REDEEM_PATH, &[("x-forwarded-for", xff.as_str())]).await.0, StatusCode::NOT_FOUND, "{i}");
@@ -721,7 +741,7 @@ fn fr_c2_the_numbers_are_the_spec() {
 // ---- the real socket ----
 
 fn app_of(d: &EnrolDoor) -> Router {
-    d.app()
+    d.app(test_enrol())
 }
 
 async fn real_door(timeout: Duration, app: Router) -> (SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<std::io::Result<()>>) {
@@ -747,7 +767,7 @@ async fn d_bind() -> tokio::net::TcpListener {
 async fn fr_c2_the_real_door_answers_404_with_the_door_headers() {
     let d = door(&[]);
     let (addr, stop, task) = real_door(ENROL_HEADER_READ_TIMEOUT, app_of(&d)).await;
-    let r = raw(addr, "POST /enrol/redeem HTTP/1.1\r\nHost: 127.0.0.1:9300\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+    let r = raw(addr, "POST /enrol/nothing HTTP/1.1\r\nHost: 127.0.0.1:9300\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
     assert!(r.starts_with("HTTP/1.1 404"), "{r}");
     let lower = r.to_ascii_lowercase();
     assert!(lower.contains("x-content-type-options: nosniff"), "{r}");
@@ -764,7 +784,7 @@ async fn fr_c2_connection_cap() {
     let d = door(&[]);
     let listener = d_bind().await;
     let addr = listener.local_addr().unwrap();
-    let app = unlimited(&d, EnrolDoor::routes());
+    let app = unlimited(&d, Router::new());
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(EnrolDoor::serve_with(
         listener,
@@ -868,10 +888,14 @@ async fn fr_c2_graceful_shutdown_finishes_an_in_flight_request() {
 fn fr_c2_enrol_door_inventory_of_public_items() {
     let _: fn(SocketAddr, Option<SocketAddr>) -> Result<Option<EnrolDoor>, ember_server::enrol_door::DoorError> =
         EnrolDoor::from_env;
-    let _: fn() -> Router = EnrolDoor::routes;
+    let _: fn(Arc<Enrol>) -> Router = EnrolDoor::routes;
+    let _: fn(&EnrolDoor, Arc<Enrol>) -> Router = EnrolDoor::routes_for;
     let _: fn(&EnrolDoor, Router) -> Router = EnrolDoor::wrap;
     let _: fn(&EnrolDoor, Router, Arc<DoorLimits>) -> Router = EnrolDoor::wrap_limited;
-    let _: fn(&EnrolDoor) -> Router = EnrolDoor::app;
+    let _: fn(&EnrolDoor, Arc<Enrol>) -> Router = EnrolDoor::app;
+    let _: fn() -> ember_server::enrol_door::PollLimiter = ember_server::enrol_door::PollLimiter::new;
+    let _: fn(&ember_server::enrol_door::PollLimiter, &str, Instant) -> Result<(), Duration> =
+        ember_server::enrol_door::PollLimiter::check_at;
     let _: fn(&EnrolDoor) -> Arc<DoorLimits> = EnrolDoor::limits;
     let _: fn(&EnrolDoor) -> bool = EnrolDoor::is_remote;
     assert_eq!(ENROL_LISTEN_VAR, "EMBER_ENROL_LISTEN");

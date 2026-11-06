@@ -179,21 +179,6 @@ pub fn router(node: Node) -> Router {
         .route("/git/pr/create", post(git_pr_create_handler))
         // End FR-G5.
 
-// FR-G14, FR-G15: commit detail, revert and cherry-pick.
-async fn git_commit_show_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitShowRequest>) -> ApiResult<git_commit::GitCommitShowResponse> {
-    Ok(Json(git_commit::show(&n.0.policy, &r).await?))
-}
-
-async fn git_revert_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
-    let _guard = n.0.write_lock.lock().await;
-    Ok(Json(git_commit::revert(&n.0.policy, &r).await?))
-}
-
-async fn git_cherry_pick_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
-    let _guard = n.0.write_lock.lock().await;
-    Ok(Json(git_commit::cherry_pick(&n.0.policy, &r).await?))
-}
-// End FR-G14, FR-G15.
         .route("/git/status", post(git_status))
         .route("/git/diff", post(git_diff))
         .route("/git/stage", post(git_stage))
@@ -938,3 +923,20 @@ async fn term_attach_session(node: Node, id: String, mut ws: WebSocket) {
     let _ = sink.close().await;
     tracing::debug!(term = %id, client, "terminal client detached");
 }
+
+
+// FR-G14, FR-G15: commit detail, revert and cherry-pick.
+async fn git_commit_show_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitShowRequest>) -> ApiResult<git_commit::GitCommitShowResponse> {
+    Ok(Json(git_commit::show(&n.0.policy, &r).await?))
+}
+
+async fn git_revert_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_commit::revert(&n.0.policy, &r).await?))
+}
+
+async fn git_cherry_pick_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_commit::cherry_pick(&n.0.policy, &r).await?))
+}
+// End FR-G14, FR-G15.

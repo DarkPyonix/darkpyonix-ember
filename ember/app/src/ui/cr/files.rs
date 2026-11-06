@@ -30,7 +30,7 @@ pub use crate::ui::files::{
     Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
-use crate::ui::files::{choose_target, chip_label, chip_text_max, files_line, send_state};
+use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max, files_line, send_state};
 use super::characters::{CharState, Character};
 use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
@@ -1263,7 +1263,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         None => None,
     };
     let sheet_w = super::components::sheet_width(w, super::components::SHEET_WIDTH_DEFAULT);
-    let inner = sheet_w - 2.0 * SP[4];
+    let inner = chip_avail(sheet_w);
     let close = {
         let s = st.sheet.clone();
         move || s.set(None)
@@ -1286,7 +1286,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
             target_chip_width(&shown_label(l, *dim, glyph), glyph)
         })
         .collect();
-    let lines = super::project::wrap_lines(&widths, SP[1], inner);
+    let lines = chip_rows(&widths, SP[1], inner);
     EmberSheet("파일 보내기", open, close.clone(), None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));

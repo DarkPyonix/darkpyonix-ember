@@ -785,6 +785,37 @@ pub fn send_state(
     (blocker, can)
 }
 
+/// Space the sheet frame takes at each side besides the content padding (measured at 390 dp:
+/// the chips start at x 44 and the frame clips at x 346).
+pub const SHEET_FRAME_INSET: f32 = 24.0;
+/// The content padding of the send sheet at each side.
+pub const SEND_SHEET_PAD: f32 = 20.0;
+
+/// The width the chips may use in a sheet `sheet_w` wide.
+pub fn chip_avail(sheet_w: f32) -> f32 {
+    sheet_w - 2.0 * (SEND_SHEET_PAD + SHEET_FRAME_INSET)
+}
+
+/// Greedy rows of chips: the indices of `widths` per row, `gap` apart, so that no row is wider
+/// than `avail`. A chip wider than `avail` gets a row of its own.
+pub fn chip_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        match rows.last_mut() {
+            Some(row) if used + gap + w <= avail => {
+                row.push(i);
+                used += gap + w;
+            }
+            _ => {
+                rows.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    rows
+}
+
 /// The text of a receiver chip: the name, cut to fit, plus the offline tag for an offline device
 /// so the state is read as text and not only as a dimmed look. `fit` cuts a name to a pixel width.
 pub fn chip_label(
@@ -1337,6 +1368,25 @@ mod tests {
         assert_eq!(chip_label("PC", false, 100.0, cut), "PC");
         assert_eq!(chip_label("PC", true, 150.0, cut), "PC 오프라인");
         assert!(chip_label("긴이름", true, 150.0, |t, _| t.to_string()).ends_with(OFFLINE_TAG));
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_chips_wrap_before_they_overflow() {
+        let widths = [100.0, 160.0, 120.0, 200.0, 200.0];
+        let gap = 4.0;
+        for sheet_w in [390.0, 700.0] {
+            let avail = chip_avail(sheet_w);
+            let rows = chip_rows(&widths, gap, avail);
+            assert_eq!(rows.concat(), vec![0, 1, 2, 3, 4]);
+            for r in &rows {
+                let w: f32 = r.iter().map(|&i| widths[i]).sum::<f32>() + gap * (r.len() as f32 - 1.0);
+                assert!(w <= avail || r.len() == 1, "{sheet_w}: {w} > {avail}");
+            }
+        }
+        assert_eq!(chip_avail(390.0), 302.0);
+        assert_eq!(chip_rows(&widths, gap, chip_avail(390.0)), vec![vec![0, 1], vec![2], vec![3], vec![4]]);
+        assert_eq!(chip_rows(&widths, gap, chip_avail(700.0)), vec![vec![0, 1, 2, 3], vec![4]]);
     }
 
     #[test]

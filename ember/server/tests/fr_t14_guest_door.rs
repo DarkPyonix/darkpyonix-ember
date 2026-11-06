@@ -420,6 +420,7 @@ async fn fr_t14_every_owner_route_is_404_on_the_guest_door() {
         "/api/channels/x/guests",
         "/api/guest-door",
         "/api/computers",
+        "/api/computers/x/fs/read",
         "/api/devices",
         "/api/hub",
         "/api/hub/link",

@@ -396,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
         .merge(computers::metrics::router(computers.clone()))
+        .merge(computers::fs::router(computers.clone()))
         .merge(computers::ports::router(computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::ide::router_with_computers(sessions.clone(), ide, computers.clone()))

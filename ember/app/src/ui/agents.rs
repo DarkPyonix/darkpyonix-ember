@@ -19,7 +19,7 @@ use crate::server::ChatGptAccount;
 
 /// Said on every screen part whose settings are kept on this device only.
 pub const LOCAL_STORE_NOTE: &str =
-    "서버에 저장하는 API가 없어 이 기기에만 보관합니다. 서버가 준비되면 옮겨집니다.";
+    "이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670)";
 
 // ---------------------------------------------------------------------------------------------
 // Sections (FR-L20)
@@ -861,6 +861,11 @@ pub struct LocalStore {
     /// `None` until the user edits: the profiles are then derived from the real accounts
     /// ([`seed_profiles`]).
     pub profiles: Option<Vec<Profile>>,
+    /// The harness the owner chose as the default for new team members; `None` until chosen
+    /// (FR-L20). Never seeded from the Home catalog.
+    pub default_harness: Option<AgentHarness>,
+    /// The model id the owner chose with it; `None` until chosen.
+    pub default_model: Option<String>,
 }
 
 impl LocalStore {
@@ -871,6 +876,8 @@ impl LocalStore {
                 .map(|h| default_settings(*h))
                 .collect(),
             profiles: None,
+            default_harness: None,
+            default_model: None,
         }
     }
 
@@ -957,20 +964,392 @@ pub fn account_reset_line(harness_label: &str, sample: bool) -> String {
     }
 }
 
-/// The default harness, model and account the Models card shows as selected.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultPick {
-    pub harness: AgentHarness,
-    /// The model id kept in this device's settings for that harness, if any.
-    pub model: Option<String>,
-    pub account: String,
+// ---------------------------------------------------------------------------------------------
+// 새 팀원 기본값 (FR-L20, FR-L17) and 계정 추가 (FR-U1)
+// ---------------------------------------------------------------------------------------------
+
+/// A default the owner has not chosen yet.
+pub const NOT_CHOSEN: &str = "아직 정하지 않았습니다";
+/// The account chip when the server lists no account.
+pub const NO_ACCOUNTS: &str = "계정이 없습니다";
+/// The only row of the account sheet when there is no account.
+pub const ADD_ACCOUNT_FIRST: &str = "계정 추가에서 먼저 추가하세요";
+/// Under the default chips: what is stored where (the server keeps only the default account).
+/// TODO(server): the server has no default-harness or default-model field (#670); the choice
+/// lives in memory for this run only.
+pub const DEFAULTS_STORAGE_NOTE: &str =
+    "고른 하네스와 모델은 이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670). 기본 계정만 서버에 저장됩니다.";
+/// Why a harness cannot be picked: the server found no binary.
+pub const NOT_INSTALLED_REASON: &str = "감지되지 않았습니다";
+/// Why Gemini cannot be picked: the server has no adapter yet (D40).
+pub const HARNESS_SOON_REASON: &str = "준비 중입니다";
+/// The mark on a sample or demo value.
+pub const EXAMPLE_MARK: &str = "예시";
+/// Said in the 계정 추가 sheet: the app opens no login window; the server's user logs in.
+pub const NO_LOGIN_WINDOW_NOTE: &str =
+    "앱 안에서 로그인 창을 여는 기능은 아직 없습니다. 아래 명령을 서버를 실행하는 사용자로 터미널에서 실행한 뒤 로그인 확인을 누르세요.";
+/// The demo sheet calls nothing.
+pub const DEMO_ADD_NOTE: &str = "예시입니다. 서버를 호출하지 않았고 계정을 만들지 않았습니다.";
+/// A demo choice changes nothing.
+pub const DEMO_CHOICE_NOTE: &str = "예시입니다. 서버를 호출하지 않았습니다.";
+/// The server refused to create the account.
+pub const ADD_FAILED: &str = "계정을 만들지 못했습니다";
+/// The check call failed.
+pub const CHECK_FAILED: &str = "로그인을 확인하지 못했습니다";
+
+/// A fixed Korean sentence per HTTP status. The client's error text is English and may carry the
+/// server body or a URL, so it is never drawn (NFR-L4, FR-L17).
+pub fn account_error_ko(status: Option<u16>) -> &'static str {
+    match status {
+        Some(400) | Some(422) => "입력을 확인하세요",
+        Some(401) | Some(403) => "권한이 없습니다",
+        Some(404) => "계정을 찾을 수 없습니다",
+        Some(409) => "이미 있는 이름입니다",
+        Some(s) if s >= 500 => "서버가 처리하지 못했습니다",
+        Some(_) => "서버가 요청을 받아들이지 않았습니다",
+        None => "서버에 연결하지 못했습니다",
+    }
 }
 
-/// The selection comes from the account the server marks default (`is_default`) and this
-/// device's stored model for its harness. `None` when no account is marked default.
-pub fn default_pick(accounts: &[AccountInfo], default_ids: &[String], store: &LocalStore) -> Option<DefaultPick> {
-    let a = default_ids.iter().find_map(|id| accounts.iter().find(|a| &a.id == id))?;
-    Some(DefaultPick { harness: a.harness, model: store.settings(a.harness).model.clone(), account: a.label.clone() })
+/// The HTTP status of a server error, if the server answered at all.
+pub fn server_error_status(e: &crate::server::ServerError) -> Option<u16> {
+    match e {
+        crate::server::ServerError::Status { status, .. } => Some(*status),
+        crate::server::ServerError::Unauthorized(_) => Some(401),
+        _ => None,
+    }
+}
+
+/// What the two chips of the 새 팀원 기본값 card show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultChips {
+    pub harness: Option<AgentHarness>,
+    /// The model id the owner chose; never the catalog default.
+    pub model: Option<String>,
+    /// The label of the default account of the chosen harness.
+    pub account: Option<String>,
+}
+
+/// The chips come from what is stored: the harness and model this device keeps once the owner
+/// chose them, and the account the server marks default for that harness. With no harness
+/// chosen the account shows only when exactly one account is default (no guess among several).
+pub fn default_chips(accounts: &[AccountInfo], default_ids: &[String], store: &LocalStore) -> DefaultChips {
+    let defaults: Vec<&AccountInfo> = default_ids.iter().filter_map(|id| accounts.iter().find(|a| &a.id == id)).collect();
+    let harness = store.default_harness;
+    let account = match harness {
+        Some(h) => defaults.iter().find(|a| a.harness == h).map(|a| a.label.clone()),
+        None if defaults.len() == 1 => Some(defaults[0].label.clone()),
+        None => None,
+    };
+    DefaultChips { harness, model: harness.and(store.default_model.clone()), account }
+}
+
+fn mark(text: String, example: bool) -> String {
+    if example { format!("{text} ({EXAMPLE_MARK})") } else { text }
+}
+
+/// The harness chip: [`NOT_CHOSEN`] until the owner chose; the model only when chosen too.
+pub fn harness_chip_text(chips: &DefaultChips, model_name: impl Fn(AgentHarness, &str) -> String, example: bool) -> String {
+    match (chips.harness, chips.model.as_deref()) {
+        (None, _) => NOT_CHOSEN.to_string(),
+        (Some(h), Some(m)) => mark(format!("{} · {}", h.label(), model_name(h, m)), example),
+        (Some(h), None) => mark(h.label().to_string(), example),
+    }
+}
+
+/// The account chip: [`NO_ACCOUNTS`] when the server lists none, [`NOT_CHOSEN`] when none is default.
+pub fn account_chip_text(chips: &DefaultChips, account_count: usize, example: bool) -> String {
+    if account_count == 0 {
+        return NO_ACCOUNTS.to_string();
+    }
+    match &chips.account {
+        Some(a) => mark(a.clone(), example),
+        None => NOT_CHOSEN.to_string(),
+    }
+}
+
+/// One real account the sheet can choose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountOption {
+    pub id: String,
+    pub label: String,
+}
+
+/// The sheet's accounts: exactly the ones the server lists, `한도 가까움` on a limited one.
+pub fn account_options(accounts: &[AccountInfo]) -> Vec<AccountOption> {
+    accounts
+        .iter()
+        .map(|a| AccountOption {
+            id: a.id.clone(),
+            label: if a.limited {
+                format!("{} · {} · 한도 가까움", a.harness.label(), a.label)
+            } else {
+                format!("{} · {}", a.harness.label(), a.label)
+            },
+        })
+        .collect()
+}
+
+/// The sheet's rows: the accounts, or the single sentence that says to add one first.
+pub fn account_sheet_rows(options: &[AccountOption]) -> Vec<String> {
+    if options.is_empty() {
+        vec![ADD_ACCOUNT_FIRST.to_string()]
+    } else {
+        options.iter().map(|o| o.label.clone()).collect()
+    }
+}
+
+/// A harness the default picker lists, and why it cannot be chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessOption {
+    pub harness: AgentHarness,
+    pub installed: bool,
+    pub reason: Option<&'static str>,
+}
+
+impl HarnessOption {
+    pub fn enabled(&self) -> bool {
+        self.reason.is_none()
+    }
+}
+
+/// The harnesses with a model catalog; only a detected, installed one is enabled.
+pub fn harness_options(detected: &[DetectedAgent]) -> Vec<HarnessOption> {
+    [AgentHarness::ClaudeCode, AgentHarness::Codex, AgentHarness::Gemini]
+        .into_iter()
+        .map(|h| {
+            if h == AgentHarness::Gemini {
+                return HarnessOption { harness: h, installed: false, reason: Some(HARNESS_SOON_REASON) };
+            }
+            let installed = detected.iter().any(|d| d.installed && AgentHarness::of_kind(&d.kind) == Some(h));
+            HarnessOption { harness: h, installed, reason: (!installed).then_some(NOT_INSTALLED_REASON) }
+        })
+        .collect()
+}
+
+/// One row of the harness and model sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickRow {
+    pub harness: AgentHarness,
+    pub model: Option<String>,
+    pub label: String,
+    pub enabled: bool,
+}
+
+/// The rows: one per model of an enabled harness, one disabled row with the reason otherwise.
+/// `models` gives `(id, name)` pairs of a harness.
+pub fn pick_rows(options: &[HarnessOption], models: impl Fn(AgentHarness) -> Vec<(String, String)>) -> Vec<PickRow> {
+    let mut rows = Vec::new();
+    for o in options {
+        match o.reason {
+            None => {
+                for (id, name) in models(o.harness) {
+                    rows.push(PickRow {
+                        harness: o.harness,
+                        model: Some(id),
+                        label: format!("{} · {}", o.harness.label(), name),
+                        enabled: true,
+                    });
+                }
+            }
+            Some(reason) => rows.push(PickRow {
+                harness: o.harness,
+                model: None,
+                label: format!("{} · {}", o.harness.label(), reason),
+                enabled: false,
+            }),
+        }
+    }
+    rows
+}
+
+/// Keeps a chosen row on this device. A disabled row changes nothing; returns whether it did.
+pub fn apply_pick(store: &mut LocalStore, row: &PickRow) -> bool {
+    if !row.enabled {
+        return false;
+    }
+    store.default_harness = Some(row.harness);
+    store.default_model = row.model.clone();
+    true
+}
+
+/// A harness kind the 계정 추가 sheet lists. `note` is the server's own sentence for a kind it
+/// refuses (`login_instructions`); `None` means the server creates accounts of the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddKind {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub note: Option<&'static str>,
+}
+
+impl AddKind {
+    pub fn enabled(&self) -> bool {
+        self.note.is_none()
+    }
+}
+
+pub const ANTIGRAVITY_NOTE: &str = "Antigravity accounts are not supported yet.";
+pub const ACP_NOTE: &str = "ACP agent: log in with the agent's own CLI on the server. Ember does not isolate accounts for ACP agents yet.";
+
+pub fn add_account_kinds() -> [AddKind; 4] {
+    [
+        AddKind { kind: "claude-code", label: "Claude Code", note: None },
+        AddKind { kind: "codex", label: "Codex", note: None },
+        AddKind { kind: "antigravity", label: "Antigravity", note: Some(ANTIGRAVITY_NOTE) },
+        AddKind { kind: "acp", label: "ACP", note: Some(ACP_NOTE) },
+    ]
+}
+
+/// The Korean sentence for a disabled harness row. The UI is Korean only (NFR-L4), so the
+/// server's English note is never drawn; unknown notes get the generic sentence.
+pub fn account_note_ko(kind: &str, server_note: &str) -> String {
+    match (kind, server_note) {
+        ("antigravity", ANTIGRAVITY_NOTE) => "지원 준비 중입니다. 지금은 계정을 만들 수 없습니다".to_string(),
+        ("acp", ACP_NOTE) => "이 에이전트는 자신의 명령줄 도구로 로그인합니다. 서버가 계정을 만들지 않습니다".to_string(),
+        _ => "지금은 만들 수 없습니다".to_string(),
+    }
+}
+
+/// The note line of the login block: the sample note once (the sheet header draws it for the
+/// example already, so the block draws it only when the header did not); a server note is
+/// English, so it is not drawn.
+pub fn login_block_note(c: &CreatedLogin, header_has_sample_note: bool) -> Option<String> {
+    (c.note == DEMO_ADD_NOTE && !header_has_sample_note).then(|| c.note.clone())
+}
+
+/// What the server returned for a new account: the command to run, never logged.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CreatedLogin {
+    pub id: String,
+    pub command: String,
+    pub note: String,
+    /// The answer of the last 로그인 확인; `None` before any.
+    pub status: Option<String>,
+    pub checking: bool,
+}
+
+impl std::fmt::Debug for CreatedLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreatedLogin").field("id", &self.id).field("command", &"<hidden>").finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddPhase {
+    Form,
+    Busy,
+    Created(CreatedLogin),
+    Failed(String),
+}
+
+/// The state of the 계정 추가 sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddAccount {
+    pub open: bool,
+    pub kind: Option<&'static str>,
+    pub label: String,
+    pub phase: AddPhase,
+}
+
+impl AddAccount {
+    pub fn closed() -> AddAccount {
+        AddAccount { open: false, kind: None, label: String::new(), phase: AddPhase::Form }
+    }
+
+    /// A kind the server accepts and a label are needed; not while a call runs or after creation.
+    pub fn can_create(&self) -> bool {
+        let kind_ok = self.kind.is_some_and(|k| add_account_kinds().iter().any(|a| a.kind == k && a.enabled()));
+        kind_ok && !self.label.trim().is_empty() && matches!(self.phase, AddPhase::Form | AddPhase::Failed(_))
+    }
+}
+
+/// The created phase from the server's answer.
+pub fn created_phase(a: &crate::server::AccountWithLogin) -> AddPhase {
+    AddPhase::Created(CreatedLogin {
+        id: a.account.id.clone(),
+        command: a.login.login.clone(),
+        note: a.login.note.clone(),
+        status: None,
+        checking: false,
+    })
+}
+
+/// The sentence for the status a 로그인 확인 returned.
+pub fn check_line(status: &str) -> String {
+    match status {
+        "logged_in" => "로그인되어 있습니다".to_string(),
+        "logged_out" => "아직 로그인하지 않았습니다".to_string(),
+        _ => "로그인 상태를 알 수 없습니다".to_string(),
+    }
+}
+
+/// Demo mode's sample result: marked 예시, nothing was created.
+pub fn sample_created() -> AddPhase {
+    AddPhase::Created(CreatedLogin {
+        id: String::new(),
+        command: "CLAUDE_CONFIG_DIR=/example/claude claude auth login (예시)".to_string(),
+        note: DEMO_ADD_NOTE.to_string(),
+        status: None,
+        checking: false,
+    })
+}
+
+/// A sheet a capture can open at start (`EMBER_CR_AGENTS_SHEET`, debug builds only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetHook {
+    Harness,
+    Account,
+    AddAccount,
+    AddAccountLogin,
+}
+
+/// Pure parse of the hook value. A release build (`debug == false`) never opens a sheet.
+pub fn parse_sheet_hook(value: Option<&str>, debug: bool) -> Option<SheetHook> {
+    if !debug {
+        return None;
+    }
+    match value? {
+        "harness" => Some(SheetHook::Harness),
+        "account" => Some(SheetHook::Account),
+        "add-account" => Some(SheetHook::AddAccount),
+        "add-account-login" => Some(SheetHook::AddAccountLogin),
+        _ => None,
+    }
+}
+
+/// The hook read from `EMBER_CR_AGENTS_SHEET`.
+pub fn sheet_hook() -> Option<SheetHook> {
+    parse_sheet_hook(std::env::var("EMBER_CR_AGENTS_SHEET").ok().as_deref(), cfg!(debug_assertions))
+}
+
+/// The sample login command of the capture hook: it carries no secret.
+pub const SAMPLE_LOGIN_COMMAND: &str = "claude login (예시)";
+
+/// The 계정 추가 state a capture opens: the form, or the sample login block.
+pub fn hook_add_account(hook: Option<SheetHook>) -> AddAccount {
+    match hook {
+        Some(SheetHook::AddAccount) => AddAccount { open: true, ..AddAccount::closed() },
+        Some(SheetHook::AddAccountLogin) => AddAccount {
+            open: true,
+            kind: Some("claude-code"),
+            label: EXAMPLE_MARK.to_string(),
+            phase: AddPhase::Created(CreatedLogin {
+                id: String::new(),
+                command: SAMPLE_LOGIN_COMMAND.to_string(),
+                note: DEMO_ADD_NOTE.to_string(),
+                status: None,
+                checking: false,
+            }),
+        },
+        _ => AddAccount::closed(),
+    }
+}
+
+/// Below this width the two default chips stack so each shows its full text.
+pub const CHIPS_STACK_BELOW_DP: f32 = 560.0;
+
+pub fn chips_stacked(window_dp: f32) -> bool {
+    window_dp < CHIPS_STACK_BELOW_DP
 }
 
 #[cfg(test)]
@@ -1637,15 +2016,213 @@ mod tests {
         assert!(account_reset_line("Codex", true).contains("(예시)"));
     }
 
+    fn acct(id: &str, label: &str, h: AgentHarness, limited: bool) -> AccountInfo {
+        AccountInfo { id: id.into(), label: label.into(), harness: h, left_percent: None, limited }
+    }
+
+    fn catalog(h: AgentHarness) -> Vec<(String, String)> {
+        match h {
+            AgentHarness::ClaudeCode => vec![("opus".into(), "Opus".into()), ("sonnet".into(), "Sonnet".into())],
+            AgentHarness::Codex => vec![("gpt-5".into(), "GPT-5".into())],
+            _ => vec![],
+        }
+    }
+
     #[test]
-    fn fr_l20_default_pick_comes_from_the_default_account_and_settings() {
+    fn fr_l20_default_chips_say_not_chosen_when_nothing_is_stored() {
+        let chips = default_chips(&[], &[], &LocalStore::new());
+        assert_eq!(chips, DefaultChips { harness: None, model: None, account: None });
+        assert_eq!(harness_chip_text(&chips, |_, m| m.to_string(), false), NOT_CHOSEN);
+        assert_eq!(account_chip_text(&chips, 0, false), NO_ACCOUNTS);
+        assert_eq!(account_chip_text(&chips, 2, false), NOT_CHOSEN);
+        assert!(!NO_ACCOUNTS.contains("ncmnd"));
+    }
+
+    #[test]
+    fn fr_l17_agents_sheet_hook_is_debug_only() {
+        assert_eq!(parse_sheet_hook(Some("harness"), true), Some(SheetHook::Harness));
+        assert_eq!(parse_sheet_hook(Some("account"), true), Some(SheetHook::Account));
+        assert_eq!(parse_sheet_hook(Some("add-account"), true), Some(SheetHook::AddAccount));
+        assert_eq!(parse_sheet_hook(Some("add-account-login"), true), Some(SheetHook::AddAccountLogin));
+        assert_eq!(parse_sheet_hook(Some("nope"), true), None);
+        assert_eq!(parse_sheet_hook(None, true), None);
+        for v in ["harness", "account", "add-account", "add-account-login"] {
+            assert_eq!(parse_sheet_hook(Some(v), false), None);
+        }
+        let login = hook_add_account(Some(SheetHook::AddAccountLogin));
+        match login.phase {
+            AddPhase::Created(c) => assert!(c.command.contains(EXAMPLE_MARK) && !c.command.contains("CONFIG_DIR")),
+            other => panic!("{other:?}"),
+        }
+        assert!(!hook_add_account(None).open);
+    }
+
+    #[test]
+    fn fr_l17_default_chips_stack_below_560_dp() {
+        assert!(chips_stacked(390.0) && chips_stacked(559.0));
+        assert!(!chips_stacked(560.0) && !chips_stacked(1440.0));
+    }
+
+    #[test]
+    fn fr_l17_disabled_rows_always_carry_a_reason() {
+        let models = |_h: AgentHarness| vec![("m".to_string(), "M".to_string())];
+        for detected in [vec![], vec![det("claude-code", true, None)], vec![det("claude-code", true, None), det("codex", true, None)]] {
+            let rows = pick_rows(&harness_options(&detected), models);
+            assert!(!rows.is_empty());
+            for r in rows.iter().filter(|r| !r.enabled) {
+                let reason = [NOT_INSTALLED_REASON, HARNESS_SOON_REASON].into_iter().find(|x| r.label.contains(x));
+                assert!(reason.is_some(), "disabled row without reason: {}", r.label);
+                assert!(r.label.ends_with(reason.unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l20_default_chip_model_is_not_seeded_from_the_home_catalog() {
         let store = LocalStore::new();
-        assert_eq!(default_pick(&[], &[], &store), None);
-        let a = AccountInfo { id: "c1".into(), label: "Claude Max".into(), harness: AgentHarness::ClaudeCode, left_percent: None, limited: false };
-        assert_eq!(default_pick(&[a.clone()], &[], &store), None);
-        let pick = default_pick(&[a], &["c1".to_string()], &store).unwrap();
-        assert_eq!(pick.harness, AgentHarness::ClaudeCode);
-        assert_eq!(pick.account, "Claude Max");
-        assert_eq!(pick.model, store.settings(AgentHarness::ClaudeCode).model);
+        // The per-harness card still holds the seeded value; the chip never reads it.
+        assert!(store.settings(AgentHarness::ClaudeCode).model.is_some());
+        assert_eq!(default_chips(&[], &[], &store).model, None);
+        let mut chosen = LocalStore::new();
+        let row = PickRow { harness: AgentHarness::Codex, model: Some("gpt-5".into()), label: String::new(), enabled: true };
+        assert!(apply_pick(&mut chosen, &row));
+        let chips = default_chips(&[], &[], &chosen);
+        assert_eq!(harness_chip_text(&chips, |_, m| m.to_uppercase(), false), "Codex · GPT-5");
+        assert_eq!(harness_chip_text(&chips, |_, m| m.to_uppercase(), true), "Codex · GPT-5 (예시)");
+    }
+
+    #[test]
+    fn fr_l20_default_account_chip_shows_the_default_of_the_chosen_harness() {
+        let accounts = [acct("c1", "work", AgentHarness::ClaudeCode, false), acct("x1", "plus", AgentHarness::Codex, false)];
+        let ids = vec!["c1".to_string(), "x1".to_string()];
+        let mut store = LocalStore::new();
+        // Two defaults and no chosen harness: no guess.
+        assert_eq!(default_chips(&accounts, &ids, &store).account, None);
+        store.default_harness = Some(AgentHarness::Codex);
+        assert_eq!(default_chips(&accounts, &ids, &store).account.as_deref(), Some("plus"));
+        store.default_harness = Some(AgentHarness::ClaudeCode);
+        assert_eq!(default_chips(&accounts, &ids, &store).account.as_deref(), Some("work"));
+        // One default and no chosen harness: that one.
+        assert_eq!(default_chips(&accounts, &ids[..1], &LocalStore::new()).account.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn fr_l20_account_options_list_only_real_accounts_and_mark_limited() {
+        let accounts = [acct("c1", "work", AgentHarness::ClaudeCode, true), acct("x1", "plus", AgentHarness::Codex, false)];
+        let o = account_options(&accounts);
+        assert_eq!(o.len(), 2);
+        assert_eq!(o[0], AccountOption { id: "c1".into(), label: "Claude Code · work · 한도 가까움".into() });
+        assert_eq!(o[1].label, "Codex · plus");
+    }
+
+    #[test]
+    fn fr_l20_account_options_empty_says_to_add_one() {
+        let o = account_options(&[]);
+        assert!(o.is_empty());
+        assert_eq!(account_sheet_rows(&o), vec![ADD_ACCOUNT_FIRST.to_string()]);
+    }
+
+    #[test]
+    fn fr_l20_harness_options_disable_undetected_harnesses() {
+        let d = [det("claude-code", true, Some("2.1.4")), det("codex", false, None)];
+        let o = harness_options(&d);
+        assert!(o[0].enabled());
+        assert_eq!(o[1].reason, Some(NOT_INSTALLED_REASON));
+        assert_eq!(o[2].reason, Some(HARNESS_SOON_REASON));
+        let rows = pick_rows(&o, catalog);
+        assert_eq!(rows.iter().filter(|r| r.enabled).count(), 2);
+        assert_eq!(rows[0].label, "Claude Code · Opus");
+        let disabled = rows.iter().find(|r| r.harness == AgentHarness::Codex).unwrap();
+        assert!(!disabled.enabled && disabled.label.contains(NOT_INSTALLED_REASON));
+        let mut store = LocalStore::new();
+        assert!(!apply_pick(&mut store, disabled));
+        assert_eq!(store.default_harness, None);
+    }
+
+    #[test]
+    fn fr_l17_account_notes_are_korean_only() {
+        for k in add_account_kinds() {
+            if let Some(n) = k.note {
+                let ko = account_note_ko(k.kind, n);
+                assert!(ko.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)));
+                assert!(!ko.chars().any(|c| c.is_ascii_alphabetic()), "{ko}");
+            }
+        }
+        assert_eq!(account_note_ko("antigravity", ANTIGRAVITY_NOTE), "지원 준비 중입니다. 지금은 계정을 만들 수 없습니다");
+        assert_eq!(account_note_ko("acp", ACP_NOTE), "이 에이전트는 자신의 명령줄 도구로 로그인합니다. 서버가 계정을 만들지 않습니다");
+        assert_eq!(account_note_ko("acp", "Something new."), "지금은 만들 수 없습니다");
+    }
+
+    #[test]
+    fn fr_l17_login_block_sample_note_once() {
+        let AddPhase::Created(c) = sample_created() else { panic!() };
+        // the header draws the sample note in example mode, so the block draws none
+        let drawn = usize::from(true) + login_block_note(&c, true).iter().count();
+        assert_eq!(drawn, 1);
+        assert_eq!(login_block_note(&c, false).as_deref(), Some(DEMO_ADD_NOTE));
+    }
+
+    #[test]
+    fn fr_u1_add_account_sheet_disables_antigravity_and_acp_with_the_servers_note() {
+        let kinds = add_account_kinds();
+        assert!(kinds[0].enabled() && kinds[1].enabled());
+        assert_eq!(kinds[2].note, Some("Antigravity accounts are not supported yet."));
+        assert!(!kinds[2].enabled() && !kinds[3].enabled());
+        assert!(kinds[3].note.unwrap().starts_with("ACP agent: log in with the agent's own CLI"));
+        let mut a = AddAccount::closed();
+        a.label = "work".into();
+        a.kind = Some("antigravity");
+        assert!(!a.can_create());
+        a.kind = Some("codex");
+        assert!(a.can_create());
+        a.label = "  ".into();
+        assert!(!a.can_create());
+    }
+
+    #[test]
+    fn fr_u1_add_account_shows_the_returned_login_command_and_check_status() {
+        let made: crate::server::AccountWithLogin = serde_json::from_value(serde_json::json!({
+            "id": "a1", "agent": "claude-code", "label": "work", "status": "logged_out",
+            "login": { "login": "CLAUDE_CONFIG_DIR=/d claude auth login", "note": "Run on the server." }
+        }))
+        .unwrap();
+        let AddPhase::Created(c) = created_phase(&made) else { panic!("not created") };
+        assert_eq!(c.id, "a1");
+        assert_eq!(c.command, "CLAUDE_CONFIG_DIR=/d claude auth login");
+        assert_eq!(c.note, "Run on the server.");
+        assert_eq!(c.status, None);
+        assert!(!format!("{c:?}").contains("claude auth login"));
+        assert_eq!(check_line("logged_in"), "로그인되어 있습니다");
+        assert_eq!(check_line("logged_out"), "아직 로그인하지 않았습니다");
+        assert_eq!(check_line("unknown"), "로그인 상태를 알 수 없습니다");
+    }
+
+    #[test]
+    fn fr_l20_add_account_never_claims_a_login_window() {
+        let source = include_str!("cr/agents.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let old = ["계정 추가 창이", " 열립니다"].concat();
+        assert!(!production.contains(&old));
+        assert!(NO_LOGIN_WINDOW_NOTE.contains("로그인 창을 여는 기능은 아직 없습니다"));
+        assert!(DEFAULTS_STORAGE_NOTE.contains("이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670)"));
+    }
+
+    #[test]
+    fn fr_l17_account_errors_are_fixed_korean() {
+        assert_eq!(account_error_ko(Some(400)), "입력을 확인하세요");
+        assert_eq!(account_error_ko(Some(422)), "입력을 확인하세요");
+        assert_eq!(account_error_ko(Some(401)), "권한이 없습니다");
+        assert_eq!(account_error_ko(Some(403)), "권한이 없습니다");
+        assert_eq!(account_error_ko(Some(404)), "계정을 찾을 수 없습니다");
+        assert_eq!(account_error_ko(Some(409)), "이미 있는 이름입니다");
+        assert_eq!(account_error_ko(Some(503)), "서버가 처리하지 못했습니다");
+        assert_eq!(account_error_ko(None), "서버에 연결하지 못했습니다");
+        let e = crate::server::ServerError::Status { status: 409, message: "dup http://x".into() };
+        assert_eq!(server_error_status(&e), Some(409));
+        let source = include_str!("cr/agents.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("{ADD_FAILED}: {e}"));
+        assert!(!production.contains("{CHECK_FAILED}: {e}"));
+        assert!(!production.contains("바꾸지 못했습니다: {e}"));
     }
 }

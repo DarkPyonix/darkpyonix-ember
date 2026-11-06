@@ -45,6 +45,34 @@ pub struct Account {
     pub limited: bool,
 }
 
+/// The login commands the server returns with an account (`login_instructions`). The command
+/// names the account's config directory, so it is shown to the owner and never logged.
+#[derive(Clone, PartialEq, Default, Deserialize)]
+pub struct Login {
+    #[serde(default)]
+    pub login: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+impl std::fmt::Debug for Login {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Login").finish_non_exhaustive()
+    }
+}
+
+/// `POST /api/accounts` and `POST /api/accounts/{id}/check` answer: the account and its login.
+/// [`Account`] itself is decoded unchanged.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AccountWithLogin {
+    #[serde(flatten)]
+    pub account: Account,
+    #[serde(default)]
+    pub login: Login,
+}
+
 /// The weekly per-app cap of a ChatGPT account (FR-U4). OpenAI reports no figure, so `known`
 /// is false and the view points at where the user sets it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -352,6 +380,24 @@ impl ServerApi {
         Ok(Self::check(self.http.get(self.url("/accounts")).send().await?).await?.json().await?)
     }
 
+    /// `POST /api/accounts/{id}/default`: the per-agent default account (FR-U1, FR-L17).
+    pub async fn set_default_account(&self, id: &str) -> ServerResult<Account> {
+        let req = self.http.post(self.url(&default_path(id)));
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// `POST /api/accounts`: a new account with its own config directory and the login command.
+    pub async fn create_account(&self, agent: &str, label: &str) -> ServerResult<AccountWithLogin> {
+        let req = self.http.post(self.url("/accounts")).json(&create_account_body(agent, label));
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// `POST /api/accounts/{id}/check`: runs the agent's status command, records and returns it.
+    pub async fn check_account(&self, id: &str) -> ServerResult<AccountWithLogin> {
+        let req = self.http.post(self.url(&check_path(id)));
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
     /// ChatGPT plan accounts; an error (404 when sign-in is off, e.g. hosted) means none.
     pub async fn chatgpt_accounts(&self) -> ServerResult<Vec<ChatGptAccount>> {
         Ok(Self::check(self.http.get(self.url("/chatgpt/accounts")).send().await?).await?.json().await?)
@@ -404,6 +450,18 @@ fn status_error(status: u16, body: String) -> ServerError {
     }
 }
 
+fn default_path(id: &str) -> String {
+    format!("/accounts/{}/default", seg(id))
+}
+
+fn check_path(id: &str) -> String {
+    format!("/accounts/{}/check", seg(id))
+}
+
+fn create_account_body(agent: &str, label: &str) -> serde_json::Value {
+    json!({ "agent": agent, "label": label })
+}
+
 /// Percent-encode one path segment.
 fn seg(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -420,6 +478,29 @@ fn seg(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l17_choosing_an_account_posts_the_default_endpoint() {
+        assert_eq!(default_path("a1"), "/accounts/a1/default");
+        assert_eq!(default_path("a/b c"), "/accounts/a%2Fb%20c/default");
+        assert_eq!(check_path("a/b"), "/accounts/a%2Fb/check");
+        assert_eq!(create_account_body("codex", "work"), json!({ "agent": "codex", "label": "work" }));
+    }
+
+    #[test]
+    fn fr_u1_decodes_the_login_and_never_prints_the_command() {
+        let a: AccountWithLogin = serde_json::from_value(json!({
+            "id": "a1", "agent": "codex", "label": "w", "status": "logged_out", "is_default": false,
+            "config_dir": "/x", "login": { "env": {"CODEX_HOME": "/x"}, "login": "CODEX_HOME=/x codex login",
+            "status": "s", "logout": "l", "note": "n" }
+        }))
+        .unwrap();
+        assert_eq!(a.account.id, "a1");
+        assert_eq!(a.login.login, "CODEX_HOME=/x codex login");
+        assert!(!format!("{a:?}").contains("codex login"));
+        let bare: AccountWithLogin = serde_json::from_value(json!({ "id": "b", "agent": "x", "label": "l" })).unwrap();
+        assert_eq!(bare.login, Login::default());
+    }
 
     #[test]
     fn fr_s11_server_api_default_headers_carry_a_sensitive_bearer() {

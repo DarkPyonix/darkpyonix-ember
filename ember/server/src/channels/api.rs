@@ -40,7 +40,21 @@
 //! channel in the last 30 minutes (403), and at most 6 posts a minute per session and channel
 //! (429). The session's own A2A switch is not consulted. The message never parses mentions.
 //!
+//! | GET    | `/api/channels/{id}/guests` | → `[{id, name, created_at, expires_at, revoked_at, allow_until}]` (FR-T17) |
+//! | PUT    | `/api/channels/{id}/guests/{guest_id}/allow` | `{hours}` (whole, 1..=168; else 400 `invalid_hours`) → `{guest_id, allow_until, capped}` |
+//! | DELETE | `/api/channels/{id}/guests/{guest_id}/allow` | → 204, the allowance ends at once |
+//! | DELETE | `/api/channels/{id}/guests/{guest_id}` | → 204, the guest credential is revoked at once |
+//!
+//! `allow_until` is never beyond the guest credential's own expiry (`capped` says when it was cut).
+//! The channel (`GET /api/channels`, `GET /api/channels/{id}`) lists its present `guests` as
+//! `[{id, name, allow_until}]`, `allow_until` null when no allowance is in force.
+//!
 //! A posted message is also pushed as `channel_message` on `/api/push` (FR-L12).
+//!
+//! Every message carries `author_name` and `author_kind` besides `from` (FR-T15): `나`/`person`
+//! for `user`, the member name/`agent` for a session id, the guest's display name/`guest` for
+//! `guest:<id>`, and `system`/`system`. They are derived at read time, so an owner client renders
+//! a guest without knowing guest ids.
 //!
 //! `from` defaults to `user`; otherwise it is a member agent's session id. Errors are
 //! `{error, code}` with `code` one of `not_found`, `bad_request`, `forbidden`, `internal`.
@@ -50,7 +64,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -106,6 +120,11 @@ fn build(ctx: ChannelsCtx) -> Router {
         .route("/api/channels/{id}/mentions/preview", post(preview))
         .route("/api/channels/{id}/feed", get(feed))
         .route("/api/channels/{id}/feed/{approval_id}/answer", post(answer_feed))
+        .route("/api/channels/{id}/invites", get(list_invites).post(create_invite))
+        .route("/api/channels/{id}/invites/{invite_id}", delete(revoke_invite))
+        .route("/api/channels/{id}/guests", get(list_guests))
+        .route("/api/channels/{id}/guests/{guest_id}", delete(revoke_guest))
+        .route("/api/channels/{id}/guests/{guest_id}/allow", put(set_allowance).delete(clear_allowance))
         .with_state(ctx)
 }
 
@@ -118,6 +137,14 @@ impl IntoResponse for ChannelError {
             ChannelError::NotAMember(names) => {
                 let body = json!({ "error": format!("{self:#}"), "code": "not_a_member", "reason": "not_a_member", "unknown": names });
                 return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+            }
+            ChannelError::Coded(code, _) => {
+                let status = if matches!(*code, "rate_limited" | "quota_exceeded") {
+                    StatusCode::TOO_MANY_REQUESTS
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
+                (status, *code)
             }
             ChannelError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         };
@@ -177,13 +204,24 @@ async fn post_message(
 
 /// Store a message, append it to the JSONL file and push it (FR-T16, FR-L12).
 fn append_and_publish(c: &ChannelsCtx, id: &str, from: &str, text: &str) -> ApiResult<super::Message> {
-    // FR-T16: insert the row, then append the line, both under the log's lock so lines reach the
-    // file in seq order; if the append fails the row is deleted and the caller gets 500.
-    let _guard = c.jsonl.as_ref().map(|j| j.guard());
-    let message = c.store.post_channel_message(id, from, text)?;
-    if let Some(j) = &c.jsonl {
+    persist_and_publish(&c.store, &c.sessions, c.jsonl.as_deref(), id, || c.store.post_channel_message(id, from, text))
+}
+
+/// Run `insert` (which stores the row), append the line, then push (FR-T16, FR-L12). Insert and
+/// append happen under the log's lock so lines reach the file in seq order; if the append fails
+/// the row is deleted and the caller gets 500. Shared by the owner and the guest routes.
+pub(super) fn persist_and_publish(
+    store: &Store,
+    sessions: &Sessions,
+    jsonl: Option<&super::jsonl::JsonlLog>,
+    id: &str,
+    insert: impl FnOnce() -> ApiResult<super::Message>,
+) -> ApiResult<super::Message> {
+    let _guard = jsonl.map(|j| j.guard());
+    let message = insert()?;
+    if let Some(j) = jsonl {
         if let Err(e) = j.append(id, &message) {
-            let _ = c.store.delete_channel_message(message.seq);
+            let _ = store.delete_channel_message(message.seq);
             return Err(match e {
                 ChannelError::Other(_) => e,
                 other => ChannelError::Other(anyhow::anyhow!("{other}")),
@@ -191,7 +229,7 @@ fn append_and_publish(c: &ChannelsCtx, id: &str, from: &str, text: &str) -> ApiR
         }
     }
     // Every attached client hears of it (FR-L12); no receiver is not an error.
-    c.sessions.publish(Push::ChannelMessage { channel_id: id.to_string(), message: message.clone() });
+    sessions.publish(Push::ChannelMessage { channel_id: id.to_string(), message: message.clone() });
     Ok(message)
 }
 
@@ -313,5 +351,74 @@ async fn answer_feed(
         .answer(&item.session_id, &approval_id, b.decision)
         .await
         .map_err(|e| ChannelError::Other(anyhow::anyhow!("{e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, Default)]
+struct InviteBody {
+    ttl_hours: Option<i64>,
+}
+
+/// FR-T14: the owner creates an invite; the token is in this answer only.
+async fn create_invite(
+    State(c): State<ChannelsCtx>,
+    Path(id): Path<String>,
+    body: Option<Json<InviteBody>>,
+) -> ApiResult<impl IntoResponse> {
+    let ttl = body.and_then(|Json(b)| b.ttl_hours);
+    let (invite, token) = c.store.create_invite(&id, USER, ttl)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": invite.id,
+            "token": token,
+            "link": format!("/join#{token}"),
+            "expires_at": invite.expires_at,
+        })),
+    ))
+}
+
+async fn list_invites(State(c): State<ChannelsCtx>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(c.store.list_invites(&id)?))
+}
+
+async fn revoke_invite(
+    State(c): State<ChannelsCtx>,
+    Path((id, invite_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    c.store.revoke_invite(&id, &invite_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_guests(State(c): State<ChannelsCtx>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(c.store.list_guests(&id)?))
+}
+
+/// FR-T17: allow one guest's mentions for the next `hours` whole hours. The body is read by hand
+/// so that a missing, malformed or non-integer `hours` is one `invalid_hours` error.
+async fn set_allowance(
+    State(c): State<ChannelsCtx>,
+    Path((id, guest_id)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> ApiResult<impl IntoResponse> {
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
+    let hours = super::allowance::check_hours(parsed.as_ref().and_then(|v| v.get("hours")))?;
+    let a = c.store.set_guest_allowance(&id, &guest_id, hours)?;
+    Ok(Json(json!({ "guest_id": guest_id, "allow_until": a.allow_until, "capped": a.capped })))
+}
+
+async fn clear_allowance(
+    State(c): State<ChannelsCtx>,
+    Path((id, guest_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    c.store.clear_guest_allowance(&id, &guest_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_guest(
+    State(c): State<ChannelsCtx>,
+    Path((id, guest_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    c.store.revoke_guest(&id, &guest_id)?;
     Ok(StatusCode::NO_CONTENT)
 }

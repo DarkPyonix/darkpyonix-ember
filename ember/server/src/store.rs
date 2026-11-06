@@ -142,6 +142,7 @@ const MIGRATIONS: &[&str] = &[
     crate::channels::READS_MIGRATION,
     crate::channels::MENTIONS_MIGRATION,
     crate::projects::schema::SETTINGS_MIGRATION,
+    crate::channels::invites::MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.
@@ -524,7 +525,8 @@ mod tests {
     fn fr_l26_old_database_gains_project_settings_columns() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ember.db");
-        let before = MIGRATIONS.len() - 1;
+        // The database stops just before the settings migration, wherever it sits in the list.
+        let before = MIGRATIONS.iter().position(|m| *m == crate::projects::schema::SETTINGS_MIGRATION).unwrap();
         {
             let mut conn = Connection::open(&path).unwrap();
             for (i, sql) in MIGRATIONS.iter().enumerate().take(before) {

@@ -47,13 +47,17 @@ CREATE TABLE IF NOT EXISTS a2a_switches (
 /// database that predates them. `origin_channel` and `origin_label` mark a message that a person
 /// typed in a channel (FR-T12): `from_session` then holds `channel:<channel id>`, which is never a
 /// session id.
-const ADDED_COLUMNS: &[(&str, &str)] = &[("origin_channel", "TEXT"), ("origin_label", "TEXT")];
+///
+/// `origin_guest_until` marks the message as a guest's (FR-T17): the guest's allowance end in Unix
+/// milliseconds, with `origin_label` holding the guest's display name.
+const ADDED_COLUMNS: &[(&str, &str)] =
+    &[("origin_channel", "TEXT"), ("origin_label", "TEXT"), ("origin_guest_until", "INTEGER")];
 
 /// Prefix of `from_session` for a message from a person in a channel.
 pub const CHANNEL_SENDER_PREFIX: &str = "channel:";
 
 const MESSAGE_COLUMNS: &str = "id, from_session, to_session, reply_to, text, created_at, delivered_at, \
-     origin_channel, origin_label";
+     origin_channel, origin_label, origin_guest_until";
 
 /// Idempotent: adds each missing column of [`ADDED_COLUMNS`] to `a2a_messages`.
 fn migrate(conn: &Connection) -> anyhow::Result<()> {
@@ -114,6 +118,10 @@ pub struct A2aMessage {
     /// The person's name at send time (e.g. `나`); set with `origin_channel`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_label: Option<String>,
+    /// Set for a message from a guest (FR-T17): the end of the allowance it was delivered under,
+    /// Unix milliseconds. `origin_label` is then the guest's display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_guest_until: Option<i64>,
 }
 
 pub struct A2aStore {
@@ -188,6 +196,7 @@ impl A2aStore {
             delivered_at: None,
             origin_channel: None,
             origin_label: None,
+            origin_guest_until: None,
         };
         self.insert(&msg)?;
         Ok(msg)
@@ -202,6 +211,30 @@ impl A2aStore {
         to: &str,
         text: &str,
     ) -> anyhow::Result<A2aMessage> {
+        self.insert_origin(channel_id, label, None, to, text)
+    }
+
+    /// Store a message a guest typed in `channel_id` (FR-T17), delivered under an allowance that
+    /// ends at `allow_until` (Unix ms). Same sender form as a person's message.
+    pub fn insert_guest_message(
+        &self,
+        channel_id: &str,
+        guest_name: &str,
+        allow_until: i64,
+        to: &str,
+        text: &str,
+    ) -> anyhow::Result<A2aMessage> {
+        self.insert_origin(channel_id, guest_name, Some(allow_until), to, text)
+    }
+
+    fn insert_origin(
+        &self,
+        channel_id: &str,
+        label: &str,
+        guest_until: Option<i64>,
+        to: &str,
+        text: &str,
+    ) -> anyhow::Result<A2aMessage> {
         let msg = A2aMessage {
             id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
             from_session: format!("{CHANNEL_SENDER_PREFIX}{channel_id}"),
@@ -212,6 +245,7 @@ impl A2aStore {
             delivered_at: None,
             origin_channel: Some(channel_id.into()),
             origin_label: Some(label.into()),
+            origin_guest_until: guest_until,
         };
         self.insert(&msg)?;
         Ok(msg)
@@ -220,8 +254,9 @@ impl A2aStore {
     fn insert(&self, msg: &A2aMessage) -> anyhow::Result<()> {
         self.conn.lock().unwrap().execute(
             "INSERT INTO a2a_messages
-                 (id, from_session, to_session, reply_to, text, created_at, origin_channel, origin_label)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (id, from_session, to_session, reply_to, text, created_at, origin_channel, origin_label,
+                  origin_guest_until)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 msg.id,
                 msg.from_session,
@@ -230,7 +265,8 @@ impl A2aStore {
                 msg.text,
                 msg.created_at,
                 msg.origin_channel,
-                msg.origin_label
+                msg.origin_label,
+                msg.origin_guest_until
             ],
         )?;
         Ok(())
@@ -406,6 +442,7 @@ fn row_to_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<A2aMessage> {
         delivered_at: r.get(6)?,
         origin_channel: r.get(7)?,
         origin_label: r.get(8)?,
+        origin_guest_until: r.get(9)?,
     })
 }
 

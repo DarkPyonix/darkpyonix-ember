@@ -27,6 +27,15 @@ struct Shared {
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
+thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
+
+/// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
+fn now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -92,11 +101,12 @@ pub mod page {
     use dioxus_compose::html::prelude::*;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
+    use super::{DOUBLE_SHIFT, now_ms, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, breadcrumb_text, tooltip_text, Side, Stripes, ToolWindow,
     };
-    use crate::ui::keymap::{Action, Keymap, Os};
+    use crate::ui::keymap::{Action, Chord, Keymap, Os};
+    use crate::ui::editor::DoubleShift;
     use crate::ui::project::{project_boxes, status_pill, SOON};
 
     pub fn app() -> Element {
@@ -202,6 +212,22 @@ pub mod page {
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let keymap = *key_s.keymap.read();
+                    let name = key_name(&event.key());
+                    let double = DOUBLE_SHIFT.with(|d| {
+                        d.borrow_mut().press(
+                            &name,
+                            event.is_auto_repeating(),
+                            m.contains(Modifiers::CONTROL),
+                            m.contains(Modifiers::ALT),
+                            m.contains(Modifiers::META),
+                            now_ms(),
+                        )
+                    });
+                    if double {
+                        if let Some(action) = keymap.action_for(&Chord::DoubleShift, Os::current()) {
+                            run_action(&key_s, action);
+                        }
+                    }
                     if let Some(action) = action_for_key(
                         keymap,
                         Os::current(),

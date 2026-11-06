@@ -127,7 +127,13 @@ async fn fr_n3_letify_revoking_a_device_cuts_its_relayed_path_at_once() {
     spawn_echo(&n.node, "svc");
     let conn = n.client.connect(n.node.peer_id(), "svc").await.unwrap();
     assert_eq!(echo_roundtrip(&conn, b"alive").await, b"alive");
-    assert!(matches!(conn.path_state(), PathState::Relayed { .. }));
+    // The path state is reported when the session settles on a path, which can trail the first
+    // echo on a loaded runner; wait for it instead of reading it at once (#351).
+    let settle = Instant::now() + Duration::from_secs(5);
+    while !matches!(conn.path_state(), PathState::Relayed { .. }) {
+        assert!(Instant::now() < settle, "the connection never reported a relayed path: {:?}", conn.path_state());
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     n.gate.revoke(&n.node.peer_id());
     // The relayed path is gone within a moment (not at the next keepalive).

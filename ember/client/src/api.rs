@@ -172,6 +172,71 @@ pub enum GitLogRefKind {
     Head,
 }
 
+/// Pull requests of the repository's GitHub remote (`POST /projects/{id}/git/prs`, FR-G8).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitPrs {
+    #[serde(default)]
+    pub prs: Vec<GitPr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPr {
+    pub number: u64,
+    pub title: String,
+    pub state: GitPrState,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub base: String,
+    /// ISO 8601 (`2026-11-05T10:00:00Z`).
+    #[serde(default)]
+    pub updated_at: String,
+    pub review: GitPrReview,
+    pub checks: GitPrChecks,
+    pub merge: GitPrMerge,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrState {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReview {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitPrChecks {
+    #[serde(default)]
+    pub passed: u32,
+    #[serde(default)]
+    pub failed: u32,
+    #[serde(default)]
+    pub pending: u32,
+}
+
+/// The merge gate: `reason` is the node's Korean text, also when `can_merge` is true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrMerge {
+    pub can_merge: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitStashEntry {
     pub index: u32,
@@ -624,6 +689,12 @@ impl Api {
     /// Read a page of repository history.
     pub async fn git_log(&self, project: &str, limit: u32, skip: u64, branch: Option<&str>) -> ApiResult<GitLog> {
         Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
+    }
+
+    /// List pull requests (`state` is `open`, `closed`, `merged` or `all`). The node runs the
+    /// computer's own `gh`; a missing or logged-out `gh` answers 409 with a Korean message.
+    pub async fn git_prs(&self, project: &str, state: &str, limit: u32) -> ApiResult<GitPrs> {
+        Self::decode(self.git_post(project, "prs", json!({ "state": state, "limit": limit })).await?)
     }
 
     pub async fn git_stash_list(&self, project: &str) -> ApiResult<Vec<GitStashEntry>> {
@@ -1242,6 +1313,114 @@ impl Api {
     /// Tokens one session's harness reported (FR-U7).
     pub async fn session_usage(&self, id: &str) -> ApiResult<SessionUsage> {
         self.get(&format!("/sessions/{}/usage", seg(id))).await
+    }
+}
+
+// ---- project settings (FR-L26) ----------------------------------------------------------------
+
+/// Why `PATCH /projects/{name}` failed. The server answers `{error, code}`; the status and the
+/// `code` are kept so a UI can pick its own sentence and never shows the raw text.
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectPatchError {
+    /// The server refused the patch: `code` is e.g. `name_taken`, `protected_project`,
+    /// `unknown_field`, `not_yet` (absent for an answer without a code).
+    #[error("server answered {status} ({code:?}): {message}")]
+    Rejected { status: u16, code: Option<String>, message: String },
+    /// Anything else: transport, authentication, undecodable answer.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+}
+
+impl ProjectPatchError {
+    /// The error `code` of a refusal, if the server sent one.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            ProjectPatchError::Rejected { code, .. } => code.as_deref(),
+            ProjectPatchError::Api(_) => None,
+        }
+    }
+
+    /// The HTTP status of a refusal.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            ProjectPatchError::Rejected { status, .. } => Some(*status),
+            ProjectPatchError::Api(ApiError::Status { status, .. }) => Some(*status),
+            ProjectPatchError::Api(_) => None,
+        }
+    }
+
+    /// Reads a non-success answer: status, `code` and `error` of a JSON body.
+    pub(crate) fn from_answer(status: u16, body: &[u8]) -> ProjectPatchError {
+        let text = String::from_utf8_lossy(body).into_owned();
+        let v: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+        let code = v.as_ref().and_then(|v| v.get("code")).and_then(|c| c.as_str()).map(str::to_string);
+        let message = v.as_ref().and_then(|v| v.get("error")).and_then(|e| e.as_str()).map(str::to_string).unwrap_or(text);
+        if status == 401 {
+            return ProjectPatchError::Api(ApiError::Unauthorized(message));
+        }
+        ProjectPatchError::Rejected { status, code, message }
+    }
+}
+
+impl Api {
+    /// `PATCH /projects/{name}` (FR-L26): only the fields set in `patch` are sent. Answers the
+    /// updated project; a rename answers under the new name.
+    pub async fn patch_project(&self, name: &str, patch: &crate::wire::ProjectPatch) -> Result<Project, ProjectPatchError> {
+        let body = serde_json::to_value(patch).expect("ProjectPatch serialises");
+        let raw = self.send(Method::PATCH, &format!("/projects/{}", seg(name)), Some(body)).await?;
+        if !raw.status.is_success() {
+            return Err(ProjectPatchError::from_answer(raw.status.as_u16(), &raw.body));
+        }
+        serde_json::from_slice(&raw.body).map_err(|e| ProjectPatchError::Api(ApiError::Decode(e.to_string())))
+    }
+}
+
+#[cfg(test)]
+mod project_patch_tests {
+    use super::*;
+    use crate::wire::{MemberDefaults, ProjectPatch};
+
+    #[test]
+    fn fr_l26_a_patch_sends_only_its_set_fields() {
+        let p = ProjectPatch { repository: Some("github.com/a/b".into()), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"repository": "github.com/a/b"}));
+        assert!(ProjectPatch::default().is_empty());
+        assert_eq!(serde_json::to_value(ProjectPatch::default()).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn fr_l26_clearing_sends_an_empty_string_or_null() {
+        let p = ProjectPatch { default_branch: Some(String::new()), member_defaults: Some(None), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"default_branch": "", "member_defaults": null}));
+        let p = ProjectPatch {
+            member_defaults: Some(Some(MemberDefaults { agent: Some("codex".into()), ..Default::default() })),
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"member_defaults": {"agent": "codex"}}));
+    }
+
+    #[test]
+    fn fr_l26_a_refusal_keeps_status_and_code() {
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"name taken","code":"name_taken"}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("name_taken")));
+        let e = ProjectPatchError::from_answer(502, b"bad gateway");
+        assert_eq!((e.status(), e.code()), (Some(502), None));
+        assert!(matches!(ProjectPatchError::from_answer(401, b"{}"), ProjectPatchError::Api(ApiError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn fr_l26_a_project_decodes_with_and_without_the_new_fields() {
+        let old: Project = serde_json::from_value(json!({"name": "p", "created_at": 1, "computers": ["local"]})).unwrap();
+        assert_eq!((old.repository, old.member_defaults, old.archived), (None, None, false));
+        let new: Project = serde_json::from_value(json!({
+            "name": "p", "repository": "r", "default_branch": "develop",
+            "member_defaults": {"agent": "codex", "mode": "plan"}, "character_style": "crew", "archived": false
+        }))
+        .unwrap();
+        assert_eq!(new.default_branch.as_deref(), Some("develop"));
+        assert_eq!(new.member_defaults.unwrap().mode.as_deref(), Some("plan"));
+        let nulls: Project = serde_json::from_value(json!({"name": "p", "member_defaults": null, "character_style": null})).unwrap();
+        assert_eq!(nulls.member_defaults, None);
     }
 }
 

@@ -853,36 +853,52 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
         AgentHarness::Antigravity,
     ];
 
-    if compact {
+    let cols = harness_columns(compact_window_width(compact));
+    if cols < 2 {
         for h in harnesses {
             HarnessCard(h, store, &live.detected, &profiles, compact);
         }
     } else {
-        cu::Row()
-            .alignment(Alignment::TopStart)
-            .spacing(SP[3])
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[0], store, &live.detected, &profiles, compact);
+        for pair in harnesses.chunks(cols) {
+            cu::Row()
+                .alignment(Alignment::TopStart)
+                .spacing(SP[3])
+                .modifier(Modifier::new().fill_max_width())
+                .content(|| {
+                    for h in pair {
+                        let h = *h;
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            HarnessCard(h, store, &live.detected, &profiles, compact);
+                        });
+                    }
                 });
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[1], store, &live.detected, &profiles, compact);
-                });
-            });
-        cu::Row()
-            .alignment(Alignment::TopStart)
-            .spacing(SP[3])
-            .modifier(Modifier::new().fill_max_width())
-            .content(|| {
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[2], store, &live.detected, &profiles, compact);
-                });
-                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[3], store, &live.detected, &profiles, compact);
-                });
-            });
+        }
     }
+}
+
+/// The window width the harness grid decides from; a compact layout is always one column.
+fn compact_window_width(compact: bool) -> f32 {
+    if compact { 0.0 } else { compose_rust::runtime::current_window_size().width_dp }
+}
+
+/// Columns of the harness cards (FR-L20): two from 1280 dp, one below. At 1024 dp two columns
+/// left each card about 320 dp, so the hints wrapped per character; the mockup keeps one column
+/// there.
+pub fn harness_columns(window_dp: f32) -> usize {
+    if window_dp >= 1280.0 { 2 } else { 1 }
+}
+
+/// Width of one harness card at `window_dp` with `nav` dp of navigation: the body is the window
+/// minus the navigation, the page padding and (on a desktop layout) the 200 dp section column
+/// with its 25 dp gap; `columns` cards share it with `SP[3]` between them.
+pub fn harness_card_width(window_dp: f32, nav: f32, columns: usize) -> f32 {
+    let n = columns.max(1) as f32;
+    let body = if window_dp <= 900.0 {
+        window_dp - nav - 2.0 * SP[3]
+    } else {
+        window_dp - nav - 2.0 * SP[6] - 200.0 - 25.0
+    };
+    ((body - SP[3] * (n - 1.0)) / n).max(0.0)
 }
 
 fn HarnessCard(
@@ -2237,32 +2253,43 @@ pub fn sample_bars() -> Vec<crate::ui::home::HarnessBar> {
     ]
 }
 
-// Models the harness card's share of the shell and section layout with expanded navigation.
-#[cfg(test)]
-fn agent_card_width(window_width: f32) -> f32 {
-    use crate::ui::shell::{nav_mode, ShellMode};
-    let nav = match nav_mode(window_width, false) {
-        ShellMode::BottomTabs => 0.0,
-        ShellMode::Rail => RAIL_W,
-        ShellMode::Sidebar => SIDE_W,
-    };
-    if window_width <= 900.0 {
-        (window_width - nav - 2.0 * SP[3]).max(0.0)
-    } else {
-        ((window_width - nav - 2.0 * SP[6] - 200.0 - 25.0 - SP[3]) / 2.0).max(0.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use compose_rust::{Host, Recomposer};
+
+    fn agent_card_width(window_width: f32) -> f32 {
+        use crate::ui::shell::{nav_mode, ShellMode};
+        let nav = match nav_mode(window_width, false) {
+            ShellMode::BottomTabs => 0.0,
+            ShellMode::Rail => RAIL_W,
+            ShellMode::Sidebar => SIDE_W,
+        };
+        harness_card_width(window_width, nav, harness_columns(window_width))
+    }
 
     #[test]
     fn fr_l20a_agent_card_width_fills_available_content() {
         assert_eq!(agent_card_width(390.0), 358.0);
         assert_eq!(agent_card_width(768.0), 664.0);
         assert_eq!(agent_card_width(1440.0), 450.5);
+    }
+
+    #[test]
+    fn fr_l20_the_harness_grid_is_one_column_until_1280_so_text_never_wraps_per_character() {
+        assert_eq!(
+            (harness_columns(1440.0), harness_columns(1280.0), harness_columns(1024.0), harness_columns(768.0), harness_columns(390.0)),
+            (2, 2, 1, 1, 1)
+        );
+        // 1024 (rail): one card of 679 dp, where two columns were about 320 dp each.
+        assert_eq!(agent_card_width(1024.0), 679.0);
+        assert!(agent_card_width(1024.0) > 600.0);
+        // No width makes a card narrower than 340 dp (a hint beside its control stays readable).
+        for w in [390.0, 560.0, 768.0, 900.0, 1024.0, 1280.0, 1440.0, 1920.0] {
+            assert!(agent_card_width(w) >= 340.0, "{w}");
+        }
+        assert_eq!(compact_window_width(true), 0.0);
+        assert_eq!(harness_columns(compact_window_width(true)), 1);
     }
 
     fn s(v: &[&str]) -> Vec<String> {

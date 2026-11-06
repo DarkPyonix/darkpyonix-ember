@@ -556,8 +556,8 @@ pub const CHIP_TEXT_CAPS: [f32; CHIP_COUNT] = [170.0, 240.0, 140.0, 150.0];
 /// The least text each chip keeps when a line is very narrow: project and computer four Korean
 /// glyphs (4 x 13.5), model and mode enough for "Claud...".
 pub const CHIP_TEXT_MINS: [f32; CHIP_COUNT] = [54.0, 40.0, 40.0, 54.0];
-/// Icon (16) and the chip's padding beside the text.
-const CHIP_FRAME: f32 = 30.0;
+/// Padding 8, icon 14, gap 4, chevron 12 with its gap 4 and padding 8 around the text (13 dp chips, cr/home.rs ComposerChip).
+const CHIP_FRAME: f32 = 50.0;
 const CHIP_GAP: f32 = 6.0;
 
 /// A label's width at the composer's chip font: about 13.5 dp per Korean glyph and 7.8 per ASCII
@@ -1838,10 +1838,16 @@ mod tests {
     }
 
     #[test]
-    fn fr_l15_demo_labels_fit_one_line_at_718() {
-        let b = composer_chip_budget(718.0);
-        let widths: Vec<f32> = demo_chip_labels().iter().zip(b).map(|(t, m)| composer_chip_width(&composer_fit_text(t, m))).collect();
-        assert_eq!(composer_chip_rows(&widths, 718.0).len(), 1, "{widths:?}");
+    fn fr_l15_demo_labels_fit_one_line_at_900_and_two_at_718() {
+        // The 13 dp chips carry an icon and a chevron (CHIP_FRAME 50), so the four demo chips need
+        // about 660 dp: one line from a 900 dp card, and two lines (never cut) at 718.
+        let rows = |w: f32| {
+            let b = composer_chip_budget(w);
+            let widths: Vec<f32> = demo_chip_labels().iter().zip(b).map(|(t, m)| composer_chip_width(&composer_fit_text(t, m))).collect();
+            composer_chip_rows(&widths, w).len()
+        };
+        assert_eq!(rows(900.0), 1);
+        assert_eq!(rows(718.0), 2);
     }
 
     #[test]

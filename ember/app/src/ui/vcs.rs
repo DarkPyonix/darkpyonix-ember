@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitBranchInfo, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrCheckState, GitPrCreated, GitPrDetail, GitPrMergeMethod, GitPrReview, GitPrReviewAction, GitPrReviewItem, GitPrReviewState, GitPrState, GitPrs, GitStashEntry, GitStatus,
+    ApiError, GitBranchInfo, GitCommitApplied, GitCommitDetail, GitCommitFileStatus, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrCheckState, GitPrCreated, GitPrDetail, GitPrMergeMethod, GitPrReview, GitPrReviewAction, GitPrReviewItem, GitPrReviewState, GitPrState, GitPrs, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -1381,6 +1381,251 @@ pub fn history_append(state: HistoryLoad, result: Result<GitLog, ApiError>, now:
         }
         Err(e) => (HistoryLoad::Ready { entries, more: true, loading_more: false }, Some(failure_text("다음 히스토리를 확인", &e))),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commit detail, revert, cherry-pick and a branch from a commit (FR-G14, FR-G15, #484)
+// ---------------------------------------------------------------------------------------------
+
+/// The most changed files the detail card lists; the rest is a count.
+pub const COMMIT_FILES_SHOWN: usize = 100;
+/// The most message-body lines the detail card shows.
+pub const COMMIT_BODY_LINES: usize = 12;
+
+/// One changed file of a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFileView {
+    pub path: String,
+    pub old_path: Option<String>,
+    /// "A", "M", "D", "R", "C" or "T".
+    pub status_letter: &'static str,
+    pub additions: u64,
+    pub deletions: u64,
+    pub binary: bool,
+}
+
+/// One commit in full, as the detail card shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetailView {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    /// The message after the subject, without blank lines, cut at `COMMIT_BODY_LINES`.
+    pub body_lines: Vec<String>,
+    pub author: String,
+    /// "3시간 전", or the node's own text when it is not a time this code reads.
+    pub time_text: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<HistoryRef>,
+    pub is_merge: bool,
+    pub files: Vec<CommitFileView>,
+    /// The files the commit changed, also those past what the node listed.
+    pub files_total: usize,
+    pub truncated: bool,
+}
+
+/// The state of the detail of the selected commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitDetailLoad {
+    Idle,
+    Loading,
+    Ready(CommitDetailView),
+    Failed(String),
+}
+
+/// The letter before a file in the list.
+pub fn file_status_letter(status: GitCommitFileStatus) -> &'static str {
+    match status {
+        GitCommitFileStatus::Added => "A",
+        GitCommitFileStatus::Modified => "M",
+        GitCommitFileStatus::Deleted => "D",
+        GitCommitFileStatus::Renamed => "R",
+        GitCommitFileStatus::Copied => "C",
+        GitCommitFileStatus::TypeChanged => "T",
+    }
+}
+
+/// The count after a file: "+12 -3", or "바이너리" for a file with no line counts.
+pub fn file_stat_text(additions: u64, deletions: u64, binary: bool) -> String {
+    if binary { "바이너리".to_string() } else { format!("+{additions} -{deletions}") }
+}
+
+/// The detail card's data for a node answer. `now` is unix seconds.
+pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
+    let files: Vec<CommitFileView> = d
+        .files
+        .iter()
+        .map(|f| CommitFileView {
+            path: f.path.clone(),
+            old_path: f.old_path.clone().filter(|o| !o.is_empty() && *o != f.path),
+            status_letter: file_status_letter(f.status),
+            additions: f.additions,
+            deletions: f.deletions,
+            binary: f.binary,
+        })
+        .collect();
+    let rank = |k: &GitLogRefKind| match k {
+        GitLogRefKind::Head => 0,
+        GitLogRefKind::Branch => 1,
+        GitLogRefKind::Remote => 2,
+        GitLogRefKind::Tag => 3,
+    };
+    let mut refs: Vec<HistoryRef> = d.refs.iter().map(|r| HistoryRef { label: ref_label(&r.name), kind: r.kind.clone() }).collect();
+    refs.sort_by_key(|r| rank(&r.kind));
+    // The node sends the whole message in `body` (subject first in some answers): drop a leading copy of the subject.
+    let mut lines = d.body.lines().map(str::trim_end).skip_while(|l| l.trim().is_empty());
+    let first = lines.clone().next();
+    if first.is_some_and(|l| l.trim() == d.subject.trim()) {
+        lines.next();
+    }
+    let body_lines: Vec<String> = lines.filter(|l| !l.trim().is_empty()).take(COMMIT_BODY_LINES).map(String::from).collect();
+    CommitDetailView {
+        sha: d.sha.clone(),
+        short: if d.short.is_empty() { d.sha.chars().take(7).collect() } else { d.short.clone() },
+        subject: d.subject.clone(),
+        body_lines,
+        author: d.author.clone(),
+        time_text: iso_to_unix(&d.time).map(|t| history_time_text(now, t)).unwrap_or_else(|| d.time.clone()),
+        parents: d.parents.clone(),
+        refs,
+        is_merge: d.parents.len() > 1,
+        files_total: d.files_total.max(files.len()),
+        truncated: d.truncated,
+        files,
+    }
+}
+
+/// Read one commit. Runs on the runtime, not the UI thread.
+pub async fn fetch_commit_detail(project: &str, sha: &str) -> Result<GitCommitDetail, ApiError> {
+    git_call(project, "commit/show", json!({ "sha": sha })).await
+}
+
+/// The detail as a view state. A failure keeps the node's Korean line, else a Korean one.
+pub fn commit_detail_from(result: Result<GitCommitDetail, ApiError>, now: i64) -> CommitDetailLoad {
+    match result {
+        Ok(d) => CommitDetailLoad::Ready(commit_detail_view(&d, now)),
+        Err(e) => CommitDetailLoad::Failed(commit_failure("커밋 확인", &e)),
+    }
+}
+
+/// The files shown and the line under them ("N개 더 있습니다") for the rest.
+pub fn commit_files_shown(v: &CommitDetailView) -> (&[CommitFileView], Option<String>) {
+    let shown = &v.files[..v.files.len().min(COMMIT_FILES_SHOWN)];
+    let more = v.files_total.saturating_sub(shown.len());
+    (shown, if more > 0 { Some(format!("{more}개 더 있습니다")) } else { None })
+}
+
+/// A Korean line for a failed commit call: the node's Korean message as it is; anything else
+/// (git's own text, a demo's) becomes "{what}에 실패했습니다" with a Korean reason, never raw English.
+pub fn commit_failure(what: &str, e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { .. } => format!("{what}에 실패했습니다. 잠시 후 다시 시도해 주세요"),
+        ApiError::Unauthorized(_) => format!("{what}에 실패했습니다. 서버 인증에 실패했습니다. 서버 토큰을 확인해 주세요"),
+        _ => format!("{what}에 실패했습니다. 서버에 닿지 않습니다"),
+    }
+}
+
+/// The two actions that change the current branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitAction {
+    Revert,
+    CherryPick,
+}
+
+impl CommitAction {
+    /// The button text.
+    pub fn label(self) -> &'static str {
+        match self {
+            CommitAction::Revert => "되돌리기",
+            CommitAction::CherryPick => "Cherry-pick",
+        }
+    }
+
+    /// The button text of the armed second tap.
+    pub fn armed_label(self) -> &'static str {
+        match self {
+            CommitAction::Revert => "정말 되돌립니다",
+            CommitAction::CherryPick => "정말 가져옵니다",
+        }
+    }
+
+    fn done_text(self) -> &'static str {
+        match self {
+            CommitAction::Revert => "되돌렸습니다",
+            CommitAction::CherryPick => "가져왔습니다",
+        }
+    }
+}
+
+/// Why an action cannot start, before any call. A merge commit cannot be cherry-picked (it has
+/// no single parent to diff against); both actions need a clean tracked tree. `dirty` is
+/// computed from the screen's snapshot; an unknown state is passed as clean and the node answers.
+pub fn commit_action_gate(action: CommitAction, dirty: bool, is_merge: bool) -> Result<(), &'static str> {
+    if action == CommitAction::CherryPick && is_merge {
+        return Err("병합 커밋은 가져올 수 없습니다");
+    }
+    if dirty {
+        return Err("작업 중인 변경이 있어 먼저 커밋하거나 스태시해야 합니다");
+    }
+    Ok(())
+}
+
+/// Whether the snapshot has changes to tracked files. An untracked file reads as an added file
+/// that is not staged (git leaves it alone on a revert), so it does not count.
+pub fn snapshot_dirty(snap: &RepoSnapshot) -> bool {
+    snap.changes.iter().any(|f| !(f.status == FileStatus::Added && !snap.staged.contains(&f.path)))
+}
+
+/// The key of one action on one commit in the armed state (`delete_tap`): two keys per commit,
+/// so arming 되돌리기 never confirms Cherry-pick and another commit starts unarmed.
+pub fn commit_action_key(sha: &str, action: CommitAction) -> usize {
+    let mut h: usize = 0xcbf2_9ce4;
+    for b in sha.bytes() {
+        h = (h ^ b as usize).wrapping_mul(0x0100_0193);
+    }
+    (h >> 1).wrapping_mul(2) + usize::from(action == CommitAction::CherryPick)
+}
+
+/// The notice after a revert or cherry-pick: the new commit's short sha.
+pub fn commit_applied_notice(action: CommitAction, new_sha: &str) -> String {
+    let short: String = new_sha.chars().take(7).collect();
+    if short.is_empty() {
+        format!("{}. 새 커밋이 만들어졌습니다", action.done_text())
+    } else {
+        format!("{}. 새 커밋 {short}", action.done_text())
+    }
+}
+
+async fn run_commit_apply(project: &str, sha: &str, action: CommitAction) -> Result<String, String> {
+    let op = if action == CommitAction::Revert { "revert" } else { "cherry-pick" };
+    git_call::<GitCommitApplied>(project, op, json!({ "sha": sha, "confirm": true }))
+        .await
+        .map(|a| commit_applied_notice(action, &a.new_sha))
+        .map_err(|e| commit_failure(action.label(), &e))
+}
+
+/// Revert a commit on the current branch. `Ok` is the notice, `Err` a Korean line (the node's
+/// conflict answer is Korean and shown as it is).
+pub async fn run_commit_revert(project: &str, sha: &str) -> Result<String, String> {
+    run_commit_apply(project, sha, CommitAction::Revert).await
+}
+
+/// Cherry-pick a commit onto the current branch. Same answers as `run_commit_revert`.
+pub async fn run_commit_cherry_pick(project: &str, sha: &str) -> Result<String, String> {
+    run_commit_apply(project, sha, CommitAction::CherryPick).await
+}
+
+/// Create `name` at `sha` and switch to it (the node's `branch` op with `from`).
+pub async fn run_branch_from(project: &str, name: &str, sha: &str) -> Result<String, String> {
+    let name = name.trim();
+    if !valid_branch_name(name) {
+        return Err("브랜치 이름을 확인해 주세요. 공백이나 쓸 수 없는 문자가 있습니다".to_string());
+    }
+    git_call::<Value>(project, "branch", branch_create_body(name, Some(sha)))
+        .await
+        .map(|_| format!("브랜치를 만들어 전환했습니다: {name}"))
+        .map_err(|e| commit_failure("브랜치 만들기", &e))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4675,5 +4920,171 @@ rename to new.txt
         let gate = ApiError::Status { status: 409, message: "CI 체크가 실패했습니다.".into(), code: None };
         assert_eq!(korean_failure("병합", &gate), "CI 체크가 실패했습니다.");
         assert!(!korean_failure("병합", &ApiError::Peer("refused".into())).contains("refused"));
+    }
+}
+
+#[cfg(test)]
+mod commit_detail_tests {
+    use super::*;
+    use ember_client::api::{GitCommitFile, GitLogRef};
+
+    fn file(path: &str, status: GitCommitFileStatus, add: u64, del: u64, binary: bool) -> GitCommitFile {
+        GitCommitFile { path: path.to_string(), old_path: None, status, additions: add, deletions: del, binary }
+    }
+
+    fn detail(parents: &[&str], files: Vec<GitCommitFile>) -> GitCommitDetail {
+        GitCommitDetail {
+            sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            short: "0123456".to_string(),
+            subject: "Feat: x".to_string(),
+            body: "Feat: x\n\nfirst line\n\nsecond line\n".to_string(),
+            author: "BREW".to_string(),
+            time: "2026-11-06T12:00:00+09:00".to_string(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            refs: vec![
+                GitLogRef { name: "refs/tags/v1".to_string(), kind: GitLogRefKind::Tag },
+                GitLogRef { name: "refs/heads/main".to_string(), kind: GitLogRefKind::Branch },
+            ],
+            files_total: files.len(),
+            files,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn fr_g14_status_letters_cover_every_status() {
+        assert_eq!(file_status_letter(GitCommitFileStatus::Added), "A");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Modified), "M");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Deleted), "D");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Renamed), "R");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Copied), "C");
+        assert_eq!(file_status_letter(GitCommitFileStatus::TypeChanged), "T");
+    }
+
+    #[test]
+    fn fr_g14_stat_text_is_counts_or_binary() {
+        assert_eq!(file_stat_text(12, 3, false), "+12 -3");
+        assert_eq!(file_stat_text(0, 0, false), "+0 -0");
+        assert_eq!(file_stat_text(0, 0, true), "바이너리");
+    }
+
+    #[test]
+    fn fr_g14_the_view_drops_the_subject_copy_and_blank_lines_and_reads_the_time() {
+        let now = iso_to_unix("2026-11-06T15:00:00+09:00").unwrap();
+        let v = commit_detail_view(&detail(&["p1"], vec![file("a.rs", GitCommitFileStatus::Modified, 1, 2, false)]), now);
+        assert_eq!(v.body_lines, ["first line", "second line"]);
+        assert_eq!(v.time_text, "3시간 전");
+        assert_eq!(v.short, "0123456");
+        assert!(!v.is_merge);
+        assert_eq!(v.refs[0].label, "main");
+        assert_eq!(v.refs[1].label, "v1");
+        assert_eq!(v.files[0].status_letter, "M");
+    }
+
+    #[test]
+    fn fr_g14_a_time_that_does_not_parse_is_shown_as_the_node_sent_it() {
+        let mut d = detail(&[], vec![]);
+        d.time = "yesterday".to_string();
+        assert_eq!(commit_detail_view(&d, 0).time_text, "yesterday");
+    }
+
+    #[test]
+    fn fr_g14_two_parents_are_a_merge_and_a_rename_keeps_its_old_path() {
+        let mut f = file("new.rs", GitCommitFileStatus::Renamed, 0, 0, false);
+        f.old_path = Some("old.rs".to_string());
+        let v = commit_detail_view(&detail(&["a", "b"], vec![f]), 0);
+        assert!(v.is_merge);
+        assert_eq!(v.files[0].old_path.as_deref(), Some("old.rs"));
+    }
+
+    #[test]
+    fn fr_g14_the_list_is_cut_at_100_and_says_how_many_more() {
+        let files: Vec<_> = (0..130).map(|i| file(&format!("f{i}.rs"), GitCommitFileStatus::Added, 1, 0, false)).collect();
+        let v = commit_detail_view(&detail(&["p"], files), 0);
+        let (shown, more) = commit_files_shown(&v);
+        assert_eq!(shown.len(), 100);
+        assert_eq!(more.as_deref(), Some("30개 더 있습니다"));
+        // The node cut its list: the total is larger than what came.
+        let mut d = detail(&["p"], vec![file("a", GitCommitFileStatus::Added, 1, 0, false)]);
+        d.files_total = 500;
+        d.truncated = true;
+        let v = commit_detail_view(&d, 0);
+        assert_eq!(commit_files_shown(&v).1.as_deref(), Some("499개 더 있습니다"));
+        let small = commit_detail_view(&detail(&["p"], vec![file("a", GitCommitFileStatus::Added, 1, 0, false)]), 0);
+        assert_eq!(commit_files_shown(&small).1, None);
+    }
+
+    #[test]
+    fn fr_g14_a_failed_read_is_a_korean_line() {
+        let en = ApiError::Status { status: 404, message: "no such commit".to_string(), code: None };
+        let ko = ApiError::Status { status: 404, message: "그런 커밋을 찾을 수 없습니다.".to_string(), code: None };
+        let CommitDetailLoad::Failed(a) = commit_detail_from(Err(en), 0) else { panic!() };
+        let CommitDetailLoad::Failed(b) = commit_detail_from(Err(ko), 0) else { panic!() };
+        assert!(!a.is_ascii() && !a.contains("no such"));
+        assert_eq!(b, "그런 커밋을 찾을 수 없습니다.");
+        assert!(matches!(commit_detail_from(Ok(detail(&[], vec![])), 0), CommitDetailLoad::Ready(_)));
+    }
+
+    #[test]
+    fn fr_g15_a_merge_commit_cannot_be_cherry_picked_but_can_be_reverted() {
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, false, true), Err("병합 커밋은 가져올 수 없습니다"));
+        assert_eq!(commit_action_gate(CommitAction::Revert, false, true), Ok(()));
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, false, false), Ok(()));
+    }
+
+    #[test]
+    fn fr_g15_a_dirty_tree_stops_both_actions() {
+        let line = "작업 중인 변경이 있어 먼저 커밋하거나 스태시해야 합니다";
+        assert_eq!(commit_action_gate(CommitAction::Revert, true, false), Err(line));
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, true, false), Err(line));
+        // A merge says why it cannot be picked before it talks about the tree.
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, true, true), Err("병합 커밋은 가져올 수 없습니다"));
+    }
+
+    #[test]
+    fn fr_g15_untracked_files_do_not_make_the_tree_dirty() {
+        let f = |path: &str, status| FileDiff { path: path.to_string(), old_path: None, status, binary: false, mode: None, hunks: vec![] };
+        let mut snap = RepoSnapshot::default();
+        assert!(!snapshot_dirty(&snap));
+        snap.changes = vec![f("new.txt", FileStatus::Added)];
+        assert!(!snapshot_dirty(&snap));
+        snap.staged.insert("new.txt".to_string());
+        assert!(snapshot_dirty(&snap));
+        snap.staged.clear();
+        snap.changes = vec![f("a.rs", FileStatus::Modified)];
+        assert!(snapshot_dirty(&snap));
+    }
+
+    #[test]
+    fn fr_g15_the_armed_keys_differ_by_commit_and_action() {
+        let (a, b) = ("0123456789abcdef", "fedcba9876543210");
+        assert_ne!(commit_action_key(a, CommitAction::Revert), commit_action_key(a, CommitAction::CherryPick));
+        assert_ne!(commit_action_key(a, CommitAction::Revert), commit_action_key(b, CommitAction::Revert));
+        assert_eq!(commit_action_key(a, CommitAction::Revert), commit_action_key(a, CommitAction::Revert));
+    }
+
+    #[test]
+    fn fr_g15_the_branch_form_uses_the_branch_name_rule() {
+        assert!(valid_branch_name("fix/from-abc1234"));
+        assert!(!valid_branch_name("bad name"));
+        assert!(!valid_branch_name("  "));
+    }
+
+    #[test]
+    fn fr_g15_labels_and_notices_are_korean_without_a_plain_da_ending() {
+        assert_eq!(CommitAction::Revert.armed_label(), "정말 되돌립니다");
+        assert_eq!(CommitAction::CherryPick.armed_label(), "정말 가져옵니다");
+        assert_eq!(commit_applied_notice(CommitAction::Revert, "abcdef0123"), "되돌렸습니다. 새 커밋 abcdef0");
+        assert_eq!(commit_applied_notice(CommitAction::CherryPick, ""), "가져왔습니다. 새 커밋이 만들어졌습니다");
+    }
+
+    #[test]
+    fn fr_g15_failures_keep_the_nodes_korean_and_never_show_english() {
+        let conflict = ApiError::Status { status: 409, message: "충돌이 나서 중단했습니다. 되돌리기를 취소했습니다.".to_string(), code: None };
+        assert_eq!(commit_failure("되돌리기", &conflict), "충돌이 나서 중단했습니다. 되돌리기를 취소했습니다.");
+        let en = ApiError::Status { status: 500, message: "error: could not revert".to_string(), code: None };
+        let line = commit_failure("Cherry-pick", &en);
+        assert!(!line.contains("could not"));
+        assert!(line.ends_with("다시 시도해 주세요"));
     }
 }

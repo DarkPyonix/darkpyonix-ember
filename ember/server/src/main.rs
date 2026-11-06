@@ -77,12 +77,15 @@ use ember_server::store::Store;
 ///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let started = std::time::SystemTime::now();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+    // Private MCP config files left by a crashed run hold env values such as runtime tokens.
+    ember_server::agents::claude_code::cleanup_stale_mcp_files(&std::env::temp_dir(), started);
 
     let data_dir = std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".ember")

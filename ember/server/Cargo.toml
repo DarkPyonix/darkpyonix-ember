@@ -48,6 +48,10 @@ zeroize = "1"
 # Project mount, macOS server: loopback NFSv3 server (BSD-3-Clause). See src/computers/mount.rs.
 nfsserve = { version = "0.11", optional = true }
 
+# axum::body::to_bytes reports a size-limit error as http_body_util::LengthLimitError; the enrol door tells it
+# apart from other read errors by type (it was a dev dependency only until #591).
+http-body-util = "0.1"
+
 # Project mount, Linux server: FUSE through fusermount3 (MIT; edition 2024, rustc >= 1.85).
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18", optional = true }
@@ -64,5 +68,4 @@ letify = ["ember-transport/letify"]
 ember-hub = { path = "../hub", features = ["fake"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }

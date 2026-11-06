@@ -1135,6 +1135,33 @@ impl Enrol {
         }
     }
 
+    /// The row of `enrol_id` when `poll_secret` is its poll secret: the secret is hashed and
+    /// compared in constant effort, and an unknown id, a row without a poll hash (never redeemed)
+    /// and a wrong secret all do the same work and give `None`. The caller holds the gate and has
+    /// settled. Shared by [`Enrol::take_delivery`] and [`Enrol::verify_poll`], so they cannot
+    /// disagree on who gets past the secret check.
+    fn row_for_secret(&self, enrol_id: &str, poll_secret: &str) -> Result<Option<Row>, EnrolError> {
+        let presented = digest(poll_secret);
+        let row = self.load(enrol_id)?;
+        let zero = vec![0u8; 32];
+        let stored = row.as_ref().and_then(|r| r.poll_hash.as_ref()).unwrap_or(&zero);
+        let matches = digests_eq(&presented, stored);
+        let known = row.as_ref().is_some_and(|r| r.poll_hash.is_some());
+        Ok(row.filter(|_| known && matches))
+    }
+
+    /// Whether `poll_secret` would get past the secret check of [`Enrol::take_delivery`], with no
+    /// delivery: `true` exactly when `take_delivery` would not answer [`Delivery::Unknown`] (the
+    /// row exists, has a poll hash, the digests match and the state is not `waiting`). It never
+    /// touches `pending`, never transitions a row and never hands out a token; the only write is
+    /// the time-based settle that every core call does first. The door uses it to limit only the
+    /// polls whose secret verified, so a caller without a valid secret takes no limiter slot.
+    pub fn verify_poll(&self, enrol_id: &str, poll_secret: &str, now_ms: i64) -> Result<bool, EnrolError> {
+        let g = self.gate();
+        self.settle(&g, now_ms)?;
+        Ok(self.row_for_secret(enrol_id, poll_secret)?.is_some_and(|r| r.state != State::Waiting))
+    }
+
     /// The node asks for its credential with its poll secret. The presented secret is hashed and
     /// compared in constant effort, and an unknown enrol id does the same work, so every bad
     /// secret and every unknown id is [`Delivery::Unknown`]. The token is returned once and
@@ -1142,13 +1169,7 @@ impl Enrol {
     pub fn take_delivery(&self, enrol_id: &str, poll_secret: &str, now_ms: i64) -> Result<Delivery, EnrolError> {
         let g = self.gate();
         self.settle(&g, now_ms)?;
-        let presented = digest(poll_secret);
-        let row = self.load(enrol_id)?;
-        let zero = vec![0u8; 32];
-        let stored = row.as_ref().and_then(|r| r.poll_hash.as_ref()).unwrap_or(&zero);
-        let matches = digests_eq(&presented, stored);
-        let known = row.as_ref().is_some_and(|r| r.poll_hash.is_some());
-        let Some(row) = row.filter(|_| known && matches) else {
+        let Some(row) = self.row_for_secret(enrol_id, poll_secret)? else {
             return Ok(Delivery::Unknown);
         };
         Ok(match row.state {
@@ -1885,6 +1906,68 @@ mod tests {
         let (_, other_secret) = open(&e, T0);
         assert!(matches!(e.take_delivery(&id, &other_secret, T0 + 9).unwrap(), Delivery::Unknown));
         assert!(matches!(e.take_delivery(&id, &secret, T0 + 10).unwrap(), Delivery::Joined { .. }));
+    }
+
+    #[test]
+    fn fr_c2_verify_poll_has_no_side_effect() {
+        let (_, e) = svc();
+        let fake = Fake::default();
+        let (id, secret) = open(&e, T0);
+        let wrong = format!("{POLL_PREFIX}{}", "0".repeat(96));
+        e.confirm(&id, None, T0 + 5, &fake).unwrap();
+        assert_eq!(e.pending.lock().unwrap().len(), 1);
+        assert!(e.verify_poll(&id, &secret, T0 + 6).unwrap());
+        assert!(e.verify_poll(&id, &secret, T0 + 7).unwrap(), "verifying twice changes nothing");
+        assert_eq!(e.pending.lock().unwrap().len(), 1, "the token is still pending");
+        assert_eq!(e.status(&id, T0 + 8).unwrap(), EnrolStatus::AwaitingConfirmation);
+        assert!(!e.verify_poll(&id, &wrong, T0 + 9).unwrap());
+        assert!(!e.verify_poll(&id, "", T0 + 9).unwrap());
+        assert!(!e.verify_poll("no-such-id", &secret, T0 + 9).unwrap());
+        assert_eq!(e.pending.lock().unwrap().len(), 1, "a wrong secret or unknown id takes nothing");
+        match e.take_delivery(&id, &secret, T0 + 10).unwrap() {
+            Delivery::Joined { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(e.pending.lock().unwrap().is_empty());
+        assert!(e.verify_poll(&id, &secret, T0 + 11).unwrap(), "joined still verifies");
+        assert!(matches!(e.take_delivery(&id, &secret, T0 + 12).unwrap(), Delivery::Delivered));
+    }
+
+    #[test]
+    fn fr_c2_verify_poll_agrees_with_take_delivery_on_who_gets_past_the_secret_check() {
+        let wrong = format!("{POLL_PREFIX}{}", "0".repeat(96));
+        let check = |e: &Enrol, id: &str, secret: &str, now: i64, label: &str| {
+            let v = e.verify_poll(id, secret, now).unwrap();
+            let d = e.take_delivery(id, secret, now).unwrap();
+            assert_eq!(v, !matches!(d, Delivery::Unknown), "{label}: verify_poll {v}, take_delivery {d:?}");
+        };
+        let fake = Fake::default();
+        // Waiting: minted, never redeemed, no poll hash.
+        let (_, e) = svc();
+        let m = mint(&e, T0);
+        check(&e, &m.id, m.code.expose(), T0 + 1, "waiting");
+        assert!(!e.verify_poll(&m.id, m.code.expose(), T0 + 1).unwrap());
+        // AwaitingConfirmation.
+        let (id, secret) = open(&e, T0);
+        check(&e, &id, &secret, T0 + 5, "awaiting_confirmation");
+        assert!(e.verify_poll(&id, &secret, T0 + 5).unwrap());
+        // Wrong secret and unknown id.
+        check(&e, &id, &wrong, T0 + 6, "wrong secret");
+        check(&e, &id, "", T0 + 6, "empty secret");
+        check(&e, "no-such-id", &secret, T0 + 6, "unknown id");
+        // Confirmed (verify first, then take_delivery inside check delivers; Joined follows).
+        let (id2, secret2) = open(&e, T0);
+        e.confirm(&id2, None, T0 + 7, &fake).unwrap();
+        check(&e, &id2, &secret2, T0 + 8, "confirmed");
+        // Joined (already delivered by the check above).
+        check(&e, &id2, &secret2, T0 + 9, "joined");
+        // Denied.
+        let (id3, secret3) = open(&e, T0);
+        e.deny(&id3, T0 + 7).unwrap();
+        check(&e, &id3, &secret3, T0 + 8, "denied");
+        // Expired.
+        let (id4, secret4) = open(&e, T0);
+        check(&e, &id4, &secret4, T0 + 1 + CONFIRM_WINDOW_MS + 1, "expired");
     }
 
     #[test]

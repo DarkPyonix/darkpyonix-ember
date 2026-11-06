@@ -697,6 +697,7 @@ dependencies = [
  "ember-node",
  "ember-transport",
  "futures",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "libc",

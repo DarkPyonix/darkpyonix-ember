@@ -42,7 +42,7 @@ use crate::ui::home::{
     model_catalog, modes_for, project_options, DEFAULT_PROJECT, Harness, Selection,
 };
 use super::components::{
-    pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel,
+    pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel, SearchField,
     FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
 };
 use super::project::PHONE_MENU_ROOM;
@@ -1036,7 +1036,6 @@ pub fn preview() {
 
 const ICON_CLOCK_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z\"/></svg>";
 const ICON_ZAP_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m3.75 13.5 10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75Z\"/></svg>";
-const ICON_SEARCH_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z\"/></svg>";
 const ICON_EDIT_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125\"/></svg>";
 const ICON_PLAY_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z\"/></svg>";
 
@@ -1370,38 +1369,7 @@ fn ListPane(
                         }
                     });
                 let q_set = query.clone();
-                cu::Row()
-                    .alignment(Alignment::CenterStart)
-                    .modifier(
-                        Modifier::new()
-                            .fill_max_width()
-                            .height(H_BTN)
-                            .background(paint(p.surface))
-                            .border(1.0, paint(p.line))
-                            .corner_radius(CORNER_SM),
-                    )
-                    .content(move || {
-                        cu::Spacer().modifier(Modifier::new().width(12.0));
-                        NavIcon(ICON_SEARCH_SVG, p.muted.to_argb(), 18.0);
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                        // The field takes the row's remaining width by weight (a box with
-                        // `weight(1.0)`, the field filling it), so it shrinks with the row and
-                        // never carries a width estimate that can overrun the 390 dp content.
-                        cu::Box().modifier(Modifier::new().weight(1.0).height(H_BTN)).content(move || {
-                            EmberField(FieldOptions {
-                                bare: true,
-                                background: Some(Paint::Literal(Color::argb(0))),
-                                border_width: Some(0.0),
-                                border_color: Some(Paint::Literal(Color::argb(0))),
-                                height: Some(H_BTN),
-                                fill_max_width: true,
-                                placeholder: "루틴 검색".to_string(),
-                                on_value_change: Some(Box::new(move |v| q_set.set(v))),
-                                ..Default::default()
-                            });
-                        });
-                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                    });
+                SearchField("루틴 검색", H_BTN, move |v| q_set.set(v));
                 if groups.is_empty() {
                     Label(
                         if entries.is_empty() {

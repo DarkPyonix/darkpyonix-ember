@@ -920,9 +920,83 @@ pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) 
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// SearchField (style.css `.searchbox`)
+// ---------------------------------------------------------------------------------------------
+
+/// The compact search height of the session sidebar (`.sside .st-q`).
+pub const SEARCH_FIELD_H_COMPACT: f32 = 36.0;
+/// The leading magnifier's size (`.searchbox svg`).
+pub const SEARCH_ICON_SIZE: f32 = 18.0;
+
+/// The pill radius of a search field of `height` (`.searchbox` is 999, capped at half the height).
+pub fn search_field_radius(height: f32) -> f32 {
+    (height / 2.0).min(PILL)
+}
+
+/// The leading padding before the magnifier: 16 at the 40 px height, 12 at the compact one.
+pub fn search_field_padding(height: f32) -> f32 {
+    if height < H_BTN { 12.0 } else { 16.0 }
+}
+
+/// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
+/// takes the rest of the row. The field is uncontrolled and keeps its hint `placeholder`.
+/// TODO(compose-rust#376, #374): the field frame and leading icon belong to the toolkit field.
+pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
+    let p = ember_theme().palette;
+    let placeholder = placeholder.to_string();
+    let on_change = std::rc::Rc::new(std::cell::RefCell::new(Some(on_change)));
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .height(height)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full),
+        )
+        .content(move || {
+            cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
+            super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            // The field takes the row's remaining width by weight, so it never overruns it.
+            let cb = on_change.clone();
+            let placeholder = placeholder.clone();
+            cu::Box().modifier(Modifier::new().weight(1.0).height(height)).content(move || {
+                EmberField(FieldOptions {
+                    bare: true,
+                    background: Some(Paint::Literal(Color::argb(0))),
+                    border_width: Some(0.0),
+                    border_color: Some(Paint::Literal(Color::argb(0))),
+                    height: Some(height),
+                    fill_max_width: true,
+                    placeholder: placeholder.clone(),
+                    on_value_change: cb.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
+                    ..Default::default()
+                });
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l10_1_search_field_height_radius_and_icon_size() {
+        assert_eq!(H_BTN, 40.0);
+        assert_eq!(SEARCH_FIELD_H_COMPACT, 36.0);
+        assert_eq!(SEARCH_ICON_SIZE, 18.0);
+        assert_eq!(search_field_radius(40.0), 20.0);
+        assert_eq!(search_field_radius(36.0), 18.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_padding_is_16_and_12_when_compact() {
+        assert_eq!(search_field_padding(H_BTN), 16.0);
+        assert_eq!(search_field_padding(SEARCH_FIELD_H_COMPACT), 12.0);
+    }
 
     #[test]
     fn type_roles_never_use_bold() {

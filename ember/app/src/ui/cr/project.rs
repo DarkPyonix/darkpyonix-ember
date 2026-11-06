@@ -29,7 +29,7 @@ use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip,
-    IconButton, Label, OptionSheet, Pill, PillTone, Select, SheetFooter,
+    IconButton, Label, OptionSheet, Pill, PillTone, SearchField, Select, SheetFooter,
 };
 use super::home::{content_width, fit_label, ring_image, text_px, Cols, Part};
 use super::notice;
@@ -321,14 +321,9 @@ pub fn ThemeButton(ui: &SharedUi) {
 fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if w > 900.0 {
         let q = st.query.clone();
-        // TODO(compose-rust#376, #374): the field frame, the magnifier and the "/" key hint.
+        // TODO(compose-rust#376, #374): the "/" key hint.
         cu::Column().modifier(Modifier::new().width(240.0)).content(|| {
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "팀원 검색".to_string(),
-                on_value_change: Some(Box::new(move |v| q.set(v))),
-                ..Default::default()
-            });
+            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
         });
     }
     let u_search = ui.clone();

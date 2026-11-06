@@ -71,3 +71,10 @@ ALTER TABLE projects ADD COLUMN member_defaults TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE projects ADD COLUMN character_style TEXT;
 ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
 ";
+
+/// Migration 25: the per-project profile override (FR-L26, FR-L20, #384 PR 3). `profile_overrides`
+/// is a nullable TEXT holding a JSON object that maps a harness name to an account id
+/// (`{"claude-code":"<account id>"}`); `NULL` means none. Existing rows get `NULL`.
+pub const PROFILE_OVERRIDES_MIGRATION: &str = "
+ALTER TABLE projects ADD COLUMN profile_overrides TEXT;
+";

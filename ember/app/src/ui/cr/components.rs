@@ -319,6 +319,8 @@ pub struct FieldOptions {
     pub weight: Option<f32>,
     pub fill_max_width: bool,
     pub placeholder: String,
+    /// Text the field starts with (selectable, copyable); `None` starts empty.
+    pub text: Option<String>,
     pub multiline: bool,
     /// `None` keeps the field enabled.
     pub enabled: Option<bool>,
@@ -365,6 +367,9 @@ pub fn EmberField(o: FieldOptions) {
         .placeholder(o.placeholder)
         .multiline(o.multiline)
         .enabled(o.enabled.unwrap_or(true));
+    if let Some(t) = o.text {
+        f = f.text(t);
+    }
     if let Some(r) = o.type_role {
         f = f.type_role(r);
     }

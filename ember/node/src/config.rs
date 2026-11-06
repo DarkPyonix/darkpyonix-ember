@@ -52,7 +52,20 @@ impl NodeConfig {
     ///   ([`crate::egress::EgressPolicy::from_env`]).
     pub fn from_env() -> anyhow::Result<Self> {
         let state_dir = default_state_dir();
-        let token = token_from(std::env::var("EMBER_NODE_TOKEN").ok(), state_dir.as_deref())?;
+        let (token, source) = token_with_source(std::env::var("EMBER_NODE_TOKEN").ok(), state_dir.as_deref())?;
+        // The source is logged, never the value: a stale environment token silently beats a newer
+        // enrol.json otherwise.
+        match source {
+            TokenSource::Env => {
+                tracing::info!(source = "EMBER_NODE_TOKEN", "node token source");
+                if let Some(dir) = state_dir.as_deref() {
+                    if std::fs::symlink_metadata(dir.join(crate::enrol::ENROL_FILE)).is_ok() {
+                        tracing::info!("EMBER_NODE_TOKEN is set and takes precedence over enrol.json");
+                    }
+                }
+            }
+            TokenSource::EnrolFile => tracing::info!(source = "enrol.json", "node token source"),
+        }
         let roots: Vec<PathBuf> = match std::env::var_os("EMBER_NODE_ROOTS") {
             Some(v) if !v.is_empty() => std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect(),
             _ => vec![PathBuf::from(
@@ -73,12 +86,26 @@ impl NodeConfig {
 /// `node_token` of `<state dir>/enrol.json`; otherwise an error. A malformed `enrol.json` is an
 /// error that names the file and never quotes it.
 pub fn token_from(env_token: Option<String>, state_dir: Option<&Path>) -> anyhow::Result<String> {
+    token_with_source(env_token, state_dir).map(|(token, _)| token)
+}
+
+/// Where the bearer token came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSource {
+    /// `EMBER_NODE_TOKEN`.
+    Env,
+    /// `<state dir>/enrol.json`.
+    EnrolFile,
+}
+
+/// [`token_from`] together with the source that supplied the token.
+pub fn token_with_source(env_token: Option<String>, state_dir: Option<&Path>) -> anyhow::Result<(String, TokenSource)> {
     if let Some(t) = env_token.filter(|t| !t.is_empty()) {
-        return Ok(t);
+        return Ok((t, TokenSource::Env));
     }
     if let Some(dir) = state_dir {
         if let Some(e) = crate::enrol::read_enrolment(dir)? {
-            return Ok(e.node_token);
+            return Ok((e.node_token, TokenSource::EnrolFile));
         }
     }
     anyhow::bail!("EMBER_NODE_TOKEN must be set to a non-empty secret or this node enrolled (ember-node enrol)")
@@ -198,7 +225,9 @@ mod tests {
             computer_id: "c".into(),
             enrolled_ms: 1,
         };
-        crate::enrol::write_enrolment(d.path(), &e, None, false).unwrap();
+        let lock = crate::enrol::lock_state_dir(d.path()).unwrap();
+        crate::enrol::write_enrolment(&lock, &e, None, false).unwrap();
+        drop(lock);
         d
     }
 
@@ -224,6 +253,20 @@ mod tests {
             assert!(err.contains("EMBER_NODE_TOKEN"), "{err}");
             assert!(err.contains("ember-node enrol"), "{err}");
         }
+    }
+
+    #[test]
+    fn fr_c2_node_config_token_with_source_reports_env_file_or_error() {
+        let d = enrolled_dir("from-file");
+        assert_eq!(token_with_source(Some("from-env".into()), Some(d.path())).unwrap(), ("from-env".to_string(), TokenSource::Env));
+        assert_eq!(token_with_source(None, Some(d.path())).unwrap(), ("from-file".to_string(), TokenSource::EnrolFile));
+        assert_eq!(
+            token_with_source(Some(String::new()), Some(d.path())).unwrap(),
+            ("from-file".to_string(), TokenSource::EnrolFile)
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert!(token_with_source(None, Some(empty.path())).is_err());
+        assert!(token_with_source(None, None).is_err());
     }
 
     #[test]

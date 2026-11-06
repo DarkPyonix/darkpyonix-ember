@@ -49,7 +49,7 @@ Written from `.scratch/pz/editor-parity-server-facts.md` (file and line evidence
 
 1. **The OSE runs on the server machine only.** `ember/server/src/ose.rs` spawns one OSE process per canonical project folder, on the server (`--host 127.0.0.1`, an OS-chosen port that is read and released before the child binds it, a 64-hex connection token). `ember/server/src/api/ide.rs:263-266` refuses a non-local computer with "OSE server is only available on the local computer"; the node has no OSE or `/ide` route (`ember/node/src/api.rs:147-203`). So remote files, language servers, file watching and extensions are all relative to the server's disk. How the OSE behaves when several folders share the default data dir (no `--server-data-dir`, `ose.rs:65`) is unknown.
 2. **The endpoint is a plain-TCP loopback address that the app dials itself** (`http://127.0.0.1:<port>`, `ember/editor/src/session.rs:112-120`). A device on another machine connects to itself. No relay, TLS or transport carries the OSE socket.
-3. **The IDE computer list is hand-written** (`EMBER_IDE_COMPUTERS`, TODO at `ide.rs:18-21`), separate from the computers registry, while the terminal relay expects registry ids; whether the names match is unknown. The terminal relay answers 400 for the local computer.
+3. **The IDE computer list is hand-written** (`EMBER_IDE_COMPUTERS`, TODO at `ide.rs:18-21`), separate from the computers registry, while the terminal relay expects registry ids; whether the names match is unknown. The terminal relay answers 400 for the local computer. **Resolved by #454:** the IDE computers come from the registry and the session's current computer, and `launch.computer` is the registry id; `EMBER_IDE_COMPUTERS` is only an override. For the local computer the id is `local`, so the terminal relay still answers 400 until #455.
 4. **Search and SCM have node routes but no editor path:** `POST /fs/glob`, `/fs/grep` on the node, the server's git relay; the editor calls none of them.
 5. **The companion extension is browser-only** (`package.json` declares `browser`, no `main`), so tasks, debug and the `ember-term` automation profile run only in the VS Code Web fallback, not in the Ember editor's Node extension host; `ember-editor-conn` answers `MainThreadTask*` and `MainThreadDebugService` with default replies.
 6. **Client limits:** one workspace folder (`session.rs:205`), no reconnect (the building block `reconnect_loop` exists), no configuration change at runtime.
@@ -58,7 +58,7 @@ Written from `.scratch/pz/editor-parity-server-facts.md` (file and line evidence
 
 | # | Task | Size | Unblocks | Issue |
 |---|---|---|---|---|
-| 1 | IDE computer from the registry and the session's current computer | small | terminal for any computer; prerequisite for 2 and 4 | #454 |
+| 1 | IDE computer from the registry and the session's current computer | small | terminal for any computer; prerequisite for 2 and 4 | #454 (built in the PR: `ide.rs` resolves registry plus `EMBER_IDE_COMPUTERS`; `launch.computer` is the registry id; tests `fr_w4_ide_computers.rs`) |
 | 2 | In-process node for the local computer's terminal relay | small to medium | terminal and tasks on the server machine | #455 |
 | 3 | Server relay of node file operations incl. glob and grep | small to medium | native search, tree and read/write for other computers | #456 |
 | 4 | **Decision**: remote-files model, OSE on the node (large) or the server OSE on the project mount (medium) | decision | remote files, language servers, extensions per computer | #457 |

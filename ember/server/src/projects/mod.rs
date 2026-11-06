@@ -10,6 +10,8 @@
 
 pub mod schema;
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +60,9 @@ pub struct Project {
     /// One of [`CHARACTER_STYLES`]; `null` means the client default.
     pub character_style: Option<String>,
     pub archived: bool,
+    /// Per harness, the account new members of this project use instead of the router's choice
+    /// (FR-L20). An account that has been deleted since reads as `null`.
+    pub profile_overrides: BTreeMap<String, Option<String>>,
 }
 
 /// `PATCH /api/projects/{name}`. Every field is optional; `Some(None)` clears a nullable field.
@@ -74,6 +79,10 @@ pub struct ProjectPatch {
     pub member_defaults: Option<Option<MemberDefaults>>,
     #[serde(default, deserialize_with = "nullable")]
     pub character_style: Option<Option<String>>,
+    /// Harness name to account id or `null`. The map replaces the stored one; `null` is refused
+    /// for the field itself (send `{}` to clear).
+    #[serde(default, deserialize_with = "nullable")]
+    pub profile_overrides: Option<Option<BTreeMap<String, Option<serde_json::Value>>>>,
 }
 
 /// Tell an absent field (`None`) from an explicit `null` (`Some(None)`).
@@ -116,7 +125,7 @@ const RENAMED_TABLES: &[&str] =
     &["project_computers", "channels", "sessions", "schedules", "teams", "browser_egress"];
 
 const PROJECT_COLUMNS: &str =
-    "name, created_at, repository, default_branch, member_defaults, character_style, archived";
+    "name, created_at, repository, default_branch, member_defaults, character_style, archived, profile_overrides";
 
 fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     let defaults: String = r.get(4)?;
@@ -129,6 +138,11 @@ fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         member_defaults: serde_json::from_str(&defaults).unwrap_or_default(),
         character_style: r.get(5)?,
         archived: r.get::<_, i64>(6)? != 0,
+        profile_overrides: r
+            .get::<_, Option<String>>(7)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .map(|m: BTreeMap<String, String>| m.into_iter().map(|(h, a)| (h, Some(a))).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -201,6 +215,58 @@ fn check_defaults(v: Option<&MemberDefaults>) -> Result<MemberDefaults, ProjectE
     Ok(MemberDefaults { agent, model, mode })
 }
 
+/// Validate a whole `profile_overrides` map and return what is stored (harness to account id,
+/// without the `null` entries). Every harness must be known and every account must exist and
+/// belong to that harness.
+fn check_overrides(
+    conn: &rusqlite::Connection,
+    v: Option<&BTreeMap<String, Option<serde_json::Value>>>,
+) -> Result<BTreeMap<String, String>, ProjectError> {
+    let Some(map) = v else {
+        return Err(bad("profile_overrides must be an object (send {} to clear)"));
+    };
+    let mut out = BTreeMap::new();
+    for (harness, value) in map {
+        let Some(kind) = crate::agents::AgentKind::parse(harness) else {
+            return Err(bad(format!("profile_overrides: {harness:?} is not a known harness")));
+        };
+        let Some(value) = value else { continue };
+        let id = match value.as_str().map(str::trim) {
+            Some(id) if !id.is_empty() => id,
+            _ => return Err(bad(format!("profile_overrides.{harness} must be an account id string or null"))),
+        };
+        let agent: Option<String> =
+            conn.query_row("SELECT agent FROM accounts WHERE id = ?1", params![id], |r| r.get(0)).optional()?;
+        match agent {
+            None => return Err(bad(format!("profile_overrides.{harness}: account {id} does not exist"))),
+            Some(a) if a != kind.as_str() => {
+                return Err(bad(format!("profile_overrides.{harness}: account {id} belongs to {a}, not {harness}")))
+            }
+            Some(_) => {}
+        }
+        out.insert(kind.as_str().to_string(), id.to_string());
+    }
+    Ok(out)
+}
+
+/// Report an override whose account is gone as `null` (the account delete does not touch
+/// projects; the override is simply not used).
+fn blank_dangling(conn: &rusqlite::Connection, projects: &mut [Project]) -> rusqlite::Result<()> {
+    if projects.iter().all(|p| p.profile_overrides.is_empty()) {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare("SELECT id FROM accounts")?;
+    let ids: std::collections::HashSet<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+    for p in projects {
+        for v in p.profile_overrides.values_mut() {
+            if v.as_ref().is_some_and(|id| !ids.contains(id)) {
+                *v = None;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_style(v: Option<&str>) -> Result<Option<String>, ProjectError> {
     match v {
         None => Ok(None),
@@ -229,6 +295,7 @@ impl Store {
         for p in &mut projects {
             p.computers = pairs.iter().filter(|(n, _)| *n == p.name).map(|(_, c)| c.clone()).collect();
         }
+        blank_dangling(&conn, &mut projects)?;
         Ok(projects)
     }
 
@@ -241,10 +308,19 @@ impl Store {
         let mut stmt =
             conn.prepare("SELECT computer_id FROM project_computers WHERE project = ?1 ORDER BY computer_id")?;
         project.computers = stmt.query_map(params![name], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        blank_dangling(&conn, std::slice::from_mut(&mut project))?;
         Ok(Some(project))
     }
 
+    /// The account the project's override names for `agent`, when it is set and the account
+    /// still exists (FR-L20). `None` lets the router choose.
+    pub fn project_account_override(&self, project: &str, agent: crate::agents::AgentKind) -> anyhow::Result<Option<String>> {
+        Ok(self.project(project)?.and_then(|p| p.profile_overrides.get(agent.as_str()).cloned().flatten()))
+    }
+
     /// Apply a partial settings change (FR-L26, #384) in one transaction.
+    ///
+    /// `profile_overrides` replaces the stored map as a whole; an empty map clears it.
     ///
     /// Order of refusals: unknown project (`NotFound`), 기본 프로젝트 rename (`Protected`), bad
     /// values (`BadRequest`), a taken name (`NameTaken`). A rename rewrites the name in every
@@ -270,7 +346,15 @@ impl Store {
 
         let final_name = {
             let mut conn = self.conn();
+            let overrides = match &patch.profile_overrides {
+                Some(v) => Some(check_overrides(&conn, v.as_ref())?),
+                None => None,
+            };
             let tx = conn.transaction()?;
+            if let Some(v) = &overrides {
+                let json = if v.is_empty() { None } else { Some(serde_json::to_string(v).map_err(anyhow::Error::from)?) };
+                tx.execute("UPDATE projects SET profile_overrides = ?1 WHERE name = ?2", params![json, name])?;
+            }
             if let Some(v) = &repository {
                 tx.execute("UPDATE projects SET repository = ?1 WHERE name = ?2", params![v, name])?;
             }
@@ -295,8 +379,9 @@ impl Store {
                 // first, the dependants move, then the old row goes.
                 tx.execute(
                     "INSERT INTO projects (name, created_at, repository, default_branch, member_defaults,
-                                           character_style, archived)
-                     SELECT ?1, created_at, repository, default_branch, member_defaults, character_style, archived
+                                           character_style, archived, profile_overrides)
+                     SELECT ?1, created_at, repository, default_branch, member_defaults, character_style, archived,
+                            profile_overrides
                      FROM projects WHERE name = ?2",
                     params![new, name],
                 )?;

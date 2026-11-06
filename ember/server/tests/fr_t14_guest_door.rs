@@ -1,6 +1,6 @@
 //! FR-T14: the guest door (`EMBER_GUEST_LISTEN`, PR 5a). Details are [provisional].
 //! The door is built in process (the guest router wrapped by `GuestDoor::wrap`) and driven
-//! with `oneshot`, so no socket is bound. Rate limits are PR 5b and not tested here.
+//! with `oneshot`, so no socket is bound. Rate limits, the bucket and the header timeout are tested in `fr_t14_guest_limits.rs`.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -75,45 +75,46 @@ fn fr_t14_guest_listen_equal_to_owner_listen_is_a_startup_error() {
     assert!(e.contains("EMBER_LISTEN"), "{e}");
 }
 
-const REFUSAL: &str = "the guest door is loopback only until the per-address rate limiters and the header-read timeout land (invite PR 5b); EMBER_GUEST_LISTEN_ALLOW_REMOTE has no effect yet";
-
-fn refused(addr: &str) {
-    for allow in [None, Some("0"), Some("1")] {
+/// A non-loopback bind needs `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1` (PR 5b made it effective again).
+fn needs_allow_remote(addr: &str) {
+    for allow in [None, Some("0"), Some("")] {
         let mut v = vec![("EMBER_GUEST_LISTEN", addr)];
         if let Some(a) = allow {
             v.push(("EMBER_GUEST_LISTEN_ALLOW_REMOTE", a));
         }
         let e = door_with(&v).unwrap_err();
-        assert!(e.contains(REFUSAL), "{addr} allow={allow:?}: {e}");
+        assert!(e.contains("EMBER_GUEST_LISTEN_ALLOW_REMOTE=1"), "{addr} allow={allow:?}: {e}");
     }
+    let d = door_with(&[("EMBER_GUEST_LISTEN", addr), ("EMBER_GUEST_LISTEN_ALLOW_REMOTE", "1")]).unwrap();
+    assert!(d.expect("door on").is_remote(), "{addr}");
 }
 
 #[test]
-fn fr_t14_door_refuses_0_0_0_0_even_with_allow_remote() {
-    refused("0.0.0.0:9000");
+fn fr_t14_door_refuses_0_0_0_0_without_allow_remote_and_binds_with_it() {
+    needs_allow_remote("0.0.0.0:9000");
 }
 
 #[test]
-fn fr_t14_door_refuses_the_unspecified_ipv6_even_with_allow_remote() {
-    refused("[::]:9000");
+fn fr_t14_door_refuses_the_unspecified_ipv6_without_allow_remote_and_binds_with_it() {
+    needs_allow_remote("[::]:9000");
 }
 
 #[test]
-fn fr_t14_door_refuses_an_ipv4_mapped_loopback_even_with_allow_remote() {
-    refused("[::ffff:127.0.0.1]:9000");
+fn fr_t14_door_treats_an_ipv4_mapped_loopback_as_remote() {
+    needs_allow_remote("[::ffff:127.0.0.1]:9000");
 }
 
 #[test]
-fn fr_t14_door_refuses_a_lan_address_even_with_allow_remote() {
-    refused("192.168.1.5:9000");
-    refused("10.0.0.7:9000");
+fn fr_t14_door_refuses_a_lan_address_without_allow_remote_and_binds_with_it() {
+    needs_allow_remote("192.168.1.5:9000");
+    needs_allow_remote("10.0.0.7:9000");
 }
 
 #[test]
 fn fr_t14_door_accepts_loopback_addresses() {
     for a in ["127.0.0.1:9000", "127.0.0.2:9000", "[::1]:9000"] {
-        assert!(door_with(&[("EMBER_GUEST_LISTEN", a)]).unwrap().is_some(), "{a}");
-        // The inert variable changes nothing for loopback.
+        let d = door_with(&[("EMBER_GUEST_LISTEN", a)]).unwrap().expect("door on");
+        assert!(!d.is_remote(), "{a}");
         assert!(door_with(&[("EMBER_GUEST_LISTEN", a), ("EMBER_GUEST_LISTEN_ALLOW_REMOTE", "1")]).unwrap().is_some());
     }
 }

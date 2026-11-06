@@ -741,8 +741,29 @@ fn sheet_presentation(window_width_dp: f32, monitor: bool) -> SheetPresentation 
     }
 }
 
-fn bottom_sheet_height(window_height_dp: f32) -> f32 {
-    window_height_dp.max(0.0) * 0.85
+/// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
+/// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
+pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
+    let h = window_height_dp.max(0.0);
+    match sheet_presentation(window_width_dp, monitor) {
+        SheetPresentation::Bottom => h * 0.85,
+        SheetPresentation::FullScreen => h,
+        SheetPresentation::Dialog => (h - 32.0).max(0.0),
+    }
+}
+
+/// The body height used while the window height is unknown (not yet reported).
+const SHEET_BODY_UNKNOWN_H: f32 = 240.0;
+
+/// The one formula for a sheet body's height: what is left of the sheet's maximum height after
+/// the header (and any footer), never negative. Every sheet body sizes itself with this.
+pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool, chrome_h: f32) -> f32 {
+    // A window that has not reported its height yet (0) is not a zero-high window: keep the body
+    // visible instead of collapsing it.
+    if window_height_dp <= 0.0 {
+        return SHEET_BODY_UNKNOWN_H;
+    }
+    (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h).max(0.0)
 }
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
@@ -827,7 +848,7 @@ pub fn EmberSheetSized(
         // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap
         // their content instead of occupying the full 85 percent height.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width().height(bottom_sheet_height(window.height_dp))
+            .modifier(modifier.fill_max_width().height(sheet_max_height(window.width_dp, window.height_dp, monitor))
                 .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
             .on_dismiss(on_dismiss)
             .content(body);
@@ -1076,7 +1097,31 @@ mod tests {
         assert_eq!(sheet_presentation(600.0, false), SheetPresentation::Dialog);
         assert_eq!(sheet_presentation(559.0, false), SheetPresentation::Bottom);
         assert_eq!(sheet_presentation(560.0, false), SheetPresentation::Dialog);
-        assert_eq!(bottom_sheet_height(1000.0), 850.0);
+        assert_eq!(sheet_max_height(390.0, 1000.0, false), 850.0);
+    }
+
+    #[test]
+    fn fr_l32_sheet_body_height_is_one_formula() {
+        // 85 percent of the window for the sheet, minus the 60 dp header.
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 60.0), 844.0 * 0.85 - 60.0);
+        assert_eq!(sheet_body_max_height(390.0, 700.0, false, 60.0), 700.0 * 0.85 - 60.0);
+        assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0);
+        // With a 65 dp footer as well.
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0);
+        // The real call sites at 390x844 and 390x640 keep a body well above 300 (header 60, footer 65).
+        for h in [844.0, 640.0] {
+            assert!(sheet_body_max_height(390.0, h, false, 60.0).min(900.0) > 300.0, "project {h}");
+            assert!(sheet_body_max_height(390.0, h, false, 125.0).min(600.0) > 300.0, "routines {h}");
+            assert!(sheet_body_max_height(390.0, h, false, 125.0).min(900.0) > 300.0, "new session {h}");
+            assert!(sheet_body_max_height(390.0, h, true, 60.0).min(1200.0) > 300.0, "monitor {h}");
+        }
+        // A window that has not reported its height does not collapse the body.
+        assert_eq!(sheet_body_max_height(390.0, 0.0, false, 60.0), 240.0);
+        // Never negative.
+        assert_eq!(sheet_body_max_height(390.0, 50.0, false, 125.0), 0.0);
+        // The monitor fills the screen at 390; a dialog keeps 32 dp of margin.
+        assert_eq!(sheet_body_max_height(390.0, 844.0, true, 60.0), 784.0);
+        assert_eq!(sheet_body_max_height(900.0, 900.0, false, 60.0), 808.0);
     }
 
     static DISMISSES: AtomicUsize = AtomicUsize::new(0);

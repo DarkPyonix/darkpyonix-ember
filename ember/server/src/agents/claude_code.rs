@@ -193,6 +193,61 @@ impl Drop for PrivateConfigFile {
     }
 }
 
+/// Whether `name` is exactly `ember-mcp-` + 32 lowercase hex digits + `.json`, the name
+/// [`PrivateConfigFile::create`] gives (a simple v4 UUID).
+fn is_mcp_file_name(name: &str) -> bool {
+    name.strip_prefix("ember-mcp-")
+        .and_then(|r| r.strip_suffix(".json"))
+        .is_some_and(|h| h.len() == 32 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// Remove `ember-mcp-<32 hex>.json` files that a crashed server left in `dir` (they hold env
+/// values such as the runtime token). Called once at server start. A file goes only when it is a
+/// regular file (not a symlink) owned by this user with mode exactly 0600, last modified before
+/// `started` (this process's start) and at least one hour ago: an agent that survived the previous
+/// server run (FR-S8) may still re-read its MCP servers from a recent file. Removal errors are
+/// ignored (one debug line). Returns the number removed; logs it at info when above zero.
+pub fn cleanup_stale_mcp_files(dir: &std::path::Path, started: std::time::SystemTime) -> usize {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        const MIN_AGE: Duration = Duration::from_secs(3600);
+        let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+        let now = std::time::SystemTime::now();
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_str().is_some_and(is_mcp_file_name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if !meta.file_type().is_file() || meta.uid() != me || meta.mode() & 0o777 != 0o600 {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else { continue };
+            let old_enough = now.duration_since(modified).is_ok_and(|age| age >= MIN_AGE);
+            if modified >= started || !old_enough {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::debug!("removing stale MCP config file failed: {e}"),
+            }
+        }
+        if removed > 0 {
+            tracing::info!("removed {removed} stale MCP config file(s) from a previous run");
+        }
+        removed
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, started);
+        0
+    }
+}
+
 /// `MCP_TIMEOUT` (milliseconds, Claude Code's MCP server start timeout) from the longest
 /// `startup_timeout_secs`, unless the server's environment already sets it. Overridden by the
 /// request's own `env`.
@@ -1145,5 +1200,109 @@ mod tests {
         let args = ClaudeCodeAdapter::args(&req);
         let i = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert_eq!(args[i..], ["--allowedTools", "mcp__ember-channels__channel_post"]);
+    }
+
+    #[cfg(unix)]
+    mod stale_mcp_files {
+        use super::super::cleanup_stale_mcp_files;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::time::{Duration, SystemTime};
+
+        const HEX: &str = "0123456789abcdef0123456789abcdef";
+
+        fn name(hex: &str) -> String {
+            format!("ember-mcp-{hex}.json")
+        }
+
+        fn make(dir: &std::path::Path, file: &str, mode: u32, age: Duration) -> std::path::PathBuf {
+            let p = dir.join(file);
+            std::fs::write(&p, "{}").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(SystemTime::now() - age).unwrap();
+            p
+        }
+
+        const DAY: Duration = Duration::from_secs(86_400);
+
+        #[test]
+        fn fr_t12_cleanup_removes_an_old_matching_private_file_and_counts_it() {
+            let d = tempfile::tempdir().unwrap();
+            let a = make(d.path(), &name(HEX), 0o600, DAY);
+            let b = make(d.path(), &name(&"f".repeat(32)), 0o600, 2 * DAY);
+            let started = SystemTime::now() - Duration::from_secs(60);
+            assert_eq!(cleanup_stale_mcp_files(d.path(), started), 2);
+            assert!(!a.exists() && !b.exists());
+            assert_eq!(cleanup_stale_mcp_files(d.path(), started), 0);
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_file_newer_than_the_server_start() {
+            let d = tempfile::tempdir().unwrap();
+            // Two hours old, but the server started three hours ago.
+            let p = make(d.path(), &name(HEX), 0o600, Duration::from_secs(2 * 3600));
+            let started = SystemTime::now() - Duration::from_secs(3 * 3600);
+            assert_eq!(cleanup_stale_mcp_files(d.path(), started), 0);
+            assert!(p.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_file_younger_than_one_hour() {
+            let d = tempfile::tempdir().unwrap();
+            let p = make(d.path(), &name(HEX), 0o600, Duration::from_secs(30 * 60));
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(p.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_file_with_another_mode() {
+            let d = tempfile::tempdir().unwrap();
+            let p = make(d.path(), &name(HEX), 0o644, DAY);
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(p.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_symlink_and_its_target() {
+            let d = tempfile::tempdir().unwrap();
+            let target = make(d.path(), "target.txt", 0o600, DAY);
+            let link = d.path().join(name(HEX));
+            symlink(&target, &link).unwrap();
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(link.symlink_metadata().is_ok());
+            assert!(target.exists());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_a_directory_with_a_matching_name() {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join(name(HEX));
+            std::fs::create_dir(&p).unwrap();
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(p.is_dir());
+        }
+
+        #[test]
+        fn fr_t12_cleanup_keeps_names_that_do_not_match_exactly() {
+            let d = tempfile::tempdir().unwrap();
+            let names = [
+                name(&HEX.to_uppercase()),
+                name(&HEX[..31]),
+                name(&format!("{HEX}0")),
+                format!("{}.bak", name(HEX)),
+                name(&"g".repeat(32)),
+                "ember-mcp-.json".to_string(),
+                "unrelated.json".to_string(),
+            ];
+            let paths: Vec<_> = names.iter().map(|n| make(d.path(), n, 0o600, DAY)).collect();
+            assert_eq!(cleanup_stale_mcp_files(d.path(), SystemTime::now()), 0);
+            assert!(paths.iter().all(|p| p.exists()));
+        }
+
+        #[test]
+        fn fr_t12_cleanup_of_a_missing_directory_is_zero() {
+            let d = tempfile::tempdir().unwrap();
+            assert_eq!(cleanup_stale_mcp_files(&d.path().join("nope"), SystemTime::now()), 0);
+        }
     }
 }

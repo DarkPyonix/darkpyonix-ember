@@ -390,8 +390,14 @@ pub mod page {
             let action = s.bridge.borrow_mut().apply(update);
             match action {
                 BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
-                BridgeAction::OpenFailed { uri, error } => { s.open_errors.borrow_mut().insert(uri.path.clone(), error); }
-                BridgeAction::SaveFailed { uri, error } => notice(format!("{}을(를) 저장하지 못했습니다: {error}", base_name(&uri.path))),
+                BridgeAction::OpenFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "opening a file failed");
+                    s.open_errors.borrow_mut().insert(uri.path.clone(), crate::ui::editor::file_failure_reason(&error).to_string());
+                }
+                BridgeAction::SaveFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "saving a file failed");
+                    notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
+                }
                 _ => {}
             }
         }
@@ -493,7 +499,7 @@ pub mod page {
                             if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
                                 div { class: "ed-empty", role: "alert",
-                                    b { "{base_name(&error.0)} 파일을 열 수 없습니다" }
+                                    b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
                                     p { "{error.1}" }
                                 }
                             }
@@ -767,7 +773,8 @@ pub mod page {
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 onclick: move |_| {
-                                    if matches!(prompt.read().as_ref(), Some(TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. })) { prompt.set(None); }
+                                    let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
+                                    if close { prompt.set(None); }
                                     tree_sel.set(Some((path.clone(), is_dir)));
                                     if is_dir {
                                         let was_open = expanded.read().contains(&path);

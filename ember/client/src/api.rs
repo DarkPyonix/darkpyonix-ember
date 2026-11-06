@@ -782,6 +782,12 @@ impl Api {
         Self::decode(self.post(&format!("/channels/{}/read", seg(id)), body).await?)
     }
 
+    /// The state of the guest door (FR-T14): on or off, its listen address and public URL, and
+    /// whether the link needs a reachability check. Known before the first invite is made.
+    pub async fn guest_door(&self) -> ApiResult<crate::channels::GuestDoorState> {
+        self.get(crate::channels::GUEST_DOOR_PATH).await
+    }
+
     /// The feed of a channel (FR-T11): pending approvals and last-turn reports of its agents,
     /// newest first.
     pub async fn channel_feed(&self, id: &str) -> ApiResult<Vec<FeedItem>> {

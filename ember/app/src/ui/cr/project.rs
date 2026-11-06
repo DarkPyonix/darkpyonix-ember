@@ -23,7 +23,7 @@ pub use crate::ui::project::{
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
-    NewProjectDraft, NewProjectOutcome, ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
+    create_error_message, NewProjectDraft, NewProjectOutcome, ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
@@ -996,7 +996,8 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
         };
         let p = ember_theme().palette;
         // The body follows the window like the settings sheet (a fixed 560 dp cut the last
-        // style rows at 390).
+        // style rows at 390). When the window has not reported a size (390 can read 0x0) the
+        // shared formula falls back to 240 dp: TODO(compose-rust#479) until the size is reported.
         let new_window = compose_rust::runtime::current_window_size();
         let new_body_height =
             super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
@@ -1005,11 +1006,28 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                 cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     // TODO(compose-rust#374): the fields are uncontrolled with no initial value.
                     let (d1, d2, d3) = (st.new_draft.clone(), st.new_draft.clone(), st.new_draft.clone());
+                    let (f1, f2, f3) = (st.new_failure.clone(), st.new_failure.clone(), st.new_failure.clone());
+                    let submit = {
+                        let (dr, saving_s, failure, leave) =
+                            (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+                        let existing = existing.clone();
+                        move |_: String| {
+                            let d = dr.get_untracked();
+                            if d.validate(&existing).is_empty() && !saving_s.get_untracked() {
+                                create_project(d, saving_s.clone(), failure.clone(), leave.clone());
+                            }
+                        }
+                    };
+                    let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
                     FieldRow("이름", || {
                         EmberField(FieldOptions {
                             fill_max_width: true,
                             placeholder: "프로젝트 이름".to_string(),
-                            on_value_change: Some(Box::new(move |v| d1.update(|s| s.name = v))),
+                            on_value_change: Some(Box::new(move |v| {
+                                f1.set(None);
+                                d1.update(|s| s.name = v)
+                            })),
+                            on_submit: Some(Box::new(s1)),
                             ..Default::default()
                         });
                     });
@@ -1019,7 +1037,11 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
                                     placeholder: "github.com/...".to_string(),
-                                    on_value_change: Some(Box::new(move |v| d2.update(|s| s.repo = v))),
+                                    on_value_change: Some(Box::new(move |v| {
+                                f2.set(None);
+                                d2.update(|s| s.repo = v)
+                            })),
+                            on_submit: Some(Box::new(s2)),
                                     ..Default::default()
                                 });
                             });
@@ -1029,12 +1051,19 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
                                 EmberField(FieldOptions {
                                     fill_max_width: true,
                                     placeholder: "develop".to_string(),
-                                    on_value_change: Some(Box::new(move |v| d3.update(|s| s.branch = v))),
+                                    on_value_change: Some(Box::new(move |v| {
+                                f3.set(None);
+                                d3.update(|s| s.branch = v)
+                            })),
+                            on_submit: Some(Box::new(s3)),
                                     ..Default::default()
                                 });
                             });
                         });
                     });
+                    if d.branch.trim().is_empty() {
+                        Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
                     Label("팀 캐릭터", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
                     let dr = st.new_draft.clone();
                     let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
@@ -1173,7 +1202,7 @@ fn FieldRow(label: &str, content: impl FnOnce()) {
 
 /// Creates the project, then sends the filled fields in a second PATCH (FR-L26). A failed second
 /// step keeps the project and says so with a fixed sentence; a failed first step keeps the sheet
-/// open with its content.
+/// open with its content. The repository value is never logged.
 fn create_project(
     draft: NewProjectDraft,
     saving: MutableState<bool>,
@@ -1204,7 +1233,7 @@ fn create_project(
                 .api()
                 .create_project(&name)
                 .await
-                .map_err(|_| "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요".to_string())?;
+                .map_err(|e| create_error_message(e.code()).to_string())?;
             let _ = s.client.load_projects().await;
             if patch.is_empty() {
                 return Ok(false);

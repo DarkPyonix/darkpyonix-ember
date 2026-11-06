@@ -779,8 +779,6 @@ pub enum NewProjectError {
     /// A rule the settings sheet has too (name, repository, branch).
     Field(SettingsError),
     NameTaken,
-    /// A repository is given without a default branch.
-    BranchRequired,
 }
 
 impl NewProjectError {
@@ -788,8 +786,16 @@ impl NewProjectError {
         match self {
             NewProjectError::Field(e) => e.message(),
             NewProjectError::NameTaken => "같은 이름의 프로젝트가 이미 있습니다",
-            NewProjectError::BranchRequired => "저장소를 넣으면 기본 브랜치도 입력해 주세요",
         }
+    }
+}
+
+/// The sentence a failed `POST /api/projects` shows. Never the server's raw text.
+pub fn create_error_message(code: Option<&str>) -> &'static str {
+    match code {
+        Some("name_taken") => "이미 있는 이름입니다",
+        Some("protected_project") => "기본 프로젝트와 같은 이름은 쓸 수 없습니다",
+        _ => "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
     }
 }
 
@@ -821,8 +827,7 @@ impl NewProjectDraft {
         *self == NewProjectDraft::default()
     }
 
-    /// Name rules as the settings sheet, a name not taken, and a branch whenever a repository is
-    /// given. `existing` are the project names that exist now (the server's create is idempotent,
+    /// Name rules as the settings sheet and a name not taken (an empty branch means `develop`). `existing` are the project names that exist now (the server's create is idempotent,
     /// so a taken name must be refused here).
     pub fn validate(&self, existing: &[String]) -> Vec<NewProjectError> {
         let as_settings = SettingsDraft {
@@ -837,10 +842,16 @@ impl NewProjectDraft {
         if !name.is_empty() && existing.iter().any(|e| e == name) {
             errors.push(NewProjectError::NameTaken);
         }
-        if !self.repo.trim().is_empty() && self.branch.trim().is_empty() {
-            errors.push(NewProjectError::BranchRequired);
-        }
         errors
+    }
+
+    /// The branch used when the field is empty (the mockup shows `develop`).
+    pub const DEFAULT_BRANCH: &'static str = "develop";
+
+    /// The typed branch, or `develop` when the field is empty.
+    pub fn effective_branch(&self) -> String {
+        let b = self.branch.trim();
+        if b.is_empty() { Self::DEFAULT_BRANCH.to_string() } else { b.to_string() }
     }
 
     /// The second call after `POST /api/projects` (which takes only a name): the filled fields,
@@ -849,7 +860,8 @@ impl NewProjectDraft {
         let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
         ProjectPatch {
             repository: some(&self.repo),
-            default_branch: some(&self.branch),
+            default_branch: (!self.repo.trim().is_empty() || !self.branch.trim().is_empty())
+                .then(|| self.effective_branch()),
             character_style: some(&self.style),
             ..Default::default()
         }
@@ -1404,16 +1416,28 @@ mod tests {
     }
 
     #[test]
-    fn fr_l26_new_project_repository_requires_a_branch() {
+    fn fr_l26_new_project_empty_branch_means_develop() {
         let d = np_draft("ember", "github.com/a/b", "", "");
-        assert_eq!(d.validate(&[]), vec![NewProjectError::BranchRequired]);
-        assert_eq!(NewProjectError::BranchRequired.message(), "저장소를 넣으면 기본 브랜치도 입력해 주세요");
-        let d = np_draft("ember", "github.com/a/b", "develop", "");
         assert!(d.validate(&[]).is_empty());
+        assert_eq!(d.effective_branch(), "develop");
         let patch = d.followup_patch();
         assert_eq!(patch.repository.as_deref(), Some("github.com/a/b"));
         assert_eq!(patch.default_branch.as_deref(), Some("develop"));
         assert!(patch.name.is_none() && patch.member_defaults.is_none() && patch.character_style.is_none());
+        let d = np_draft("ember", "github.com/a/b", " main ", "");
+        assert_eq!(d.effective_branch(), "main");
+        assert_eq!(d.followup_patch().default_branch.as_deref(), Some("main"));
+        // No repository and no branch: no branch is sent.
+        assert!(np_draft("ember", "", "", "").followup_patch().default_branch.is_none());
+        assert_eq!(np_draft("ember", "", "dev", "").followup_patch().default_branch.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn fr_l26_new_project_create_error_maps_name_taken() {
+        assert_eq!(create_error_message(Some("name_taken")), "이미 있는 이름입니다");
+        assert_eq!(create_error_message(Some("protected_project")), "기본 프로젝트와 같은 이름은 쓸 수 없습니다");
+        assert_eq!(create_error_message(Some("boom")), "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요");
+        assert_eq!(create_error_message(None), "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요");
     }
 
     #[test]

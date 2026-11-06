@@ -48,6 +48,14 @@ pub enum AgentEvent {
     Notice { message: String },
 }
 
+/// Whether an approval for `tool` is really the agent asking the person a question (Claude
+/// Code's built-in `AskUserQuestion`). No automatic mode may answer it: approve-everything and
+/// "allow always" skip it, and only a person answers (FR-A5). Exact, case-sensitive match: a
+/// prefixed MCP tool such as `mcp__x__AskUserQuestion` is an ordinary tool.
+pub fn is_user_question_tool(tool: &str) -> bool {
+    tool == "AskUserQuestion"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -126,5 +134,15 @@ mod tests {
         let v = serde_json::to_value(AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted })
             .unwrap();
         assert_eq!(v, serde_json::json!({"kind": "turn_ended", "outcome": "interrupted"}));
+    }
+
+    #[test]
+    fn fr_a5_user_question_tool_is_exactly_ask_user_question() {
+        assert!(is_user_question_tool("AskUserQuestion"));
+        for no in ["askuserquestion", "ASKUSERQUESTION", "askUserQuestion", "AskUserQuestion ", " AskUserQuestion",
+            "AskUser", "AskUserQuestions", "mcp__x__AskUserQuestion", "Bash", "ExitPlanMode", ""]
+        {
+            assert!(!is_user_question_tool(no), "{no:?}");
+        }
     }
 }

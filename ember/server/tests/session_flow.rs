@@ -322,3 +322,140 @@ async fn approve_all_http_toggle_and_session_detail() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+/// A fake agent that asks one question (`AskUserQuestion`, id `q1`) and one Bash approval (`b1`)
+/// per message, and records the ids it was answered for.
+struct AsksQuestion {
+    answered: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentAdapter for AsksQuestion {
+    fn kind(&self) -> AgentKind {
+        AgentKind::Scripted
+    }
+
+    async fn detect(&self) -> ember_server::agents::Detected {
+        ember_server::agents::Detected { kind: AgentKind::Scripted, installed: true, version: None }
+    }
+
+    async fn start(
+        &self,
+        _req: ember_server::agents::StartRequest,
+        events: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> anyhow::Result<Box<dyn ember_server::agents::AgentRun>> {
+        Ok(Box::new(AsksQuestionRun { events, answered: self.answered.clone() }))
+    }
+}
+
+struct AsksQuestionRun {
+    events: tokio::sync::mpsc::Sender<AgentEvent>,
+    answered: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl ember_server::agents::AgentRun for AsksQuestionRun {
+    async fn send(&mut self, _text: &str) -> anyhow::Result<()> {
+        let q = serde_json::json!({"questions": [{"question": "Which?", "header": "H",
+            "options": [{"label": "a", "description": ""}, {"label": "b", "description": ""}],
+            "multiSelect": false}]});
+        self.events
+            .send(AgentEvent::ApprovalRequested { approval_id: "q1".into(), tool: "AskUserQuestion".into(), input: q })
+            .await?;
+        self.events
+            .send(AgentEvent::ApprovalRequested {
+                approval_id: "b1".into(),
+                tool: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn answer(&mut self, approval_id: &str, _decision: ApprovalDecision) -> anyhow::Result<()> {
+        self.answered.lock().unwrap().push(approval_id.to_string());
+        Ok(())
+    }
+
+    async fn interrupt(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+fn asks_question_sessions() -> (Arc<Sessions>, Arc<std::sync::Mutex<Vec<String>>>) {
+    let answered: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(AsksQuestion { answered: answered.clone() })];
+    (Sessions::new(Arc::new(Store::open_in_memory().unwrap()), adapters), answered)
+}
+
+async fn wait_answered(answered: &Arc<std::sync::Mutex<Vec<String>>>, n: usize) {
+    for _ in 0..200 {
+        if answered.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the agent was never answered {n} times");
+}
+
+fn notices(s: &Sessions, id: &str) -> Vec<String> {
+    s.store()
+        .events_after(id, 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            AgentEvent::Notice { message } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+const QUESTION_NOTICE: &str = "Approve everything does not answer questions; waiting for you.";
+
+/// FR-A5: with approve-everything on, a question waits for a person while a Bash approval in the
+/// same turn is allowed.
+#[tokio::test]
+async fn fr_a5_approve_all_does_not_answer_a_question_but_answers_a_normal_approval() {
+    let (s, answered) = asks_question_sessions();
+    let id = new_session(&s);
+    s.set_approve_all(&id, true).await.unwrap();
+    s.send(&id, "go").await.unwrap();
+    wait_answered(&answered, 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string()], "the question was not answered");
+    let n: Vec<_> = notices(&s, &id).into_iter().filter(|m| m == QUESTION_NOTICE).collect();
+    assert_eq!(n.len(), 1, "one notice says why the question waits");
+    // A person can still answer it.
+    s.answer(&id, "q1", ApprovalDecision::AllowOnce).await.unwrap();
+    assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string(), "q1".to_string()]);
+}
+
+/// FR-A5: switching approve-everything on answers the pending Bash approval, not the question.
+#[tokio::test]
+async fn fr_a5_switching_approve_all_on_skips_a_pending_question() {
+    let (s, answered) = asks_question_sessions();
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    for _ in 0..200 {
+        let both = s
+            .store()
+            .events_after(&id, 0)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.event, AgentEvent::ApprovalRequested { .. }))
+            .count()
+            == 2;
+        if both {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    s.set_approve_all(&id, true).await.unwrap();
+    wait_answered(&answered, 1).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string()]);
+}

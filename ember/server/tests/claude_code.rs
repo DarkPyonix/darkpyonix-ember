@@ -258,3 +258,73 @@ async fn real_claude_read_edit_run_then_resume() {
     assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }));
     run.shutdown().await.unwrap();
 }
+
+/// FR-A5: "allow always" on a question does not make the next question answer itself, while it
+/// still does for an ordinary tool (Write).
+#[tokio::test]
+async fn fr_a5_allow_always_on_a_question_does_not_auto_answer_the_next_question() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/fake-claude-question.sh");
+    let (tx, mut rx) = mpsc::channel(64);
+    let mut run = ClaudeCodeAdapter::new(bin)
+        .start(
+            StartRequest {
+                cwd: dir.path().to_path_buf(),
+                resume_native_id: None,
+                model: None,
+                env: Vec::new(),
+                instructions: None,
+                remote: None,
+                mcp_servers: Vec::new(),
+                computer: None,
+                fork_from: None,
+                mem_limit_mb: None,
+                allowed_tools: Vec::new(),
+            },
+            tx,
+        )
+        .await
+        .unwrap();
+    run.send("hello").await.unwrap();
+    loop {
+        if let AgentEvent::ApprovalRequested { approval_id, tool, .. } = next(&mut rx, 10).await {
+            assert_eq!((approval_id.as_str(), tool.as_str()), ("q1", "AskUserQuestion"));
+            break;
+        }
+    }
+    run.answer("q1", ApprovalDecision::AllowAlways).await.unwrap();
+    // q2 is a question again: it asks, it is not answered from the memory.
+    loop {
+        if let AgentEvent::ApprovalRequested { approval_id, tool, .. } = next(&mut rx, 10).await {
+            assert_eq!((approval_id.as_str(), tool.as_str()), ("q2", "AskUserQuestion"));
+            break;
+        }
+    }
+    run.answer("q2", ApprovalDecision::AllowOnce).await.unwrap();
+    // w1 (Write) asks; after allow-always, w2 (Write) is answered without an event.
+    loop {
+        if let AgentEvent::ApprovalRequested { approval_id, tool, .. } = next(&mut rx, 10).await {
+            assert_eq!((approval_id.as_str(), tool.as_str()), ("w1", "Write"));
+            break;
+        }
+    }
+    run.answer("w1", ApprovalDecision::AllowAlways).await.unwrap();
+    loop {
+        match next(&mut rx, 10).await {
+            AgentEvent::ApprovalRequested { approval_id, .. } => panic!("{approval_id} should auto-allow"),
+            AgentEvent::TurnEnded { outcome } => {
+                assert_eq!(outcome, TurnOutcome::Completed);
+                break;
+            }
+            _ => {}
+        }
+    }
+    run.shutdown().await.unwrap();
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("stdin.log"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let ids: Vec<_> = lines[1..].iter().map(|l| l["response"]["request_id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids, ["q1", "q2", "w1", "w2"], "{lines:?}");
+}

@@ -33,7 +33,7 @@ pub use crate::ui::agents::{
 };
 use super::components::{
     AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, InsetPanel,
-    Label, Pill, PillTone,
+    Label, OptionSheet, Pill, PillTone,
 };
 use super::theme::*;
 use crate::server::{Account, ChatGptAccount};
@@ -210,7 +210,11 @@ pub fn AgentsScreen() {
     let initial_section = std::env::var("EMBER_CR_AGENTS_SECTION")
         .ok()
         .map(|sec| resolve_section(&sec))
-        .unwrap_or(Section::Harness);
+        .unwrap_or_else(|| match crate::ui::agents::sheet_hook() {
+            Some(crate::ui::agents::SheetHook::Harness | crate::ui::agents::SheetHook::Account) => Section::Models,
+            Some(crate::ui::agents::SheetHook::AddAccount | crate::ui::agents::SheetHook::AddAccountLogin) => Section::Profiles,
+            None => Section::Harness,
+        });
 
     let _requested = remember(|| {
         if !is_sample {
@@ -1216,38 +1220,83 @@ const GEMINI_SPECS: [ModelSpec; 2] = [
     },
 ];
 
-/// The catalog name for a stored model id, else the id itself.
-fn model_name(h: AgentHarness, id: &str) -> String {
-    let specs: &[ModelSpec] = match h {
+fn specs_of(h: AgentHarness) -> &'static [ModelSpec] {
+    match h {
         AgentHarness::ClaudeCode => &CLAUDE_SPECS,
         AgentHarness::Codex => &CODEX_SPECS,
         AgentHarness::Gemini => &GEMINI_SPECS,
         _ => &[],
-    };
+    }
+}
+
+/// `(id, name)` of a harness's catalog models, for the default picker.
+fn model_pairs(h: AgentHarness) -> Vec<(String, String)> {
+    specs_of(h).iter().map(|m| (m.id.to_string(), m.name.to_string())).collect()
+}
+
+/// `POST /api/accounts/{id}/default`, then re-read the account list so the chip shows the
+/// server's answer. A failure is said, not hidden.
+fn set_default_account(id: String) {
+    crate::services::run_shared(
+        async move {
+            let s = crate::services::services();
+            match s.server.set_default_account(&id).await {
+                Ok(_) => {
+                    reload_accounts().await;
+                    None
+                }
+                Err(e) => Some(crate::ui::agents::server_error_status(&e)),
+            }
+        },
+        |failed| {
+            if let Some(status) = failed {
+                post_notice(&format!("기본 계정을 바꾸지 못했습니다. {}", crate::ui::agents::account_error_ko(status)));
+            }
+        },
+    );
+}
+
+async fn reload_accounts() {
+    let s = crate::services::services();
+    if let Ok(a) = s.server.accounts().await {
+        s.ui.live.accounts.set(a);
+    }
+}
+
+/// The catalog name for a stored model id, else the id itself.
+fn model_name(h: AgentHarness, id: &str) -> String {
+    let specs: &[ModelSpec] = specs_of(h);
     specs.iter().find(|m| m.id == id).map_or_else(|| id.to_string(), |m| m.name.to_string())
 }
 
 fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: bool) {
-    // The selection comes from the account the server marks default and this device's stored
-    // model; with none, the pills say so instead of showing a default as chosen.
-    let pick = crate::ui::agents::default_pick(&live.accounts, &live.default_ids, &store.get());
-    let harness_pill = match &pick {
-        Some(d) => {
-            let model = d.model.as_deref().map(|m| model_name(d.harness, m));
-            match model {
-                Some(m) => format!("{} · {m}", d.harness.label()),
-                None => d.harness.label().to_string(),
-            }
-        }
-        None => crate::ui::agents::NO_INFO.to_string(),
-    };
-    let account_pill = pick.as_ref().map_or_else(|| crate::ui::agents::NO_INFO.to_string(), |d| d.account.clone());
+    // The chips show what is stored: the harness and model the owner chose on this device
+    // and the account the server marks default; with none, they say so (FR-L20).
+    let example = live.sample || live.demo;
+    let chips = crate::ui::agents::default_chips(&live.accounts, &live.default_ids, &store.get());
+    let harness_pill = crate::ui::agents::harness_chip_text(&chips, model_name, example);
+    let account_pill = crate::ui::agents::account_chip_text(&chips, live.accounts.len(), example);
+    let hook = crate::ui::agents::sheet_hook();
+    let pick_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Harness)));
+    let acct_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Account)));
+    let stacked = crate::ui::agents::chips_stacked(compose_rust::runtime::current_window_size().width_dp);
+    let rows = crate::ui::agents::pick_rows(&crate::ui::agents::harness_options(&live.detected), model_pairs);
+    let row_labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
+    let row_chosen = rows
+        .iter()
+        .position(|r| r.enabled && Some(r.harness) == chips.harness && r.model == chips.model);
+    let options = crate::ui::agents::account_options(&live.accounts);
+    let acct_rows = crate::ui::agents::account_sheet_rows(&options);
     // "새 팀원 기본값" card
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                 CardHeaderIcon(super::shell::ICON_PLUS_SVG);
                 Label("새 팀원 기본값", Fs::Lg, Weight::Semibold, None, Some(1));
+                if example {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Pill(crate::ui::agents::EXAMPLE_MARK, PillTone::Grey, true);
+                }
             });
             Label(
                 "홈과 새 팀원 만들기, 루틴에서 처음 보이는 하네스와 모델입니다. 고른 계정의 플랜에서 쓸 수 없는 모델은 흐리게 표시됩니다.",
@@ -1256,14 +1305,48 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                 None,
                 None,
             );
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || {
-                    post_notice("기본 하네스와 모델을 선택합니다");
+            let chips_body = || {
+                let po = pick_open.clone();
+                ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || po.set(true));
+                let ao = acct_open.clone();
+                ModelPickerPill(&account_pill, Some(ICON_USER_SVG), move || ao.set(true));
+                // One node holds both sheets, so the closed dialogs add no gap.
+                cu::Box().content(|| {
+                    let close = {
+                        let o = pick_open.clone();
+                        move || o.set(false)
+                    };
+                    let (st, list) = (store.clone(), rows.clone());
+                    OptionSheet(pick_open.get(), &row_labels, row_chosen, 320.0, close, move |i| {
+                        if let Some(r) = list.get(i) {
+                            // Device-local, so the demo may keep it; nothing is sent.
+                            edit(&st, |s| {
+                                crate::ui::agents::apply_pick(s, r);
+                            });
+                        }
+                    });
+                    let close = {
+                        let o = acct_open.clone();
+                        move || o.set(false)
+                    };
+                    let list = options.clone();
+                    OptionSheet(acct_open.get(), &acct_rows, None, 320.0, close, move |i| {
+                        let Some(o) = list.get(i) else { return };
+                        if example {
+                            post_notice(crate::ui::agents::DEMO_CHOICE_NOTE);
+                        } else {
+                            set_default_account(o.id.clone());
+                        }
+                    });
                 });
-                ModelPickerPill(&account_pill, Some(ICON_USER_SVG), move || {
-                    post_notice("기본 계정을 선택합니다");
-                });
-            });
+            };
+            // Below 560 dp the chips stack so each keeps its full text.
+            if stacked {
+                cu::Column().spacing(SP[2]).content(chips_body);
+            } else {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(chips_body);
+            }
+            Label(crate::ui::agents::DEFAULTS_STORAGE_NOTE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
         });
     });
 
@@ -1289,6 +1372,175 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
             cu::Spacer().modifier(Modifier::new().weight(1.0));
         });
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 계정 추가 (FR-U1): the honest flow
+// ---------------------------------------------------------------------------------------------
+
+/// Pick a harness and a label, create the account on the server, show the login command it
+/// returns and let the owner ask whether the login happened. There is no login window: the
+/// login runs on the server's machine (INTENT E3). Demo mode shows a sample and calls nothing.
+fn AddAccountSheet(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
+    use crate::ui::agents::{add_account_kinds, AddAccount, AddPhase};
+    let theme = ember_theme();
+    let p = theme.palette;
+    let cur = add.get();
+    let close = {
+        let a = add.clone();
+        move || a.set(AddAccount::closed())
+    };
+    let busy = cur.phase == AddPhase::Busy;
+    cu::Dialog(cur.open)
+        .modifier(
+            with_shadows(Modifier::new(), theme.shadow_lg())
+                .width(420.0)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_MD)
+                .padding(SP[3]),
+        )
+        .on_dismiss(close.clone())
+        .content(|| {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Label("계정 추가", Fs::Lg, Weight::Semibold, None, Some(1));
+                Label(crate::ui::agents::NO_LOGIN_WINDOW_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                if example {
+                    Label(crate::ui::agents::DEMO_ADD_NOTE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                }
+                if let AddPhase::Created(c) = &cur.phase {
+                    if let Some(note) = crate::ui::agents::login_block_note(c, example) {
+                        Label(&note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    }
+                    // Selectable plain text; edits are dropped. Never logged.
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        text: Some(c.command.clone()),
+                        multiline: true,
+                        on_value_change: Some(Box::new(|_: String| {})),
+                        ..Default::default()
+                    });
+                    if let Some(line) = &c.status {
+                        Label(line, Fs::Sm, Weight::Medium, None, None);
+                    }
+                    cu::Row().spacing(SP[2]).content(|| {
+                        let a = add.clone();
+                        let id = c.id.clone();
+                        AppButton("로그인 확인", None, ButtonKind::Primary, true, !c.checking && !id.is_empty() && !example, false, move || {
+                            check_login(&a, id.clone());
+                        });
+                        AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
+                    });
+                } else {
+                    Label("하네스", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    for k in add_account_kinds() {
+                        cu::Column().content(|| {
+                            let a = add.clone();
+                            let kind = if cur.kind == Some(k.kind) { ButtonKind::Primary } else { ButtonKind::Default };
+                            AppButton(k.label, None, kind, true, k.enabled() && !busy, false, move || {
+                                let mut n = a.get_untracked();
+                                n.kind = Some(k.kind);
+                                a.set(n);
+                            });
+                            if let Some(note) = k.note {
+                                let ko = crate::ui::agents::account_note_ko(k.kind, note);
+                                Label(&ko, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                            }
+                        });
+                    }
+                    Label("이름", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                    let a = add.clone();
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        placeholder: "예: 회사 계정".to_string(),
+                        enabled: Some(!busy),
+                        on_value_change: Some(Box::new(move |v: String| {
+                            let mut n = a.get_untracked();
+                            n.label = v;
+                            a.set(n);
+                        })),
+                        ..Default::default()
+                    });
+                    match &cur.phase {
+                        AddPhase::Busy => Label("만드는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None),
+                        AddPhase::Failed(e) => Label(e, Fs::Sm, Weight::Regular, Some(paint(p.text)), None),
+                        _ => {}
+                    }
+                    cu::Row().spacing(SP[2]).content(|| {
+                        let a = add.clone();
+                        AppButton("만들기", None, ButtonKind::Primary, true, cur.can_create(), false, move || create_account(&a, example));
+                        AppButton("닫기", None, ButtonKind::Default, true, true, false, close.clone());
+                    });
+                }
+            });
+        });
+}
+
+fn create_account(add: &MutableState<crate::ui::agents::AddAccount>, example: bool) {
+    use crate::ui::agents::{created_phase, sample_created, AddPhase, ADD_FAILED};
+    let cur = add.get_untracked();
+    let Some(kind) = cur.kind.filter(|_| cur.can_create()) else { return };
+    let mut next = cur.clone();
+    if example {
+        next.phase = sample_created();
+        add.set(next);
+        return;
+    }
+    next.phase = AddPhase::Busy;
+    add.set(next);
+    let label = cur.label.trim().to_string();
+    let st = add.clone();
+    crate::services::run_shared(
+        async move {
+            let s = crate::services::services();
+            let r = s.server.create_account(kind, &label).await.map_err(|e| crate::ui::agents::server_error_status(&e));
+            if r.is_ok() {
+                reload_accounts().await;
+            }
+            r
+        },
+        move |r| {
+            let mut n = st.get_untracked();
+            n.phase = match r {
+                Ok(a) => created_phase(&a),
+                Err(status) => AddPhase::Failed(format!("{ADD_FAILED}. {}", crate::ui::agents::account_error_ko(status))),
+            };
+            st.set(n);
+        },
+    );
+}
+
+fn check_login(add: &MutableState<crate::ui::agents::AddAccount>, id: String) {
+    use crate::ui::agents::{check_line, AddPhase, CHECK_FAILED};
+    fn set(add: &MutableState<crate::ui::agents::AddAccount>, checking: bool, line: Option<String>) {
+        let mut n = add.get_untracked();
+        if let AddPhase::Created(c) = &mut n.phase {
+            c.checking = checking;
+            if line.is_some() {
+                c.status = line;
+            }
+        }
+        add.set(n);
+    }
+    set(add, true, None);
+    let st = add.clone();
+    crate::services::run_shared(
+        async move {
+            let s = crate::services::services();
+            let r = s.server.check_account(&id).await.map(|a| a.account.status).map_err(|e| crate::ui::agents::server_error_status(&e));
+            if r.is_ok() {
+                reload_accounts().await;
+            }
+            r
+        },
+        move |r| {
+            let line = match r {
+                Ok(status) => check_line(&status),
+                Err(status) => format!("{CHECK_FAILED}. {}", crate::ui::agents::account_error_ko(status)),
+            };
+            set(&st, false, Some(line));
+        },
+    );
 }
 
 fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) {
@@ -1489,6 +1741,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
         })
         .collect();
     let first = live.accounts.first().cloned();
+    let add = remember(|| mutable_state_of(crate::ui::agents::hook_add_account(crate::ui::agents::sheet_hook())));
     let seed = profiles.clone();
     let for_new = profiles.clone();
 
@@ -1534,9 +1787,11 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                 CardHeaderIcon(ICON_USER_SVG);
                 Label("계정", Fs::Lg, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                AppButton("계정 추가", Some(IconRole::Add), ButtonKind::Default, true, true, false, || {
-                    post_notice("계정 추가 창이 열립니다");
+                let open_add = add.clone();
+                AppButton("계정 추가", Some(IconRole::Add), ButtonKind::Default, true, true, false, move || {
+                    open_add.set(crate::ui::agents::AddAccount { open: true, ..crate::ui::agents::AddAccount::closed() });
                 });
+                AddAccountSheet(&add, live.sample || live.demo);
             });
             if compact {
                 for a in &live.accounts {
@@ -3044,12 +3299,12 @@ mod tests {
     }
 
     #[test]
-    fn fr_l16_models_controls_expose_their_own_labels_and_the_account_select_stays() {
+    fn fr_l16_models_controls_expose_their_own_labels_and_the_default_chips_say_not_chosen() {
         use compose_rust::WindowSizeClass as W;
         for (w, class) in [(1440.0, W::Expanded), (390.0, W::Compact)] {
             let names: Vec<String> =
                 button_texts_at(w, class, Section::Models).into_iter().map(|(_, t)| t).collect();
-            for want in ["명령마다 확인", "Claude Max"] {
+            for want in ["명령마다 확인", "아직 정하지 않았습니다"] {
                 assert!(names.iter().any(|n| n == want), "missing button {want} at {w} dp: {names:?}");
             }
             // A radio and a switch name their model.

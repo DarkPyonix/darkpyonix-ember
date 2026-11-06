@@ -298,6 +298,38 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
         .on_click(on_click);
 }
 
+/// FR-L19 (audit P2, #517): the text of the screen's own inputs, buttons and chips is the small
+/// step of the scale (13 px), like the mockup's `.btn.sm`, `.chip` and `.field.sm`, not the
+/// toolkit default (16 px).
+pub const VCS_CONTROL_FS: Fs = Fs::Sm;
+/// The toolkit text role a field takes to draw 13 px: `Label` maps to [`VCS_CONTROL_FS`]
+/// (`type_role_style`). `TextField` has no `font_size` builder in compose-rust v0.0.6.
+pub const VCS_FIELD_ROLE: TypeRole = TypeRole::Label;
+/// Height of the 이 덩어리 전체 button: smaller than the 32 px control, with a 1 px border.
+pub const VCS_HUNK_BUTTON_H: f32 = 28.0;
+
+/// Width of a painted small pill or chip: the text at [`VCS_CONTROL_FS`] plus 14 px each side,
+/// at least 64. A Box in a Row takes the remaining width (compose-rust#427), so it is fixed.
+pub fn vcs_pill_width(text: &str) -> f32 {
+    (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
+}
+
+// TODO(compose-rust#500): toolkit `Button` and `PickChip` take no font size (v0.0.6 `ButtonScope`
+// has no `font_size`/`text_style`), so a chip is painted with a `Label` at the small step and an
+// invisible `FocusOverlay` button on top, as the stash pill does.
+/// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected.
+fn VcsChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (height, fill) = super::components::pickchip_style(selected, p);
+    cu::Box()
+        .modifier(Modifier::new().width(vcs_pill_width(text)).height(height).background(paint(fill)).shape_role(ShapeRole::Full))
+        .alignment(Alignment::Center)
+        .content(move || {
+            Label(text, VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            FocusOverlay(text, on_click);
+        });
+}
+
 /// Card shown when a section's server data is not yet available.
 pub fn Unavailable(section: Section) {
     let p = ember_theme().palette;
@@ -708,6 +740,7 @@ fn RepoBarWithActions(
                             fill_max_width: true,
                             text: Some(new_branch.get()),
                             placeholder: "새 브랜치 이름".to_string(),
+                            type_role: Some(VCS_FIELD_ROLE),
                             on_value_change: Some(Box::new(move |v| branch_value.set(v))),
                             ..Default::default()
                         });
@@ -931,15 +964,15 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
                 cu::Box()
                     .modifier(
                         Modifier::new()
-                            .width(110.0)
-                            .height(32.0)
-                            .border(2.0, paint(p.ink))
+                            .width(vcs_pill_width("이 덩어리 전체"))
+                            .height(VCS_HUNK_BUTTON_H)
+                            .border(1.0, paint(p.line))
                             .background(paint(p.surface))
                             .shape_role(ShapeRole::Full),
                     )
                     .alignment(Alignment::Center)
                     .content(move || {
-                        Label("이 덩어리 전체", Fs::Sm, Weight::Medium, Some(paint(p.text)), Some(1));
+                        Label("이 덩어리 전체", VCS_CONTROL_FS, Weight::Medium, Some(paint(p.text)), Some(1));
                         FocusOverlay("이 덩어리 전체", move || {
                             let mut s = st_hunk.get();
                             s.file_mut(&f_hunk.path).toggle_hunk(&f_hunk, hi);
@@ -1271,6 +1304,7 @@ fn CommitBox(
                     fill_max_width: true,
                     text: Some(sum_state.get()),
                     placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
+                    type_role: Some(VCS_FIELD_ROLE),
                     on_value_change: Some(Box::new(move |v| {
                         s_armed.set(0);
                         s_state.set(v);
@@ -1287,6 +1321,7 @@ fn CommitBox(
                     height: Some(64.0),
                     text: Some(body_state.get()),
                     placeholder: "설명 (선택)".to_string(),
+                    type_role: Some(VCS_FIELD_ROLE),
                     multiline: true,
                     on_value_change: Some(Box::new(move |v| {
                         b_armed.set(0);
@@ -3152,7 +3187,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
                 for f in PrFilter::ALL {
                     let filter = filter.clone();
-                    PickChip(f.label(), None, f == shown, false, move || filter.set(f));
+                    VcsChip(f.label(), f == shown, move || filter.set(f));
                 }
             });
         }
@@ -3910,7 +3945,7 @@ fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed:
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     let s = super::components::button_style_for(kind, true, enabled, p);
-    let width = (super::home::text_px(text, s.fs.size()) + 28.0).max(64.0);
+    let width = vcs_pill_width(text);
     cu::Box()
         .modifier(
             Modifier::new()
@@ -5134,6 +5169,21 @@ mod tests {
         let labels = remote_button_labels();
         assert_eq!(labels, ["가져오기", "내려받기", "올리기", "스태시"]);
         assert!(labels.iter().all(|l| !l.is_empty()));
+    }
+
+    #[test]
+    fn fr_l19_control_text_uses_the_small_scale() {
+        // The constant is the design token: 13 px, and the field role draws the same step.
+        assert_eq!(VCS_CONTROL_FS, Fs::Sm);
+        assert_eq!(VCS_CONTROL_FS.size(), 13.0);
+        assert_eq!(super::super::components::type_role_style(VCS_FIELD_ROLE).0, VCS_CONTROL_FS);
+        // The stash pill, the chip and the hunk button estimate their width with that size.
+        for text in ["적용", "꺼내기", "삭제", "정말 삭제합니다", "이 덩어리 전체", "병합됨"] {
+            let want = (super::super::home::text_px(text, 13.0) + 28.0).max(64.0);
+            assert_eq!(vcs_pill_width(text), want, "{text}");
+        }
+        assert!(vcs_pill_width("정말 삭제합니다") < (super::super::home::text_px("정말 삭제합니다", 16.0) + 28.0));
+        assert!(VCS_HUNK_BUTTON_H < H_CTL);
     }
 
     #[test]

@@ -272,6 +272,53 @@ fn fr_l30_double_shift_needs_two_bare_shift_presses_within_the_window() {
     assert!(!d.press("Shift", false, true, false, false, 100));
 }
 
+// FR-L31 (D38): the explorer is a tree of the folder, directories first, children indented,
+// a directory's children shown only while it is expanded and once they have been listed.
+mod tree {
+    use super::*;
+    use ember_app::ui::editor::{tree_rows, TreeRow};
+    use std::collections::HashSet;
+
+    const DIR: u32 = ember_editor_conn::remote_fs::file_type::DIRECTORY;
+    const FILE: u32 = ember_editor_conn::remote_fs::file_type::FILE;
+
+    fn listings() -> HashMap<String, Vec<(String, u32)>> {
+        HashMap::from([
+            ("/p".to_string(), vec![("b.rs".to_string(), FILE), ("src".to_string(), DIR), ("A.md".to_string(), FILE)]),
+            ("/p/src".to_string(), vec![("lib.rs".to_string(), FILE), ("deep".to_string(), DIR)]),
+        ])
+    }
+
+    fn names(rows: &[TreeRow]) -> Vec<(&str, u32)> {
+        rows.iter().map(|r| (r.name.as_str(), r.depth)).collect()
+    }
+
+    #[test]
+    fn fr_l31_collapsed_tree_lists_directories_first_then_files_by_name() {
+        let rows = tree_rows("/p", &listings(), &HashSet::new());
+        assert_eq!(names(&rows), vec![("src", 0), ("A.md", 0), ("b.rs", 0)]);
+        assert!(rows[0].is_dir && !rows[0].open);
+        assert_eq!(rows[0].path, "/p/src");
+    }
+
+    #[test]
+    fn fr_l31_expanded_directory_shows_its_children_indented() {
+        let open = HashSet::from(["/p/src".to_string()]);
+        let rows = tree_rows("/p", &listings(), &open);
+        assert_eq!(names(&rows), vec![("src", 0), ("deep", 1), ("lib.rs", 1), ("A.md", 0), ("b.rs", 0)]);
+        assert!(rows[0].open);
+    }
+
+    #[test]
+    fn fr_l31_expanded_directory_not_listed_yet_shows_no_children() {
+        let open = HashSet::from(["/p/src".to_string(), "/p/src/deep".to_string()]);
+        let rows = tree_rows("/p", &listings(), &open);
+        let deep = rows.iter().find(|r| r.name == "deep").unwrap();
+        assert!(deep.open);
+        assert_eq!(rows.len(), 5);
+    }
+}
+
 // FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
 // 0 high row, and the stripes decide which.
 mod grid {
@@ -279,10 +326,9 @@ mod grid {
     use ember_app::ui::editor::editor_grid_style;
 
     #[test]
-    fn fr_l31_open_left_and_bottom_keep_the_mockup_tracks() {
-        let g = editor_grid_style(true, true);
-        assert!(g.contains("grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw)"), "{g}");
-        assert!(g.contains("grid-template-rows:52px minmax(0,1fr) 260px var(--sbh)"), "{g}");
+    fn fr_l31_open_left_and_bottom_leave_the_tracks_to_the_stylesheet() {
+        // The stylesheet's tracks carry the width breakpoints; an inline track would override them.
+        assert_eq!(editor_grid_style(true, true), "");
     }
 
     #[test]
@@ -308,5 +354,70 @@ mod grid {
         assert_eq!(grid(&s), editor_grid_style(false, false));
         s.toggle(ToolWindow::Git);
         assert_eq!(grid(&s), editor_grid_style(true, false));
+    }
+}
+
+// FR-L31 (D38): the maximized bottom window takes the editor's row, like the mockup's `.ed.max`.
+#[test]
+fn fr_l31_maximized_bottom_window_collapses_the_editor_row() {
+    let g = ember_app::ui::editor::editor_grid_style_maximized();
+    assert!(g.contains("grid-template-rows:52px 0 minmax(0,1fr) var(--sbh)"), "{g}");
+    assert!(!g.contains("grid-template-columns"), "{g}");
+}
+
+// FR-L31 (D38): the status bar's agent dot and path follow the mockup.
+mod status {
+    use ember_app::ui::editor::{agent_dot_class, status_crumbs};
+
+    #[test]
+    fn fr_l31_agent_dot_colours_follow_the_state() {
+        assert_eq!(agent_dot_class("승인 대기"), "dot wait");
+        assert_eq!(agent_dot_class("실행 중"), "dot run");
+        assert_eq!(agent_dot_class("완료"), "dot ok");
+        assert_eq!(agent_dot_class("팀원 없음"), "dot ok");
+    }
+
+    #[test]
+    fn fr_l31_status_path_is_the_folder_name_then_the_file_directories() {
+        assert_eq!(status_crumbs("/w/p/", None), "p");
+        assert_eq!(status_crumbs("/w/p", Some("/w/p/ember/proxy/src/shim.rs")), "p \u{203A} ember \u{203A} proxy \u{203A} src");
+        assert_eq!(status_crumbs("/w/p", Some("/w/p/README.md")), "p");
+    }
+}
+
+// FR-L31 (D38): the window opens FullSize on macOS, the top bar is the title strip.
+mod title_strip {
+    use ember_app::ui::editor::{editor_page_height, editor_strip_padding};
+
+    #[test]
+    fn fr_l31_full_size_page_is_the_window_height_and_other_chrome_keeps_its_allowance() {
+        assert_eq!(editor_page_height(true), "100vh");
+        assert_eq!(editor_page_height(false), "calc(100vh - 76px)");
+    }
+
+    #[test]
+    fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {
+        assert_eq!(editor_strip_padding(true, 98.0), "padding-left:98px;");
+        assert_eq!(editor_strip_padding(false, 98.0), "");
+    }
+
+    #[test]
+    fn fr_l31_top_bar_is_a_drag_region_and_its_controls_are_cut_out_in_the_stylesheets() {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(".ed-top{-webkit-app-region:drag}"), "no drag rule for the top bar");
+        assert!(
+            compact.contains(".ed-topbutton,.ed-top.ed-menu{-webkit-app-region:no-drag}"),
+            "the top bar's buttons and menu are not cut out of the drag region"
+        );
+    }
+
+    #[test]
+    fn fr_l31_editor_window_opens_full_size_on_macos() {
+        use compose_rust::schema::{Chrome, Window};
+        // The chrome the editor window is given is the shell's: FullSize on macOS, untouched elsewhere.
+        let given = ember_app::ui::cr::shell::window_chrome(Window::new()).chrome;
+        let plain = Window::new().chrome;
+        assert_eq!(given, if cfg!(target_os = "macos") { Chrome::FullSize } else { plain });
     }
 }

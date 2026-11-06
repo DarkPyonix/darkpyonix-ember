@@ -122,19 +122,105 @@ pub fn breadcrumb_segments(path: &str, folder: &str) -> Vec<String> {
         .collect()
 }
 
-/// The editor page's grid tracks as inline style: the mockup's `.ed` grid with its `.no-left` and
-/// `.no-bottom` cases, a closed left column 0 wide and a closed bottom row 0 high.
+/// One row of the explorer tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub path: String,
+    pub name: String,
+    pub depth: u32,
+    pub is_dir: bool,
+    pub open: bool,
+}
+
+/// The rows of the explorer: the folder's entries with directories first, then files by name,
+/// and below an expanded directory its own entries once they have been listed.
+pub fn tree_rows(
+    root: &str,
+    listings: &std::collections::HashMap<String, Vec<(String, u32)>>,
+    expanded: &std::collections::HashSet<String>,
+) -> Vec<TreeRow> {
+    fn walk(
+        dir: &str,
+        depth: u32,
+        listings: &std::collections::HashMap<String, Vec<(String, u32)>>,
+        expanded: &std::collections::HashSet<String>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        let Some(entries) = listings.get(dir) else { return };
+        let is_dir = |kind: u32| kind & ember_editor_conn::remote_fs::file_type::DIRECTORY != 0;
+        let mut sorted: Vec<&(String, u32)> = entries.iter().collect();
+        sorted.sort_by_key(|(name, kind)| (!is_dir(*kind), name.to_lowercase()));
+        for (name, kind) in sorted {
+            let path = super::editor_workbench::join_path(dir, name);
+            let dir_row = is_dir(*kind);
+            let open = dir_row && expanded.contains(&path);
+            rows.push(TreeRow { path: path.clone(), name: name.clone(), depth, is_dir: dir_row, open });
+            if open {
+                walk(&path, depth + 1, listings, expanded, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    walk(root, 0, listings, expanded, &mut rows);
+    rows
+}
+
+/// The editor page's grid tracks as inline style. An open tool window adds nothing: the
+/// stylesheet's tracks apply, including its width breakpoints. A closed left column is 0 wide and
+/// a closed bottom row is 0 high (the mockup's `.no-left` and `.no-bottom`).
 pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
-    format!(
-        "grid-template-columns:{}; grid-template-rows:{};",
-        if has_left { "var(--stw) 280px minmax(0,1fr) var(--stw)" } else { "var(--stw) 0 minmax(0,1fr) var(--stw)" },
-        if has_bottom { "52px minmax(0,1fr) 260px var(--sbh)" } else { "52px minmax(0,1fr) 0 var(--sbh)" },
-    )
+    let mut style = String::new();
+    if !has_left {
+        style.push_str("grid-template-columns:var(--stw) 0 minmax(0,1fr) var(--stw); ");
+    }
+    if !has_bottom {
+        style.push_str("grid-template-rows:52px minmax(0,1fr) 0 var(--sbh); ");
+    }
+    style
+}
+
+/// The page's height rule: macOS opens the window FullSize, so the page is the window's height;
+/// elsewhere the native chrome stays and the page keeps its 76px allowance.
+pub fn editor_page_height(full_size: bool) -> &'static str {
+    if full_size { "100vh" } else { "calc(100vh - 76px)" }
+}
+
+/// The top bar's left padding past the window controls: under FullSize the traffic lights float
+/// over its left end, so it starts after their footprint; otherwise nothing is added.
+pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
+    if full_size { format!("padding-left:{leading}px;") } else { String::new() }
+}
+
+/// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row
+/// is 0 high and the bottom window takes its row and the one below.
+pub fn editor_grid_style_maximized() -> String {
+    "grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
 }
 
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
+}
+
+/// The status bar's agent dot: orange while waiting for approval, blue while running, green otherwise.
+pub fn agent_dot_class(state: &str) -> &'static str {
+    match state {
+        "승인 대기" => "dot wait",
+        "실행 중" => "dot run",
+        _ => "dot ok",
+    }
+}
+
+/// The status bar's path: the folder's name, then the directories of the open file below it.
+pub fn status_crumbs(folder: &str, current: Option<&str>) -> String {
+    let name = folder.trim_end_matches('/').rsplit('/').next().unwrap_or(folder);
+    let mut parts = vec![name.to_string()];
+    if let Some(path) = current {
+        let mut dirs = breadcrumb_segments(path, folder);
+        dirs.pop();
+        parts.extend(dirs);
+    }
+    parts.join(" \u{203A} ")
 }
 
 /// The status bar's agent field.

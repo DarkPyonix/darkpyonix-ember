@@ -37,7 +37,8 @@ use ember_server::store::Store;
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
 ///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
-///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary). See `agents::acp`.
+///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary) and `gemini` (`gemini --acp`, API key or
+///   Enterprise only; `EMBER_GEMINI_BIN` picks the binary). Both are opt-in. See `agents::acp`.
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
@@ -190,6 +191,7 @@ async fn main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
     let store_for_guest = store.clone();
+    let store_for_enrol = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
@@ -237,6 +239,9 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
         .parse()?;
+    // The server's own externally reachable URL is not known to it: EMBER_PUBLIC_URL, else the
+    // listen address (FR-C1). The enrol command and its owner warning print it.
+    let enrol_base_url = std::env::var("EMBER_PUBLIC_URL").unwrap_or_else(|_| format!("http://{addr}"));
     // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
     let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
     // This server as seen from this machine (an unspecified address replaced by loopback).
@@ -399,6 +404,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::metrics::router(computers.clone()))
         .merge(computers::fs::router(computers.clone()))
         .merge(computers::ports::router(computers.clone()))
+        .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
         .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
@@ -433,7 +439,16 @@ async fn main() -> anyhow::Result<()> {
     let local_app = app
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
-        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
+        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()))
+        // FR-C1: minting an enrol code is an admin act, local and token-protected only. There is
+        // no redeem route (docs/design/COMPUTERS.md, "Adding a computer with an enrol code").
+        // FR-C2c: the owner's confirm and deny are on this router too, and so is the registrar
+        // that adds the confirmed computer to the registry.
+        .merge(computers::enrol::router(
+            computers::enrol::Enrol::new(store_for_enrol),
+            enrol_base_url,
+            Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
+        ));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {

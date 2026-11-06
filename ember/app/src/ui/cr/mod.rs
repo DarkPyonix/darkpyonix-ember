@@ -4,6 +4,7 @@
 
 pub mod theme;
 pub mod components;
+pub mod a11y;
 pub mod compat;
 pub mod gallery;
 pub mod shell;

@@ -56,6 +56,20 @@ pub struct ShimSpec {
     pub linger_secs: Option<u64>,
 }
 
+/// An entry of an agent's `env` list that is not a variable: the child starts with an empty
+/// environment (`env_clear`) and only the other entries (an allow-list, FR-A10) are set. It rides
+/// in `env` so that a [`ShimSpec`] needs no new field and the shim applies it the same way.
+pub const ENV_CLEAR: &str = "EMBER_ENV_CLEAR";
+
+/// Set `env` on `cmd`: honours [`ENV_CLEAR`], otherwise the entries are added on top of the
+/// inherited environment.
+pub fn apply_env(cmd: &mut tokio::process::Command, env: &[(String, String)]) {
+    if env.iter().any(|(k, _)| k == ENV_CLEAR) {
+        cmd.env_clear();
+    }
+    cmd.envs(env.iter().filter(|(k, _)| k != ENV_CLEAR).map(|(k, v)| (k, v)));
+}
+
 /// Post-exit linger: the spec's value, else `EMBER_SHIM_LINGER_SECS`, else 3600 s (FR-S8).
 pub fn linger_secs(spec: Option<u64>, env: Option<&str>) -> u64 {
     spec.or_else(|| env.and_then(|v| v.trim().parse().ok())).unwrap_or(3600)
@@ -121,8 +135,8 @@ pub async fn run_shim(dir: &Path, id: &str) -> anyhow::Result<()> {
     let stderr = std::fs::OpenOptions::new().create(true).append(true).open(log_path(dir, id))?;
 
     let mut cmd = tokio::process::Command::new(&spec.program);
+    apply_env(&mut cmd, &spec.env);
     cmd.args(&spec.args)
-        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

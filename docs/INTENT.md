@@ -874,4 +874,34 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 
 **Why.** A code that dies after one use and ten minutes leaves nothing worth stealing, and the server never keeps it in a form that can be replayed.
 
-**Status.** Specified only (`FR-C1`, `FR-C2`, Draft; issue #491). Not built.
+**Confirm at join (leader approval 2026-11-06).** [provisional, 2026-11-06, leader approval relayed by the supervisor; owner confirmation pending] The independent review of #523 (issue #526) found that a hostile or confused node that redeems a code would get what D37 grants (file read, agents, so remote execution) with no owner act. The door design memo (`.scratch/pz/enrol-door-design.md`) answers it, and the leader approved these decisions. The labels D1 to D13 are the memo's.
+
+- **D4, D5: the owner confirms every enrolment.** A redeemed code makes the enrolment `awaiting_confirmation`. The app shows the machine's reported host name and the observed address next to the owner-chosen name. The server mints the node token only when the owner presses confirm, and delivers it once. The owner can deny. An unconfirmed enrolment expires 10 minutes after the redeem (equal to the code lifetime).
+- **D3: the credential is server-minted and released after confirm.** The redeem answer carries only `{enrol_id, poll_secret}`; the node polls with the per-enrol secret and receives the token once.
+- **D1, D2: the enrol door is its own listener**, `EMBER_ENROL_LISTEN`, default OFF, with `EMBER_ENROL_PUBLIC_URL` in the printed command. When the door is off the mint answer says `door: off` and prints no command.
+- **D6: limits.** A global failure cap of 60 per 10 minutes across all sources, door limits of 5 per second with burst 10, 8 in flight, 32 connections and a 4 KiB body, all in a configurable struct.
+- **D9: `ember-node enrol` asks before it redeems** (prompt unless `--yes`). A server address outside the private ranges needs `--allow-http` to use plain http; plain http on a private LAN is allowed. Both the node and the app warn that plain http exposes the code on the network.
+- **D10: no enrol over the transport.** A machine that already has a device key uses the hub device-link route.
+- **D13: the node keeps its credentials in `enrol.json`** (0600, in its state dir); `EMBER_NODE_TOKEN` wins when set.
+- **D11 [provisional, pT/pX].** When the node reports no address, the server proposes the observed address with port 8741 and shows it to the owner for editing; the guess is never trusted automatically.
+- **Later, not v1.** D12 door auto-close after the last pending code expires (a runtime toggle), D7 sealed credential delivery (X25519 with an AEAD) and D8 server fingerprint pinning (`--server-fingerprint`). The v1 residual risks are documented in `COMPUTERS.md` and `FR-C2j`.
+
+**Rejected at this step.** Releasing the credential at redeem time (a hostile node would have it before any owner act, and a sniffer who wins the redeem would hold it). Holding the redeem request open until the owner clicks (it runs into the request timeout and the in-flight cap, and one valid-looking redeem could pin permits). A node-chosen token (the node would send a secret that controls itself to a server the owner has not confirmed, and a rogue server at the URL would collect a working key to the node). Option (b), enrol over the `FR-N5` transport (it weakens the rule that every transport caller is authenticated, and the machines it would serve already have a device key and use the device-link route). A shared listener, a `/enrol/*` prefix on the guest door (it would stay open as long as the guest door, mixes two audiences and two proxy setups, and a guest-door bug would reach enrol).
+
+**Status.** `FR-C1` (admin side and redeem core) is built and merged (#523); `FR-C2` and its parts `FR-C2a` to `FR-C2k` are specified and approved, not built (issues #491, #526).
+
+### D40: The Gemini CLI is a harness through the ACP adapter
+
+**Decision.** [user, 2026-11-06, option "(a) Gemini CLI 어댑터 추가" chosen by the owner] Ember adds the Gemini CLI as a harness on top of the generic ACP adapter (`ember/server/src/agents/acp.rs`, issue #53). The mockup's Gemini card and the Home chip stay. Until the adapter is verified against the real CLI, the app shows the card as "preparing" (준비 중입니다). The requirements are `FR-A10` to `FR-A10g` (issue #53).
+
+- [provisional] The harness is an ACP agent named `gemini` with a built-in preset (command `gemini`, ACP flag per `SPEC.md` "Gemini CLI facts"), not a new protocol adapter. This keeps `FR-A3`: adding the agent needs a preset only.
+- [provisional] Authentication stays the user's own: Ember never stores or reads Gemini credentials.
+- [provisional] Usage limits come from the CLI and its documentation, never from an Ember estimate.
+
+**Rejected** (the owner chose adding the adapter over each of these). Removing the Gemini card from the mockup and the Home chip. Keeping the card as a permanent "preparing" placeholder with no adapter behind it.
+
+**Why.** The owner wants Gemini in the harness list as a working harness, and the ACP adapter already exists, so the cost is a preset plus verification.
+
+**Owner and leader decision, 2026-11-06 (option "(c) 카드 유지 + API 키·엔터프라이즈 전용" tag [user, relayed by the supervisor]).** Research found that Google's Gemini CLI announcement says that since 2026-06-18 the Gemini CLI no longer serves Google AI Pro, Google AI Ultra and free-tier individual accounts (replaced by the Antigravity CLI, `agy`); Enterprise Code Assist licences and API-key authentication are stated as unaffected, and Vertex AI is not addressed. Sources, read on 2026-11-06: <https://github.com/google-gemini/gemini-cli/discussions/28017> (announcement of 2026-06-18) and <https://9to5google.com/2026/06/17/gemini-cli-code-assist-shutting-down/> (consumer accounts only, shutdown on 2026-06-18). The decision: the Gemini card stays, it is marked as for API-key and Enterprise (Code Assist) accounts only, and a user with an individual account is pointed to the Antigravity harness (D14). The adapter authenticates with an API key (and Code Assist) over the ACP adapter; "Login with Google" for individuals is not supported. This narrows the earlier choice "(a) Gemini CLI 어댑터 추가": the adapter is still built, for the accounts the CLI still serves. Rejected: building the adapter around "Login with Google" for individuals (the CLI does not serve them); removing the card; merging it into the Antigravity card.
+
+**Status.** Specified only (`FR-A10`, Draft; issue #53). Not built.

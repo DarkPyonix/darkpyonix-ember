@@ -18,6 +18,7 @@ fn path(name: &str) -> &'static str {
         "more" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM18.75 12a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"/>"#,
         "refresh" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99"/>"#,
         "pause" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5"/>"#,
+        "plus" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>"#,
         "up" => r#"<path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/>"#,
         "down" => r#"<path d="M12 5v14M18.5 12.5 12 19l-6.5-6.5"/>"#,
         "close" => r#"<path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>"#,
@@ -29,6 +30,18 @@ fn path(name: &str) -> &'static str {
 
 /// The SVG document of an icon stroked in `color` (e.g. `#56534d`).
 fn svg(name: &str, color: &str) -> String {
+    // `<name>-w` is the icon in white, for a dark pill (the active tab).
+    // The ink pill is light in the dark palette, so its icon is the dark ink colour there.
+    if let Some(base) = name.strip_suffix("-w") {
+        return svg(base, if color == "#c3bfb7" { "#151514" } else { "#ffffff" });
+    }
+    if name == "chev-dn" {
+        // The mockup turns the right chevron a quarter turn for an open node.
+        return format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='1.5'><g transform='rotate(90 12 12)'>{}</g></svg>",
+            path("chev").replace('"', "'")
+        );
+    }
     format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='1.5'>{}</svg>",
         path(name).replace('"', "'")
@@ -49,10 +62,16 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
         if let Some(id) = self.ids.get(name) {
             return Some(*id);
         }
-        let doc: String = if name == "mark" {
+        let (base, dark) = match name.strip_suffix("@dark") {
+            Some(base) => (base, true),
+            None => (name, false),
+        };
+        let doc: String = if base == "mark" {
             include_str!("../../assets/brand/mark-sm.svg").to_string()
+        } else if dark {
+            svg(base, "#c3bfb7")
         } else {
-            svg(name, "#56534d")
+            svg(base, "#56534d")
         };
         let bytes: &'static [u8] = Box::leak(doc.into_boxed_str().into_boxed_bytes());
         let id = dioxus_compose::html::prelude::AssetId(compose_rust::asset(compose_rust::schema::AssetKind::Svg, bytes));

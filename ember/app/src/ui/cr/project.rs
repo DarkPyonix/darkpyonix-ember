@@ -22,7 +22,7 @@ pub use crate::ui::project::{
     agent_options, build_patch, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
-    effective_style, follow_rename, override_harnesses, override_label, override_options, CloseAction, SettingsGuard, DISCARD_QUESTION,
+    effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
     ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
@@ -303,7 +303,9 @@ pub fn ThemeButton(ui: &SharedUi) {
         Modifier::new().size(H_BTN, H_BTN).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
         Alignment::Center,
         move || u.set_theme_pref(u.theme_pref.get_untracked().next()),
-        || NavIcon(if dark { shell::ICON_SUN_SVG } else { shell::ICON_MOON_SVG }, p.text_2.to_argb(), 18.0),
+        || {
+            NavIcon(if dark { shell::ICON_SUN_SVG } else { shell::ICON_MOON_SVG }, p.text_2.to_argb(), 18.0);
+        },
     );
 }
 
@@ -485,12 +487,15 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                         // `.pbox-act`: version control, settings, and the primary "세션 열기".
                         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
                             let (u, id) = (ui.clone(), b.id.clone());
-                            IconButton(IconRole::History, true, move || {
+                            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
+                            IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, move || {
                                 u.set_selected_project(Some(id.clone()));
                                 shell::choose(&u, NavMenu::VersionControl);
                             });
                             let (settings, id) = (st.settings.clone(), b.id.clone());
-                            IconButton(IconRole::Settings, true, move || settings.set(Some(id.clone())));
+                            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
+                            IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, move || settings.set(Some(id.clone())));
+                            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
                             OpenSessionButton(b, ui, true);
                         });
                     });
@@ -535,20 +540,36 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
 }
 
 /// 세션 열기: the first member's conversation, or a new session when the project has none.
-/// TODO(compose-rust#372): the mockup's grid glyph; the toolkit's forward arrow.
+/// The mockup's grid glyph, named 세션 열기 (FR-L26, #501).
 fn OpenSessionButton(b: &ProjectBox, ui: &SharedUi, small: bool) {
     let p = ember_theme().palette;
     let size = if small { H_CTL } else { H_BTN };
     let (u, first, id) = (ui.clone(), b.members.first().map(|m| m.session_id.clone()), b.id.clone());
-    cu::Button("")
-        .icon(IconRole::Forward)
-        .variant(ButtonVariant::Text)
-        .color(paint(p.ink_text))
-        .modifier(Modifier::new().size(size, size).background(paint(p.ink)).shape_role(ShapeRole::Full))
-        .on_click(move || match &first {
+    Clickable(
+        Modifier::new().size(size, size).background(paint(p.ink)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || match &first {
             Some(s) => u.open_conversation(s),
             None => u.open_new_session(Some(id.clone())),
-        });
+        },
+        || {
+            NavIcon(super::session::ICON_GRID_SVG, p.ink_text.to_argb(), if small { 16.0 } else { 18.0 });
+        },
+    );
+}
+
+/// A 32 px round icon button from the app's own SVG set (the mockup's `.icon-btn.sm`), named
+/// for assistive technology by `label`.
+fn IconAction(svg: &'static str, _label: &'static str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        move || {
+            NavIcon(svg, p.text_2.to_argb(), 16.0);
+        },
+    );
 }
 
 /// `.pbox-stats`: the non-empty segments and the computer count flow left to right, 14 px apart,
@@ -638,8 +659,11 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
         let (settings, id) = (st.settings.clone(), b.id.clone());
         let open_settings = move || settings.set(Some(id.clone()));
         if compact {
-            IconButton(IconRole::History, true, vcs);
-            IconButton(IconRole::Settings, true, open_settings);
+            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
+            IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, vcs);
+            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
+            IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, open_settings);
+            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
             OpenSessionButton(b, ui, true);
             cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
         } else {
@@ -1081,6 +1105,7 @@ fn save_settings(
     let ui = shared_ui().clone();
     let style_changed = patch.character_style.is_some();
     let renamed = patch.name.clone();
+    let sent = patch.clone();
     let saved_as = renamed.clone().unwrap_or_else(|| project.clone());
     let old = project.clone();
     run_shared(
@@ -1100,7 +1125,7 @@ fn save_settings(
                     }
                     closed.set(None);
                 }
-                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code()).to_string())),
+                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
             }
         },
     );
@@ -1290,18 +1315,12 @@ fn SettingsSheet(
                             let opts = override_options(kind, &accounts);
                             let labels: Vec<String> = opts.iter().map(|(_, l)| l.clone()).collect();
                             let at = d.overrides.get(kind).and_then(|id| opts.iter().position(|(i, _)| i == id)).unwrap_or(0);
-                            let shown = override_label(&server, &d, kind, &accounts);
+                            let shown = override_label(&server, &d, kind, &accounts, AccountsState::of(&accounts));
                             FieldRow(name, || {
-                                let (dr, opts) = (draft.clone(), opts.clone());
+                                let (dr, opts, sv) = (draft.clone(), opts.clone(), server.clone());
                                 Select(&shown, &labels, at, 260.0, move |i| {
                                     if let Some((id, _)) = opts.get(i) {
-                                        dr.update(|s| {
-                                            if id.is_empty() {
-                                                s.overrides.remove(kind);
-                                            } else {
-                                                s.overrides.insert(kind.to_string(), id.clone());
-                                            }
-                                        });
+                                        dr.update(|s| pick_override(&sv, s, kind, id));
                                     }
                                 });
                             });

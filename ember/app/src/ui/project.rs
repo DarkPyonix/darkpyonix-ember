@@ -758,6 +758,99 @@ pub fn validate_settings(d: &SettingsDraft, project_id: &str) -> Vec<SettingsErr
     errors
 }
 
+/// The form of the 새 프로젝트 sheet (FR-L26, FR-L1). Empty strings mean "not filled"; `style` is
+/// the server's character style id, empty until the user picks one (the picker shows 몽글 then).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewProjectDraft {
+    pub name: String,
+    pub repo: String,
+    pub branch: String,
+    pub style: String,
+}
+
+/// Why the 새 프로젝트 sheet cannot create yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewProjectError {
+    /// A rule the settings sheet has too (name, repository, branch).
+    Field(SettingsError),
+    NameTaken,
+    /// A repository is given without a default branch.
+    BranchRequired,
+}
+
+impl NewProjectError {
+    pub fn message(self) -> &'static str {
+        match self {
+            NewProjectError::Field(e) => e.message(),
+            NewProjectError::NameTaken => "같은 이름의 프로젝트가 이미 있습니다",
+            NewProjectError::BranchRequired => "저장소를 넣으면 기본 브랜치도 입력해 주세요",
+        }
+    }
+}
+
+/// What the sheet does once the follow-up `PATCH` has answered. The project exists in both cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProjectOutcome {
+    pub project_kept: bool,
+    pub notice: Option<&'static str>,
+}
+
+impl NewProjectOutcome {
+    pub fn after_followup(failed: bool) -> NewProjectOutcome {
+        NewProjectOutcome {
+            project_kept: true,
+            notice: failed.then_some(
+                "프로젝트는 만들었지만 저장소와 캐릭터 설정은 저장하지 못했습니다. 프로젝트 설정에서 다시 저장해 주세요",
+            ),
+        }
+    }
+}
+
+impl NewProjectDraft {
+    pub fn trimmed_name(&self) -> String {
+        self.name.trim().to_string()
+    }
+
+    /// Nothing typed or picked: closing needs no question.
+    pub fn is_blank(&self) -> bool {
+        *self == NewProjectDraft::default()
+    }
+
+    /// Name rules as the settings sheet, a name not taken, and a branch whenever a repository is
+    /// given. `existing` are the project names that exist now (the server's create is idempotent,
+    /// so a taken name must be refused here).
+    pub fn validate(&self, existing: &[String]) -> Vec<NewProjectError> {
+        let as_settings = SettingsDraft {
+            name: self.name.clone(),
+            repo: self.repo.clone(),
+            branch: self.branch.clone(),
+            ..Default::default()
+        };
+        let mut errors: Vec<NewProjectError> =
+            validate_settings(&as_settings, "").into_iter().map(NewProjectError::Field).collect();
+        let name = self.name.trim();
+        if !name.is_empty() && existing.iter().any(|e| e == name) {
+            errors.push(NewProjectError::NameTaken);
+        }
+        if !self.repo.trim().is_empty() && self.branch.trim().is_empty() {
+            errors.push(NewProjectError::BranchRequired);
+        }
+        errors
+    }
+
+    /// The second call after `POST /api/projects` (which takes only a name): the filled fields,
+    /// empty when only the name was given.
+    pub fn followup_patch(&self) -> ProjectPatch {
+        let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+        ProjectPatch {
+            repository: some(&self.repo),
+            default_branch: some(&self.branch),
+            character_style: some(&self.style),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1273,5 +1366,79 @@ mod tests {
     fn fr_l26_guard_asks_when_dirty() {
         assert_eq!(SettingsGuard::new(false, false).on_close(), CloseAction::Confirm);
         assert_eq!(SettingsGuard::new(false, true).on_close(), CloseAction::Close);
+    }
+
+    // --- the new project sheet (FR-L26, FR-L1) ---
+
+    fn np_draft(name: &str, repo: &str, branch: &str, style: &str) -> NewProjectDraft {
+        NewProjectDraft { name: name.into(), repo: repo.into(), branch: branch.into(), style: style.into() }
+    }
+
+    #[test]
+    fn fr_l26_new_project_name_only_creates_without_a_patch() {
+        let d = np_draft("  ember  ", "", "", "");
+        assert!(d.validate(&[]).is_empty());
+        assert_eq!(d.trimmed_name(), "ember");
+        assert!(d.followup_patch().is_empty());
+        assert!(!d.is_blank());
+    }
+
+    #[test]
+    fn fr_l26_new_project_name_rules_as_settings() {
+        assert_eq!(np_draft("  ", "", "", "").validate(&[]), vec![NewProjectError::Field(SettingsError::NameEmpty)]);
+        assert_eq!(np_draft("a/b", "", "", "").validate(&[]), vec![NewProjectError::Field(SettingsError::NameInvalid)]);
+        assert_eq!(np_draft(&"x".repeat(65), "", "", "").validate(&[]), vec![NewProjectError::Field(SettingsError::NameTooLong)]);
+        assert_eq!(np_draft("a", "", "", "").validate(&["a".to_string()]), vec![NewProjectError::NameTaken]);
+        assert_eq!(NewProjectError::NameTaken.message(), "같은 이름의 프로젝트가 이미 있습니다");
+    }
+
+    #[test]
+    fn fr_l26_new_project_repository_requires_a_branch() {
+        let d = np_draft("ember", "github.com/a/b", "", "");
+        assert_eq!(d.validate(&[]), vec![NewProjectError::BranchRequired]);
+        assert_eq!(NewProjectError::BranchRequired.message(), "저장소를 넣으면 기본 브랜치도 입력해 주세요");
+        let d = np_draft("ember", "github.com/a/b", "develop", "");
+        assert!(d.validate(&[]).is_empty());
+        let patch = d.followup_patch();
+        assert_eq!(patch.repository.as_deref(), Some("github.com/a/b"));
+        assert_eq!(patch.default_branch.as_deref(), Some("develop"));
+        assert!(patch.name.is_none() && patch.member_defaults.is_none() && patch.character_style.is_none());
+    }
+
+    #[test]
+    fn fr_l26_new_project_invalid_repository_message() {
+        let d = np_draft("ember", "github.com/a b", "develop", "");
+        assert_eq!(d.validate(&[]), vec![NewProjectError::Field(SettingsError::RepoHasSpace)]);
+        assert_eq!(NewProjectError::Field(SettingsError::RepoHasSpace).message(), "저장소 주소에는 공백이 들어갈 수 없습니다");
+        let d = np_draft("ember", "github.com/a/b", "-x", "");
+        assert_eq!(d.validate(&[]), vec![NewProjectError::Field(SettingsError::BranchInvalid)]);
+    }
+
+    #[test]
+    fn fr_l26_new_project_character_style_is_in_the_patch() {
+        let patch = np_draft("ember", "", "", "crew").followup_patch();
+        assert_eq!(patch.character_style.as_deref(), Some("crew"));
+        assert!(patch.repository.is_none() && patch.default_branch.is_none());
+        assert!(!patch.is_empty());
+    }
+
+    #[test]
+    fn fr_l26_new_project_a_failed_followup_keeps_the_project_and_says_so() {
+        let ok = NewProjectOutcome::after_followup(false);
+        assert!(ok.project_kept && ok.notice.is_none());
+        let bad = NewProjectOutcome::after_followup(true);
+        assert!(bad.project_kept);
+        assert_eq!(
+            bad.notice,
+            Some("프로젝트는 만들었지만 저장소와 캐릭터 설정은 저장하지 못했습니다. 프로젝트 설정에서 다시 저장해 주세요")
+        );
+    }
+
+    #[test]
+    fn fr_l26_new_project_guard_asks_only_after_typing() {
+        assert!(NewProjectDraft::default().is_blank());
+        assert_eq!(SettingsGuard::new(false, NewProjectDraft::default().is_blank()).on_close(), CloseAction::Close);
+        assert_eq!(SettingsGuard::new(false, np_draft("x", "", "", "").is_blank()).on_close(), CloseAction::Confirm);
+        assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
     }
 }

@@ -188,6 +188,44 @@ impl Worker {
     }
 }
 
+/// Runs `run` on a batch and turns a panic in it into "highlighting is off" for every document the batch touched,
+/// with a fresh worker afterwards: a grammar or an input that breaks the tokenizer must not take the thread, and
+/// with it every later document's colours, down.
+pub fn guard(
+    worker: &mut Worker,
+    jobs: Vec<HighlightJob>,
+    run: impl FnOnce(&mut Worker, Vec<HighlightJob>) -> Vec<HighlightOutput>,
+) -> Vec<HighlightOutput> {
+    let mut keys: Vec<(String, u64)> = Vec::new();
+    for job in &jobs {
+        let (key, seq) = match job {
+            HighlightJob::Build { key, seq, .. } | HighlightJob::Edit { key, seq, .. } | HighlightJob::Window { key, seq, .. } => (key, *seq),
+            HighlightJob::Drop { .. } => continue,
+        };
+        match keys.iter_mut().find(|(k, _)| k == key) {
+            Some(entry) => entry.1 = seq,
+            None => keys.push((key.clone(), seq)),
+        }
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(worker, jobs))) {
+        Ok(outputs) => outputs,
+        Err(_) => {
+            tracing::warn!("ember-editor: the highlighting worker panicked; colours are off for {} document(s)", keys.len());
+            *worker = Worker::new();
+            keys.into_iter()
+                .map(|(key, seq)| HighlightOutput {
+                    key,
+                    seq,
+                    version: 0,
+                    window: (0, 0),
+                    runs: Vec::new(),
+                    problem: Some(Problem::Off("the highlighter stopped on an internal error".to_owned())),
+                })
+                .collect()
+        }
+    }
+}
+
 // ---- the session side ---------------------------------------------------------------------------------
 
 /// What [`Highlights`] asks the session to do.

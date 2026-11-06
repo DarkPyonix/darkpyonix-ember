@@ -34,6 +34,9 @@ use crate::registry::{KindTag, Registry, RegistryChange};
 use crate::replies::session_reply;
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
 
+/// How many versions behind the document an answer of the highlighter may be and still be shown.
+const MAX_SPAN_VERSION_LAG: u32 = 500;
+
 /// Identifies an outstanding RPC call or file write of the core.
 pub type Token = u64;
 
@@ -1157,7 +1160,12 @@ impl SessionCore {
     }
 
     fn on_grammar_read(&mut self, scope: &str, uri: &UriComponents, result: Result<Vec<u8>, String>) {
-        let result = result.and_then(|bytes| String::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned()));
+        let result = result.and_then(|bytes| {
+            if bytes.len() as u64 > crate::textmate::MAX_GRAMMAR_BYTES {
+                return Err("the grammar file is too large".to_owned());
+            }
+            String::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned())
+        });
         let (actions, ready) = self.highlights.grammar_read(scope, &uri.path, result);
         self.run_highlight_actions(uri, actions);
         for key in ready {
@@ -1170,6 +1178,15 @@ impl SessionCore {
             return;
         }
         let key = output.key.clone();
+        // Runs written against a version the document has not reached cannot be right, and ones far behind it
+        // are past what the widget can move them across: neither is shown.
+        if let Some(doc) = self.docs.get(&key) {
+            let current = doc.widget_version();
+            if output.problem.is_none() && (output.version > current || current - output.version > MAX_SPAN_VERSION_LAG) {
+                tracing::debug!("ember-editor: dropped runs for version {} of {key} (document at {current})", output.version);
+                return;
+            }
+        }
         match output.problem {
             Some(Problem::Rebuild) => {
                 self.highlights.rebuild(&key);

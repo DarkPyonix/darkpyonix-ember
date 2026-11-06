@@ -420,7 +420,7 @@ fn spawn_highlighter(answers: mpsc::UnboundedSender<Input>) -> std::sync::mpsc::
         while let Ok(first) = rx.recv() {
             let mut batch = vec![first];
             batch.extend(rx.try_iter());
-            for output in worker.run(batch) {
+            for output in crate::highlight::guard(&mut worker, batch, Worker::run) {
                 if answers.send(Input::Highlighted(output)).is_err() {
                     return;
                 }
@@ -561,8 +561,21 @@ impl Driver {
                 }
                 Effect::ReadFile { uri, purpose } => {
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // A grammar file comes from an extension on the server: ask how big it is before reading it.
+                    let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
-                        let result = fs.read_file(&uri).await.map_err(|e| e.to_string());
+                        let too_big = match cap {
+                            Some(cap) => match fs.stat(&uri).await {
+                                Ok(st) if st.size > cap => Some("the grammar file is too large".to_owned()),
+                                Ok(_) => None,
+                                Err(e) => Some(e.to_string()),
+                            },
+                            None => None,
+                        };
+                        let result = match too_big {
+                            Some(why) => Err(why),
+                            None => fs.read_file(&uri).await.map_err(|e| e.to_string()),
+                        };
                         let _ = tx.send(Input::FileRead { uri, purpose, result });
                     });
                 }

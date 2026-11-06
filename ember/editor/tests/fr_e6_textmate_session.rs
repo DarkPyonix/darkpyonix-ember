@@ -247,3 +247,71 @@ fn fr_e6_a_grammar_that_is_missing_turns_highlighting_off_without_a_crash() {
     let out = w.run(vec![job]);
     assert!(matches!(out[0].problem, Some(Problem::Off(_))));
 }
+
+// ---- a server's grammars are untrusted input -----------------------------------------------------------
+
+#[test]
+fn fr_e6_a_grammar_path_that_leaves_the_extension_folder_is_never_requested() {
+    let t0 = Instant::now();
+    let hostile = vec![json!({
+        "identifier": {"value": "evil.ext"},
+        "extensionLocation": {"path": "/e/evil"},
+        "contributes": {
+            "languages": [{"id": "evil", "extensions": [".evil"]}],
+            "grammars": [{"language": "evil", "scopeName": "source.evil", "path": "../../etc/passwd"}]
+        }
+    })];
+    let mut core = SessionCore::new(LanguageRegistry::from_extensions(&hostile), CoreOptions::default(), t0);
+    core.set_grammar_catalog(GrammarCatalog::from_extensions(&hostile));
+    let effects = core.handle(t0, Input::FileRead { uri: uri("/w/a.evil"), purpose: ReadPurpose::Open, result: Ok(b"x".to_vec()) });
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::ReadFile { purpose: ReadPurpose::Grammar { .. }, .. })),
+        "no read of a path outside the extension: {effects:?}"
+    );
+}
+
+#[test]
+fn fr_e6_a_grammar_answer_over_the_size_cap_turns_colours_off_for_the_language() {
+    let mut d = Driver::new();
+    let mut effects = d.core.handle(d.t, Input::FileRead { uri: uri("/w/a.ts"), purpose: ReadPurpose::Open, result: Ok(b"let a;\n".to_vec()) });
+    let first = effects
+        .drain(..)
+        .find_map(|e| match e {
+            Effect::ReadFile { uri, purpose: ReadPurpose::Grammar { scope } } => Some((uri, scope)),
+            _ => None,
+        })
+        .expect("a grammar read");
+    let huge = vec![b' '; ember_editor::textmate::MAX_GRAMMAR_BYTES as usize + 1];
+    let after = d.core.handle(d.t, Input::FileRead { uri: first.0, purpose: ReadPurpose::Grammar { scope: first.1 }, result: Ok(huge) });
+    assert!(!after.iter().any(|e| matches!(e, Effect::Highlight(_))), "no build from an oversized grammar: {after:?}");
+}
+
+#[test]
+fn fr_e6_runs_for_a_version_the_document_has_not_reached_or_is_far_past_are_dropped() {
+    let mut d = Driver::new();
+    d.open("/w/a.ts", "let a;\n");
+    let seq = match d.jobs.iter().find_map(|j| match j { HighlightJob::Build { seq, .. } => Some(*seq), _ => None }) {
+        Some(s) => s,
+        None => panic!("a build job"),
+    };
+    let before = d.syntax.len();
+    let future = HighlightOutput { key: uri("/w/a.ts").key(), seq, version: 9, window: (0, 10), runs: Vec::new(), problem: None };
+    d.feed(Input::Highlighted(future));
+    assert_eq!(d.syntax.len(), before, "an answer for version 9 of a document at version 0 is dropped");
+}
+
+#[test]
+fn fr_e6_a_panic_in_the_worker_is_contained_and_reported_as_colours_off() {
+    use ember_editor::highlight::guard;
+    let mut worker = Worker::new();
+    worker.run(vec![build_job("k", 1, "let a;")]);
+    let outputs = guard(&mut worker, vec![edit("k", 1, (0, 0), "x", 1), HighlightJob::Window { key: "other".into(), seq: 4, window: (0, 5) }], |_, _| {
+        panic!("a broken grammar")
+    });
+    let mut keys: Vec<(&str, u64)> = outputs.iter().map(|o| (o.key.as_str(), o.seq)).collect();
+    keys.sort();
+    assert_eq!(keys, vec![("k", 1), ("other", 4)]);
+    assert!(outputs.iter().all(|o| matches!(o.problem, Some(Problem::Off(_)))));
+    // The thread survives with a fresh worker: a later job works.
+    assert_eq!(guard(&mut worker, vec![build_job("k2", 2, "let b;")], Worker::run).len(), 1);
+}

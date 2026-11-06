@@ -560,11 +560,11 @@ pub const CHIP_TEXT_MINS: [f32; CHIP_COUNT] = [54.0, 40.0, 40.0, 54.0];
 const CHIP_FRAME: f32 = 50.0;
 const CHIP_GAP: f32 = 6.0;
 
-/// A label's width at the composer's chip font: about 13.5 dp per Korean glyph and 7.8 per ASCII
+/// A label's width at the composer's chip font (13 dp, weight 500; measured on the PR #629 captures): about 13.5 dp per Korean glyph and 6.8 per ASCII
 /// character or middle dot. The send sheet's estimate (`files::chip_text_px`, 16 and 9) is
 /// deliberately more pessimistic and stays as it is.
 pub fn composer_text_px(text: &str) -> f32 {
-    text.chars().map(|c| if c.is_ascii() || c == '\u{b7}' { 7.8 } else { 13.5 }).sum()
+    text.chars().map(|c| if c.is_ascii() || c == '\u{b7}' { 6.8 } else { 13.5 }).sum()
 }
 
 /// `text` cut with an ellipsis so [`composer_text_px`] stays within `max_px`.
@@ -1812,7 +1812,7 @@ mod tests {
     #[test]
     fn fr_l15_composer_estimate_matches_the_measured_label() {
         let w = composer_text_px("Claude Code \u{b7} Opus 5.5 \u{b7} 높음");
-        assert!((205.0..=235.0).contains(&w), "{w}");
+        assert!((180.0..=200.0).contains(&w), "{w}");
         // The send sheet's pessimistic estimate is a different, larger function.
         assert!(crate::ui::files::chip_text_px("가나다") > composer_text_px("가나다"));
     }

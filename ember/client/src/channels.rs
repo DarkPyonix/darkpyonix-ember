@@ -81,6 +81,9 @@ pub struct NewInvite {
     pub ttl_hours: Option<u32>,
 }
 
+/// Path of the guest door status route (owner route, FR-T14).
+pub const GUEST_DOOR_PATH: &str = "/guest-door";
+
 /// The `guest_door` object of a create-invite answer; absent on a server without the guest door.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestDoorState {
@@ -90,6 +93,10 @@ pub struct GuestDoorState {
     pub listen: Option<String>,
     #[serde(default)]
     pub public_url: Option<String>,
+    /// True when the door is on and no public URL is set: ask the owner to check that the listen
+    /// address is reachable from outside. Only the guest-door route sends it (FR-T14).
+    #[serde(default)]
+    pub link_warning: bool,
 }
 
 impl GuestDoorState {
@@ -581,5 +588,18 @@ mod tests {
         assert_eq!(guests_path("c1"), "/channels/c1/guests");
         assert_eq!(guest_path("c1", "g/1"), "/channels/c1/guests/g%2F1");
         assert_eq!(guest_allow_path("c1", "g1"), "/channels/c1/guests/g1/allow");
+    }
+
+    #[test]
+    fn fr_t14_client_guest_door_decodes() {
+        let off: GuestDoorState = serde_json::from_str(r#"{"state":"off","listen":null,"public_url":null,"link_warning":false}"#).unwrap();
+        assert!(!off.is_on() && !off.link_warning && off.listen.is_none());
+        let on: GuestDoorState = serde_json::from_str(r#"{"state":"on","listen":"0.0.0.0:8741","public_url":null,"link_warning":true}"#).unwrap();
+        assert!(on.is_on() && on.link_warning);
+        assert_eq!(on.listen.as_deref(), Some("0.0.0.0:8741"));
+        // The invite answer's guest_door has no link_warning: it defaults to false.
+        let embedded: GuestDoorState = serde_json::from_str(r#"{"state":"on","listen":"127.0.0.1:8741","public_url":"https://x.example"}"#).unwrap();
+        assert!(embedded.is_on() && !embedded.link_warning);
+        assert_eq!(GUEST_DOOR_PATH, "/guest-door");
     }
 }

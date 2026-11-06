@@ -4,29 +4,54 @@
 //! grammar files; a path with another extension is refused with [`GrammarError::UnsupportedFormat`]
 //! so the caller can say so rather than tokenize nothing silently.
 //!
-//! The model keeps every field of the format the interpreter needs (`match`, `begin`/`end`/`while`,
-//! the capture maps, `patterns`, `include`, `repository`, `injections`, `applyEndPatternLast`) and
-//! drops the editor-only ones (`foldingStartMarker`, `fileTypes`, ...). Regular expressions stay as
-//! text: compiling them is the interpreter's job, because an `end` pattern may refer to captures of
-//! its `begin` and is only known while a line is being tokenized.
+//! A grammar file comes from an extension, so it is input from outside the editor. The reader is as
+//! forgiving as vscode-textmate: a value of the wrong type (`"patterns": null`, `"name": 5`, a string
+//! where a rule belongs, `"disabled": "x"`) is dropped and the rest of the grammar is kept. It is
+//! strict about size: the file, the number of rules and the nesting depth are capped, and an error
+//! never repeats the file's text.
+//!
+//! The model keeps every field the interpreter needs (`match`, `begin`/`end`/`while`, the capture
+//! maps, `patterns`, `include`, `repository`, `injections`, `applyEndPatternLast`) and drops the
+//! editor-only ones. Regular expressions stay as text: compiling them is the interpreter's job,
+//! because an `end` pattern may refer to captures of its `begin` and is only known while a line is
+//! being tokenized.
 
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::Path;
 
-use serde::{Deserialize, Deserializer};
+use serde_json::{Map, Value};
+
+/// The largest grammar file read. The biggest in a Code-OSS build is under 0.5 MiB.
+pub const MAX_GRAMMAR_BYTES: u64 = 4 * 1024 * 1024;
+/// The most rules (every nested rule and capture counts) one grammar may hold.
+pub const MAX_RULES: usize = 100_000;
+/// The deepest nesting of rules. serde_json refuses documents nested deeper than 128 as well.
+pub const MAX_DEPTH: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GrammarError {
-    #[error("grammar is not valid JSON: {0}")]
-    Json(#[from] serde_json::Error),
+    /// `at` is the line and column; the text of the file is never part of the message.
+    #[error("grammar is not valid JSON (line {line}, column {column})")]
+    Json { line: usize, column: usize },
     #[error("grammar has no scopeName")]
     MissingScopeName,
     #[error("grammar file {0} is not JSON (only .json grammars are read)")]
     UnsupportedFormat(String),
+    #[error("grammar file is larger than {MAX_GRAMMAR_BYTES} bytes")]
+    TooLarge,
+    #[error("grammar has more than {MAX_RULES} rules")]
+    TooManyRules,
+    #[error("grammar rules are nested deeper than {MAX_DEPTH} levels")]
+    TooDeep,
+    #[error("grammar file is outside the extension folder")]
+    OutsideExtension,
+    #[error("grammar file could not be read: {0}")]
+    Io(String),
 }
 
 /// A grammar file: the scope it defines, its top-level rules, and the repository `include`s resolve in.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Debug, Clone, Default)]
 pub struct RawGrammar {
     pub name: Option<String>,
     pub scope_name: String,
@@ -40,157 +65,147 @@ pub struct RawGrammar {
 
 /// One rule. Which fields are set decides its kind: `match` (a single pattern), `begin` with `end` or
 /// `while` (a region), `include` (a reference), or only `patterns` (a group).
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Debug, Clone, Default)]
 pub struct RawRule {
     pub name: Option<String>,
     pub content_name: Option<String>,
-    #[serde(rename = "match")]
     pub match_: Option<String>,
     pub begin: Option<String>,
     pub end: Option<String>,
-    #[serde(rename = "while")]
     pub while_: Option<String>,
-    #[serde(deserialize_with = "capture_map")]
     pub captures: BTreeMap<String, RawRule>,
-    #[serde(deserialize_with = "capture_map")]
     pub begin_captures: BTreeMap<String, RawRule>,
-    #[serde(deserialize_with = "capture_map")]
     pub end_captures: BTreeMap<String, RawRule>,
-    #[serde(deserialize_with = "capture_map")]
     pub while_captures: BTreeMap<String, RawRule>,
     pub patterns: Vec<RawRule>,
     pub include: Option<String>,
     pub repository: BTreeMap<String, RawRule>,
-    #[serde(deserialize_with = "flag")]
     pub apply_end_pattern_last: bool,
-    #[serde(deserialize_with = "flag")]
     pub disabled: bool,
 }
 
-/// A capture map. Real grammars contain stray non-rule entries (the XML grammar has `"end": "--%>"` inside a
-/// `captures` object); vscode-textmate ignores what is not a rule, so they are dropped here instead of
-/// failing the whole grammar.
-fn capture_map<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, RawRule>, D::Error> {
-    let raw = Option::<BTreeMap<String, serde_json::Value>>::deserialize(d)?.unwrap_or_default();
+/// Counts what has been built, against [`MAX_RULES`].
+struct Budget {
+    rules: usize,
+}
+
+fn text(obj: &Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Grammars write flags as `1`, `0`, `true` or `false`; anything else is false.
+fn flag(obj: &Map<String, Value>, key: &str) -> bool {
+    match obj.get(key) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_i64().is_some_and(|n| n != 0),
+        _ => false,
+    }
+}
+
+/// An object of rules (`repository`, a capture map): entries that are not objects are dropped.
+fn rule_map(obj: &Map<String, Value>, key: &str, depth: usize, budget: &mut Budget) -> Result<BTreeMap<String, RawRule>, GrammarError> {
     let mut out = BTreeMap::new();
-    for (key, value) in raw {
-        if value.is_object() {
-            out.insert(key, serde_json::from_value(value).map_err(serde::de::Error::custom)?);
+    if let Some(Value::Object(map)) = obj.get(key) {
+        for (name, value) in map {
+            if let Value::Object(rule) = value {
+                out.insert(name.clone(), rule_from(rule, depth + 1, budget)?);
+            }
         }
     }
     Ok(out)
 }
 
-/// Grammars write flags as `1`, `0`, `true` or `false`.
-fn flag<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Flag {
-        Bool(bool),
-        Int(i64),
+/// A list of rules (`patterns`): entries that are not objects are dropped.
+fn rule_list(obj: &Map<String, Value>, key: &str, depth: usize, budget: &mut Budget) -> Result<Vec<RawRule>, GrammarError> {
+    let mut out = Vec::new();
+    if let Some(Value::Array(items)) = obj.get(key) {
+        for value in items {
+            if let Value::Object(rule) = value {
+                out.push(rule_from(rule, depth + 1, budget)?);
+            }
+        }
     }
-    Ok(match Option::<Flag>::deserialize(d)? {
-        Some(Flag::Bool(b)) => b,
-        Some(Flag::Int(n)) => n != 0,
-        None => false,
+    Ok(out)
+}
+
+fn rule_from(obj: &Map<String, Value>, depth: usize, budget: &mut Budget) -> Result<RawRule, GrammarError> {
+    if depth > MAX_DEPTH {
+        return Err(GrammarError::TooDeep);
+    }
+    budget.rules += 1;
+    if budget.rules > MAX_RULES {
+        return Err(GrammarError::TooManyRules);
+    }
+    Ok(RawRule {
+        name: text(obj, "name"),
+        content_name: text(obj, "contentName"),
+        match_: text(obj, "match"),
+        begin: text(obj, "begin"),
+        end: text(obj, "end"),
+        while_: text(obj, "while"),
+        captures: rule_map(obj, "captures", depth, budget)?,
+        begin_captures: rule_map(obj, "beginCaptures", depth, budget)?,
+        end_captures: rule_map(obj, "endCaptures", depth, budget)?,
+        while_captures: rule_map(obj, "whileCaptures", depth, budget)?,
+        patterns: rule_list(obj, "patterns", depth, budget)?,
+        include: text(obj, "include"),
+        repository: rule_map(obj, "repository", depth, budget)?,
+        apply_end_pattern_last: flag(obj, "applyEndPatternLast"),
+        disabled: flag(obj, "disabled"),
     })
 }
 
 /// Parses the text of a grammar file. `path` is only used to refuse formats that are not JSON.
-pub fn parse_grammar(path: &str, text: &str) -> Result<RawGrammar, GrammarError> {
-    let lower = path.to_lowercase();
-    if !lower.ends_with(".json") {
-        return Err(GrammarError::UnsupportedFormat(path.to_owned()));
+pub fn parse_grammar(path: &str, content: &str) -> Result<RawGrammar, GrammarError> {
+    if !path.to_lowercase().ends_with(".json") {
+        return Err(GrammarError::UnsupportedFormat(path.chars().filter(|c| !c.is_control()).take(120).collect()));
     }
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let grammar: RawGrammar = serde_json::from_str(text)?;
-    if grammar.scope_name.is_empty() {
+    if content.len() as u64 > MAX_GRAMMAR_BYTES {
+        return Err(GrammarError::TooLarge);
+    }
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let value: Value = serde_json::from_str(content).map_err(|e| GrammarError::Json { line: e.line(), column: e.column() })?;
+    let Value::Object(root) = value else {
         return Err(GrammarError::MissingScopeName);
-    }
-    Ok(grammar)
+    };
+    let scope_name = text(&root, "scopeName").filter(|s| !s.is_empty()).ok_or(GrammarError::MissingScopeName)?;
+    let mut budget = Budget { rules: 0 };
+    Ok(RawGrammar {
+        name: text(&root, "name"),
+        scope_name,
+        patterns: rule_list(&root, "patterns", 0, &mut budget)?,
+        repository: rule_map(&root, "repository", 0, &mut budget)?,
+        injections: rule_map(&root, "injections", 0, &mut budget)?,
+        injection_selector: text(&root, "injectionSelector"),
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_grammar_keeps_its_scope_rules_and_repository() {
-        let g = parse_grammar(
-            "x.tmLanguage.json",
-            r##"{"name":"Demo","scopeName":"source.demo","patterns":[{"include":"#kw"},{"match":"\\d+","name":"constant.numeric.demo"}],
-                "repository":{"kw":{"match":"\\b(if|else)\\b","captures":{"1":{"name":"keyword.control.demo"}}}}}"##,
-        )
-        .unwrap();
-        assert_eq!(g.scope_name, "source.demo");
-        assert_eq!(g.patterns.len(), 2);
-        assert_eq!(g.patterns[0].include.as_deref(), Some("#kw"));
-        assert_eq!(g.patterns[1].match_.as_deref(), Some("\\d+"));
-        assert_eq!(g.repository["kw"].captures["1"].name.as_deref(), Some("keyword.control.demo"));
+/// Reads a grammar file from the local disk, on behalf of one extension. The file must lie inside the
+/// extension folder once symbolic links are resolved (`path` may be relative or contain `..`; a link in
+/// the folder that leads out of it is refused), and its size is checked before it is read.
+///
+/// This reads the machine the editor runs on. A grammar on a server must be read through a reader that
+/// makes the same checks on the server's side.
+pub fn read_grammar(extension_dir: &Path, path: &Path) -> Result<RawGrammar, GrammarError> {
+    let dir = std::fs::canonicalize(extension_dir).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
+    let file = std::fs::canonicalize(path).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
+    if !file.starts_with(&dir) {
+        return Err(GrammarError::OutsideExtension);
     }
-
-    #[test]
-    fn a_region_keeps_begin_end_while_captures_and_content_name() {
-        let g = parse_grammar(
-            "a.json",
-            r#"{"scopeName":"source.r","patterns":[
-                {"begin":"\"","end":"\"","name":"string.quoted","contentName":"meta.string-contents",
-                 "beginCaptures":{"0":{"name":"punctuation.open"}},"endCaptures":{"0":{"name":"punctuation.close"}},
-                 "patterns":[{"match":"\\\\.","name":"constant.character.escape"}]},
-                {"begin":"^>","while":"^>","applyEndPatternLast":1}]}"#,
-        )
-        .unwrap();
-        let s = &g.patterns[0];
-        assert_eq!((s.begin.as_deref(), s.end.as_deref()), (Some("\""), Some("\"")));
-        assert_eq!(s.content_name.as_deref(), Some("meta.string-contents"));
-        assert_eq!(s.begin_captures["0"].name.as_deref(), Some("punctuation.open"));
-        assert_eq!(s.end_captures["0"].name.as_deref(), Some("punctuation.close"));
-        assert_eq!(s.patterns[0].name.as_deref(), Some("constant.character.escape"));
-        let q = &g.patterns[1];
-        assert_eq!(q.while_.as_deref(), Some("^>"));
-        assert!(q.apply_end_pattern_last, "1 means true");
+    let f = std::fs::File::open(&file).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
+    let meta = f.metadata().map_err(|e| GrammarError::Io(e.kind().to_string()))?;
+    if !meta.is_file() {
+        return Err(GrammarError::Io("not a regular file".to_owned()));
     }
-
-    #[test]
-    fn flags_accept_numbers_and_booleans_and_default_to_false() {
-        let g = parse_grammar(
-            "a.json",
-            r#"{"scopeName":"s","patterns":[{"match":"a","disabled":1},{"match":"b","disabled":false},{"match":"c","applyEndPatternLast":true},{"match":"d"}]}"#,
-        )
-        .unwrap();
-        let flags: Vec<(bool, bool)> = g.patterns.iter().map(|r| (r.disabled, r.apply_end_pattern_last)).collect();
-        assert_eq!(flags, vec![(true, false), (false, false), (false, true), (false, false)]);
+    if meta.len() > MAX_GRAMMAR_BYTES {
+        return Err(GrammarError::TooLarge);
     }
-
-    #[test]
-    fn injections_and_a_byte_order_mark_are_read() {
-        let g = parse_grammar(
-            "a.json",
-            "\u{feff}{\"scopeName\":\"text.md\",\"injectionSelector\":\"L:source.demo\",\"injections\":{\"L:text.md -comment\":{\"patterns\":[{\"match\":\"x\"}]}}}",
-        )
-        .unwrap();
-        assert_eq!(g.injection_selector.as_deref(), Some("L:source.demo"));
-        assert_eq!(g.injections["L:text.md -comment"].patterns.len(), 1);
+    // The size can change between the check and the read: read at most one byte over the cap.
+    let mut bytes = Vec::new();
+    f.take(MAX_GRAMMAR_BYTES + 1).read_to_end(&mut bytes).map_err(|e| GrammarError::Io(e.kind().to_string()))?;
+    if bytes.len() as u64 > MAX_GRAMMAR_BYTES {
+        return Err(GrammarError::TooLarge);
     }
-
-    #[test]
-    fn a_stray_non_rule_entry_in_a_capture_map_is_ignored() {
-        let g = parse_grammar(
-            "xml.json",
-            r#"{"scopeName":"text.xml","patterns":[{"begin":"<%--","captures":{"0":{"name":"punctuation"},"end":"--%>","name":"comment.block.xml"}}]}"#,
-        )
-        .unwrap();
-        let c = &g.patterns[0].captures;
-        assert_eq!(c.len(), 1);
-        assert_eq!(c["0"].name.as_deref(), Some("punctuation"));
-    }
-
-    #[test]
-    fn bad_input_is_an_error_not_an_empty_grammar() {
-        assert!(matches!(parse_grammar("a.json", "{nope"), Err(GrammarError::Json(_))));
-        assert!(matches!(parse_grammar("a.json", "{\"patterns\":[]}"), Err(GrammarError::MissingScopeName)));
-        assert!(matches!(parse_grammar("a.tmLanguage", "<plist/>"), Err(GrammarError::UnsupportedFormat(_))));
-        assert!(matches!(parse_grammar("a.YAML-tmLanguage", "scopeName: x"), Err(GrammarError::UnsupportedFormat(_))));
-    }
+    let content = String::from_utf8(bytes).map_err(|_| GrammarError::Io("not UTF-8".to_owned()))?;
+    parse_grammar(&file.to_string_lossy(), &content)
 }

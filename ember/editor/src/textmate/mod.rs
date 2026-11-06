@@ -10,4 +10,4 @@ pub mod catalog;
 pub mod grammar;
 
 pub use catalog::{GrammarCatalog, GrammarEntry};
-pub use grammar::{parse_grammar, GrammarError, RawGrammar, RawRule};
+pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_DEPTH, MAX_GRAMMAR_BYTES, MAX_RULES};

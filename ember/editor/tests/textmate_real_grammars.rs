@@ -8,12 +8,12 @@
 
 use std::path::PathBuf;
 
-use ember_editor::textmate::{parse_grammar, GrammarCatalog};
+use ember_editor::textmate::{read_grammar, GrammarCatalog};
 use serde_json::{json, Value};
 
 #[test]
 #[ignore = "needs a real OSE extensions folder: EMBER_OSE_EXTENSIONS=<unpacked build>/extensions"]
-fn every_grammar_the_real_extensions_contribute_loads_and_parses() {
+fn fr_e6_every_grammar_the_real_extensions_contribute_loads_and_parses() {
     let Some(dir) = std::env::var_os("EMBER_OSE_EXTENSIONS").map(PathBuf::from) else {
         eprintln!("[textmate] EMBER_OSE_EXTENSIONS not set; skipping");
         return;
@@ -40,8 +40,8 @@ fn every_grammar_the_real_extensions_contribute_loads_and_parses() {
     for scope in descriptions.iter().flat_map(|d| d["contributes"]["grammars"].as_array().cloned().unwrap_or_default()) {
         let scope_name = scope["scopeName"].as_str().unwrap();
         let entry = catalog.by_scope(scope_name).unwrap();
-        let text = std::fs::read_to_string(&entry.path).unwrap_or_else(|e| panic!("read {}: {e}", entry.path));
-        match parse_grammar(&entry.path, &text) {
+        let ext_dir = std::path::Path::new(&entry.path).ancestors().find(|p| p.parent() == Some(dir.as_path())).unwrap().to_path_buf();
+        match read_grammar(&ext_dir, std::path::Path::new(&entry.path)) {
             Ok(g) => {
                 assert_eq!(g.scope_name, scope_name, "{}", entry.path);
                 parsed += 1;

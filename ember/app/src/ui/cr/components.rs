@@ -768,6 +768,11 @@ pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32,
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// TODO(compose-rust#372): a pointer-up subscription; the toolkit's modal calls on_dismiss for Escape and the scrim (not yet checked on a display).
+/// TODO(compose-rust#476, FR-L32, #502): Escape does not close a sheet on a display. The Rust API
+/// of v0.0.6 cannot receive the key: `Key` has only `Enter`, only `TextField` has `on_key_down`,
+/// and there is no request-focus call, so a sheet cannot take focus when it opens. Ember passes
+/// the same close callback (guarded where a guard exists) to the modal's `on_dismiss`, so Escape
+/// closes every sheet as soon as the renderer delivers it.
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     Clickable(
@@ -1124,6 +1129,27 @@ mod tests {
         assert_eq!(sheet_body_max_height(900.0, 900.0, false, 60.0), 808.0);
     }
 
+    #[test]
+    fn fr_l32_every_modal_wires_dismiss_and_settings_keeps_its_guard() {
+        // Escape, the scrim and the close button share one callback, so a modal without
+        // on_dismiss could never close on Escape, and a guarded sheet must pass its guard.
+        for (name, src) in [
+            ("components.rs", include_str!("components.rs")),
+            ("session.rs", include_str!("session.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+        ] {
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                if (t.starts_with("cu::Dialog(") || t.starts_with("cu::Sheet(")) && !t.starts_with("//") {
+                    let near = lines[i..(i + 24).min(lines.len())].join("\n");
+                    assert!(near.contains(".on_dismiss("), "{name}:{} modal without on_dismiss", i + 1);
+                }
+            }
+        }
+        assert!(include_str!("project.rs").contains("EmberSheet(&format!(\"{} 설정\", b.name), true, request_close,"));
+    }
+
     static DISMISSES: AtomicUsize = AtomicUsize::new(0);
 
     #[composable]
@@ -1209,7 +1235,7 @@ mod tests {
                 "files.rs" => 1,
                 "home.rs" => 2,
                 "launcher.rs" => 1,
-                "project.rs" => 2,
+                "project.rs" => 1,
                 "routines.rs" => 2,
                 // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
                 "vcs.rs" => 2,

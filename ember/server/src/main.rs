@@ -37,7 +37,8 @@ use ember_server::store::Store;
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
 ///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
-///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary). See `agents::acp`.
+///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary) and `gemini` (`gemini --acp`, API key or
+///   Enterprise only; `EMBER_GEMINI_BIN` picks the binary). Both are opt-in. See `agents::acp`.
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)

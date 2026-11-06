@@ -39,6 +39,10 @@ pub enum AgentEvent {
     TurnEnded { outcome: TurnOutcome },
     /// The agent process reported or hit an error.
     Error { message: String },
+    /// The agent's turn failed for a reason the app renders specially (FR-A10b, FR-A10c): `code`
+    /// is `auth_required` (sign-in or API key missing or rejected) or `quota_exceeded` (quota or
+    /// rate limit). `message` is the text to show. Always followed by a failed `TurnEnded`.
+    TurnError { code: String, message: String },
     /// Something Ember itself shows in this session, e.g. an A2A message refused by loop
     /// protection (FR-T5). Not part of the agent's conversation; leaves the status alone.
     Notice { message: String },

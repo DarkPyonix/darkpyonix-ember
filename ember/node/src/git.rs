@@ -11,6 +11,8 @@
 //! [`GitError::TooLarge`].
 
 
+#[path = "git_branches.rs"]
+pub mod git_branches;
 #[path = "git_log.rs"]
 pub mod git_log;
 #[path = "git_prs.rs"]

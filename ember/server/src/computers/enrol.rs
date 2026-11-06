@@ -3234,4 +3234,38 @@ mod tests {
         }
         assert_eq!(computers.registry().list().unwrap().len(), 1);
     }
+
+    #[tokio::test]
+    async fn fr_c2_without_a_transport_a_peer_only_node_registers_by_its_observed_address() {
+        // Mutation M12: a real registrar over a `Computers` with no dialer. The mirror (the same
+        // node with a dialer gives "peer") is pinned by
+        // `fr_c2_the_real_registrar_maps_a_duplicate_peer_to_failed_and_reports_peer_by`; it is
+        // repeated here only for the stored shape.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::new(crate::computers::Registry::new(store), crate::computers::connector(None));
+        assert!(computers.dialer().is_none());
+        let reg = ComputersRegistrar::new(computers.clone());
+        let n = node(None, Some(&real_id()));
+        assert_eq!(reg.registers_by(&n, SRC), Some("observed"));
+        let id = reg.register("plain", "tok", &n, SRC).unwrap();
+        let c = computers.registry().get(&id).unwrap().unwrap();
+        assert!(c.peer.is_none(), "{c:?}");
+        assert!(!c.url.is_empty(), "{c:?}");
+
+        // With the dialer the same node is registered by peer.
+        let net = ember_transport::mem::MemNetwork::new();
+        let st = crate::transport::ServerTransport::new(net.transport());
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let on = Computers::with_transport(
+            crate::computers::Registry::new(store),
+            crate::computers::connector(Some(st.dialer.clone())),
+            None,
+            Some(st.dialer.clone()),
+        );
+        let reg = ComputersRegistrar::new(on.clone());
+        assert_eq!(reg.registers_by(&n, SRC), Some("peer"));
+        let id = reg.register("viapeer", "tok", &n, SRC).unwrap();
+        let c = on.registry().get(&id).unwrap().unwrap();
+        assert!(c.peer.is_some() && c.url.is_empty(), "{c:?}");
+    }
 }

@@ -29,6 +29,17 @@ fn path(name: &str) -> &'static str {
 
 /// The SVG document of an icon stroked in `color` (e.g. `#56534d`).
 fn svg(name: &str, color: &str) -> String {
+    // `<name>-w` is the icon in white, for a dark pill (the active tab).
+    if let Some(base) = name.strip_suffix("-w") {
+        return svg(base, "#ffffff");
+    }
+    if name == "chev-dn" {
+        // The mockup turns the right chevron a quarter turn for an open node.
+        return format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='1.5'><g transform='rotate(90 12 12)'>{}</g></svg>",
+            path("chev").replace('"', "'")
+        );
+    }
     format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{color}' stroke-width='1.5'>{}</svg>",
         path(name).replace('"', "'")

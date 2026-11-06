@@ -451,6 +451,144 @@ pub fn pane_mode(compact: bool, detail_open: bool) -> PaneMode {
     }
 }
 
+/// Where the routine form opens (FR-L25, #511).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormLayout {
+    /// In the detail area, in place of the detail (mockup v8), with 취소 and 저장 in its header.
+    Inline,
+    /// A modal sheet: the compact layouts have no detail area beside the list.
+    Sheet,
+}
+
+/// Wide layouts (list and detail side by side) open the form in the detail area; the compact
+/// ones keep the sheet.
+pub fn form_layout(mode: PaneMode) -> FormLayout {
+    match mode {
+        PaneMode::Both => FormLayout::Inline,
+        PaneMode::ListOnly | PaneMode::DetailOnly => FormLayout::Sheet,
+    }
+}
+
+/// A route out of the open routine form, or into another form (FR-L25, #511).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Leave {
+    /// 취소.
+    Cancel,
+    /// A list row was tapped.
+    OpenRoutine(String),
+    /// 새 루틴.
+    NewForm,
+    /// 편집 of a routine.
+    EditForm(String),
+}
+
+/// What a route out does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveDecision {
+    /// Go at once: the form is closed or has no changes.
+    Go,
+    /// Ask "변경 사항을 버릴까요?" first.
+    Ask,
+    /// A save is in flight: do nothing.
+    Block,
+}
+
+/// Whether the form holds changes: any field differs from the draft it opened with (name,
+/// project, trigger, cron or event, model, permission, computer, prompt).
+pub fn routine_form_dirty(initial: &FormDraft, current: &FormDraft) -> bool {
+    initial != current
+}
+
+/// The one rule for every route out. A save closes the form at once (it hands the draft to the
+/// save path and sets the panel to view), so `saving` stays false today.
+pub fn leave_decision(form_open: bool, dirty: bool, saving: bool) -> LeaveDecision {
+    if !form_open {
+        LeaveDecision::Go
+    } else if saving {
+        LeaveDecision::Block
+    } else if dirty {
+        LeaveDecision::Ask
+    } else {
+        LeaveDecision::Go
+    }
+}
+
+/// The question of the confirm.
+pub const ROUTINE_DISCARD_QUESTION: &str = "변경 사항을 버릴까요?";
+
+/// The fields of the routine form, in mockup v8 order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormField {
+    Name,
+    Project,
+    Trigger,
+    /// A read-only line derived from the schedule: the server stores no description text.
+    ScheduleDescription,
+    Schedule,
+    /// One picker for harness, model and effort.
+    Model,
+    Mode,
+    Computer,
+    Prompt,
+}
+
+pub const FORM_FIELDS: [FormField; 9] = [
+    FormField::Name,
+    FormField::Project,
+    FormField::Trigger,
+    FormField::ScheduleDescription,
+    FormField::Schedule,
+    FormField::Model,
+    FormField::Mode,
+    FormField::Computer,
+    FormField::Prompt,
+];
+
+/// The 일정 설명 line: the cron in words and the next run for a time routine, a fixed sentence
+/// for an event routine. It is computed from the schedule, never stored or typed.
+pub fn schedule_description(trigger: Trigger, cron: &str, now: Minutes) -> String {
+    match trigger {
+        Trigger::Time => {
+            let words = describe_cron(cron.trim());
+            match next_run(cron.trim(), now) {
+                Some(t) => format!("{words} · 다음 실행 {}", format_next(t, now)),
+                None => words,
+            }
+        }
+        Trigger::Event => "이벤트가 일어날 때 실행됩니다".to_string(),
+    }
+}
+
+/// The rows of the one model picker: every harness that can run (`allowed`), or only the
+/// current harness for a server routine, which cannot change it.
+pub fn model_choices(
+    catalog: &[super::home::ModelOption],
+    allowed: &[Harness],
+    current: Harness,
+    server: bool,
+) -> Vec<super::home::ModelOption> {
+    catalog
+        .iter()
+        .filter(|o| {
+            if server {
+                o.harness == current
+            } else {
+                o.harness == current || allowed.contains(&o.harness)
+            }
+        })
+        .copied()
+        .collect()
+}
+
+/// The lines the big time heading may take: one for a time ("오전 9시"), three for an event
+/// name such as `event: pull_request.opened, synchronize`, which would otherwise be cut.
+pub fn when_big_max_lines(trigger: Trigger) -> u32 {
+    match trigger {
+        Trigger::Time => 1,
+        Trigger::Event => 3,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Form
 // ---------------------------------------------------------------------------------------------

@@ -149,6 +149,12 @@ async fn fr_c2_the_secrets_are_in_no_log_of_a_full_enrolment_through_the_door() 
     let wrong_bearer = [("authorization", "Bearer dps_wrongwrongwrong".to_string())];
     let (wrong_st, _) = on_door(&d.app(enrol.clone()), "GET", &poll_uri, &wrong_bearer, None).await;
 
+    // An invented id with a newline and an ANSI escape (percent-encoded in the path, decoded by the
+    // door): whatever the door logs about it must not carry either raw.
+    let evil_uri = "/enrol/status/x%0AINJECTEDLINE%1B%5B31mred";
+    let (evil_st, _) = on_door(&d.app(enrol.clone()), "GET", evil_uri, &bearer, None).await;
+    let (evil_wrong_st, _) = on_door(&d.app(enrol.clone()), "GET", evil_uri, &wrong_bearer, None).await;
+
     // 4. The owner confirms; 5. the poll delivers; 6. the next poll says delivered.
     let (confirm_st, _) = owner(&owner_app, "POST", &format!("/api/computers/enrol-codes/{id}/confirm"), Some(json!({}))).await;
     let (joined_st, joined) = on_door(&d.app(enrol.clone()), "GET", &poll_uri, &bearer, None).await;
@@ -173,6 +179,11 @@ async fn fr_c2_the_secrets_are_in_no_log_of_a_full_enrolment_through_the_door() 
     }
     assert!(failures.is_empty(), "{failures:?}; {context}");
     assert!(!out.contains("wrongwrongwrong"), "the wrong poll secret reached the log; {context}");
+    // Attacker-chosen text does not reach the log raw: no escape byte, and the invented id's
+    // newline did not start a line of its own.
+    assert!(!out.contains('\u{1b}'), "an escape byte reached the log; {context}");
+    assert!(!out.contains("x\nINJECTEDLINE"), "a newline-injected id reached the log; {context}");
+    assert!(!out.lines().any(|l| l.starts_with("INJECTEDLINE")), "an injected line reached the log; {context}");
 
     // B. The flow itself went as intended, so a missing line below is a logging problem.
     assert_eq!(mint_st, StatusCode::CREATED);
@@ -180,6 +191,7 @@ async fn fr_c2_the_secrets_are_in_no_log_of_a_full_enrolment_through_the_door() 
     assert_eq!(refused_st, StatusCode::FORBIDDEN);
     assert_eq!((waiting_st, &waiting["status"]), (StatusCode::OK, &json!("waiting")));
     assert_eq!(wrong_st, StatusCode::NOT_FOUND);
+    assert_eq!((evil_st, evil_wrong_st), (StatusCode::NOT_FOUND, StatusCode::NOT_FOUND));
     assert_eq!(confirm_st, StatusCode::OK);
     assert_eq!((joined_st, &joined["status"]), (StatusCode::OK, &json!("joined")));
     assert_eq!(joined["credential"]["node_token"], token.as_str());

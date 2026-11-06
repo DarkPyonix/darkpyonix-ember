@@ -1004,6 +1004,105 @@ fn usage_path(days: Option<u32>) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Listening ports of a computer's sessions (FR-P7)
+// ---------------------------------------------------------------------------------------------
+
+/// How far a listening port is reachable. An unknown value from a newer node reads as `Lan`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortScope {
+    Loopback,
+    Any,
+    #[default]
+    #[serde(other)]
+    Lan,
+}
+
+/// The terminal or job a listening process belongs to (`kind` is `term` or `job`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PortOwner {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+}
+
+/// One TCP port in LISTEN state under a node-owned terminal or job.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ListeningPort {
+    pub port: u16,
+    #[serde(default)]
+    pub scope: PortScope,
+    /// Executable name only.
+    #[serde(default)]
+    pub process: String,
+    #[serde(default)]
+    pub owner: PortOwner,
+}
+
+/// `GET /api/computers/{id}/ports` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Ports {
+    #[serde(default)]
+    pub ports: Vec<ListeningPort>,
+    /// False where the node cannot look (not Linux or macOS). Older nodes omit it: true.
+    #[serde(default = "ports_supported_default")]
+    pub supported: bool,
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Ports { ports: Vec::new(), supported: true }
+    }
+}
+
+fn ports_supported_default() -> bool {
+    true
+}
+
+impl Api {
+    /// Listening TCP ports of the processes under a computer's terminals and jobs (FR-P7).
+    pub async fn computer_ports(&self, computer_id: &str) -> ApiResult<Ports> {
+        self.get(&ports_path(computer_id)).await
+    }
+}
+
+fn ports_path(computer_id: &str) -> String {
+    format!("/computers/{}/ports", seg(computer_id))
+}
+
+#[cfg(test)]
+mod ports_tests {
+    use super::*;
+
+    #[test]
+    fn fr_p7_the_ports_path_escapes_the_computer_id() {
+        assert_eq!(ports_path("a b"), "/computers/a%20b/ports");
+    }
+
+    #[test]
+    fn fr_p7_a_ports_answer_decodes() {
+        let p: Ports = serde_json::from_value(json!({
+            "ports": [
+                {"port": 3000, "scope": "loopback", "process": "node", "owner": {"kind": "job", "id": "j1"}},
+                {"port": 8080, "scope": "any", "process": "python3", "owner": {"kind": "term", "id": "t1"}},
+                {"port": 22, "scope": "future", "process": "x", "owner": {"kind": "term", "id": "t2"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(p.ports.len(), 3);
+        assert_eq!(p.ports[0].scope, PortScope::Loopback);
+        assert_eq!(p.ports[0].owner, PortOwner { kind: "job".into(), id: "j1".into() });
+        assert_eq!(p.ports[1].scope, PortScope::Any);
+        assert_eq!(p.ports[2].scope, PortScope::Lan);
+        assert!(p.supported, "an older node omits supported: true");
+        assert_eq!(serde_json::from_value::<Ports>(json!({})).unwrap(), Ports::default());
+        let off: Ports = serde_json::from_value(json!({"ports": [], "supported": false})).unwrap();
+        assert!(!off.supported);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Computer metrics (FR-X7, FR-L21)
 // ---------------------------------------------------------------------------------------------
 

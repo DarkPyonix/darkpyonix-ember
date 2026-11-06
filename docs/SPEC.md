@@ -80,6 +80,7 @@ screen or a real hub are run by hand and are listed as not verified until they a
 | FR-W6 | Extensions are in `extensions/` (#69). Staging into OSE (`ember/ose/stage-extensions.sh`) and the proxy default list (`DEFAULT_EXTENSIONS`) are written (#117), unverified on a real build. `.vsix` packaging into `extensions/dist` is not yet produced. Notebook criteria are open. | #15 |
 | NFR-W1 | Harness `ember/ose/regress.sh` (install, activation log parse, compare with `ember/ose/regression/expected.json`); self-test in CI. Extension list unconfirmed, no real run, no activation client. | #84 |
 | FR-P1–P6 | ember node sessions, CI (#37, #42); VS Code companion in `ember/proxy/companion`. The Ember editor's terminal panel is not built; acceptance runs not verified. | #26 |
+| FR-P7 | `GET /ports` on the node and `/api/computers/{id}/ports` on the server are written and tested (node 131, server 631, client 110, CI green on #435). On macOS lsof runs from a fixed path with its output capped, answers are reused for 1 s, and platforms other than Linux and macOS answer an empty list with `supported` false. The client call `computer_ports` is written; the Session web page list (#326) is not wired. | #386 |
 | NFR-P1 | Not measured. | #26 |
 | FR-B1–B4 | `detach.js` and `ember/bridge` (CI) implemented (#31). No platform webview host; not verified in a native shell. | #30 |
 | NFR-B1, NFR-B2 | Not measured. | #30 |
@@ -485,7 +486,7 @@ feature itself and its AirDrop-like intent are [user, 2026-10-25] (`INTENT.md` D
 | **FR-W1** | The IDE window serves VS Code Web for the session's project and current computer, so that only API and data traffic crosses the network on repeat loads. | Static workbench assets are cached; a cold open on a slow link renders the shell promptly and degrades gracefully. |
 | **FR-W2** | The wrapping layer applies CSS/DOM overrides for a native-feeling titlebar and a responsive layout for tablet and phone widths, on an unmodified VS Code Web build. | Implemented today by `ember/proxy/` (the iframe wrapper, overlay, keyboard policy). A CI check diffs the served bundle against its pinned release. |
 | **FR-W3** | Native window chrome is suppressed where the injected titlebar replaces it, without losing window controls. | Verified per platform. |
-| **FR-W4** | Two runtimes: OSE (DarkPyonix-built from MIT source, Open VSX) by default, and VSC (the user's installed Microsoft build, Microsoft Marketplace) as an option. *[provisional, from `docs/design/INTEGRATION.md`]* | Choosing VSC shows an install notice, a copyable install guide, and a command field to verify `code --version` before `code serve-web` is used. |
+| **FR-W4** | Two runtimes: OSE (DarkPyonix-built from MIT source, Open VSX) by default, and VSC (the user's installed Microsoft build, Microsoft Marketplace) as an option. *[provisional, from `docs/design/INTEGRATION.md`]* Server relay of node files (#456, built for the read-only subset): `POST /api/computers/{id}/fs/{op}` for `stat`, `lstat`, `read`, `list`, `readlink`, `glob` and `grep`, with the node's request and response bodies unchanged (`ember/server/src/computers/fs.rs`). The node enforces its allowed roots; the server adds no second check, caps the request body at 1 MiB, and adds no response cap (a read returns at most the node's 16 MiB). The write operations are not routed (404); they come in a later change with their own review. Unknown computer 404, the local computer 400, an unreachable node 502, a node error keeps its status and body. The routes are owner routes behind `auth::protect`; the guest door does not serve them. *[provisional]* Tests: `ember/server/tests/fr_w4_fs_relay.rs` (`fr_w4_fs_relay_*`), `fr_t14_guest_door.rs` (not yet run). | Choosing VSC shows an install notice, a copyable install guide, and a command field to verify `code --version` before `code serve-web` is used. |
 | **FR-W5** | On Android and iOS the IDE window works without Node: through a `serve-web`-compatible Rust backend, or directly through web APIs with no backend. [user] | Opens and edits a project on a phone with no Node installed anywhere on the device. Only web-capable extensions run in this mode (`INTENT.md` D10). |
 | **FR-W5a** | *[provisional, `docs/design/MOBILE-NO-NODE.md`]* On Android and iOS, "Open IDE → VS Code" opens the session's project on its **current computer**: the IDE window loads that computer's own `serve-web` (OSE or VSC) through the in-app gateway (`FR-W5b`) over the transport (`FR-N5`). Node runs only on the computer. | On a phone with no Node anywhere on the device: open a project, edit and save a file, and the change is on the computer's disk. An extension with only a `main` (Node) entry installed on that computer works. An extension webview renders on a real phone (`FR-N4`). |
 | **FR-W5b** | *[provisional]* One Rust **ide-gateway** in the app process serves the IDE window from a loopback origin that the platform webview treats as a secure context, with a second secure origin for `webviewEndpoint`. It reverse-proxies HTTP and WebSocket over transport streams (mode `FR-W5a`) and serves static workbench assets and the working-copy file API (mode `FR-W5f`). | Binds loopback only and rejects requests without the per-launch token. `navigator.serviceWorker` exists in both origins on iOS and Android. No `iroh` type is imported outside the transport crate (`FR-N5`). Wi-Fi ↔ LTE switch keeps the workbench connected within `NFR-N1`'s stall bound. |
@@ -507,6 +508,42 @@ feature itself and its AirDrop-like intent are [user, 2026-10-25] (`INTENT.md` D
 > remote exists, which E4 forbids us to answer with our own host, and with no Node every extension
 > runs in the web worker anyway. Whether this reading of `FR-W5`'s wording is right is open
 > (`MOBILE-NO-NODE.md` Q-M1). The build is tracked in #80.
+
+### FR-W4 extension install and data dir (#459, provisional, not yet compiled or run)
+
+Each computer has an OSE data dir, `<EMBER_OSE_DATA_DIR or <EMBER_DATA_DIR or ~/.ember>/ose-data>/<computer id>`
+(mode 0700 when Ember creates it; an existing directory keeps its mode and a warning is logged if group or others
+can access it; a symlink at the root or the computer dir is refused). With no override and no HOME the data
+root does not resolve: the OSE start and the install fail with a message, never a relative path. The dir is
+passed as `--server-data-dir` to every OSE the server starts and to every install.
+`POST /api/computers/{id}/ide/extensions` with `{"id":"publisher.name","version":"1.2.3"}` runs
+`dpx-ose-server --install-extension publisher.name[@version]` against it. The id is
+`^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*$` (uppercase allowed, as in `GitHub.copilot`, never a
+leading `-`); the version is `1.2.3[-+suffix]`. No shell, a 120 s timeout that kills the child and its
+process group, output capped at 16 KiB, one install per computer at a time (409). Answers 200, 400, 404, 409,
+502, 503, 500. Local computer only.
+
+Security boundary:
+
+- The route is owner/admin only (D37): it sits in the token-protected router and is not reachable through the
+  guest door.
+- The OSE child (install and start) does not inherit the server environment: it gets `HOME`, `PATH`, `LANG`,
+  `LC_ALL`, `TMPDIR` and `USER` only. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own.
+  **Effect of the cleared environment (unverified with a real extension host):** proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms), `SSL_CERT_FILE`, `SHELL`, `TERM`,
+  `XDG_*` and `SSH_AUTH_SOCK` do not reach the OSE or its extensions, so an Open VSX download behind a proxy
+  may fail and an extension that needs one of these finds it unset. Follow-up #471: an opt-in server setting
+  (for example `EMBER_OSE_ENV_PASSTHROUGH`, variable names only, default empty, never a request field).
+- **Known gap, signature verification:** Open VSX installs need `extensions.verifySignature` off in the data
+  dir's settings (`ember/ose/smoke.sh` writes it for the Machine and User scopes). The route does not set it and
+  does not verify any signature, so an install from the route either fails on the signature check or, with the
+  setting off, runs unverified code, and installed extension code later runs in the editor's extension host.
+- The 200 and 502 `output` is what the OSE printed and can contain absolute paths of the server machine; only the
+  owner sees it.
+- Tests: `ember/server/tests/fr_w4_ose_data_dir.rs`.
+- Unverified: the `@version` form, and `--list-extensions` (not documented in this repository, so there is no list
+  route). How several OSE processes behave on one data dir is unknown. A server shutdown or panic does not kill
+  a running install or the OSE start's grandchildren (follow-up).
 
 ### FR-W4 acceptance: the OSE runtime
 
@@ -558,6 +595,7 @@ Design, attach API and VS Code settings: `docs/design/TERMINALS.md`.
 | **FR-P4** | Input from several attached clients: **all attached clients may type** and their keystrokes are serialized by ember node in arrival order. Any client can **take control**, after which other clients are read-only, with a visible "controlled by <device>" banner, until control is released or the controller detaches. The terminal size follows the controller, or the most recently active client when nobody has control. Others see the content at that size, scaled to fit. | Two devices type alternately: the output contains both inputs in order and neither is lost. Device A takes control: device B's keystrokes are refused with the banner shown, and are accepted again after A releases or detaches. Resizing on the controller resizes the PTY. |
 | **FR-P5** | VS Code tasks (`tasks.json`) and the Ember editor's run actions run in persistent sessions as well. Debug sessions keep their debuggee process running when the window closes; re-attaching the debugger is best-effort. | Start a long build task, close the window, reopen: the task's terminal is listed with its output and exits normally. A program started under the debugger is still running after the window closes. |
 | **FR-P6** | Persistent sessions are listed per computer and per project in the client, with what started them (IDE, agent, user), and can be killed from there. Sessions survive an ember server restart. Sessions survive an ember node restart only if the processes were detached from it (best-effort; documented). | Restart ember server: every terminal is still listed and attachable. The list shows the origin and allows kill. Through the server: `/api/computers/{id}/terms...` relays list, create, kill and attach to the node (`ember/server/tests/terms_relay.rs`; written, not yet run) [provisional]. |
+| **FR-P7** | The node lists the TCP ports in LISTEN state held by processes that descend from a terminal (PTY) or job the node itself started (a process tree walk from the pids it tracks), so the client can show a session's web pages. `GET /ports` answers `{ports: [{port, scope, process, owner}], supported}`: `scope` is `loopback` (127.0.0.0/8 or ::1), `lan` (any other concrete address) or `any` (0.0.0.0 or ::); `process` is the executable name only; `owner` is `{kind: term\|job, id}`. Processes that are not descendants of a node-owned terminal or job (system services, other users, the node itself, ember-server) are never listed. `supported` is false where the node cannot look (platforms other than Linux and macOS), and `ports` is then empty. The route sits behind the node's auth like `/terms`. No pid, command line, environment, working directory or user name is exposed. Best effort: an unreadable `/proc` entry or a failed `lsof` gives an empty or partial list, never a 500. The server relays it as `GET /api/computers/{id}/ports` behind the same auth as the other per-computer routes. **[provisional]** (#386) | In a terminal or job run a listener on `127.0.0.1` port 0. `GET /ports` lists that port with `scope` `loopback` and the terminal or job id. A listener opened by the test process itself is absent, and the body holds no command line text. Unit tests parse `/proc/net/tcp`, `/proc/net/tcp6` and `lsof -F` samples (`ember/node/src/ports.rs`, `ember/node/tests/ports.rs`, `ember/server/tests/fr_p7_ports_relay.rs`; written, not yet run). Linux reads `/proc/<pid>/fd`; macOS runs `lsof`; other platforms answer an empty list with `supported` false (`fr_p7_unsupported_platforms_say_so`). |
 | **NFR-P1** | Attach latency and overhead. | Re-attach shows the last screen in ≤ 500 ms on a LAN. Idle sessions cost ≤ 2 MB of memory each in ember node beyond the shell itself. |
 
 **FR-P5 notes (debugging).** VS Code serves a debug adapter's `runInTerminal` itself and an extension

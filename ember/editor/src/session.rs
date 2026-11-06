@@ -41,6 +41,7 @@ use tokio::task::JoinHandle;
 use crate::coords::WidgetPos;
 use crate::engine::{CoreOptions, Effect, Input, SessionCore, SessionUpdate, Token};
 use crate::fallback::{ConnectOutcome, FallbackTarget};
+use crate::highlight::{HighlightJob, Worker};
 use crate::languages::LanguageRegistry;
 use crate::widget::WidgetEvent;
 use crate::Error;
@@ -243,9 +244,11 @@ impl EditorSession {
         // two bootstrap calls below are outstanding.
         let (tx, rx) = mpsc::unbounded_channel();
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
-        let core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
+        let mut core = SessionCore::new(LanguageRegistry::from_extensions(&extensions), config.core.clone(), Instant::now());
+        core.set_grammar_catalog(crate::textmate::GrammarCatalog::from_extensions(&extensions));
         let driver = Driver {
             core,
+            highlight: None,
             peer: peer.clone(),
             fs: Arc::clone(&fs),
             ipc,
@@ -396,6 +399,8 @@ impl Drop for EditorSession {
 
 struct Driver {
     core: SessionCore,
+    /// Jobs for the highlighting thread (started in [`Driver::run`]).
+    highlight: Option<std::sync::mpsc::SyncSender<HighlightJob>>,
     peer: RpcPeer,
     fs: Arc<RemoteFs>,
     ipc: IpcClient,
@@ -404,6 +409,34 @@ struct Driver {
     reqs: HashMap<Token, u32>,
     /// uri key → watch request id.
     watches: Arc<Mutex<HashMap<String, String>>>,
+}
+
+/// How many jobs may wait for the highlighting thread. A job that does not fit is not lost silently: its
+/// document is rebuilt from the session's text.
+const HIGHLIGHT_QUEUE: usize = 1024;
+/// How long a grammar file may take to arrive.
+const GRAMMAR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The thread that tokenizes documents: a first pass over a long file takes a second, which the session's own
+/// task must not spend. Jobs arrive in order; the ones that queued up while it worked are run as one batch.
+fn spawn_highlighter(answers: mpsc::UnboundedSender<Input>) -> std::sync::mpsc::SyncSender<HighlightJob> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HighlightJob>(HIGHLIGHT_QUEUE);
+    let spawned = std::thread::Builder::new().name("ember-highlight".into()).spawn(move || {
+        let mut worker = Worker::new();
+        while let Ok(first) = rx.recv() {
+            let mut batch = vec![first];
+            batch.extend(rx.try_iter());
+            for output in crate::highlight::guard(&mut worker, batch, Worker::run) {
+                if answers.send(Input::Highlighted(output)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("ember-editor: cannot start the highlighting thread: {e}");
+    }
+    tx
 }
 
 async fn recv_opt<T>(rx: &mut Option<mpsc::UnboundedReceiver<T>>) -> Option<T> {
@@ -422,6 +455,7 @@ impl Driver {
         ipc_lifecycle: mpsc::UnboundedReceiver<IpcLifecycle>,
     ) {
         let (internal_tx, mut internal_rx) = mpsc::unbounded_channel::<Input>();
+        self.highlight = Some(spawn_highlighter(internal_tx.clone()));
         let mut changes = Some(changes);
         let mut lifecycle = Some(ipc_lifecycle);
         loop {
@@ -526,10 +560,41 @@ impl Driver {
                     }
                 }
                 Effect::Respond { req, result } => self.peer.respond(req, result),
+                Effect::Highlight(job) => {
+                    if let Some(tx) = &self.highlight {
+                        if let Err(std::sync::mpsc::TrySendError::Full(job)) = tx.try_send(job) {
+                            // The thread is far behind: drop the job and have the document built again from the
+                            // session's text instead of leaving the colours wrong.
+                            if let Some((key, seq)) = job.target() {
+                                let rebuild = crate::highlight::HighlightOutput::rebuild(key, seq);
+                                let _ = internal.send(Input::Highlighted(rebuild));
+                            }
+                        }
+                    }
+                }
                 Effect::ReadFile { uri, purpose } => {
                     let (fs, tx) = (Arc::clone(&self.fs), internal.clone());
+                    // A grammar file comes from an extension on the server: ask how big it is before reading it.
+                    let cap = matches!(purpose, crate::engine::ReadPurpose::Grammar { .. }).then_some(crate::textmate::MAX_GRAMMAR_BYTES);
                     tokio::spawn(async move {
-                        let result = fs.read_file(&uri).await.map_err(|e| e.to_string());
+                        let read = async {
+                            if let Some(cap) = cap {
+                                match fs.stat(&uri).await {
+                                    Ok(st) if st.size > cap => return Err("the grammar file is too large".to_owned()),
+                                    Ok(_) => {}
+                                    Err(e) => return Err(e.to_string()),
+                                }
+                            }
+                            fs.read_file(&uri).await.map_err(|e| e.to_string())
+                        };
+                        // A grammar read is bounded in time as well as in size.
+                        let result = match cap {
+                            Some(_) => match tokio::time::timeout(GRAMMAR_READ_TIMEOUT, read).await {
+                                Ok(r) => r,
+                                Err(_) => Err("reading the grammar file timed out".to_owned()),
+                            },
+                            None => read.await,
+                        };
                         let _ = tx.send(Input::FileRead { uri, purpose, result });
                     });
                 }

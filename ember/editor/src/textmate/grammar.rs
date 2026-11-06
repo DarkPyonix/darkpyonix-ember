@@ -150,6 +150,36 @@ fn rule_from(obj: &Map<String, Value>, budget: &mut Budget) -> Result<RawRule, G
     })
 }
 
+impl RawGrammar {
+    /// The scope names of the other grammars this one includes (`source.js.regexp`, or the part before the `#`
+    /// of `source.css#rule-list`), in order of first use, without `$self`, `$base` and local `#name` includes.
+    pub fn referenced_scopes(&self) -> Vec<String> {
+        fn walk(rule: &RawRule, own: &str, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>) {
+            if let Some(include) = &rule.include {
+                let scope = include.split('#').next().unwrap_or("");
+                if !scope.is_empty() && !scope.starts_with('$') && scope != own && seen.insert(scope.to_owned()) {
+                    out.push(scope.to_owned());
+                }
+            }
+            let maps = [&rule.captures, &rule.begin_captures, &rule.end_captures, &rule.while_captures, &rule.repository];
+            for map in maps {
+                for r in map.values() {
+                    walk(r, own, out, seen);
+                }
+            }
+            for r in &rule.patterns {
+                walk(r, own, out, seen);
+            }
+        }
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in self.patterns.iter().chain(self.repository.values()).chain(self.injections.values()) {
+            walk(r, &self.scope_name, &mut out, &mut seen);
+        }
+        out
+    }
+}
+
 /// Parses the text of a grammar file. `path` is only used to refuse formats that are not JSON.
 pub fn parse_grammar(path: &str, content: &str) -> Result<RawGrammar, GrammarError> {
     if !path.to_lowercase().ends_with(".json") {

@@ -231,3 +231,19 @@ fn fr_e6_lines_that_end_in_the_same_state_share_it() {
     assert_eq!(changed.tokenized, 1);
     assert_eq!(doc.runs(), DocumentTokens::new(g, &doc.text()).unwrap().runs());
 }
+
+#[test]
+fn fr_e6_an_edit_that_takes_a_document_over_the_size_limit_is_refused_and_changes_nothing() {
+    let g = grammar("source.ts");
+    // Just under the limit, in lines short enough to be cheap to tokenize.
+    let line = "x".repeat(999);
+    let lines = (MAX_DOCUMENT_BYTES - 16) / 1000;
+    let text = vec![line; lines].join("\n");
+    assert!(text.len() < MAX_DOCUMENT_BYTES);
+    let mut doc = DocumentTokens::new(g, &text).unwrap();
+    let before = doc.line_count();
+    let result = doc.apply_edit(range(0, 0, 0, 0), &"y".repeat(100_000));
+    assert_eq!(result, Err(EditError::TooLarge));
+    assert_eq!(doc.line_count(), before);
+    assert_eq!(doc.text().len(), text.len(), "nothing was changed");
+}

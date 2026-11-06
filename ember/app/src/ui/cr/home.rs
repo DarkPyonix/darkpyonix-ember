@@ -1259,6 +1259,9 @@ fn IntegrationsArea() {
                     }
                 });
             }
+            if let Some(more) = &card.more_repos {
+                Label(more, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
             // The server sends no list of what the integration did, so none is drawn.
             Label(card.activity_empty, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
         });

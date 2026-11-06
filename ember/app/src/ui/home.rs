@@ -30,8 +30,8 @@ pub const GITHUB_NO_ACTIVITY: &str = "연동이 만든 일이 아직 없습니�
 pub const GITHUB_LOGIN_HINT: &str = "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오";
 pub const GITHUB_INSTALL_HINT: &str = "gh를 설치하고 로그인하십시오";
 pub const GITHUB_UNAVAILABLE_HINT: &str = "연결 상태를 확인할 수 없습니다";
-pub const GITHUB_CONNECT: &str = "연결";
-pub const GITHUB_RELOGIN: &str = "다시 로그인";
+/// The control only reveals the `gh auth login` guidance, so it does not say 연결 or 다시 로그인.
+pub const GITHUB_HOW: &str = "방법 보기";
 /// Repositories listed on the card; the server may send more.
 pub const GITHUB_MAX_REPOS: usize = 3;
 /// CI cells per repository, newest first.
@@ -125,7 +125,7 @@ pub struct GithubRepoRow {
     pub error: Option<String>,
 }
 
-/// The 연결 / 다시 로그인 control. Pressing it only shows `guidance`; Ember never logs in itself.
+/// The 방법 보기 control. Pressing it only shows `guidance`; Ember never logs in itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GithubAction {
     pub label: &'static str,
@@ -146,7 +146,16 @@ pub struct GithubCard {
     /// Repositories, open PRs, review requests, CI pass rate.
     pub kpis: [(&'static str, String); 4],
     pub repos: Vec<GithubRepoRow>,
+    /// "외 N개" under the listed rows when the server sent more than are shown.
+    pub more_repos: Option<String>,
     pub activity_empty: &'static str,
+}
+
+/// "외 N개" when `total` repositories exist and only `shown` are listed. `total` is the
+/// server's count when known, else the length of the list it sent.
+pub fn more_repos_text(shown: usize, total: Option<usize>) -> Option<String> {
+    let extra = total?.checked_sub(shown).filter(|n| *n > 0)?;
+    Some(format!("외 {extra}개"))
 }
 
 impl GithubCard {
@@ -163,13 +172,14 @@ impl GithubCard {
                 action: None,
                 kpis: labels.map(|l| (l, none())),
                 repos: Vec::new(),
+                more_repos: None,
                 activity_empty: GITHUB_NO_ACTIVITY,
             };
         };
         let (pill, tone, header_line, label) = match g.state {
             GithubConn::On => ("연결됨", GithubPill::On, "GitHub 연결됨", None),
-            GithubConn::Warn => ("재인증 필요", GithubPill::Warn, "GitHub 재인증 필요", Some(GITHUB_RELOGIN)),
-            GithubConn::Off => ("연결 안 됨", GithubPill::Off, "GitHub 연결 안 됨", Some(GITHUB_CONNECT)),
+            GithubConn::Warn => ("재인증 필요", GithubPill::Warn, "GitHub 재인증 필요", Some(GITHUB_HOW)),
+            GithubConn::Off => ("연결 안 됨", GithubPill::Off, "GitHub 연결 안 됨", Some(GITHUB_HOW)),
         };
         let note = (g.state != GithubConn::On)
             .then(|| g.reason.clone().unwrap_or_else(|| GITHUB_UNAVAILABLE_HINT.to_string()));
@@ -206,6 +216,7 @@ impl GithubCard {
         } else {
             Vec::new()
         };
+        let more_repos = if shows_numbers { more_repos_text(repos.len(), t.repos.map(|n| n as usize).or(Some(g.repos.len()))) } else { None };
         GithubCard {
             pill,
             tone,
@@ -220,6 +231,7 @@ impl GithubCard {
                 (labels[3], rate),
             ],
             repos,
+            more_repos,
             activity_empty: GITHUB_NO_ACTIVITY,
         }
     }
@@ -1239,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_github_card_without_server_is_coming_soon() {
+    fn fr_l35_github_card_without_server_is_coming_soon() {
         let c = GithubCard::from_state(None);
         assert_eq!(c.pill, "준비 중입니다");
         assert_eq!(c.tone, GithubPill::Soon);
@@ -1251,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_github_card_on_shows_numbers_and_null_is_no_information() {
+    fn fr_l35_github_card_on_shows_numbers_and_null_is_no_information() {
         let g = ready_github();
         let c = GithubCard::from_state(Some(&g));
         assert_eq!(c.pill, "연결됨");
@@ -1268,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_github_card_warn_shows_relogin_and_the_hint() {
+    fn fr_l35_github_card_warn_shows_relogin_and_the_hint() {
         let mut g = ready_github();
         g.state = GithubConn::Warn;
         g.reason = Some("로그인이 만료되었습니다".into());
@@ -1277,17 +1289,17 @@ mod tests {
         assert_eq!(c.tone, GithubPill::Warn);
         assert_eq!(c.note.as_deref(), Some("로그인이 만료되었습니다"));
         let a = c.action.unwrap();
-        assert_eq!(a.label, "다시 로그인");
+        assert_eq!(a.label, "방법 보기");
         assert_eq!(a.guidance, "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오");
     }
 
     #[test]
-    fn fr_l23_github_card_off_says_how_and_shows_no_numbers() {
+    fn fr_l35_github_card_off_says_how_and_shows_no_numbers() {
         let mut g = ready_github();
         g.state = GithubConn::Off;
         let c = GithubCard::from_state(Some(&g));
         assert_eq!(c.pill, "연결 안 됨");
-        assert_eq!(c.action.as_ref().unwrap().label, "연결");
+        assert_eq!(c.action.as_ref().unwrap().label, "방법 보기");
         assert!(c.action.as_ref().unwrap().guidance.contains("gh auth login"));
         assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
         assert!(c.repos.is_empty());
@@ -1299,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_github_card_repo_error_row_replaces_numbers() {
+    fn fr_l35_github_card_repo_error_row_replaces_numbers() {
         let mut g = ready_github();
         g.repos[0].error = Some("저장소를 읽지 못했습니다".into());
         let c = GithubCard::from_state(Some(&g));
@@ -1308,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_github_card_ci_cells_newest_first_and_at_most_14() {
+    fn fr_l35_github_card_ci_cells_newest_first_and_at_most_14() {
         let mut g = ready_github();
         g.repos[0].ci = Some((0..20).map(|i| if i == 0 { CiResult::Failure } else { CiResult::Success }).collect());
         let c = GithubCard::from_state(Some(&g));
@@ -1319,13 +1331,28 @@ mod tests {
     }
 
     #[test]
-    fn fr_l23_github_card_lists_at_most_three_repos() {
+    fn fr_l35_github_card_lists_at_most_three_repos() {
         let mut g = ready_github();
         g.repos = (0..5).map(|i| repo(&format!("octo/r{i}"))).collect();
         let c = GithubCard::from_state(Some(&g));
         assert_eq!(c.repos.len(), 3);
         assert_eq!(c.repos[2].name, "octo/r2");
         assert_eq!(c.repos[0].open_prs, "2");
+    }
+
+    #[test]
+    fn fr_l35_github_card_says_how_many_more_repos() {
+        assert_eq!(more_repos_text(3, Some(8)).as_deref(), Some("외 5개"));
+        assert_eq!(more_repos_text(3, Some(3)), None);
+        assert_eq!(more_repos_text(2, None), None);
+        let mut g = ready_github();
+        g.repos = (0..5).map(|i| repo(&format!("octo/r{i}"))).collect();
+        g.totals.repos = Some(9);
+        assert_eq!(GithubCard::from_state(Some(&g)).more_repos.as_deref(), Some("외 6개"));
+        g.totals.repos = None;
+        assert_eq!(GithubCard::from_state(Some(&g)).more_repos.as_deref(), Some("외 2개"));
+        g.repos.truncate(2);
+        assert_eq!(GithubCard::from_state(Some(&g)).more_repos, None);
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! then write `enrol.json` (and, only when the server is trusted, one line of `allowed-peers`)
 //! through [`crate::enrol::write_enrolment`].
 //!
-//! Compiled and tested by CI on PR #614 (the step 8 wording for a failed write came after that run
-//! and is covered by the tests in `ember/server/tests/fr_c2_enrol_node.rs`).
+//! N2 is merged (#614, compiled and tested by CI). The follow-up N2b (the preflight before the
+//! redeem, the Ctrl-C handling in the poll loop, the NotSynced output, the help wording and the
+//! new tests in `ember/server/tests/fr_c2_enrol_node.rs`) is written and not yet compiled.
 //!
 //! Rules that hold on every path:
 //! - Nothing is written before the trust decision, and an aborted run writes nothing at all.
@@ -28,7 +29,7 @@ use anyhow::{anyhow, bail, ensure, Context};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::enrol::{is_peer_hex, lock_state_dir, validate, write_enrolment, Enrolment, WriteError, ENROL_FILE};
+use crate::enrol::{is_peer_hex, lock_state_dir, preflight, validate, write_enrolment, Enrolment, WriteError, ENROL_FILE};
 
 /// The most of a response body that is read (64 KiB).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -57,7 +58,18 @@ const MAX_DISPLAY_ID_CHARS: usize = 128;
 
 pub const USAGE: &str = "usage: ember-node enrol <code|-> --server <url> [--server-fingerprint <id>] \
 [--trust-unverified-server] [--url <http://host:port>] [--transport] [--state-dir <dir>] [--yes] \
-[--allow-http] [--replace]";
+[--allow-http] [--replace]
+
+A code given as an argument is visible in `ps` and in your shell history for as long as it lives
+(it works once and expires after 10 minutes). Prefer `-`, which reads the code from one line of
+stdin:
+  printf '%s\\n' \"$CODE\" | ember-node enrol - --server <url> --server-fingerprint <id> --yes
+With `-` stdin is a pipe, not a terminal: there is no \"Continue?\" prompt (pass --yes) and no
+fingerprint question. Without --server-fingerprint (or --trust-unverified-server) the server's
+transport id is then not added to allowed-peers; only the token over HTTP is set up.
+Ctrl-C while waiting for the owner stops the command; the code is already redeemed by then, so
+cancel the pending computer in Ember or let it expire. After the credential arrives, Ctrl-C is
+ignored until the files are written: answer the fingerprint question with n, Enter or Ctrl-D.";
 
 /// The exact text printed for every http server (design 4.2).
 pub const PLAIN_HTTP_WARNING: &str = "This server speaks plain HTTP. Anyone on the network path can read the enrol code, the poll secret and the credential this node receives, and whoever reads the poll secret can fetch the credential before this node does. Use a network you trust, or an https address.";
@@ -67,7 +79,8 @@ pub const REFUSED_TEXT: &str = "this enrol code cannot be used";
 const RATE_LIMITED_TEXT: &str = "too many attempts, wait and try again";
 const TIMEOUT_TEXT: &str = "timed out waiting for the owner";
 const FINGERPRINT_PROMPT: &str =
-    "Does this match the fingerprint your Ember server prints at start and shows in the app? [y/N] ";
+    "Does this match the fingerprint your Ember server prints at start and shows in the app? (n, Enter or Ctrl-D declines) [y/N] ";
+const INTERRUPTED_TEXT: &str = "interrupted; nothing was written on this node. The code was already redeemed: ask the owner to cancel the pending computer in Ember, or let it expire.";
 const UNVERIFIED_WARNING: &str = "Warning: this adds an unverified server to this node's allowed peers; the transport crosses NAT, so a rogue server could reach this node from anywhere.";
 
 // ---- options and arguments ----------------------------------------------------------------
@@ -638,15 +651,33 @@ fn write_failure_text(err: &WriteError, name: &str, computer_id: &str, enrol_pat
         WriteError::NewKept(_) => format!(
             "enrol.json now holds the NEW enrolment (the previous file could not be restored): the token is on disk; check {enrol_path}."
         ),
-        WriteError::NotSynced(_) => "The files are written, but syncing the directory failed: the token is on disk and works now, but it may not survive a crash or power loss; run sync, or enrol again if the node loses it.".to_string(),
+        WriteError::NotSynced(..) => "The files are written, but syncing the directory failed: the token is on disk and works now, but it may not survive a crash or power loss; run sync, or enrol again if the node loses it.".to_string(),
     }
 }
+
+/// An error whose text `run` already said through [`EnrolIo::say`]. `run` still returns the text
+/// (tests and library callers read it); [`cli`] does not print it a second time.
+#[derive(Debug)]
+struct Said(String);
+
+impl std::fmt::Display for Said {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Said {}
 
 /// `ember-node enrol …`: parse, run on the real terminal.
 pub async fn cli(args: &[String]) -> anyhow::Result<()> {
     let opts = parse_args(args, crate::config::default_state_dir())?;
     let mut io = StdIo;
-    run(opts, &mut io).await.map(|_| ())
+    match run(opts, &mut io).await {
+        Ok(_) => Ok(()),
+        // The failure sentence was printed above; the exit status and `error:` line stay.
+        Err(e) if e.downcast_ref::<Said>().is_some() => Err(anyhow!("the enrolment did not complete cleanly (see above)")),
+        Err(e) => Err(e),
+    }
 }
 
 /// The whole flow (design section 2). Everything before the final write leaves nothing on disk
@@ -691,6 +722,10 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
             bail!("{} already exists; pass --replace to replace it", enrol_path.display());
         }
     }
+
+    // Everything `write_enrolment` would refuse later is refused now: the server hands the
+    // credential over once, so a refusal after the delivery loses the token.
+    preflight(&lock, replace)?;
 
     // 4. What this node tells the server about itself.
     let mut hostname = strip_display(crate::envinfo::hostname().trim(), MAX_HOSTNAME_CHARS).trim().to_string();
@@ -758,6 +793,17 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         )),
         None => io.say("Waiting for the owner to confirm this computer in Ember."),
     }
+    // From here until the process ends Ctrl-C is handled by this listener and no longer kills the
+    // process (registering a tokio signal listener replaces the default SIGINT action for the
+    // rest of the process). While polling, the select below turns it into a clean exit. After the
+    // delivery nothing reads it any more, so a Ctrl-C can no longer kill the process in the middle
+    // of the write, which would lose the token; the cost is that the fingerprint question after
+    // the delivery is declined with n, Enter or Ctrl-D (FINGERPRINT_PROMPT says so), not Ctrl-C.
+    // `unix::signal` registers now (`ctrl_c()` would register on its first poll, and a signal
+    // between two polls would be lost). Not covered by a test: it needs a signal sent to the test
+    // process. The server cannot cancel the pending enrolment (no such route, issue #617).
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|_| anyhow!("cannot listen for Ctrl-C"))?;
     let poll_url = format!("{}/enrol/status/{}", server.base, redeemed.enrol_id);
     let started = Instant::now();
     let mut delay = opts.poll_every;
@@ -767,11 +813,17 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         if elapsed >= wait {
             bail!("{TIMEOUT_TEXT}");
         }
-        tokio::time::sleep((delay + jitter()).min(wait - elapsed)).await;
-        if started.elapsed() >= wait {
-            bail!("{TIMEOUT_TEXT}");
-        }
-        match poll_once(&client, &poll_url, &redeemed.poll_secret).await? {
+        let polled = tokio::select! {
+            r = async {
+                tokio::time::sleep((delay + jitter()).min(wait - elapsed)).await;
+                if started.elapsed() >= wait {
+                    bail!("{TIMEOUT_TEXT}");
+                }
+                poll_once(&client, &poll_url, &redeemed.poll_secret).await
+            } => r?,
+            _ = sigint.recv() => bail!("{INTERRUPTED_TEXT}"),
+        };
+        match polled {
             Polled::Answer(a) => {
                 net_errors = 0;
                 delay = opts.poll_every;
@@ -873,18 +925,31 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     let allow = if trusted { delivered.as_deref() } else { None };
     // The server wiped the credential when it handed it over, so every outcome other than a full
     // success says what happened to the token, in plain words (never the token itself).
+    let mut sync_warning: Option<String> = None;
     let report = match write_enrolment(&lock, &enrolment, allow, replace) {
         Ok(r) => r,
         Err(e) => {
             let path = opts.state_dir.join(ENROL_FILE);
             let text = write_failure_text(&e, &name, &computer_id, &path.display().to_string());
             io.say(&text);
-            return Err(anyhow!("{text}"));
+            match e {
+                // Both files are in place: the node is set up, so the rest of the report follows
+                // and the failure is returned at the end (said once, here, not again by `cli`).
+                WriteError::NotSynced(_, report) => {
+                    sync_warning = Some(text);
+                    report
+                }
+                _ => return Err(anyhow::Error::new(Said(text))),
+            }
         }
     };
     drop(enrolment);
 
-    io.say(&format!("Enrolled as {name} ({computer_id})."));
+    if sync_warning.is_none() {
+        io.say(&format!("Enrolled as {name} ({computer_id})."));
+    } else {
+        io.say(&format!("Enrolled as {name} ({computer_id}), with the warning above."));
+    }
     if trusted {
         if let PinResult::Match { short: true } = pin_result.unwrap_or(PinResult::Mismatch) {
             io.say("short pin: 64 bits (the full 64-hex id is a stronger pin)");
@@ -910,6 +975,9 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         }
     }
     io.say("Start the node with: ember-node (add EMBER_NODE_TRANSPORT=1 to serve over the transport).");
+    if let Some(text) = sync_warning {
+        return Err(anyhow::Error::new(Said(text)));
+    }
     Ok(Outcome { name, computer_id, server_trusted: trusted, peer_added: report.peer_added })
 }
 
@@ -1306,5 +1374,56 @@ mod tests {
         let mut io = Script::new(true, &[false]);
         let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
         assert!(!err.contains("SECRETCODE") && !io.lines.join("\n").contains("SECRETCODE"));
+    }
+
+    /// The port is closed: reaching the network would give "cannot connect". The preflight error
+    /// must come first.
+    #[tokio::test]
+    async fn fr_c2_node_cli_run_preflight_refuses_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real");
+        std::fs::write(&target, b"").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("allowed-peers")).unwrap();
+        let mut o = Options::new("dpe_x".into(), "http://127.0.0.1:1".into(), dir.path().to_path_buf());
+        o.yes = true;
+        let mut io = Script::new(false, &[]);
+        let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+        assert!(err.contains("symbolic link") && err.contains("nothing was redeemed"), "{err}");
+        assert!(!err.contains("cannot connect"), "{err}");
+        assert!(!dir.path().join(ENROL_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn fr_c2_node_cli_run_preflight_refuses_an_unreadable_enrol_json_with_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(ENROL_FILE)).unwrap();
+        let mut o = Options::new("dpe_x".into(), "http://127.0.0.1:1".into(), dir.path().to_path_buf());
+        o.yes = true;
+        o.replace = true;
+        let mut io = Script::new(false, &[]);
+        let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+        assert!(err.contains("symbolic link"), "{err}");
+        assert!(!err.contains("cannot connect"), "{err}");
+    }
+
+    #[test]
+    fn fr_c2_node_cli_the_help_and_the_prompt_say_what_to_do() {
+        assert!(FINGERPRINT_PROMPT.starts_with("Does this match the fingerprint"));
+        assert!(FINGERPRINT_PROMPT.contains("(n, Enter or Ctrl-D declines)"));
+        assert!(USAGE.contains("visible in `ps`") && USAGE.contains("printf") && USAGE.contains("--yes"));
+        assert!(INTERRUPTED_TEXT.contains("nothing was written") && INTERRUPTED_TEXT.contains("cancel the pending computer"));
+        assert!(!USAGE.contains("--forget"));
+    }
+
+    // Ctrl-C in the poll loop (INTERRUPTED_TEXT) is not unit tested: it needs a SIGINT sent to the
+    // test process, which would also reach the other tests of the binary.
+
+    #[test]
+    fn fr_c2_node_cli_said_errors_are_recognised_by_cli() {
+        let e = anyhow::Error::new(Said("x".into()));
+        assert!(e.downcast_ref::<Said>().is_some());
+        assert_eq!(format!("{e:#}"), "x");
     }
 }

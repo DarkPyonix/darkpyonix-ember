@@ -574,8 +574,6 @@ span.mp-k{background:none}
 .cs-card{display:flex;flex-direction:column;align-items:center;gap:var(--sp1);padding:var(--sp3);border:1px solid var(--line);border-radius:var(--r);background:var(--surface);cursor:pointer;text-align:center;min-width:0;position:relative}
 .cs-card:hover{border-color:var(--c-grey)}
 .cs-card input{position:absolute;opacity:0;pointer-events:none}
-.cs-card:has(input:checked){border-color:var(--ink);background:var(--sel)}
-.cs-card:has(input:focus-visible){outline:2px solid var(--c-blue);outline-offset:2px}
 .cs-art{display:grid;place-items:center;width:56px;height:56px}
 .cs-card b{font-size:var(--fs-sm);font-weight:var(--fw-semibold)}
 .cs-s{font-size:var(--fs-xs);line-height:var(--lh-xs);color:var(--muted)}

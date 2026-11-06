@@ -244,6 +244,9 @@ async fn main() -> anyhow::Result<()> {
     let enrol_base_url = std::env::var("EMBER_PUBLIC_URL").unwrap_or_else(|_| format!("http://{addr}"));
     // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
     let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
+    // The enrol door (FR-C2e): off unless EMBER_ENROL_LISTEN is set. A bad value, or an address
+    // that clashes with the owner's or the guest door's, is a startup error.
+    let enrol_door = ember_server::enrol_door::EnrolDoor::from_env(addr, guest_door.as_ref().map(|d| d.listen))?;
     // This server as seen from this machine (an unspecified address replaced by loopback).
     let local_url = {
         let mut local = addr;
@@ -360,6 +363,24 @@ async fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+    // Bound before the owner server starts serving, so a bind failure aborts the start.
+    let enrol_listener = match &enrol_door {
+        Some(d) => {
+            let l = d.bind().await.map_err(|e| anyhow::anyhow!("enrol door: cannot bind {}: {e}", d.listen))?;
+            if d.is_remote() {
+                tracing::warn!(
+                    "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
+                     speaks plain HTTP, so an enrol code and the credential cross the network in clear; put \
+                     TLS in front of it",
+                    d.listen
+                );
+            } else {
+                tracing::info!("enrol door on {} (loopback)", d.listen);
+            }
+            Some(l)
+        }
+        None => None,
+    };
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
@@ -398,6 +419,9 @@ async fn main() -> anyhow::Result<()> {
             d.limits(),
         )
     });
+    // The enrol door's router is built only when the door is on, wrapped only by the door's
+    // guards, and never merged into `app` or `local_app` (not under auth::protect either).
+    let enrol_app = enrol_door.as_ref().map(|d| d.app());
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
@@ -491,6 +515,21 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    // The enrol door is its own task on the same stop watch. Its failure never stops the owner server.
+    let enrol_task = match (enrol_listener, enrol_app) {
+        (Some(listener), Some(app)) => {
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                if let Err(e) = ember_server::enrol_door::EnrolDoor::serve(listener, app, shutdown).await {
+                    tracing::error!("enrol door failed and is closed: {e}");
+                }
+            }))
+        }
+        _ => None,
+    };
     let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -498,6 +537,11 @@ async fn main() -> anyhow::Result<()> {
         .await;
     let _ = stop_tx.send(true);
     if let Some(mut task) = guest_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+    if let Some(mut task) = enrol_task {
         if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
             task.abort();
         }

@@ -5,9 +5,9 @@
 //! - `approval`: a tool approval a member session asked for and nobody has answered or withdrawn
 //!   (`FR-A5`). It leaves the feed when answered, interrupted or ended.
 //! - `question`: an agent's question to the person (`QuestionAsked`, FR-A5) that nobody has
-//!   answered, skipped or withdrawn. Listed with `question_id` and `questions` (labels only); it
-//!   cannot be answered through the feed yet (the answer route is `POST
-//!   /api/sessions/{id}/questions/{question_id}/answer`). It leaves the feed when answered,
+//!   answered, skipped or withdrawn. Listed with `question_id` and `questions` (labels only); the
+//!   owner answers it through `POST /api/channels/{id}/questions/{question_id}/answer`
+//!   ([`Store::channel_feed_question`] is its membership check). It leaves the feed when answered,
 //!   skipped, interrupted or ended.
 //! - `report`: how a member's last turn ended (`completed`, `failed`, `interrupted`; `FR-T8`),
 //!   shown while that session is `finished` or `failed`. A new turn clears it.
@@ -15,7 +15,7 @@
 //! An approval for `AskUserQuestion` also carries `questions` (the question text and option
 //! labels), because the person must answer it and no automatic mode may.
 //!
-//! Not built: answering a question through the feed, stall reports, and dismissing a report
+//! Not built: stall reports, and dismissing a report
 //! without starting another turn.
 
 use serde::Serialize;
@@ -247,6 +247,16 @@ impl Store {
             .into_iter()
             .find(|i| i.kind == "approval" && i.approval_id.as_deref() == Some(approval_id))
             .ok_or_else(|| ChannelError::NotFound(format!("pending approval {approval_id} in channel {channel}")))
+    }
+
+    /// The pending question `question_id` in the feed of `channel`, if there is one (FR-T11).
+    /// This is the membership check of the channel's answer route: a question of a session that
+    /// is not a member, or one that is no longer pending, is not in the feed, so it is `NotFound`.
+    pub fn channel_feed_question(&self, channel: &str, question_id: &str) -> Result<FeedItem, ChannelError> {
+        self.channel_feed(channel)?
+            .into_iter()
+            .find(|i| i.kind == "question" && i.question_id.as_deref() == Some(question_id))
+            .ok_or_else(|| ChannelError::NotFound(format!("pending question {question_id} in channel {channel}")))
     }
 }
 

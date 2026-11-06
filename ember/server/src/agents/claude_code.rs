@@ -57,7 +57,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
-use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
+use crate::events::{is_user_question_tool, AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// How long to wait for a `result` after the interrupt control request before sending SIGINT.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
@@ -466,7 +466,8 @@ async fn read_stdout(
                 Parsed::PermissionRequest { request_id, tool, input } => {
                     let auto = {
                         let mut st = state.lock().unwrap();
-                        if st.always_allowed.contains(&tool) {
+                        // A question always waits for a person, whatever the memory holds.
+                        if !is_user_question_tool(&tool) && st.always_allowed.contains(&tool) {
                             true
                         } else {
                             st.pending.insert(request_id.clone(), (tool.clone(), input.clone()));
@@ -581,7 +582,8 @@ impl AgentRun for ClaudeRun {
                 .pending
                 .remove(approval_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-            if decision == ApprovalDecision::AllowAlways {
+            // "Allow always" on a question is an allow-once: the next one asks again.
+            if decision == ApprovalDecision::AllowAlways && !is_user_question_tool(&tool) {
                 st.always_allowed.insert(tool.clone());
             }
             (tool, input)

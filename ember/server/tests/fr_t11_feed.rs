@@ -159,3 +159,55 @@ async fn fr_t11_unknown_channel_is_not_found() {
     let (st, _) = call(&f.app, "GET", "/api/channels/nope/feed", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+fn ask(store: &Store, session: &str, id: &str, tool: &str, input: Value) {
+    store
+        .append(
+            session,
+            &ember_server::events::AgentEvent::ApprovalRequested {
+                approval_id: id.into(),
+                tool: tool.into(),
+                input,
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn fr_t11_a_question_approval_carries_readable_questions_and_keeps_its_raw_input() {
+    let f = fx();
+    let a = session(&f.store, "core", "alpha");
+    let long = "x".repeat(300);
+    let input = json!({"questions": [{
+        "question": "Which database?", "header": "DB", "multiSelect": true,
+        "options": [{"label": "pg", "description": "d"}, {"label": "sqlite", "description": "d"}]
+    }, {"question": long, "options": []}]});
+    ask(&f.store, &a, "q1", "AskUserQuestion", input.clone());
+    let (st, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let it = &feed.as_array().unwrap()[0];
+    assert_eq!(it["tool"], "AskUserQuestion");
+    assert_eq!(it["input"], input, "the raw input stays");
+    assert_eq!(it["questions"][0]["header"], "DB");
+    assert_eq!(it["questions"][0]["text"], "Which database?");
+    assert_eq!(it["questions"][0]["options"], json!(["pg", "sqlite"]));
+    assert_eq!(it["questions"][0]["multi_select"], true);
+    assert_eq!(it["questions"][1]["multi_select"], false);
+    assert!(it["questions"][1].get("header").is_none());
+    assert_eq!(it["questions"][1]["text"].as_str().unwrap().chars().count(), 200);
+}
+
+#[tokio::test]
+async fn fr_t11_a_malformed_question_input_and_a_normal_approval_have_no_questions() {
+    let f = fx();
+    let a = session(&f.store, "core", "alpha");
+    ask(&f.store, &a, "q1", "AskUserQuestion", json!({"questions": "nope"}));
+    ask(&f.store, &a, "b1", "Bash", json!({"questions": [{"question": "q"}]}));
+    let (_, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    let items = feed.as_array().unwrap();
+    assert_eq!(items.len(), 2, "{feed}");
+    for it in items {
+        assert!(it.get("questions").is_none(), "{it}");
+        assert!(it.get("input").is_some());
+    }
+}

@@ -14,7 +14,10 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, Probe, StartRequest};
-use crate::events::{AgentEvent, ApprovalDecision, SessionStatus};
+use crate::events::{is_user_question_tool, AgentEvent, ApprovalDecision, SessionStatus};
+
+/// Shown when approve-everything leaves an agent's question for a person (FR-A5).
+const QUESTION_WAITS_NOTICE: &str = "Approve everything does not answer questions; waiting for you.";
 use crate::projects::Project;
 use crate::schedules::{Schedule, ScheduleRun};
 use crate::store::{SessionPatch, SessionRecord, Store, StoredEvent};
@@ -537,8 +540,14 @@ impl Sessions {
                 }
                 // Approve-everything mode answers a new request itself (FR-A5). Spawned: the
                 // answer goes back through this very channel.
-                if let AgentEvent::ApprovalRequested { approval_id, .. } = &event {
-                    if this.approve_all(&sid) {
+                if let AgentEvent::ApprovalRequested { approval_id, tool, .. } = &event {
+                    if this.approve_all(&sid) && is_user_question_tool(tool) {
+                        // A question is for a person; no automatic mode answers it (FR-A5).
+                        let note = AgentEvent::Notice { message: QUESTION_WAITS_NOTICE.into() };
+                        if let Err(e) = this.record(&sid, &note) {
+                            tracing::warn!(session = %sid, "failed to store notice: {e:#}");
+                        }
+                    } else if this.approve_all(&sid) {
                         let (this, sid, approval_id) = (this.clone(), sid.clone(), approval_id.clone());
                         tokio::spawn(async move {
                             if let Err(e) = this.answer(&sid, &approval_id, ApprovalDecision::AllowOnce).await {
@@ -736,7 +745,10 @@ impl Sessions {
             let mut pending: Vec<String> = Vec::new();
             for e in self.store.events_after(id, 0)? {
                 match e.event {
-                    AgentEvent::ApprovalRequested { approval_id, .. } => pending.push(approval_id),
+                    // A question is never answered by the mode (FR-A5).
+                    AgentEvent::ApprovalRequested { approval_id, tool, .. } if !is_user_question_tool(&tool) => {
+                        pending.push(approval_id)
+                    }
                     AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|p| *p != approval_id),
                     AgentEvent::TurnEnded { .. } => pending.clear(),
                     _ => {}

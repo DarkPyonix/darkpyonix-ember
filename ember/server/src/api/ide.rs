@@ -325,9 +325,14 @@ struct IdeState {
 }
 
 pub fn router(sessions: Arc<Sessions>, config: Arc<IdeConfig>) -> Router {
+    router_with_ose(sessions, config, Arc::new(OseManager::default()))
+}
+
+/// Like [`router`] with the manager shared with the extension route (`ide_extensions`).
+pub fn router_with_ose(sessions: Arc<Sessions>, config: Arc<IdeConfig>, ose: Arc<OseManager>) -> Router {
     Router::new()
         .route("/api/sessions/{id}/ide", get(ide_targets))
-        .with_state(IdeState { sessions, config, ose: Arc::new(OseManager::default()) })
+        .with_state(IdeState { sessions, config, ose })
 }
 
 #[derive(Deserialize)]
@@ -411,7 +416,7 @@ exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]);
 while True: s.accept()[0].close()' "$@"
 "##).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let manager = OseManager::new(Some(script));
+        let manager = OseManager::with_data_root(Some(script), dir.path().join("ose-data"));
         let computer = ComputerIde { local: true, ..Default::default() };
         let first = launch_targets(&record(dir.path()), "local", &computer, None, &manager);
         let second = launch_targets(&record(dir.path()), "local", &computer, None, &manager);

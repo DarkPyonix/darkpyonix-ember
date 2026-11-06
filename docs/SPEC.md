@@ -507,6 +507,17 @@ feature itself and its AirDrop-like intent are [user, 2026-10-25] (`INTENT.md` D
 > runs in the web worker anyway. Whether this reading of `FR-W5`'s wording is right is open
 > (`MOBILE-NO-NODE.md` Q-M1). The build is tracked in #80.
 
+### FR-W4 extension install and data dir (#459, provisional, not yet compiled or run)
+
+Each computer has an OSE data dir, `<EMBER_OSE_DATA_DIR or <EMBER_DATA_DIR or ~/.ember>/ose-data>/<computer id>`
+(mode 0700), passed as `--server-data-dir` to every OSE the server starts and to every install.
+`POST /api/computers/{id}/ide/extensions` with `{"id":"publisher.name","version":"1.2.3"}` runs
+`dpx-ose-server --install-extension publisher.name[@version]` against it: strict id and version
+patterns, no shell, 120 s timeout with a kill, output capped at 16 KiB, one install per computer at
+a time (409). Answers 200, 400, 404, 409, 502, 503. Local computer only. Token-protected, never on the
+guest door. Tests: `ember/server/tests/fr_w4_ose_data_dir.rs`. Unverified: the `@version` form and
+`--list-extensions` (no list route); how several OSE processes behave on one data dir is unknown.
+
 ### FR-W4 acceptance: the OSE runtime
 
 OSE is built by `.github/workflows/test-ose.yml` from `ember/ose/` (Code-OSS at the tag in `ember/ose/VERSION`,

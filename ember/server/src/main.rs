@@ -380,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
     // EMBER_IDE_COMPUTERS; derive them from the computers registry (and the session's current
     // computer) instead of a second, hand-maintained list.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    let ose = Arc::new(ember_server::ose::OseManager::default());
     // The guest router is built only when the door is on, wrapped only by the door's guards, and
     // never merged into `app` (not under auth::protect either).
     let guest_app = guest_door.as_ref().map(|d| {
@@ -398,7 +399,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::terms::router(computers.clone()))
         .merge(computers::metrics::router(computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
-        .merge(ember_server::api::ide::router(sessions.clone(), ide))
+        .merge(ember_server::api::ide::router_with_ose(sessions.clone(), ide, ose.clone()))
+        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))

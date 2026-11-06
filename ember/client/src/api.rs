@@ -1913,3 +1913,120 @@ mod detect_tests {
         assert_eq!(e.code(), Some("not_implemented"));
     }
 }
+
+// ---- hub devices, read only (FR-C1 / FR-C2, D39, #490) ------------------------
+
+/// What a device says it runs (`app` of the hub's device). Tolerant: a hint only.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct HubDeviceApp {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub version: String,
+}
+
+/// One entry of `GET /api/hub/devices`: the hub's `Device` fields the UI needs, flattened, plus
+/// the server's own flags. The hub reports no operating system, so none is shown.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct HubDevice {
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub name: String,
+    /// `main_server`, `computer` or `client`; empty when the server did not say.
+    #[serde(default)]
+    pub role: String,
+    /// `None` when the hub did not report it.
+    #[serde(default)]
+    pub online: Option<bool>,
+    #[serde(default)]
+    pub last_seen: Option<i64>,
+    #[serde(default)]
+    pub app: Option<HubDeviceApp>,
+    /// This server itself.
+    #[serde(default)]
+    pub this_server: bool,
+    /// The computer registered for this device, if any.
+    #[serde(default)]
+    pub computer_id: Option<String>,
+    /// On this server's devices allow-list.
+    #[serde(default)]
+    pub allowed: bool,
+}
+
+/// A hub call failed. 503 means the server runs with the hub off, which is a state and not a
+/// failure; the message of the server is never carried to the screen.
+#[derive(Debug)]
+pub enum HubCallError {
+    Off,
+    Api(ApiError),
+}
+
+impl HubCallError {
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            HubCallError::Off => Some(503),
+            HubCallError::Api(e) => e.status(),
+        }
+    }
+}
+
+impl From<ApiError> for HubCallError {
+    fn from(e: ApiError) -> Self {
+        if e.status() == Some(503) {
+            HubCallError::Off
+        } else {
+            HubCallError::Api(e)
+        }
+    }
+}
+
+/// `/hub/devices`, below `/api`.
+pub(crate) fn hub_devices_path() -> &'static str {
+    "/hub/devices"
+}
+
+impl Api {
+    /// The account's devices as the hub integration lists them.
+    pub async fn hub_devices(&self) -> Result<Vec<HubDevice>, HubCallError> {
+        Ok(self.get(hub_devices_path()).await?)
+    }
+}
+
+#[cfg(test)]
+mod hub_device_tests {
+    use super::*;
+
+    #[test]
+    fn fr_c2_hub_devices_decode_the_server_shape_and_missing_fields() {
+        let v: Vec<HubDevice> = serde_json::from_value(json!([
+            {"endpoint_id": "abc", "name": "studio", "role": "computer", "created_at": 1, "last_seen": 5,
+             "online": true, "app": {"kind": "ember-node", "version": "0.9", "services": []},
+             "this_server": false, "computer_id": "studio", "allowed": true},
+            {"endpoint_id": "def"}
+        ]))
+        .unwrap();
+        assert_eq!(v[0].computer_id.as_deref(), Some("studio"));
+        assert_eq!(v[0].app.as_ref().map(|a| a.kind.as_str()), Some("ember-node"));
+        assert!(v[0].online == Some(true) && v[0].allowed && !v[0].this_server);
+        assert_eq!(v[1], HubDevice { endpoint_id: "def".into(), ..Default::default() });
+        assert_eq!(v[1].online, None);
+    }
+
+    #[test]
+    fn fr_c2_hub_devices_path_is_fixed() {
+        assert_eq!(hub_devices_path(), "/hub/devices");
+    }
+
+    #[test]
+    fn fr_c2_a_503_is_the_typed_hub_off_error() {
+        let raw = Raw {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: Bytes::from_static(br#"{"error":"the hub is off"}"#),
+        };
+        let e: HubCallError = Api::check(raw).unwrap_err().into();
+        assert!(matches!(e, HubCallError::Off));
+        let raw = Raw { status: StatusCode::BAD_REQUEST, body: Bytes::from_static(br#"{"error":"x"}"#) };
+        let e: HubCallError = Api::check(raw).unwrap_err().into();
+        assert_eq!(e.status(), Some(400));
+    }
+}

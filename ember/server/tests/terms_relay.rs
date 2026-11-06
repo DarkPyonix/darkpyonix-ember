@@ -357,11 +357,12 @@ async fn fr_p3_errors_keep_the_nodes_status_and_unreachable_nodes_are_502() {
         let cid = register(&s, &node).await;
         let c = reqwest::Client::new();
 
-        // Unknown computer, and the local computer (no node client).
+        // Unknown computer. The local computer is a computer like any other since #455 (it answers
+        // through the lazily started in-process node), so listing its terminals is a 200.
         let r = c.get(http(&s, "/api/computers/nope/terms")).send().await.unwrap();
         assert_eq!(r.status(), 404);
         let r = c.get(http(&s, "/api/computers/local/terms")).send().await.unwrap();
-        assert_eq!(r.status(), 400);
+        assert_eq!(r.status(), 200);
 
         // The node's own 404 and its body.
         let r = c.get(http(&s, &format!("/api/computers/{cid}/terms/missing"))).send().await.unwrap();

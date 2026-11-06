@@ -509,6 +509,26 @@ Sections on the left (pills at 900 and below):
 - **사용량**: today's tokens, 7/14-day bars, token kinds (`FR-U7`, "unknown" never estimated), cost
   by harness (donut) and by model (bars), account rings per provider.
 
+#### Harness detect API (hand-off to the app session, `FR-A6.1`)
+
+Server side is written (not compiled yet). The app still has to change two things in
+`ember/app/src/ui/cr/agents.rs`:
+
+- Route: `POST /api/computers/{id}/harnesses/detect` (no body; `local` for this server) answers
+  `[{"harness": "claude-code", "installed": true, "version": "2.1.288", "path": "/usr/local/bin/claude",
+  "detected_at": 1761900000000}]`. `harness` is the kind string `GET /api/agents` calls `kind`.
+  `version` and `path` are `null` when unknown; `detected_at` is epoch ms. Another registered
+  computer answers 501 `{error, code: "not_implemented"}` (node probe open), an unknown id 404.
+  `GET /api/agents` keeps `kind`, `installed`, `version` and gains `path` and `detected_at`.
+- Change 1: drop the `unwrap_or("1.0.0")` fallbacks (lines 920, 939, 942). With no version, show
+  "버전 알 수 없음" in the subtitle and the pill, and never `v1.0.0`.
+- Change 2: the 다시 찾기 button calls the route for the selected computer, replaces that
+  harness's `installed`, `version` and `path` from the answer, and posts the notice from the
+  answer ("Codex v0.46.0을 찾았습니다", or "찾지 못했습니다" when `installed` is false, or "버전을
+  알 수 없습니다" when installed without a version). On 501 post "이 컴퓨터에서는 아직 다시 찾을 수
+  없습니다". The client needs `Api::detect_harnesses(computer_id)` and the extra `path` and
+  `detected_at` fields on `DetectedAgent` (tolerant defaults).
+
 ### 6.8 파일 (Files)
 
 The screen for file transfer between the user's devices (D24 and `FR-F1`..`FR-F9`, in PR #153).

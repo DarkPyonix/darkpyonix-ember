@@ -21,6 +21,8 @@ pub struct HostState {
     pub connected: bool,
     pub error: Option<String>,
     pub entries: Vec<(String, u32)>,
+    /// Every directory listed so far, by path, for the explorer tree.
+    pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -49,6 +51,14 @@ impl HostState {
             Ok(entries) => self.entries = entries,
             Err(error) => self.error = Some(error.to_string()),
         }
+    }
+
+    /// Store the listing of one directory for the tree, and keep it as the current entries.
+    pub fn set_dir_listing<E: std::fmt::Display>(&mut self, dir: &str, result: Result<Vec<(String, u32)>, E>) {
+        if let Ok(entries) = &result {
+            self.listings.insert(dir.to_string(), entries.clone());
+        }
+        self.set_listing(result);
     }
 
     /// Handle one session update: connection loss is recorded, every update is queued in order.
@@ -82,6 +92,7 @@ impl EditorHost {
                 *revision.write() += 1;
                 return;
             }
+            let root = target.folder.clone();
             let mut config = SessionConfig::new(target.endpoint, target.folder);
             config.connection_token = (!target.token.is_empty()).then_some(target.token);
             config.app_language = "ko".into();
@@ -97,7 +108,7 @@ impl EditorHost {
                 let entries = session.read_dir(&session.workspace_uri()).await;
                 let mut state = shared.lock().unwrap();
                 state.connected = true;
-                state.set_listing(entries);
+                state.set_dir_listing(&root, entries);
             }
             *revision.write() += 1;
             loop {
@@ -105,7 +116,7 @@ impl EditorHost {
                     command = rx.recv() => match command {
                         Some(HostCommand::List(path)) => {
                             let result = session.read_dir(&session.uri(&path)).await;
-                            shared.lock().unwrap().set_listing(result);
+                            shared.lock().unwrap().set_dir_listing(&path, result);
                         }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }

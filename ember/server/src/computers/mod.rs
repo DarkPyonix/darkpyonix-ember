@@ -55,7 +55,9 @@ use crate::store::{now_ms, SessionRecord, Store};
 pub mod api;
 pub mod bridge;
 pub mod egress;
+pub mod enrol;
 pub mod fs;
+pub mod local_node;
 pub mod metrics;
 pub mod mount;
 pub mod observations;
@@ -637,6 +639,9 @@ pub struct Computers {
     watch_secs: std::sync::atomic::AtomicU64,
     /// Per session: how many consecutive probes wanted a move (FR-X3 debounce).
     flap: Mutex<HashMap<String, u32>>,
+    /// This machine's in-process node, started on first use of the local computer's terminals
+    /// (FR-W4, #455). Dropping it closes the loopback port.
+    local_node: Mutex<Option<local_node::LocalNode>>,
 }
 
 /// Probes in a row that must agree before a fallback or return happens (FR-X3).
@@ -691,6 +696,7 @@ impl Computers {
             debounce: std::sync::atomic::AtomicU32::new(fallback_env().0),
             watch_secs: std::sync::atomic::AtomicU64::new(fallback_env().1),
             flap: Mutex::new(HashMap::new()),
+            local_node: Mutex::new(None),
         })
     }
 
@@ -753,6 +759,21 @@ impl Computers {
             ComputerError::BadRequest("the local computer has no node client".into())
         })?;
         Ok(node_client(&c, self.dialer.as_ref())?)
+    }
+
+    /// A [`NodeClient`] for this machine's in-process node, which is started on the first call
+    /// (loopback, random token, rooted at `$HOME`). Needs a Tokio runtime (FR-W4, #455).
+    pub fn local_node_client(&self) -> Result<NodeClient, ComputerError> {
+        let mut slot = self.local_node.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(local_node::LocalNode::start()?);
+        }
+        Ok(slot.as_ref().expect("just set").client()?)
+    }
+
+    /// Where the local node listens, or `None` while it has not been started (a test accessor).
+    pub fn local_node_addr(&self) -> Option<std::net::SocketAddr> {
+        self.local_node.lock().unwrap().as_ref().map(|n| n.addr())
     }
 
     pub fn registry(&self) -> &Registry {

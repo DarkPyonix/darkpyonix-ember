@@ -227,9 +227,7 @@ pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut(
             Modifier::new().size(44.0, 40.0).corner_radius(CORNER_SM),
             Alignment::Center,
             on_click,
-            || {
-                NavIcon(svg, p.muted.to_argb(), 20.0);
-            },
+            || NavIcon(svg, p.muted.to_argb(), 20.0),
         );
         return;
     }
@@ -498,9 +496,7 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                     .shape_role(compose_rust::ShapeRole::Full),
                 Alignment::Center,
                 move || o.set(!o.get_untracked()),
-                || {
-                    NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0);
-                },
+                || NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0),
             );
             if open.get() {
                 cu::Spacer().modifier(Modifier::new().height(4.0));

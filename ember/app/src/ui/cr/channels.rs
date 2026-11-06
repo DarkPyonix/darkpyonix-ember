@@ -309,9 +309,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                             .shape_role(compose_rust::ShapeRole::Full)
                             .alpha(0.4),
                     )
-                    .content(|| {
-                        super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);
-                    });
+                    .content(|| super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0));
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
@@ -460,9 +458,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                             .shape_role(compose_rust::ShapeRole::Full),
                         Alignment::Center,
                         move || st.open.set(true),
-                        || {
-                            super::shell::NavIcon(super::shell::ICON_USERS_SVG, p.text_2.to_argb(), 16.0);
-                        },
+                        || super::shell::NavIcon(super::shell::ICON_USERS_SVG, p.text_2.to_argb(), 16.0),
                     );
                 }
                 for svg in [super::shell::ICON_MORE_SVG] {
@@ -475,9 +471,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                                 .border(1.0, paint(p.line))
                                 .shape_role(compose_rust::ShapeRole::Full),
                         )
-                        .content(|| {
-                            super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0);
-                        });
+                        .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0));
                 }
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });
@@ -567,9 +561,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                     cu::Box()
                         .alignment(Alignment::Center)
                         .modifier(Modifier::new().size(H_CTL, H_CTL))
-                        .content(|| {
-                            super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0);
-                        });
+                        .content(|| super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0));
                 }
                 EmberField(FieldOptions {
                     weight: Some(1.0),
@@ -589,9 +581,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                 cu::Box()
                     .alignment(Alignment::Center)
                     .modifier(Modifier::new().size(H_CTL, H_CTL))
-                    .content(|| {
-                        super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0);
-                    });
+                    .content(|| super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0));
                 // Sending is for the server's rooms; the sample rooms (demo) cannot send.
                 let sending = state.get() == SendState::Sending;
                 let can_send = live.is_some() && !sending && !draft.get().trim().is_empty();

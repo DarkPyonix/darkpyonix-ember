@@ -487,12 +487,15 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                         // `.pbox-act`: version control, settings, and the primary "세션 열기".
                         cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
                             let (u, id) = (ui.clone(), b.id.clone());
+                            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
                             IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, move || {
                                 u.set_selected_project(Some(id.clone()));
                                 shell::choose(&u, NavMenu::VersionControl);
                             });
                             let (settings, id) = (st.settings.clone(), b.id.clone());
+                            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
                             IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, move || settings.set(Some(id.clone())));
+                            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
                             OpenSessionButton(b, ui, true);
                         });
                     });
@@ -656,8 +659,11 @@ fn FullProject(b: &ProjectBox, chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w
         let (settings, id) = (st.settings.clone(), b.id.clone());
         let open_settings = move || settings.set(Some(id.clone()));
         if compact {
+            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
             IconAction(super::session::ICON_GIT_SVG, super::a11y::VERSION_CONTROL, vcs);
+            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
             IconAction(shell::ICON_GEAR_SVG, super::a11y::PROJECT_SETTINGS, open_settings);
+            // TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
             OpenSessionButton(b, ui, true);
             cu::Spacer().modifier(Modifier::new().width(PHONE_MENU_ROOM));
         } else {

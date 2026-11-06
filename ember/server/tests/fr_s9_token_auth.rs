@@ -51,7 +51,11 @@ fn router(dir: &std::path::Path) -> Router {
     ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
-        .merge(computers::enrol::router(enrol, "http://127.0.0.1:8740".into()))
+        .merge(computers::enrol::router(
+            enrol,
+            "http://127.0.0.1:8740".into(),
+            Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
+        ))
         .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
@@ -101,6 +105,8 @@ const FAMILIES: &[(&str, &str)] = &[
     ("POST", "/api/computers/enrol-codes"),
     ("GET", "/api/computers/enrol-codes/e1"),
     ("DELETE", "/api/computers/enrol-codes/e1"),
+    ("POST", "/api/computers/enrol-codes/e1/confirm"),
+    ("POST", "/api/computers/enrol-codes/e1/deny"),
     ("POST", "/api/computers/local/harnesses/detect"),
     ("GET", "/api/accounts"),
     ("GET", "/api/mcp"),

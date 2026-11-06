@@ -23,7 +23,7 @@ use compose_rust::{Alignment, ButtonVariant, IconRole, ShapeRole};
 use ember_client::state::Computer;
 
 pub use crate::ui::files::{
-    answer_offer, build_model, share_agents, share_devices, share_file_card, share_tap, ShareTap, SHARE_ACTIONS, SHARE_NOTE, connected_count, empty_text, format_bytes, grid, kpis, offer_line,
+    answer_offer, build_model, share_agents, share_devices, share_file_card, share_tap, ShareTap, SHARE_ACTIONS, SHARE_AGENTS_NOTE, SHARE_NAME_LINES, SHARE_NOTE, connected_count, empty_text, format_bytes, grid, kpis, offer_line,
     path_label, percent, progress_line, send_blocker, sendable_devices, transfer_service,
     user_actions, visible_offers, Answer, Device, DeviceKind, Direction, FilesKpi, FilesModel,
     HistoryEntry, HistoryResult, Offer, PathKind, Presence, ReceivedFile, SendDraft, SendTarget,
@@ -412,6 +412,7 @@ pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<Cre
                         cu::Spacer().modifier(Modifier::new().height(PHONE_MENU_ROW));
                     }
                     HeaderGap("파일", "연결된 모든 장비 사이에서 파일을 주고받습니다. 휴대폰과 태블릿도 포함됩니다.", compact, w <= 900.0, 6.0, || {
+                        // TODO(compose-rust#460): no label modifier, so the share button has no accessible name "공유 시트 열기".
                         ShareButton(compact, {
                             let o = share_open.clone();
                             move || o.set(true)
@@ -1371,14 +1372,15 @@ fn ShareTile(name: &str, caption: &str, dim: bool, on_click: impl FnMut() + 'sta
                 .modifier(Modifier::new().size(60.0, 60.0).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full))
                 .alignment(Alignment::Center)
                 .content(glyph);
-            Label(&fit_label(name, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, None, Some(1));
+            // Two lines at most (an ellipsis after that), so two long names stay distinguishable.
+            Label(name, Fs::Xs2, Weight::Regular, None, Some(SHARE_NAME_LINES));
             Label(&fit_label(caption, 72.0, Fs::Xs2.size()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
     });
 }
 
 /// The share sheet, a preview of the phone's share sheet (mockup state `files-sharesheet`): the
-/// file being shared, "Ember로 보내기" (the real devices, connected ones first), "팀원에게"
+/// file being shared, "Ember로 보내기" (the real devices, connected ones first), "에이전트에게"
 /// (running agents), the sheet's own actions and a note. Nothing can be shared yet (no file
 /// picker, no transfer service, #487), so the file card and the actions say so and a tap on a
 /// receiver explains why nothing was sent instead of reporting success.
@@ -1411,6 +1413,7 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
     let dev_lines = super::project::wrap_lines(&dev_widths, SP[3], inner);
     let ag_widths: Vec<f32> = agents.iter().map(|_| 72.0).collect();
     let ag_lines = super::project::wrap_lines(&ag_widths, SP[3], inner);
+    // TODO(compose-rust#460): the sheet header's close button has no accessible name "닫기" (no label modifier).
     EmberSheetSized("공유 시트", is_open, SHARE_SHEET_WIDTH, false, close, None, || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h).background(paint(p.surface_2))).content(|| {
             cu::Column().spacing(SP[3]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
@@ -1446,7 +1449,8 @@ fn ShareSheet(open: &MutableState<bool>, devices: &[Device], members: &[CrewMemb
                         }
                     });
                 }
-                Label("팀원에게", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label("에이전트에게", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(SHARE_AGENTS_NOTE, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
                 if agents.is_empty() {
                     Label("일하는 팀원이 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
                 }

@@ -238,7 +238,7 @@ pub fn sample_snapshot() -> RepoSnapshot {
         ],
         changes: parse_unified(SAMPLE_DIFF),
         staged: Default::default(),
-        conflicts: Vec::new(),
+        conflicts: vec!["ember/app/src/ui/cr/shell.rs".to_string(), "docs/SPEC.md".to_string()],
         notes: Vec::new(),
     }
 }

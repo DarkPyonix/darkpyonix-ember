@@ -15,6 +15,7 @@ struct Shared {
     directory: Signal<String>,
     expanded: Signal<std::collections::HashSet<String>>,
     bottom_max: Signal<bool>,
+    theme: Signal<crate::ui::theme::ThemePref>,
     position: Signal<(usize, usize)>,
     stripes: Signal<Stripes>,
     menu_open: Signal<bool>,
@@ -38,6 +39,7 @@ fn now_ms() -> u64 {
     START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
 
+thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -50,6 +52,7 @@ fn init(target: EditorTarget) {
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
+    let theme = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().theme, root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
@@ -57,7 +60,7 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -117,8 +120,11 @@ pub mod page {
     pub fn config() -> HtmlConfig {
         HtmlConfig {
             stylesheets: vec![
-                include_str!("../../assets/editor/style.css").to_string(),
+                // The mockup's dark tokens hang on `:root[data-theme=dark]`; here the page's own container
+                // carries the attribute, so the selector is the attribute alone.
+                include_str!("../../assets/editor/style.css").replace(":root[data-theme=dark]", "[data-theme=dark]"),
                 include_str!("../../assets/editor/editor.css").to_string(),
+                include_str!("../../assets/editor/page.css").to_string(),
             ],
             images: Some(Box::new(crate::ui::editor_icons::IconResolver::default())),
             ..HtmlConfig::default()
@@ -210,6 +216,13 @@ pub mod page {
         let key_s = s.clone();
         let has_left = sel.selected(Side::Left).is_some();
         let has_bottom = sel.selected(Side::Bottom).is_some();
+        let theme_pref = *s.theme.read();
+        let dark = theme_pref.resolve(crate::ui::theme::system_scheme()) == crate::ui::theme::Scheme::Dark;
+        if super::ICON_DARK.with(|d| d.replace(dark)) != dark {
+            // The code editor is a Compose widget: it takes its colours from the toolkit's theme.
+            let scheme = if dark { compose_rust::schema::ColorScheme::Dark } else { compose_rust::schema::ColorScheme::Light };
+            compose_rust::theme::set_theme(compose_rust::theme::current_theme().with_color_scheme(scheme));
+        }
         let ed_class = format!(
             "ed{}{}",
             if has_left { "" } else { " no-left" },
@@ -222,7 +235,7 @@ pub mod page {
         let ed_style = format!("width:100vw; height:calc(100vh - 76px); {grid}");
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
-            div { class: "{ed_class}", tabindex: "0", style: "{ed_style}",
+            div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "0", style: "{ed_style}",
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let keymap = *key_s.keymap.read();
@@ -280,13 +293,10 @@ pub mod page {
                         }
                     }
                     {stripe_column(&s, sel, keymap, Strip::Right)}
-                    if let Some(w) = sel.selected(Side::Right) {
-                        {side_note(w, "ed-right")}
-                    }
                     if let Some(w) = sel.selected(Side::Bottom) {
                         {bottom_window(&s, w)}
                     }
-                    {status_bar(&s, &agent_state, &branch, active.is_some(), line, col)}
+                    {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col)}
                 }
             }
         }
@@ -301,11 +311,15 @@ pub mod page {
 
     /// A mockup icon at `px` dp (the mockup sizes tree, tab and breadcrumb icons by context).
     pub(super) fn icon_px(name: &str, px: u32) -> Element {
-        rsx! { img { class: "i", src: "icon:{name}", width: "{px}", height: "{px}" } }
+        let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
+        rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
     }
 
     fn top_bar(s: &Shared, branch: &str, keymap: Keymap) -> Element {
         let mut menu_open = s.menu_open;
+        let mut theme = s.theme;
+        let theme_pref = *s.theme.read();
+        let theme_title = format!("테마: {}", theme_pref.label());
         let name = s.project_name.clone();
         let branch = branch.to_string();
         let find = tooltip_text(keymap.find_label(), &keymap.hint(Action::Find, Os::current()));
@@ -315,8 +329,8 @@ pub mod page {
         rsx! {
             header { class: "ed-top",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
-                button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" }
-                button { class: "ed-pj", {icon("git")} "{branch}" }
+                button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "브랜치", onclick: move |_| notice(format!("브랜치: {SOON}")), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
                 div { class: "spacer" }
                 button { class: "ed-find", title: "{find}", onclick: move |_| notice(find_note.clone()),
                     {icon("search")}
@@ -324,9 +338,14 @@ pub mod page {
                     kbd { class: "ed-sc", "{find_hint}" }
                 }
                 div { class: "ed-runcfg",
-                    button { class: "ed-pj", title: "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" }
+                    button { class: "ed-pj", title: "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
                     button { class: "ed-ib run", title: "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
                     button { class: "ed-ib", title: "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
+                    button { class: "ed-ib", title: "{theme_title}", onclick: move |_| {
+                        let next = theme_pref.next();
+                        theme.set(next);
+                        crate::services::services().ui.update_prefs(|p| p.theme = next);
+                    }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
                     button { class: "ed-ib", title: "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
                     button { class: "ed-ib", title: "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
                 }
@@ -373,7 +392,9 @@ pub mod page {
         let tip = tooltip_text(w.label(), &hint);
         let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
-            button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", onclick: move |_| stripes.write().toggle(w), {icon(icon_name(w))} }
+            button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", onclick: move |_| {
+                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+            }, {icon(icon_name(w))} }
         }
     }
 
@@ -408,9 +429,8 @@ pub mod page {
 
     fn side_note(w: ToolWindow, area: &str) -> Element {
         let class = format!("ed-tw {area}");
-        let style = if area == "ed-right" { "position:fixed; right:52px; top:60px; bottom:44px; width:260px; z-index:20;" } else { "" };
         rsx! {
-            section { class, style, "aria-label": "{w.label()}",
+            section { class, "aria-label": "{w.label()}",
                 div { class: "ed-twh", b { class: "ed-twt", "{w.label()}" } }
                 div { style: "padding:12px;",
                     div { style: "color:var(--text-2);", "{SOON}" }
@@ -627,12 +647,13 @@ pub mod page {
         let mut stripes = s.stripes;
         let mut bottom_max = s.bottom_max;
         let max = *bottom_max.read();
+        let has_left = s.stripes.read().selected(Side::Left).is_some();
         let body = match w {
             ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
             _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
         };
         rsx! {
-            section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else { "" }, "aria-label": "아래 도구 창",
+            section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "아래 도구 창",
                 div { class: "ed-twh",
                     div { class: "ed-btabs", role: "tablist",
                         for b in ToolWindow::BOTTOM {
@@ -655,21 +676,23 @@ pub mod page {
         }
     }
 
-    fn status_bar(s: &Shared, agent_state: &str, branch: &str, has_file: bool, line: usize, col: usize) -> Element {
-        let folder = s.folder.clone();
+    fn status_bar(s: &Shared, agent_state: &str, branch: &str, current: Option<&str>, line: usize, col: usize) -> Element {
+        let crumbs = crate::ui::editor::status_crumbs(&s.folder, current);
         let agent = agent_status_text(agent_state);
-        let dot = "dot ok";
+        let dot = crate::ui::editor::agent_dot_class(agent_state);
         let position = position_text(line, col);
         let branch = branch.to_string();
+        let has_file = current.is_some();
         rsx! {
             footer { class: "ed-status",
-                span { class: "ed-sbi crumbs-s", "{folder}" }
+                span { class: "ed-sbi crumbs-s", "{crumbs}" }
                 div { class: "spacer" }
                 span { class: "ed-sbi", span { class: "{dot}" } "{agent}" }
                 if has_file {
                     span { class: "ed-sbi", "{position}" }
                     span { class: "ed-sbi hide-md", "LF" }
                     span { class: "ed-sbi hide-md", "UTF-8" }
+                    span { class: "ed-sbi hide-md", "4칸" }
                 }
                 span { class: "ed-sbi", {icon("git")} "{branch}" }
             }

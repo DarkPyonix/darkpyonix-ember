@@ -2160,7 +2160,8 @@ pub struct TeamRow {
 /// `cwd` is `worktree` or inside it (a path boundary, so "/w/ui2" is not inside "/w/ui").
 fn cwd_in_worktree(cwd: &str, worktree: &str) -> bool {
     let (c, w) = (cwd.trim_end_matches('/'), worktree.trim_end_matches('/'));
-    c == w || (c.starts_with(w) && c[w.len()..].starts_with('/'))
+    // A worktree of "/" would hold every folder: it holds none.
+    !w.is_empty() && (c == w || (c.starts_with(w) && c[w.len()..].starts_with('/')))
 }
 
 /// The rows of 팀 작업, one per branch that has a worktree: the current branch (the main
@@ -4002,7 +4003,14 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_team_longest_prefix_wins_for_a_nested_worktree() {
+    fn fr_g9_team_a_root_worktree_holds_no_member_folder() {
+        assert!(!cwd_in_worktree("/Users/x", "/"));
+        assert!(!cwd_in_worktree("/", "/"));
+        assert!(cwd_in_worktree("/a/b", "/a/"));
+    }
+
+    #[test]
+    fn fr_g9_team_longest_prefix_wins_for_a_nested_worktree() {
         let b = branches_of(&[("main", true, Some("/r")), ("feat/ui", false, Some("/r/.claude/worktrees/ui"))]);
         let m = [a_member("ui-agent", false, "/r/.claude/worktrees/ui/ember/app"), a_member("lead", true, "/r/docs")];
         let rows = team_rows(&b, &m, &[]);
@@ -4012,7 +4020,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_team_a_sibling_folder_with_the_same_prefix_is_not_inside() {
+    fn fr_g9_team_a_sibling_folder_with_the_same_prefix_is_not_inside() {
         let b = branches_of(&[("feat/ui", false, Some("/w/ui"))]);
         let rows = team_rows(&b, &[a_member("x", false, "/w/ui2")], &[]);
         assert_eq!(rows[0].member, None);
@@ -4020,7 +4028,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_team_a_worktree_without_a_member_has_none() {
+    fn fr_g9_team_a_worktree_without_a_member_has_none() {
         let b = branches_of(&[("main", true, Some("/r"))]);
         let rows = team_rows(&b, &[a_member("far", false, "/elsewhere")], &[]);
         assert_eq!(rows.len(), 1);
@@ -4029,7 +4037,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_team_lists_only_branches_with_a_worktree_main_first_then_by_name() {
+    fn fr_g9_team_lists_only_branches_with_a_worktree_main_first_then_by_name() {
         let b = branches_of(&[("zeta", false, Some("/w/z")), ("develop", false, None), ("alpha", false, Some("/w/a")), ("main", true, Some("/r"))]);
         let names: Vec<String> = team_rows(&b, &[], &[]).into_iter().map(|r| r.branch).collect();
         assert_eq!(names, ["main", "alpha", "zeta"]);
@@ -4037,14 +4045,14 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_team_a_shared_worktree_shows_the_leader() {
+    fn fr_g9_team_a_shared_worktree_shows_the_leader() {
         let b = branches_of(&[("main", true, Some("/r"))]);
         let m = [a_member("first", false, "/r"), a_member("lead", true, "/r/x")];
         assert_eq!(team_rows(&b, &m, &[])[0].member.as_ref().unwrap().name, "lead");
     }
 
     #[test]
-    fn fr_l19_team_the_pr_text_is_the_branch_pr_open_first() {
+    fn fr_g9_team_the_pr_text_is_the_branch_pr_open_first() {
         let b = branches_of(&[("feat/x", false, Some("/w/x")), ("main", true, Some("/r"))]);
         let prs = [
             pr_entry(&a_pr(7, GitPrState::Merged, GitPrReview::None, (0, 0, 0), (false, "")), 0),
@@ -4057,7 +4065,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_team_empty_input_gives_no_rows_and_the_count_is_the_loaded_count() {
+    fn fr_g9_team_empty_input_gives_no_rows_and_the_count_is_the_loaded_count() {
         assert!(team_rows(&[], &[], &[]).is_empty());
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, None), None);
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, Some(3)), Some(3));

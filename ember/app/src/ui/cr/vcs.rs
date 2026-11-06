@@ -2762,7 +2762,8 @@ fn VcsScreenWithLoad(
     let pr_count = remember(|| mutable_state_of(None::<usize>));
     let branch_count = remember(|| mutable_state_of(None::<usize>));
     let team_count = remember(|| mutable_state_of(None::<usize>));
-    let pr_list = remember(|| mutable_state_of(Vec::<PrEntry>::new()));
+    // Keyed by the project: the PR pills of another project's branches must not carry over.
+    let pr_list = remember_with_key(selected_proj.get(), || mutable_state_of(Vec::<PrEntry>::new()));
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());

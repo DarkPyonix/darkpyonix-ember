@@ -25,6 +25,7 @@ use crate::codelens::{CodeLenses, CommandDto};
 use crate::coords::{WidgetPos, WidgetRange};
 use crate::diagnostics::Diagnostics;
 use crate::document::{decode, OpenDocument};
+use crate::highlight::{Action as HighlightAction, HighlightJob, HighlightOutput, Highlights, Problem};
 use crate::hover::{HoverPopup, HoverState};
 use crate::ids::{DecorationIds, IdSpace};
 use crate::inline::{self, EndReason, Ghost, InlineDoc, ReplyOutcome, TypeThrough};
@@ -32,6 +33,9 @@ use crate::languages::LanguageRegistry;
 use crate::registry::{KindTag, Registry, RegistryChange};
 use crate::replies::session_reply;
 use crate::widget::{Decoration, DecorationKind, WidgetCommand, WidgetEvent};
+
+/// How many versions behind the document an answer of the highlighter may be and still be shown.
+const MAX_SPAN_VERSION_LAG: u32 = 500;
 
 /// Identifies an outstanding RPC call or file write of the core.
 pub type Token = u64;
@@ -69,6 +73,8 @@ pub enum ReadPurpose {
     Reload,
     /// `MainThreadDocuments.$tryOpenDocument` from the extension host (`workspace.openTextDocument`).
     ExtHostOpen { req: u32 },
+    /// A grammar file the syntax highlighting needs (`scope` is the grammar's scope name).
+    Grammar { scope: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,6 +92,8 @@ pub enum Input {
     FileRead { uri: UriComponents, purpose: ReadPurpose, result: Result<Vec<u8>, String> },
     FileWritten { uri: UriComponents, token: Token, result: Result<(), String> },
     FilesChanged(Vec<FileChange>),
+    /// The highlighting worker finished a batch of jobs.
+    Highlighted(HighlightOutput),
     /// Nothing happened; run due timers.
     Tick,
 }
@@ -103,6 +111,8 @@ pub enum Effect {
     WriteFile { uri: UriComponents, bytes: Vec<u8>, token: Token },
     Watch { uri: UriComponents },
     Unwatch { uri: UriComponents },
+    /// Work for the highlighting thread; its answer comes back as [`Input::Highlighted`].
+    Highlight(HighlightJob),
     Ui(SessionUpdate),
 }
 
@@ -117,6 +127,9 @@ pub enum ExternalChange {
 /// What the UI layer applies to the widget and around it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionUpdate {
+    /// The coloured runs of the lines in `window` (first, last inclusive) of the node with key `generation`,
+    /// written against document `version`; lines outside the window carry none. Replaces the earlier list.
+    Syntax { uri: UriComponents, generation: u64, version: u32, window: (u32, u32), runs: Vec<crate::textmate::DocRun> },
     /// Render a `CodeEditor` with key `generation`, `Text = text`, `TabWidth = tab_width`.
     Opened { uri: UriComponents, generation: u64, text: String, language_id: String, tab_width: u32 },
     OpenFailed { uri: UriComponents, error: String },
@@ -166,6 +179,7 @@ pub struct SessionCore {
     registry: Registry,
     diagnostics: Diagnostics,
     lenses: CodeLenses,
+    highlights: Highlights,
     codelens_due: HashMap<String, inline::Debouncer>,
     codelens_inflight: HashMap<(String, i64), Token>,
     hover: HoverState,
@@ -208,6 +222,7 @@ impl SessionCore {
             registry: Registry::new(),
             diagnostics: Diagnostics::new(),
             lenses: CodeLenses::new(),
+            highlights: Highlights::new(),
             codelens_due: HashMap::new(),
             codelens_inflight: HashMap::new(),
             hover: HoverState::new(),
@@ -240,11 +255,21 @@ impl SessionCore {
             Input::FileRead { uri, purpose, result } => self.on_file_read(uri, purpose, result),
             Input::FileWritten { uri, token, result } => self.on_file_written(&uri, token, result),
             Input::FilesChanged(changes) => self.on_files_changed(changes),
+            Input::Highlighted(output) => self.on_highlighted(output),
             Input::Tick => {}
         }
         self.run_timers();
         self.flush_decorations();
         std::mem::take(&mut self.out)
+    }
+
+    /// The grammars the installed extensions contribute (`contributes.grammars`); documents opened after this
+    /// are highlighted when their language has one.
+    pub fn set_grammar_catalog(&mut self, catalog: crate::textmate::GrammarCatalog) {
+        for why in catalog.skipped() {
+            tracing::debug!("ember-editor: grammar skipped: {why}");
+        }
+        self.highlights.set_catalog(catalog);
     }
 
     /// When [`Input::Tick`] must be delivered next (earliest debounce deadline).
@@ -412,6 +437,7 @@ impl SessionCore {
             tab_width: self.opts.tab_width,
         });
         self.docs.insert(key.clone(), doc);
+        self.highlight_open(&key);
         self.active = Some(key.clone());
         self.out.push(Effect::Watch { uri });
         self.send_tab_model();
@@ -423,6 +449,9 @@ impl SessionCore {
         let key = uri.key();
         let Some(doc) = self.docs.remove(&key) else { return };
         self.rpc(doc.remove_call());
+        if let Some(job) = self.highlights.close(&key) {
+            self.out.push(Effect::Highlight(job));
+        }
         self.out.push(Effect::Unwatch { uri: doc.uri.clone() });
         for (handle, cache_id) in self.lenses.close(&key) {
             self.rpc(exthost::release_code_lenses(handle, cache_id));
@@ -509,6 +538,7 @@ impl SessionCore {
         }
         self.diagnostics.on_edit(key, range, text);
         self.lenses.on_edit(key, range, text);
+        self.highlight_edit(key, version, range, text);
         // Monaco hides the hover on typing.
         let (tokens, shown) = self.hover.end_for(key);
         self.cancel(tokens);
@@ -533,6 +563,9 @@ impl SessionCore {
     }
 
     fn on_visible_range_changed(&mut self, key: &str, first_line: u32, last_line: u32) {
+        if let Some(job) = self.highlights.visible(key, first_line, last_line) {
+            self.out.push(Effect::Highlight(job));
+        }
         let to_resolve = self.lenses.set_visible_range(key, first_line, last_line);
         for (handle, serial, index, dto) in to_resolve {
             self.rpc_with(
@@ -1080,6 +1113,99 @@ impl SessionCore {
                 self.reset_doc(&key, &text, Some(bom));
             }
             ReadPurpose::ExtHostOpen { req } => self.finish_exthost_open(uri, req, result),
+            ReadPurpose::Grammar { scope } => self.on_grammar_read(&scope, &uri, result),
+        }
+    }
+
+    // ---- syntax highlighting ------------------------------------------------------------------
+
+    /// Turns what [`Highlights`] asks for into effects. `like` is any URI of the server: grammar files live on
+    /// the same machine as the document.
+    fn run_highlight_actions(&mut self, like: &UriComponents, actions: Vec<HighlightAction>) {
+        for action in actions {
+            match action {
+                HighlightAction::Read { scope, path } => {
+                    let uri = UriComponents::remote(&like.authority, &path);
+                    self.out.push(Effect::ReadFile { uri, purpose: ReadPurpose::Grammar { scope } });
+                }
+                HighlightAction::Job(job) => self.out.push(Effect::Highlight(job)),
+                HighlightAction::Off { key, why } => tracing::debug!("ember-editor: no colours for {key}: {why}"),
+            }
+        }
+    }
+
+    fn highlight_build(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (text, version) = (doc.lines().join("\n"), doc.widget_version());
+        if let Some(job) = self.highlights.build_job(key, text, version) {
+            self.out.push(Effect::Highlight(job));
+        }
+    }
+
+    /// A document was opened, or its text replaced (reload, resync): colour it from the start.
+    fn highlight_open(&mut self, key: &str) {
+        let Some(doc) = self.docs.get(key) else { return };
+        let (language, like) = (doc.language_id.clone(), doc.uri.clone());
+        let (actions, ready) = self.highlights.open(key, &language);
+        self.run_highlight_actions(&like, actions);
+        if ready {
+            self.highlight_build(key);
+        }
+    }
+
+    fn highlight_edit(&mut self, key: &str, version: u32, range: WidgetRange, text: &str) {
+        if let Some(job) = self.highlights.edit(key, range, text, version) {
+            self.out.push(Effect::Highlight(job));
+        }
+    }
+
+    fn on_grammar_read(&mut self, scope: &str, uri: &UriComponents, result: Result<Vec<u8>, String>) {
+        let result = result.and_then(|bytes| {
+            if bytes.len() as u64 > crate::textmate::MAX_GRAMMAR_BYTES {
+                return Err("the grammar file is too large".to_owned());
+            }
+            String::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned())
+        });
+        let (actions, ready) = self.highlights.grammar_read(scope, &uri.path, result);
+        self.run_highlight_actions(uri, actions);
+        for key in ready {
+            self.highlight_build(&key);
+        }
+    }
+
+    fn on_highlighted(&mut self, output: HighlightOutput) {
+        if !self.highlights.accept(&output) {
+            return;
+        }
+        let key = output.key.clone();
+        // Runs written against a version the document has not reached cannot be right, and ones far behind it
+        // are past what the widget can move them across: neither is shown.
+        if let Some(doc) = self.docs.get(&key) {
+            let current = doc.widget_version();
+            if output.problem.is_none() && (output.version > current || current - output.version > MAX_SPAN_VERSION_LAG) {
+                tracing::debug!("ember-editor: dropped runs for version {} of {key} (document at {current})", output.version);
+                return;
+            }
+        }
+        match output.problem {
+            Some(Problem::Rebuild) => {
+                self.highlights.rebuild(&key);
+                self.highlight_build(&key);
+            }
+            Some(Problem::Off(why)) => {
+                tracing::debug!("ember-editor: no colours for {key}: {why}");
+                self.highlights.turn_off(&key);
+                if let Some(doc) = self.docs.get(&key) {
+                    let (uri, generation) = (doc.uri.clone(), doc.generation());
+                    self.ui(SessionUpdate::Syntax { uri, generation, version: 0, window: (0, 0), runs: Vec::new() });
+                }
+            }
+            None => {
+                if let Some(doc) = self.docs.get(&key) {
+                    let (uri, generation) = (doc.uri.clone(), doc.generation());
+                    self.ui(SessionUpdate::Syntax { uri, generation, version: output.version, window: output.window, runs: output.runs });
+                }
+            }
         }
     }
 
@@ -1123,6 +1249,7 @@ impl SessionCore {
         }
         self.ids.forget_document(key);
         self.ui(SessionUpdate::Command { uri, command: WidgetCommand::SetText { generation, text: widget_text } });
+        self.highlight_open(key);
         self.send_tab_model();
         self.schedule_codelens(key, Duration::ZERO);
         self.touched.insert(key.to_owned());

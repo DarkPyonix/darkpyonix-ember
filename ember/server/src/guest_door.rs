@@ -30,14 +30,14 @@
 //! `wrap_limited` has no limits and must not be exposed to a network.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -45,6 +45,13 @@ use axum::Router;
 use serde_json::{json, Value};
 
 use crate::api::origin::host_of;
+use crate::door::err;
+use crate::door::harden::{forbid, not_found, origin_ok, request_host, response_headers, Guard};
+use crate::door::limits::{busy, normalize_ip, too_many};
+
+pub use crate::door::harden::with_timeout;
+pub use crate::door::limits::{addr_key, client_ip, TokenBucket};
+pub use crate::door::DoorError;
 
 pub const LISTEN_VAR: &str = "EMBER_GUEST_LISTEN";
 pub const ALLOW_REMOTE_VAR: &str = "EMBER_GUEST_LISTEN_ALLOW_REMOTE";
@@ -139,15 +146,6 @@ pub fn build_join_page_from(html_template: &str, js: &str) -> JoinPage {
 pub fn join_page() -> &'static JoinPage {
     static PAGE: std::sync::OnceLock<JoinPage> = std::sync::OnceLock::new();
     PAGE.get_or_init(build_join_page)
-}
-
-/// A startup error of the door's configuration.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct DoorError(pub String);
-
-fn err<T>(m: impl Into<String>) -> Result<T, DoorError> {
-    Err(DoorError(m.into()))
 }
 
 /// The door's validated configuration. Cheap to clone.
@@ -406,43 +404,6 @@ fn parse_public_url(u: &str) -> Result<String, DoorError> {
     Ok(format!("{scheme}://{rest}"))
 }
 
-/// Answers 408 when the request (handler included) exceeds `limit`.
-pub fn with_timeout(app: Router, limit: Duration) -> Router {
-    app.layer(middleware::from_fn_with_state(limit, timeout_layer))
-}
-
-async fn timeout_layer(State(limit): State<Duration>, req: Request, next: Next) -> Response {
-    match tokio::time::timeout(limit, next.run(req)).await {
-        Ok(r) => r,
-        Err(_) => (StatusCode::REQUEST_TIMEOUT, axum::Json(json!({ "error": "request timed out", "code": "timeout" })))
-            .into_response(),
-    }
-}
-
-#[derive(Clone)]
-struct Guard {
-    hosts: Arc<HashSet<String>>,
-}
-
-fn forbid(why: &str) -> Response {
-    (StatusCode::FORBIDDEN, axum::Json(json!({ "error": why, "code": "forbidden" }))).into_response()
-}
-
-fn is_loopback_name(host: &str) -> bool {
-    host == "localhost"
-        || host.ends_with(".localhost")
-        || host.parse::<std::net::IpAddr>().map(|a| a.is_loopback()).unwrap_or(false)
-}
-
-fn request_host(req: &Request) -> Option<String> {
-    let mut all = req.headers().get_all(header::HOST).iter();
-    match (all.next(), all.next()) {
-        (Some(v), None) => v.to_str().ok().map(str::to_string),
-        (None, _) => req.uri().authority().map(|a| a.to_string()),
-        _ => None,
-    }
-}
-
 /// Host, Origin and Upgrade checks, before any route or body.
 async fn guard_layer(State(g): State<Guard>, req: Request, next: Next) -> Response {
     let Some(host) = request_host(&req) else { return forbid("host not allowed") };
@@ -471,42 +432,6 @@ async fn guard_layer(State(g): State<Guard>, req: Request, next: Next) -> Respon
             .into_response();
     }
     next.run(req).await
-}
-
-/// Absent is allowed. Present: its authority equals `Host` (case-insensitive), or its host is
-/// an allowed name that is not loopback. `null`, a bad value, another site, and a loopback
-/// Origin different from `Host` are refused.
-fn origin_ok(headers: &HeaderMap, host: &str, allowed: &HashSet<String>) -> bool {
-    let mut all = headers.get_all(header::ORIGIN).iter();
-    let Some(first) = all.next() else { return true };
-    if all.next().is_some() {
-        return false;
-    }
-    let Ok(origin) = first.to_str() else { return false };
-    let Some((scheme, authority)) = origin.split_once("://") else { return false };
-    if (scheme != "http" && scheme != "https") || authority.is_empty() || authority.contains(['/', '@', ' ', '\\']) {
-        return false;
-    }
-    if authority.eq_ignore_ascii_case(host) {
-        return true;
-    }
-    let h = host_of(authority);
-    !is_loopback_name(&h) && allowed.contains(&h)
-}
-
-/// Headers on every response of the door.
-async fn response_headers(req: Request, next: Next) -> Response {
-    let mut res = next.run(req).await;
-    let h = res.headers_mut();
-    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    res
-}
-
-async fn not_found() -> Response {
-    let mut r = Response::new(Body::empty());
-    *r.status_mut() = StatusCode::NOT_FOUND;
-    r
 }
 
 async fn join() -> Response {
@@ -556,28 +481,6 @@ pub enum LimitKind {
     Accept,
     /// Everything else.
     Other,
-}
-
-/// IPv4-mapped IPv6 addresses compare as their IPv4 address.
-fn normalize_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    }
-}
-
-/// The limiter key: IPv4 exact, IPv6 reduced to its /64 (one host cannot rotate through its range).
-pub fn addr_key(ip: IpAddr) -> IpAddr {
-    match normalize_ip(ip) {
-        IpAddr::V6(v6) => {
-            let mut o = v6.octets();
-            for b in &mut o[8..] {
-                *b = 0;
-            }
-            IpAddr::V6(Ipv6Addr::from(o))
-        }
-        v4 => v4,
-    }
 }
 
 const MINUTE: Duration = Duration::from_secs(60);
@@ -681,35 +584,6 @@ impl AddrLimiter {
     }
 }
 
-/// A token bucket for the whole door.
-pub struct TokenBucket {
-    per_second: f64,
-    burst: f64,
-    state: Mutex<(f64, Instant)>,
-}
-
-impl TokenBucket {
-    /// Starts full at `now`.
-    pub fn new_at(per_second: f64, burst: f64, now: Instant) -> Self {
-        Self { per_second, burst, state: Mutex::new((burst, now)) }
-    }
-
-    pub fn try_take_at(&self, now: Instant) -> bool {
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let elapsed = now.saturating_duration_since(st.1).as_secs_f64();
-        st.0 = (st.0 + elapsed * self.per_second).min(self.burst);
-        if now > st.1 {
-            st.1 = now;
-        }
-        if st.0 >= 1.0 {
-            st.0 -= 1.0;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 /// Everything the limit layer needs: per-address limiter, global bucket, in-flight cap, and the
 /// trusted proxies that decide whether `X-Forwarded-For` is read.
 pub struct DoorLimits {
@@ -728,62 +602,6 @@ impl DoorLimits {
             trusted: trusted.into_iter().map(normalize_ip).collect(),
         }
     }
-}
-
-/// One `X-Forwarded-For` entry as an address: whitespace trimmed, an IPv4 `:port`, `[v6]:port`
-/// and `[v6]` accepted, the port dropped, so one address is one key.
-fn parse_forwarded(entry: &str) -> Option<IpAddr> {
-    let e = entry.trim();
-    if let Ok(ip) = e.parse::<IpAddr>() {
-        return Some(normalize_ip(ip));
-    }
-    if let Ok(sa) = e.parse::<SocketAddr>() {
-        return Some(normalize_ip(sa.ip()));
-    }
-    let inner = e.strip_prefix('[')?.strip_suffix(']')?;
-    inner.parse::<IpAddr>().ok().map(normalize_ip)
-}
-
-/// The address a request counts against. The TCP `peer` unless it is a trusted proxy; then the
-/// chain of `X-Forwarded-For` is walked from the right: trusted hops are skipped and the first
-/// entry that is not a trusted proxy is the client. Everything left of it is ignored (a client
-/// can forge only what it sends, which the proxy puts on the left). If that entry does not
-/// parse, or every entry is a trusted hop, the key is `peer`.
-pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpAddr]) -> IpAddr {
-    let peer = normalize_ip(peer);
-    if !trusted.contains(&peer) {
-        return peer;
-    }
-    // Entries in arrival order across all header lines; a line that is not text is one bad entry.
-    let mut chain: Vec<Option<&str>> = Vec::new();
-    for v in headers.get_all("x-forwarded-for").iter() {
-        match v.to_str() {
-            Ok(v) => chain.extend(v.split(',').map(Some)),
-            Err(_) => chain.push(None),
-        }
-    }
-    for entry in chain.into_iter().rev() {
-        match entry.and_then(parse_forwarded) {
-            Some(ip) if trusted.contains(&ip) => continue,
-            Some(ip) => return ip,
-            None => return peer,
-        }
-    }
-    peer
-}
-
-fn too_many(wait: Duration) -> Response {
-    let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-    let mut r = (StatusCode::TOO_MANY_REQUESTS, axum::Json(json!({ "error": "too many requests", "code": "rate_limited" })))
-        .into_response();
-    r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
-    r
-}
-
-fn busy() -> Response {
-    let mut r = (StatusCode::SERVICE_UNAVAILABLE, axum::Json(json!({ "error": "busy", "code": "busy" }))).into_response();
-    r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-    r
 }
 
 /// The per-address limits, then the global bucket and the in-flight cap. Runs before the Host check and

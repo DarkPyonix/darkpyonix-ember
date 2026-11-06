@@ -20,7 +20,7 @@ pub use crate::ui::home::{
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
     ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, integrations_area, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
@@ -1196,16 +1196,58 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
     });
 }
 
-/// `연동` (FR-L23, #498): Ember has no integration concept yet, so the area is one muted line,
-/// never a count, a card or a button that pretends to connect.
-/// TODO(#498): needs an owner decision on which services and an API before any card.
+/// `연동` (FR-L23, #498): the GitHub card, then one small 준비 중 card per later service. The
+/// server API for GitHub does not exist yet (`None`), so the card says 준비 중입니다 and every
+/// value reads "아직 정보가 없습니다". No number is drawn that the server did not send.
 fn IntegrationsArea() {
     let p = ember_theme().palette;
-    let (title, line) = integrations_area();
-    Tile(|| {
-        Label(title, Fs::Md, Weight::Semibold, None, Some(1));
-        cu::Spacer().modifier(Modifier::new().height(6.0));
-        Label(line, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+    let card = GithubCard::from_state(None);
+    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
+        Label(&card.header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+        Tile(|| {
+            cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Box()
+                    .alignment(Alignment::Center)
+                    .modifier(Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).corner_radius(CORNER_SM))
+                    .content(|| Label("G", Fs::Md, Weight::Semibold, None, Some(1)));
+                Label(GITHUB_NAME, Fs::Lg, Weight::Semibold, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                let tone = match card.tone {
+                    GithubPill::Soon => PillTone::Grey,
+                    GithubPill::Off => PillTone::Orange,
+                    GithubPill::On => PillTone::Green,
+                };
+                Pill(card.pill, tone, true);
+            });
+            if let Some(note) = &card.note {
+                Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+            }
+            for (label, value) in &card.kpis {
+                cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label(label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Label(value, Fs::Md, Weight::Regular, None, Some(1));
+                });
+            }
+            if card.activity.is_empty() {
+                Label(card.activity_empty, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+            } else {
+                for line in &card.activity {
+                    Label(line, Fs::Md, Weight::Regular, None, Some(2));
+                }
+            }
+        });
+        for name in LATER_INTEGRATIONS {
+            Tile(|| {
+                cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label(name, Fs::Md, Weight::Semibold, None, Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Pill(LATER_PILL, PillTone::Grey, true);
+                });
+                Label(LATER_LINE, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        }
     });
 }
 

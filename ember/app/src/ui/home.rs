@@ -20,14 +20,143 @@ pub const UNAVAILABLE: &str = "준비 중입니다";
 /// The built-in project that holds Home chats by default (FR-L13).
 pub const DEFAULT_PROJECT: &str = "기본 프로젝트";
 
-/// The Home integrations area (FR-L23, #498): Ember has no integration concept yet, so the
-/// area names itself and says so. No count, no service name, nothing that looks connected.
+/// The Home integrations area (FR-L23, #498). Owner decision (2026-11-06): GitHub is the one
+/// integration in scope for November, its auth reuses the session computer's `gh` (Ember stores
+/// no token). Slack, Discord, Linear, calendar and mail come in December or later.
 pub const INTEGRATIONS_TITLE: &str = "연동";
-pub const INTEGRATIONS_PENDING: &str = "연동은 준비 중입니다. 어떤 서비스와 연결할지는 아직 정해지지 않았습니다.";
+pub const GITHUB_NAME: &str = "GitHub";
+pub const GITHUB_NO_INFO: &str = "아직 정보가 없습니다";
+pub const GITHUB_NO_ACTIVITY: &str = "연동이 만든 일이 아직 없습니다";
+pub const GITHUB_LOGIN_HINT: &str =
+    "이 컴퓨터에서 gh auth login 을 실행하면 연결됩니다. Ember는 토큰을 저장하지 않습니다.";
+pub const GITHUB_UNAVAILABLE_HINT: &str = "연결 상태를 확인할 수 없습니다";
+pub const LATER_PILL: &str = "준비 중입니다";
+pub const LATER_LINE: &str = "12월 이후에 지원합니다";
+/// The services that come after GitHub, in the mockup order.
+pub const LATER_INTEGRATIONS: [&str; 5] = ["Slack", "Discord", "Linear", "캘린더", "메일"];
 
-/// The title and the honest line of the integrations area.
-pub fn integrations_area() -> (&'static str, &'static str) {
-    (INTEGRATIONS_TITLE, INTEGRATIONS_PENDING)
+/// `GET /api/integrations/github` `state` (proposed, the server API does not exist yet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubConn {
+    Unavailable,
+    Unauthenticated,
+    Ready,
+}
+
+/// One thing the integration did, e.g. a CI failure linked to a routine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubActivity {
+    pub id: String,
+    pub title: String,
+    pub at: String,
+    pub result: String,
+    pub kind: String,
+    pub link: Option<String>,
+}
+
+/// Mirror of the proposed `GET /api/integrations/github` body. Every number is nullable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubState {
+    pub state: GithubConn,
+    pub reason: Option<String>,
+    pub account: Option<String>,
+    pub repos: Option<u32>,
+    pub open_prs: Option<u32>,
+    pub review_requested: Option<u32>,
+    /// Percent, 0 to 100.
+    pub ci_pass_rate: Option<f32>,
+    pub updated_at: Option<String>,
+    pub activity: Vec<GithubActivity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubPill {
+    /// Grey: the server cannot say yet.
+    Soon,
+    /// Orange: not connected.
+    Off,
+    /// Green: connected.
+    On,
+}
+
+/// What the GitHub card draws. Pure, so the honest states are testable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubCard {
+    pub pill: &'static str,
+    pub tone: GithubPill,
+    /// The count line under the area header.
+    pub header_line: String,
+    /// A line under the title (account, reason or how to connect).
+    pub note: Option<String>,
+    /// Repositories, open PRs, review requests, CI pass rate.
+    pub kpis: [(&'static str, String); 4],
+    pub activity: Vec<String>,
+    pub activity_empty: &'static str,
+}
+
+impl GithubCard {
+    pub fn from_state(state: Option<&GithubState>) -> GithubCard {
+        let labels = ["저장소", "열린 PR", "리뷰 요청", "CI 통과율"];
+        let none = || GITHUB_NO_INFO.to_string();
+        let Some(g) = state else {
+            return GithubCard {
+                pill: UNAVAILABLE,
+                tone: GithubPill::Soon,
+                header_line: "GitHub 연결 확인 전".to_string(),
+                note: None,
+                kpis: labels.map(|l| (l, none())),
+                activity: Vec::new(),
+                activity_empty: GITHUB_NO_ACTIVITY,
+            };
+        };
+        let count = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_else(none);
+        let (pill, tone, header_line, note) = match g.state {
+            GithubConn::Ready => (
+                "연결됨",
+                GithubPill::On,
+                "GitHub 연결됨".to_string(),
+                g.account.clone(),
+            ),
+            GithubConn::Unauthenticated => (
+                "연결 안 됨",
+                GithubPill::Off,
+                "GitHub 연결 안 됨".to_string(),
+                Some(GITHUB_LOGIN_HINT.to_string()),
+            ),
+            GithubConn::Unavailable => (
+                "연결 안 됨",
+                GithubPill::Off,
+                "GitHub 연결 확인 전".to_string(),
+                Some(g.reason.clone().unwrap_or_else(|| GITHUB_UNAVAILABLE_HINT.to_string())),
+            ),
+        };
+        let ready = g.state == GithubConn::Ready;
+        let num = |v: Option<u32>| if ready { count(v) } else { none() };
+        let rate = if ready {
+            g.ci_pass_rate.map(|r| format!("{}%", r.round() as i64)).unwrap_or_else(none)
+        } else {
+            none()
+        };
+        let activity = if ready {
+            g.activity.iter().map(|a| format!("{} ({})", a.title, a.result)).collect()
+        } else {
+            Vec::new()
+        };
+        GithubCard {
+            pill,
+            tone,
+            header_line,
+            note,
+            kpis: [
+                (labels[0], num(g.repos)),
+                (labels[1], num(g.open_prs)),
+                (labels[2], num(g.review_requested)),
+                (labels[3], rate),
+            ],
+            activity,
+            activity_empty: GITHUB_NO_ACTIVITY,
+        }
+    }
 }
 
 /// What tapping the composer's attach button says (FR-L11, #500): picking files needs the
@@ -1016,16 +1145,64 @@ pub fn read_dash(state: &State) -> Dash {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fr_l23_integrations_area_is_honest() {
-        let (title, line) = integrations_area();
-        assert_eq!(title, "연동");
-        assert!(line.contains("준비 중"));
-        assert!(!line.chars().any(|c| c.is_ascii_digit()), "no count: {line}");
-        for name in ["GitHub", "Slack", "Discord", "Linear", "캘린더", "메일"] {
-            assert!(!line.contains(name), "no service name: {name}");
+    fn ready_github() -> GithubState {
+        GithubState {
+            state: GithubConn::Ready,
+            reason: None,
+            account: Some("octo".into()),
+            repos: Some(3),
+            open_prs: None,
+            review_requested: Some(0),
+            ci_pass_rate: None,
+            updated_at: None,
+            activity: Vec::new(),
         }
-        assert!(!line.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn fr_l23_github_card_without_server_is_coming_soon() {
+        let c = GithubCard::from_state(None);
+        assert_eq!(c.pill, "준비 중입니다");
+        assert_eq!(c.tone, GithubPill::Soon);
+        assert_eq!(c.header_line, "GitHub 연결 확인 전");
+        assert!(!c.header_line.chars().any(|ch| ch.is_ascii_digit()), "no count");
+    }
+
+    #[test]
+    fn fr_l23_github_card_nulls_are_no_information() {
+        let c = GithubCard::from_state(None);
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+        assert!(c.activity.is_empty());
+        assert_eq!(c.activity_empty, "연동이 만든 일이 아직 없습니다");
+        let g = ready_github();
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "연결됨");
+        assert_eq!(c.kpis[0].1, "3");
+        assert_eq!(c.kpis[1].1, "아직 정보가 없습니다");
+        assert_eq!(c.kpis[2].1, "0", "a real zero is shown as 0");
+        assert_eq!(c.kpis[3].1, "아직 정보가 없습니다");
+    }
+
+    #[test]
+    fn fr_l23_github_card_unauthenticated_says_how() {
+        let mut g = ready_github();
+        g.state = GithubConn::Unauthenticated;
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "연결 안 됨");
+        assert!(c.note.as_deref().unwrap().contains("gh auth login"));
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"), "no numbers while unconnected");
+        assert!(!c.header_line.contains("연결됨"));
+    }
+
+    #[test]
+    fn fr_l23_other_integrations_are_coming_soon() {
+        assert_eq!(LATER_INTEGRATIONS, ["Slack", "Discord", "Linear", "캘린더", "메일"]);
+        assert_eq!(LATER_PILL, "준비 중입니다");
+        assert_eq!(LATER_LINE, "12월 이후에 지원합니다");
+        assert_eq!(INTEGRATIONS_TITLE, "연동");
+        for s in [LATER_LINE, GITHUB_LOGIN_HINT, GITHUB_NO_INFO, GITHUB_NO_ACTIVITY] {
+            assert!(!s.contains('\u{2014}'));
+        }
     }
 
     #[test]

@@ -340,6 +340,13 @@ pub fn weekday_chart_size(compact: bool) -> (f32, f32, f32) {
     }
 }
 
+/// Height of the weekday card content in dp: heading (16) + gap (4) + chart (+1 baseline) + the
+/// 24 dp day-label row + 2 x 16 dp padding, so the card grows to hold the labels (FR-L25).
+pub fn weekday_card_height(narrow: bool) -> f32 {
+    let (_, chart_h, _) = weekday_chart_size(narrow);
+    16.0 + 4.0 + chart_h + 1.0 + 24.0 + 2.0 * 16.0
+}
+
 /// Corner radius of a weekday bar: a pill (half the width), never more than half the height.
 pub fn weekday_bar_radius(w: f32, h: f32) -> f32 {
     (w / 2.0).min(h / 2.0).max(0.0)
@@ -2010,6 +2017,14 @@ mod tests {
         assert_eq!(RunStatus::Done.label(), "완료");
         assert_eq!(RunStatus::Failed.label(), "실패");
         assert!(!RunStatus::Done.label().contains("성공"));
+    }
+
+    #[test]
+    fn fr_l25_weekday_card_fits_chart_and_labels() {
+        for narrow in [false, true] {
+            let (_, chart_h, _) = weekday_chart_size(narrow);
+            assert!(weekday_card_height(narrow) >= chart_h + 24.0 + 16.0 + 2.0 * 16.0);
+        }
     }
 
     #[test]

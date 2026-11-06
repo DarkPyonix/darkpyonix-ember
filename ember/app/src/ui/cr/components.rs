@@ -1383,7 +1383,7 @@ mod tests {
                 "components.rs" => 3,
                 "agents.rs" => 2,
                 "files.rs" => 1,
-                "home.rs" => 2,
+                "home.rs" => 0,
                 "launcher.rs" => 1,
                 "project.rs" => 1,
                 "routines.rs" => 2,

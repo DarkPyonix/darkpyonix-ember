@@ -140,9 +140,14 @@ async fn node_registered_by_peer_is_reached_over_the_transport() {
     assert!(gpu.get("token").is_none());
     assert_eq!(gpu["url"], "");
     let gpu_id = gpu["id"].as_str().unwrap().to_string();
-    // … or by bare peer id; url and peer together are refused.
-    let (st, _) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "gpu2", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
+    // … or by bare peer id (another peer: the same peer id twice is refused, C5); url and peer together are refused.
+    let other_peer = ember_transport::SecretKey::generate().peer_id().to_string();
+    let (st, _) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "gpu2", "peer": other_peer, "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::CREATED);
+    // The node's own peer id is already registered as "gpu": a second computer with it is a 400.
+    let (st, body) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "gpu3", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("already registered"), "{body}");
     let (st, _) = call(&app, Method::POST, "/api/computers", Some(json!({ "name": "x", "url": "http://x:1", "peer": n.node_t.peer_id().to_string(), "token": TOKEN }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 

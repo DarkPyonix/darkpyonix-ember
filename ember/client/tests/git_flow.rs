@@ -44,6 +44,9 @@ async fn handle(
             "files":[{"path":"n.rs", "old_path":"o.rs", "status":"renamed", "additions":2, "deletions":1, "binary":false},
                      {"path":"i.png", "status":"type_changed", "additions":0, "deletions":0, "binary":true}],
             "files_total": 2, "truncated": false}))),
+        "merge" => (StatusCode::OK, Json(json!({"in_progress": true, "from": "origin/main", "into": null, "conflict_files": 2, "can_commit": false}))),
+        "merge/abort" => (StatusCode::OK, Json(json!({"ok": true}))),
+        "merge/commit" => (StatusCode::CONFLICT, Json(json!({"error": "충돌이 남아 있어 병합 커밋을 만들 수 없습니다."}))),
         "revert" | "cherry-pick" if body["sha"] == "dirty000" => (StatusCode::CONFLICT, Json(json!({"error": "작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시하세요."}))),
         "revert" | "cherry-pick" => (StatusCode::OK, Json(json!({"new_sha": "fedcba9876543210fedcba9876543210fedcba98"}))),
         "branches" => (StatusCode::OK, Json(json!({"branches": [
@@ -316,4 +319,17 @@ async fn fr_g14_commit_show_decodes_files_and_fr_g15_actions_send_confirm() {
     assert_eq!((last(&seen).1, last(&seen).2), ("cherry-pick".into(), json!({"sha":"abcdef0", "confirm":true})));
     let err = api.git_revert("ember", "dirty000").await.unwrap_err();
     assert!(err.to_string().contains("작업 중인 변경"), "{err}");
+}
+
+#[tokio::test]
+async fn fr_g16_merge_state_decodes_and_fr_g17_calls_send_confirm() {
+    let (api, seen) = start().await;
+    let m = api.git_merge_state("ember").await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("merge".into(), json!({})));
+    assert_eq!((m.in_progress, m.from.as_deref(), m.into.as_deref(), m.conflict_files, m.can_commit), (true, Some("origin/main"), None, 2, false));
+    assert!(api.git_merge_abort("ember").await.unwrap().ok);
+    assert_eq!((last(&seen).1, last(&seen).2), ("merge/abort".into(), json!({"confirm":true})));
+    let err = api.git_merge_commit("ember").await.unwrap_err();
+    assert_eq!((last(&seen).1, last(&seen).2), ("merge/commit".into(), json!({"confirm":true})));
+    assert!(err.to_string().contains("충돌이 남아"), "{err}");
 }

@@ -132,7 +132,7 @@ pub fn launch() {
         // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
         launch_builder()
             .with_html(ui::editor_workbench::page::config)
-            .with_window(Window::new().with_title(title).with_size(w, h))
+            .with_window(ui::cr::shell::window_chrome(Window::new().with_title(title).with_size(w, h)))
             .launch(ui::editor_workbench::page::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.

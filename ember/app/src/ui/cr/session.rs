@@ -51,7 +51,8 @@ use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
     AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter,
+    SEARCH_FIELD_H_COMPACT,
 };
 use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
 use super::notice;
@@ -758,12 +759,7 @@ pub fn SideList(
                         .padding(SP[2]),
                 )
                 .content(move || {
-                    EmberField(FieldOptions {
-                        fill_max_width: true,
-                        placeholder: "세션 검색".to_string(),
-                        on_value_change: Some(Box::new(on_query)),
-                        ..Default::default()
-                    });
+                    SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, on_query);
 
                     if is_multi {
                         Label(

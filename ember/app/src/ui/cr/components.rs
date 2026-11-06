@@ -920,9 +920,125 @@ pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) 
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// SearchField (style.css `.searchbox`)
+// ---------------------------------------------------------------------------------------------
+
+/// The compact search height of the session sidebar (`.sside .st-q`).
+pub const SEARCH_FIELD_H_COMPACT: f32 = 36.0;
+/// The leading magnifier's size (`.searchbox svg`).
+pub const SEARCH_ICON_SIZE: f32 = 18.0;
+
+/// The pill radius of a search field of `height` (`.searchbox` is 999, capped at half the height).
+pub fn search_field_radius(height: f32) -> f32 {
+    (height / 2.0).min(PILL)
+}
+
+/// The leading padding before the magnifier: 16 at the 40 px height, 12 at the compact one.
+pub fn search_field_padding(height: f32) -> f32 {
+    if height < H_BTN { 12.0 } else { 16.0 }
+}
+
+/// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
+pub const SEARCH_FIELD_GAP: f32 = 8.0;
+/// The leading inset the bare toolkit text field adds before its text. Measured from captures
+/// (a 4 px spacer showed a ~24 px gap), so about 20 px; re-measure if the toolkit changes it.
+pub const SEARCH_FIELD_INSET: f32 = 20.0;
+
+/// The visible icon-to-text gap: no spacer, the field's own inset, and a negative offset that
+/// pulls the field left by `inset - gap`. Assumes [`SEARCH_FIELD_INSET`].
+pub fn search_field_gap() -> f32 {
+    search_field_offset() + SEARCH_FIELD_INSET
+}
+
+/// The negative x offset applied to the bare field so the visible gap is [`SEARCH_FIELD_GAP`].
+pub fn search_field_offset() -> f32 {
+    -(SEARCH_FIELD_INSET - SEARCH_FIELD_GAP)
+}
+
+/// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
+/// takes the rest of the row. Width intent: it fills its column (`fill_max_width`); the mockup's
+/// 280/220 px is for the standalone box, which a caller gets by constraining the parent. The
+/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field. The field is uncontrolled and keeps its hint `placeholder`.
+/// TODO(compose-rust#376, #374): the field frame and leading icon belong to the toolkit field.
+pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
+    let p = ember_theme().palette;
+    let placeholder = placeholder.to_string();
+    let on_change = std::rc::Rc::new(std::cell::RefCell::new(Some(on_change)));
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .height(height)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full),
+        )
+        .content(move || {
+            cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
+            super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
+            // The field takes the row's remaining width by weight, so it never overruns it.
+            let cb = on_change.clone();
+            let placeholder = placeholder.clone();
+            cu::Box().modifier(Modifier::new().weight(1.0).height(height).offset(search_field_offset(), 0.0)).content(move || {
+                EmberField(FieldOptions {
+                    bare: true,
+                    type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
+                    background: Some(Paint::Literal(Color::argb(0))),
+                    border_width: Some(0.0),
+                    border_color: Some(Paint::Literal(Color::argb(0))),
+                    height: Some(height),
+                    fill_max_width: true,
+                    placeholder: placeholder.clone(),
+                    on_value_change: cb.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
+                    ..Default::default()
+                });
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l10_1_search_field_height_radius_and_icon_size() {
+        assert_eq!(H_BTN, 40.0);
+        assert_eq!(SEARCH_FIELD_H_COMPACT, 36.0);
+        assert_eq!(SEARCH_ICON_SIZE, 18.0);
+        assert_eq!(search_field_radius(40.0), 20.0);
+        assert_eq!(search_field_radius(36.0), 18.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_padding_is_16_and_12_when_compact() {
+        assert_eq!(search_field_padding(H_BTN), 16.0);
+        assert_eq!(search_field_padding(SEARCH_FIELD_H_COMPACT), 12.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_visible_gap_is_8() {
+        assert_eq!(search_field_gap(), 8.0);
+        assert_eq!(search_field_offset(), -12.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_call_sites() {
+        let sites = [
+            ("channels", include_str!("channels.rs"), "채널, 메시지 검색"),
+            ("session", include_str!("session.rs"), "세션 검색"),
+            ("project", include_str!("project.rs"), "팀원 검색"),
+            ("project", include_str!("project.rs"), "멤버 검색"),
+            ("routines", include_str!("routines.rs"), "루틴 검색"),
+        ];
+        for (name, src, ph) in sites {
+            assert!(src.contains("SearchField("), "{name} uses SearchField");
+            assert!(src.contains(&format!("SearchField(\"{ph}\"")), "{name} keeps the placeholder {ph}");
+        }
+        let project = include_str!("project.rs");
+        assert!(!project.contains("placeholder: \"멤버 검색\""), "the old EmberField member search is gone");
+    }
 
     #[test]
     fn type_roles_never_use_bold() {

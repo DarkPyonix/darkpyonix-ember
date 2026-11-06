@@ -35,6 +35,7 @@ pub use crate::ui::shell::{
 };
 use super::components::{Clickable, EmberSheet, Label};
 use super::theme::*;
+pub const ICON_SEARCH_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z\"/></svg>";
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
 pub const ICON_HASH_SVG: &str = include_str!("../../../assets/nav/hash.svg");
 pub const ICON_USERS_SVG: &str = include_str!("../../../assets/nav/users.svg");

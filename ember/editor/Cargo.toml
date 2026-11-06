@@ -16,6 +16,11 @@ ember-editor-conn = { path = "../editor-conn" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Oniguruma, the regex engine TextMate grammars are written for (variable-length lookbehind, \G, \g<name>
+# subroutines): a pure Rust engine rejects 26 rules of the Markdown and YAML grammars. onig_sys builds the C
+# library with `cc`, so the build needs a C compiler on every platform; the Oniguruma CI job proves it on
+# Windows and macOS (Linux is the Cargo test (editor) job). No `generate` feature: it needs bindgen and libclang.
+onig = { version = "6.5", default-features = false }
 tokio = { version = "1", features = ["io-util", "sync", "time", "rt", "macros", "net"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }

@@ -127,7 +127,7 @@ fn fx_with_server_id(vars: &[(&str, &str)], server_peer_id: Option<&str>) -> Fx 
         None => Enrol::new(store),
     };
     let fake = Arc::new(Fake::default());
-    let owner = computers::enrol::router(enrol.clone(), BASE.into(), fake.clone());
+    let owner = computers::enrol::router(enrol.clone(), ember_server::computers::enrol::DoorUrl::Url(BASE.into()), fake.clone());
     Fx { d: door(vars), enrol, owner, fake }
 }
 

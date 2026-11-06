@@ -23,6 +23,7 @@
 //! | POST | `/git/commit/show` | [`git_commit::GitCommitShowRequest`] → [`git_commit::GitCommitShowResponse`] (FR-G14: one commit with its changed files; 400 for a bad sha, 404 `not_found` for an unknown one) |
 //! | POST | `/git/revert`, `/git/cherry-pick` | [`git_commit::GitCommitActionRequest`] → [`git_commit::GitCommitActionResponse`] (FR-G15; need `confirm: true`; 409 for a dirty tree or a conflict, which is aborted) |
 //! | POST | `/git/branches` | [`GitRepoRequest`] → [`git_branches::GitBranchesResponse`] (FR-G9: local branches with upstream ahead/behind, last commit, default and worktree) |
+//! | POST | `/git/github` | [`git_github::GitGithubRequest`] → [`git_github::GitGithubResponse`] (FR-G13, through `gh`; each failed call nulls its own fields; 409 when gh is missing) |
 //! | POST | `/git/prs` | [`git_prs::GitPrsRequest`] → [`git_prs::GitPrsResponse`] (FR-G8, through `gh pr list`; 409 when gh is missing, not logged in or the repository has no GitHub remote) |
 //! | POST | `/git/pr`, `/git/pr/review`, `/git/pr/merge`, `/git/pr/create` | [`git_prs::GitPrRef`], [`git_prs::GitPrReviewRequest`], [`git_prs::GitPrMergeRequest`], [`git_prs::GitPrCreateRequest`] (FR-G10 to FR-G12, through `gh`; changing calls need `confirm: true`, merge answers 409 with the gate reason when closed) |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
@@ -173,6 +174,7 @@ pub fn router(node: Node) -> Router {
         .route("/git/cherry-pick", post(git_cherry_pick_handler))
         .route("/git/branches", post(git_branches_handler))
         .route("/git/prs", post(git_prs_handler))
+        .route("/git/github", post(git_github_handler))
         .route("/git/pr", post(git_pr_handler))
         .route("/git/pr/review", post(git_pr_review_handler))
         .route("/git/pr/merge", post(git_pr_merge_handler))
@@ -428,6 +430,11 @@ async fn git_prs_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrsReq
 }
 // End FR-G8.
 
+// FR-G13: GitHub card summary handler (runs `gh`, holds no lock).
+async fn git_github_handler(State(n): State<Node>, Json(r): Json<git_github::GitGithubRequest>) -> ApiResult<git_github::GitGithubResponse> {
+    Ok(Json(git_github::summarize(&n.0.policy, &r).await?))
+}
+// End FR-G13.
 // FR-G10 to FR-G12: pull request detail, review, merge and create (run `gh`, hold no lock).
 async fn git_pr_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrRef>) -> ApiResult<git_prs::GitPrDetail> {
     Ok(Json(git_prs::detail(&n.0.policy, &r).await?))

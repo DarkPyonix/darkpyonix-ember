@@ -116,7 +116,7 @@ async fn fr_c2_the_secrets_are_in_no_log_of_a_full_enrolment_through_the_door() 
     let store = Arc::new(Store::open_in_memory().unwrap());
     let enrol = Enrol::new(store);
     let fake = Arc::new(Fake::default());
-    let owner_app = computers::enrol::router(enrol.clone(), BASE.into(), fake.clone());
+    let owner_app = computers::enrol::router(enrol.clone(), ember_server::computers::enrol::DoorUrl::Url(BASE.into()), fake.clone());
     let vars = [(ENROL_LISTEN_VAR.to_string(), "127.0.0.1:9300".to_string())];
     let d = EnrolDoor::from_lookup(
         |k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()),

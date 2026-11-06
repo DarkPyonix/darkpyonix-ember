@@ -25,7 +25,7 @@ pub use crate::ui::channels::{
     bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
     me_id, merge_messages, message_from, room_from, rooms_from, rooms_snapshot, split_view,
     time_label, BubbleView, FeedItem, ListFilter, Load, Member, Message, Room, RoomRow, Section,
-    Side,
+    should_mark_read, Side,
 };
 use super::components::{
     pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone,
@@ -157,6 +157,26 @@ impl Feed {
         }
     }
 
+    /// The person opened room `id`: zero its badge at once, then tell the server. A failure is
+    /// only logged; the next refresh shows the server's count. Out of scope: marking read when a
+    /// message arrives in the already open room.
+    fn mark_read(&self, id: &str) {
+        self.rooms.update(|rooms| {
+            if let Some(r) = rooms.iter_mut().find(|r| r.id == id) {
+                r.unread = 0;
+            }
+        });
+        let id = id.to_string();
+        crate::services::run_shared(
+            async move { crate::services::services().client.api().mark_channel_read(&id, None).await },
+            |r| {
+                if let Err(e) = r {
+                    tracing::warn!("channel mark read failed: {e}");
+                }
+            },
+        );
+    }
+
     /// Posts `text` as the person; the answer joins the room at once, a failure is told.
     fn send(&self, id: &str, text: &str, done: impl FnOnce(bool) + Send + 'static) {
         let text = text.trim().to_string();
@@ -251,7 +271,7 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
         });
     }
     let room = cur.as_ref().and_then(|id| rooms.iter().find(|r| &r.id == id)).cloned();
-    let list = || RoomList(&rooms, &order, &filter, &open, cur.clone(), window.width_dp <= 900.0, &load, &new_ch, feed.is_some());
+    let list = || RoomList(&rooms, &order, &filter, &open, cur.clone(), window.width_dp <= 900.0, &load, &new_ch, feed.is_some(), feed.clone());
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
@@ -289,7 +309,7 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     super::new_channel::NewChannelSheet(&new_ch, &rooms, feed.clone(), &open);
 }
 
-fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, current_room: Option<String>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool) {
+fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, current_room: Option<String>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let current = filter.get();
     let sections = group_rooms(rooms, order, &current);
@@ -352,7 +372,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                     for s in sections.iter() {
                         for r in s.rooms.iter() {
                             let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
-                            RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open);
+                            RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open, feed.clone());
                         }
                     }
                 });
@@ -391,11 +411,12 @@ fn RoomIcon(room_id: &str, project: &str, size: f32) {
 }
 
 /// One room in the list. TODO(compose-rust#372): the row is a pointer-up `Clickable`.
-fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, open: &MutableState<Option<String>>) {
+fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, open: &MutableState<Option<String>>, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let time = row.last_at.map(|t| time_label(t, local_tz())).unwrap_or_default();
     let (open, id) = (open.clone(), row.id.clone());
     let detail = detail_state();
+    let unread = row.unread;
     let fill = if selected { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
     super::components::Clickable(
         Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(SP[1]),
@@ -403,6 +424,12 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
         move || {
             if let Some(d) = &detail {
                 d.set(true);
+            }
+            // A click is the person opening the room; `initial_room` never reaches here.
+            if let Some(f) = &feed {
+                if should_mark_read(true, unread) {
+                    f.mark_read(&id);
+                }
             }
             open.set(Some(id.clone()));
         },

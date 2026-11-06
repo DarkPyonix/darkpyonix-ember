@@ -54,7 +54,7 @@ const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습�
 const WEB_LOADING: &str = "불러오는 중입니다";
 const WEB_EMPTY: &str = "열려 있는 웹 포트가 없습니다";
 const WEB_UNSUPPORTED: &str = "이 컴퓨터는 포트 목록을 지원하지 않습니다";
-const WEB_LOOPBACK_ONLY: &str = "이 컴퓨터 안에서만 열립니다";
+const WEB_LOOPBACK_ONLY: &str = "이 컴퓨터 안에서만 열 수 있습니다";
 const WEB_NO_HOST: &str = "주소를 알 수 없어 열 수 없습니다";
 const COMPUTER_LOADING: &str = "확인하는 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
@@ -1814,7 +1814,7 @@ mod tests {
         assert_eq!(l[0].label, "http://127.0.0.1:5173 (vite)");
         let r = ready(web_pages_from(Ok(ports_of(vec![lp(5173, Loopback, "vite")])), &remote("192.168.0.10")));
         assert_eq!(r[0].url, None);
-        assert_eq!(r[0].note, Some("이 컴퓨터 안에서만 열립니다"));
+        assert_eq!(r[0].note, Some("이 컴퓨터 안에서만 열 수 있습니다"));
         assert_eq!(r[0].label, ":5173 (vite)");
     }
 
@@ -1870,7 +1870,7 @@ mod tests {
         let load = web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(5173, Loopback, "vite")])), &remote("h"));
         assert_eq!(web_menu_lines(&load), ["http://h:3000 (node)", ":5173 (vite)"]);
         assert_eq!(web_tap(&load, 0), WebTap::Open("http://h:3000".into()));
-        assert_eq!(web_tap(&load, 1), WebTap::Say("이 컴퓨터 안에서만 열립니다".into()));
+        assert_eq!(web_tap(&load, 1), WebTap::Say("이 컴퓨터 안에서만 열 수 있습니다".into()));
         assert_eq!(web_tap(&load, 9), WebTap::Nothing);
         assert_eq!(web_menu_lines(&WebPagesLoad::Loading), ["불러오는 중입니다"]);
         assert_eq!(web_tap(&WebPagesLoad::Loading, 0), WebTap::Nothing);

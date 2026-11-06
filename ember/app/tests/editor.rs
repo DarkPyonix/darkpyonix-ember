@@ -326,10 +326,9 @@ mod grid {
     use ember_app::ui::editor::editor_grid_style;
 
     #[test]
-    fn fr_l31_open_left_and_bottom_keep_the_mockup_tracks() {
-        let g = editor_grid_style(true, true);
-        assert!(g.contains("grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw)"), "{g}");
-        assert!(g.contains("grid-template-rows:52px minmax(0,1fr) 260px var(--sbh)"), "{g}");
+    fn fr_l31_open_left_and_bottom_leave_the_tracks_to_the_stylesheet() {
+        // The stylesheet's tracks carry the width breakpoints; an inline track would override them.
+        assert_eq!(editor_grid_style(true, true), "");
     }
 
     #[test]
@@ -363,5 +362,25 @@ mod grid {
 fn fr_l31_maximized_bottom_window_collapses_the_editor_row() {
     let g = ember_app::ui::editor::editor_grid_style_maximized();
     assert!(g.contains("grid-template-rows:52px 0 minmax(0,1fr) var(--sbh)"), "{g}");
-    assert!(g.contains("grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw)"), "{g}");
+    assert!(!g.contains("grid-template-columns"), "{g}");
+}
+
+// FR-L31 (D38): the status bar's agent dot and path follow the mockup.
+mod status {
+    use ember_app::ui::editor::{agent_dot_class, status_crumbs};
+
+    #[test]
+    fn fr_l31_agent_dot_colours_follow_the_state() {
+        assert_eq!(agent_dot_class("승인 대기"), "dot wait");
+        assert_eq!(agent_dot_class("실행 중"), "dot run");
+        assert_eq!(agent_dot_class("완료"), "dot ok");
+        assert_eq!(agent_dot_class("팀원 없음"), "dot ok");
+    }
+
+    #[test]
+    fn fr_l31_status_path_is_the_folder_name_then_the_file_directories() {
+        assert_eq!(status_crumbs("/w/p/", None), "p");
+        assert_eq!(status_crumbs("/w/p", Some("/w/p/ember/proxy/src/shim.rs")), "p \u{203A} ember \u{203A} proxy \u{203A} src");
+        assert_eq!(status_crumbs("/w/p", Some("/w/p/README.md")), "p");
+    }
 }

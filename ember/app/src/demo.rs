@@ -986,6 +986,25 @@ fn demo_log(now: i64) -> Vec<Value> {
         .collect()
 }
 
+/// The files each seeded commit of [`demo_log`] changed, by row (FR-G14): (path, old path, status,
+/// additions, deletions, binary). The merge commit (row 4) lists what it brought in over its
+/// first parent; the last row is the root commit.
+type DemoCommitFile = (&'static str, Option<&'static str>, &'static str, u64, u64, bool);
+const DEMO_COMMIT_FILES: &[&[DemoCommitFile]] = &[
+    &[("ember/node/src/git_log.rs", None, "added", 85, 0, false), ("ember/node/tests/git_log.rs", None, "added", 120, 0, false), ("ember/server/src/api/git.rs", None, "modified", 3, 1, false)],
+    &[("ember/app/src/ui/vcs.rs", None, "modified", 18, 6, false), ("ember/app/src/ui/cr/vcs.rs", None, "modified", 9, 2, false)],
+    &[("docs/SPEC.md", None, "modified", 14, 2, false), ("AGENTS.md", None, "modified", 4, 1, false), ("docs/INTENT.md", None, "modified", 6, 0, false)],
+    &[("ember/node/tests/git_log.rs", None, "modified", 22, 0, false), ("ember/node/src/git.rs", None, "modified", 2, 0, false)],
+    &[("ember/app/src/ui/hunks.rs", None, "added", 58, 0, false), ("ember/app/src/ui/vcs.rs", None, "modified", 53, 10, false), ("ember/node/src/git.rs", None, "modified", 30, 4, false)],
+    &[("ember/app/src/ui/hunks.rs", None, "added", 58, 0, false), ("ember/app/src/ui/vcs.rs", None, "modified", 12, 3, false)],
+    &[("ember/node/src/git.rs", None, "modified", 88, 131, false), ("ember/node/src/git_status.rs", None, "added", 140, 0, false)],
+    &[("ember/node/src/git.rs", None, "modified", 9, 3, false), ("ember/node/tests/git_api.rs", None, "modified", 31, 0, false), ("docs/notes.md", Some("docs/old-notes.md"), "renamed", 2, 1, false)],
+    &[("Cargo.lock", None, "modified", 120, 118, false), ("ember/node/Cargo.toml", None, "modified", 3, 3, false), ("ember/app/assets/icon.png", None, "modified", 0, 0, true)],
+    &[("ember/node/src/git.rs", None, "modified", 64, 2, false), ("ember/client/src/api.rs", None, "modified", 11, 0, false)],
+    &[("ember/node/src/git.rs", None, "modified", 140, 0, false), ("ember/app/src/ui/vcs.rs", None, "modified", 33, 5, false), ("ember/node/src/old_commit.rs", None, "deleted", 0, 40, false)],
+    &[("README.md", None, "added", 20, 0, false), ("Cargo.toml", None, "added", 12, 0, false), ("ember/node/src/main.rs", None, "added", 45, 0, false), (".gitignore", None, "added", 6, 0, false)],
+];
+
 /// An error answer of a demo git route: the status and the `ErrorBody` fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitError {
@@ -1102,6 +1121,20 @@ struct GitState {
     /// Pull requests (FR-G8, FR-G10 to FR-G12), each as the node's detail JSON; the list op
     /// strips the detail-only keys. Review, merge and create change this in memory.
     prs: Vec<Value>,
+    /// Commits made by revert and cherry-pick (FR-G15), newest first; the log lists them above the
+    /// seeded history.
+    applied: Vec<DemoApplied>,
+}
+
+/// One commit a demo revert or cherry-pick made: its sha, subject, time (unix seconds) and the
+/// seeded commit whose files it carries (`invert` swaps additions and deletions).
+#[derive(Debug, Clone)]
+struct DemoApplied {
+    sha: String,
+    subject: String,
+    time: i64,
+    source: usize,
+    invert: bool,
 }
 
 /// One unmerged demo file: the blocks `git/conflict` answers, as the node's JSON.
@@ -1276,6 +1309,7 @@ impl GitState {
             commits: 0,
             conflicts: demo_conflicts(),
             prs: demo_pr_details(now_ms() / 1000),
+            applied: Vec::new(),
             stashes: {
                 let now = now_ms() / 1000;
                 let held = |path: &str, line: &str| DemoFile {
@@ -1307,6 +1341,103 @@ impl GitState {
             .iter_mut()
             .find(|f| f.path == path)
             .ok_or_else(|| GitError::bad(&format!("pathspec '{path}' did not match any files")))
+    }
+
+    /// The log with the commits of revert and cherry-pick on top (FR-G15). The newest one carries
+    /// HEAD and the current branch, which the seeded tip then loses.
+    fn full_log(&self, now: i64) -> Vec<Value> {
+        let mut base = demo_log(now);
+        if self.applied.is_empty() {
+            return base;
+        }
+        if let Some(refs) = base.first_mut().and_then(|c| c["refs"].as_array_mut()) {
+            refs.retain(|r| r["kind"] != "head" && r["kind"] != "branch");
+        }
+        let mut parent = base[0]["sha"].clone();
+        let mut top: Vec<Value> = Vec::new();
+        for a in self.applied.iter().rev() {
+            top.push(json!({
+                "sha": a.sha, "parents": [parent], "author": "BREW", "email": "brew@example.com",
+                "time": a.time, "subject": a.subject, "refs": [],
+            }));
+            parent = Value::String(a.sha.clone());
+        }
+        top.reverse();
+        top[0]["refs"] = json!([{ "name": "HEAD", "kind": "head" }, { "name": format!("refs/heads/{}", self.current), "kind": "branch" }]);
+        top.extend(base);
+        top
+    }
+
+    /// The log row (and the seeded row index, or the source of an applied commit) a sha prefix names.
+    fn find_commit(&self, sha: &str) -> Option<(Value, usize, bool)> {
+        let sha = sha.to_ascii_lowercase();
+        if sha.len() < 7 || sha.len() > 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let seeded = demo_log(now_ms() / 1000);
+        for a in &self.applied {
+            if a.sha.starts_with(&sha) {
+                let row = self.full_log(now_ms() / 1000).into_iter().find(|c| c["sha"] == a.sha.as_str())?;
+                return Some((row, a.source, a.invert));
+            }
+        }
+        let at = seeded.iter().position(|c| c["sha"].as_str().is_some_and(|s| s.starts_with(&sha)))?;
+        Some((self.full_log(now_ms() / 1000).into_iter().find(|c| c["sha"] == seeded[at]["sha"])?, at, false))
+    }
+
+    /// `commit/show` (FR-G14).
+    fn commit_show(&self, body: &Value) -> Result<Value, GitError> {
+        let sha = str_of(body, "sha").unwrap_or("");
+        if sha.len() < 7 || sha.len() > 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(GitError::bad("커밋 SHA는 7자에서 40자의 16진수여야 합니다."));
+        }
+        let (row, source, invert) = self.find_commit(sha).ok_or_else(|| GitError::new(404, "not_found", "그런 커밋을 찾을 수 없습니다."))?;
+        let files: Vec<Value> = DEMO_COMMIT_FILES[source]
+            .iter()
+            .map(|(path, old, status, add, del, binary)| {
+                let (add, del) = if invert { (*del, *add) } else { (*add, *del) };
+                let mut f = json!({ "path": path, "status": status, "additions": add, "deletions": del, "binary": binary });
+                if let Some(old) = old {
+                    f["old_path"] = json!(old);
+                }
+                f
+            })
+            .collect();
+        let full = row["sha"].as_str().unwrap_or_default().to_string();
+        let subject = row["subject"].as_str().unwrap_or_default().to_string();
+        Ok(json!({
+            "sha": full, "short": full.chars().take(7).collect::<String>(), "subject": subject,
+            "body": format!("{subject}\n\n데모 커밋입니다."),
+            "author": row["author"], "time": iso_time(row["time"].as_i64().unwrap_or(0)),
+            "parents": row["parents"], "refs": row["refs"],
+            "files_total": files.len(), "files": files, "truncated": false,
+        }))
+    }
+
+    /// `revert` and `cherry-pick` (FR-G15): add a commit to the demo log, or refuse as the node does.
+    fn commit_apply(&mut self, op: &str, body: &Value) -> Result<Value, GitError> {
+        let sha = str_of(body, "sha").unwrap_or("");
+        if sha.len() < 7 || sha.len() > 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(GitError::bad("커밋 SHA는 7자에서 40자의 16진수여야 합니다."));
+        }
+        if !body.get("confirm").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(GitError::bad("확인이 필요합니다."));
+        }
+        let (row, source, _) = self.find_commit(sha).ok_or_else(|| GitError::new(404, "not_found", "그런 커밋을 찾을 수 없습니다."))?;
+        if self.files.iter().any(|f| !(f.kind == Kind::New && f.staged.is_empty())) {
+            return Err(GitError::conflict("작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시하세요."));
+        }
+        let is_merge = row["parents"].as_array().is_some_and(|p| p.len() > 1);
+        if op == "cherry-pick" && is_merge {
+            return Err(GitError::bad("병합 커밋은 지원하지 않습니다."));
+        }
+        let subject = row["subject"].as_str().unwrap_or_default();
+        let (subject, invert) = if op == "revert" { (format!("Revert \"{subject}\""), true) } else { (subject.to_string(), false) };
+        self.commits += 1;
+        let new_sha = format!("{:040x}", 0x00de_c0de_0000_u128 + self.commits);
+        self.applied.insert(0, DemoApplied { sha: new_sha.clone(), subject, time: now_ms() / 1000, source, invert });
+        self.branch_mut().ahead += 1;
+        Ok(json!({ "new_sha": new_sha }))
     }
 
     fn tidy(&mut self) {
@@ -1517,7 +1648,7 @@ impl GitState {
                     return Err(GitError::conflict(&format!("a branch named '{name}' already exists")));
                 }
                 if let Some(from) = str_of(body, "from") {
-                    if !self.branches.iter().any(|b| b.name == from) {
+                    if !self.branches.iter().any(|b| b.name == from) && self.find_commit(from).is_none() {
                         return Err(GitError::bad(&format!("not a valid object name: '{from}'")));
                     }
                 }
@@ -1612,8 +1743,10 @@ impl GitState {
             "log" => {
                 let limit = body["limit"].as_u64().unwrap_or(50) as usize;
                 let skip = body["skip"].as_u64().unwrap_or(0) as usize;
-                Ok(json!({ "commits": demo_log(now_ms() / 1000).into_iter().skip(skip).take(limit).collect::<Vec<_>>() }))
+                Ok(json!({ "commits": self.full_log(now_ms() / 1000).into_iter().skip(skip).take(limit).collect::<Vec<_>>() }))
             }
+            "commit/show" => self.commit_show(body),
+            "revert" | "cherry-pick" => self.commit_apply(op, body),
             "branches" => Ok(json!({ "branches": demo_branches(now_ms() / 1000) })),
             "prs" => {
                 let state = body.get("state").and_then(Value::as_str).unwrap_or("open");
@@ -2011,6 +2144,100 @@ mod tests {
         assert_eq!(page[0]["sha"], all[3]["sha"]);
         let past = gs(&d, "log", json!({ "limit": 5, "skip": 100 })).unwrap();
         assert!(past["commits"].as_array().unwrap().is_empty());
+    }
+
+    fn clean_demo() -> DemoSource {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        gs(&d, "stash/push", json!({})).unwrap();
+        d
+    }
+
+    #[test]
+    fn fr_g14_demo_commit_show_lists_two_to_four_files_for_every_log_commit() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let log = gs(&d, "log", json!({})).unwrap();
+        for c in log["commits"].as_array().unwrap() {
+            let sha = c["sha"].as_str().unwrap();
+            let v = gs(&d, "commit/show", json!({ "sha": &sha[..9] })).unwrap();
+            assert_eq!(v["sha"], sha);
+            assert_eq!(v["short"], &sha[..7]);
+            assert_eq!(v["parents"], c["parents"]);
+            assert!(v["time"].as_str().unwrap().contains('T'));
+            let n = v["files"].as_array().unwrap().len();
+            assert!((2..=4).contains(&n), "{sha}: {n}");
+            assert_eq!(v["files_total"], n);
+        }
+    }
+
+    #[test]
+    fn fr_g14_demo_commit_show_decodes_with_the_client_type_and_has_a_merge_and_a_rename() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let log = gs(&d, "log", json!({})).unwrap();
+        let commits = log["commits"].as_array().unwrap();
+        let merge = commits.iter().find(|c| c["parents"].as_array().unwrap().len() == 2).unwrap();
+        let v = gs(&d, "commit/show", json!({ "sha": merge["sha"] })).unwrap();
+        let decoded: ember_client::api::GitCommitDetail = serde_json::from_value(v).unwrap();
+        assert_eq!(decoded.parents.len(), 2);
+        assert!(!decoded.files.is_empty());
+        let renamed = commits.iter().filter_map(|c| gs(&d, "commit/show", json!({ "sha": c["sha"] })).ok())
+            .any(|v| v["files"].as_array().unwrap().iter().any(|f| f["status"] == "renamed" && f["old_path"].is_string()));
+        assert!(renamed);
+    }
+
+    #[test]
+    fn fr_g14_demo_commit_show_unknown_is_404_and_bad_is_400() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        assert_eq!(gs(&d, "commit/show", json!({ "sha": "deadbeef" })).unwrap_err().status, 404);
+        for sha in ["abc12", "--all", "zzzzzzz"] {
+            assert_eq!(gs(&d, "commit/show", json!({ "sha": sha })).unwrap_err().status, 400, "{sha}");
+        }
+    }
+
+    #[test]
+    fn fr_g14_demo_branch_can_start_from_a_commit_sha() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        gs(&d, "branch", json!({ "name": "from-sha", "from": "9c8d7e6" })).unwrap();
+        assert_eq!(status(&d)["branch"], "from-sha");
+        assert_eq!(gs(&d, "branch", json!({ "name": "other", "from": "deadbeef" })).unwrap_err().status, 400);
+    }
+
+    #[test]
+    fn fr_g15_demo_revert_adds_a_commit_on_top_of_the_log() {
+        let d = clean_demo();
+        let before = gs(&d, "log", json!({})).unwrap()["commits"].as_array().unwrap().clone();
+        let r = gs(&d, "revert", json!({ "sha": "9c8d7e6f", "confirm": true })).unwrap();
+        let after = gs(&d, "log", json!({})).unwrap()["commits"].as_array().unwrap().clone();
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after[0]["sha"], r["new_sha"]);
+        assert_eq!(after[0]["subject"], "Revert \"Docs: describe the commit message rules\"");
+        assert_eq!(after[0]["parents"], json!([before[0]["sha"]]));
+        let heads = after.iter().filter(|c| c["refs"].as_array().unwrap().iter().any(|r| r["kind"] == "head")).count();
+        assert_eq!(heads, 1);
+        let shown = gs(&d, "commit/show", json!({ "sha": r["new_sha"] })).unwrap();
+        assert_eq!(shown["files"][0]["deletions"], 14);
+    }
+
+    #[test]
+    fn fr_g15_demo_cherry_pick_adds_a_commit_and_refuses_a_merge() {
+        let d = clean_demo();
+        let r = gs(&d, "cherry-pick", json!({ "sha": "5d6e7f8", "confirm": true })).unwrap();
+        let log = gs(&d, "log", json!({ "limit": 1 })).unwrap();
+        assert_eq!(log["commits"][0]["sha"], r["new_sha"]);
+        assert_eq!(log["commits"][0]["subject"], "Test: cover unborn branch history");
+        let e = gs(&d, "cherry-pick", json!({ "sha": "2b3c4d5", "confirm": true })).unwrap_err();
+        assert_eq!((e.status, e.message.as_str()), (400, "병합 커밋은 지원하지 않습니다."));
+    }
+
+    #[test]
+    fn fr_g15_demo_dirty_tree_is_409_and_confirm_is_required() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for op in ["revert", "cherry-pick"] {
+            let e = gs(&d, op, json!({ "sha": "9c8d7e6", "confirm": true })).unwrap_err();
+            assert_eq!(e.status, 409, "{op}");
+            assert_eq!(e.message, "작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시하세요.");
+            assert_eq!(gs(&d, op, json!({ "sha": "9c8d7e6" })).unwrap_err().status, 400);
+        }
+        assert_eq!(gs(&d, "log", json!({})).unwrap()["commits"].as_array().unwrap().len(), 12);
     }
 
     #[test]

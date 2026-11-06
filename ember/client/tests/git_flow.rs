@@ -39,6 +39,13 @@ async fn handle(
         "fetch" | "pull" | "push" => (StatusCode::OK, Json(json!({ "output": format!("{op} ok") }))),
         "conflicts" => (StatusCode::OK, Json(json!({ "paths": ["c.rs"] }))),
         "log" => (StatusCode::OK, Json(json!({"commits": [{"sha":"abc", "parents":["def"], "author":"A", "email":"a@example.com", "time":123, "subject":"subject", "refs":[{"name":"HEAD", "kind":"head"}]}]}))),
+        "commit/show" => (StatusCode::OK, Json(json!({"sha":"abcdef0123456789abcdef0123456789abcdef01", "short":"abcdef0", "subject":"s", "body":"b", "author":"A",
+            "time":"2026-11-06T10:00:00+09:00", "parents":["def"], "refs":[{"name":"refs/heads/main", "kind":"branch"}],
+            "files":[{"path":"n.rs", "old_path":"o.rs", "status":"renamed", "additions":2, "deletions":1, "binary":false},
+                     {"path":"i.png", "status":"type_changed", "additions":0, "deletions":0, "binary":true}],
+            "files_total": 2, "truncated": false}))),
+        "revert" | "cherry-pick" if body["sha"] == "dirty000" => (StatusCode::CONFLICT, Json(json!({"error": "작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시하세요."}))),
+        "revert" | "cherry-pick" => (StatusCode::OK, Json(json!({"new_sha": "fedcba9876543210fedcba9876543210fedcba98"}))),
         "branches" => (StatusCode::OK, Json(json!({"branches": [
             {"name":"feat/x", "is_current":true, "is_default":false, "upstream":"origin/feat/x", "ahead":2, "behind":1,
              "last_sha":"abc1234", "last_subject":"Fix: x", "last_time":"2026-11-05T10:00:00+09:00", "worktree":"/w/ember"},
@@ -255,4 +262,22 @@ async fn fr_g12_pr_create_call_sends_the_fields_and_decodes_number_and_url() {
     let c = api.git_pr_create("ember", "Add x", Some("why"), Some("develop"), Some("feat/x"), true).await.unwrap();
     assert_eq!((c.number, c.url.as_str()), (42, "https://github.com/o/r/pull/42"));
     assert_eq!((last(&seen).1, last(&seen).2), ("pr/create".into(), json!({"title":"Add x", "body":"why", "base":"develop", "head":"feat/x", "draft":true, "confirm":true})));
+}
+
+#[tokio::test]
+async fn fr_g14_commit_show_decodes_files_and_fr_g15_actions_send_confirm() {
+    use ember_client::api::GitCommitFileStatus;
+    let (api, seen) = start().await;
+    let d = api.git_commit_show("ember", "abcdef0").await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("commit/show".into(), json!({"sha":"abcdef0"})));
+    assert_eq!((d.short.as_str(), d.subject.as_str(), d.parents.len(), d.files_total), ("abcdef0", "s", 1, 2));
+    assert_eq!((d.files[0].status, d.files[0].old_path.as_deref(), d.files[0].additions), (GitCommitFileStatus::Renamed, Some("o.rs"), 2));
+    assert_eq!((d.files[1].status, d.files[1].binary, d.files[1].old_path.as_deref()), (GitCommitFileStatus::TypeChanged, true, None));
+    let r = api.git_revert("ember", "abcdef0").await.unwrap();
+    assert!(r.new_sha.starts_with("fedcba"));
+    assert_eq!((last(&seen).1, last(&seen).2), ("revert".into(), json!({"sha":"abcdef0", "confirm":true})));
+    api.git_cherry_pick("ember", "abcdef0").await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("cherry-pick".into(), json!({"sha":"abcdef0", "confirm":true})));
+    let err = api.git_revert("ember", "dirty000").await.unwrap_err();
+    assert!(err.to_string().contains("작업 중인 변경"), "{err}");
 }

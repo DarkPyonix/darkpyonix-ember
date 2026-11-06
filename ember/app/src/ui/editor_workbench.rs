@@ -234,8 +234,11 @@ pub mod page {
         use crate::ui::palette::{highlight_segments, items_for, move_selection, placeholder, rank, Payload};
         let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
         let mode = *s.palette_mode.read();
-        let files = s.host.state.lock().unwrap().file_index.clone();
-        let items = items_for(mode, keymap, Os::current(), &s.folder, &files);
+        let (files, index_running, index_capped) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running, state.index_capped)
+        };
+        let items = items_for(mode, keymap, Os::current(), &files);
         let hint_text = placeholder(mode, keymap);
         let text = query.read().clone();
         let ranked = rank(&text, &items);
@@ -252,7 +255,7 @@ pub mod page {
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
-                        "aria-label": "명령 검색", placeholder: "{hint_text}", value: "{text}", autofocus: true,
+                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
                             match event.key() {
@@ -271,8 +274,14 @@ pub mod page {
                         },
                     }
                 }
+                if mode != crate::ui::palette::Mode::Commands && index_running && !shown.is_empty() {
+                    div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
+                }
+                if mode != crate::ui::palette::Mode::Commands && index_capped {
+                    div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
+                }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
-                    if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "일치하는 항목이 없습니다." } }
+                    if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
                     for (row, r) in shown.iter().enumerate() {
                         {
                             let item = &items[r.index];

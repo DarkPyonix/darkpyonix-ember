@@ -60,6 +60,9 @@ pub enum AgentEvent {
     /// A question was answered, or skipped (`answers` empty). The values of a `secret` question
     /// are stored as `***`, never in clear.
     QuestionAnswered { question_id: String, answers: Vec<QuestionAnswer> },
+    /// The agent withdrew a pending approval or question before anyone answered it (Claude Code's
+    /// `control_cancel_request`). Neither denied nor answered; the prompt just stops waiting.
+    PromptWithdrawn { prompt_id: String },
 }
 
 /// One question of a [`AgentEvent::QuestionAsked`].
@@ -235,7 +238,17 @@ impl SessionStatus {
             AgentEvent::ApprovalRequested { .. } | AgentEvent::QuestionAsked { .. } => {
                 SessionStatus::WaitingForApproval
             }
-            AgentEvent::ApprovalResolved { .. } | AgentEvent::QuestionAnswered { .. } => SessionStatus::Running,
+            AgentEvent::ApprovalResolved { .. } => SessionStatus::Running,
+            // A question is answered AFTER the adapter accepted the answer, so a turn end can be
+            // stored first: a late answer or withdrawal must not turn a finished or failed session
+            // back into Running. Only a session that is waiting goes back to Running.
+            AgentEvent::QuestionAnswered { .. } | AgentEvent::PromptWithdrawn { .. } => {
+                if self == SessionStatus::WaitingForApproval {
+                    SessionStatus::Running
+                } else {
+                    self
+                }
+            }
             AgentEvent::TurnEnded { outcome: TurnOutcome::Failed } => SessionStatus::Failed,
             AgentEvent::TurnEnded { .. } => SessionStatus::Finished,
             _ => self,
@@ -246,6 +259,20 @@ impl SessionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A late `QuestionAnswered` or `PromptWithdrawn` (stored after the turn already ended)
+    /// leaves a finished or failed session as it is; a waiting one returns to Running.
+    #[test]
+    fn fr_a5_a_late_question_answer_does_not_reopen_a_finished_session() {
+        let answered = AgentEvent::QuestionAnswered { question_id: "q".into(), answers: vec![] };
+        let withdrawn = AgentEvent::PromptWithdrawn { prompt_id: "q".into() };
+        for done in [SessionStatus::Finished, SessionStatus::Failed, SessionStatus::Idle] {
+            assert_eq!(done.after(&answered), done);
+            assert_eq!(done.after(&withdrawn), done);
+        }
+        assert_eq!(SessionStatus::WaitingForApproval.after(&answered), SessionStatus::Running);
+        assert_eq!(SessionStatus::WaitingForApproval.after(&withdrawn), SessionStatus::Running);
+    }
 
     #[test]
     fn approval_outranks_running_until_resolved() {
@@ -370,6 +397,15 @@ mod tests {
         assert_eq!(s, SessionStatus::WaitingForApproval);
         let answered = AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: Vec::new() };
         assert_eq!(s.after(&answered), SessionStatus::Running);
+    }
+
+    #[test]
+    fn fr_a5_prompt_withdrawn_round_trips_and_returns_to_running() {
+        let w = AgentEvent::PromptWithdrawn { prompt_id: "r1".into() };
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"kind":"prompt_withdrawn","prompt_id":"r1"}"#);
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), w);
+        assert_eq!(SessionStatus::WaitingForApproval.after(&w), SessionStatus::Running);
     }
 
     #[test]

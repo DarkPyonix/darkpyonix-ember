@@ -578,6 +578,240 @@ pub fn harness_status(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Harness KPI row, version and re-detection (FR-L20, FR-A6)
+// ---------------------------------------------------------------------------------------------
+
+/// Said where a value has no source. Never a made-up number.
+pub const NO_INFO: &str = "아직 정보가 없습니다";
+
+/// Harnesses the server reported as installed; `None` until the server answered (an empty
+/// list is "not asked yet", as in [`harness_status`]).
+pub fn kpi_installed(detected: &[DetectedAgent]) -> Option<usize> {
+    if detected.is_empty() {
+        None
+    } else {
+        Some(detected.iter().filter(|d| d.installed).count())
+    }
+}
+
+/// Running shims. TODO(server): the client holds no shim or session-process count, so there is
+/// never a source yet; the argument is where one will come from.
+pub fn kpi_shim(running: Option<usize>) -> Option<usize> {
+    running
+}
+
+/// The sum of the memory limits set on the installed harnesses, in MB. `None` when no
+/// installed harness has a limit (the limits are this device's settings, `LOCAL_STORE_NOTE`).
+pub fn kpi_mem_total_mb(limits_of_installed: &[Option<u32>]) -> Option<u64> {
+    let set: Vec<u64> = limits_of_installed.iter().flatten().map(|m| u64::from(*m)).collect();
+    if set.is_empty() {
+        None
+    } else {
+        Some(set.iter().sum())
+    }
+}
+
+/// `"4 GB"` or `"512 MB"`; whole gigabytes drop the fraction, others keep one decimal.
+pub fn mem_total_label(mb: u64) -> String {
+    if mb >= 1024 {
+        if mb % 1024 == 0 {
+            format!("{} GB", mb / 1024)
+        } else {
+            format!("{:.1} GB", mb as f64 / 1024.0)
+        }
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// A KPI value: the number, or [`NO_INFO`] when there is no source.
+pub fn kpi_text(value: Option<String>) -> String {
+    value.unwrap_or_else(|| NO_INFO.to_string())
+}
+
+/// When the detection last ran, relative to `now_ms`. `None` (never ran in this run of the
+/// app) says [`NO_INFO`].
+pub fn last_detect_label(now_ms: u64, at_ms: Option<u64>) -> String {
+    let Some(at) = at_ms else { return NO_INFO.to_string() };
+    let secs = now_ms.saturating_sub(at) / 1000;
+    if secs < 10 {
+        "방금".to_string()
+    } else if secs < 60 {
+        format!("{secs}초 전")
+    } else if secs < 3600 {
+        format!("{}분 전", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}시간 전", secs / 3600)
+    } else {
+        format!("{}일 전", secs / 86_400)
+    }
+}
+
+/// The version pill of a card: only a version the server reported.
+pub fn version_pill(version: Option<&str>) -> Option<String> {
+    version.map(str::trim).filter(|v| !v.is_empty()).map(|v| format!("v{v}"))
+}
+
+/// The line under a harness name: the run mode, plus the version when the server reported one.
+pub fn harness_subtitle(run_mode: &str, version: Option<&str>) -> String {
+    match version_pill(version) {
+        Some(v) => format!("{run_mode} · {v}"),
+        None => run_mode.to_string(),
+    }
+}
+
+/// The state of the 다시 찾기 buttons.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Rescan {
+    #[default]
+    Idle,
+    Running,
+    /// The sentence the last run ended with.
+    Done(String),
+}
+
+/// Why a re-detection gave no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescanFailure {
+    /// The computer cannot be probed from here yet (501 `not_implemented`).
+    NotImplemented,
+    Failed,
+}
+
+pub const RESCAN_NOT_IMPLEMENTED: &str = "이 컴퓨터에서는 아직 다시 찾을 수 없습니다";
+pub const RESCAN_FAILED: &str = "다시 찾지 못했습니다. 잠시 뒤에 다시 시도해 주세요";
+/// The Gemini card: no CLI adapter yet, so nothing is detected or invented.
+pub const SOON: &str = "준비 중입니다";
+pub const NO_VERSION: &str = "버전을 알 수 없습니다";
+
+/// Map a failed `POST .../harnesses/detect` to what the screen says.
+pub fn rescan_failure(status: Option<u16>, code: Option<&str>) -> RescanFailure {
+    if status == Some(501) || code == Some("not_implemented") {
+        RescanFailure::NotImplemented
+    } else {
+        RescanFailure::Failed
+    }
+}
+
+/// The detect answer as agent entries (path and probe time kept as reported).
+pub fn detect_to_agents(got: &[ember_client::api::DetectedHarness]) -> Vec<DetectedAgent> {
+    got.iter()
+        .map(|h| DetectedAgent {
+            kind: h.harness.clone(),
+            installed: h.installed,
+            version: h.version.clone(),
+            path: h.path.clone(),
+            detected_at: h.detected_at,
+        })
+        .collect()
+}
+
+/// `before` with the entries of `fresh` replacing the same kinds; kinds the probe did not
+/// answer (Gemini) keep their entry.
+pub fn merge_detected(before: &[DetectedAgent], fresh: &[DetectedAgent]) -> Vec<DetectedAgent> {
+    let mut out: Vec<DetectedAgent> =
+        before.iter().filter(|b| !fresh.iter().any(|f| f.kind == b.kind)).cloned().collect();
+    out.extend(fresh.iter().cloned());
+    out
+}
+
+/// The newest probe time the server reported (epoch ms).
+pub fn latest_detected_at(list: &[DetectedAgent]) -> Option<u64> {
+    list.iter().filter_map(|d| d.detected_at).filter(|t| *t > 0).max().map(|t| t as u64)
+}
+
+/// The sentence a finished re-detection ends with. `after` is the failure when the server could
+/// not be asked or answered nothing.
+pub fn rescan_sentence(before: &[DetectedAgent], after: Result<&[DetectedAgent], RescanFailure>) -> String {
+    let after = match after {
+        Ok(a) => a,
+        Err(RescanFailure::NotImplemented) => return RESCAN_NOT_IMPLEMENTED.to_string(),
+        Err(RescanFailure::Failed) => return RESCAN_FAILED.to_string(),
+    };
+    let found = after.iter().filter(|d| d.installed).count();
+    let was = |kind: &str| before.iter().any(|d| d.kind == kind && d.installed);
+    let new = after.iter().filter(|d| d.installed && !was(&d.kind)).count();
+    if found == 0 {
+        "찾지 못했습니다".to_string()
+    } else if new == 0 {
+        "새로 찾은 하네스가 없습니다".to_string()
+    } else {
+        format!("찾았습니다: {new}개")
+    }
+}
+
+/// What the 다시 찾기 button says: always the action, or that it is running. The outcome is
+/// shown once beside the button ([`rescan_note`]), not in the label of every card.
+pub fn rescan_label(state: &Rescan) -> String {
+    match state {
+        Rescan::Running => "찾는 중입니다".to_string(),
+        Rescan::Idle | Rescan::Done(_) => "다시 찾기".to_string(),
+    }
+}
+
+/// The outcome sentence to show near the buttons, while there is one.
+pub fn rescan_note(state: &Rescan) -> Option<String> {
+    match state {
+        Rescan::Done(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a harness card's 다시 찾기 can be pressed, and the reason when it cannot.
+/// Gemini has no adapter yet (owner decision), so its probe would answer nothing.
+pub fn rescan_enabled(h: AgentHarness, state: &Rescan) -> (bool, Option<&'static str>) {
+    if h == AgentHarness::Gemini {
+        (false, Some(SOON))
+    } else {
+        (!matches!(state, Rescan::Running), None)
+    }
+}
+
+/// The path line of a harness card: the path the server reported for an installed harness,
+/// [`SOON`] for Gemini, otherwise [`NO_INFO`]. `example` marks sample or demo data.
+pub fn harness_path_text(h: AgentHarness, detected: &[DetectedAgent], example: bool) -> String {
+    if h == AgentHarness::Gemini {
+        return SOON.to_string();
+    }
+    let path = detected
+        .iter()
+        .find(|d| d.installed && AgentHarness::of_kind(&d.kind) == Some(h))
+        .and_then(|d| d.path.as_deref())
+        .filter(|p| !p.is_empty());
+    match path {
+        Some(p) if example => format!("{p} (예시)"),
+        Some(p) => p.to_string(),
+        None => NO_INFO.to_string(),
+    }
+}
+
+/// The version pill text of an installed harness: the version, or [`NO_VERSION`] when the
+/// server reported none; a harness that is not installed has no pill text.
+/// The version Ember verified for Antigravity (the 고정 버전 row).
+pub const PINNED_ANTIGRAVITY_VERSION: &str = "1.2.16";
+
+/// How the detected version compares with the pinned one. `None` when nothing was detected (no
+/// version reported): the row then shows no verdict, never a made-up "일치".
+pub fn pin_verdict(detected: Option<&str>, pinned: &str) -> Option<&'static str> {
+    let v = detected?.trim().trim_start_matches('v');
+    if v.is_empty() {
+        None
+    } else if v == pinned.trim_start_matches('v') {
+        Some("일치")
+    } else {
+        Some("다름")
+    }
+}
+
+pub fn version_text(installed: bool, version: Option<&str>, example: bool) -> Option<String> {
+    if !installed {
+        return None;
+    }
+    let v = version_pill(version).unwrap_or_else(|| NO_VERSION.to_string());
+    Some(if example && version.is_some() { format!("{v} (예시)") } else { v })
+}
+
+// ---------------------------------------------------------------------------------------------
 // Network (FR-X6) and usage (FR-U7)
 // ---------------------------------------------------------------------------------------------
 
@@ -659,9 +893,166 @@ impl Default for LocalStore {
     }
 }
 
+/// What the client knows about one computer beyond its name and reachability. The client holds
+/// no OS, IP or per-computer session counts (`ember_client::state::Computer`), so a live
+/// computer has every field `None` (FR-L20); only a sample capture fills them, marked 예시.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComputerFacts {
+    pub os: Option<String>,
+    pub ip: Option<String>,
+    pub sessions: Option<u32>,
+    pub connections: Option<u32>,
+    /// The computer the sessions move to when this one drops (sample only).
+    pub fallback: Option<String>,
+}
+
+/// The facts for a computer. Live (`sample == false`) is always empty; the name-keyed table
+/// is the review window's sample data.
+pub fn computer_facts(name: &str, sample: bool) -> ComputerFacts {
+    if !sample {
+        return ComputerFacts::default();
+    }
+    let s = |v: &str| Some(v.to_string());
+    match name {
+        "mac-mini" => ComputerFacts { os: s("macOS 26 · 메인 서버"), ip: s("211.36.142.18"), sessions: Some(7), connections: Some(12), fallback: None },
+        "ws-linux-01" => ComputerFacts { os: s("Ubuntu 24.04"), ip: s("121.134.77.205"), sessions: Some(6), connections: Some(9), fallback: None },
+        "macbook-pro" => ComputerFacts { os: s("macOS 26"), ip: s("175.223.10.91"), sessions: Some(0), connections: Some(0), fallback: None },
+        "win-desktop" => ComputerFacts { os: s("Windows 11"), ip: None, sessions: Some(3), connections: Some(0), fallback: s("mac-mini") },
+        _ => ComputerFacts::default(),
+    }
+}
+
+/// A fact's text: the value, or [`NO_INFO`]. A sample value carries 예시.
+pub fn fact_text(value: Option<&str>, sample: bool) -> String {
+    match value {
+        Some(v) if sample => format!("{v} (예시)"),
+        Some(v) => v.to_string(),
+        None => NO_INFO.to_string(),
+    }
+}
+
+/// A count's number, or [`NO_INFO`]; never zero by default.
+pub fn count_text(value: Option<u32>) -> String {
+    value.map_or_else(|| NO_INFO.to_string(), |n| n.to_string())
+}
+
+/// The sentence under an unreachable computer: only when it is really offline and its session
+/// count and fallback are known.
+pub fn disconnect_note(r: Reachability, facts: &ComputerFacts) -> Option<String> {
+    if r != Reachability::Offline {
+        return None;
+    }
+    let n = facts.sessions.filter(|n| *n > 0)?;
+    let to = facts.fallback.as_deref()?;
+    Some(format!("연결이 끊겨 세션 {n}개가 {to}(으)로 연결됩니다. (예시)"))
+}
+
+/// The account tile's second line: the harness, and a reset time only when one is known. The
+/// accounts API carries none, so only a sample shows one, marked 예시.
+pub fn account_reset_line(harness_label: &str, sample: bool) -> String {
+    if sample {
+        format!("{harness_label} · 리셋 3일 뒤 (예시)")
+    } else {
+        format!("{harness_label} · 리셋 시각 {NO_INFO}")
+    }
+}
+
+/// The default harness, model and account the Models card shows as selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultPick {
+    pub harness: AgentHarness,
+    /// The model id kept in this device's settings for that harness, if any.
+    pub model: Option<String>,
+    pub account: String,
+}
+
+/// The selection comes from the account the server marks default (`is_default`) and this
+/// device's stored model for its harness. `None` when no account is marked default.
+pub fn default_pick(accounts: &[AccountInfo], default_ids: &[String], store: &LocalStore) -> Option<DefaultPick> {
+    let a = default_ids.iter().find_map(|id| accounts.iter().find(|a| &a.id == id))?;
+    Some(DefaultPick { harness: a.harness, model: store.settings(a.harness).model.clone(), account: a.label.clone() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn det(kind: &str, installed: bool, version: Option<&str>) -> DetectedAgent {
+        DetectedAgent { kind: kind.into(), installed, version: version.map(String::from), ..Default::default() }
+    }
+
+    #[test]
+    fn fr_l20_kpi_installed_counts_only_reported_installs() {
+        assert_eq!(kpi_installed(&[]), None);
+        let d = [det("claude-code", true, Some("2.1.4")), det("codex", false, None)];
+        assert_eq!(kpi_installed(&d), Some(1));
+        assert_eq!(kpi_installed(&[det("codex", false, None)]), Some(0));
+    }
+
+    #[test]
+    fn fr_l20_kpi_without_source_says_no_info() {
+        assert_eq!(kpi_text(kpi_shim(None).map(|n| n.to_string())), "아직 정보가 없습니다");
+        assert_eq!(kpi_text(kpi_installed(&[]).map(|n| n.to_string())), NO_INFO);
+        assert_eq!(kpi_mem_total_mb(&[None, None]), None);
+        assert_eq!(kpi_mem_total_mb(&[]), None);
+        assert_eq!(kpi_text(kpi_installed(&[det("codex", true, None)]).map(|n| n.to_string())), "1");
+    }
+
+    #[test]
+    fn fr_l20_kpi_memory_total_sums_set_limits() {
+        assert_eq!(kpi_mem_total_mb(&[Some(2048), None, Some(4096)]), Some(6144));
+        assert_eq!(mem_total_label(6144), "6 GB");
+        assert_eq!(mem_total_label(1536), "1.5 GB");
+        assert_eq!(mem_total_label(512), "512 MB");
+    }
+
+    #[test]
+    fn fr_l20_last_detect_label_is_relative_or_no_info() {
+        assert_eq!(last_detect_label(1_000_000, None), NO_INFO);
+        assert_eq!(last_detect_label(1_005_000, Some(1_000_000)), "방금");
+        assert_eq!(last_detect_label(1_030_000, Some(1_000_000)), "30초 전");
+        assert_eq!(last_detect_label(1_000_000 + 5 * 60_000, Some(1_000_000)), "5분 전");
+        assert_eq!(last_detect_label(1_000_000 + 3 * 3_600_000, Some(1_000_000)), "3시간 전");
+        assert_eq!(last_detect_label(1_000_000, Some(2_000_000)), "방금");
+    }
+
+    #[test]
+    fn fr_l20_version_shown_only_when_reported() {
+        assert_eq!(version_pill(None), None);
+        assert_eq!(version_pill(Some("  ")), None);
+        assert_eq!(version_pill(Some("2.1.4")).as_deref(), Some("v2.1.4"));
+        assert_eq!(harness_subtitle("stream-json", None), "stream-json");
+        assert_eq!(harness_subtitle("stream-json", Some("2.1.4")), "stream-json · v2.1.4");
+    }
+
+    #[test]
+    fn fr_l20_not_detected_harness_has_no_version() {
+        let d = [det("codex", false, Some("0.1.0"))];
+        let (_, _, v) = harness_status(AgentHarness::Codex, &d);
+        assert_eq!(version_pill(v.as_deref()), None);
+    }
+
+    #[test]
+    fn fr_l21_rescan_sentence_per_outcome() {
+        let before = [det("claude-code", true, None), det("codex", false, None)];
+        let same = [det("claude-code", true, None), det("codex", false, None)];
+        assert_eq!(rescan_sentence(&before, Ok(&same)), "새로 찾은 하네스가 없습니다");
+        let more = [det("claude-code", true, None), det("codex", true, Some("0.48.0"))];
+        assert_eq!(rescan_sentence(&before, Ok(&more)), "찾았습니다: 1개");
+        let none = [det("claude-code", false, None)];
+        assert_eq!(rescan_sentence(&before, Ok(&none)), "찾지 못했습니다");
+        assert_eq!(rescan_sentence(&before, Err(RescanFailure::Failed)), RESCAN_FAILED);
+        assert_eq!(rescan_sentence(&[], Ok(&more)), "찾았습니다: 2개");
+    }
+
+    #[test]
+    fn fr_l21_rescan_label_follows_state() {
+        assert_eq!(rescan_label(&Rescan::Idle), "다시 찾기");
+        assert_eq!(rescan_label(&Rescan::Running), "찾는 중입니다");
+        assert_eq!(rescan_label(&Rescan::Done("찾았습니다: 1개".into())), "다시 찾기");
+        assert_eq!(rescan_note(&Rescan::Done("x".into())).as_deref(), Some("x"));
+        assert_eq!(rescan_note(&Rescan::Idle), None);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -1116,6 +1507,7 @@ mod tests {
             kind: k.into(),
             installed: i,
             version: v.map(String::from),
+            ..Default::default()
         };
         let list = vec![
             d("claude-code", true, Some("2.1.0")),
@@ -1141,5 +1533,119 @@ mod tests {
             "확인 중입니다"
         );
         assert_eq!(harness_status(AgentHarness::Gemini, &list).0, UNAVAILABLE);
+    }
+
+    #[test]
+    fn fr_l20_path_shown_only_when_reported() {
+        let mut c = det("claude-code", true, Some("2.1.4"));
+        assert_eq!(harness_path_text(AgentHarness::ClaudeCode, &[c.clone()], false), NO_INFO);
+        c.path = Some("/opt/x/claude".into());
+        assert_eq!(harness_path_text(AgentHarness::ClaudeCode, &[c.clone()], false), "/opt/x/claude");
+        assert_eq!(harness_path_text(AgentHarness::ClaudeCode, &[c.clone()], true), "/opt/x/claude (예시)");
+        // Not installed: a stale path is not shown. Other harness: nothing.
+        let mut n = det("codex", false, None);
+        n.path = Some("/old/codex".into());
+        assert_eq!(harness_path_text(AgentHarness::Codex, &[n], false), NO_INFO);
+        assert_eq!(harness_path_text(AgentHarness::Codex, &[c], false), NO_INFO);
+        assert_eq!(harness_path_text(AgentHarness::Gemini, &[], false), SOON);
+    }
+
+    #[test]
+    fn fr_l20_version_text_says_unknown_for_null() {
+        assert_eq!(version_text(true, None, false).as_deref(), Some(NO_VERSION));
+        assert_eq!(version_text(false, Some("1.0"), false), None);
+        assert!(version_text(true, Some("2.1.0"), true).unwrap().ends_with("(예시)"));
+    }
+
+    #[test]
+    fn fr_l20_rescan_outcome_maps_failures_incl_501() {
+        assert_eq!(rescan_failure(Some(501), Some("not_implemented")), RescanFailure::NotImplemented);
+        assert_eq!(rescan_failure(Some(501), None), RescanFailure::NotImplemented);
+        assert_eq!(rescan_failure(Some(404), None), RescanFailure::Failed);
+        assert_eq!(rescan_failure(None, None), RescanFailure::Failed);
+        assert_eq!(rescan_sentence(&[], Err(RescanFailure::NotImplemented)), "이 컴퓨터에서는 아직 다시 찾을 수 없습니다");
+        assert_eq!(rescan_sentence(&[], Err(RescanFailure::Failed)), RESCAN_FAILED);
+    }
+
+    #[test]
+    fn fr_l20_detect_answer_replaces_entries_and_keeps_gemini() {
+        let before = vec![det("gemini", false, None), det("codex", false, None)];
+        let got = vec![ember_client::api::DetectedHarness {
+            harness: "codex".into(),
+            installed: true,
+            version: None,
+            path: Some("/p/codex".into()),
+            detected_at: Some(1_761_900_000_000),
+        }];
+        let fresh = detect_to_agents(&got);
+        let merged = merge_detected(&before, &fresh);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|d| d.kind == "gemini"));
+        let c = merged.iter().find(|d| d.kind == "codex").unwrap();
+        assert!(c.installed && c.path.as_deref() == Some("/p/codex"));
+        assert_eq!(latest_detected_at(&merged), Some(1_761_900_000_000));
+        assert_eq!(latest_detected_at(&before), None);
+    }
+
+    #[test]
+    fn fr_l20_gemini_rescan_is_disabled_with_a_reason() {
+        assert_eq!(rescan_enabled(AgentHarness::Gemini, &Rescan::Idle), (false, Some("준비 중입니다")));
+        assert_eq!(rescan_enabled(AgentHarness::Codex, &Rescan::Idle), (true, None));
+        assert_eq!(rescan_enabled(AgentHarness::Codex, &Rescan::Running), (false, None));
+    }
+
+    #[test]
+    fn fr_l20_the_pin_verdict_needs_a_detected_version() {
+        assert_eq!(pin_verdict(None, PINNED_ANTIGRAVITY_VERSION), None);
+        assert_eq!(pin_verdict(Some(" "), PINNED_ANTIGRAVITY_VERSION), None);
+        assert_eq!(pin_verdict(Some("1.2.16"), PINNED_ANTIGRAVITY_VERSION), Some("일치"));
+        assert_eq!(pin_verdict(Some("v1.2.16"), PINNED_ANTIGRAVITY_VERSION), Some("일치"));
+        assert_eq!(pin_verdict(Some("1.3.0"), PINNED_ANTIGRAVITY_VERSION), Some("다름"));
+    }
+
+    #[test]
+    fn fr_l20_live_computer_has_no_invented_facts() {
+        assert_eq!(computer_facts("mac-mini", false), ComputerFacts::default());
+        assert_eq!(computer_facts("win-desktop", false), ComputerFacts::default());
+        assert_eq!(fact_text(None, false), NO_INFO);
+        assert_eq!(count_text(None), NO_INFO);
+    }
+
+    #[test]
+    fn fr_l20_sample_computer_facts_are_marked_example() {
+        let f = computer_facts("mac-mini", true);
+        assert_eq!(fact_text(f.ip.as_deref(), true), "211.36.142.18 (예시)");
+        assert_eq!(count_text(f.sessions), "7");
+        assert_eq!(computer_facts("gpu-box", true), ComputerFacts::default());
+    }
+
+    #[test]
+    fn fr_l20_disconnect_note_needs_an_offline_computer_with_sessions() {
+        let w = computer_facts("win-desktop", true);
+        assert!(disconnect_note(Reachability::Offline, &w).unwrap().contains("세션 3개"));
+        assert_eq!(disconnect_note(Reachability::Online, &w), None);
+        assert_eq!(disconnect_note(Reachability::Unknown, &w), None);
+        assert_eq!(disconnect_note(Reachability::Offline, &ComputerFacts::default()), None);
+        let zero = ComputerFacts { sessions: Some(0), fallback: Some("x".into()), ..Default::default() };
+        assert_eq!(disconnect_note(Reachability::Offline, &zero), None);
+    }
+
+    #[test]
+    fn fr_x6_reset_text_only_when_a_source_exists() {
+        assert!(!account_reset_line("Codex", false).contains("3일"));
+        assert!(account_reset_line("Codex", false).contains(NO_INFO));
+        assert!(account_reset_line("Codex", true).contains("(예시)"));
+    }
+
+    #[test]
+    fn fr_l20_default_pick_comes_from_the_default_account_and_settings() {
+        let store = LocalStore::new();
+        assert_eq!(default_pick(&[], &[], &store), None);
+        let a = AccountInfo { id: "c1".into(), label: "Claude Max".into(), harness: AgentHarness::ClaudeCode, left_percent: None, limited: false };
+        assert_eq!(default_pick(&[a.clone()], &[], &store), None);
+        let pick = default_pick(&[a], &["c1".to_string()], &store).unwrap();
+        assert_eq!(pick.harness, AgentHarness::ClaudeCode);
+        assert_eq!(pick.account, "Claude Max");
+        assert_eq!(pick.model, store.settings(AgentHarness::ClaudeCode).model);
     }
 }

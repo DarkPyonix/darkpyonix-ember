@@ -271,3 +271,50 @@ fn fr_l30_double_shift_needs_two_bare_shift_presses_within_the_window() {
     assert!(!d.press("Shift", false, true, false, false, 0));
     assert!(!d.press("Shift", false, true, false, false, 100));
 }
+
+// FR-L31 (D38): the explorer is a tree of the folder, directories first, children indented,
+// a directory's children shown only while it is expanded and once they have been listed.
+mod tree {
+    use super::*;
+    use ember_app::ui::editor::{tree_rows, TreeRow};
+    use std::collections::HashSet;
+
+    const DIR: u32 = ember_editor_conn::remote_fs::file_type::DIRECTORY;
+    const FILE: u32 = ember_editor_conn::remote_fs::file_type::FILE;
+
+    fn listings() -> HashMap<String, Vec<(String, u32)>> {
+        HashMap::from([
+            ("/p".to_string(), vec![("b.rs".to_string(), FILE), ("src".to_string(), DIR), ("A.md".to_string(), FILE)]),
+            ("/p/src".to_string(), vec![("lib.rs".to_string(), FILE), ("deep".to_string(), DIR)]),
+        ])
+    }
+
+    fn names(rows: &[TreeRow]) -> Vec<(&str, u32)> {
+        rows.iter().map(|r| (r.name.as_str(), r.depth)).collect()
+    }
+
+    #[test]
+    fn fr_l31_collapsed_tree_lists_directories_first_then_files_by_name() {
+        let rows = tree_rows("/p", &listings(), &HashSet::new());
+        assert_eq!(names(&rows), vec![("src", 0), ("A.md", 0), ("b.rs", 0)]);
+        assert!(rows[0].is_dir && !rows[0].open);
+        assert_eq!(rows[0].path, "/p/src");
+    }
+
+    #[test]
+    fn fr_l31_expanded_directory_shows_its_children_indented() {
+        let open = HashSet::from(["/p/src".to_string()]);
+        let rows = tree_rows("/p", &listings(), &open);
+        assert_eq!(names(&rows), vec![("src", 0), ("deep", 1), ("lib.rs", 1), ("A.md", 0), ("b.rs", 0)]);
+        assert!(rows[0].open);
+    }
+
+    #[test]
+    fn fr_l31_expanded_directory_not_listed_yet_shows_no_children() {
+        let open = HashSet::from(["/p/src".to_string(), "/p/src/deep".to_string()]);
+        let rows = tree_rows("/p", &listings(), &open);
+        let deep = rows.iter().find(|r| r.name == "deep").unwrap();
+        assert!(deep.open);
+        assert_eq!(rows.len(), 5);
+    }
+}

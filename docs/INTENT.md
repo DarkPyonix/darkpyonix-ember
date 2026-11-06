@@ -597,7 +597,17 @@ Rejected: messages as the only channel between sessions.
 
 **Why.** The tunnel already connects every device of the user end to end. File transfer is the missing use of it, and it removes the habit of mailing files to oneself.
 
-**Status.** Specified only (`FR-F1`–`FR-F9`, Draft; issue #152). Not built. The Files menu mock is separate UI work.
+**Decisions of 2026-11-06** *[provisional, 2026-11-06 supervisor]*, issue #487:
+
+- **Who may offer**: only between the user's own devices registered under the same GitHub account (`FR-N2`). Rejected: offering to other accounts, to guests, or to unregistered devices, because each needs a trust model this version does not have.
+- **Size limit**: 4 GiB per transfer by default, configurable per device, applied to the sum of an offer and checked at the offer before any byte moves (`FR-F10`). Rejected: unlimited transfers, which let one device fill another's disk.
+- **File names**: only the basename is accepted. Control characters, path separators (`/` and `\`) and a leading dot are removed or replaced; an empty result gets a generated name. A folder offer keeps relative paths, every component goes through the same cleaning, and `..` never escapes (`FR-F9`). Rejected: trusting the sender's path, which is the classic path traversal.
+- **Storage**: `FR-F8` keeps the downloads folder as the target; the first version writes to a received-files folder under the device's data folder, and a user-chosen location is a follow-up. A clash never overwrites. Rejected: writing to downloads in the first version, since it needs per-OS pickers and permissions.
+- **Execute bit**: removed on receive. Files are written 0644, with no setuid, setgid or sticky bit. Rejected: preserving the sender's mode, which turns a received file into something runnable.
+
+**Architecture** *[provisional, session pZ proposal, needs supervisor confirmation]*. `FR-F6` allows file network code only inside the transport crate, and the transfer endpoints are devices (the app on a desktop or phone), not servers or computers. So the transfer service is a device-side library crate `ember/transfer` (a directory under `ember/`, no new repository root entry). It owns the offer, accept, decline and expire state machine, name cleaning, size limits, receive modes and the resume ledger, and talks to peers only through `ember-transport` streams. It is tested over the in-memory fake transport. The app's `TransferService` trait (`ember/app/src/ui/files.rs`) is implemented by it. The Ember server is not in the path and gets no `/api/transfers` route. Rejected: server-hosted transfer tables, because they put offer metadata, names and sizes on the server and contradict `FR-F6`.
+
+**Status.** Specified only (`FR-F1`–`FR-F10`, Draft; issues #152, #487). Not built. First unit: the `ember/transfer` state machine over the fake transport. The Files menu mock is separate UI work.
 
 ### D25: One client design on every OS, after the owner's reference images; Liquid Glass on iOS only
 
@@ -852,3 +862,16 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Rejected.** A dark Code-OSS look for the window (the owner asked for the mockup). Leaving the island layout "as a later polish" (the owner's words are a requirement, not a polish item).
 
 **Why.** The owner wants one product: the editor's behaviour is what developers know from VS Code, and its look is the same Ember design as every other screen. The keymap menu stays where `FR-L30` puts it (the ⋯ menu of the top bar).
+
+### D39: A new computer joins with a one-time enrol code, not a pasted token
+
+**Decision.** [provisional, session pZ proposal, needs supervisor confirmation] Adding a computer is a short flow: the server mints a one-time code, the user runs `ember-node enrol <code>` on the other machine, and the machine registers itself and appears online. The requirements are `FR-C1` (minting and storing the code) and `FR-C2` (redeeming and status), issue #491. These are the add-computer rows; the TODO in `project.rs` that cites `FR-X7` cites the metrics requirement by mistake.
+
+- The code is minted only from the local admin router (token-protected, never the guest door), is single use, lives at most 10 minutes, carries 244+ bits of randomness and is stored only as a SHA-256 hash. Redeem attempts are rate-limited per source address, and a used or expired code gets the same generic refusal.
+- The existing hub device-link route (`GET /api/hub/devices`, `POST /api/hub/devices/{id}/computer`) stays the first step for devices already signed in to the account and needs no new server code. The code flow is for machines that are not signed in.
+
+**Rejected** *[provisional]*. Pasting a long-lived node token by hand (today's `POST /api/computers {name, url|peer, token}`): the token is long-lived, travels through chat or a clipboard, and is easy to leak. A reusable or non-expiring code, which is the same leak with a shorter string. Requiring every computer to sign in to the GitHub account first, which fails for headless machines.
+
+**Why.** A code that dies after one use and ten minutes leaves nothing worth stealing, and the server never keeps it in a form that can be replayed.
+
+**Status.** Specified only (`FR-C1`, `FR-C2`, Draft; issue #491). Not built.

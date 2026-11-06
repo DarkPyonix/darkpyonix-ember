@@ -163,6 +163,7 @@ pub fn tree_rows(
     let mut rows = Vec::new();
     walk(root, 0, listings, expanded, &mut rows);
     rows
+}
 
 /// The editor page's grid tracks as inline style: the mockup's `.ed` grid with its `.no-left` and
 /// `.no-bottom` cases, a closed left column 0 wide and a closed bottom row 0 high.

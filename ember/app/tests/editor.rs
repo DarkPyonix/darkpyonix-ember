@@ -316,6 +316,8 @@ mod tree {
         let deep = rows.iter().find(|r| r.name == "deep").unwrap();
         assert!(deep.open);
         assert_eq!(rows.len(), 5);
+    }
+}
 
 // FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
 // 0 high row, and the stripes decide which.

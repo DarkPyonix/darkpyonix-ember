@@ -14,6 +14,9 @@ pub struct NodeConfig {
     pub token: String,
     /// Allowed roots for file operations and command working directories.
     pub roots: Vec<PathBuf>,
+    /// Paths inside the roots that the file API and command working directories refuse (see
+    /// [`crate::policy::PathPolicy::with_denied`]). Default empty.
+    pub denied: Vec<PathBuf>,
     /// Where persistent terminal metadata (and the local endpoint file) live. `None`: terminal
     /// sessions are kept in memory only and no keeper is started.
     pub state_dir: Option<PathBuf>,
@@ -27,11 +30,19 @@ pub struct NodeConfig {
 impl NodeConfig {
     /// A configuration with no persistent state (tests, embedding).
     pub fn new(token: impl Into<String>, roots: Vec<PathBuf>) -> Self {
-        Self { token: token.into(), roots, state_dir: None, pty_keeper: None, egress: Default::default() }
+        Self { token: token.into(), roots, denied: Vec::new(), state_dir: None, pty_keeper: None, egress: Default::default() }
+    }
+
+    /// Sets the denied paths (builder).
+    pub fn with_denied(mut self, denied: Vec<PathBuf>) -> Self {
+        self.denied = denied;
+        self
     }
 
     /// - `EMBER_NODE_TOKEN` (required, non-empty): bearer token.
     /// - `EMBER_NODE_ROOTS`: colon-separated allowed roots (default `$HOME`).
+    /// - `EMBER_NODE_DENY`: colon-separated paths the file API refuses (default none), see
+    ///   [`parse_deny`].
     /// - `EMBER_NODE_STATE_DIR`: state directory (default `$HOME/.ember/node`).
     /// - `EMBER_NODE_KEEP_PTY`: `0` disables PTY keepers (terminal sessions then end with the
     ///   daemon).
@@ -52,7 +63,17 @@ impl NodeConfig {
             _ => std::env::current_exe().ok(),
         };
         let egress = crate::egress::EgressPolicy::from_env()?;
-        Ok(Self { token, roots, state_dir, pty_keeper, egress })
+        let denied = parse_deny(std::env::var_os("EMBER_NODE_DENY").as_deref());
+        Ok(Self { token, roots, denied, state_dir, pty_keeper, egress })
+    }
+}
+
+/// Splits an `EMBER_NODE_DENY` value like `PATH` (`:` on Unix, `;` on Windows), dropping empty
+/// entries. `None` or empty gives no entries.
+pub fn parse_deny(value: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    match value {
+        Some(v) if !v.is_empty() => std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -138,6 +159,26 @@ impl LocalEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_deny_splits_like_path_and_drops_empty_entries() {
+        use std::ffi::OsStr;
+        assert!(parse_deny(None).is_empty());
+        assert!(parse_deny(Some(OsStr::new(""))).is_empty());
+        assert_eq!(parse_deny(Some(OsStr::new("/a/.ember"))), vec![PathBuf::from("/a/.ember")]);
+        assert_eq!(
+            parse_deny(Some(OsStr::new("/a/.ember::/b/ose-data:"))),
+            vec![PathBuf::from("/a/.ember"), PathBuf::from("/b/ose-data")]
+        );
+    }
+
+    #[test]
+    fn node_config_denied_defaults_to_empty_and_has_a_builder() {
+        let c = NodeConfig::new("t", vec![PathBuf::from("/r")]);
+        assert!(c.denied.is_empty());
+        let c = c.with_denied(vec![PathBuf::from("/r/x")]);
+        assert_eq!(c.denied, vec![PathBuf::from("/r/x")]);
+    }
 
     #[test]
     fn local_endpoint_round_trip_and_wildcard_bind() {

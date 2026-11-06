@@ -40,7 +40,12 @@ impl Drop for TokenFile {
 fn write_token_file(tokens_dir: &Path, folder: &Path, token: &str) -> std::io::Result<TokenFile> {
     use sha2::{Digest, Sha256};
     use std::io::{Error, ErrorKind, Write};
-    make_private_dir(tokens_dir)?;
+    // The tokens dir and its parent (the computer dir) hold or lead to a secret: they are
+    // hardened, not just created (#521).
+    if let Some(parent) = tokens_dir.parent() {
+        secure_token_dir(parent)?;
+    }
+    secure_token_dir(tokens_dir)?;
     let digest = Sha256::digest(folder.as_os_str().as_encoded_bytes());
     let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     let path = tokens_dir.join(format!("{name}.token"));
@@ -236,6 +241,63 @@ fn make_private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         std::fs::create_dir_all(path)
+    }
+}
+
+/// Makes `path` a directory only this user can use, for a directory that holds or leads to a
+/// connection token file (the tokens dir and the computer dir above it).
+///
+/// Created with 0700 when missing. A symlink, a non-directory or a directory owned by another
+/// user is refused. An existing directory that group or others can WRITE (`mode & 0o022`) is
+/// refused with `token directory <path> is writable by others; fix the permissions`: another user
+/// could delete and replace the 0600 token file before the OSE reads it. An existing directory
+/// with only group/other read or search bits (`0o055`) is tightened to 0700, because we own it and
+/// a token file lives there; this is logged at warn. The shared data root above is not touched
+/// here (see [`make_private_dir`]).
+fn secure_token_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::{Error, ErrorKind};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        match std::fs::symlink_metadata(path) {
+            Ok(md) => {
+                if md.file_type().is_symlink() {
+                    return Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())));
+                }
+                if !md.is_dir() {
+                    return Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display())));
+                }
+                // SAFETY: geteuid takes no arguments and cannot fail.
+                if md.uid() != unsafe { libc::geteuid() } {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!("{} is not owned by the current user", path.display()),
+                    ));
+                }
+                let mode = md.permissions().mode() & 0o777;
+                if mode & 0o022 != 0 {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!("token directory {} is writable by others; fix the permissions", path.display()),
+                    ));
+                }
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        path = %path.display(),
+                        mode = format!("{mode:o}"),
+                        "token directory is readable by group or others; tightening it to 0700"
+                    );
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => make_private_dir(path),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        make_private_dir(path)
     }
 }
 

@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use ember_server::auth::{self, ServerAuth};
-use ember_server::computers::enrol::Enrol;
+use ember_server::computers::enrol::{Enrol, NodeInfo, RegisterError, Registrar};
 use ember_server::store::Store;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -16,6 +16,19 @@ use tower::ServiceExt;
 
 const LISTEN: &str = "127.0.0.1:8740";
 const BASE: &str = "http://192.168.0.5:8740";
+
+/// A registrar that is never asked to register in these tests.
+struct NoRegistrar;
+
+impl Registrar for NoRegistrar {
+    fn name_taken(&self, _name: &str) -> bool {
+        false
+    }
+    fn register(&self, _n: &str, _t: &str, _i: &NodeInfo, _o: &str) -> Result<String, RegisterError> {
+        Err(RegisterError::Failed("not used in fr_c1".into()))
+    }
+    fn remove(&self, _id: &str) {}
+}
 
 struct Fx {
     app: Router,
@@ -30,7 +43,7 @@ fn fx() -> Fx {
     let enrol = Enrol::new(store);
     let token = auth::load_or_create_token(dir.path()).unwrap();
     let a = ServerAuth::new(token.clone(), LISTEN.parse::<SocketAddr>().unwrap(), []);
-    let app = auth::protect(ember_server::computers::enrol::router(enrol.clone(), BASE.into()), a);
+    let app = auth::protect(ember_server::computers::enrol::router(enrol.clone(), BASE.into(), Arc::new(NoRegistrar)), a);
     Fx { app, enrol, token, _dir: dir }
 }
 
@@ -121,16 +134,16 @@ async fn fr_c1_status_and_cancel_by_id() {
     let (st, _, _) = call(&f.app, Method::DELETE, &path, Some(&h), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
-    // A redeemed code cannot be cancelled, and reads joined once completed.
+    // A redeemed code cannot be cancelled, and reads awaiting_confirmation until the owner confirms.
     let (_, body, _) = call(&f.app, Method::POST, "/api/computers/enrol-codes", Some(&h), Some(json!({"name": "b"}))).await;
     let (id, code) = (body["id"].as_str().unwrap().to_string(), body["code"].as_str().unwrap().to_string());
-    let r = f.enrol.redeem(&code, ember_server::store::now_ms(), "src").unwrap();
+    f.enrol.redeem(&code, &NodeInfo::minimal("laptop-host"), ember_server::store::now_ms(), "src").unwrap();
     let path = format!("/api/computers/enrol-codes/{id}");
     let (st, _, _) = call(&f.app, Method::DELETE, &path, Some(&h), None).await;
     assert_eq!(st, StatusCode::CONFLICT);
-    f.enrol.complete(&r.enrol_id, "c1").unwrap();
+    // A redeem alone does not join: the owner has not confirmed (FR-C2a).
     let (_, body, _) = call(&f.app, Method::GET, &path, Some(&h), None).await;
-    assert_eq!(body["status"], "joined");
+    assert_eq!(body["status"], "awaiting_confirmation");
 }
 
 #[tokio::test]

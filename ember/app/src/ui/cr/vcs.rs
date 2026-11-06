@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
+use crate::ui::vcs::{commit_action_branch_line, commit_failure_reloads_snapshot, commit_action_gate, commit_action_key, commit_detail_from, commit_detail_view, commit_files_shown, fetch_commit_detail, file_stat_text, run_branch_from, run_commit_cherry_pick, run_commit_revert, snapshot_dirty, CommitAction, CommitDetailLoad, CommitDetailView, choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState, banner_sub, banner_title, fetch_merge_state, banner_button_text, merge_tap, merge_tap_key, run_merge_abort, run_merge_commit, MergeAction, MergeLoad, MergeView, MERGE_ABORT_NOTE, MERGE_COMMIT_NOTE, merge_answer_reloads, pick_all_key, pick_all_note, pick_all_text};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -239,7 +239,7 @@ pub fn sample_snapshot() -> RepoSnapshot {
         ],
         changes: parse_unified(SAMPLE_DIFF),
         staged: Default::default(),
-        conflicts: Vec::new(),
+        conflicts: vec!["ember/app/src/ui/cr/shell.rs".to_string(), "docs/SPEC.md".to_string()],
         notes: Vec::new(),
     }
 }
@@ -767,7 +767,7 @@ fn SectionListWithSample(
                     match sec {
                         Section::PullRequests => Some(sample_pr_count()),
                         Section::Stash => Some(2),
-                        Section::Conflicts => Some(2),
+                        Section::Conflicts => Some(SAMPLE_CONFLICT_COUNT),
                         Section::Team => Some(sample_team_len()),
                         _ => None,
                     }
@@ -1555,16 +1555,179 @@ fn sample_conflict() -> ConflictFile {
     ConflictFile::from_node("ember/app/src/ui/cr/shell.rs", &c)
 }
 
+/// How many conflict files the sample screen lists (the tab count and the banner agree).
+const SAMPLE_CONFLICT_COUNT: usize = 2;
+
+/// The merge banner state for the sample screen (no services).
+fn sample_merge() -> MergeLoad {
+    MergeLoad::Ready(Some(MergeView { from: "origin/main".into(), into: "feat/session-shim".into(), remaining: SAMPLE_CONFLICT_COUNT, can_commit: false }))
+}
+
+/// 충돌 with the merge banner (FR-G16, FR-G17, #382): the banner card above the list or editor
+/// while a merge is in progress, with 병합 취소 and 병합 커밋 (each asks twice). A conflict list
+/// without a merge (a stash pop, a cherry-pick) shows no banner. `actions` is `None` for the
+/// sample screen. A finished abort or commit remounts the body so an open editor closes.
+fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout) {
+    let merge = remember(|| mutable_state_of(MergeLoad::Idle));
+    let mlocal = remember(|| mutable_state_of(0_u64));
+    let mbusy = remember(|| mutable_state_of(false));
+    let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
+    let generation = remember(|| mutable_state_of(0_u64));
+
+    if let Some(a) = actions.clone() {
+        let (m, armed) = (merge.clone(), armed.clone());
+        launched_effect((a.project.clone(), a.reload.get(), mlocal.get()), move || async move {
+            // A reload of the state disarms 병합 취소 and 병합 커밋.
+            armed.set(None);
+            if crate::services::try_services().is_some() {
+                if m.get() == MergeLoad::Idle {
+                    m.set(MergeLoad::Loading);
+                }
+                let name = a.project.clone();
+                crate::services::run_shared(async move { fetch_merge_state(&name).await }, move |result| m.set(result));
+            } else {
+                m.set(MergeLoad::Ready(None));
+            }
+        });
+    }
+    let current = if actions.is_some() { merge.get() } else { sample_merge() };
+    let failed = match &current {
+        MergeLoad::Failed(text) if actions.is_some() => Some(text.clone()),
+        _ => None,
+    };
+    let view = match current {
+        MergeLoad::Ready(Some(v)) => Some(v),
+        _ => None,
+    };
+
+    let tap = {
+        let (actions, armed, mbusy, mlocal, generation) = (actions.clone(), armed.clone(), mbusy.clone(), mlocal.clone(), generation.clone());
+        move |action: MergeAction| {
+            if mbusy.get() {
+                return;
+            }
+            let now = crate::demo::now_ms();
+            match merge_tap(action, armed.get(), now) {
+                DeleteTap::Arm | DeleteTap::Expired => armed.set(Some((merge_tap_key(action), now))),
+                DeleteTap::Wait => {}
+                DeleteTap::Confirm => {
+                    armed.set(None);
+                    let Some(a) = actions.clone() else { return };
+                    // Busy is set before the request is spawned, so a second quick tap is ignored.
+                    mbusy.set(true);
+                    let (name, mbusy, mlocal, generation, reload, armed) = (a.project.clone(), mbusy.clone(), mlocal.clone(), generation.clone(), a.reload.clone(), armed.clone());
+                    crate::services::run_shared(
+                        async move {
+                            match action {
+                                MergeAction::Abort => run_merge_abort(&name).await,
+                                MergeAction::Commit => run_merge_commit(&name).await,
+                            }
+                        },
+                        move |result| {
+                            let result_for_reload = result.clone();
+                            match result {
+                                Ok(text) => notice::post(text),
+                                Err(line) => notice::post(line),
+                            }
+                            // Read the state, list and snapshot again after either answer: a 409
+                            // means the state on screen was stale.
+                            if merge_answer_reloads(&result_for_reload) {
+                                armed.set(None);
+                                mlocal.set(mlocal.get() + 1);
+                                generation.set(generation.get() + 1);
+                                reload.set(reload.get() + 1);
+                            }
+                            mbusy.set(false);
+                        },
+                    );
+                }
+            }
+        }
+    };
+
+    let two = layout == PaneLayout::Two;
+    let body_paths = paths.to_vec();
+    let body = {
+        let (actions, generation) = (actions.clone(), generation.clone());
+        move || {
+            key(generation.get(), || ConflictsBody(&body_paths, actions.clone(), layout));
+        }
+    };
+    let banner = {
+        let (armed, mbusy, tap, mlocal) = (armed.clone(), mbusy.clone(), tap.clone(), mlocal.clone());
+        move || {
+            if let Some(v) = &view {
+                MergeBanner(v, &armed, mbusy.get(), tap.clone());
+            } else if let Some(text) = &failed {
+                // The state read failed: say so (Korean) and offer a retry instead of nothing.
+                let p = ember_theme().palette;
+                let retry = mlocal.clone();
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content({
+                    let text = text.clone();
+                    move || {
+                        Label("병합 상태를 불러오지 못했습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        let retry = retry.clone();
+                        AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
+                    }
+                });
+            }
+        }
+    };
+    if two {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().fill_max_height()).content(move || {
+            banner();
+            cu::Box().modifier(Modifier::new().fill_max_width().weight(1.0)).content(body.clone());
+        });
+    } else {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            banner();
+            body();
+        });
+    }
+}
+
+/// The banner card: "<from> -> <into> 병합 중", the remaining files, 병합 취소 and 병합 커밋.
+/// 병합 커밋 is enabled only when no conflict file remains; both ask twice (the armed label shows
+/// while `armed_label_visible` holds at composition).
+fn MergeBanner(v: &MergeView, armed: &MutableState<Option<(usize, i64)>>, busy: bool, tap: impl Fn(MergeAction) + Clone + 'static) {
+    let p = ember_theme().palette;
+    let now = crate::demo::now_ms();
+    let shows = |action: MergeAction| armed_label_visible(armed.get(), merge_tap_key(action), now);
+    let (abort_armed, commit_armed) = (shows(MergeAction::Abort), shows(MergeAction::Commit));
+    let (title, sub, can_commit) = (banner_title(v), banner_sub(v.remaining), v.can_commit);
+    VcsCard(move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+            Txt(&title, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+            Label(&sub, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                let on_abort = tap.clone();
+                let kind = if abort_armed { ButtonKind::Destructive } else { ButtonKind::Default };
+                AppButton(banner_button_text(MergeAction::Abort, abort_armed), None, kind, true, !busy, false, move || on_abort(MergeAction::Abort));
+                let on_commit = tap.clone();
+                AppButton(banner_button_text(MergeAction::Commit, commit_armed), None, ButtonKind::Primary, true, can_commit && !busy, false, move || on_commit(MergeAction::Commit));
+            });
+            Label(MERGE_ABORT_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            if commit_armed {
+                Label(MERGE_COMMIT_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+        });
+    });
+}
+
 /// 충돌: the unmerged files, and (after a tap) the editor of one file. `paths` is the list from
 /// the repository snapshot; resolving a file bumps the screen's reload counter so the list and
 /// 변경 사항 read again. `actions` is `None` for the sample screen, which edits a sample file.
-fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout) {
+fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout) {
     let p = ember_theme().palette;
     // `EMBER_CR_VCS_CONFLICT=<path>` opens that file's editor directly, for captures without clicks.
     let open = remember(|| mutable_state_of(std::env::var("EMBER_CR_VCS_CONFLICT").ok().filter(|p| !p.is_empty())));
     let state = remember(|| mutable_state_of(ConflictLoad::Loading));
     let local = remember(|| mutable_state_of(0_u64));
     let busy = remember(|| mutable_state_of(false));
+    // The armed pick-all button (key, arm time). It lives in the body, which the pane remounts
+    // with `key(generation)` after a merge answer, so a reload starts it unarmed.
+    let pick_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
 
     if let (Some(a), Some(path)) = (actions.clone(), open.get()) {
         let st = state.clone();
@@ -1606,8 +1769,9 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
 
     let step = remember(|| mutable_state_of(ConflictStep::Editing));
     let back = {
-        let (open, busy, step) = (open.clone(), busy.clone(), step.clone());
+        let (open, busy, step, pick_armed) = (open.clone(), busy.clone(), step.clone(), pick_armed.clone());
         move || {
+            pick_armed.set(None);
             open.set(None);
             busy.set(false);
             step.set(ConflictStep::Editing);
@@ -1616,7 +1780,7 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
     let two = layout == PaneLayout::Two;
     // The scrolling part: the path, then the blocks, or the preview of the merged text.
     let content = {
-        let (state, local, busy, step, path) = (state.clone(), local.clone(), busy.clone(), step.clone(), path.clone());
+        let (state, local, busy, step, path, pick_armed) = (state.clone(), local.clone(), busy.clone(), step.clone(), path.clone(), pick_armed.clone());
         move || {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
                 Txt(&path, TypeRole::Mono, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
@@ -1633,7 +1797,40 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                         if step.get().is_preview() {
                             ConflictPreview(&file, &step);
                         } else {
-                            ConflictBlocks(&file, layout, busy.get(), &state);
+                            // 모두 현재 것 / 모두 들어오는 것: settle every block of this file in one tap, or in
+                            // two when a block already has a choice (it would be replaced).
+                            let now = crate::demo::now_ms();
+                            let needs_confirm = pick_all_note(&file).is_some();
+                            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content({
+                                let (file, state, pick_armed, busy) = (file.clone(), state.clone(), pick_armed.clone(), busy.clone());
+                                move || {
+                                    for (text, pick) in [("모두 현재 것", ConflictChoice::Ours), ("모두 들어오는 것", ConflictChoice::Theirs)] {
+                                        let (file, state, pick_armed) = (file.clone(), state.clone(), pick_armed.clone());
+                                        let key = pick_all_key(pick);
+                                        let shown = needs_confirm && armed_label_visible(pick_armed.get(), key, now);
+                                        let kind = if shown { ButtonKind::Destructive } else { ButtonKind::Default };
+                                        AppButton(pick_all_text(text, shown), None, kind, true, !busy.get(), false, move || {
+                                            if !needs_confirm {
+                                                state.set(ConflictLoad::Ready(file.pick_all(pick)));
+                                                return;
+                                            }
+                                            let now = crate::demo::now_ms();
+                                            match delete_tap(pick_armed.get(), key, now) {
+                                                DeleteTap::Arm | DeleteTap::Expired => pick_armed.set(Some((key, now))),
+                                                DeleteTap::Wait => {}
+                                                DeleteTap::Confirm => {
+                                                    pick_armed.set(None);
+                                                    state.set(ConflictLoad::Ready(file.pick_all(pick)));
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                            if let Some(note) = pick_all_note(&file) {
+                                Label(note, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                            }
+                            ConflictBlocks(&file, layout, busy.get(), &state, &pick_armed);
                         }
                     }
                 }
@@ -1671,7 +1868,7 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
 }
 
 /// The blocks of one file as cards, each with its three choices.
-fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state: &MutableState<ConflictLoad>) {
+fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state: &MutableState<ConflictLoad>, pick_armed: &MutableState<Option<(usize, i64)>>) {
     let p = ember_theme().palette;
     let mut index = 0;
     for seg in &file.segments {
@@ -1688,7 +1885,7 @@ fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state:
             ConflictSegment::Block { ours_label, theirs_label, ours, theirs, choice } => {
                 let n = index;
                 index += 1;
-                let (choice, file, state) = (*choice, file.clone(), state.clone());
+                let (choice, file, state, pick_armed) = (*choice, file.clone(), state.clone(), pick_armed.clone());
                 VcsCard(|| {
                     cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
                         Label(&format!("충돌 {}", n + 1), Fs::Sm, Weight::Semibold, None, Some(1));
@@ -1712,10 +1909,11 @@ fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state:
                         }
                         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                             for (text, pick) in [("내 변경", ConflictChoice::Ours), ("상대 변경", ConflictChoice::Theirs), ("둘 다", ConflictChoice::Both)] {
-                                let (file, state) = (file.clone(), state.clone());
+                                let (file, state, pick_armed) = (file.clone(), state.clone(), pick_armed.clone());
                                 let selected = choice == pick;
                                 let kind = if selected { ButtonKind::Primary } else { ButtonKind::Default };
                                 AppButton(&choice_label(text, selected), None, kind, true, !is_busy, false, move || {
+                                    pick_armed.set(None);
                                     state.set(ConflictLoad::Ready(file.with_choice(n, pick)));
                                 });
                             }
@@ -4674,6 +4872,13 @@ mod tests {
     #[compose_rust::runtime::composable]
     fn conflicts_sample_compact() {
         ConflictsPane(&["a.rs".to_string()], None, PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_g16_the_sample_banner_and_list_agree() {
+        let MergeLoad::Ready(Some(v)) = sample_merge() else { panic!("the sample has a banner") };
+        assert_eq!(v.remaining, SAMPLE_CONFLICT_COUNT);
+        assert_eq!(banner_sub(v.remaining), format!("남은 충돌 파일 {SAMPLE_CONFLICT_COUNT}개"));
     }
 
     #[test]

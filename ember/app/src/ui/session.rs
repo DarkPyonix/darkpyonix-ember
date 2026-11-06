@@ -105,6 +105,8 @@ pub const UI_STRINGS: &[&str] = &[
     crate::ui::enrol_flow::UNKNOWN_STATE,
     crate::ui::add_computer::ENROL_NOTE,
     crate::ui::home::GITHUB_NO_INFO,
+    crate::ui::home::GITHUB_UNKNOWN,
+    crate::ui::home::GITHUB_SAMPLE_MARK,
     crate::ui::home::GITHUB_NO_ACTIVITY,
     crate::ui::home::GITHUB_LOGIN_HINT,
     crate::ui::home::GITHUB_UNAVAILABLE_HINT,

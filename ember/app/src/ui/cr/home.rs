@@ -1197,15 +1197,26 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
 }
 
 /// `연동` (FR-L23, #498): the GitHub card, then one small 준비 중 card per later service. The
-/// server API for GitHub does not exist yet (`None`), so the card says 준비 중입니다 and every
-/// value reads "아직 정보가 없습니다". No number is drawn that the server did not send.
+/// card reads `GET /api/integrations/github` through the live slot (FR-L35). Before the first
+/// answer, or when it failed, it says 준비 중입니다; a null number reads 알 수 없음. In the demo
+/// the card shows a fixed sample and its header carries (예시). No number is drawn that the
+/// server did not send.
 fn IntegrationsArea() {
     let p = ember_theme().palette;
-    let card = GithubCard::from_state(None);
+    let s = services();
+    let _requested = remember(|| {
+        crate::bridge::request_github_summary();
+        0u8
+    });
+    let demo = s.demo.is_some();
+    let fetched = s.ui.live.github.get();
+    let sample = demo.then(crate::demo::github_state);
+    let card = GithubCard::from_state(if demo { sample.as_ref() } else { fetched.state() });
+    let header_line = if demo { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
     let guidance = remember(|| mutable_state_of(false));
     cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
         Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
-        Label(&card.header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+        Label(&header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
         Tile(|| {
             cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Box()
@@ -1226,7 +1237,7 @@ fn IntegrationsArea() {
                 Label(account, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
             if let Some(note) = &card.note {
-                Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
             if let Some(action) = &card.action {
                 // Pressing only shows how to log in; Ember runs nothing and stores no token.

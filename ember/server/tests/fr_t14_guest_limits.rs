@@ -404,6 +404,24 @@ async fn real_door(timeout: Duration, cfg: LimitConfig) -> (SocketAddr, tokio::s
     (addr, tx, task)
 }
 
+/// Polls `cond` every 10 ms until it is true; panics naming `what` when `timeout` passes.
+async fn eventually<F, Fut>(timeout: Duration, what: &str, mut cond: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cond().await {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("condition not met within {timeout:?}: {what}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn raw(addr: SocketAddr, request: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -548,22 +566,43 @@ async fn fr_t14_connections_over_the_cap_are_closed_and_a_slot_frees_when_one_cl
         Duration::from_secs(30),
         2,
     ));
-    // Two idle connections fill the cap.
-    let c1 = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // The third is closed by the door: it reads EOF (or a reset) at once, with no response.
+    // Two connections fill the cap. Each counts as registered once the door has served a request
+    // on it (keep-alive keeps it open), not after a delay.
+    let join = "GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\n\r\n";
+    let mut c1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    for (n, c) in [&mut c1, &mut c2].into_iter().enumerate() {
+        c.write_all(join.as_bytes()).await.unwrap();
+        let c: &tokio::net::TcpStream = c;
+        let got = std::cell::RefCell::new(Vec::<u8>::new());
+        eventually(Duration::from_secs(5), &format!("connection {} is served by the door", n + 1), || {
+            let got = &got;
+            async move {
+                let mut chunk = [0u8; 2048];
+                // try_read never blocks: WouldBlock just means the answer has not arrived yet.
+                if let Ok(k) = c.try_read(&mut chunk) {
+                    got.borrow_mut().extend_from_slice(&chunk[..k]);
+                }
+                String::from_utf8_lossy(&got.borrow()).contains("</html>")
+            }
+        })
+        .await;
+    }
+    // The third is closed by the door: it reads EOF (or a reset) with no response.
     let mut c3 = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let _ = c3.write_all(b"GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\n\r\n").await;
+    let _ = c3.write_all(join.as_bytes()).await;
     let mut buf = Vec::new();
     let r = tokio::time::timeout(Duration::from_secs(5), c3.read_to_end(&mut buf)).await;
     assert!(r.is_ok(), "the extra connection was left open");
     assert!(buf.is_empty(), "the extra connection got an answer: {:?}", String::from_utf8_lossy(&buf));
-    // One of the first two closes; a new connection is then served.
+    // One of the first two closes; a new connection is served as soon as the door frees the slot.
     drop(c1);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let ok = raw(addr, "GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\nConnection: close\r\n\r\n").await;
-    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    eventually(Duration::from_secs(5), "a new connection is served after one of the first two closed", || async {
+        raw(addr, "GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\nConnection: close\r\n\r\n")
+            .await
+            .starts_with("HTTP/1.1 200")
+    })
+    .await;
     drop(c2);
     let _ = tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(5), task).await;

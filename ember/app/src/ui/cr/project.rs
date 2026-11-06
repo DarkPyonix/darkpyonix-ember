@@ -157,7 +157,7 @@ pub fn chip_sub(c: &ComputerChip) -> String {
 
 /// What the screen has open and typed. `EMBER_CR_ROUTE=project-detail` opens the first
 /// project's full view (`EMBER_CR_PROJECT=<id>` another), `EMBER_CR_PROJECT_SHEET=settings|
-/// computer|new` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
+/// computer|new|add-computer` a sheet (`EMBER_CR_ADD_COMPUTER=confirm` its confirm view), `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
 #[derive(Clone)]
 struct Ui {
     full: MutableState<Option<String>>,
@@ -194,7 +194,7 @@ impl Ui {
             new_saving: mutable_state_of(false),
             new_failure: mutable_state_of(None),
             new_confirm: mutable_state_of(false),
-            add: super::add_computer::AddUi::new(),
+            add: super::add_computer::AddUi::for_review(),
             query: mutable_state_of(String::new()),
             expanded: mutable_state_of(if expand { boxes.iter().map(|b| b.id.clone()).collect() } else { Vec::new() }),
             filter: mutable_state_of(MemberFilter::All),

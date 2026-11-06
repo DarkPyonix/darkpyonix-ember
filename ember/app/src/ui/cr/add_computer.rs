@@ -30,6 +30,8 @@ pub struct AddUi {
     /// The form, or the confirmation before the POST. Holds no token.
     step: MutableState<AddStep>,
     armed_at: MutableState<i64>,
+    /// A debug review capture: sample devices, nothing calls the server.
+    review: bool,
 }
 
 impl AddUi {
@@ -45,12 +47,38 @@ impl AddUi {
             confirm: mutable_state_of(false),
             step: mutable_state_of(AddStep::cleared()),
             armed_at: mutable_state_of(0),
+            review: false,
         }
+    }
+
+    /// The debug review hook (`EMBER_CR_PROJECT_SHEET=add-computer`, `EMBER_CR_ADD_COMPUTER=confirm`).
+    pub fn for_review() -> AddUi {
+        let mode = review_mode(
+            std::env::var("EMBER_CR_PROJECT_SHEET").ok().as_deref(),
+            std::env::var("EMBER_CR_ADD_COMPUTER").ok().as_deref(),
+            cfg!(debug_assertions),
+        );
+        let mut ui = AddUi::new();
+        if mode == ReviewMode::Off {
+            return ui;
+        }
+        ui.review = true;
+        ui.open.set(true);
+        ui.devices.set(DevicesState::Ready(demo_devices()));
+        if mode == ReviewMode::Confirm {
+            ui.target.set(Some(REVIEW_DEVICE_ID.to_string()));
+            ui.token.set(REVIEW_TOKEN.to_string());
+            ui.step.set(AddStep::Confirm { device_id: REVIEW_DEVICE_ID.to_string(), name: None });
+        }
+        ui
     }
 
     /// The 컴퓨터 추가 chip: open the sheet and read the devices.
     pub fn show(&self) {
         self.open.set(true);
+        if self.review {
+            return;
+        }
         load_devices(self.devices.clone());
     }
 
@@ -77,7 +105,7 @@ fn load_devices(state: MutableState<DevicesState>) {
 
 /// Sends the token once, then refreshes the computer list and the devices.
 fn add(ui: AddUi, endpoint_id: String, token: String, name: Option<String>) {
-    if services().demo.is_some() {
+    if services().demo.is_some() || ui.review {
         ui.failure.set(Some(DEMO_CANNOT_ADD.to_string()));
         return;
     }
@@ -130,7 +158,7 @@ pub fn AddComputerSheet(ui: &AddUi) {
     };
     let w = compose_rust::runtime::current_window_size();
     let body_h = super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0).min(700.0);
-    let sample = services().demo.is_some();
+    let sample = services().demo.is_some() || ui.review;
     EmberSheet("컴퓨터 추가", ui.open.get(), request_close.clone(), None, || {
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(body_h)).content(|| {
             cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {

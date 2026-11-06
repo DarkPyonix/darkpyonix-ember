@@ -229,6 +229,34 @@ pub fn demo_devices() -> Vec<HubDevice> {
     ]
 }
 
+/// What a capture asks of the add-computer sheet (debug builds only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewMode {
+    Off,
+    /// `EMBER_CR_PROJECT_SHEET=add-computer`: the sheet open with sample devices.
+    List,
+    /// `EMBER_CR_ADD_COMPUTER=confirm` as well: the free device chosen and the confirm view open.
+    Confirm,
+}
+
+/// Decides the review mode from the two env values and the debug flag; a release build is always
+/// `Off`, so the hook cannot open a sheet or skip the server for a user.
+pub fn review_mode(sheet: Option<&str>, step: Option<&str>, debug: bool) -> ReviewMode {
+    if !debug || sheet != Some("add-computer") {
+        return ReviewMode::Off;
+    }
+    if step == Some("confirm") {
+        ReviewMode::Confirm
+    } else {
+        ReviewMode::List
+    }
+}
+
+/// The sample device the confirm view of a review capture is about (the free one).
+pub const REVIEW_DEVICE_ID: &str = "demo-lab";
+/// A sample token for the review capture; the confirm view never shows it.
+pub const REVIEW_TOKEN: &str = "sample-token";
+
 /// The unsaved-changes guard input: something typed.
 pub fn is_blank(token: &str, name: &str) -> bool {
     token.trim().is_empty() && name.trim().is_empty()
@@ -353,6 +381,17 @@ mod tests {
             DevicesState::Failed(m) => assert!(!m.contains("raw text")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn fr_x7_add_computer_review_hook_is_debug_only() {
+        let (s, c) = (Some("add-computer"), Some("confirm"));
+        assert_eq!(review_mode(s, None, true), ReviewMode::List);
+        assert_eq!(review_mode(s, c, true), ReviewMode::Confirm);
+        assert_eq!(review_mode(s, c, false), ReviewMode::Off);
+        assert_eq!(review_mode(Some("settings"), c, true), ReviewMode::Off);
+        assert_eq!(review_mode(None, c, true), ReviewMode::Off);
+        assert!(demo_devices().iter().any(|d| d.endpoint_id == REVIEW_DEVICE_ID));
     }
 
     #[test]

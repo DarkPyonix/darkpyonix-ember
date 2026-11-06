@@ -212,7 +212,12 @@ async fn fr_t12_mcp_non_member_is_refused_as_a_tool_error() {
     mcp.open_like_claude_code();
     let v = mcp.post(3, &w.channel, "let me in");
     assert_eq!(v["result"]["isError"], true, "{v}");
-    assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("403"), "{v}");
+    // Updated: the fixed sentence for the server's `forbidden` code, not the server's own text.
+    assert_eq!(
+        v["result"]["content"][0]["text"],
+        "The post was refused: you are not a member of this channel, or no one has mentioned you in it in the last 30 minutes. Answer only after a mention.",
+        "{v}"
+    );
     assert!(v.get("error").is_none());
     assert!(w.log().await.iter().all(|m| m["from"] != w.outsider.as_str()));
     // The server is still serving.
@@ -226,7 +231,12 @@ async fn fr_t12_mcp_a_bad_token_is_refused_as_a_tool_error() {
     let mut mcp = Mcp::spawn(Some(&w.url), Some("not-a-token"));
     let v = mcp.post(1, &w.channel, "hi");
     assert_eq!(v["result"]["isError"], true, "{v}");
-    assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("401"), "{v}");
+    // Updated: the fixed sentence for the `unauthorized` code.
+    assert_eq!(
+        v["result"]["content"][0]["text"],
+        "The post was refused: the runtime token was not accepted, so this session cannot post to channels.",
+        "{v}"
+    );
     assert_eq!(mcp.finish(), Some(0));
 }
 
@@ -242,7 +252,12 @@ async fn fr_t12_mcp_the_seventh_post_in_a_minute_is_refused() {
     }
     let v = mcp.post(99, &w.channel, "one too many");
     assert_eq!(v["result"]["isError"], true, "{v}");
-    assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("429"), "{v}");
+    // Updated: the fixed sentence for the `rate_limited` code.
+    assert_eq!(
+        v["result"]["content"][0]["text"],
+        "The post was refused: too many posts in a minute. Wait, then post once.",
+        "{v}"
+    );
     let mine = w.log().await.iter().filter(|m| m["from"] == w.alpha.as_str()).count();
     assert_eq!(mine as i64, limit);
     assert_eq!(mcp.finish(), Some(0));
@@ -266,4 +281,112 @@ async fn fr_t12_mcp_closing_stdin_ends_the_process_with_zero() {
     let mut mcp = Mcp::spawn(None, None);
     assert_eq!(mcp.rpc(1, "ping", json!({}))["result"], json!({}));
     assert_eq!(mcp.finish(), Some(0));
+}
+
+/// Run the real binary with `mcp`, the canary token and `url`; drive the frames, close stdin and
+/// return (stdout lines, stderr, exit code). Both pipes are drained on threads so a full pipe
+/// cannot block the child.
+fn run_real_process(url: &str, canary: &str) -> (Vec<String>, String, Option<i32>) {
+    use std::io::Read;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ember-a2a"))
+        .arg("mcp")
+        .env("EMBER_URL", url)
+        .env("EMBER_RUNTIME_TOKEN", canary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        stdout.read_to_string(&mut s).unwrap();
+        s
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        stderr.read_to_string(&mut s).unwrap();
+        s
+    });
+    let frames = [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-11-25" } }),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+        // Fails to connect.
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "channel_post", "arguments": { "channel": "some-channel", "text": "hello" } } }),
+        // A bad argument.
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "channel_post", "arguments": { "channel": "a/b", "text": "hello" } } }),
+    ];
+    for f in frames {
+        writeln!(stdin, "{f}").unwrap();
+    }
+    stdin.flush().unwrap();
+    drop(stdin);
+    let deadline = Instant::now() + WAIT;
+    let code = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code();
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("the child did not exit after stdin closed");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let out = out_thread.join().unwrap();
+    let err = err_thread.join().unwrap();
+    (out.lines().map(str::to_string).collect(), err, code)
+}
+
+fn assert_protocol_only(stdout: &[String]) {
+    assert_eq!(stdout.len(), 4, "four answers (the notification gets none): {stdout:?}");
+    for (i, line) in stdout.iter().enumerate() {
+        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
+        assert_eq!(v["jsonrpc"], "2.0", "{line}");
+        assert_eq!(v["id"], [1, 2, 3, 4][i], "{line}");
+    }
+    let failed: Value = serde_json::from_str(&stdout[2]).unwrap();
+    assert_eq!(failed["result"]["isError"], true);
+    assert_eq!(failed["result"]["content"][0]["text"], "Could not reach the Ember server.");
+    let bad: Value = serde_json::from_str(&stdout[3]).unwrap();
+    assert_eq!(bad["result"]["isError"], true);
+}
+
+#[test]
+fn fr_t12_mcp_the_token_is_in_no_output_of_the_real_process() {
+    const CANARY: &str = "TOKEN-CANARY-STDERR-7731";
+    // A port that was open a moment ago and is closed now.
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let url = format!("http://127.0.0.1:{port}");
+    let (stdout, stderr, code) = run_real_process(&url, CANARY);
+    assert_protocol_only(&stdout);
+    for text in stdout.iter().map(String::as_str).chain([stderr.as_str()]) {
+        assert!(!text.contains(CANARY), "the token leaked: {text}");
+        assert!(!text.contains(&url) && !text.contains("http://"), "the URL leaked: {text}");
+    }
+    assert!(!stderr.contains("not this machine"), "loopback gets no warning: {stderr}");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn fr_t12_mcp_a_non_loopback_url_prints_one_host_only_warning_on_stderr() {
+    const CANARY: &str = "TOKEN-CANARY-STDERR-7731";
+    let (stdout, stderr, code) = run_real_process("http://ember.invalid:1", CANARY);
+    assert_protocol_only(&stdout);
+    let warnings: Vec<_> = stderr.lines().filter(|l| l.contains("not this machine")).collect();
+    assert_eq!(
+        warnings,
+        ["ember-a2a mcp: EMBER_URL names ember.invalid, which is not this machine; the runtime token is sent to it over plain HTTP"],
+        "{stderr}"
+    );
+    assert!(!stderr.contains(CANARY) && !stderr.contains("http://"), "{stderr}");
+    assert!(stdout.iter().all(|l| !l.contains(CANARY) && !l.contains("ember.invalid")), "{stdout:?}");
+    assert_eq!(code, Some(0));
 }

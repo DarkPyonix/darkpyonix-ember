@@ -411,6 +411,25 @@ fn is_json(headers: &HeaderMap) -> bool {
     v.to_str().is_ok_and(|v| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
 }
 
+/// The text of `http_body_util::LengthLimitError`'s `Display` (http-body-util 0.1, `limited.rs`).
+/// `http-body-util` is only a dev-dependency of this crate, so the type cannot be named here and the
+/// two cases are told apart by this text. Matching a string is weaker than `downcast_ref`: a body
+/// error that happens to print exactly this text would also be answered 413.
+const LENGTH_LIMIT_TEXT: &str = "length limit exceeded";
+
+/// True when `e`, or an error in its `source()` chain, is the size-limit error of
+/// `axum::body::to_bytes` (axum's wrapper prints its inner error, so the first link already matches).
+fn is_length_limit(e: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if err.to_string() == LENGTH_LIMIT_TEXT {
+            return true;
+        }
+        cur = err.source();
+    }
+    false
+}
+
 async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
     // 1. The content type, before the body is read or parsed and before the code is looked at.
     if !is_json(req.headers()) {
@@ -425,7 +444,9 @@ async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
     let (_, body) = req.into_parts();
     let bytes = match axum::body::to_bytes(body, ENROL_MAX_BODY_BYTES).await {
         Ok(b) => b,
-        Err(_) => return reply(StatusCode::PAYLOAD_TOO_LARGE, "body too large", "too_large"),
+        Err(e) if is_length_limit(&e) => return reply(StatusCode::PAYLOAD_TOO_LARGE, "body too large", "too_large"),
+        // A client that aborts or breaks the stream is a bad request, not an oversized one.
+        Err(_) => return bad_request(),
     };
     // 2. A fixed text for every parse failure: serde's message could echo the input.
     let Ok(b) = serde_json::from_slice::<RedeemBody>(&bytes) else { return bad_request() };
@@ -530,6 +551,21 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn is_length_limit_tells_the_size_limit_from_a_broken_stream() {
+        use axum::body::{Body, Bytes};
+        let over = axum::body::to_bytes(Body::from(vec![0u8; 16]), 8).await.unwrap_err();
+        assert!(is_length_limit(&over), "the real over-limit error: {over}");
+        let broken = Body::from_stream(futures::stream::iter([Err::<Bytes, std::io::Error>(std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "client went away",
+        ))]));
+        let other = axum::body::to_bytes(broken, 8).await.unwrap_err();
+        assert!(!is_length_limit(&other), "a stream error is not the limit: {other}");
+        let within = axum::body::to_bytes(Body::from(vec![0u8; 8]), 8).await;
+        assert!(within.is_ok(), "exactly the limit passes");
+    }
 
     #[test]
     fn log_id_keeps_only_a_short_safe_charset() {

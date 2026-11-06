@@ -504,6 +504,49 @@ async fn fr_c2_redeem_oversized_body_is_413_with_or_without_content_length() {
     assert_eq!(json_of(&r.2), json!({ "error": "body too large", "code": "too_large" }));
 }
 
+/// A body that fails midway (a client that aborts) is a 400 with the fixed bad-request text, not
+/// the 413 of an oversized body. Only the size limit is 413.
+#[tokio::test]
+async fn fr_c2_redeem_a_body_stream_that_errors_midway_is_400_not_413() {
+    use axum::body::Bytes;
+    let f = fx();
+    let app = f.open_app();
+    let stream = futures::stream::iter([
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{\"code\":")),
+        Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "client went away")),
+    ]);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/enrol/redeem")
+        .header("host", HOST)
+        .header("content-type", "application/json")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(SocketAddr::new(PEER.parse::<IpAddr>().unwrap(), 40000)));
+    let res = app.clone().oneshot(req).await.unwrap();
+    let (parts, body) = res.into_parts();
+    assert_eq!(parts.status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_of(&body.collect().await.unwrap().to_bytes()), json!({ "error": "bad request", "code": "bad_request" }));
+}
+
+/// The guard answers HEAD with 405 before the router, so the poll route's `Allow: GET,HEAD` is never
+/// reached: the answer has an empty body and only the two door headers, no `allow`.
+#[tokio::test]
+async fn fr_c2_head_on_the_poll_route_is_405() {
+    let f = fx();
+    for app in [f.open_app(), f.app()] {
+        for uri in ["/enrol/status/x", "/enrol/redeem"] {
+            let r = send(&app, PEER, "HEAD", uri, &[], Vec::new()).await;
+            assert_eq!(r.0, StatusCode::METHOD_NOT_ALLOWED, "HEAD {uri}");
+            assert!(r.2.is_empty(), "HEAD {uri}: {:?}", String::from_utf8_lossy(&r.2));
+            let mut names: Vec<String> =
+                r.1.keys().map(|k| k.as_str().to_string()).filter(|k| k != "content-length").collect();
+            names.sort();
+            assert_eq!(names, ["cache-control", "x-content-type-options"], "HEAD {uri}: no allow header");
+        }
+    }
+}
+
 #[tokio::test]
 async fn fr_c2_redeem_bad_node_info_is_400_and_does_not_burn_the_code() {
     let f = fx();

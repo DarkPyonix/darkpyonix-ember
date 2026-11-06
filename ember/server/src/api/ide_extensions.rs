@@ -9,7 +9,7 @@
 //! checked against a strict pattern (`ose::extension_spec`): no VSIX paths, no URLs, nothing
 //! that starts with `-`. The OSE binary runs directly (no shell) with the computer's data dir;
 //! at most one install per computer runs at a time (a second answers 409); a run is killed
-//! after 120 s. A failed run answers 502 with what it printed (at most 16 KiB).
+//! after 120 s (child and process group). The OSE child gets a cleared environment (allowlist only). A failed run answers 502 with what it printed (at most 16 KiB).
 //!
 //! There is no list route: `--list-extensions` is not documented in this repository
 //! (unverified), so it is not called. The route sits in the token-protected router and is not

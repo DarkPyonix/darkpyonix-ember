@@ -511,13 +511,33 @@ feature itself and its AirDrop-like intent are [user, 2026-10-25] (`INTENT.md` D
 ### FR-W4 extension install and data dir (#459, provisional, not yet compiled or run)
 
 Each computer has an OSE data dir, `<EMBER_OSE_DATA_DIR or <EMBER_DATA_DIR or ~/.ember>/ose-data>/<computer id>`
-(mode 0700), passed as `--server-data-dir` to every OSE the server starts and to every install.
+(mode 0700 when Ember creates it; an existing directory keeps its mode and a warning is logged if group or others
+can access it; a symlink at the root or the computer dir is refused). With no override and no HOME the data
+root does not resolve: the OSE start and the install fail with a message, never a relative path. The dir is
+passed as `--server-data-dir` to every OSE the server starts and to every install.
 `POST /api/computers/{id}/ide/extensions` with `{"id":"publisher.name","version":"1.2.3"}` runs
-`dpx-ose-server --install-extension publisher.name[@version]` against it: strict id and version
-patterns, no shell, 120 s timeout with a kill, output capped at 16 KiB, one install per computer at
-a time (409). Answers 200, 400, 404, 409, 502, 503. Local computer only. Token-protected, never on the
-guest door. Tests: `ember/server/tests/fr_w4_ose_data_dir.rs`. Unverified: the `@version` form and
-`--list-extensions` (no list route); how several OSE processes behave on one data dir is unknown.
+`dpx-ose-server --install-extension publisher.name[@version]` against it. The id is
+`^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*$` (uppercase allowed, as in `GitHub.copilot`, never a
+leading `-`); the version is `1.2.3[-+suffix]`. No shell, a 120 s timeout that kills the child and its
+process group, output capped at 16 KiB, one install per computer at a time (409). Answers 200, 400, 404, 409,
+502, 503, 500. Local computer only.
+
+Security boundary:
+
+- The route is owner/admin only (D37): it sits in the token-protected router and is not reachable through the
+  guest door.
+- The OSE child (install and start) does not inherit the server environment: it gets `HOME`, `PATH`, `LANG`,
+  `LC_ALL`, `TMPDIR` and `USER` only. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own.
+- **Known gap, signature verification:** Open VSX installs need `extensions.verifySignature` off in the data
+  dir's settings (`ember/ose/smoke.sh` writes it for the Machine and User scopes). The route does not set it and
+  does not verify any signature, so an install from the route either fails on the signature check or, with the
+  setting off, runs unverified code, and installed extension code later runs in the editor's extension host.
+- The 200 and 502 `output` is what the OSE printed and can contain absolute paths of the server machine; only the
+  owner sees it.
+- Tests: `ember/server/tests/fr_w4_ose_data_dir.rs`.
+- Unverified: the `@version` form, and `--list-extensions` (not documented in this repository, so there is no list
+  route). How several OSE processes behave on one data dir is unknown. A server shutdown or panic does not kill
+  a running install or the OSE start's grandchildren (follow-up).
 
 ### FR-W4 acceptance: the OSE runtime
 

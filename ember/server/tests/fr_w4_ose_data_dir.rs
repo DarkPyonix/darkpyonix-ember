@@ -124,7 +124,7 @@ async fn fr_w4_ose_data_dir_bad_ids_are_400_and_the_binary_never_runs() {
     let bad: Vec<String> = vec![
         "../x".into(), "a b".into(), "a;b.c".into(), "x".into(), "--foo.bar".into(),
         "https://example.com/a.vsix".into(), "".into(), long, "/tmp/a.vsix".into(), "a.b.c".into(),
-        "$(touch pwn).x".into(), "A.b".into(), "a.b\n--foo".into(),
+        "$(touch pwn).x".into(), "-A.b".into(), "A.-b".into(), "a.b\n--foo".into(),
     ];
     for id in &bad {
         let (st, body) = post(&f.app, "local", &json!({ "id": id }).to_string(), Some(&h)).await;
@@ -147,6 +147,7 @@ async fn fr_w4_ose_data_dir_bad_ids_are_400_and_the_binary_never_runs() {
 fn fr_w4_ose_data_dir_spec_and_computer_id_validation() {
     assert_eq!(extension_spec("ms-python.python", None).unwrap(), "ms-python.python");
     assert_eq!(extension_spec("a1.b-2", Some("10.0.1+build.5")).unwrap(), "a1.b-2@10.0.1+build.5");
+    assert_eq!(extension_spec("GitHub.copilot", Some("1.0.0")).unwrap(), "GitHub.copilot@1.0.0");
     assert!(extension_spec("-a.b", None).is_err());
     assert!(extension_spec("a.-b", None).is_err());
     for ok in ["local", "mini-2", "a.b_c"] {
@@ -176,10 +177,95 @@ fn fr_w4_ose_data_dir_a_computer_id_cannot_escape_the_root() {
 #[test]
 fn fr_w4_ose_data_dir_root_resolution() {
     let p = |s: &str| Some(PathBuf::from(s));
-    assert_eq!(data_root_from(p("/o"), p("/d"), p("/h")), PathBuf::from("/o"));
-    assert_eq!(data_root_from(None, p("/d"), p("/h")), PathBuf::from("/d/ose-data"));
-    assert_eq!(data_root_from(None, None, p("/h")), PathBuf::from("/h/.ember/ose-data"));
-    assert_eq!(data_root_from(p(""), p(""), p("/h")), PathBuf::from("/h/.ember/ose-data"));
+    assert_eq!(data_root_from(p("/o"), p("/d"), p("/h")).unwrap(), PathBuf::from("/o"));
+    assert_eq!(data_root_from(None, p("/d"), p("/h")).unwrap(), PathBuf::from("/d/ose-data"));
+    assert_eq!(data_root_from(None, None, p("/h")).unwrap(), PathBuf::from("/h/.ember/ose-data"));
+    assert_eq!(data_root_from(p(""), p(""), p("/h")).unwrap(), PathBuf::from("/h/.ember/ose-data"));
+    // No override and no HOME: an error, never a relative path.
+    assert!(data_root_from(None, None, None).is_err());
+    assert!(data_root_from(p(""), p(""), p("")).is_err());
+    assert_eq!(data_root_from(None, p("/d"), None).unwrap(), PathBuf::from("/d/ose-data"));
+}
+
+#[test]
+fn fr_w4_ose_data_dir_an_unresolved_root_fails_install_and_start() {
+    // The explicit-root API: the manager built from an unresolvable environment is modelled by
+    // data_root_from's error; computer_data_dir on a manager whose root is a file also fails.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    let m = OseManager::with_data_root(None, file);
+    assert!(m.computer_data_dir("local").is_err());
+    let msg = data_root_from(None, None, None).unwrap_err();
+    assert!(msg.contains("HOME"), "{msg}");
+}
+
+#[test]
+fn fr_w4_ose_data_dir_a_symlinked_root_or_computer_dir_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let m = OseManager::with_data_root(None, link);
+    let err = m.computer_data_dir("local").unwrap_err();
+    assert!(err.contains("symlink"), "{err}");
+    assert!(!real.join("local").exists());
+    // A symlinked computer dir inside a real root.
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::os::unix::fs::symlink(&real, root.join("local")).unwrap();
+    let m = OseManager::with_data_root(None, root);
+    assert!(m.computer_data_dir("local").unwrap_err().contains("symlink"));
+}
+
+#[test]
+fn fr_w4_ose_data_dir_an_existing_dir_keeps_its_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let m = OseManager::with_data_root(None, root.clone());
+    let local = m.computer_data_dir("local").unwrap();
+    assert_eq!(mode(&root), 0o755, "an existing root is not chmodded");
+    assert_eq!(mode(&local), 0o700, "a directory this call created is 0700");
+}
+
+#[test]
+fn fr_w4_ose_data_dir_the_child_does_not_inherit_the_server_environment() {
+    // cargo sets CARGO_MANIFEST_DIR for every test process, so it stands in for a server secret.
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake(dir.path(), r#"env > "$(dirname "$0")/env.txt""#);
+    let m = OseManager::with_data_root(Some(bin), dir.path().join("ose-data"));
+    m.install_extension("local", "a.b", None).unwrap();
+    let dump = std::fs::read_to_string(dir.path().join("env.txt")).unwrap();
+    assert!(!dump.contains("CARGO_MANIFEST_DIR"), "secret leaked into the install child:\n{dump}");
+    assert!(!dump.contains("CARGO_PKG"), "{dump}");
+    assert!(dump.lines().any(|l| l.starts_with("PATH=")), "{dump}");
+    if std::env::var_os("HOME").is_some() {
+        assert!(dump.lines().any(|l| l.starts_with("HOME=")), "{dump}");
+    }
+}
+
+#[test]
+fn fr_w4_ose_data_dir_a_timeout_kills_the_whole_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake(dir.path(), r#"sleep 60 & echo $! > "$(dirname "$0")/gpid.txt"; wait"#);
+    let m = OseManager::with_data_root(Some(bin), dir.path().join("ose-data"))
+        .with_install_timeout(Duration::from_millis(500));
+    let err = m.install_extension("local", "a.b", None).unwrap_err();
+    assert!(matches!(err, ember_server::ose::InstallError::Failed { .. }), "{err:?}");
+    let pid = std::fs::read_to_string(dir.path().join("gpid.txt")).unwrap().trim().to_string();
+    let mut alive = true;
+    for _ in 0..100 {
+        alive = std::process::Command::new("kill").args(["-0", &pid]).status().unwrap().success();
+        if !alive {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive, "grandchild {pid} survived the timeout");
 }
 
 #[tokio::test]
@@ -190,6 +276,7 @@ async fn fr_w4_ose_data_dir_start_passes_server_data_dir() {
         &bin,
         r##"#!/bin/sh
 printf '%s\n' "$@" > "$(dirname "$0")/start-argv.txt"
+env > "$(dirname "$0")/start-env.txt"
 exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
 while True: s.accept()[0].close()' "$@"
 "##,
@@ -210,6 +297,9 @@ while True: s.accept()[0].close()' "$@"
         std::fs::read_to_string(dir.path().join("start-argv.txt")).unwrap().lines().map(String::from).collect();
     assert_eq!(arg_after(&v, "--server-data-dir"), root.join("local").to_str().unwrap());
     assert!(v.contains(&"--connection-token".to_string()));
+    let env = std::fs::read_to_string(dir.path().join("start-env.txt")).unwrap();
+    assert!(!env.contains("CARGO_MANIFEST_DIR"), "the server environment leaked into the OSE start:\n{env}");
+    assert!(env.lines().any(|l| l.starts_with("PATH=")), "{env}");
     assert_eq!(mode(&root.join("local")), 0o700);
     drop(m);
 }

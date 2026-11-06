@@ -51,7 +51,8 @@ const FLAG_LIST_UNVERIFIED: &str = "--list-extensions";
 /// Owns one server per (computer, local project folder).
 pub struct OseManager {
     binary: Option<PathBuf>,
-    data_root: PathBuf,
+    /// `Err` when no root can be resolved (no override and no HOME): every use answers the message.
+    data_root: Result<PathBuf, String>,
     install_timeout: Duration,
     installing: Arc<Mutex<HashSet<String>>>,
     processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>>,
@@ -85,11 +86,11 @@ pub fn valid_computer_id(id: &str) -> bool {
 fn slug_ok(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b[0].is_ascii_alphanumeric()
+        && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
 }
 
-/// Checks `publisher.name` (`^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$`, at most 128 bytes) and an
+/// Checks `publisher.name` (`^[A-Za-z0-9][A-Za-z0-9-]*\.[A-Za-z0-9][A-Za-z0-9-]*$`, at most 128 bytes) and an
 /// optional `major.minor.patch[-+suffix]` version, and returns the argument for
 /// `--install-extension` (`publisher.name` or `publisher.name@version`). Paths, URLs and
 /// anything starting with `-` fail the pattern.
@@ -97,7 +98,7 @@ pub fn extension_spec(id: &str, version: Option<&str>) -> Result<String, String>
     let ok_id = id.len() <= 128
         && matches!(id.split_once('.'), Some((p, n)) if slug_ok(p) && slug_ok(n));
     if !ok_id {
-        return Err("extension id must look like publisher.name (lowercase letters, digits, '-')".into());
+        return Err("extension id must look like publisher.name (letters, digits, '-')".into());
     }
     let Some(v) = version else { return Ok(id.to_string()) };
     let (core, rest) = match v.find(['-', '+']) {
@@ -116,17 +117,30 @@ pub fn extension_spec(id: &str, version: Option<&str>) -> Result<String, String>
     Ok(format!("{id}@{v}"))
 }
 
-/// The OSE data root from the environment values (kept pure so tests need no env).
-pub fn data_root_from(ose_dir: Option<PathBuf>, data_dir: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
+/// The OSE data root from the environment values (kept pure so tests need no env). With no
+/// `EMBER_OSE_DATA_DIR`, no `EMBER_DATA_DIR` and no usable HOME it is an error: a relative path
+/// under the working directory is never used.
+pub fn data_root_from(
+    ose_dir: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, String> {
     let non_empty = |p: Option<PathBuf>| p.filter(|p| !p.as_os_str().is_empty());
     if let Some(p) = non_empty(ose_dir) {
-        return p;
+        return Ok(p);
     }
-    let base = non_empty(data_dir).unwrap_or_else(|| home.unwrap_or_default().join(".ember"));
-    base.join("ose-data")
+    let base = match non_empty(data_dir) {
+        Some(d) => d,
+        None => non_empty(home)
+            .ok_or_else(|| {
+                "cannot resolve the OSE data dir: set EMBER_OSE_DATA_DIR or EMBER_DATA_DIR, or HOME".to_string()
+            })?
+            .join(".ember"),
+    };
+    Ok(base.join("ose-data"))
 }
 
-fn default_data_root() -> PathBuf {
+fn default_data_root() -> Result<PathBuf, String> {
     data_root_from(
         std::env::var_os("EMBER_OSE_DATA_DIR").map(PathBuf::from),
         std::env::var_os("EMBER_DATA_DIR").map(PathBuf::from),
@@ -134,17 +148,83 @@ fn default_data_root() -> PathBuf {
     )
 }
 
+/// Makes `path` (and missing parents) with mode 0700 and returns it ready for use.
+///
+/// A symlink at `path` is refused, as is anything that is not a directory. A directory that
+/// already exists is used as it is: its mode is NOT changed (it may be a directory the user chose
+/// with `EMBER_OSE_DATA_DIR`, even a shared one), a warning is logged when group or others can
+/// access it, and it must be owned by the current user. Only a directory this call creates is
+/// set to 0700.
 fn make_private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        use std::io::{Error, ErrorKind};
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        match std::fs::symlink_metadata(path) {
+            Ok(md) => {
+                if md.file_type().is_symlink() {
+                    return Err(Error::new(ErrorKind::PermissionDenied, format!("{} is a symlink", path.display())));
+                }
+                if !md.is_dir() {
+                    return Err(Error::new(ErrorKind::InvalidInput, format!("{} is not a directory", path.display())));
+                }
+                // SAFETY: geteuid takes no arguments and cannot fail.
+                if md.uid() != unsafe { libc::geteuid() } {
+                    return Err(Error::new(
+                        ErrorKind::PermissionDenied,
+                        format!("{} is not owned by the current user", path.display()),
+                    ));
+                }
+                if md.permissions().mode() & 0o077 != 0 {
+                    tracing::warn!(
+                        path = %path.display(),
+                        mode = format!("{:o}", md.permissions().mode() & 0o777),
+                        "OSE data dir is accessible to group or others; its mode is left unchanged"
+                    );
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            }
+            Err(e) => Err(e),
+        }
     }
     #[cfg(not(unix))]
     {
         std::fs::create_dir_all(path)
     }
+}
+
+/// The variables an OSE child gets from the server's environment. Everything else (server tokens,
+/// other secrets) is dropped. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own
+/// and call the launcher with the caller's environment, so nothing beyond this list is known to
+/// be needed. Not forwarded, to be added only when proven needed: proxy variables.
+const ENV_ALLOWLIST: [&str; 6] = ["HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "USER"];
+
+/// A command for the OSE binary with a cleared environment plus the allowlist.
+fn ose_command(binary: &Path) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.env_clear();
+    for key in ENV_ALLOWLIST {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd
+}
+
+/// Kills a child and everything in its process group (the child leads its own group, see
+/// `process_group(0)` at the spawn), then reaps it.
+fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: killpg takes plain integers; a stale group id at worst fails with ESRCH.
+        unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Removes the computer from the busy set when dropped.
@@ -209,10 +289,14 @@ impl Default for OseManager {
 
 impl OseManager {
     pub fn new(binary: Option<PathBuf>) -> Self {
-        Self::with_data_root(binary, default_data_root())
+        Self::with_root(binary, default_data_root())
     }
 
     pub fn with_data_root(binary: Option<PathBuf>, data_root: PathBuf) -> Self {
+        Self::with_root(binary, Ok(data_root))
+    }
+
+    fn with_root(binary: Option<PathBuf>, data_root: Result<PathBuf, String>) -> Self {
         let processes: Arc<Mutex<HashMap<(String, PathBuf), Process>>> = Arc::new(Mutex::new(HashMap::new()));
         let weak = Arc::downgrade(&processes);
         std::thread::spawn(move || loop {
@@ -236,8 +320,8 @@ impl OseManager {
         self
     }
 
-    pub fn data_root(&self) -> &Path {
-        &self.data_root
+    pub fn data_root(&self) -> Result<&Path, String> {
+        self.data_root.as_deref().map_err(|e| e.clone())
     }
 
     /// `<data root>/<computer id>`, created with mode 0700. The id is validated first, so a
@@ -246,8 +330,9 @@ impl OseManager {
         if !valid_computer_id(computer_id) {
             return Err(format!("invalid computer id: {computer_id:?}"));
         }
-        make_private_dir(&self.data_root).map_err(|e| format!("cannot create OSE data root: {e}"))?;
-        let dir = self.data_root.join(computer_id);
+        let root = self.data_root()?;
+        make_private_dir(root).map_err(|e| format!("cannot create OSE data root: {e}"))?;
+        let dir = root.join(computer_id);
         make_private_dir(&dir).map_err(|e| format!("cannot create OSE data dir: {e}"))?;
         Ok(dir)
     }
@@ -263,7 +348,8 @@ impl OseManager {
 
     /// Runs `<binary> --install-extension <id>[@version]` against the computer's data dir. No
     /// shell; the arguments are separate argv entries; one install at a time per computer; the
-    /// child is killed through its handle on timeout. Blocking: call from `spawn_blocking`.
+    /// child runs with a cleared environment (allowlist only) in its own process group, which is
+    /// killed on timeout. A server shutdown or panic does not kill a running install (TODO follow-up). Blocking: call from `spawn_blocking`.
     pub fn install_extension(
         &self,
         computer_id: &str,
@@ -283,13 +369,17 @@ impl OseManager {
         }
         let _guard = BusyGuard { set: self.installing.clone(), id: computer_id.to_string() };
         let dir = self.computer_data_dir(computer_id).map_err(InstallError::Io)?;
-        let mut child = Command::new(binary)
+        let mut command = ose_command(binary);
+        command
             .arg(FLAG_INSTALL)
             .arg(&spec)
             .args(Self::dir_args(&dir))
             .arg("--accept-server-license-terms")
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // Own process group, so a timeout kills a launcher's children too.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().map_err(|e| InstallError::Io(format!("cannot start OSE server: {e}")))?;
         let parts = [capture(child.stdout.take().expect("piped")), capture(child.stderr.take().expect("piped"))];
         let deadline = Instant::now() + self.install_timeout;
         loop {
@@ -303,8 +393,7 @@ impl OseManager {
                     };
                 }
                 Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(&mut child);
                     let output = collect(&parts, false);
                     return Err(InstallError::Failed {
                         message: format!("install timed out after {}s", self.install_timeout.as_secs_f32()),
@@ -313,8 +402,7 @@ impl OseManager {
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(&mut child);
                     return Err(InstallError::Io(format!("cannot wait for the OSE server: {e}")));
                 }
             }
@@ -344,7 +432,7 @@ impl OseManager {
         let address = listener.local_addr().map_err(|e| format!("cannot read OSE port: {e}"))?;
         drop(listener);
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        let child = Command::new(binary)
+        let child = ose_command(binary)
             .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token", &token,
                 "--accept-server-license-terms", "--telemetry-level", "off"])
             .args(Self::dir_args(&data_dir))
@@ -377,4 +465,28 @@ fn server_binary() -> Option<PathBuf> {
         .map(|e| e.path().join("bin/dpx-ose-server")).filter(|p| p.is_file()).collect();
     candidates.sort();
     candidates.pop()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FR-W4: the per-computer busy flag is released on every path out of an install, including
+    /// a panic. (A dropped HTTP future does not cancel the blocking task: `spawn_blocking` keeps
+    /// running to its end, and the guard drops there.)
+    #[test]
+    fn fr_w4_ose_data_dir_busy_guard_releases_on_panic_and_drop() {
+        let set = Arc::new(Mutex::new(HashSet::new()));
+        set.lock().unwrap().insert("local".to_string());
+        let s = set.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _guard = BusyGuard { set: s, id: "local".into() };
+            panic!("install blew up");
+        });
+        assert!(result.is_err());
+        assert!(set.lock().unwrap_or_else(|e| e.into_inner()).is_empty(), "guard must release on panic");
+        set.lock().unwrap_or_else(|e| e.into_inner()).insert("local".to_string());
+        drop(BusyGuard { set: set.clone(), id: "local".into() });
+        assert!(set.lock().unwrap().is_empty());
+    }
 }

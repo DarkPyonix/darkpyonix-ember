@@ -80,7 +80,7 @@ const RATE_LIMITED_TEXT: &str = "too many attempts, wait and try again";
 const TIMEOUT_TEXT: &str = "timed out waiting for the owner";
 const FINGERPRINT_PROMPT: &str =
     "Does this match the fingerprint your Ember server prints at start and shows in the app? (n, Enter or Ctrl-D declines) [y/N] ";
-const INTERRUPTED_TEXT: &str = "interrupted; nothing was written on this node. The code was already redeemed: ask the owner to cancel the pending computer in Ember, or let it expire.";
+const INTERRUPTED_TEXT: &str = "interrupted; nothing was written on this node. The code may already have been redeemed: ask the owner to cancel the pending computer in Ember, or let it expire.";
 const UNVERIFIED_WARNING: &str = "Warning: this adds an unverified server to this node's allowed peers; the transport crosses NAT, so a rogue server could reach this node from anywhere.";
 
 // ---- options and arguments ----------------------------------------------------------------
@@ -680,6 +680,35 @@ pub async fn cli(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
+/// The three signals that end a terminal session or a process: SIGINT (Ctrl-C), SIGTERM and SIGHUP.
+/// Registered together, once, before the code is redeemed (see `run`).
+struct Signals {
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    fn register() -> anyhow::Result<Signals> {
+        use tokio::signal::unix::{signal, SignalKind};
+        let one = |k| signal(k).map_err(|_| anyhow!("cannot listen for Ctrl-C"));
+        Ok(Signals {
+            int: one(SignalKind::interrupt())?,
+            term: one(SignalKind::terminate())?,
+            hup: one(SignalKind::hangup())?,
+        })
+    }
+
+    /// Completes when any of the three arrives.
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.int.recv() => {}
+            _ = self.term.recv() => {}
+            _ = self.hup.recv() => {}
+        }
+    }
+}
+
 /// The whole flow (design section 2). Everything before the final write leaves nothing on disk
 /// (apart from the lock file and, with `--transport`, the node's own transport key).
 pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome> {
@@ -753,6 +782,18 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     }
 
     // 5. Redeem.
+    // Signal listeners are registered BEFORE the code is spent: from here until the process ends
+    // Ctrl-C (SIGINT), SIGTERM and SIGHUP (the terminal closed, the ssh link dropped) no longer
+    // kill the process (registering a tokio signal listener replaces the default action for the
+    // rest of the process). While the redeem request and the poll loop run, a signal is turned
+    // into a clean exit that writes nothing. After the delivery nothing reads the listeners any
+    // more, so no signal can kill the process in the middle of the write, which would lose the
+    // token; the cost is that the fingerprint question after the delivery is declined with n,
+    // Enter or Ctrl-D (FINGERPRINT_PROMPT says so), not Ctrl-C. `unix::signal` registers now
+    // (`ctrl_c()` would register on its first poll and a signal between two polls would be lost).
+    // Not covered by a test: it needs a signal sent to the test process. The server cannot cancel
+    // the pending enrolment (no such route, issue #617).
+    let mut signals = Signals::register()?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -760,12 +801,11 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         .build()
         .map_err(|_| anyhow!("cannot build the HTTP client"))?;
     tracing::info!(server = %server.base, "redeeming an enrol code");
-    let resp = client
-        .post(format!("{}/enrol/redeem", server.base))
-        .json(&json!({ "code": opts.code, "node_public_info": info }))
-        .send()
-        .await
-        .map_err(|e| anyhow!("{}", net_err(&e)))?;
+    let sent = client.post(format!("{}/enrol/redeem", server.base)).json(&json!({ "code": opts.code, "node_public_info": info })).send();
+    let resp = tokio::select! {
+        r = sent => r.map_err(|e| anyhow!("{}", net_err(&e)))?,
+        _ = signals.recv() => bail!("{INTERRUPTED_TEXT}"),
+    };
     match resp.status().as_u16() {
         200 => {}
         403 => bail!("{REFUSED_TEXT}"),
@@ -793,17 +833,6 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         )),
         None => io.say("Waiting for the owner to confirm this computer in Ember."),
     }
-    // From here until the process ends Ctrl-C is handled by this listener and no longer kills the
-    // process (registering a tokio signal listener replaces the default SIGINT action for the
-    // rest of the process). While polling, the select below turns it into a clean exit. After the
-    // delivery nothing reads it any more, so a Ctrl-C can no longer kill the process in the middle
-    // of the write, which would lose the token; the cost is that the fingerprint question after
-    // the delivery is declined with n, Enter or Ctrl-D (FINGERPRINT_PROMPT says so), not Ctrl-C.
-    // `unix::signal` registers now (`ctrl_c()` would register on its first poll, and a signal
-    // between two polls would be lost). Not covered by a test: it needs a signal sent to the test
-    // process. The server cannot cancel the pending enrolment (no such route, issue #617).
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .map_err(|_| anyhow!("cannot listen for Ctrl-C"))?;
     let poll_url = format!("{}/enrol/status/{}", server.base, redeemed.enrol_id);
     let started = Instant::now();
     let mut delay = opts.poll_every;
@@ -821,7 +850,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
                 }
                 poll_once(&client, &poll_url, &redeemed.poll_secret).await
             } => r?,
-            _ = sigint.recv() => bail!("{INTERRUPTED_TEXT}"),
+            _ = signals.recv() => bail!("{INTERRUPTED_TEXT}"),
         };
         match polled {
             Polled::Answer(a) => {

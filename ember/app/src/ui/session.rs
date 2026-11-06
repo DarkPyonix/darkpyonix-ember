@@ -77,6 +77,9 @@ pub fn timeline_summary(demo: bool) -> &'static str {
 }
 
 pub const UI_STRINGS: &[&str] = &[
+    crate::ui::home::INTEGRATIONS_TITLE,
+    crate::ui::home::INTEGRATIONS_PENDING,
+    crate::ui::home::ATTACH_UNSUPPORTED,
     SOON,
     NO_PROJECT,
     NO_MEMBERS,

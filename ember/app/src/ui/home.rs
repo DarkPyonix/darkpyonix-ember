@@ -20,6 +20,20 @@ pub const UNAVAILABLE: &str = "준비 중입니다";
 /// The built-in project that holds Home chats by default (FR-L13).
 pub const DEFAULT_PROJECT: &str = "기본 프로젝트";
 
+/// The Home integrations area (FR-L23, #498): Ember has no integration concept yet, so the
+/// area names itself and says so. No count, no service name, nothing that looks connected.
+pub const INTEGRATIONS_TITLE: &str = "연동";
+pub const INTEGRATIONS_PENDING: &str = "연동은 준비 중입니다. 어떤 서비스와 연결할지는 아직 정해지지 않았습니다.";
+
+/// The title and the honest line of the integrations area.
+pub fn integrations_area() -> (&'static str, &'static str) {
+    (INTEGRATIONS_TITLE, INTEGRATIONS_PENDING)
+}
+
+/// What tapping the composer's attach button says (FR-L11, #500): picking files needs the
+/// toolkit's file picker (compose-rust#483, planned for v0.0.8).
+pub const ATTACH_UNSUPPORTED: &str = "파일 고르기는 아직 지원하지 않습니다";
+
 pub const GREETING: &str = "무엇을 도와줄까요?";
 pub const COMPOSER_PLACEHOLDER: &str =
     "무엇이든 물어보세요. 새 대화는 고른 프로젝트의 팀원이 됩니다.";
@@ -820,6 +834,25 @@ pub fn read_dash(state: &State) -> Dash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l23_integrations_area_is_honest() {
+        let (title, line) = integrations_area();
+        assert_eq!(title, "연동");
+        assert!(line.contains("준비 중"));
+        assert!(!line.chars().any(|c| c.is_ascii_digit()), "no count: {line}");
+        for name in ["GitHub", "Slack", "Discord", "Linear", "캘린더", "메일"] {
+            assert!(!line.contains(name), "no service name: {name}");
+        }
+        assert!(!line.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn fr_l11_attach_is_disabled_with_a_reason() {
+        assert_ne!(ATTACH_UNSUPPORTED, UNAVAILABLE);
+        assert!(ATTACH_UNSUPPORTED.contains("지원하지 않습니다"));
+        assert!(ATTACH_UNSUPPORTED.ends_with("습니다"));
+    }
 
     #[test]
     fn fr_u7_hatch_lines_stay_inside_the_bar() {

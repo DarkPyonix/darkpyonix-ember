@@ -19,8 +19,8 @@ pub use crate::ui::home::{
     harness_block, kpis, mode_after_harness_change, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
-    PermMode, ProjectTile, Selection, StatusCounts, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, integrations_area, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
@@ -790,8 +790,12 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, !icon_only || pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
-        // TODO(FR-L11): attachments need the file picker and an upload API.
-        super::components::IconButton(IconRole::Add, true, || notice::post(UNAVAILABLE));
+        // TODO(compose-rust#483, #500): attachments need the file picker (planned for v0.0.8)
+        // and an upload API. Until then the button is dimmed and says why when tapped.
+        // TODO(compose-rust#429): the dimmed wrapper has no disabled accessible name.
+        cu::Box().modifier(Modifier::new().alpha(0.5)).content(|| {
+            super::components::IconButton(IconRole::Add, true, || notice::post(ATTACH_UNSUPPORTED));
+        });
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
@@ -927,6 +931,20 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
             Unavailable(shell::ICON_CPU_SVG, "컴퓨터 부하");
         }
         ProjectsTile(&d.projects, ui, l);
+        IntegrationsArea();
+    });
+}
+
+/// `연동` (FR-L23, #498): Ember has no integration concept yet, so the area is one muted line,
+/// never a count, a card or a button that pretends to connect.
+/// TODO(#498): needs an owner decision on which services and an API before any card.
+fn IntegrationsArea() {
+    let p = ember_theme().palette;
+    let (title, line) = integrations_area();
+    Tile(|| {
+        Label(title, Fs::Md, Weight::Semibold, None, Some(1));
+        cu::Spacer().modifier(Modifier::new().height(6.0));
+        Label(line, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
     });
 }
 

@@ -178,6 +178,18 @@ pub struct Project {
     pub character_style: Option<String>,
     #[serde(default)]
     pub archived: bool,
+    /// Harness to account id (FR-L26); `null` for a harness whose account was deleted. `{}`, a
+    /// missing field or `null` reads as no overrides.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub profile_overrides: std::collections::BTreeMap<String, Option<String>>,
+}
+
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// New member defaults of a project (FR-L26): harness kind, model id and permission mode.
@@ -199,7 +211,7 @@ impl MemberDefaults {
 
 /// `PATCH /projects/{name}` body (FR-L26). `None` fields are omitted. For the text fields an
 /// empty string clears; `member_defaults: Some(None)` sends `null` and clears. The client never
-/// sends `leader_session`, `profile_overrides` or `archived` (the server answers 400 `not_yet`).
+/// sends `leader_session` or `archived` (the server answers 400 `not_yet`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ProjectPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,6 +224,10 @@ pub struct ProjectPatch {
     pub member_defaults: Option<Option<MemberDefaults>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub character_style: Option<String>,
+    /// The whole map, harness to account id (`Some(map)` replaces the stored one, an empty map
+    /// clears all). The field is never sent as `null` (the server answers 400).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_overrides: Option<std::collections::BTreeMap<String, Option<String>>>,
 }
 
 impl ProjectPatch {

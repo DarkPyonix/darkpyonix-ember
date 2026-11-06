@@ -122,6 +122,16 @@ pub fn breadcrumb_segments(path: &str, folder: &str) -> Vec<String> {
         .collect()
 }
 
+/// The editor page's grid tracks as inline style: the mockup's `.ed` grid with its `.no-left` and
+/// `.no-bottom` cases, a closed left column 0 wide and a closed bottom row 0 high.
+pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
+    format!(
+        "grid-template-columns:{}; grid-template-rows:{};",
+        if has_left { "var(--stw) 280px minmax(0,1fr) var(--stw)" } else { "var(--stw) 0 minmax(0,1fr) var(--stw)" },
+        if has_bottom { "52px minmax(0,1fr) 260px var(--sbh)" } else { "52px minmax(0,1fr) 0 var(--sbh)" },
+    )
+}
+
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")

@@ -697,6 +697,8 @@ dependencies = [
  "ember-node",
  "ember-transport",
  "futures",
+ "hyper",
+ "hyper-util",
  "libc",
  "reqwest",
  "rusqlite",

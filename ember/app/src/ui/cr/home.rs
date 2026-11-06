@@ -1389,12 +1389,21 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
                 let d = days.clone();
                 // The mockup's toggle pill is 42 x 26.
                 let fill = if days.get() == n { p.sel } else { p.surface_2 };
-                cu::Button(&format!("{n}일"))
-                    .variant(ButtonVariant::Text)
-                    .max_lines(1)
-                    .color(paint(p.text_2))
-                    .modifier(Modifier::new().size(42.0, 26.0).background(paint(fill)).shape_role(ShapeRole::Full))
-                    .on_click(move || d.set(n));
+                let on = days.get() == n;
+                Clickable(
+                    Modifier::new().size(42.0, 26.0).background(paint(fill)).shape_role(ShapeRole::Full),
+                    Alignment::Center,
+                    move || d.set(n),
+                    || {
+                        Label(
+                            &format!("{n}일"),
+                            Fs::Xs,
+                            Weight::Medium,
+                            Some(paint(if on { p.text } else { p.text_2 })),
+                            Some(1),
+                        );
+                    },
+                );
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             }
         });

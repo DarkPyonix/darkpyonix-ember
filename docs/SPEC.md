@@ -529,6 +529,11 @@ Security boundary:
   guest door.
 - The OSE child (install and start) does not inherit the server environment: it gets `HOME`, `PATH`, `LANG`,
   `LC_ALL`, `TMPDIR` and `USER` only. `ember/ose/smoke.sh` and `regress.sh` set no variable of their own.
+  **Effect of the cleared environment (unverified with a real extension host):** proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms), `SSL_CERT_FILE`, `SHELL`, `TERM`,
+  `XDG_*` and `SSH_AUTH_SOCK` do not reach the OSE or its extensions, so an Open VSX download behind a proxy
+  may fail and an extension that needs one of these finds it unset. Follow-up #471: an opt-in server setting
+  (for example `EMBER_OSE_ENV_PASSTHROUGH`, variable names only, default empty, never a request field).
 - **Known gap, signature verification:** Open VSX installs need `extensions.verifySignature` off in the data
   dir's settings (`ember/ose/smoke.sh` writes it for the Machine and User scopes). The route does not set it and
   does not verify any signature, so an install from the route either fails on the signature check or, with the

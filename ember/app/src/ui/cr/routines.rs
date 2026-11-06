@@ -25,8 +25,9 @@ use ember_client::api::ApiError;
 pub use crate::ui::routines::{
     begin_demo_run, changed_patch, current_value_line, demo_run_allowed, demo_session_title,
     finish_demo_run, patch_is_empty, run_is_simulated, DEMO_RUN_DONE, DEMO_RUN_MS,
-    DEMO_RUN_STARTED, SAMPLE_FLAG,
-    ago, big_time, changes_frozen_fields, civil_from_days, cron_valid, days_from_civil,
+    DEMO_RUN_STARTED, SAMPLE_FLAG, DEMO_SESSION_PREFIX, NAME_SERVER_REASON, SERVER_CANNOT_CHANGE,
+    not_saved_sentence, run_row_text, unsaved_fields,
+    ago, big_time, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
@@ -55,8 +56,6 @@ use crate::ui::cr::notice;
 const RUN_NOTICE: &str = "서버에 연결되지 않아 지금 실행할 수 없습니다";
 const NO_CWD_NOTICE: &str =
     "이 프로젝트의 작업 폴더를 알 수 없습니다. 프로젝트에서 세션을 한 번 시작하셔야 합니다";
-const FROZEN_NOTICE: &str =
-    "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 바꿀 수 없어 프롬프트와 일정만 저장했습니다";
 const RUNS_SHOWN: usize = 20;
 
 fn store() -> &'static Mutex<LocalStore> {
@@ -136,6 +135,39 @@ fn demo_run(id: &str, entries_st: &MutableState<Vec<Entry>>, tick: &MutableState
             notice::post(DEMO_RUN_DONE);
         },
     );
+}
+
+/// Capture-only hook, debug builds only: `EMBER_CR_ROUTINE_EDIT=1` opens the edit form of the
+/// routine selected by `EMBER_CR_ROUTINE` at start.
+fn capture_edit_panel(selected: Option<&str>) -> Panel {
+    if cfg!(debug_assertions) && std::env::var("EMBER_CR_ROUTINE_EDIT").as_deref() == Ok("1") {
+        if let Some(id) = selected {
+            return Panel::Edit(id.to_string());
+        }
+    }
+    Panel::View
+}
+
+/// Capture-only hook, debug builds and demo mode only: `EMBER_CR_ROUTINE_RUN=running` (or `1`)
+/// starts the simulated run of the selected routine at start and holds the "실행 중" state
+/// without finishing, `=done` shows the finished entry. It needs no timer, so a screenshot
+/// always catches the state (`EMBER_CR_ROUTINE_RUN_AT` is therefore not needed).
+fn capture_demo_run(entries: &mut [Entry], selected: Option<&str>) {
+    if !cfg!(debug_assertions) || !demo_active() {
+        return;
+    }
+    let mode = std::env::var("EMBER_CR_ROUTINE_RUN").unwrap_or_default();
+    if !matches!(mode.as_str(), "1" | "running" | "done") {
+        return;
+    }
+    let Some(id) = selected else { return };
+    let Some(e) = entries.iter_mut().find(|e| e.routine.id == id) else { return };
+    if !demo_run_allowed(true, sample_entries().iter().any(|s| s.routine.id == id)) {
+        return;
+    }
+    if begin_demo_run(e, now_local()).is_ok() && mode == "done" {
+        finish_demo_run(e, Some(format!("{DEMO_SESSION_PREFIX}capture")));
+    }
 }
 
 /// What the server last answered: `online` is false until a load succeeds.
@@ -473,10 +505,16 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             });
         mutable_state_of(preset)
     });
-    let panel = remember_with_key(launch_tick, || mutable_state_of(Panel::View));
+    let panel_preset = capture_edit_panel(selected.get().as_deref());
+    let panel = remember_with_key(launch_tick, move || mutable_state_of(panel_preset));
     let filter = remember_with_key(launch_tick, || mutable_state_of(None::<String>));
     let query = remember_with_key(launch_tick, || mutable_state_of(String::new()));
-    let entries_state = remember_with_key(launch_tick, move || mutable_state_of(entries));
+    let capture_sel = selected.get();
+    let entries_state = remember_with_key(launch_tick, move || {
+        let mut entries = entries;
+        capture_demo_run(&mut entries, capture_sel.as_deref());
+        mutable_state_of(entries)
+    });
     let online_state = remember_with_key(launch_tick, move || mutable_state_of(online));
 
     let _ = tick.get();
@@ -591,7 +629,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .find(|e| e.routine.id == id)
                         .map(|e| e.routine.clone())
                 });
-                let frozen = old.as_ref().is_some_and(|o| changes_frozen_fields(&draft, o));
+                let unsaved = old.as_ref().map(|o| unsaved_fields(&draft, o)).unwrap_or_default();
+                let frozen = !unsaved.is_empty();
                 let patch = match &old {
                     Some(o) => changed_patch(&draft, o),
                     None => schedule_patch(&draft),
@@ -599,16 +638,15 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 if patch_is_empty(&patch) {
                     // Nothing the server can store changed; do not send an empty PATCH.
                     panel_ref.set(Panel::View);
-                    notice::post(if frozen {
-                        "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 서버에서 바꿀 수 없어 저장하지 않았습니다"
-                    } else {
-                        "바뀐 내용이 없습니다"
-                    });
+                    notice::post(
+                        not_saved_sentence(&unsaved)
+                            .unwrap_or_else(|| "바뀐 내용이 없습니다".to_string()),
+                    );
                     return;
                 }
                 remote_action(tick_ref.clone(), async move {
                     services().client.api().update_schedule(&id, &patch).await?;
-                    Ok(frozen.then(|| FROZEN_NOTICE.to_string()))
+                    Ok(not_saved_sentence(&unsaved).map(|n| format!("{n}. 프롬프트와 일정만 저장했습니다")))
                 });
                 panel_ref.set(Panel::View);
                 return;
@@ -869,6 +907,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         RoutineForm(
             initial,
             editing.clone(),
+            editing.as_deref().is_some_and(is_remote),
             &computers,
             &existing_projects,
             move |d| save_cb((d, editing.clone())),
@@ -1691,8 +1730,8 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
     let p = ember_theme().palette;
     let tone = status_tone(run.status);
     let session = run.session.clone();
-    let status_lbl = run.status.label();
-    let ago_lbl = ago(now, run.at);
+    let row = run_row_text(run, now, simulated);
+    let (status_lbl, ago_lbl) = (row.status, row.ago);
     InsetPanel(true, move || {
         cu::Row()
             .alignment(Alignment::CenterStart)
@@ -1723,6 +1762,7 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
+    server: bool,
     computers: &[(String, String)],
     projects: &[String],
     mut on_save: impl FnMut(FormDraft) + Clone + 'static,
@@ -1789,10 +1829,18 @@ fn RoutineForm(
                         // below already start on the stored project, harness, model, mode and
                         // computer (the draft is built by `FormDraft::from_routine`).
                         FormLabel("이름");
-                        CurrentValue(editing.is_some(), &initial.name);
+                        if server {
+                            Label(NAME_SERVER_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        } else {
+                            CurrentValue(editing.is_some(), &initial.name);
+                        }
                         let draft_name = draft.clone();
                         EmberField(FieldOptions {
                             fill_max_width: true,
+                            // TODO(server): `SchedulePatch` takes no name, so a server routine's
+                            // name is shown as is and cannot be edited.
+                            text: server.then(|| initial.name.clone()),
+                            enabled: server.then_some(false),
                             placeholder: if editing.is_some() {
                                 "바꾸려면 새 이름을 입력하세요".to_string()
                             } else {
@@ -1804,6 +1852,7 @@ fn RoutineForm(
                             ..Default::default()
                         });
                         FormLabel("프로젝트");
+                        FrozenReason(server);
                         cu::ScrollRow()
                             .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                             .content(|| {
@@ -1812,6 +1861,9 @@ fn RoutineForm(
                                     let n = name.clone();
                                     let selected = d.sel.project == *name;
                                     PickChip(name, None, selected, false, move || {
+                                        if server {
+                                            return;
+                                        }
                                         sel_proj.update(|d| d.sel.project = n.clone());
                                     });
                                     cu::Spacer().modifier(Modifier::new().width(SP[1]));
@@ -1846,6 +1898,7 @@ fn RoutineForm(
                         });
                         Label(&schedule_hint, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
                         FormLabel("하네스");
+                        FrozenReason(server);
                         cu::ScrollRow()
                             .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                             .content(|| {
@@ -1853,7 +1906,9 @@ fn RoutineForm(
                                     if harness_block(h, &agents, &[]).is_none() {
                                         let sel_h = draft.clone();
                                         PickChip(h.label(), None, d.sel.option.harness == h, false, move || {
-                                            sel_h.update(|d| d.sel = d.sel.with_harness(h));
+                                            if !server {
+                                                sel_h.update(|d| d.sel = d.sel.with_harness(h));
+                                            }
                                         });
                                         cu::Spacer().modifier(Modifier::new().width(SP[1]));
                                     }
@@ -1886,12 +1941,15 @@ fn RoutineForm(
                                 }
                             });
                         FormLabel("컴퓨터");
+                        FrozenReason(server);
                         cu::ScrollRow()
                             .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
                             .content(|| {
                                 let sel_c = draft.clone();
                                 PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
-                                    sel_c.update(|d| d.sel.computer = None);
+                                    if !server {
+                                        sel_c.update(|d| d.sel.computer = None);
+                                    }
                                 });
                                 cu::Spacer().modifier(Modifier::new().width(SP[1]));
                                 for (cid, cname) in &comp_list {
@@ -1899,7 +1957,9 @@ fn RoutineForm(
                                     let cid_clone = cid.clone();
                                     let selected = d.sel.computer.as_deref() == Some(cid.as_str());
                                     PickChip(cname, None, selected, false, move || {
-                                        sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
+                                        if !server {
+                                            sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
+                                        }
                                     });
                                     cu::Spacer().modifier(Modifier::new().width(SP[1]));
                                 }
@@ -1944,6 +2004,13 @@ fn RoutineForm(
             });
         });
     });
+}
+
+/// The reason beside the chips a server routine cannot change (TODO(server)).
+fn FrozenReason(server: bool) {
+    if server {
+        Label(SERVER_CANNOT_CHANGE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), Some(1));
+    }
 }
 
 /// The stored value of a text field in the edit form, as a muted line above the field (#493).
@@ -2891,7 +2958,6 @@ mod tests {
             LOCAL_NOTE.into(),
             RUN_NOTICE.into(),
             NO_CWD_NOTICE.into(),
-            FROZEN_NOTICE.into(),
         ];
         strings.extend(Trigger::ALL.iter().map(|t| t.label().to_string()));
         for e in [

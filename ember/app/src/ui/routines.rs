@@ -898,6 +898,56 @@ pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
     }
 }
 
+/// Why a server routine's name, project, agent and computer cannot be edited (TODO(server): the
+/// `SchedulePatch` takes only the prompt, the schedule kind and catch-up).
+pub const SERVER_CANNOT_CHANGE: &str = "서버가 아직 바꿀 수 없습니다";
+pub const NAME_SERVER_REASON: &str = "이름은 서버가 아직 바꿀 수 없습니다";
+
+/// The fields of a draft that differ from `old` and that the server cannot store, in form order.
+pub fn unsaved_fields(d: &FormDraft, old: &Routine) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if d.name.trim() != old.name.trim() {
+        v.push("이름");
+    }
+    if d.sel.project != old.sel.project {
+        v.push("프로젝트");
+    }
+    if d.sel.option.harness != old.sel.option.harness {
+        v.push("하네스");
+    }
+    if d.sel.computer != old.sel.computer {
+        v.push("컴퓨터");
+    }
+    v
+}
+
+/// The sentence for an edit whose patch holds nothing the server takes: it names what was not
+/// saved instead of saying nothing changed. `None` when no such field changed.
+pub fn not_saved_sentence(fields: &[&str]) -> Option<String> {
+    if fields.is_empty() {
+        return None;
+    }
+    Some(format!("{}은(는) 서버가 아직 바꿀 수 없어 저장하지 않았습니다", fields.join(", ")))
+}
+
+/// One row of a run history, as plain parts (the screen draws them as pills and a button).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRowText {
+    pub status: &'static str,
+    pub flag: Option<&'static str>,
+    pub ago: String,
+    pub opens_session: bool,
+}
+
+pub fn run_row_text(r: &Run, now: Minutes, simulated: bool) -> RunRowText {
+    RunRowText {
+        status: r.status.label(),
+        flag: simulated.then_some(SAMPLE_FLAG),
+        ago: ago(now, r.at),
+        opens_session: r.session.is_some(),
+    }
+}
+
 /// Whether a patch carries no change.
 pub fn patch_is_empty(p: &SchedulePatch) -> bool {
     p.prompt.is_none() && p.kind.is_none() && p.catch_up.is_none()
@@ -1695,6 +1745,46 @@ mod tests {
         let p = changed_patch(&d, &old);
         assert!(p.prompt.is_none());
         assert_eq!(p.kind, Some(cron_kind("30 8 * * 1")));
+    }
+
+    #[test]
+    fn fr_l25_edit_name_is_not_silently_dropped() {
+        let old = routine("r1", "CI 요약", "ember", "0 9 * * *");
+        let mut d = FormDraft::from_routine(&old);
+        d.name = "새 이름".into();
+        assert!(patch_is_empty(&changed_patch(&d, &old)), "the server takes no name");
+        assert_eq!(unsaved_fields(&d, &old), vec!["이름"]);
+        assert!(NAME_SERVER_REASON.contains("이름은 서버가 아직 바꿀 수 없습니다"));
+    }
+
+    #[test]
+    fn fr_l25_not_saved_sentence_names_the_fields() {
+        let old = routine("r1", "a", "ember", "0 9 * * *");
+        let mut d = FormDraft::from_routine(&old);
+        assert_eq!(not_saved_sentence(&unsaved_fields(&d, &old)), None);
+        d.name = "b".into();
+        d.sel.project = "core".into();
+        let s = not_saved_sentence(&unsaved_fields(&d, &old)).unwrap();
+        assert!(s.starts_with("이름, 프로젝트"), "{s}");
+        assert!(s.ends_with("저장하지 않았습니다"));
+        assert!(!s.contains("바뀐 내용이 없습니다"));
+    }
+
+    #[test]
+    fn fr_l25_run_history_row_text_for_running_and_done() {
+        let mut e = entry(routine("r1", "a", "ember", "0 9 * * *"), vec![run(10, RunStatus::Done)]);
+        begin_demo_run(&mut e, 100).unwrap();
+        let running = run_row_text(&e.runs[0], 100, true);
+        assert_eq!(running.status, "실행 중");
+        assert_eq!(running.flag, Some("예시"));
+        assert_eq!(running.ago, "방금 전");
+        assert!(!running.opens_session);
+        finish_demo_run(&mut e, Some("demo-new-1".into()));
+        let done = run_row_text(&e.runs[0], 103, true);
+        assert_eq!(done.ago, "3분 전");
+        assert!(done.opens_session);
+        let old = run_row_text(&e.runs[1], 103, false);
+        assert_eq!(old.flag, None);
     }
 
     #[test]

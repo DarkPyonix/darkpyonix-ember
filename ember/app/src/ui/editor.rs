@@ -175,6 +175,12 @@ pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
     )
 }
 
+/// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row
+/// is 0 high and the bottom window takes its row and the one below.
+pub fn editor_grid_style_maximized() -> String {
+    "grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw); grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
+}
+
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")

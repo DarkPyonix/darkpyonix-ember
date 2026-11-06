@@ -320,10 +320,21 @@ async fn fr_c2_enrol_door_does_not_read_the_guest_variables_and_the_guest_door_d
 // ---- the route table is empty ----
 
 /// C3a: the table is exactly `POST /enrol/redeem` and `GET /enrol/status/{enrol_id}`. Everything
-/// else is 404 with an empty body and exactly the two door headers: every other path, and every
-/// other method on those two paths (the router's 405 is turned into the plain 404). The two
-/// routes themselves answer something else (415 for a redeem with no content type, 404 with a JSON
-/// body for a poll), which `fr_c2_enrol_redeem.rs` pins in detail.
+/// else is 404 with an empty body. Every path OUTSIDE the two registered paths carries exactly the
+/// two door headers whatever the method, so those cannot be told apart. A wrong METHOD on a
+/// registered path is also a 404 with an empty body, but it also carries `allow`: the router's 405
+/// body is replaced by `method_not_allowed_fallback`, which keeps the 405's headers (measured in
+/// CI on #584; the author had written 'unverified' for this very behaviour). The two registered
+/// paths are public (SPEC FR-C2e, the node calls them), so `allow` leaks nothing new; the
+/// supervisor accepted this exception on 2026-11-06. The two routes themselves answer something
+/// else (415 for a redeem with no content type, 404 with a JSON body for a poll), which
+/// `fr_c2_enrol_redeem.rs` pins in detail.
+///
+/// THE MATRIX BELOW IS MEASURED, NOT READ: every (method, path) pair prints its header names as a
+/// `ROUTE_MATRIX|` line straight to the real stdout (cargo hides the output of a passing test and
+/// the harness captures print!, so the line reaches the CI log only this way). The assertion for a
+/// wrong method on a registered path is deliberately loose (the two door headers, with or without
+/// `allow`) until the matrix has been read from CI and pinned.
 #[tokio::test]
 async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
     let a = unlimited(&door(&[]), EnrolDoor::routes(test_enrol()));
@@ -358,7 +369,20 @@ async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
             let names: BTreeSet<String> =
                 h.keys().map(|k| k.as_str().to_string()).filter(|k| k != "content-length").collect();
             let names: BTreeSet<&str> = names.iter().map(String::as_str).collect();
-            assert_eq!(names, want, "{m} {p}");
+            {
+                // Straight to the real stdout so that the line survives in the CI log of a passing test.
+                use std::io::Write;
+                let allow = h.get("allow").and_then(|v| v.to_str().ok()).unwrap_or("-");
+                let _ = writeln!(std::io::stdout(), "ROUTE_MATRIX|{m}|{p}|{names:?}|allow={allow}");
+            }
+            let registered = p == "/enrol/redeem" || p == "/enrol/status/x";
+            if registered {
+                // A wrong method on a registered path: the two door headers, with or without `allow`.
+                let without_allow: BTreeSet<&str> = names.iter().copied().filter(|n| *n != "allow").collect();
+                assert_eq!(without_allow, want, "{m} {p}: {names:?}");
+            } else {
+                assert_eq!(names, want, "{m} {p}");
+            }
             assert_eq!(h["x-content-type-options"], "nosniff");
             assert_eq!(h["cache-control"], "no-store");
         }

@@ -1250,6 +1250,8 @@ mod tests {
                 "routines.rs" => 2,
                 // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
                 "vcs.rs" => 2,
+                // The accessible-name overlay of the channel + button (#499, compose-rust#429).
+                "new_channel.rs" => 1,
                 _ => 0,
             };
             assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");

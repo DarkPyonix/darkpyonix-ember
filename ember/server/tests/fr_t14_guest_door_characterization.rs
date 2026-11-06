@@ -284,15 +284,26 @@ async fn fr_t14_char_head_trace_and_connect_are_405_with_no_body_after_the_host_
         let (s, h, body) = call(&a, m, "/ok", &[("host", HOST)], Vec::new(), None).await;
         assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "{m}");
         assert!(body.is_empty(), "{m}");
-        // No Allow header and no content type: only the two door headers.
-        assert_eq!(names(&h), ["cache-control", "x-content-type-options"], "{m}");
-        // The method check runs after Host and Origin: a bad one is 403, not 405.
+        // The reply has no content type; besides the two door headers it carries `allow`, which is
+        // added by axum's method router, not by the door (CHARACTERISES CURRENT BEHAVIOUR: the
+        // value of `allow` is not pinned, only that it is present).
+        assert_eq!(names(&h), ["allow", "cache-control", "x-content-type-options"], "{m}");
+        // The method check runs after Host and Origin: a bad one is 403, not 405. A reply to HEAD
+        // has no body by the HTTP rules, so only the other methods can be read back as JSON.
         let (s, _, body) = call(&a, m, "/ok", &[("host", b"evil.example")], Vec::new(), None).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{m} host");
-        assert_eq!(json_of(&body), forbidden("host not allowed"));
+        if m == "HEAD" {
+            assert!(body.is_empty(), "a HEAD reply has no body");
+        } else {
+            assert_eq!(json_of(&body), forbidden("host not allowed"));
+        }
         let (s, _, body) = call(&a, m, "/ok", &[("host", HOST), ("origin", b"null")], Vec::new(), None).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{m} origin");
-        assert_eq!(json_of(&body), forbidden("origin not allowed"));
+        if m == "HEAD" {
+            assert!(body.is_empty(), "a HEAD reply has no body");
+        } else {
+            assert_eq!(json_of(&body), forbidden("origin not allowed"));
+        }
         // 405 on an unknown path as well (before the 404 fallback).
         assert_eq!(call(&a, m, "/nothing", &[("host", HOST)], Vec::new(), None).await.0, StatusCode::METHOD_NOT_ALLOWED, "{m} unknown");
     }
@@ -416,7 +427,8 @@ async fn fr_t14_char_security_headers_on_every_kind_of_answer() {
     check_values(&h);
     let (s, h, _) = call(&a, "TRACE", "/ok", &[("host", HOST)], Vec::new(), None).await;
     assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(names(&h), two);
+    // `allow` is added by axum's method router, not by the door; its value is not pinned.
+    assert_eq!(names(&h), ["allow", "cache-control", "x-content-type-options"]);
     check_values(&h);
     let (s, h, _) = get_with(&a, "/ok", &[("host", HOST), ("upgrade", b"websocket")]).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);

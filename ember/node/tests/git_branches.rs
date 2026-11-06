@@ -36,6 +36,10 @@ async fn serve(root: &Path) -> (String, reqwest::Client) {
 async fn fixture() -> Fx {
     let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.scratch/git-branches-tests");
     std::fs::create_dir_all(&scratch).unwrap();
+    // The scratch directory sits inside this checkout's work tree; stop git's upward search there so
+    // a plain directory is not found to be part of the checkout's own repository.
+    static CEILING: std::sync::Once = std::sync::Once::new();
+    CEILING.call_once(|| std::env::set_var("GIT_CEILING_DIRECTORIES", scratch.canonicalize().unwrap()));
     let dir = tempfile::Builder::new().prefix("b").tempdir_in(scratch).unwrap();
     let root = dir.path().canonicalize().unwrap();
     let bare = root.join("remote.git");
@@ -151,5 +155,5 @@ async fn fr_g9_a_plain_directory_is_404_not_a_repo() {
     std::fs::create_dir_all(&plain).unwrap();
     let (status, body) = branches(&fx, &plain).await;
     assert_eq!(status, 404);
-    assert_eq!(body["error"], "not_a_repo");
+    assert_eq!(body["code"], "not_a_repo");
 }

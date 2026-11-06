@@ -765,14 +765,16 @@ impl AgentRun for ClaudeRun {
     /// saw (it was stored by the previous server). Rebuild the entry, so the answer can go out.
     async fn restore_pending_approvals(
         &mut self,
-        pending: Vec<(String, String, Value)>,
+        pending: Vec<(String, String, Value, bool)>,
     ) {
         if !self.reattached || pending.is_empty() {
             return;
         }
         let mut st = self.state.lock().unwrap();
-        for (id, tool, input) in pending {
-            st.pending.entry(id).or_insert((tool, input, false));
+        for (id, tool, input, needs_person) in pending {
+            // The stored flag is kept: a flagged tool the CLI marked as needing a person must not
+            // lose that safety net (approval_policy) across a server restart.
+            st.pending.entry(id).or_insert((tool, input, needs_person));
         }
         st.turn_active = true;
     }

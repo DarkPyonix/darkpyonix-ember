@@ -601,22 +601,11 @@ impl Sessions {
     }
 
     /// Prompts of `id` that were asked and not answered or withdrawn by a turn end: `(approval id,
-    /// tool, input)` (FR-S8).
-    fn pending_approvals(&self, id: &str) -> anyhow::Result<Vec<(String, String, serde_json::Value)>> {
-        let mut pending: Vec<(String, String, serde_json::Value)> = Vec::new();
-        for e in self.store.events_after(id, 0)? {
-            match e.event {
-                AgentEvent::ApprovalRequested { approval_id, tool, input, .. } => {
-                    pending.push((approval_id, tool, input))
-                }
-                AgentEvent::ApprovalResolved { approval_id, .. } => {
-                    pending.retain(|(p, _, _)| *p != approval_id)
-                }
-                AgentEvent::TurnEnded { .. } => pending.clear(),
-                _ => {}
-            }
-        }
-        Ok(pending)
+    /// tool, input, needs_person)` (FR-S8). `needs_person` is the stored flag of the request, so a
+    /// rejoined adapter keeps the safety net for a tool the CLI marked as needing a person.
+    fn pending_approvals(&self, id: &str) -> anyhow::Result<Vec<(String, String, serde_json::Value, bool)>> {
+        let events: Vec<AgentEvent> = self.store.events_after(id, 0)?.into_iter().map(|e| e.event).collect();
+        Ok(pending_approvals_of(events))
     }
 
     /// Questions of `id` that were asked and not answered, skipped or withdrawn by a turn end:
@@ -965,5 +954,72 @@ impl Sessions {
 
     pub async fn is_live(&self, id: &str) -> bool {
         self.live.lock().await.contains_key(id)
+    }
+}
+
+/// The approvals still pending in `events` (oldest first): asked, not resolved, and not withdrawn
+/// by a turn end. `needs_person` is the stored flag, so it survives a server restart (FR-S8, FR-A5).
+fn pending_approvals_of(events: Vec<AgentEvent>) -> Vec<(String, String, serde_json::Value, bool)> {
+    let mut pending: Vec<(String, String, serde_json::Value, bool)> = Vec::new();
+    for event in events {
+        match event {
+            AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person } => {
+                pending.push((approval_id, tool, input, needs_person))
+            }
+            AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|(p, _, _, _)| *p != approval_id),
+            AgentEvent::TurnEnded { .. } => pending.clear(),
+            _ => {}
+        }
+    }
+    pending
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+    use crate::events::TurnOutcome;
+
+    fn asked(id: &str, tool: &str, needs_person: bool) -> AgentEvent {
+        AgentEvent::ApprovalRequested {
+            approval_id: id.into(),
+            tool: tool.into(),
+            input: serde_json::json!({ "k": id }),
+            needs_person,
+        }
+    }
+
+    /// Review finding of #675: the rebuilt pending list used to drop the `needs_person` flag, so
+    /// after a rejoin an unknown flagged tool lost its safety net and could be remembered.
+    #[test]
+    fn fr_a5_pending_approvals_keep_the_stored_needs_person_flag() {
+        let pending = pending_approvals_of(vec![
+            asked("a1", "SomeNewTool", true),
+            asked("a2", "Bash", false),
+            AgentEvent::ApprovalResolved { approval_id: "a2".into(), decision: ApprovalDecision::AllowOnce },
+        ]);
+        assert_eq!(pending.len(), 1);
+        assert_eq!((pending[0].0.as_str(), pending[0].1.as_str(), pending[0].3), ("a1", "SomeNewTool", true));
+        // Both flags survive side by side, and a turn end withdraws everything.
+        let pending = pending_approvals_of(vec![asked("a1", "X", true), asked("a2", "Y", false)]);
+        assert_eq!(pending.iter().map(|p| p.3).collect::<Vec<_>>(), vec![true, false]);
+        let pending = pending_approvals_of(vec![
+            asked("a1", "X", true),
+            AgentEvent::TurnEnded { outcome: TurnOutcome::Completed },
+            asked("a3", "Z", true),
+        ]);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "a3");
+    }
+
+    /// A row stored before the flag existed has no `needs_person` and reads as false.
+    #[test]
+    fn fr_a5_a_stored_row_without_the_flag_restores_as_false() {
+        let old: AgentEvent = serde_json::from_str(
+            r#"{"kind":"approval_requested","approval_id":"o1","tool":"Bash","input":{}}"#,
+        )
+        .unwrap();
+        let pending = pending_approvals_of(vec![old]);
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].3);
     }
 }

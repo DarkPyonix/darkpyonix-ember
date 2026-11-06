@@ -361,9 +361,9 @@ pub trait AgentRun: Send {
         -> anyhow::Result<()>;
 
     /// Prompts that were pending when the previous server died, found in the store after this
-    /// run rejoined its surviving agent (FR-S8). Each is `(approval_id, tool, input)`. An
+    /// run rejoined its surviving agent (FR-S8). Each is `(approval_id, tool, input, needs_person)`. An
     /// adapter that holds its pending approvals in memory rebuilds them here. Default: nothing.
-    async fn restore_pending_approvals(&mut self, _pending: Vec<(String, String, serde_json::Value)>) {}
+    async fn restore_pending_approvals(&mut self, _pending: Vec<(String, String, serde_json::Value, bool)>) {}
 
     /// Questions that were pending when the previous server died, found in the store after this
     /// run rejoined its surviving agent: `(question id, questions)`. Default: nothing.

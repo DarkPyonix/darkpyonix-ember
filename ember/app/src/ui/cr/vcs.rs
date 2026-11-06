@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -81,7 +81,7 @@ impl Actions {
 
     fn branch(&self, name: String, create: bool, on_success: impl FnMut() + Send + 'static) {
         let project = self.project.clone();
-        self.finish_with("브랜치를 ", async move {
+        self.finish_with(if create { "브랜치 만들기를 " } else { "브랜치 전환을 " }, async move {
             let (op, body) = if create { ("branch", json!({"name": name})) } else { ("checkout", json!({"branch": name})) };
             git_call::<Value>(&project, op, body).await?;
             Ok(if create { "새 브랜치를 만들었습니다" } else { "브랜치를 전환했습니다" }.to_string())
@@ -92,7 +92,7 @@ impl Actions {
     /// `branch` op runs `git switch -c`.
     fn create_from(&self, name: String, base: Option<String>, on_success: impl FnMut() + Send + 'static) {
         let project = self.project.clone();
-        self.finish_with("브랜치를 ", async move {
+        self.finish_with("브랜치 만들기를 ", async move {
             git_call::<Value>(&project, "branch", branch_create_body(&name, base.as_deref())).await?;
             Ok("새 브랜치를 만들어 전환했습니다".to_string())
         }, on_success);
@@ -112,7 +112,7 @@ impl Actions {
                     notice::post("스태시를 만들었습니다".to_string());
                     reload.set(reload.get() + 1);
                 }
-                Err(line) => notice::post(line),
+                Err(line) => notice::post(stash_now_error(&line)),
             }
         });
     }
@@ -3297,7 +3297,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l19_branches_pane_shows_the_creator_the_default_and_the_work_branches_at_both_widths() {
+    fn fr_g9_branches_pane_shows_the_creator_the_default_and_the_work_branches_at_both_widths() {
         let _guard = crate::services::test_guard();
         compose_rust::window::reset_window_size();
         for content in [branches_sample_wide as fn(), branches_sample_compact as fn()] {

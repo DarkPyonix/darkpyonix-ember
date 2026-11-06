@@ -1657,6 +1657,17 @@ pub fn branch_create_body(name: &str, base: Option<&str>) -> Value {
 }
 
 /// The 스태시 button of 변경 사항: a clean tree has nothing to stash, and the API is not called.
+/// The Korean line for a failed stash-now. An untracked-only tree passes the gate (the gate counts
+/// every change) but git has nothing to stash because untracked files are left out; its English
+/// text is replaced by a line that says so.
+pub fn stash_now_error(line: &str) -> String {
+    if line.contains("No local changes") {
+        "스태시할 추적 중인 변경이 없습니다. 추적하지 않는 파일은 포함되지 않습니다".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 pub fn stash_now_gate(changes_len: usize) -> Result<(), &'static str> {
     if changes_len == 0 {
         Err("스태시할 변경이 없습니다")
@@ -3734,7 +3745,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_ahead_behind_label_reads_in_korean() {
+    fn fr_g9_branches_ahead_behind_label_reads_in_korean() {
         assert_eq!(ahead_behind_label(2, 1), "앞섬 2 \u{00b7} 뒤처짐 1");
         assert_eq!(ahead_behind_label(3, 0), "앞섬 3");
         assert_eq!(ahead_behind_label(0, 4), "뒤처짐 4");
@@ -3742,7 +3753,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_a_branch_without_an_upstream_says_so() {
+    fn fr_g9_branches_a_branch_without_an_upstream_says_so() {
         let now = iso_to_unix("2026-11-06T14:00:00Z").unwrap();
         let e = branch_entry(&a_branch("feat/x", false, false, None, 0, 0, None), now);
         assert_eq!((e.sync_text().as_str(), e.upstream_text.as_str(), e.has_upstream), ("업스트림 없음", "업스트림 없음", false));
@@ -3752,7 +3763,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_an_unreadable_time_shows_as_sent_and_blank_parts_drop() {
+    fn fr_g9_branches_an_unreadable_time_shows_as_sent_and_blank_parts_drop() {
         let mut b = a_branch("m", false, true, None, 0, 0, None);
         b.last_time = Some("yesterday".into());
         b.last_sha = String::new();
@@ -3762,7 +3773,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_worktree_shows_its_last_folder() {
+    fn fr_g9_branches_worktree_shows_its_last_folder() {
         assert_eq!(worktree_tail("/Users/demo/worktrees/ui-phase-6"), "ui-phase-6");
         assert_eq!(worktree_tail("/Users/demo/darkpyonix-ember/"), "darkpyonix-ember");
         assert_eq!(worktree_tail("ember"), "ember");
@@ -3772,14 +3783,14 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_the_bars_are_proportional_and_capped() {
+    fn fr_g9_branches_the_bars_are_proportional_and_capped() {
         assert_eq!(branch_bar_fractions(0, 0), (0.0, 0.0));
         assert_eq!(branch_bar_fractions(5, 1), (0.5, 0.1));
         assert_eq!(branch_bar_fractions(50, 10), (1.0, 1.0));
     }
 
     #[test]
-    fn fr_l19_branches_the_default_is_split_from_the_work_branches_in_node_order() {
+    fn fr_g9_branches_the_default_is_split_from_the_work_branches_in_node_order() {
         let list = GitBranches { branches: vec![
             a_branch("feat/a", true, false, Some("origin/feat/a"), 1, 0, None),
             a_branch("main", false, true, Some("origin/main"), 0, 0, None),
@@ -3795,7 +3806,7 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_the_list_is_a_view_state_and_an_error_carries_the_message() {
+    fn fr_g9_branches_the_list_is_a_view_state_and_an_error_carries_the_message() {
         assert_eq!(branches_from(Ok(GitBranches::default()), 0), BranchLoad::Ready(Vec::new()));
         let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(branches_from(Err(boom), 0), BranchLoad::Failed("브랜치 목록을 확인하지 못했습니다: boom".into()));
@@ -3804,19 +3815,26 @@ rename to new.txt
     }
 
     #[test]
-    fn fr_l19_branches_create_sends_the_base_only_when_chosen() {
+    fn fr_g9_branches_create_sends_the_base_only_when_chosen() {
         assert_eq!(branch_create_body("feat/n", None), json!({ "name": "feat/n" }));
         assert_eq!(branch_create_body("feat/n", Some("main")), json!({ "name": "feat/n", "from": "main" }));
     }
 
     #[test]
-    fn fr_l19_branches_the_tab_count_is_the_loaded_count() {
+    fn fr_g9_branches_the_tab_count_is_the_loaded_count() {
         assert_eq!(section_count_with_branches(Section::Branches, None, None, None, None), None);
         assert_eq!(section_count_with_branches(Section::Branches, None, None, None, Some(4)), Some(4));
         let snap = RepoSnapshot { branches: s(&["main", "x"]), ..Default::default() };
         assert_eq!(section_count_with_branches(Section::Branches, Some(&snap), None, None, None), Some(2), "snapshot count until read");
         assert_eq!(section_count_with_branches(Section::Branches, Some(&snap), None, None, Some(5)), Some(5));
         assert_eq!(section_count_with_branches(Section::Stash, Some(&snap), Some(1), None, Some(5)), Some(1));
+    }
+
+    #[test]
+    fn fr_l19_stash_now_an_untracked_only_tree_says_so_in_korean() {
+        let raw = "스태시 만들기를 하지 못했습니다: No local changes to save";
+        assert!(stash_now_error(raw).contains("추적 중인 변경이 없습니다"));
+        assert_eq!(stash_now_error("다른 오류입니다"), "다른 오류입니다");
     }
 
     #[test]

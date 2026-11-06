@@ -6,6 +6,30 @@ use ember_editor::widget::HoverPhase as EditorHoverPhase;
 use crate::editor_host::{EditorHost, HostCommand};
 use super::{editor::{EditorTarget, EditorTabs, Stripes, base_name, position_text}, keymap::Keymap, workbench};
 
+/// The find bar's state: whether it is open, what is typed, the options, which match the reader is on,
+/// and the command the editor pane carries out next (a selection to show, or replacements to make).
+#[derive(Clone, Copy)]
+struct FindState {
+    open: Signal<bool>,
+    query: Signal<String>,
+    replacement: Signal<String>,
+    case_sensitive: Signal<bool>,
+    whole_word: Signal<bool>,
+    current: Signal<Option<usize>>,
+    cmd: Signal<Option<FindCmd>>,
+    next_id: Signal<u64>,
+}
+
+/// One thing asked of the editor by the find bar. `id` is new for every request, so the pane does each once.
+#[derive(Clone, Debug, PartialEq)]
+struct FindCmd {
+    id: u64,
+    /// The match to select and bring into view.
+    goto: Option<crate::ui::find::Match>,
+    /// Replacements, last first, each written against the same document version.
+    replacements: Vec<(crate::ui::find::Match, String)>,
+}
+
 #[derive(Clone)]
 struct Shared {
     host: EditorHost,
@@ -20,6 +44,7 @@ struct Shared {
     prompt_text: Signal<String>,
     prompt_at: Signal<u64>,
     palette_open: Signal<bool>,
+    find: FindState,
     palette_query: Signal<String>,
     palette_sel: Signal<usize>,
     theme: Signal<crate::ui::theme::ThemePref>,
@@ -63,6 +88,16 @@ fn init(target: EditorTarget) {
     let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
     let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
     let palette_open = use_hook(|| Signal::new_in_scope(false, root));
+    let find = use_hook(|| FindState {
+        open: Signal::new_in_scope(false, root),
+        query: Signal::new_in_scope(String::new(), root),
+        replacement: Signal::new_in_scope(String::new(), root),
+        case_sensitive: Signal::new_in_scope(false, root),
+        whole_word: Signal::new_in_scope(false, root),
+        current: Signal::new_in_scope(None, root),
+        cmd: Signal::new_in_scope(None, root),
+        next_id: Signal::new_in_scope(1, root),
+    });
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
@@ -74,7 +109,7 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -92,6 +127,14 @@ fn unsaved_open_paths(s: &Shared) -> Vec<String> {
         .filter(|p| uris.get(*p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty))
         .map(str::to_owned)
         .collect()
+}
+
+thread_local! {
+    /// The editor's document version as last heard: (generation, version). A selection, a reveal or an
+    /// edit the find bar asks for is written against it.
+    static EDITOR_VERSION: std::cell::Cell<(u64, u32)> = const { std::cell::Cell::new((0, 0)) };
+    /// The last find command the editor pane carried out.
+    static LAST_FIND_CMD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
@@ -112,15 +155,29 @@ fn editor_pane() -> Element {
     let Some(doc) = doc else { return rsx! {}; };
     let generation = doc.generation;
     let uri = doc.uri.clone();
+    let handle = dioxus_compose::use_code_editor();
+    let version = EDITOR_VERSION.with(|v| { let (g, n) = v.get(); if g == generation { n } else { v.set((generation, 0)); 0 } });
+    if let Some(cmd) = s.find.cmd.read().clone() {
+        if LAST_FIND_CMD.with(|last| last.replace(cmd.id)) != cmd.id {
+            use compose_rust::code::{CodeRange, Position};
+            if let Some(m) = cmd.goto {
+                handle.select(version, Position::new(m.line, m.start), Position::new(m.line, m.end));
+                handle.reveal(version, CodeRange::of(m.line, m.start, m.line, m.end), compose_rust::schema::RevealAlign::Center);
+            }
+            for (i, (m, text)) in cmd.replacements.iter().enumerate() {
+                handle.edit(i as u32 + 1, version, CodeRange::of(m.line, m.start, m.line, m.end), text.clone());
+            }
+        }
+    }
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
     let click_s = s.clone(); let click_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
     rsx! { CodeEditor {
-        key: "{generation}", width: Some(box_w), height: Some(box_h),
+        key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), tab_width: Some(doc.tab_width),
-        on_change: move |e: compose_rust::code::CodeChange| { let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
+        on_change: move |e: compose_rust::code::CodeChange| { EDITOR_VERSION.with(|v| v.set((generation, e.version))); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
         on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
@@ -180,6 +237,11 @@ pub mod page {
     /// Do a keymap action. Closing a tab also tells the host; an action the editor cannot do
     /// says it is not ready.
     fn run_action(s: &Shared, action: Action) {
+        if action == Action::FindInFile {
+            let mut open = s.find.open;
+            open.set(true);
+            return;
+        }
         if matches!(action, Action::Palette | Action::Find) {
             open_palette(s);
             return;
@@ -277,6 +339,110 @@ pub mod page {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// The text of the open file, or empty.
+    fn active_text(s: &Shared) -> String {
+        s.bridge.borrow().active_document().map(|d| d.text.clone()).unwrap_or_default()
+    }
+
+    fn find_options(s: &Shared) -> crate::ui::find::FindOptions {
+        crate::ui::find::FindOptions { case_sensitive: *s.find.case_sensitive.read(), whole_word: *s.find.whole_word.read() }
+    }
+
+    /// Asks the editor to do `goto` and `replacements`, once.
+    fn find_send(s: &Shared, goto: Option<crate::ui::find::Match>, replacements: Vec<(crate::ui::find::Match, String)>) {
+        let (mut cmd, mut next_id) = (s.find.cmd, s.find.next_id);
+        let id = *next_id.read();
+        next_id.set(id + 1);
+        cmd.set(Some(super::FindCmd { id, goto, replacements }));
+    }
+
+    /// Goes to the next or the previous match: from the match the reader is on, else from the caret.
+    fn find_go(s: &Shared, forward: bool) {
+        let matches = crate::ui::find::find_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        if matches.is_empty() { return; }
+        let mut current = s.find.current;
+        let index = match *current.read() {
+            Some(i) if i < matches.len() => if forward { (i + 1) % matches.len() } else { (i + matches.len() - 1) % matches.len() },
+            _ => {
+                let (line, col) = *s.position.read();
+                crate::ui::find::next_match(&matches, (line.saturating_sub(1) as u32, col.saturating_sub(1) as u32), forward).unwrap_or(0)
+            }
+        };
+        current.set(Some(index));
+        find_send(s, Some(matches[index]), Vec::new());
+    }
+
+    /// Replaces the match the reader is on (the first one when none is chosen yet).
+    fn find_replace_one(s: &Shared) {
+        let matches = crate::ui::find::find_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        let mut current = s.find.current;
+        let index = current.read().filter(|i| *i < matches.len()).or(if matches.is_empty() { None } else { Some(0) });
+        let Some(index) = index else { return };
+        let replacement = s.find.replacement.read().clone();
+        find_send(s, None, vec![(matches[index], replacement)]);
+        current.set(None);
+    }
+
+    fn find_replace_all(s: &Shared) {
+        let matches = crate::ui::find::find_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        if matches.is_empty() { return; }
+        let replacement = s.find.replacement.read().clone();
+        // Last first: each edit is written against the same version and none moves another.
+        let edits: Vec<(crate::ui::find::Match, String)> = matches.into_iter().rev().map(|m| (m, replacement.clone())).collect();
+        let mut current = s.find.current;
+        find_send(s, None, edits);
+        current.set(None);
+    }
+
+    /// The find bar over the editor: a field with the case and whole-word options, the counter and the
+    /// previous and next buttons, a replacement field with replace and replace all, and close. Enter goes
+    /// to the next match, Shift+Enter to the previous, Escape closes.
+    fn find_bar(s: &Shared) -> Element {
+        let (mut query, mut replacement, mut case_sensitive, mut whole_word, mut current, mut open) =
+            (s.find.query, s.find.replacement, s.find.case_sensitive, s.find.whole_word, s.find.current, s.find.open);
+        let text = active_text(s);
+        let q = query.read().clone();
+        let matches = crate::ui::find::find_matches(&text, &q, find_options(s));
+        let counter = crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q);
+        let (prev_s, next_s, one_s, all_s, key_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        let has_matches = !matches.is_empty();
+        let (case_on, word_on) = (*case_sensitive.read(), *whole_word.read());
+        let on = |flag: bool| if flag { "ed-pj on" } else { "ed-pj" };
+        rsx! {
+            div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
+                div { class: "ed-find", style: "width:220px; height:28px;",
+                    {icon("search")}
+                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                        "aria-label": "찾을 내용", placeholder: "찾기", value: "{q}", autofocus: true,
+                        oninput: move |event| { query.set(event.value()); current.set(None); },
+                        onkeydown: move |event| {
+                            match event.key() {
+                                Key::Enter => { event.stop_propagation(); find_go(&key_s, !event.modifiers().contains(Modifiers::SHIFT)); }
+                                Key::Escape => { event.stop_propagation(); open.set(false); }
+                                _ => {}
+                            }
+                        },
+                    }
+                }
+                button { class: on(case_on), title: "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
+                button { class: on(word_on), title: "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
+                span { class: "ed-sbi", role: "status", "{counter}" }
+                button { class: "ed-ib", title: "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
+                button { class: "ed-ib", title: "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
+                div { class: "ed-find", style: "width:200px; height:28px;",
+                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                        "aria-label": "바꿀 내용", placeholder: "바꾸기", value: "{replacement}",
+                        oninput: move |event| replacement.set(event.value()),
+                    }
+                }
+                button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
+                button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
+                div { class: "spacer" }
+                button { class: "ed-ib", title: "닫기", onclick: move |_| open.set(false), {icon("close")} }
             }
         }
     }
@@ -433,6 +599,7 @@ pub mod page {
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
                         }
+                        if *s.find.open.read() && active.is_some() { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
                             if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
                             else { div { class: "ed-empty", b { "열린 파일이 없습니다" } } }
@@ -507,7 +674,7 @@ pub mod page {
         let os = Os::current();
         rsx! {
             div { class: "ed-menu", role: "menu",
-                for a in [Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Palette] {
+                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Palette] {
                     {
                         let s = s.clone();
                         let label = if a == Action::Palette { keymap.palette_label() } else { a.label() };

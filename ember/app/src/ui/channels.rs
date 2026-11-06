@@ -683,11 +683,12 @@ mod layout_tests {
             last_message: None,
             messages: Vec::new(),
             unread: 0,
+            guests: Vec::new(),
         }
     }
 
     fn wire_msg(seq: i64, from: &str, at: i64) -> ember_client::channels::ChannelMessage {
-        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0, mentions: Vec::new() }
+        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0, mentions: Vec::new(), author_name: String::new(), author_kind: String::new() }
     }
 
     #[test]

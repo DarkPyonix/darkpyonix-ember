@@ -144,6 +144,7 @@ fn build(ctx: ChannelsCtx) -> Router {
         .route("/api/channels/{id}/mentions/preview", post(preview))
         .route("/api/channels/{id}/feed", get(feed))
         .route("/api/channels/{id}/feed/{approval_id}/answer", post(answer_feed))
+        .route("/api/guest-door", get(guest_door_status))
         .route("/api/channels/{id}/invites", get(list_invites).post(create_invite))
         .route("/api/channels/{id}/invites/{invite_id}", delete(revoke_invite))
         .route("/api/channels/{id}/guests", get(list_guests))
@@ -403,6 +404,11 @@ async fn create_invite(
             "expires_at": invite.expires_at,
         })),
     ))
+}
+
+/// FR-T14: the guest door's state for the owner UI. Owner router only, behind the server token.
+async fn guest_door_status(State(c): State<ChannelsCtx>) -> impl IntoResponse {
+    Json(crate::guest_door::status_body(c.door.as_ref()))
 }
 
 async fn list_invites(State(c): State<ChannelsCtx>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {

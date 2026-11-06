@@ -24,7 +24,7 @@ use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
-use crate::channels::{Channel, ChannelMessage, FeedAnswer, FeedDecision, FeedItem, MentionPreview, MentionPreviewRequest, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
+use crate::channels::{Allowance, AllowanceBody, Channel, ChannelMessage, CreatedInvite, Guest, Invite, FeedAnswer, FeedDecision, FeedItem, MentionPreview, MentionPreviewRequest, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
@@ -41,7 +41,7 @@ pub enum ApiError {
     #[error("peer connection failed: {0}")]
     Peer(String),
     #[error("server answered {status}: {message}")]
-    Status { status: u16, message: String },
+    Status { status: u16, message: String, code: Option<String> },
     /// The server answered 401: the token is missing or wrong (FR-S11). The client never retries
     /// on this, because the same token would be refused again.
     #[error("authentication failed: the server refused the token ({0})")]
@@ -67,6 +67,15 @@ pub(crate) fn fork_body(turn_seq: Option<i64>) -> serde_json::Value {
 }
 
 impl ApiError {
+    /// The server's JSON `code` (`invalid_hours`, `not_found`, ...), when the error body had one.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            ApiError::Status { code, .. } => code.as_deref(),
+            ApiError::NotAMember { .. } => Some("not_a_member"),
+            _ => None,
+        }
+    }
+
     pub fn status(&self) -> Option<u16> {
         match self {
             ApiError::Status { status, .. } => Some(*status),
@@ -443,7 +452,10 @@ impl Api {
                 return Err(ApiError::NotAMember { message, unknown });
             }
         }
-        Err(ApiError::Status { status: raw.status.as_u16(), message })
+        let code = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+        Err(ApiError::Status { status: raw.status.as_u16(), message, code })
     }
 
     /// The `unknown` names of a `not_a_member` error body, or `None` for any other body.
@@ -780,6 +792,50 @@ impl Api {
     pub async fn answer_channel_feed(&self, id: &str, approval_id: &str, decision: FeedDecision) -> ApiResult<()> {
         let body = serde_json::to_value(FeedAnswer { decision }).expect("FeedAnswer serialises");
         self.post(&crate::channels::feed_answer_path(id, approval_id), body).await?;
+        Ok(())
+    }
+
+    // ---- invites, guests, allowances (FR-T14, FR-T17) --------------------------------------
+
+    /// Create a single-use invite. The token and link are in this answer only. `None` lets the
+    /// server pick its default TTL; the body is `{}` then, never empty.
+    pub async fn create_invite(&self, channel: &str, ttl_hours: Option<u32>) -> ApiResult<CreatedInvite> {
+        let body = crate::channels::new_invite_body(ttl_hours);
+        Self::decode(self.post(&crate::channels::invites_path(channel), body).await?)
+    }
+
+    /// Invites of a channel, newest first (no token, no link).
+    pub async fn invites(&self, channel: &str) -> ApiResult<Vec<Invite>> {
+        self.get(&crate::channels::invites_path(channel)).await
+    }
+
+    /// Revoke an invite (204); also ends the guest made from it.
+    pub async fn revoke_invite(&self, channel: &str, invite_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &crate::channels::invite_path(channel, invite_id), None).await?)?;
+        Ok(())
+    }
+
+    /// Guests of a channel, newest first, revoked and expired ones included.
+    pub async fn guests(&self, channel: &str) -> ApiResult<Vec<Guest>> {
+        self.get(&crate::channels::guests_path(channel)).await
+    }
+
+    /// Remove a guest (204): the credential and allowance end at once.
+    pub async fn remove_guest(&self, channel: &str, guest_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &crate::channels::guest_path(channel, guest_id), None).await?)?;
+        Ok(())
+    }
+
+    /// Allow the guest's mentions to reach agents for `hours` (1..=168); replaces any end time.
+    pub async fn set_allowance(&self, channel: &str, guest_id: &str, hours: u32) -> ApiResult<Allowance> {
+        let body = serde_json::to_value(AllowanceBody { hours }).expect("AllowanceBody serialises");
+        let path = crate::channels::guest_allow_path(channel, guest_id);
+        Self::decode(self.send(Method::PUT, &path, Some(body)).await?)
+    }
+
+    /// Stop delivering the guest's mentions (204).
+    pub async fn clear_allowance(&self, channel: &str, guest_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &crate::channels::guest_allow_path(channel, guest_id), None).await?)?;
         Ok(())
     }
 
@@ -1140,6 +1196,30 @@ mod tests {
         assert_eq!(err.status(), Some(401));
         let other = Raw { status: StatusCode::FORBIDDEN, body: Bytes::from_static(b"no") };
         assert!(matches!(Api::check(other), Err(ApiError::Status { status: 403, .. })));
+    }
+
+    #[test]
+    fn fr_t17_client_error_code_is_exposed() {
+        let raw = Raw {
+            status: StatusCode::BAD_REQUEST,
+            body: Bytes::from_static(br#"{"error":"hours must be a whole number from 1 to 168","code":"invalid_hours"}"#),
+        };
+        let e = Api::check(raw).err().expect("an error");
+        assert_eq!(e.code(), Some("invalid_hours"));
+        assert_eq!(e.status(), Some(400));
+        assert_eq!(e.to_string(), "server answered 400: hours must be a whole number from 1 to 168");
+        let raw = Raw { status: StatusCode::NOT_FOUND, body: Bytes::from_static(br#"{"error":"invite i1 not found","code":"not_found"}"#) };
+        assert_eq!(Api::check(raw).err().expect("an error").code(), Some("not_found"));
+        let raw = Raw { status: StatusCode::INTERNAL_SERVER_ERROR, body: Bytes::from_static(b"plain") };
+        assert_eq!(Api::check(raw).err().expect("an error").code(), None);
+    }
+
+    #[test]
+    fn fr_t14_client_not_a_member_code_and_invite_body() {
+        let e = ApiError::NotAMember { message: "m".into(), unknown: vec![] };
+        assert_eq!(e.code(), Some("not_a_member"));
+        assert_eq!(ApiError::Unauthorized("x".into()).code(), None);
+        assert_eq!(crate::channels::new_invite_body(None), json!({}));
     }
 
     #[test]

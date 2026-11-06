@@ -1128,7 +1128,7 @@ pub fn build_snapshot(
 /// A demo source answer as an API result: the status and message of its error become an
 /// [`ApiError::Status`], so the demo and the server share the same load states.
 pub fn git_result<T: DeserializeOwned>(r: Result<Value, GitError>) -> Result<T, ApiError> {
-    let v = r.map_err(|e| ApiError::Status { status: e.status, message: format!("{}: {}", e.code, e.message) })?;
+    let v = r.map_err(|e| ApiError::Status { status: e.status, message: format!("{}: {}", e.code, e.message), code: None })?;
     serde_json::from_value(v).map_err(|e| ApiError::Decode(e.to_string()))
 }
 
@@ -2712,16 +2712,16 @@ rename to new.txt
 
     #[test]
     fn a_missing_repository_or_server_is_not_data() {
-        let not_repo = ApiError::Status { status: 404, message: "not_a_repo".into() };
+        let not_repo = ApiError::Status { status: 404, message: "not_a_repo".into(), code: None };
         assert_eq!(load_from(Err(not_repo)), Load::NotRepo);
         let down = ApiError::Peer("refused".into());
         assert!(matches!(load_from(Err(down)), Load::Unavailable(_)));
         // Any other answer of the node is a failure with its message, not "준비 중입니다".
-        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
         let failed = load_from(Err(boom));
         assert!(matches!(&failed, Load::Failed(t) if t.contains("boom")), "{failed:?}");
         assert_ne!(failed.note(), Some(soon_line("저장소 정보")));
-        let busy = ApiError::Status { status: 409, message: "병합 중이라 차이를 읽지 못했습니다: x".into() };
+        let busy = ApiError::Status { status: 409, message: "병합 중이라 차이를 읽지 못했습니다: x".into(), code: None };
         assert_eq!(load_from(Err(busy)), Load::Failed("병합 중이라 차이를 읽지 못했습니다: x".into()));
         assert!(matches!(load_from(Err(ApiError::Decode("bad".into()))), Load::Failed(_)));
         assert!(Load::Loading.snapshot().is_none());
@@ -2771,7 +2771,7 @@ rename to new.txt
 
     #[test]
     fn fr_g3_a_413_on_untracked_keeps_the_tracked_changes_and_notes_it() {
-        let too_big = ApiError::Status { status: 413, message: "출력이 너무 큽니다".into() };
+        let too_big = ApiError::Status { status: 413, message: "출력이 너무 큽니다".into(), code: None };
         let (patch, note) = merge_untracked_diff(Ok(SAMPLE.to_string()), Err(too_big)).unwrap();
         assert_eq!(patch, SAMPLE);
         assert_eq!(note, Some("추적하지 않는 파일이 너무 많아 내용을 건너뛰었습니다. 파일 목록만 표시합니다."));
@@ -2785,10 +2785,10 @@ rename to new.txt
 
     #[test]
     fn fr_g3_other_untracked_errors_still_fail() {
-        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert!(merge_untracked_diff(Ok(String::new()), Err(boom)).is_err());
-        let tracked_fail = ApiError::Status { status: 413, message: "x".into() };
-        let too_big = ApiError::Status { status: 413, message: "y".into() };
+        let tracked_fail = ApiError::Status { status: 413, message: "x".into(), code: None };
+        let too_big = ApiError::Status { status: 413, message: "y".into(), code: None };
         assert!(merge_untracked_diff(Err(tracked_fail), Err(too_big)).is_err(), "no tracked diff to keep");
     }
 
@@ -2911,7 +2911,7 @@ rename to new.txt
             "Pull 완료: Already up to date."
         );
         assert_eq!(remote_done_text(RemoteAction::Fetch, ""), "Fetch을 마쳤습니다");
-        let e = ApiError::Status { status: 409, message: "not fast-forward".into() };
+        let e = ApiError::Status { status: 409, message: "not fast-forward".into(), code: None };
         assert_eq!(failure_text("Pull", &e), "Pull하지 못했습니다: not fast-forward");
         let down = ApiError::Peer("refused".into());
         assert!(failure_text("Push", &down).contains("서버에 닿지 않습니다"));
@@ -2922,6 +2922,7 @@ rename to new.txt
         let e = ApiError::Status {
             status: 409,
             message: "분기되어 있어 pull할 수 없습니다: fatal: Not possible to fast-forward".into(),
+            code: None,
         };
         assert_eq!(
             failure_text("Pull", &e),
@@ -3169,7 +3170,7 @@ rename to new.txt
         assert_eq!(entries.iter().map(|e| e.short.as_str()).collect::<Vec<_>>(), ["a0a0a0a", "b0b0b0b"]);
         assert!(!more);
 
-        let down = ApiError::Status { status: 500, message: "boom".into() };
+        let down = ApiError::Status { status: 500, message: "boom".into(), code: None };
         let (kept, err) = history_append(first, Err(down), 0);
         assert!(err.unwrap().contains("boom"));
         let HistoryLoad::Ready { entries, more, .. } = kept else { panic!() };
@@ -3179,7 +3180,7 @@ rename to new.txt
 
     #[test]
     fn fr_g5_a_failed_first_page_shows_the_nodes_message() {
-        let e = ApiError::Status { status: 500, message: "로그를 읽지 못했습니다".into() };
+        let e = ApiError::Status { status: 500, message: "로그를 읽지 못했습니다".into(), code: None };
         assert_eq!(history_from(Err(e), 0), HistoryLoad::Failed("로그를 읽지 못했습니다".into()));
     }
 
@@ -3228,7 +3229,7 @@ rename to new.txt
 
     #[test]
     fn fr_g6_a_failed_list_shows_the_nodes_message() {
-        let e = ApiError::Status { status: 500, message: "스태시를 읽지 못했습니다".into() };
+        let e = ApiError::Status { status: 500, message: "스태시를 읽지 못했습니다".into(), code: None };
         assert_eq!(stash_from(Err(e), 0), StashLoad::Failed("스태시를 읽지 못했습니다".into()));
     }
 
@@ -3241,7 +3242,7 @@ rename to new.txt
     #[test]
     fn fr_g6_a_failed_pop_keeps_the_list_and_says_why() {
         let shown = stash_from(Ok(vec![stash(0, "a", "2026-08-29T10:40:00Z")]), 0);
-        let down = ApiError::Status { status: 409, message: "충돌 때문에 꺼낼 수 없습니다. 스태시는 그대로 남아 있습니다.".into() };
+        let down = ApiError::Status { status: 409, message: "충돌 때문에 꺼낼 수 없습니다. 스태시는 그대로 남아 있습니다.".into(), code: None };
         let result: Result<(), String> = Err(failure_text(StashAction::Pop.what(), &down));
         let after = stash_after_action(shown.clone(), &result, StashLoad::Ready(Vec::new()));
         assert_eq!(after, shown);
@@ -3253,7 +3254,7 @@ rename to new.txt
 
     #[test]
     fn fr_g6_a_non_korean_failure_gets_a_korean_prefix() {
-        let e = ApiError::Status { status: 500, message: "boom".into() };
+        let e = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(failure_text(StashAction::Apply.what(), &e), "스태시를 적용하지 못했습니다: boom");
     }
 
@@ -3353,9 +3354,9 @@ rename to new.txt
 
     #[test]
     fn fr_g7_a_failed_read_shows_the_nodes_korean_message() {
-        let e = ApiError::Status { status: 409, message: "병합 충돌 중인 파일이 아닙니다.".into() };
+        let e = ApiError::Status { status: 409, message: "병합 충돌 중인 파일이 아닙니다.".into(), code: None };
         assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("병합 충돌 중인 파일이 아닙니다.".into()));
-        let e = ApiError::Status { status: 500, message: "boom".into() };
+        let e = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("충돌 내용을 확인하지 못했습니다: boom".into()));
         assert!(matches!(conflict_from("a", Ok(GitConflict { blocks: vec![] })), ConflictLoad::Ready(_)));
     }
@@ -3420,9 +3421,9 @@ rename to new.txt
         assert_eq!(prs_from(Ok(GitPrs::default()), 0), PrLoad::Ready(Vec::new()));
         let one = GitPrs { prs: vec![a_pr(1, GitPrState::Open, GitPrReview::Approved, (1, 0, 0), (true, "x"))] };
         assert!(matches!(prs_from(Ok(one), 0), PrLoad::Ready(v) if v.len() == 1));
-        let login = ApiError::Status { status: 409, message: "GitHub에 로그인되어 있지 않습니다.\ngh auth login".into() };
+        let login = ApiError::Status { status: 409, message: "GitHub에 로그인되어 있지 않습니다.\ngh auth login".into(), code: None };
         assert_eq!(prs_from(Err(login), 0), PrLoad::Failed("GitHub에 로그인되어 있지 않습니다.\ngh auth login".into()));
-        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(prs_from(Err(boom), 0), PrLoad::Failed("풀 리퀘스트 목록을 확인하지 못했습니다: boom".into()));
         let down = ApiError::Peer("refused".into());
         assert!(matches!(prs_from(Err(down), 0), PrLoad::Failed(t) if t.contains("서버에 닿지 않습니다")));

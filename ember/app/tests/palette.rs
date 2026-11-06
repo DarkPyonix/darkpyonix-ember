@@ -2,7 +2,7 @@
 //! the editor's own actions it starts with. No renderer.
 
 use ember_app::ui::keymap::{Action, Keymap, Os};
-use ember_app::ui::palette::{action_items, highlight_segments, move_selection, rank, Item, Payload};
+use ember_app::ui::palette::{action_items, file_items, highlight_segments, items_for, mode_for, move_selection, placeholder, rank, skipped_directory, Item, Mode, Payload};
 
 fn items(titles: &[&str]) -> Vec<Item> {
     titles
@@ -102,4 +102,53 @@ fn fr_l31_the_arrow_keys_move_the_highlight_and_stop_at_the_ends() {
     assert_eq!(move_selection(0, 3, false), 0);
     assert_eq!(move_selection(2, 3, false), 1);
     assert_eq!(move_selection(0, 0, true), 0);
+}
+
+#[test]
+fn fr_l31_find_opens_files_in_vs_code_and_everything_in_jetbrains_and_the_palette_opens_commands() {
+    assert_eq!(mode_for(Action::Palette, Keymap::VsCode), Some(Mode::Commands));
+    assert_eq!(mode_for(Action::Palette, Keymap::JetBrains), Some(Mode::Commands));
+    assert_eq!(mode_for(Action::Find, Keymap::VsCode), Some(Mode::Files));
+    assert_eq!(mode_for(Action::Find, Keymap::JetBrains), Some(Mode::Everything));
+    assert_eq!(mode_for(Action::Save, Keymap::VsCode), None);
+    assert_ne!(placeholder(Mode::Files), placeholder(Mode::Commands));
+}
+
+#[test]
+fn fr_l31_the_index_skips_version_control_dependencies_and_build_output() {
+    for name in [".git", "node_modules", "target", ".hg", "__pycache__"] {
+        assert!(skipped_directory(name), "{name}");
+    }
+    for name in ["src", ".github", ".vscode", "docs", "build"] {
+        assert!(!skipped_directory(name), "{name}");
+    }
+}
+
+#[test]
+fn fr_l31_files_are_listed_by_their_path_below_the_project_folder_sorted_by_name() {
+    let paths = vec!["/w/p/src/b.rs".to_string(), "/w/p/README.md".to_string(), "/w/p/src/A.rs".to_string()];
+    let items = file_items("/w/p/", &paths);
+    let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+    assert_eq!(titles, vec!["README.md", "src/A.rs", "src/b.rs"]);
+    assert_eq!(items[1].payload, Payload::File("/w/p/src/A.rs".to_string()), "the payload is the full path");
+}
+
+#[test]
+fn fr_l31_a_file_is_found_by_the_letters_of_its_path() {
+    let paths = vec!["/w/p/src/main.rs".to_string(), "/w/p/src/lib.rs".to_string(), "/w/p/README.md".to_string()];
+    let list = file_items("/w/p", &paths);
+    let ranked = rank("smr", &list);
+    assert_eq!(list[ranked[0].index].title, "src/main.rs");
+    let list = file_items("/w/p", &paths);
+    assert_eq!(list[rank("read", &list)[0].index].title, "README.md");
+}
+
+#[test]
+fn fr_l31_everything_lists_the_actions_then_the_files() {
+    let files = vec!["/w/p/a.rs".to_string()];
+    let all = items_for(Mode::Everything, Keymap::JetBrains, Os::Mac, "/w/p", &files);
+    let commands = items_for(Mode::Commands, Keymap::JetBrains, Os::Mac, "/w/p", &files);
+    assert_eq!(all.len(), commands.len() + 1);
+    assert_eq!(all.last().unwrap().payload, Payload::File("/w/p/a.rs".to_string()));
+    assert!(items_for(Mode::Files, Keymap::VsCode, Os::Mac, "/w/p", &files).iter().all(|i| matches!(i.payload, Payload::File(_))));
 }

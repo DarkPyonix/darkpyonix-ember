@@ -18,6 +18,8 @@ pub enum HostCommand {
     CreateFile { parent: String, name: String },
     CreateDir { parent: String, name: String },
     Rename { path: String, new_name: String },
+    /// List every file below the project folder for quick open.
+    IndexFiles,
     Delete { path: String, is_dir: bool },
 }
 
@@ -28,6 +30,8 @@ pub struct HostState {
     pub entries: Vec<(String, u32)>,
     /// Every directory listed so far, by path, for the explorer tree.
     pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
+    /// Every file below the project folder as of the last index, for quick open.
+    pub file_index: Vec<String>,
     /// Failures of explorer edits, for the window to show once.
     pub edit_errors: Vec<String>,
     /// Paths an explorer edit deleted, for the window to close their tabs.
@@ -89,6 +93,37 @@ impl HostState {
     pub fn take_updates(&mut self) -> Vec<SessionUpdate> {
         std::mem::take(&mut self.updates)
     }
+}
+
+/// How many files and directories the quick open index takes before it stops.
+const INDEX_MAX_FILES: usize = 20_000;
+const INDEX_MAX_DIRS: usize = 5_000;
+
+/// Every file below `root`, breadth first, through the OSE file channel. Version control internals,
+/// dependencies and build output are not entered, a symbolic link to a directory is not followed.
+async fn index_files(session: &ember_editor::EditorSession, root: &str) -> Vec<String> {
+    use ember_editor_conn::remote_fs::file_type::{DIRECTORY, SYMBOLIC_LINK};
+    let mut files = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.to_string()]);
+    let mut visited = 0;
+    while let Some(dir) = queue.pop_front() {
+        if files.len() >= INDEX_MAX_FILES || visited >= INDEX_MAX_DIRS {
+            break;
+        }
+        visited += 1;
+        let Ok(entries) = session.read_dir(&session.uri(&dir)).await else { continue };
+        for (name, kind) in entries {
+            let path = crate::ui::editor_workbench::join_path(&dir, &name);
+            if kind & DIRECTORY != 0 {
+                if !crate::ui::palette::skipped_directory(&name) && kind & SYMBOLIC_LINK == 0 {
+                    queue.push_back(path);
+                }
+            } else if name != ".DS_Store" {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 fn parent_of(path: &str) -> String {
@@ -184,6 +219,10 @@ impl EditorHost {
                                 state.gone.push(path.clone());
                             }
                             finish_edit(&session, &shared, "삭제", &parent, result).await;
+                        }
+                        Some(HostCommand::IndexFiles) => {
+                            let files = index_files(&session, &root).await;
+                            shared.lock().unwrap().file_index = files;
                         }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }

@@ -411,18 +411,14 @@ fn is_json(headers: &HeaderMap) -> bool {
     v.to_str().is_ok_and(|v| v.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
 }
 
-/// The text of `http_body_util::LengthLimitError`'s `Display` (http-body-util 0.1, `limited.rs`).
-/// `http-body-util` is only a dev-dependency of this crate, so the type cannot be named here and the
-/// two cases are told apart by this text. Matching a string is weaker than `downcast_ref`: a body
-/// error that happens to print exactly this text would also be answered 413.
-const LENGTH_LIMIT_TEXT: &str = "length limit exceeded";
-
-/// True when `e`, or an error in its `source()` chain, is the size-limit error of
-/// `axum::body::to_bytes` (axum's wrapper prints its inner error, so the first link already matches).
+/// True when `e`, or an error in its `source()` chain, is `http_body_util::LengthLimitError`, the
+/// size-limit error of `axum::body::to_bytes` (axum's wrapper keeps it as its `source()`; the
+/// documented way to detect it). It is matched by TYPE, not by its text: no other error can be
+/// taken for the limit.
 fn is_length_limit(e: &(dyn std::error::Error + 'static)) -> bool {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(err) = cur {
-        if err.to_string() == LENGTH_LIMIT_TEXT {
+        if err.is::<http_body_util::LengthLimitError>() {
             return true;
         }
         cur = err.source();

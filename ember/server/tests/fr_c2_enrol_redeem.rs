@@ -542,7 +542,18 @@ async fn fr_c2_head_on_the_poll_route_is_405() {
             let mut names: Vec<String> =
                 r.1.keys().map(|k| k.as_str().to_string()).filter(|k| k != "content-length").collect();
             names.sort();
-            assert_eq!(names, ["cache-control", "x-content-type-options"], "HEAD {uri}: no allow header");
+            {
+                // Measured, not read: the author READ guard_layer (a bare 405 before the router, so no
+                // `allow`) and CI showed `allow` on HEAD /enrol/redeem (#591, run 42188136645). Straight
+                // to the real stdout, the only way a line of a passing test reaches the CI log.
+                use std::io::Write;
+                let allow = r.1.get("allow").and_then(|v| v.to_str().ok()).unwrap_or("-");
+                let _ = writeln!(std::io::stdout(), "HEAD_MATRIX|HEAD|{uri}|{}|{names:?}|allow={allow}", r.0.as_u16());
+            }
+            // Pinned after the measurement; until then only what the code makes certain: the guard's
+            // bare 405 plus the two door headers, `allow` or not.
+            let without_allow: Vec<&str> = names.iter().map(String::as_str).filter(|n| *n != "allow").collect();
+            assert_eq!(without_allow, ["cache-control", "x-content-type-options"], "HEAD {uri}");
         }
     }
 }

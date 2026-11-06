@@ -12,14 +12,14 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole, TextOverflow};
+use compose_rust::{Alignment, ButtonVariant, Color, DrawList, Paint, IconRole, ShapeRole, TextOverflow};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, mode_header, mode_picker_rows, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
-    PermMode, ProjectTile, Selection, StatusCounts, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
+    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
     EMPTY_CREW, EMPTY_HARNESS_USAGE, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
@@ -41,6 +41,70 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
 /// The width of the option popups of the composer's chips.
 const POPUP_WIDTH: f32 = 280.0;
+/// The permission popup is wider: each row carries a description line.
+const MODE_POPUP_WIDTH: f32 = 340.0;
+
+/// The permission-mode popup (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
+/// one row per mode with a shield, the title, a one-line description and a check on the chosen
+/// row. The bypass row is drawn in red. A modal, as the other option lists, until the toolkit
+/// can place a popup below its anchor (TODO(compose-rust#383), see `OptionSheet`).
+#[allow(clippy::too_many_arguments)]
+fn ModeSheet(
+    open: bool,
+    header: &str,
+    rows: &[ModeRow],
+    width: f32,
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_choose: impl FnMut(usize) + Clone + 'static,
+) {
+    let theme = ember_theme();
+    let p = theme.palette;
+    cu::Dialog(open)
+        .modifier(
+            with_shadows(Modifier::new(), theme.shadow_lg())
+                .width(width + 2.0 * SP[0])
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_MD)
+                .padding(SP[0]),
+        )
+        .on_dismiss(on_dismiss.clone())
+        .content(|| {
+            cu::Column().content(|| {
+                cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
+                    Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+                });
+                for (i, r) in rows.iter().enumerate() {
+                    let (mut dismiss, mut choose) = (on_dismiss.clone(), on_choose.clone());
+                    let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+                    let tone = if r.danger { p.red.strong } else { p.muted };
+                    let title = if r.danger { p.red.strong } else { p.text };
+                    Clickable(
+                        Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
+                        Alignment::CenterStart,
+                        move || {
+                            dismiss();
+                            choose(i);
+                        },
+                        || {
+                            cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                NavIcon(ICON_SHIELD, tone.to_argb(), 16.0);
+                                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                    Label(r.title, Fs::Sm, Weight::Medium, Some(paint(title)), Some(1));
+                                    Label(r.description, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                                });
+                                if r.chosen {
+                                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                                    NavIcon(ICON_CHECK, p.text.to_argb(), 16.0);
+                                }
+                            });
+                        },
+                    );
+                }
+            });
+        });
+}
 
 macro_rules! line_icon {
     ($d:literal) => {
@@ -53,6 +117,7 @@ macro_rules! line_icon {
 }
 
 const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
+const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
 const ICON_ZAP: &str = line_icon!("M13 3L5 13.5h6L10 21l8-10.5h-6z");
@@ -568,14 +633,13 @@ impl Composer {
             });
         }
         let modes = modes_for(sel.option.harness);
-        let mode_labels: Vec<String> = modes.iter().map(|m| m.label().to_string()).collect();
         {
             let selection = self.selection.clone();
-            OptionSheet(
+            ModeSheet(
                 open == Some(Pick::Mode),
-                &mode_labels,
-                modes.iter().position(|m| *m == sel.mode),
-                POPUP_WIDTH,
+                &mode_header(sel.option.harness),
+                &mode_picker_rows(sel.option.harness, sel.mode),
+                MODE_POPUP_WIDTH,
                 close.clone(),
                 move |i| {
                     if let Some(m) = modes.get(i) {

@@ -92,24 +92,66 @@ impl PermMode {
         }
     }
 
+    /// The one-line description under the row title (copied from mockup v8, `data.js` modes).
+    pub fn description(self) -> &'static str {
+        match self {
+            PermMode::Ask => "파일을 고치거나 명령을 실행하기 전에 매번 묻습니다",
+            PermMode::Edits => "파일 편집은 바로 하고, 명령은 실행 전에 묻습니다",
+            PermMode::Bypass => "묻지 않고 모두 실행합니다. 믿을 수 있는 환경에서만 쓰세요",
+            PermMode::Plan => "읽기만 하고 계획을 세운 뒤 승인을 기다립니다",
+        }
+    }
+
     /// Bypass is drawn in the warning colour so it is never chosen by accident.
     pub fn is_bypass(self) -> bool {
         self == PermMode::Bypass
     }
 }
 
-/// The modes a harness supports, in menu order. [provisional] until each CLI is verified
-/// (FR-L16): Claude Code has the four, Codex and Gemini three.
+/// The modes a harness supports, in menu order (mockup v8: ask, edits, bypass, plan).
+/// [provisional] until each CLI is verified (FR-L16): Claude Code has the four, Codex and
+/// Gemini three.
 pub fn modes_for(h: Harness) -> &'static [PermMode] {
     match h {
         Harness::ClaudeCode => &[
             PermMode::Ask,
             PermMode::Edits,
-            PermMode::Plan,
             PermMode::Bypass,
+            PermMode::Plan,
         ],
         Harness::Codex | Harness::Gemini => &[PermMode::Ask, PermMode::Edits, PermMode::Bypass],
     }
+}
+
+/// One row of the permission picker (FR-L16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeRow {
+    pub mode: PermMode,
+    pub title: &'static str,
+    pub description: &'static str,
+    /// Drawn with the red shield (bypass).
+    pub danger: bool,
+    /// The row of the current mode, drawn with a check mark.
+    pub chosen: bool,
+}
+
+/// The header of the permission picker: "권한 모드 · Claude Code".
+pub fn mode_header(h: Harness) -> String {
+    format!("권한 모드 \u{b7} {}", h.label())
+}
+
+/// The rows of the permission picker for a harness, in menu order, with `current` marked.
+pub fn mode_picker_rows(h: Harness, current: PermMode) -> Vec<ModeRow> {
+    modes_for(h)
+        .iter()
+        .map(|m| ModeRow {
+            mode: *m,
+            title: m.label(),
+            description: m.description(),
+            danger: m.is_bypass(),
+            chosen: *m == current,
+        })
+        .collect()
 }
 
 pub fn default_mode(_h: Harness) -> PermMode {
@@ -880,13 +922,64 @@ mod tests {
     }
 
     #[test]
-    fn fr_l16_every_harness_lists_its_default_and_bypass_last() {
+    fn fr_l16_every_harness_lists_its_default_and_bypass_before_plan() {
         for h in Harness::ALL {
             let m = modes_for(h);
             assert!(m.contains(&default_mode(h)));
-            assert_eq!(m.last(), Some(&PermMode::Bypass));
+            // Mockup v8 order: ask, edits, bypass, then plan where the harness has it.
+            let bypass = m.iter().position(|x| x.is_bypass()).unwrap();
+            if let Some(plan) = m.iter().position(|x| *x == PermMode::Plan) {
+                assert!(bypass < plan);
+            } else {
+                assert_eq!(bypass, m.len() - 1);
+            }
             assert_eq!(m.iter().filter(|x| x.is_bypass()).count(), 1);
         }
+    }
+
+    #[test]
+    fn fr_l16_picker_order_is_ask_edits_bypass_plan() {
+        let rows = mode_picker_rows(Harness::ClaudeCode, PermMode::Ask);
+        let order: Vec<PermMode> = rows.iter().map(|r| r.mode).collect();
+        assert_eq!(order, [PermMode::Ask, PermMode::Edits, PermMode::Bypass, PermMode::Plan]);
+        let codex: Vec<PermMode> = mode_picker_rows(Harness::Codex, PermMode::Ask).iter().map(|r| r.mode).collect();
+        assert_eq!(codex, [PermMode::Ask, PermMode::Edits, PermMode::Bypass]);
+    }
+
+    #[test]
+    fn fr_l16_every_row_has_a_korean_description() {
+        for h in Harness::ALL {
+            for r in mode_picker_rows(h, PermMode::Ask) {
+                assert!(!r.description.is_empty());
+                assert!(r.description.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)), "{}", r.description);
+                assert_ne!(r.description, r.title);
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l16_only_the_bypass_row_is_danger() {
+        for h in Harness::ALL {
+            let rows = mode_picker_rows(h, PermMode::Ask);
+            assert_eq!(rows.iter().filter(|r| r.danger).count(), 1);
+            assert!(rows.iter().find(|r| r.danger).unwrap().mode == PermMode::Bypass);
+        }
+    }
+
+    #[test]
+    fn fr_l16_exactly_the_current_mode_is_marked_chosen() {
+        for m in modes_for(Harness::ClaudeCode) {
+            let rows = mode_picker_rows(Harness::ClaudeCode, *m);
+            assert_eq!(rows.iter().filter(|r| r.chosen).count(), 1);
+            assert_eq!(rows.iter().find(|r| r.chosen).unwrap().mode, *m);
+        }
+        // A mode the harness lacks marks nothing.
+        assert!(mode_picker_rows(Harness::Codex, PermMode::Plan).iter().all(|r| !r.chosen));
+    }
+
+    #[test]
+    fn fr_l16_header_names_the_harness() {
+        assert_eq!(mode_header(Harness::ClaudeCode), format!("권한 모드 \u{b7} {}", Harness::ClaudeCode.label()));
     }
 
     #[test]

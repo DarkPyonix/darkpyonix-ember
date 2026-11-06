@@ -221,6 +221,66 @@ pub fn window_total(load: &Load<UsageSummary>, window: usize) -> Option<u64> {
     (rows.iter().map(|d| d.turns).sum::<u64>() > 0).then(|| rows.iter().map(|d| d.total_tokens).sum())
 }
 
+/// The Home cost card (FR-L11, #509) shows a stat only when the server sent its data.
+pub const NO_DATA: &str = "데이터 없음";
+/// The card opens on 14 days, as the mockup does.
+pub const DEFAULT_WINDOW: usize = 14;
+
+fn window_rows(load: &Load<UsageSummary>, window: usize) -> &[UsageDayRow] {
+    let Load::Ready(s) = load else { return &[] };
+    let start = s.days.len().saturating_sub(window.max(1));
+    &s.days[start..]
+}
+
+/// Sum of the days' `cost_usd` in the window, or `None` when no day carries a cost (today the
+/// server sends `null` everywhere, so this is `None`; no price is invented).
+pub fn period_cost(load: &Load<UsageSummary>, window: usize) -> Option<f64> {
+    let costs: Vec<f64> = window_rows(load, window).iter().filter_map(|d| d.cost_usd).collect();
+    (!costs.is_empty()).then(|| costs.iter().sum())
+}
+
+/// Sessions that reported usage in the window (sum of the daily counts), or `None` when zero.
+pub fn window_sessions(load: &Load<UsageSummary>, window: usize) -> Option<u64> {
+    let n: u64 = window_rows(load, window).iter().map(|d| d.sessions).sum();
+    (n > 0).then_some(n)
+}
+
+/// Cost per session: the cost divided by the sessions, `None` unless both exist.
+pub fn cost_per_job(cost: Option<f64>, sessions: Option<u64>) -> Option<f64> {
+    match (cost, sessions) {
+        (Some(c), Some(n)) if n > 0 => Some(c / n as f64),
+        _ => None,
+    }
+}
+
+pub fn format_usd(v: f64) -> String {
+    format!("${v:.2}")
+}
+
+/// The four stats of the card, `(label, value)`: 기간 비용, 토큰, 작업당 비용, 캐시 적중.
+/// 캐시 적중 is always [`NO_DATA`]: the `usage` event carries input and output tokens only.
+pub fn cost_stats(load: &Load<UsageSummary>, window: usize) -> [(&'static str, String); 4] {
+    let cost = period_cost(load, window);
+    let per_job = cost_per_job(cost, window_sessions(load, window));
+    let usd = |v: Option<f64>| v.map(format_usd).unwrap_or_else(|| NO_DATA.to_string());
+    [
+        ("기간 비용", usd(cost)),
+        ("토큰", window_total(load, window).map(format_compact).unwrap_or_else(|| NO_DATA.to_string())),
+        ("작업당 비용", usd(per_job)),
+        ("캐시 적중", NO_DATA.to_string()),
+    ]
+}
+
+/// What the bars are: tokens per UTC day. The cost line of the mockup is named only when cost
+/// data exists.
+pub fn cost_legend(load: &Load<UsageSummary>, window: usize) -> String {
+    if period_cost(load, window).is_some() {
+        "막대: 일별 토큰 · 선: 비용".to_string()
+    } else {
+        "막대: 일별 토큰 (비용 데이터 없음)".to_string()
+    }
+}
+
 /// Tokens per UTC day for the last `window` days, oldest first, as `(YYYY-MM-DD, tokens)`.
 /// Empty until the summary is here.
 pub fn trend_days(load: &Load<UsageSummary>, window: usize) -> Vec<(String, u64)> {
@@ -430,6 +490,37 @@ mod tests {
 
     fn summary(days: Vec<UsageDayRow>) -> Load<UsageSummary> {
         Load::Ready(UsageSummary { days, ..Default::default() })
+    }
+
+    #[test]
+    fn fr_l11_cost_card_without_cost_says_no_data() {
+        let l = summary(vec![day("2026-11-05", 100, 0, 2)]);
+        let st = cost_stats(&l, 14);
+        assert_eq!(st[0].1, NO_DATA);
+        assert_eq!(st[2].1, NO_DATA);
+        assert_eq!(st[3].1, NO_DATA);
+        assert_eq!(st[1].1, "100");
+        assert!(cost_legend(&l, 14).contains("비용 데이터 없음"));
+        assert_eq!(cost_stats(&Load::Loading, 14)[1].1, NO_DATA);
+    }
+
+    #[test]
+    fn fr_l11_cost_card_sums_cost_and_divides_by_sessions() {
+        let mut a = day("2026-11-04", 10, 0, 1);
+        a.cost_usd = Some(1.0);
+        a.sessions = 1;
+        let mut b = day("2026-11-05", 10, 0, 1);
+        b.cost_usd = Some(2.0);
+        b.sessions = 2;
+        let l = summary(vec![a, b]);
+        assert_eq!(period_cost(&l, 14), Some(3.0));
+        assert_eq!(window_sessions(&l, 14), Some(3));
+        assert_eq!(cost_per_job(Some(3.0), Some(3)), Some(1.0));
+        assert_eq!(cost_per_job(None, Some(3)), None);
+        assert_eq!(cost_per_job(Some(3.0), None), None);
+        assert_eq!(cost_stats(&l, 14)[0].1, "$3.00");
+        assert_eq!(period_cost(&l, 1), Some(2.0));
+        assert_eq!(DEFAULT_WINDOW, 14);
     }
 
     #[test]

@@ -405,7 +405,7 @@ pub fn toolbar_fold_level(toolbar_dp: f32) -> usize {
 }
 
 /// Width of the left session drawer (mockup `.sside`, #582): `min(300, 86% of the window)` at
-/// phone width, 290 between 561 and 900 where the 64 px rail stays and the drawer opens over it.
+/// phone width, 290 between 561 and 900 where the 64 px rail stays and the drawer opens beside it (the list column's place).
 pub fn drawer_width(window_dp: f32) -> f32 {
     // The window size reads 0 until the renderer reports it: the widest phone drawer then.
     if window_dp <= 0.0 {
@@ -421,6 +421,12 @@ pub fn drawer_width(window_dp: f32) -> f32 {
 /// column shows only above 900 dp, FR-L18).
 pub fn drawer_is_overlay(window_dp: f32) -> bool {
     window_dp <= 900.0
+}
+
+/// Whether the drawer is open for the overlay decision: it counts only while the list is not a
+/// column, so widening past 900 dp and shrinking again does not reopen it (FR-L18).
+pub fn drawer_open_effective(show_column: bool, drawer_open: bool) -> bool {
+    !show_column && drawer_open
 }
 
 /// Whether the 멀티/싱글/상태 chips move to their own row: at the bottom-bar width (mockup
@@ -1473,6 +1479,14 @@ mod tests {
         assert!(drawer_is_overlay(561.0));
         assert!(drawer_is_overlay(900.0));
         assert!(!drawer_is_overlay(901.0));
+    }
+
+    #[test]
+    fn fr_l18_drawer_open_effective_resets_when_the_list_is_a_column() {
+        assert!(drawer_open_effective(false, true));
+        assert!(!drawer_open_effective(false, false));
+        assert!(!drawer_open_effective(true, true));
+        assert!(!drawer_open_effective(true, false));
     }
 
     #[test]

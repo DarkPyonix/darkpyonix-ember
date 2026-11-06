@@ -141,7 +141,12 @@ async fn fr_t14_guard_matrix_limited_door() {
     certain(&rows);
 }
 
-/// Only what the code makes certain. The wrong-method rows are NOT asserted here.
+/// Pinned to the CI measurement of #594 (head 12ad88d, 84 rows per kind, wrapped and limited
+/// identical): the guard covers the wrong-method path of the guest door. A foreign Host or a foreign
+/// Origin is a 403 for EVERY method on EVERY path, registered or not. With a good Host a wrong method
+/// on a registered path is axum's default 405 (the guest door sets no `method_not_allowed_fallback`,
+/// unlike the enrol door, whose wrong method is a 404), HEAD is the guard's 405 on every path, and an
+/// unregistered path is 404. `Allow` is printed, not asserted: axum adds it after the fallback.
 fn certain(rows: &[(String, String, &'static str, StatusCode)]) {
     for (method, uri) in [("POST", ACCEPT_PATH), ("GET", "/ok"), ("POST", "/ok"), ("POST", "/echo")] {
         assert_eq!(status_of(rows, method, uri, "good-host"), StatusCode::OK, "{method} {uri} good host");
@@ -150,5 +155,20 @@ fn certain(rows: &[(String, String, &'static str, StatusCode)]) {
     }
     for uri in ["/ok", ACCEPT_PATH, "/echo", "/nothing"] {
         assert_eq!(status_of(rows, "HEAD", uri, "good-host"), StatusCode::METHOD_NOT_ALLOWED, "HEAD {uri}");
+    }
+    // The measured wrong-method rows.
+    let registered: [(&str, &[&str]); 3] = [("/ok", &["GET", "POST"]), (ACCEPT_PATH, &["POST"]), ("/echo", &["POST"])];
+    for method in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] {
+        for uri in ["/ok", ACCEPT_PATH, "/echo", "/nothing"] {
+            assert_eq!(status_of(rows, method, uri, "foreign-host"), StatusCode::FORBIDDEN, "{method} {uri} foreign host");
+            assert_eq!(status_of(rows, method, uri, "foreign-origin"), StatusCode::FORBIDDEN, "{method} {uri} foreign origin");
+            let want = match registered.iter().find(|(u, _)| *u == uri) {
+                _ if method == "HEAD" => StatusCode::METHOD_NOT_ALLOWED,
+                Some((_, ok)) if ok.contains(&method) => StatusCode::OK,
+                Some(_) => StatusCode::METHOD_NOT_ALLOWED,
+                None => StatusCode::NOT_FOUND,
+            };
+            assert_eq!(status_of(rows, method, uri, "good-host"), want, "{method} {uri} good host");
+        }
     }
 }

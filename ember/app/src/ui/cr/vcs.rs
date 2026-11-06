@@ -519,6 +519,29 @@ fn VcsCard(content: impl FnOnce()) {
     });
 }
 
+/// Columns of the repository, branch and remote cards: three side by side from 1000 dp, one
+/// stacked column below it (the 768 dp mockup), where the remote card's Pull and icon buttons
+/// were cut at the right edge (FR-L19).
+pub fn repo_bar_columns(width_dp: f32) -> usize {
+    if width_dp >= 1000.0 { 3 } else { 1 }
+}
+
+/// The diff header wraps to two lines (title and path, then the chips) when the diff pane is
+/// narrower than 560 dp, so the "+n -n" and "k/n줄 스테이징" chips are not clipped (FR-L19).
+pub fn diff_header_wraps(pane_width_dp: f32) -> bool {
+    pane_width_dp < 560.0
+}
+
+/// The width of the diff pane: at the two-pane layout the window minus the page padding, the
+/// section rail (200), the file column (320) and the gaps; otherwise the page width.
+pub fn diff_pane_width(window_width_dp: f32, layout: PaneLayout) -> f32 {
+    if layout == PaneLayout::Two {
+        window_width_dp - 64.0 - 200.0 - 320.0 - SP[3] - GAP_CARD
+    } else {
+        window_width_dp - 64.0
+    }
+}
+
 /// The bar of three: repository, current branch, remote origin in ONE split card.
 pub fn RepoBar(
     projects: &[(String, String)],
@@ -571,12 +594,14 @@ fn RepoBarWithActions(
     let mut on_pick_proj = on_pick.clone();
     let b_dismiss = branch_menu.clone();
 
+    // Below 1000 dp the three cards stack, so the remote card's buttons are not clipped (FR-L19).
+    let stacked = repo_bar_columns(current_window_size().width_dp) == 1;
     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
         let (project_menu_c, branch_menu_c) = (project_menu.clone(), branch_menu.clone());
         let p = ember_theme().palette;
         let remote_actions = actions.clone();
         VcsCard(move || {
-            if compact {
+            if compact || stacked {
                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
                     let p_open = project_menu_c.clone();
                     let p_name = proj_name.clone();
@@ -855,7 +880,26 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
         FileStatus::Renamed => (p.blue.soft, p.blue.strong),
     };
 
+    let window = current_window_size();
+    let wraps = diff_header_wraps(diff_pane_width(window.width_dp, pane_layout(window.class)));
+    let stage_chip = format!("{on}/{total}줄 스테이징");
     cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+        if wraps {
+            // Two lines (FR-L19): the path first, the counts and the staging chip below it.
+            cu::Column().modifier(Modifier::new().fill_max_width().padding(SP[2])).spacing(SP[1]).content(|| {
+                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
+                        Label(file.status.letter(), Fs::Xs2, Weight::Semibold, Some(paint(tone_text)), Some(1));
+                    });
+                    Txt(&file.path, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                });
+                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
+                    Label(&format!("+{}", file.added()), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
+                    Label(&format!("-{}", file.removed()), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
+                    Pill(&stage_chip, PillTone::Grey, true);
+                });
+            });
+        } else {
         // File header row (52 px)
         cu::Row().modifier(Modifier::new().fill_max_width().height(52.0).padding(SP[2])).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
             cu::Box().modifier(Modifier::new().size(20.0, 20.0).background(paint(tone_fill)).corner_radius(CORNER_XS)).alignment(Alignment::Center).content(|| {
@@ -866,8 +910,9 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             Label(&format!("+{}", file.added()), Fs::Xs, Weight::Medium, Some(paint(p.green.strong)), Some(1));
             Label(&format!("-{}", file.removed()), Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(1));
-            Pill(&format!("{on}/{total}줄 스테이징"), PillTone::Grey, true);
+            Pill(&stage_chip, PillTone::Grey, true);
         });
+        }
 
         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
 
@@ -2012,9 +2057,13 @@ fn CommitDetailBody(v: &CommitDetailView, ctl: &CommitCtl) {
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                     let name = ctl.name.clone();
                     key((v.sha.clone(), ctl.name_gen), || {
-                        cu::TextField().modifier(Modifier::new().weight(1.0).height(H_BTN))
-                            .text(ctl.name.get()).placeholder("feat/새-브랜치")
-                            .on_value_change(move |value| name.set(value));
+                        EmberField(FieldOptions {
+                            weight: Some(1.0),
+                            text: Some(ctl.name.get()),
+                            placeholder: "feat/새-브랜치".to_string(),
+                            on_value_change: Some(Box::new(move |value| name.set(value))),
+                            ..Default::default()
+                        });
                     });
                     let create = ctl.on_create.clone();
                     AppButton("만들고 전환", None, ButtonKind::Primary, true, !ctl.busy, false, move || create());
@@ -2656,9 +2705,15 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                 Label("리뷰 남기기", Fs::Md, Weight::Semibold, None, Some(1));
                 let text = ctl.review_text.clone();
                 key(ctl.review_gen.get(), || {
-                    cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
-                        .text(text.get()).placeholder("코멘트나 변경 요청의 내용").multiline(true)
-                        .on_value_change(move |value| text.set(value));
+                    EmberField(FieldOptions {
+                        fill_max_width: true,
+                        height: Some(64.0),
+                        multiline: true,
+                        text: Some(text.get()),
+                        placeholder: "코멘트나 변경 요청의 내용".to_string(),
+                        on_value_change: Some(Box::new(move |value| text.set(value))),
+                        ..Default::default()
+                    });
                 });
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                     for (action, kind) in [
@@ -2913,15 +2968,25 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                     Label("새 풀 리퀘스트", Fs::Md, Weight::Semibold, None, Some(1));
                     let t = f_title.clone();
                     key((f_gen.get(), 0_u8), || {
-                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
-                            .text(f_title.get()).placeholder("제목 (필수)")
-                            .on_value_change(move |v| t.set(v));
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            text: Some(f_title.get()),
+                            placeholder: "제목 (필수)".to_string(),
+                            on_value_change: Some(Box::new(move |v| t.set(v))),
+                            ..Default::default()
+                        });
                     });
                     let b = f_body.clone();
                     key((f_gen.get(), 1_u8), || {
-                        cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
-                            .text(f_body.get()).placeholder("설명 (선택)").multiline(true)
-                            .on_value_change(move |v| b.set(v));
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            height: Some(64.0),
+                            multiline: true,
+                            text: Some(f_body.get()),
+                            placeholder: "설명 (선택)".to_string(),
+                            on_value_change: Some(Box::new(move |v| b.set(v))),
+                            ..Default::default()
+                        });
                     });
                     let head_text = branch.clone().unwrap_or_else(|| "현재 브랜치".to_string());
                     Label(&format!("{head_text} \u{2192} 기본 브랜치"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
@@ -3761,14 +3826,23 @@ fn VcsScreenWithLoad(
     let active_tab = effective_tab(sec, tab.get());
 
     let body = || {
-        cu::Column().modifier(Modifier::new().fill_max_width()).spacing(4.0).content(|| {
-            // The sheet header carries the title (#495).
-            if !sheet {
-                Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
-            }
-            if let Some(ref proj) = project {
-                let subtitle = screen_subtitle(proj, snap.as_ref(), sample);
-                Label(&subtitle, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+        cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::CenterStart).content(|| {
+            cu::Column().modifier(Modifier::new().weight(1.0)).spacing(4.0).content(|| {
+                // The sheet header carries the title (#495).
+                if !sheet {
+                    Label("버전 관리", Fs::Xl3, Weight::Semibold, None, None);
+                }
+                if let Some(ref proj) = project {
+                    let subtitle = screen_subtitle(proj, snap.as_ref(), sample);
+                    Label(&subtitle, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
+                }
+            });
+            // The page header carries the theme toggle like 에이전트 and 파일; the sheet and the
+            // phone (where the shell's menu button sits) do not (#495).
+            if !sheet && !compact {
+                if let Some(s) = crate::services::try_services() {
+                    super::project::ThemeButton(&s.ui);
+                }
             }
         });
 
@@ -4060,6 +4134,24 @@ mod tests {
         assert_eq!(pane_layout(WindowSizeClass::Expanded), PaneLayout::Two);
         assert_eq!(pane_layout(WindowSizeClass::Medium), PaneLayout::Stacked);
         assert_eq!(pane_layout(WindowSizeClass::Compact), PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_l19_repo_bar_stacks_below_1000dp() {
+        assert_eq!(repo_bar_columns(1440.0), 3);
+        assert_eq!(repo_bar_columns(1024.0), 3);
+        assert_eq!(repo_bar_columns(1000.0), 3);
+        assert_eq!(repo_bar_columns(768.0), 1);
+        assert_eq!(repo_bar_columns(390.0), 1);
+    }
+
+    #[test]
+    fn fr_l19_diff_header_wraps_when_the_pane_is_narrow() {
+        assert!(diff_header_wraps(559.0));
+        assert!(!diff_header_wraps(560.0));
+        // 1024 dp wraps, 1440 dp does not.
+        assert!(diff_header_wraps(diff_pane_width(1024.0, PaneLayout::Two)));
+        assert!(!diff_header_wraps(diff_pane_width(1440.0, PaneLayout::Two)));
     }
 
     #[test]

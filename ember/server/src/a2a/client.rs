@@ -62,6 +62,8 @@ Channels (FR-T12):
   ember-a2a channel post <channel-id> <text...>
       Answer in a channel where a person mentioned you (within 30 minutes; 6 posts a minute at
       most). Use `-` (or no text) to read the text from stdin. `channel_post` is accepted too.
+  ember-a2a mcp
+      The stdio MCP server exposing the tool `channel_post`, started by the harness, not for people.
 
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
@@ -421,6 +423,14 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
 /// Entry point of `ember-a2a`; returns the process exit code.
 pub fn run(args: &[String]) -> i32 {
+    // `mcp` owns stdout for protocol frames, so it never goes through the `println!` below.
+    if args.first().map(String::as_str) == Some("mcp") {
+        if args.len() > 1 {
+            eprintln!("ember-a2a: mcp takes no arguments\n\n{USAGE}");
+            return 2;
+        }
+        return super::mcp::run_stdio();
+    }
     match run_inner(args) {
         Ok(out) => {
             println!("{out}");
@@ -963,6 +973,13 @@ mod tests {
         assert!(matches!(run_inner(&args(&["channel"])), Err(CliError::Usage(_))));
         assert!(matches!(run_inner(&args(&["channel", "shout"])), Err(CliError::Usage(_))));
         assert!(matches!(run_inner(&args(&["channel", "post"])), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn fr_t12_mcp_usage_names_the_subcommand() {
+        assert!(USAGE.contains("ember-a2a mcp\n"));
+        assert!(USAGE.contains("`channel_post`"));
+        assert!(USAGE.contains("not for people"));
     }
 
     #[test]

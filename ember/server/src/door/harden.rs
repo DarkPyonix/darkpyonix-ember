@@ -15,6 +15,7 @@ use axum::Router;
 use serde_json::json;
 
 use crate::api::origin::host_of;
+use crate::guest_door::MAX_BODY_BYTES;
 
 /// Answers 408 when the request (handler included) exceeds `limit`.
 pub fn with_timeout(app: Router, limit: Duration) -> Router {
@@ -87,4 +88,34 @@ pub(crate) async fn not_found() -> Response {
     let mut r = Response::new(Body::empty());
     *r.status_mut() = StatusCode::NOT_FOUND;
     r
+}
+
+/// Host, Origin and Upgrade checks, before any route or body.
+pub(crate) async fn guard_layer(State(g): State<Guard>, req: Request, next: Next) -> Response {
+    let Some(host) = request_host(&req) else { return forbid("host not allowed") };
+    if host.is_empty() || host.contains(['@', '/', '\\', ' ']) || !g.hosts.contains(&host_of(&host)) {
+        return forbid("host not allowed");
+    }
+    if !origin_ok(req.headers(), &host, &g.hosts) {
+        return forbid("origin not allowed");
+    }
+    // HEAD would be answered by axum from every GET route; nothing needs it, so nothing leaks.
+    if matches!(req.method().as_str(), "HEAD" | "TRACE" | "CONNECT") {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let too_big = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64);
+    if too_big {
+        return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(json!({ "error": "body too large", "code": "too_large" })))
+            .into_response();
+    }
+    if req.headers().contains_key(header::UPGRADE) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "no upgrade here", "code": "bad_request" })))
+            .into_response();
+    }
+    next.run(req).await
 }

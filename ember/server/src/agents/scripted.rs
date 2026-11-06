@@ -115,6 +115,7 @@ impl AgentRun for ScriptedRun {
                 approval_id,
                 tool: "Bash".into(),
                 input: serde_json::json!({ "command": "echo hi" }),
+                needs_person: false,
             })
             .await?;
         Ok(())

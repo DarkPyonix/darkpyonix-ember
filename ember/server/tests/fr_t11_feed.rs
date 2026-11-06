@@ -168,6 +168,7 @@ fn ask(store: &Store, session: &str, id: &str, tool: &str, input: Value) {
                 approval_id: id.into(),
                 tool: tool.into(),
                 input,
+                needs_person: false,
             },
         )
         .unwrap();
@@ -210,4 +211,108 @@ async fn fr_t11_a_malformed_question_input_and_a_normal_approval_have_no_questio
         assert!(it.get("questions").is_none(), "{it}");
         assert!(it.get("input").is_some());
     }
+}
+
+fn ask_question(store: &Store, session: &str, id: &str) {
+    use ember_server::events::{AgentEvent, Question, QuestionOption};
+    store
+        .append(
+            session,
+            &AgentEvent::QuestionAsked {
+                question_id: id.into(),
+                questions: vec![Question {
+                    id: "q0".into(),
+                    header: Some("Colour".into()),
+                    text: "Which colour do you prefer?".into(),
+                    options: vec![
+                        QuestionOption { label: "Red".into(), description: Some("Choose red".into()) },
+                        QuestionOption { label: "Blue".into(), description: None },
+                    ],
+                    multi_select: false,
+                    secret: false,
+                    allow_other: true,
+                }],
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn fr_a5_a_pending_question_appears_in_the_feed_with_labels_only() {
+    let f = fx();
+    let a = session(&f.store, "core", "alpha");
+    ask_question(&f.store, &a, "r1");
+    let (st, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let items = feed.as_array().unwrap();
+    assert_eq!(items.len(), 1, "{feed}");
+    let it = &items[0];
+    assert_eq!(it["kind"], "question");
+    assert_eq!(it["id"], "question:r1");
+    assert_eq!(it["question_id"], "r1");
+    assert_eq!(it["agent"]["name"], "alpha");
+    assert_eq!(it["session_id"], a.as_str());
+    assert_eq!(it["link"], format!("/sessions/{a}"));
+    assert_eq!(it["questions"][0]["header"], "Colour");
+    assert_eq!(it["questions"][0]["text"], "Which colour do you prefer?");
+    assert_eq!(it["questions"][0]["options"], json!(["Red", "Blue"]));
+    assert!(it.get("approval_id").is_none() && it.get("input").is_none(), "{it}");
+    // Not answerable through the feed in this version.
+    for path in ["r1", "question:r1"] {
+        let (st, _) = call(
+            &f.app,
+            "POST",
+            &format!("/api/channels/default-core/feed/{path}/answer"),
+            Some(json!({"decision":"allow_once"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn fr_a5_a_question_clears_when_answered_skipped_or_the_turn_ends() {
+    use ember_server::events::{AgentEvent, TurnOutcome};
+    let f = fx();
+    let a = session(&f.store, "core", "alpha");
+    let count = |feed: &Value| feed.as_array().unwrap().iter().filter(|i| i["kind"] == "question").count();
+    ask_question(&f.store, &a, "r1");
+    ask_question(&f.store, &a, "r2");
+    ask_question(&f.store, &a, "r3");
+    let (_, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    assert_eq!(count(&feed), 3);
+    // Answered, and skipped (no answers): each clears only itself.
+    f.store
+        .append(&a, &AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: Vec::new() })
+        .unwrap();
+    f.store
+        .append(
+            &a,
+            &AgentEvent::QuestionAnswered {
+                question_id: "r2".into(),
+                answers: vec![ember_server::events::QuestionAnswer { question_id: "q0".into(), values: vec!["Red".into()] }],
+            },
+        )
+        .unwrap();
+    let (_, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    assert_eq!(count(&feed), 1);
+    assert_eq!(feed[0]["question_id"], "r3");
+    // The turn ends (an interrupt too): the last one is withdrawn.
+    f.store.append(&a, &AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }).unwrap();
+    let (_, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    assert_eq!(count(&feed), 0, "{feed}");
+}
+
+#[tokio::test]
+async fn fr_t11_a_large_approval_input_is_replaced_by_a_marker() {
+    let f = fx();
+    let a = session(&f.store, "core", "alpha");
+    let big = "x".repeat(8191); // serializes to 8193 bytes
+    ask(&f.store, &a, "big", "Write", json!(big));
+    ask(&f.store, &a, "edge", "Write", json!("x".repeat(8190))); // exactly 8192
+    let (_, feed) = call(&f.app, "GET", "/api/channels/default-core/feed", None).await;
+    let items = feed.as_array().unwrap();
+    let find = |id: &str| items.iter().find(|i| i["approval_id"] == id).unwrap();
+    assert_eq!(find("big")["input"], json!({"truncated": true, "bytes": 8193}));
+    assert_eq!(find("edge")["input"], json!("x".repeat(8190)));
 }

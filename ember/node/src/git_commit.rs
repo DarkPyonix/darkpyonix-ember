@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::git_log::{ref_of, GitLogRef};
-use super::{describe, message, open, run, run_ok, GitError};
+use super::{message, open, run, GitError, Out};
 use crate::policy::PathPolicy;
 
 /// Files listed in one answer; the rest only count in `files_total`.
@@ -182,24 +182,88 @@ async fn resolve(dir: &Path, sha: &str) -> Result<String, GitError> {
     Ok(full)
 }
 
+const GENERIC_FAILURE: &str = "git 작업에 실패했습니다.";
+const IN_PROGRESS: &str = "진행 중인 git 작업이 있습니다. 먼저 끝내거나 중단하세요.";
+const ABORT_FAILED: &str = "되돌리기를 취소하지 못했습니다. 저장소에 진행 중인 작업이 남아 있을 수 있으니 터미널에서 git status를 확인하세요.";
+const TOO_MANY_FILES: &str = "변경된 파일이 너무 많아 목록을 만들 수 없습니다.";
+/// The user's hooks never run through the API (SPEC FR-G15).
+const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+
+/// Korean text for a failed git call. Git's own text is never returned to the client.
+pub fn failure_message(git_text: &str) -> &'static str {
+    let t = git_text.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    if has(&["index.lock", "another git process"]) {
+        "다른 git 작업이 진행 중입니다. 잠시 뒤 다시 시도하세요."
+    } else if has(&["please tell me who you are", "unable to auto-detect", "empty ident name", "no email was given", "no name was given", "author identity unknown"]) {
+        "git 사용자 이름과 이메일이 설정되어 있지 않습니다."
+    } else if has(&["nothing to commit", "is now empty", "empty commit", "nothing added to commit"]) {
+        "적용할 변경이 없어 건너뛰었습니다."
+    } else if has(&["conflict"]) {
+        "충돌이 발생해 취소했습니다."
+    } else {
+        GENERIC_FAILURE
+    }
+}
+
+/// The answer after `<verb> --abort` ran with `abort_exit_code`: the cancel message only when
+/// the abort worked, else the honest "could not cancel".
+pub fn abort_outcome(abort_exit_code: i32, cancelled: &str) -> GitError {
+    if abort_exit_code == 0 {
+        GitError::Conflict(cancelled.to_owned())
+    } else {
+        GitError::Conflict(ABORT_FAILED.to_owned())
+    }
+}
+
+/// Drop control characters (C0, DEL, C1, ESC). `\n` and `\t` stay when `keep_whitespace`.
+pub fn strip_controls(text: &str, keep_whitespace: bool) -> String {
+    text.chars()
+        .filter(|c| if *c == '\n' || *c == '\t' { keep_whitespace } else { !c.is_control() })
+        .collect()
+}
+
+/// Run git; a failure becomes a Korean message with no git text (the text is only logged).
+async fn run_k(dir: &Path, args: &[&str], too_big: &str) -> Result<Out, GitError> {
+    let o = run(dir, args, None).await?;
+    if o.truncated {
+        return Err(GitError::TooLarge(too_big.to_owned()));
+    }
+    if o.code != 0 {
+        tracing::debug!(git_text = %message(&o), "git call failed");
+        return Err(GitError::Conflict(failure_message(&message(&o)).to_owned()));
+    }
+    Ok(o)
+}
+
+/// True when a cherry-pick, revert, merge or rebase is in progress in the repository.
+async fn in_progress(dir: &Path) -> Result<bool, GitError> {
+    let o = run_k(dir, &[
+        "rev-parse",
+        "--git-path", "CHERRY_PICK_HEAD", "--git-path", "REVERT_HEAD", "--git-path", "MERGE_HEAD",
+        "--git-path", "sequencer", "--git-path", "rebase-merge", "--git-path", "rebase-apply",
+    ], GENERIC_FAILURE).await?;
+    Ok(o.stdout.lines().any(|p| !p.is_empty() && dir.join(p).exists()))
+}
+
 pub async fn show(policy: &PathPolicy, r: &GitCommitShowRequest) -> Result<GitCommitShowResponse, GitError> {
     let sha = check_sha(&r.sha)?;
     let dir = open(policy, &r.repo).await?;
     let full = resolve(&dir, sha).await?;
-    let meta = run_ok(&dir, &[
+    let meta = run_k(&dir, &[
         "show", "--no-patch", "--no-color", "--decorate=full",
         "--format=%H%x00%P%x00%an%x00%aI%x00%s%x00%(decorate:prefix=,suffix=,separator=%x1f,pointer=%x1f,tag=)%x00%b",
         "--end-of-options", &full,
-    ], None).await?;
+    ], GENERIC_FAILURE).await?;
     let mut fields = meta.stdout.splitn(7, '\0');
     let mut next = || fields.next().ok_or_else(bad_output);
     let sha_full = next()?.to_owned();
     let parents: Vec<String> = next()?.split_whitespace().map(str::to_owned).collect();
-    let author = next()?.to_owned();
+    let author = strip_controls(next()?, false);
     let time = next()?.to_owned();
-    let subject = next()?.to_owned();
+    let subject = strip_controls(next()?, false);
     let refs = next()?.split('\x1f').filter_map(ref_of).collect();
-    let body = cut_chars(next()?.trim(), MAX_BODY_CHARS);
+    let body = cut_chars(&strip_controls(next()?.trim(), true), MAX_BODY_CHARS);
 
     // A merge commit is compared with its first parent, the root commit with the empty tree.
     let mut name_args = vec!["diff-tree", "--no-commit-id", "--name-status", "-r", "-M", "-z"];
@@ -211,8 +275,8 @@ pub async fn show(policy: &PathPolicy, r: &GitCommitShowRequest) -> Result<GitCo
     }
     name_args.extend(&tail);
     stat_args.extend(&tail);
-    let names = run_ok(&dir, &name_args, None).await?;
-    let stats = run_ok(&dir, &stat_args, None).await?;
+    let names = run_k(&dir, &name_args, TOO_MANY_FILES).await?;
+    let stats = run_k(&dir, &stat_args, TOO_MANY_FILES).await?;
     let mut files = merge_files(parse_name_status(&names.stdout)?, parse_numstat(&stats.stdout)?);
     let files_total = files.len();
     let truncated = files_total > MAX_FILES;
@@ -240,14 +304,18 @@ async fn act(policy: &PathPolicy, r: &GitCommitActionRequest, action: Action) ->
         return Err(GitError::Bad("확인이 필요합니다.".into()));
     }
     let dir = open(policy, &r.repo).await?;
+    // An operation the user (or another tool) left paused is theirs: refuse, never touch it.
+    if in_progress(&dir).await? {
+        return Err(GitError::Conflict(IN_PROGRESS.into()));
+    }
     let full = resolve(&dir, sha).await?;
-    let dirty = run_ok(&dir, &["status", "--porcelain", "--untracked-files=no"], None).await?;
+    let dirty = run_k(&dir, &["status", "--porcelain", "--untracked-files=no"], GENERIC_FAILURE).await?;
     if !dirty.stdout.trim().is_empty() {
         return Err(GitError::Conflict("작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시하세요.".into()));
     }
-    let listed = run_ok(&dir, &["rev-list", "--parents", "-n", "1", &full], None).await?;
+    let listed = run_k(&dir, &["rev-list", "--parents", "-n", "1", &full], GENERIC_FAILURE).await?;
     let is_merge = listed.stdout.split_whitespace().count() > 2;
-    let (verb, args): (&str, Vec<&str>) = match action {
+    let (verb, op_args): (&str, Vec<&str>) = match action {
         Action::Revert if is_merge => ("revert", vec!["revert", "--no-edit", "-m", "1", &full]),
         Action::Revert => ("revert", vec!["revert", "--no-edit", &full]),
         Action::CherryPick if is_merge => {
@@ -255,18 +323,25 @@ async fn act(policy: &PathPolicy, r: &GitCommitActionRequest, action: Action) ->
         }
         Action::CherryPick => ("cherry-pick", vec!["cherry-pick", &full]),
     };
+    let args: Vec<&str> = NO_HOOKS.iter().copied().chain(op_args).collect();
     let out = run(&dir, &args, None).await?;
     if out.code != 0 {
-        let text = message(&out);
         let combined = format!("{}\n{}", out.stderr.trim(), out.stdout.trim());
-        // Leave nothing half-done: the abort restores HEAD, the index and the work tree.
-        let _ = run(&dir, &[verb, "--abort"], None).await?;
-        if combined.to_lowercase().contains("conflict") {
-            return Err(GitError::Conflict(format!("충돌이 발생해 취소했습니다.\n{}", combined.trim())));
+        tracing::debug!(git_text = %combined.trim(), verb, "git operation failed");
+        let msg = failure_message(&combined);
+        // Abort only an operation this call started: the pre-check made sure none was there
+        // before, so a leftover state now is ours. A failure before it started (a lock, say)
+        // leaves nothing to abort.
+        if in_progress(&dir).await.unwrap_or(true) {
+            let abort = run(&dir, &[NO_HOOKS[0], NO_HOOKS[1], verb, "--abort"], None).await?;
+            if abort.code != 0 {
+                tracing::debug!(git_text = %message(&abort), verb, "git abort failed");
+            }
+            return Err(abort_outcome(abort.code, msg));
         }
-        return Err(GitError::Conflict(describe(&text)));
+        return Err(GitError::Conflict(msg.to_owned()));
     }
-    let head = run_ok(&dir, &["rev-parse", "HEAD"], None).await?;
+    let head = run_k(&dir, &["rev-parse", "HEAD"], GENERIC_FAILURE).await?;
     Ok(GitCommitActionResponse { new_sha: head.stdout.trim().to_owned() })
 }
 
@@ -331,5 +406,37 @@ mod tests {
         let text = "가".repeat(30000);
         assert_eq!(cut_chars(&text, MAX_BODY_CHARS).chars().count(), MAX_BODY_CHARS);
         assert_eq!(cut_chars("short", MAX_BODY_CHARS), "short");
+    }
+
+    #[test]
+    fn fr_g15_failure_text_maps_to_korean_only() {
+        let cases = [
+            ("fatal: Unable to create '/r/.git/index.lock': File exists.", "다른 git 작업이 진행 중입니다. 잠시 뒤 다시 시도하세요."),
+            ("*** Please tell me who you are.", "git 사용자 이름과 이메일이 설정되어 있지 않습니다."),
+            ("fatal: unable to auto-detect email address", "git 사용자 이름과 이메일이 설정되어 있지 않습니다."),
+            ("The previous cherry-pick is now empty, possibly due to conflict resolution.", "적용할 변경이 없어 건너뛰었습니다."),
+            ("nothing to commit, working tree clean", "적용할 변경이 없어 건너뛰었습니다."),
+            ("CONFLICT (content): Merge conflict in a", "충돌이 발생해 취소했습니다."),
+            ("fatal: something strange", "git 작업에 실패했습니다."),
+        ];
+        for (text, want) in cases {
+            assert_eq!(failure_message(text), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn fr_g15_abort_outcome_claims_cancel_only_when_the_abort_worked() {
+        assert_eq!(abort_outcome(0, "충돌이 발생해 취소했습니다.").to_string(), "충돌이 발생해 취소했습니다.");
+        for code in [1, 128, -1] {
+            let e = abort_outcome(code, "충돌이 발생해 취소했습니다.").to_string();
+            assert!(e.starts_with("되돌리기를 취소하지 못했습니다."), "{e}");
+            assert!(!e.contains("충돌이 발생해"));
+        }
+    }
+
+    #[test]
+    fn fr_g14_control_characters_are_stripped() {
+        assert_eq!(strip_controls("a\x1b[31mb\x07c\r\nd\te\u{7f}", true), "a[31mbc\nd\te");
+        assert_eq!(strip_controls("x\ny\tz\x00", false), "xyz");
     }
 }

@@ -294,3 +294,159 @@ async fn fr_g15_unknown_sha_is_404_and_bad_sha_is_400() {
     let (status, _) = call(&client, &base, "cherry-pick", json!({"repo": repo, "sha": "-x", "confirm": true})).await;
     assert_eq!(status, 400);
 }
+
+fn no_english_git_text(v: &Value) {
+    let text = v["error"].as_str().unwrap_or_default();
+    for word in ["CONFLICT", "error:", "fatal:", "hint:", "Unable", "index.lock", "could not", "Merge conflict"] {
+        assert!(!text.contains(word), "{word} in {text:?}");
+    }
+}
+
+#[tokio::test]
+async fn fr_g15_conflict_answers_carry_no_git_text() {
+    let (_dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    git(&repo, &["checkout", "-q", "-b", "other"]);
+    let picked = commit(&repo, "a", "other side\n", "other edit");
+    git(&repo, &["checkout", "-q", "main"]);
+    commit(&repo, "a", "main side\n", "main edit");
+    let (status, v) = call(&client, &base, "cherry-pick", json!({"repo": repo, "sha": picked, "confirm": true})).await;
+    assert_eq!(status, 409, "{v}");
+    assert_eq!(v["error"], "충돌이 발생해 취소했습니다.");
+    no_english_git_text(&v);
+}
+
+#[tokio::test]
+async fn fr_g15_index_lock_is_a_korean_409_and_not_claimed_cancelled() {
+    let (_dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    let last = commit(&repo, "a", "changed\n", "change");
+    std::fs::write(repo.join(".git/index.lock"), "").unwrap();
+    for op in ["revert", "cherry-pick"] {
+        let (status, v) = call(&client, &base, op, json!({"repo": repo, "sha": last, "confirm": true})).await;
+        assert_eq!(status, 409, "{op}: {v}");
+        let text = v["error"].as_str().unwrap();
+        assert!(text.contains("다른 git 작업이 진행 중입니다") || text.contains("취소하지 못했습니다"), "{text}");
+        assert!(!text.contains("취소했습니다"), "{text}");
+        no_english_git_text(&v);
+    }
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), last);
+}
+
+#[tokio::test]
+async fn fr_g15_paused_cherry_pick_is_refused_and_left_alone() {
+    let (_dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    git(&repo, &["checkout", "-q", "-b", "other"]);
+    let picked = commit(&repo, "a", "other side\n", "other edit");
+    git(&repo, &["checkout", "-q", "main"]);
+    let head = commit(&repo, "a", "main side\n", "main edit");
+    // Leave the cherry-pick paused on its conflict, as a person at a terminal might.
+    let paused = Command::new("git").args(["cherry-pick", &picked]).current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(!paused.status.success());
+    assert!(repo.join(".git/CHERRY_PICK_HEAD").exists());
+    for op in ["revert", "cherry-pick"] {
+        let (status, v) = call(&client, &base, op, json!({"repo": repo, "sha": head, "confirm": true})).await;
+        assert_eq!(status, 409, "{op}: {v}");
+        assert_eq!(v["error"], "진행 중인 git 작업이 있습니다. 먼저 끝내거나 중단하세요.");
+        assert!(repo.join(".git/CHERRY_PICK_HEAD").exists(), "{op} touched the user's cherry-pick");
+    }
+}
+
+#[tokio::test]
+async fn fr_g15_other_operation_markers_are_refused_and_left_alone() {
+    let (_dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    let last = commit(&repo, "a", "changed\n", "change");
+    for marker in ["REVERT_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD"] {
+        let path = repo.join(".git").join(marker);
+        std::fs::write(&path, &last).unwrap();
+        for op in ["revert", "cherry-pick"] {
+            let (status, v) = call(&client, &base, op, json!({"repo": repo, "sha": last, "confirm": true})).await;
+            assert_eq!(status, 409, "{marker} {op}: {v}");
+            assert_eq!(v["error"], "진행 중인 git 작업이 있습니다. 먼저 끝내거나 중단하세요.");
+            assert!(path.exists(), "{marker} removed by {op}");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+    for dir in ["sequencer", "rebase-merge", "rebase-apply"] {
+        let path = repo.join(".git").join(dir);
+        std::fs::create_dir_all(&path).unwrap();
+        let (status, v) = call(&client, &base, "revert", json!({"repo": repo, "sha": last, "confirm": true})).await;
+        assert_eq!(status, 409, "{dir}: {v}");
+        assert!(path.exists());
+        std::fs::remove_dir_all(&path).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn fr_g15_missing_identity_is_a_korean_409() {
+    let (dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    let last = commit(&repo, "a", "changed\n", "change");
+    // No identity anywhere: not in the repository, not global, and no guessing from the host.
+    git(&repo, &["config", "--unset", "user.name"]);
+    git(&repo, &["config", "--unset", "user.email"]);
+    git(&repo, &["config", "user.useConfigOnly", "true"]);
+    let home = dir.path().join("empty-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    for name in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"] {
+        std::env::remove_var(name);
+    }
+    let (status, v) = call(&client, &base, "revert", json!({"repo": repo, "sha": last, "confirm": true})).await;
+    assert_eq!(status, 409, "{v}");
+    assert_eq!(v["error"], "git 사용자 이름과 이메일이 설정되어 있지 않습니다.");
+    no_english_git_text(&v);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), last);
+    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
+    assert!(!repo.join(".git/REVERT_HEAD").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fr_g15_user_hooks_do_not_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, repo, base, client) = setup().await;
+    commit(&repo, "a", "base\n", "base");
+    let last = commit(&repo, "a", "changed\n", "change");
+    let marker = dir.path().join("hook-ran");
+    let hook = repo.join(".git/hooks/post-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (status, v) = call(&client, &base, "revert", json!({"repo": repo, "sha": last, "confirm": true})).await;
+    assert_eq!(status, 200, "{v}");
+    assert!(!marker.exists(), "post-commit hook ran through the API");
+}
+
+#[tokio::test]
+async fn fr_g14_many_files_are_truncated_to_500() {
+    let (_dir, repo, base, client) = setup().await;
+    commit(&repo, "root", "r\n", "root");
+    for i in 0..600 {
+        std::fs::write(repo.join(format!("f{i:03}.txt")), "x\n").unwrap();
+    }
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "many"]);
+    let (status, v) = call(&client, &base, "commit/show", json!({"repo": repo, "sha": git(&repo, &["rev-parse", "HEAD"])})).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["truncated"], true);
+    assert_eq!(v["files"].as_array().unwrap().len(), 500);
+    assert_eq!(v["files_total"], 600);
+}
+
+#[tokio::test]
+async fn fr_g14_control_characters_are_stripped_from_the_message() {
+    let (_dir, repo, base, client) = setup().await;
+    std::fs::write(repo.join("a"), "1\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "title\u{1b}[31m red", "-m", "body\u{7}line"]);
+    let (status, v) = call(&client, &base, "commit/show", json!({"repo": repo, "sha": git(&repo, &["rev-parse", "HEAD"])})).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["subject"], "title[31m red");
+    assert_eq!(v["body"], "bodyline");
+}

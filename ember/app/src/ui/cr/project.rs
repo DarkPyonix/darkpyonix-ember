@@ -4,8 +4,8 @@
 //!
 //! The decisions (boxes, members, ordering, filters, deck, settings rules) are `ui::project`'s
 //! plain functions, used as they are. The settings sheet saves name, repository, default
-//! branch, new member defaults and character style with `PATCH /api/projects/{name}` (FR-L26,
-//! #327). Leader, profile override, archive and delete stay disabled: the server does not
+//! branch, new member defaults, character style and profile override per harness with
+//! `PATCH /api/projects/{name}` (FR-L26, #327). Leader, archive and delete stay disabled: the server does not
 //! support them yet (TODO(#384)).
 
 #![allow(non_snake_case)]
@@ -22,7 +22,7 @@ pub use crate::ui::project::{
     agent_options, build_patch, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
-    effective_style, follow_rename, CloseAction, SettingsGuard, DISCARD_QUESTION,
+    effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
     ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
@@ -1066,7 +1066,7 @@ fn FieldRow(label: &str, content: impl FnOnce()) {
 /// failure (FR-L26). After a rename the selected project and the open project view follow the new
 /// name, and this device's remembered style moves with it. The character style is also kept in
 /// this device's prefs, but only as the fallback the tiles read when the server has none.
-/// TODO(#384): leader, profile override, archive and delete are not sent (server `not_yet`).
+/// TODO(#384): leader, archive and delete are not sent (server `not_yet`).
 fn save_settings(
     project: String,
     patch: ember_client::wire::ProjectPatch,
@@ -1081,6 +1081,7 @@ fn save_settings(
     let ui = shared_ui().clone();
     let style_changed = patch.character_style.is_some();
     let renamed = patch.name.clone();
+    let sent = patch.clone();
     let saved_as = renamed.clone().unwrap_or_else(|| project.clone());
     let old = project.clone();
     run_shared(
@@ -1100,7 +1101,7 @@ fn save_settings(
                     }
                     closed.set(None);
                 }
-                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code()).to_string())),
+                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
             }
         },
     );
@@ -1281,8 +1282,26 @@ fn SettingsSheet(
                         Label("리더가 필요하면 프로젝트를 새로 만들어 옮기세요.", Fs::Md, Weight::Regular, Some(paint(p.text_2)), Some(1));
                     });
                 }
-                SkipSection(&sheet_skip, EST_SEC_PROFILE, "프로필 덮어쓰기", "이 프로젝트에서만 하네스에 다른 프로필을 쓰는 설정입니다. 서버가 아직 지원하지 않습니다", false, || {
-                    AppButton("프로필 고르기", None, ButtonKind::Default, false, part_supported(SettingsPart::ProfileOverride), false, || {});
+                SkipSection(&sheet_skip, EST_SEC_PROFILE, "프로필 덮어쓰기", "이 프로젝트에서만 하네스에 고정할 계정입니다. 팀원 정의에 고정 계정이 없을 때 새 세션에 쓰입니다", false, || {
+                    cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        let accounts: Vec<(String, String, String)> = crate::services::try_services()
+                            .map(|s| s.ui.live.accounts.get().iter().map(|a| (a.id.clone(), a.agent.clone(), a.label.clone())).collect())
+                            .unwrap_or_default();
+                        for (kind, name) in override_harnesses() {
+                            let opts = override_options(kind, &accounts);
+                            let labels: Vec<String> = opts.iter().map(|(_, l)| l.clone()).collect();
+                            let at = d.overrides.get(kind).and_then(|id| opts.iter().position(|(i, _)| i == id)).unwrap_or(0);
+                            let shown = override_label(&server, &d, kind, &accounts, AccountsState::of(&accounts));
+                            FieldRow(name, || {
+                                let (dr, opts, sv) = (draft.clone(), opts.clone(), server.clone());
+                                Select(&shown, &labels, at, 260.0, move |i| {
+                                    if let Some((id, _)) = opts.get(i) {
+                                        dr.update(|s| pick_override(&sv, s, kind, id));
+                                    }
+                                });
+                            });
+                        }
+                    });
                 });
                 SkipSection(&sheet_skip, EST_SEC_LINKS, "연결", "이 프로젝트에 묶인 채널, 루틴, 버전 관리는 서버가 아직 지원하지 않습니다", false, || {
                     Label("연결된 항목이 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);

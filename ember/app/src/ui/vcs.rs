@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitBranchInfo, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrReview, GitPrState, GitPrs, GitStashEntry, GitStatus,
+    ApiError, GitBranchInfo, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrCheckState, GitPrCreated, GitPrDetail, GitPrMergeMethod, GitPrReview, GitPrReviewAction, GitPrReviewItem, GitPrReviewState, GitPrState, GitPrs, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -1542,6 +1542,313 @@ pub fn prs_body(filter: PrFilter) -> Value {
 /// Read a project's pull requests. Runs on the runtime, not the UI thread.
 pub async fn fetch_prs(project: &str, filter: PrFilter) -> Result<GitPrs, ApiError> {
     git_call(project, "prs", prs_body(filter)).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pull request detail, review, merge and new PR (FR-G10, FR-G11, FR-G12, #483)
+// ---------------------------------------------------------------------------------------------
+
+/// The class of one check run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckClass {
+    Passed,
+    Failed,
+    Pending,
+}
+
+impl CheckClass {
+    /// The word beside the check's dot.
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckClass::Passed => "통과",
+            CheckClass::Failed => "실패",
+            CheckClass::Pending => "진행 중",
+        }
+    }
+}
+
+/// Where one reviewer stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewerState {
+    Approved,
+    ChangesRequested,
+    /// Asked to review, or a dismissed or pending review.
+    Waiting,
+    /// Left comments only.
+    Commented,
+}
+
+impl ReviewerState {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewerState::Approved => "승인",
+            ReviewerState::ChangesRequested => "변경 요청",
+            ReviewerState::Waiting => "대기",
+            ReviewerState::Commented => "코멘트",
+        }
+    }
+}
+
+/// The merge hint when the node gave no reason.
+pub const MERGE_GATE_DEFAULT: &str = "CI 통과와 승인이 있어야 병합할 수 있습니다";
+/// The longest comment shown in the detail, in characters.
+pub const PR_COMMENT_CUT: usize = 300;
+/// The most description lines shown in the detail.
+pub const PR_BODY_LINES: usize = 8;
+
+/// One pull request in full, as the detail card shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrDetailView {
+    pub number: u64,
+    pub title: String,
+    /// "열림", "닫힘" or "병합됨".
+    pub state_text: &'static str,
+    pub body_lines: Vec<String>,
+    pub author: String,
+    pub head: String,
+    pub base: String,
+    /// "파일 3 +40 -2".
+    pub files_text: String,
+    pub checks: Vec<(String, CheckClass, String)>,
+    /// The row's checks summary ("체크 3/4 통과", or "체크 없음").
+    pub ci_pill: String,
+    pub checks_failed: u32,
+    pub checks_pending: u32,
+    /// "승인됨", "변경 요청", "리뷰 필요" or "리뷰 없음".
+    pub review_pill: &'static str,
+    pub review: GitPrReview,
+    pub reviewers: Vec<(String, ReviewerState)>,
+    pub comments: Vec<(String, String)>,
+    pub can_merge: bool,
+    /// The node's Korean reason, or `MERGE_GATE_DEFAULT` when it sent none.
+    pub merge_reason: String,
+    pub open: bool,
+    pub draft: bool,
+    /// The head commit the user saw (40 hex characters); `pr/merge` carries it. Empty when the node sent none.
+    pub head_sha: String,
+}
+
+/// The state of the detail of the selected pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrDetailLoad {
+    Idle,
+    Loading,
+    Ready(PrDetailView),
+    Failed(String),
+}
+
+/// A text cut at `max` characters with an ellipsis.
+fn cut_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut s: String = text.chars().take(max).collect();
+        s.push('\u{2026}');
+        s
+    }
+}
+
+/// The reviewers: the newest decisive review of each author, then the requested ones that have
+/// not reviewed. A comment-only review never replaces an approval or a change request.
+pub fn pr_reviewers(reviews: &[GitPrReviewItem], requested: &[String]) -> Vec<(String, ReviewerState)> {
+    let mut out: Vec<(String, ReviewerState)> = Vec::new();
+    for r in reviews {
+        if r.author.is_empty() {
+            continue;
+        }
+        let state = match r.state {
+            GitPrReviewState::Approved => ReviewerState::Approved,
+            GitPrReviewState::ChangesRequested => ReviewerState::ChangesRequested,
+            GitPrReviewState::Commented => ReviewerState::Commented,
+            GitPrReviewState::Dismissed | GitPrReviewState::Pending => ReviewerState::Waiting,
+        };
+        match out.iter_mut().find(|(a, _)| *a == r.author) {
+            Some(slot) => {
+                if !(state == ReviewerState::Commented && slot.1 != ReviewerState::Waiting) {
+                    slot.1 = state;
+                }
+            }
+            None => out.push((r.author.clone(), state)),
+        }
+    }
+    for name in requested {
+        if !name.is_empty() && !out.iter().any(|(a, _)| a == name) {
+            out.push((name.clone(), ReviewerState::Waiting));
+        }
+    }
+    out
+}
+
+/// The detail of one pull request for the card.
+pub fn pr_detail_view(d: &GitPrDetail) -> PrDetailView {
+    let pr = &d.pr;
+    let checks = d
+        .check_runs
+        .iter()
+        .map(|c| match c.state {
+            GitPrCheckState::Passed => (c.name.clone(), CheckClass::Passed, CheckClass::Passed.label().to_string()),
+            GitPrCheckState::Failed => (c.name.clone(), CheckClass::Failed, CheckClass::Failed.label().to_string()),
+            GitPrCheckState::Pending => (c.name.clone(), CheckClass::Pending, CheckClass::Pending.label().to_string()),
+        })
+        .collect();
+    let mut comments: Vec<(String, String)> = d
+        .reviews
+        .iter()
+        .filter(|r| !r.body.trim().is_empty())
+        .map(|r| (r.author.clone(), cut_chars(r.body.trim(), PR_COMMENT_CUT)))
+        .collect();
+    comments.extend(d.comments.iter().filter(|c| !c.body.trim().is_empty()).map(|c| (c.author.clone(), cut_chars(c.body.trim(), PR_COMMENT_CUT))));
+    PrDetailView {
+        number: pr.number,
+        title: pr.title.clone(),
+        state_text: pr_state_text(pr.state),
+        body_lines: d.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(PR_BODY_LINES).map(String::from).collect(),
+        author: pr.author.clone(),
+        head: pr.head.clone(),
+        base: pr.base.clone(),
+        files_text: format!("파일 {} +{} -{}", d.changed_files, d.additions, d.deletions),
+        checks,
+        ci_pill: pr_checks_text(pr.checks.passed, pr.checks.failed, pr.checks.pending),
+        checks_failed: pr.checks.failed,
+        checks_pending: pr.checks.pending,
+        review_pill: pr_review_text(pr.review),
+        review: pr.review,
+        reviewers: pr_reviewers(&d.reviews, &d.requested_reviewers),
+        comments,
+        can_merge: pr.merge.can_merge,
+        merge_reason: if pr.merge.reason.trim().is_empty() { MERGE_GATE_DEFAULT.to_string() } else { pr.merge.reason.clone() },
+        open: pr.state == GitPrState::Open,
+        draft: pr.draft,
+        head_sha: d.head_sha.clone(),
+    }
+}
+
+/// The detail as a view state. A failure keeps the node's Korean line, else a Korean one.
+pub fn pr_detail_from(result: Result<GitPrDetail, ApiError>) -> PrDetailLoad {
+    match result {
+        Ok(d) => PrDetailLoad::Ready(pr_detail_view(&d)),
+        Err(e) => PrDetailLoad::Failed(korean_failure("풀 리퀘스트를 확인", &e)),
+    }
+}
+
+/// Like `failure_text`, but an English message (git's, gh's or a demo's) never reaches the
+/// screen: a Korean message of the node is shown as it is, anything else becomes
+/// "{what}하지 못했습니다" with a Korean reason.
+pub fn korean_failure(what: &str, e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { .. } => format!("{what}하지 못했습니다. 잠시 후 다시 시도해 주세요"),
+        ApiError::Unauthorized(_) => format!("{what}하지 못했습니다. 서버 인증에 실패했습니다. 서버 토큰을 확인해 주세요"),
+        _ => format!("{what}하지 못했습니다. 서버에 닿지 않습니다"),
+    }
+}
+
+/// The merge button: enabled only when the node's gate is open and the pull request is open.
+/// The hint is the reason shown under a disabled button.
+pub fn merge_button_state(v: &PrDetailView) -> (bool, Option<String>) {
+    if !v.open {
+        return (false, Some("열려 있는 풀 리퀘스트만 병합할 수 있습니다".to_string()));
+    }
+    if v.head_sha.trim().is_empty() {
+        return (false, Some(MERGE_NO_HEAD.to_string()));
+    }
+    if v.can_merge {
+        (true, None)
+    } else {
+        (false, Some(v.merge_reason.clone()))
+    }
+}
+
+/// The merge hint when the detail carries no head SHA to merge against.
+pub const MERGE_NO_HEAD: &str = "헤드를 확인할 수 없어 병합할 수 없습니다";
+
+/// The first line of the armed merge: the method is squash.
+pub const MERGE_METHOD_TEXT: &str = "스쿼시로 병합합니다";
+
+/// The label of the merge button; the armed second tap reads "정말 병합합니다".
+pub fn merge_button_text(armed: bool) -> &'static str {
+    if armed { "정말 병합합니다" } else { "병합" }
+}
+
+/// Whether a review of this kind can be sent: a comment and a change request need a body.
+pub fn review_request_gate(action: GitPrReviewAction, body: &str) -> Result<(), &'static str> {
+    match action {
+        GitPrReviewAction::Approve => Ok(()),
+        GitPrReviewAction::Comment | GitPrReviewAction::RequestChanges => {
+            if body.trim().is_empty() { Err("내용을 입력해 주세요") } else { Ok(()) }
+        }
+    }
+}
+
+/// A new pull request needs a title.
+pub fn pr_create_gate(title: &str) -> Result<(), &'static str> {
+    if title.trim().is_empty() { Err("제목을 입력해 주세요") } else { Ok(()) }
+}
+
+pub fn pr_review_notice(action: GitPrReviewAction) -> &'static str {
+    match action {
+        GitPrReviewAction::Approve => "승인했습니다",
+        GitPrReviewAction::RequestChanges => "변경을 요청했습니다",
+        GitPrReviewAction::Comment => "코멘트를 남겼습니다",
+    }
+}
+
+fn non_empty(text: &str) -> Option<&str> {
+    let t = text.trim();
+    if t.is_empty() { None } else { Some(t) }
+}
+
+/// The `pr/review` body. The caller confirmed by tapping, so `confirm` is true.
+pub fn pr_review_body(number: u64, action: GitPrReviewAction, body: &str) -> Value {
+    json!({ "number": number, "action": action, "body": non_empty(body), "confirm": true })
+}
+
+/// The `pr/merge` body (squash by default; the branch stays). `head_sha` is the head the user saw.
+pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, head_sha: &str) -> Value {
+    json!({ "number": number, "method": method, "delete_branch": false, "head_sha": head_sha, "confirm": true })
+}
+
+/// The `pr/create` body; an empty base or head is left to the node.
+pub fn pr_create_body(title: &str, body: &str, base: &str, head: &str, draft: bool) -> Value {
+    json!({ "title": title.trim(), "body": non_empty(body), "base": non_empty(base), "head": non_empty(head), "draft": draft, "confirm": true })
+}
+
+/// Read one pull request. Runs on the runtime, not the UI thread.
+pub async fn fetch_pr_detail(project: &str, number: u64) -> Result<GitPrDetail, ApiError> {
+    git_call(project, "pr", json!({ "number": number })).await
+}
+
+/// Leave a review. `Ok` is the notice to show, `Err` the Korean line.
+pub async fn run_pr_review(project: &str, number: u64, action: GitPrReviewAction, body: &str) -> Result<String, String> {
+    review_request_gate(action, body).map_err(String::from)?;
+    git_call::<Value>(project, "pr/review", pr_review_body(number, action, body))
+        .await
+        .map(|_| pr_review_notice(action).to_string())
+        .map_err(|e| korean_failure("리뷰 등록", &e))
+}
+
+/// Merge. `Ok` is the notice to show, `Err` the Korean line (a closed gate or a moved head answers 409).
+pub async fn run_pr_merge(project: &str, number: u64, method: GitPrMergeMethod, head_sha: &str) -> Result<String, String> {
+    if head_sha.trim().is_empty() {
+        return Err(MERGE_NO_HEAD.to_string());
+    }
+    git_call::<Value>(project, "pr/merge", pr_merge_body(number, method, head_sha))
+        .await
+        .map(|_| "병합했습니다".to_string())
+        .map_err(|e| korean_failure("병합", &e))
+}
+
+/// Create a pull request. `Ok` is the notice with the new number.
+pub async fn run_pr_create(project: &str, title: &str, body: &str, base: &str, head: &str, draft: bool) -> Result<String, String> {
+    pr_create_gate(title).map_err(String::from)?;
+    git_call::<GitPrCreated>(project, "pr/create", pr_create_body(title, body, base, head, draft))
+        .await
+        .map(|c| pr_created_notice(c.number))
+        .map_err(|e| korean_failure("풀 리퀘스트 생성", &e))
+}
+
+pub fn pr_created_notice(number: u64) -> String {
+    format!("풀 리퀘스트 #{number}을 만들었습니다")
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4070,5 +4377,142 @@ rename to new.txt
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, None), None);
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, Some(3)), Some(3));
         assert_eq!(section_count_with_team(Section::Branches, None, None, None, Some(4), Some(3)), Some(4));
+    // ---- FR-G10 to FR-G12: pull request detail, review, merge, create (#483) ----
+
+    use ember_client::api::{GitPrCheck, GitPrComment};
+
+    fn a_detail(state: GitPrState, merge: (bool, &str)) -> GitPrDetail {
+        GitPrDetail {
+            pr: a_pr(7, state, GitPrReview::ReviewRequired, (2, 1, 0), merge),
+            body: "첫 줄\n\n  \n둘째 줄".into(),
+            check_runs: vec![
+                GitPrCheck { name: "build".into(), state: GitPrCheckState::Passed, detail_url: None },
+                GitPrCheck { name: "test".into(), state: GitPrCheckState::Failed, detail_url: None },
+            ],
+            reviews: Vec::new(),
+            comments: Vec::new(),
+            requested_reviewers: Vec::new(),
+            additions: 40,
+            deletions: 2,
+            changed_files: 3,
+            head_sha: A_HEAD.into(),
+        }
+    }
+
+    const A_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn fr_g11_merge_is_disabled_without_a_head_sha() {
+        let mut v = pr_detail_view(&a_detail(GitPrState::Open, (true, "병합할 수 있습니다")));
+        assert_eq!(v.head_sha, A_HEAD);
+        v.head_sha = String::new();
+        assert_eq!(merge_button_state(&v), (false, Some("헤드를 확인할 수 없어 병합할 수 없습니다".to_string())));
+    }
+
+    #[test]
+    fn fr_g11_merge_body_carries_the_head_sha() {
+        let body = pr_merge_body(7, GitPrMergeMethod::Squash, A_HEAD);
+        assert_eq!(body["head_sha"], json!(A_HEAD));
+        assert_eq!(body["confirm"], json!(true));
+    }
+
+    #[test]
+    fn fr_g10_the_detail_maps_a_failed_check_and_the_counts() {
+        let v = pr_detail_view(&a_detail(GitPrState::Open, (false, "CI 체크가 실패했습니다.")));
+        assert_eq!(v.files_text, "파일 3 +40 -2");
+        assert_eq!(v.ci_pill, "체크 2/3 통과");
+        assert_eq!(v.review_pill, "리뷰 필요");
+        assert_eq!(v.checks[1], ("test".to_string(), CheckClass::Failed, "실패".to_string()));
+        assert_eq!(v.checks[0].1, CheckClass::Passed);
+        assert_eq!(v.body_lines, vec!["첫 줄".to_string(), "둘째 줄".to_string()]);
+        assert!(v.open);
+        assert_eq!(v.merge_reason, "CI 체크가 실패했습니다.");
+    }
+
+    #[test]
+    fn fr_g10_no_reviewers_gives_an_empty_list_and_the_default_reason() {
+        let v = pr_detail_view(&a_detail(GitPrState::Open, (false, "  ")));
+        assert!(v.reviewers.is_empty());
+        assert!(v.comments.is_empty());
+        assert_eq!(v.merge_reason, MERGE_GATE_DEFAULT);
+    }
+
+    #[test]
+    fn fr_g10_reviewers_keep_the_newest_decision_and_requested_ones_wait() {
+        let r = |a: &str, st| GitPrReviewItem { author: a.into(), state: st, body: String::new(), submitted_at: String::new() };
+        let list = pr_reviewers(
+            &[r("a", GitPrReviewState::ChangesRequested), r("a", GitPrReviewState::Approved), r("b", GitPrReviewState::Approved), r("b", GitPrReviewState::Commented), r("c", GitPrReviewState::Commented)],
+            &["d".to_string(), "a".to_string()],
+        );
+        assert_eq!(list, vec![("a".into(), ReviewerState::Approved), ("b".into(), ReviewerState::Approved), ("c".into(), ReviewerState::Commented), ("d".into(), ReviewerState::Waiting)]);
+        assert_eq!(ReviewerState::ChangesRequested.label(), "변경 요청");
+        assert_eq!(ReviewerState::Waiting.label(), "대기");
+    }
+
+    #[test]
+    fn fr_g10_a_long_comment_is_cut_and_empty_ones_are_dropped() {
+        let mut d = a_detail(GitPrState::Open, (true, ""));
+        d.comments = vec![
+            GitPrComment { author: "kim".into(), body: "가".repeat(PR_COMMENT_CUT + 50), created_at: String::new() },
+            GitPrComment { author: "lee".into(), body: "   ".into(), created_at: String::new() },
+        ];
+        let v = pr_detail_view(&d);
+        assert_eq!(v.comments.len(), 1);
+        assert_eq!(v.comments[0].1.chars().count(), PR_COMMENT_CUT + 1);
+        assert!(v.comments[0].1.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn fr_g10_the_detail_state_carries_a_korean_failure() {
+        assert!(matches!(pr_detail_from(Ok(a_detail(GitPrState::Open, (true, "")))), PrDetailLoad::Ready(v) if v.number == 7));
+        let korean = ApiError::Status { status: 409, message: "GitHub에 로그인되어 있지 않습니다.".into(), code: None };
+        assert_eq!(pr_detail_from(Err(korean)), PrDetailLoad::Failed("GitHub에 로그인되어 있지 않습니다.".into()));
+        let english = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(pr_detail_from(Err(english)), PrDetailLoad::Failed("풀 리퀘스트를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요".into()));
+    }
+
+    #[test]
+    fn fr_g11_the_merge_button_follows_the_gate_and_the_state() {
+        let open_ok = pr_detail_view(&a_detail(GitPrState::Open, (true, "병합할 수 있습니다")));
+        assert_eq!(merge_button_state(&open_ok), (true, None));
+        let closed_gate = pr_detail_view(&a_detail(GitPrState::Open, (false, "")));
+        assert_eq!(merge_button_state(&closed_gate), (false, Some(MERGE_GATE_DEFAULT.to_string())));
+        let merged = pr_detail_view(&a_detail(GitPrState::Merged, (true, "")));
+        assert!(!merge_button_state(&merged).0, "a merged pull request cannot be merged again");
+        assert_eq!(merge_button_text(false), "병합");
+        assert_eq!(merge_button_text(true), "정말 병합합니다");
+    }
+
+    #[test]
+    fn fr_g11_comment_and_request_changes_need_a_body() {
+        assert_eq!(review_request_gate(GitPrReviewAction::Comment, "  "), Err("내용을 입력해 주세요"));
+        assert_eq!(review_request_gate(GitPrReviewAction::RequestChanges, ""), Err("내용을 입력해 주세요"));
+        assert_eq!(review_request_gate(GitPrReviewAction::Comment, " 좋아요 "), Ok(()));
+        assert_eq!(review_request_gate(GitPrReviewAction::Approve, ""), Ok(()));
+    }
+
+    #[test]
+    fn fr_g11_the_request_bodies_confirm_and_trim() {
+        assert_eq!(pr_review_body(7, GitPrReviewAction::RequestChanges, " 고쳐 주세요 "), json!({ "number": 7, "action": "request_changes", "body": "고쳐 주세요", "confirm": true }));
+        assert_eq!(pr_review_body(7, GitPrReviewAction::Approve, ""), json!({ "number": 7, "action": "approve", "body": null, "confirm": true }));
+        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Squash, "abc"), json!({ "number": 7, "method": "squash", "delete_branch": false, "head_sha": "abc", "confirm": true }));
+        assert_eq!(pr_review_notice(GitPrReviewAction::Approve), "승인했습니다");
+    }
+
+    #[test]
+    fn fr_g12_a_new_pull_request_needs_a_title_and_leaves_blanks_to_the_node() {
+        assert_eq!(pr_create_gate(" "), Err("제목을 입력해 주세요"));
+        assert_eq!(pr_create_gate("Feat: x"), Ok(()));
+        assert_eq!(pr_create_body(" Feat: x ", "", "", "feat/x", true), json!({ "title": "Feat: x", "body": null, "base": null, "head": "feat/x", "draft": true, "confirm": true }));
+        assert_eq!(pr_created_notice(12), "풀 리퀘스트 #12을 만들었습니다");
+    }
+
+    #[test]
+    fn fr_g11_failures_are_korean_text() {
+        let english = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(korean_failure("병합", &english), "병합하지 못했습니다. 잠시 후 다시 시도해 주세요");
+        let gate = ApiError::Status { status: 409, message: "CI 체크가 실패했습니다.".into(), code: None };
+        assert_eq!(korean_failure("병합", &gate), "CI 체크가 실패했습니다.");
+        assert!(!korean_failure("병합", &ApiError::Peer("refused".into())).contains("refused"));
     }
 }

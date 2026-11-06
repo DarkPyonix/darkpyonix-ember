@@ -23,7 +23,7 @@ pub use crate::ui::project::{
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
-    ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
+    create_error_message, NewProjectDraft, NewProjectOutcome, ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
 use crate::ui::characters::CharStyle;
@@ -166,7 +166,10 @@ struct Ui {
     settings: MutableState<Option<String>>,
     computer: MutableState<Option<String>>,
     new_project: MutableState<bool>,
-    new_name: MutableState<String>,
+    new_draft: MutableState<NewProjectDraft>,
+    new_saving: MutableState<bool>,
+    new_failure: MutableState<Option<String>>,
+    new_confirm: MutableState<bool>,
     query: MutableState<String>,
     expanded: MutableState<Vec<String>>,
     filter: MutableState<MemberFilter>,
@@ -188,7 +191,10 @@ impl Ui {
             computer: mutable_state_of((sheet.as_deref() == Some("computer")).then(|| chips.first().map(|c| c.id.clone())).flatten()),
             new_project: mutable_state_of(sheet.as_deref() == Some("new")),
             full: mutable_state_of(full),
-            new_name: mutable_state_of(String::new()),
+            new_draft: mutable_state_of(NewProjectDraft::default()),
+            new_saving: mutable_state_of(false),
+            new_failure: mutable_state_of(None),
+            new_confirm: mutable_state_of(false),
             query: mutable_state_of(String::new()),
             expanded: mutable_state_of(if expand { boxes.iter().map(|b| b.id.clone()).collect() } else { Vec::new() }),
             filter: mutable_state_of(MemberFilter::All),
@@ -962,33 +968,141 @@ fn MemberRow(m: &Member, project_id: &str, ui: &SharedUi, rule: bool) {
 // ---------------------------------------------------------------------------------------------
 
 fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) {
-    // New project (demo only).
+    // New project (FR-L26, FR-L1): name, repository, default branch and team character. Creating
+    // takes only the name; the other fields go in a second PATCH.
     {
-        let close = {
-            let n = st.new_project.clone();
-            move || n.set(false)
+        let d = st.new_draft.get();
+        let existing: Vec<String> = services().client.read(|s| s.projects().into_iter().map(|p| p.name).collect());
+        let errors = d.validate(&existing);
+        let saving = st.new_saving.get();
+        let can_create = errors.is_empty() && !saving;
+        // 취소, X and the backdrop: nothing while saving, a question when something was typed.
+        let guard = SettingsGuard::new(saving, d.is_blank());
+        let leave = {
+            let (n, dr, f) = (st.new_project.clone(), st.new_draft.clone(), st.new_failure.clone());
+            move || {
+                n.set(false);
+                dr.set(NewProjectDraft::default());
+                f.set(None);
+            }
         };
-        EmberSheet("새 프로젝트", st.new_project.get(), close.clone(), None, || {
-            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
-                let name = st.new_name.clone();
-                // TODO(compose-rust#374): the field is uncontrolled with no initial value.
-                EmberField(FieldOptions {
-                    fill_max_width: true,
-                    placeholder: "프로젝트 이름".to_string(),
-                    on_value_change: Some(Box::new(move |v| name.set(v))),
-                    ..Default::default()
+        let request_close = {
+            let (confirm, leave) = (st.new_confirm.clone(), leave.clone());
+            move || match guard.on_close() {
+                CloseAction::Ignore => {}
+                CloseAction::Confirm => confirm.set(true),
+                CloseAction::Close => leave.clone()(),
+            }
+        };
+        let p = ember_theme().palette;
+        // The body follows the window like the settings sheet (a fixed 560 dp cut the last
+        // style rows at 390). When the window has not reported a size (390 can read 0x0) the
+        // shared formula falls back to 240 dp: TODO(compose-rust#479) until the size is reported.
+        let new_window = compose_rust::runtime::current_window_size();
+        let new_body_height =
+            super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
+        EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                    // TODO(compose-rust#374): the fields are uncontrolled with no initial value.
+                    let (d1, d2, d3) = (st.new_draft.clone(), st.new_draft.clone(), st.new_draft.clone());
+                    let (f1, f2, f3) = (st.new_failure.clone(), st.new_failure.clone(), st.new_failure.clone());
+                    let submit = {
+                        let (dr, saving_s, failure, leave) =
+                            (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+                        let existing = existing.clone();
+                        move |_: String| {
+                            let d = dr.get_untracked();
+                            if d.validate(&existing).is_empty() && !saving_s.get_untracked() {
+                                create_project(d, saving_s.clone(), failure.clone(), leave.clone());
+                            }
+                        }
+                    };
+                    let (s1, s2, s3) = (submit.clone(), submit.clone(), submit);
+                    FieldRow("이름", || {
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            placeholder: "프로젝트 이름".to_string(),
+                            on_value_change: Some(Box::new(move |v| {
+                                f1.set(None);
+                                d1.update(|s| s.name = v)
+                            })),
+                            on_submit: Some(Box::new(s1)),
+                            ..Default::default()
+                        });
+                    });
+                    cu::Row().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            FieldRow("저장소", || {
+                                EmberField(FieldOptions {
+                                    fill_max_width: true,
+                                    placeholder: "github.com/...".to_string(),
+                                    on_value_change: Some(Box::new(move |v| {
+                                f2.set(None);
+                                d2.update(|s| s.repo = v)
+                            })),
+                            on_submit: Some(Box::new(s2)),
+                                    ..Default::default()
+                                });
+                            });
+                        });
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            FieldRow("기본 브랜치", || {
+                                EmberField(FieldOptions {
+                                    fill_max_width: true,
+                                    placeholder: "develop".to_string(),
+                                    on_value_change: Some(Box::new(move |v| {
+                                f3.set(None);
+                                d3.update(|s| s.branch = v)
+                            })),
+                            on_submit: Some(Box::new(s3)),
+                                    ..Default::default()
+                                });
+                            });
+                        });
+                    });
+                    if d.branch.trim().is_empty() {
+                        Label(&format!("비워 두면 {}을 씁니다", NewProjectDraft::DEFAULT_BRANCH), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    }
+                    Label("팀 캐릭터", Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                    let dr = st.new_draft.clone();
+                    let shown = effective_style(if d.style.is_empty() { None } else { Some(&d.style) }, None);
+                    StylePicker(&d.name, shown, move |c| dr.update(|s| s.style = c.id().to_string()));
+                    // Errors only once something was typed, so an empty sheet is not red.
+                    if !d.is_blank() {
+                        for e in errors.iter() {
+                            Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                        }
+                    }
+                    if let Some(m) = st.new_failure.get() {
+                        Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+                    }
                 });
             });
             SheetFooter(|| {
-                AppButton("취소", None, ButtonKind::Default, true, true, false, close.clone());
-                let (name, n) = (st.new_name.clone(), st.new_project.clone());
-                AppButton("만들기", None, ButtonKind::Primary, true, true, false, move || {
-                    let s = services();
-                    let Some(d) = &s.demo else { return };
-                    match d.create_project(&s.client, &name.get_untracked()) {
-                        Ok(_) => n.set(false),
-                        Err(e) => notice::post(e),
-                    }
+                AppButton("취소", None, ButtonKind::Default, true, true, false, request_close.clone());
+                let (dr, saving_s, failure, leave) =
+                    (st.new_draft.clone(), st.new_saving.clone(), st.new_failure.clone(), leave.clone());
+                AppButton(if saving { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, can_create, false, move || {
+                    create_project(dr.get_untracked(), saving_s.clone(), failure.clone(), leave.clone())
+                });
+            });
+        });
+        // The unsaved-changes question, as the settings sheet asks it.
+        let keep = {
+            let c = st.new_confirm.clone();
+            move || c.set(false)
+        };
+        EmberSheet("변경 사항", st.new_confirm.get(), keep.clone(), None, || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                Label(DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
+            });
+            SheetFooter(|| {
+                AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
+                let (c, leave) = (st.new_confirm.clone(), leave.clone());
+                AppButton("닫기", None, ButtonKind::Primary, true, true, false, move || {
+                    c.set(false);
+                    leave.clone()();
                 });
             });
         });
@@ -1084,6 +1198,67 @@ fn FieldRow(label: &str, content: impl FnOnce()) {
         Label(label, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
         content();
     });
+}
+
+/// Creates the project, then sends the filled fields in a second PATCH (FR-L26). A failed second
+/// step keeps the project and says so with a fixed sentence; a failed first step keeps the sheet
+/// open with its content. The repository value is never logged.
+fn create_project(
+    draft: NewProjectDraft,
+    saving: MutableState<bool>,
+    failure: MutableState<Option<String>>,
+    leave: impl FnOnce() + Send + 'static,
+) {
+    saving.set(true);
+    failure.set(None);
+    let patch = draft.followup_patch();
+    let name = draft.trimmed_name();
+    let style = CharStyle::from_id(&draft.style);
+    let ui = shared_ui().clone();
+    let name_for_prefs = name.clone();
+    run_shared(
+        async move {
+            let s = services();
+            if let Some(d) = &s.demo {
+                let mut project = d.create_project(&s.client, &name)?;
+                if !patch.is_empty() {
+                    project.repository = patch.repository.clone();
+                    project.default_branch = patch.default_branch.clone();
+                    project.character_style = patch.character_style.clone();
+                    s.client.apply(ember_client::state::Input::Push(ember_client::wire::Push::ProjectUpdated { project }));
+                }
+                return Ok(false);
+            }
+            s.client
+                .api()
+                .create_project(&name)
+                .await
+                .map_err(|e| create_error_message(e.code()).to_string())?;
+            let _ = s.client.load_projects().await;
+            if patch.is_empty() {
+                return Ok(false);
+            }
+            Ok::<bool, String>(s.client.patch_project(&name, &patch).await.is_err())
+        },
+        move |r: Result<bool, String>| {
+            saving.set(false);
+            match r {
+                Ok(followup_failed) => {
+                    let outcome = NewProjectOutcome::after_followup(followup_failed);
+                    if !followup_failed {
+                        if let Some(st) = style {
+                            ui.update_prefs(|pr| pr.set_character_style(&name_for_prefs, st));
+                        }
+                    }
+                    if let Some(m) = outcome.notice {
+                        notice::post(m.to_string());
+                    }
+                    leave();
+                }
+                Err(e) => failure.set(Some(e)),
+            }
+        },
+    );
 }
 
 /// Sends the patch and shows the honest result: close on success, a fixed Korean sentence on

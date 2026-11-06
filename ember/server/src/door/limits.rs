@@ -277,6 +277,9 @@ pub struct DoorLimits {
 }
 
 impl DoorLimits {
+    /// The GUEST door's limits: the strict class is `POST` on the guest accept path. Another door
+    /// must NOT call this: it would leave its own strict path in the loose class (120 a minute
+    /// instead of the strict budget). Use [`DoorLimits::with_strict_path`] with the door's own path.
     pub fn new(cfg: LimitConfig, trusted: Vec<IpAddr>) -> Self {
         Self::with_strict_path(cfg, trusted, ACCEPT_PATH)
     }

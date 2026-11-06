@@ -306,6 +306,29 @@ mod tests {
         }
     }
 
+    /// FR-C2e: the enrol routes and the mint and owner routes are never exempt from the token.
+    /// The enrol door is not behind `protect` at all (its own listener), so an exemption here would
+    /// only ever open an owner route.
+    #[test]
+    fn fr_c2_redeem_is_not_token_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST, Method::DELETE, Method::PUT] {
+            for p in [
+                "/enrol/redeem",
+                "/enrol/redeem/",
+                "/enrol/status/x",
+                "/enrol/status/",
+                "/enrol",
+                "/api/computers/enrol-codes",
+                "/api/computers/enrol-codes/x",
+                "/api/computers/enrol-codes/x/confirm",
+                "/api/computers/enrol-codes/x/deny",
+            ] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
+
     #[test]
     fn fr_s9_token_eq_compares_whole_values() {
         assert!(token_eq("abc", "abc"));

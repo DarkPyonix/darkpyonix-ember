@@ -204,7 +204,7 @@ impl GuestDoor {
         let _ = join_page(); // hashes computed once, at startup
         let guard = Guard { hosts: self.hosts.clone(), max_body: MAX_BODY_BYTES };
         let app = guest.route(JOIN_ROUTE.1, get(join)).fallback(not_found);
-        stack(app, guard, MAX_BODY_BYTES, REQUEST_TIMEOUT, limits)
+        stack(app, guard, REQUEST_TIMEOUT, limits)
     }
 
     /// Binds the door's socket.

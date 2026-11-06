@@ -905,3 +905,19 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Owner and leader decision, 2026-11-06 (option "(c) 카드 유지 + API 키·엔터프라이즈 전용" tag [user, relayed by the supervisor]).** Research found that Google's Gemini CLI announcement says that since 2026-06-18 the Gemini CLI no longer serves Google AI Pro, Google AI Ultra and free-tier individual accounts (replaced by the Antigravity CLI, `agy`); Enterprise Code Assist licences and API-key authentication are stated as unaffected, and Vertex AI is not addressed. Sources, read on 2026-11-06: <https://github.com/google-gemini/gemini-cli/discussions/28017> (announcement of 2026-06-18) and <https://9to5google.com/2026/06/17/gemini-cli-code-assist-shutting-down/> (consumer accounts only, shutdown on 2026-06-18). The decision: the Gemini card stays, it is marked as for API-key and Enterprise (Code Assist) accounts only, and a user with an individual account is pointed to the Antigravity harness (D14). The adapter authenticates with an API key (and Code Assist) over the ACP adapter; "Login with Google" for individuals is not supported. This narrows the earlier choice "(a) Gemini CLI 어댑터 추가": the adapter is still built, for the accounts the CLI still serves. Rejected: building the adapter around "Login with Google" for individuals (the CLI does not serve them); removing the card; merging it into the Antigravity card.
 
 **Status.** Specified only (`FR-A10`, Draft; issue #53). Not built.
+
+### D41: GitHub is the first integration, read through the session computer's own gh
+
+**Decision.** [user, 2026-11-06, option "(GitHub부터)" chosen by the owner for #498] The home screen's 연동 area starts with one integration, GitHub, in the November scope. Calendar, chat and mail integrations stay specified only (`FR-L23`).
+
+- [user] The GitHub card shows what can be read now: the number of repositories, open pull requests, reviews waiting for the signed-in account, the CI pass rate of the last runs on the default branch, and the work a CI failure can start (a routine linked to a failing CI, `FR-L25`).
+- [provisional] Authentication is the `gh` login on the computer that runs the project's sessions, the same path the 버전 관리 screen uses (`FR-G8`). Ember never stores a GitHub token and has no OAuth flow of its own; when `gh` is missing or signed out the card says so and offers no connect button that would pretend otherwise.
+- [provisional] The server answers from `gh` output on demand with a 90 second cache and one request in flight, never from a background poll. A value `gh` cannot give is null and the card shows "알 수 없음", never an invented number.
+- [provisional] Text that comes from GitHub (repository names, account names) is untrusted: it is cleaned of control characters and cut before it is shown; titles and bodies are not part of this card.
+
+**Rejected.** Building the calendar, chat and mail integrations first (the owner chose GitHub). An Ember-owned GitHub OAuth app that stores tokens on the server (a second credential store, and the user's `gh` login already covers it). A demo-only card with invented connection state (`NFR` "no value is invented").
+
+**Why.** GitHub data is already reachable through the same `gh` path as the pull request screen, so the card costs an API and a view, not an identity system.
+
+**Status.** Specified (`FR-L35`, `FR-G13`, #498). The server API is in progress; the card is built by the Home owner against it.
+

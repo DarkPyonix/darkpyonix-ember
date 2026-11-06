@@ -16,7 +16,7 @@ use compose_rust::{Alignment, ButtonVariant, SpaceRole};
 use ember_client::wire::SessionPatch;
 
 use super::compat::{Badge, StatusDot, StatusPill};
-use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, Label, OptionSheet, SheetFooter};
+use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberField, EmberSheet, FieldOptions, Label, OptionSheet, SheetFooter};
 use super::notice;
 use super::theme::*;
 use crate::model::{self, SessionRow, Tone};
@@ -172,14 +172,16 @@ pub fn SessionRowWith(row: &SessionRow, menu_start_open: bool) {
     EmberSheet("세션 이름 변경", renaming.get(), move || dismiss.set(false), None, || {
         cu::Column().space_role(SpaceRole::Md).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             let (title, submit_open, id) = (new_title.clone(), renaming.clone(), row.id.clone());
-            cu::TextField()
-                .modifier(Modifier::new().fill_max_width())
-                .placeholder(row.title.clone())
-                .on_value_change(move |v| title.set(v))
-                .on_submit(move |v| {
+            EmberField(FieldOptions {
+                fill_max_width: true,
+                placeholder: row.title.clone(),
+                on_value_change: Some(Box::new(move |v| title.set(v))),
+                on_submit: Some(Box::new(move |v| {
                     rename(id.clone(), v);
                     submit_open.set(false);
-                });
+                })),
+                ..Default::default()
+            });
         });
         SheetFooter(|| {
             let cancel = renaming.clone();

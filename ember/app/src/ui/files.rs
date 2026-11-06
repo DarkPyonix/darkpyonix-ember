@@ -795,7 +795,7 @@ pub fn chip_label(
 ) -> String {
     if offline {
         let tag = format!(" {OFFLINE_TAG}");
-        let room = (max_px - 3.0 * tag.chars().count() as f32 * 4.0).max(24.0);
+        let room = (max_px - tag.chars().count() as f32 * 13.0).max(24.0);
         format!("{}{tag}", fit(name, room))
     } else {
         fit(name, max_px)

@@ -140,15 +140,13 @@ pub fn stat_width(n: usize, label: &str) -> f32 {
     8.0 + 4.0 + text_px(&n.to_string(), Fs::Md.size()) + 4.0 + text_px(label, Fs::Md.size())
 }
 
-/// The computer chip's second line: the status, the running members and the project count
-/// (`OS · 실행 2 · 프로젝트 3`; TODO(FR-X7): the OS joins when ember node reports it).
+/// The computer chip's second line: the status and the running members (`온라인 · 실행 2`). The
+/// project count is left out because the 180 px line cut it (#490); the monitor sheet lists the
+/// projects. TODO(FR-X7): the OS joins when ember node reports it.
 pub fn chip_sub(c: &ComputerChip) -> String {
     let mut s = reach_pill(c.reachability).0.to_string();
     if c.running > 0 {
         s.push_str(&format!(" \u{b7} 실행 {}", c.running));
-    }
-    if !c.projects.is_empty() {
-        s.push_str(&format!(" \u{b7} 프로젝트 {}", c.projects.len()));
     }
     s
 }
@@ -159,7 +157,7 @@ pub fn chip_sub(c: &ComputerChip) -> String {
 
 /// What the screen has open and typed. `EMBER_CR_ROUTE=project-detail` opens the first
 /// project's full view (`EMBER_CR_PROJECT=<id>` another), `EMBER_CR_PROJECT_SHEET=settings|
-/// computer|new` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
+/// computer|new|add-computer` a sheet, `EMBER_CR_PROJECT_EXPAND=1` expands every box's deck.
 #[derive(Clone)]
 struct Ui {
     full: MutableState<Option<String>>,
@@ -170,6 +168,7 @@ struct Ui {
     new_saving: MutableState<bool>,
     new_failure: MutableState<Option<String>>,
     new_confirm: MutableState<bool>,
+    add: super::add_computer::AddUi,
     query: MutableState<String>,
     expanded: MutableState<Vec<String>>,
     filter: MutableState<MemberFilter>,
@@ -195,6 +194,7 @@ impl Ui {
             new_saving: mutable_state_of(false),
             new_failure: mutable_state_of(None),
             new_confirm: mutable_state_of(false),
+            add: super::add_computer::AddUi::for_review(),
             query: mutable_state_of(String::new()),
             expanded: mutable_state_of(if expand { boxes.iter().map(|b| b.id.clone()).collect() } else { Vec::new() }),
             filter: mutable_state_of(MemberFilter::All),
@@ -404,9 +404,10 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
             ComputerChipView(c, move || open.set(Some(id.clone())));
             cu::Spacer().modifier(Modifier::new().width(SP[1]));
         }
-        // TODO(FR-X7): pairing a computer needs the hub's pairing code.
+        // The hub's devices, registered with the node's token (FR-X7, #490).
         let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
-        Clickable(add, Alignment::CenterStart, || notice::post(SOON), || {
+        let ui = st.add.clone();
+        Clickable(add, Alignment::CenterStart, move || ui.show(), || {
             cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[2]));
                 NavIcon(shell::ICON_PLUS_SVG, p.text_2.to_argb(), 18.0);
@@ -1107,6 +1108,7 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
             });
         });
     }
+    super::add_computer::AddComputerSheet(&st.add);
     // A computer's monitor.
     if let Some(id) = st.computer.get() {
         let c = st.computer.clone();
@@ -1551,6 +1553,19 @@ mod tests {
     use super::*;
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_c2_add_computer_chip_sub_is_short_enough_to_show_whole() {
+        let c = ComputerChip {
+            id: "a".into(),
+            name: "a".into(),
+            reachability: ember_client::state::Reachability::Online,
+            running: 2,
+            projects: vec!["p".into(); 3],
+        };
+        assert_eq!(chip_sub(&c), "온라인 \u{b7} 실행 2");
+        assert!(text_px(&chip_sub(&c), Fs::Xs.size()) <= 180.0);
+    }
 
     fn member(id: &str, status: LauncherStatus) -> Member {
         Member {

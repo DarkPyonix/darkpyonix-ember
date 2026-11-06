@@ -939,8 +939,27 @@ pub fn search_field_padding(height: f32) -> f32 {
     if height < H_BTN { 12.0 } else { 16.0 }
 }
 
+/// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
+pub const SEARCH_FIELD_GAP: f32 = 8.0;
+/// The leading inset the bare toolkit text field adds before its text. Measured from captures
+/// (a 4 px spacer showed a ~24 px gap), so about 20 px; re-measure if the toolkit changes it.
+pub const SEARCH_FIELD_INSET: f32 = 20.0;
+
+/// The visible icon-to-text gap: no spacer, the field's own inset, and a negative offset that
+/// pulls the field left by `inset - gap`. Assumes [`SEARCH_FIELD_INSET`].
+pub fn search_field_gap() -> f32 {
+    search_field_offset() + SEARCH_FIELD_INSET
+}
+
+/// The negative x offset applied to the bare field so the visible gap is [`SEARCH_FIELD_GAP`].
+pub fn search_field_offset() -> f32 {
+    -(SEARCH_FIELD_INSET - SEARCH_FIELD_GAP)
+}
+
 /// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
-/// takes the rest of the row. The field is uncontrolled and keeps its hint `placeholder`.
+/// takes the rest of the row. Width intent: it fills its column (`fill_max_width`); the mockup's
+/// 280/220 px is for the standalone box, which a caller gets by constraining the parent. The
+/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field. The field is uncontrolled and keeps its hint `placeholder`.
 /// TODO(compose-rust#376, #374): the field frame and leading icon belong to the toolkit field.
 pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
@@ -959,13 +978,13 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
         .content(move || {
             cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
             super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
             // The field takes the row's remaining width by weight, so it never overruns it.
             let cb = on_change.clone();
             let placeholder = placeholder.clone();
-            cu::Box().modifier(Modifier::new().weight(1.0).height(height)).content(move || {
+            cu::Box().modifier(Modifier::new().weight(1.0).height(height).offset(search_field_offset(), 0.0)).content(move || {
                 EmberField(FieldOptions {
                     bare: true,
+                    type_role: if height < H_BTN { Some(TypeRole::Label) } else { None },
                     background: Some(Paint::Literal(Color::argb(0))),
                     border_width: Some(0.0),
                     border_color: Some(Paint::Literal(Color::argb(0))),
@@ -996,6 +1015,29 @@ mod tests {
     fn fr_l10_1_search_field_padding_is_16_and_12_when_compact() {
         assert_eq!(search_field_padding(H_BTN), 16.0);
         assert_eq!(search_field_padding(SEARCH_FIELD_H_COMPACT), 12.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_visible_gap_is_8() {
+        assert_eq!(search_field_gap(), 8.0);
+        assert_eq!(search_field_offset(), -12.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_call_sites() {
+        let sites = [
+            ("channels", include_str!("channels.rs"), "채널, 메시지 검색"),
+            ("session", include_str!("session.rs"), "세션 검색"),
+            ("project", include_str!("project.rs"), "팀원 검색"),
+            ("project", include_str!("project.rs"), "멤버 검색"),
+            ("routines", include_str!("routines.rs"), "루틴 검색"),
+        ];
+        for (name, src, ph) in sites {
+            assert!(src.contains("SearchField("), "{name} uses SearchField");
+            assert!(src.contains(&format!("SearchField(\"{ph}\"")), "{name} keeps the placeholder {ph}");
+        }
+        let project = include_str!("project.rs");
+        assert!(!project.contains("placeholder: \"멤버 검색\""), "the old EmberField member search is gone");
     }
 
     #[test]

@@ -451,51 +451,119 @@ fn stored(id: &str, events: Vec<AgentEvent>, now: i64) -> Vec<StoredEvent> {
         .collect()
 }
 
-/// The scripted conversation of the first session: a tool call that ran, then a `Bash`
-/// approval that waits for the user.
+fn user(text: &str) -> AgentEvent {
+    AgentEvent::UserMessage { text: text.into() }
+}
+
+fn say(text: &str) -> AgentEvent {
+    AgentEvent::AssistantMessage { text: text.into() }
+}
+
+fn call(call_id: &str, name: &str, input: Value) -> AgentEvent {
+    AgentEvent::ToolCall {
+        call_id: call_id.into(),
+        name: name.into(),
+        input,
+    }
+}
+
+fn result(call_id: &str, output: &str) -> AgentEvent {
+    AgentEvent::ToolResult {
+        call_id: call_id.into(),
+        output: output.into(),
+        is_error: false,
+    }
+}
+
+fn ask(approval_id: &str, command: &str, description: &str) -> AgentEvent {
+    AgentEvent::ApprovalRequested {
+        approval_id: approval_id.into(),
+        tool: "Bash".into(),
+        input: json!({ "command": command, "description": description }),
+    }
+}
+
+fn decided(approval_id: &str, decision: ApprovalDecision) -> AgentEvent {
+    AgentEvent::ApprovalResolved {
+        approval_id: approval_id.into(),
+        decision,
+    }
+}
+
+/// The scripted conversation of the first session: a read, an edit with its unified diff, a
+/// shell tool call, an approval already allowed, then a `Bash` approval that waits for the user.
+/// The events go through the same transcript reducer the server's events do (#505).
 fn script_waiting(now: i64) -> Vec<StoredEvent> {
     stored(
         "demo-s1",
         vec![
-            AgentEvent::UserMessage {
-                text: "src/config.rs 에 포트 설정을 추가하고 테스트를 돌려 줘".into(),
-            },
-            AgentEvent::AssistantMessage {
-                text: "먼저 설정 파일을 읽어 보겠습니다.".into(),
-            },
-            AgentEvent::ToolCall {
-                call_id: "c1".into(),
-                name: "Read".into(),
-                input: json!({ "file_path": "src/config.rs" }),
-            },
-            AgentEvent::ToolResult {
-                call_id: "c1".into(),
-                output: "pub struct Config {\n    pub port: u16,\n}\n".into(),
-                is_error: false,
-            },
-            AgentEvent::AssistantMessage {
-                text: "포트 필드가 이미 있습니다. 테스트를 실행해 확인하겠습니다.".into(),
-            },
-            AgentEvent::ApprovalRequested {
-                approval_id: APPROVAL_ID.into(),
-                tool: "Bash".into(),
-                input: json!({ "command": "cargo test --locked", "description": "Run the tests" }),
-            },
+            user("src/config.rs 에 포트 설정을 추가하고 테스트를 돌려 줘"),
+            say("먼저 설정 파일을 읽어 보겠습니다."),
+            call("c1", "Read", json!({ "file_path": "src/config.rs" })),
+            result("c1", "pub struct Config {\n    pub port: u16,\n}\n"),
+            say("포트 필드가 이미 있습니다. 기본값을 넣는 생성 함수를 추가하겠습니다."),
+            call(
+                "c2",
+                "Edit",
+                json!({
+                    "file_path": "src/config.rs",
+                    "old_string": "    pub port: u16,\n}\n",
+                    "new_string": "    pub port: u16,\n}\n\nimpl Config {\n    pub fn new() -> Config {\n        Config { port: 8080 }\n    }\n}\n",
+                }),
+            ),
+            result(
+                "c2",
+                "--- a/src/config.rs\n+++ b/src/config.rs\n@@ -1,3 +1,9 @@\n pub struct Config {\n     pub port: u16,\n }\n+\n+impl Config {\n+    pub fn new() -> Config {\n+        Config { port: 8080 }\n+    }\n+}\n",
+            ),
+            ask("demo-approval-0", "cargo fmt --check", "Check formatting"),
+            decided("demo-approval-0", ApprovalDecision::AllowOnce),
+            call(
+                "c3",
+                "Bash",
+                json!({ "command": "cargo fmt --check", "description": "Check formatting" }),
+            ),
+            result("c3", ""),
+            say("서식은 문제가 없습니다. 테스트를 실행해 확인하겠습니다."),
+            ask(APPROVAL_ID, "cargo test --locked", "Run the tests"),
         ],
         now,
     )
 }
 
+/// The second session: an edit with a diff, one command denied and one allowed, then done.
 fn script_done(now: i64) -> Vec<StoredEvent> {
     stored(
         "demo-s2",
         vec![
-            AgentEvent::UserMessage {
-                text: "README 에 실행 방법을 한 줄 추가해 줘".into(),
-            },
-            AgentEvent::AssistantMessage {
-                text: "README.md 에 실행 방법을 추가했습니다.".into(),
-            },
+            user("README 에 실행 방법을 한 줄 추가해 줘"),
+            say("README.md 를 먼저 확인합니다."),
+            call("d1", "Read", json!({ "file_path": "README.md" })),
+            result("d1", "# demo-project\n\n작은 예제 프로젝트입니다.\n"),
+            call(
+                "d2",
+                "Edit",
+                json!({
+                    "file_path": "README.md",
+                    "old_string": "작은 예제 프로젝트입니다.\n",
+                    "new_string": "작은 예제 프로젝트입니다.\n\n실행: `cargo run`\n",
+                }),
+            ),
+            result(
+                "d2",
+                "--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,5 @@\n # demo-project\n \n 작은 예제 프로젝트입니다.\n+\n+실행: `cargo run`\n",
+            ),
+            ask("demo-approval-d1", "rm -rf target", "Clean the build output"),
+            decided("demo-approval-d1", ApprovalDecision::Deny),
+            say("빌드 결과를 지우는 명령은 거부되어 건너뛰었습니다."),
+            ask("demo-approval-d2", "git diff --stat", "Show the change"),
+            decided("demo-approval-d2", ApprovalDecision::AllowOnce),
+            call(
+                "d3",
+                "Bash",
+                json!({ "command": "git diff --stat", "description": "Show the change" }),
+            ),
+            result("d3", " README.md | 2 ++\n 1 file changed, 2 insertions(+)\n"),
+            say("README.md 에 실행 방법을 추가했습니다."),
             AgentEvent::Usage {
                 input_tokens: 1_200,
                 output_tokens: 300,
@@ -506,6 +574,54 @@ fn script_done(now: i64) -> Vec<StoredEvent> {
         ],
         now,
     )
+}
+
+/// A short conversation for the other demo sessions, so no session opens to an empty page:
+/// the prompt, one reply, and the tail that matches the status.
+fn script_brief(id: &str, status: SessionStatus, prompt: &str, reply: &str, now: i64) -> Vec<StoredEvent> {
+    let mut events = vec![user(prompt), say(reply)];
+    match status {
+        SessionStatus::Running => events.push(call(
+            "b1",
+            "Bash",
+            json!({ "command": "ls", "description": "List files" }),
+        )),
+        SessionStatus::WaitingForApproval => {
+            events.push(ask(&format!("demo-approval-{id}"), "git status", "Show the status"))
+        }
+        SessionStatus::Failed => {
+            events.push(AgentEvent::Error {
+                message: "테스트가 실패했습니다 (데모).".into(),
+            });
+            events.push(AgentEvent::TurnEnded {
+                outcome: TurnOutcome::Failed,
+            });
+        }
+        _ => events.push(AgentEvent::TurnEnded {
+            outcome: TurnOutcome::Completed,
+        }),
+    }
+    stored(id, events, now)
+}
+
+/// Every demo transcript, keyed by session id.
+fn seed_events(now: i64) -> HashMap<String, Vec<StoredEvent>> {
+    let mut events = HashMap::new();
+    events.insert("demo-s1".to_string(), script_waiting(now));
+    events.insert("demo-s2".to_string(), script_done(now - 600_000));
+    let brief: [(&str, SessionStatus, &str, &str, i64); 7] = [
+        ("demo-s3", SessionStatus::Running, "빌드 스크립트가 맞는지 점검해 줘", "스크립트를 확인하고 있습니다.", 60_000),
+        ("demo-s4", SessionStatus::Finished, "릴리스 노트 초안을 써 줘", "초안을 작성했습니다.", 900_000),
+        ("demo-s5", SessionStatus::Failed, "플레이크가 나는 테스트를 조사해 줘", "테스트를 반복 실행해 보겠습니다.", 1_200_000),
+        ("demo-s6", SessionStatus::WaitingForApproval, "문서 링크를 정리해 줘", "링크 상태를 확인하겠습니다.", 120_000),
+        ("demo-s7", SessionStatus::Finished, "의존성을 업데이트해 줘", "의존성을 갱신했습니다.", 1_800_000),
+        ("demo-s8", SessionStatus::Running, "CI 캐시를 정리해 줘", "캐시 키를 살펴보고 있습니다.", 240_000),
+        ("demo-s9", SessionStatus::Finished, "로그 형식을 통일해 줘", "로그 형식을 맞췄습니다.", 2_400_000),
+    ];
+    for (id, status, prompt, reply, ago) in brief {
+        events.insert(id.to_string(), script_brief(id, status, prompt, reply, now - ago));
+    }
+    events
 }
 
 /// The demo source: the scripted data and the transcripts it keeps, so a conversation opened
@@ -519,11 +635,8 @@ pub struct DemoSource {
 
 impl DemoSource {
     pub fn new(now: i64, data_dir: PathBuf) -> DemoSource {
-        let mut events = HashMap::new();
-        events.insert("demo-s1".to_string(), script_waiting(now));
-        events.insert("demo-s2".to_string(), script_done(now - 600_000));
         DemoSource {
-            events: Mutex::new(events),
+            events: Mutex::new(seed_events(now)),
             created: Mutex::new(0),
             data_dir,
             git: Mutex::new(HashMap::new()),
@@ -540,17 +653,15 @@ impl DemoSource {
     /// Reset all demo transcripts, created-session counter, and client state to the initial seed.
     pub fn reset(&self, client: &Client, now: i64) {
         {
-            let mut ev = self.events.lock().unwrap();
-            ev.clear();
-            ev.insert("demo-s1".to_string(), script_waiting(now));
-            ev.insert("demo-s2".to_string(), script_done(now - 600_000));
+            *self.events.lock().unwrap() = seed_events(now);
         }
         *self.created.lock().unwrap() = 0;
         self.git.lock().unwrap().clear();
         for input in self.inputs(now) {
             client.apply(input);
         }
-        for id in ["demo-s1", "demo-s2"] {
+        for id in (1..=9).map(|n| format!("demo-s{n}")) {
+            let id = id.as_str();
             client.apply(Input::EventsFetched {
                 session_id: id.to_string(),
                 events: self.events_for(id),
@@ -595,7 +706,7 @@ impl DemoSource {
                     "빌드 스크립트 점검",
                     SessionStatus::Running,
                     now - 60_000,
-                    0,
+                    n("demo-s3"),
                 )
             },
             record(
@@ -606,7 +717,7 @@ impl DemoSource {
                 "릴리스 노트 초안",
                 SessionStatus::Finished,
                 now - 900_000,
-                0,
+                n("demo-s4"),
             ),
             record(
                 &self.data_dir,
@@ -616,7 +727,7 @@ impl DemoSource {
                 "테스트 플레이크 조사",
                 SessionStatus::Failed,
                 now - 1_200_000,
-                0,
+                n("demo-s5"),
             ),
             record(
                 &self.data_dir,
@@ -626,7 +737,7 @@ impl DemoSource {
                 "문서 링크 정리",
                 SessionStatus::WaitingForApproval,
                 now - 120_000,
-                0,
+                n("demo-s6"),
             ),
             record(
                 &self.data_dir,
@@ -636,7 +747,7 @@ impl DemoSource {
                 "의존성 업데이트",
                 SessionStatus::Finished,
                 now - 1_800_000,
-                0,
+                n("demo-s7"),
             ),
             record(
                 &self.data_dir,
@@ -646,7 +757,7 @@ impl DemoSource {
                 "CI 캐시 정리",
                 SessionStatus::Running,
                 now - 240_000,
-                0,
+                n("demo-s8"),
             ),
             record(
                 &self.data_dir,
@@ -656,7 +767,7 @@ impl DemoSource {
                 "로그 형식 통일",
                 SessionStatus::Finished,
                 now - 2_400_000,
-                0,
+                n("demo-s9"),
             ),
         ];
         sessions
@@ -2011,5 +2122,62 @@ mod tests {
         ));
         // Sequence numbers are consecutive from 1, as the transcript requires.
         assert!(ev.iter().enumerate().all(|(i, e)| e.seq == i as i64 + 1));
+    }
+
+    /// Replay a demo transcript through the same reducer the server's events go through.
+    fn replay(demo: &DemoSource, id: &str) -> ember_client::transcript::Transcript {
+        let mut t = ember_client::transcript::Transcript::new();
+        for ev in demo.events_for(id) {
+            t.apply(&ev);
+        }
+        t
+    }
+
+    #[test]
+    fn demo_source_199_each_demo_session_carries_every_conversation_event_kind() {
+        use ember_client::transcript::{ApprovalState, TranscriptItem};
+        let demo = DemoSource::new(1_788_000_000_000, std::env::temp_dir());
+        for id in ["demo-s1", "demo-s2"] {
+            let t = replay(&demo, id);
+            let has = |f: &dyn Fn(&TranscriptItem) -> bool| t.items.iter().any(f);
+            assert!(has(&|i| matches!(i, TranscriptItem::User { .. })), "{id} user");
+            assert!(has(&|i| matches!(i, TranscriptItem::Assistant { .. })), "{id} assistant");
+            for tool in ["Read", "Bash", "Edit"] {
+                assert!(
+                    has(&|i| matches!(i, TranscriptItem::ToolCall { name, result: Some(_), .. } if name == tool)),
+                    "{id} {tool} call with a result"
+                );
+            }
+            assert!(
+                has(&|i| matches!(i, TranscriptItem::ToolCall { name, result: Some(r), .. }
+                    if name == "Edit" && r.output.contains("@@ ") && r.output.contains("\n+"))),
+                "{id} unified diff"
+            );
+            assert!(has(&|i| matches!(i, TranscriptItem::Approval { .. })), "{id} approval");
+        }
+        let s1 = replay(&demo, "demo-s1");
+        assert_eq!(s1.pending_approvals().count(), 1);
+        let s2 = replay(&demo, "demo-s2");
+        let states: Vec<_> = s2
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::Approval { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect();
+        assert!(states.contains(&ApprovalState::Resolved(ApprovalDecision::AllowOnce)));
+        assert!(states.contains(&ApprovalState::Resolved(ApprovalDecision::Deny)));
+    }
+
+    #[test]
+    fn demo_source_199_every_demo_session_has_events_matching_its_last_seq() {
+        let now = 1_788_000_000_000;
+        let demo = DemoSource::new(now, std::env::temp_dir());
+        for s in demo.sessions(now) {
+            let ev = demo.events_for(&s.id);
+            assert!(!ev.is_empty(), "{} has a transcript", s.id);
+            assert_eq!(ev.len() as i64, s.last_seq, "{}", s.id);
+        }
     }
 }

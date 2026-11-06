@@ -296,6 +296,17 @@ mod tests {
         }
     }
 
+    /// FR-A5: the question route is an owner route: never exempt, for any method.
+    #[test]
+    fn fr_a5_the_question_answer_route_is_not_token_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+            for p in ["/api/sessions/s1/questions/q1/answer", "/api/sessions/s1/questions/q1", "/api/sessions/s1/approvals/a1"] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
+
     #[test]
     fn fr_t14_the_guest_family_is_not_exempt() {
         use axum::http::Method;

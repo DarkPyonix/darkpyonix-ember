@@ -893,7 +893,7 @@ impl Mapper {
         }
         self.approvals
             .insert(approval_id.clone(), PendingApproval { rpc_id, kind, params: p.clone() });
-        Ok(vec![AgentEvent::ApprovalRequested { approval_id, tool, input }])
+        Ok(vec![AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person: false }])
     }
 
     /// The app-server exited without being asked to.
@@ -1214,7 +1214,8 @@ mod tests {
                 &AgentEvent::ApprovalRequested {
                     approval_id: exec.into(),
                     tool: "command".into(),
-                    input
+                    input,
+                    needs_person: false
                 },
                 &AgentEvent::ToolResult {
                     call_id: exec.into(),
@@ -1291,6 +1292,7 @@ mod tests {
                     approval_id: "call_fc1".into(),
                     tool: "file_change".into(),
                     input: json!({ "changes": changes }),
+                    needs_person: false,
                 },
                 AgentEvent::ToolResult {
                     call_id: "call_fc1".into(),

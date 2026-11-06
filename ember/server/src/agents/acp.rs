@@ -1752,7 +1752,7 @@ impl Mapper {
                 (state.tool_name(), state.input())
             }
         };
-        out.push(AgentEvent::ApprovalRequested { approval_id: approval_id.to_string(), tool, input });
+        out.push(AgentEvent::ApprovalRequested { approval_id: approval_id.to_string(), tool, input, needs_person: false });
         out
     }
 

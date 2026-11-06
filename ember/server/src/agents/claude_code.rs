@@ -41,7 +41,20 @@
 //! `request_id`. `AllowAlways` remembers the tool name for the lifetime of this process; later
 //! requests for that tool are answered `allow` by the adapter immediately and emit **no** event
 //! (the tool call itself is still visible as `ToolCall`/`ToolResult`). Requests that were already
-//! pending when `AllowAlways` was given stay pending until answered.
+//! pending when `AllowAlways` was given stay pending until answered. Which tools may be
+//! remembered is [`approval_policy`]; the frame's `requires_user_interaction: true` (measured on
+//! 2.1.319, absent on ordinary tools) becomes `needs_person`.
+//!
+//! # Questions
+//!
+//! `AskUserQuestion` (measured on 2.1.319, fixtures `question_*_2.1.319.jsonl`) arrives as a
+//! `can_use_tool` request with `input.questions[{question, header, options[{label, description}],
+//! multiSelect}]` and becomes `QuestionAsked` (`question_id` = the request id, question ids `q0`,
+//! `q1`, ...). The reply is an `allow` whose `updatedInput` is the original input plus `answers`
+//! keyed by the question text (a multi-select question joins its values with ", "). An `allow`
+//! without `answers` makes Claude Code tell the model "The user did not answer the questions."
+//! (skipping a question). A question waits for a person without end: this adapter times nothing
+//! out. An input that does not parse stays an `ApprovalRequested` with `needs_person`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -57,7 +70,10 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::proc::{spawn_agent, AgentCommand, AgentStdin, AgentStdout, ProcHandle};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, NativeFork, StartRequest};
-use crate::events::{is_user_question_tool, AgentEvent, ApprovalDecision, TurnOutcome};
+use crate::events::{
+    approval_policy, validate_question_answers, AgentEvent, AnswerInvalid, ApprovalDecision, Question,
+    QuestionAnswer, QuestionOption, TurnOutcome,
+};
 
 /// How long to wait for a `result` after the interrupt control request before sending SIGINT.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(10);
@@ -388,8 +404,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
 /// State shared between the run handle and its stdout reader.
 #[derive(Default)]
 struct RunState {
-    /// Permission prompts waiting on the user: request_id -> (tool name, original input).
-    pending: HashMap<String, (String, Value)>,
+    /// Permission prompts waiting on the user: request_id -> (tool name, original input,
+    /// whether the request carried `requires_user_interaction`).
+    pending: HashMap<String, (String, Value, bool)>,
+    /// Questions waiting on the user: request_id -> the original input and the parsed questions.
+    pending_questions: HashMap<String, PendingQuestion>,
     /// Tools the user allowed for the rest of this session.
     always_allowed: HashSet<String>,
     /// A user message was sent and its `result` has not arrived yet.
@@ -398,6 +417,14 @@ struct RunState {
     turn_seq: u64,
     interrupt_requested: bool,
     shutting_down: bool,
+}
+
+/// A question request kept until it is answered or skipped.
+#[derive(Clone)]
+struct PendingQuestion {
+    /// The request's input as the CLI sent it; the reply repeats it.
+    input: Value,
+    questions: Vec<Question>,
 }
 
 type SharedStdin = Arc<Mutex<Option<AgentStdin>>>;
@@ -421,6 +448,92 @@ fn allow_response(request_id: &str, input: &Value) -> Value {
             "response": { "behavior": "allow", "updatedInput": input },
         },
     })
+}
+
+/// The input of a question request rebuilt from the stored questions, for a question restored
+/// after a rejoin (the stored event keeps the parsed questions, not the raw input).
+fn input_from_questions(questions: &[Question]) -> Value {
+    let list: Vec<Value> = questions
+        .iter()
+        .map(|q| {
+            let options: Vec<Value> = q
+                .options
+                .iter()
+                .map(|o| match &o.description {
+                    Some(d) => json!({ "label": o.label, "description": d }),
+                    None => json!({ "label": o.label }),
+                })
+                .collect();
+            let mut v = json!({ "question": q.text, "options": options, "multiSelect": q.multi_select });
+            if let Some(h) = &q.header {
+                v["header"] = json!(h);
+            }
+            v
+        })
+        .collect();
+    json!({ "questions": list })
+}
+
+/// The `control_response` that answers a question request (measured on 2.1.319): `allow` with the
+/// original input plus `answers`, keyed by question text, a multi-select question's values joined
+/// with ", ". Validates `answers` against `questions` first.
+fn question_reply(
+    request_id: &str,
+    input: &Value,
+    questions: &[Question],
+    answers: &[QuestionAnswer],
+) -> Result<Value, AnswerInvalid> {
+    validate_question_answers(questions, answers)?;
+    let mut by_text = serde_json::Map::new();
+    for q in questions {
+        let a = answers.iter().find(|a| a.question_id == q.id).ok_or(AnswerInvalid::MissingAnswer)?;
+        let values: Vec<&str> = a.values.iter().map(|v| v.trim()).collect();
+        by_text.insert(q.text.clone(), Value::String(values.join(", ")));
+    }
+    let mut updated = if input.is_object() { input.clone() } else { json!({}) };
+    if let Some(o) = updated.as_object_mut() {
+        o.insert("answers".into(), Value::Object(by_text));
+    }
+    Ok(allow_response(request_id, &updated))
+}
+
+/// The questions of an `AskUserQuestion` input, or `None` when it does not parse: a non-empty
+/// `questions` array of objects with a string `question`, optional string `header`, optional
+/// `options` array of objects with a string `label` (and optional string `description`), optional
+/// bool `multiSelect`. Two questions with the same text are refused too, because the reply is
+/// keyed by the text.
+fn parse_questions(input: &Value) -> Option<Vec<Question>> {
+    let list = input.get("questions")?.as_array()?;
+    if list.is_empty() {
+        return None;
+    }
+    let mut out: Vec<Question> = Vec::new();
+    for (i, q) in list.iter().enumerate() {
+        let text = q.get("question")?.as_str()?.to_string();
+        if out.iter().any(|o| o.text == text) {
+            return None;
+        }
+        let header = q.get("header").and_then(Value::as_str).map(str::to_string);
+        let mut options = Vec::new();
+        if let Some(opts) = q.get("options") {
+            for o in opts.as_array()? {
+                options.push(QuestionOption {
+                    label: o.get("label")?.as_str()?.to_string(),
+                    description: o.get("description").and_then(Value::as_str).map(str::to_string),
+                });
+            }
+        }
+        out.push(Question {
+            id: format!("q{i}"),
+            header,
+            text,
+            options,
+            multi_select: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+            secret: false,
+            allow_other: true,
+        });
+    }
+    Some(out)
 }
 
 fn deny_response(request_id: &str, message: &str) -> Value {
@@ -463,14 +576,21 @@ async fn read_stdout(
         for out in parser.parse(&line) {
             let event = match out {
                 Parsed::Event(e) => e,
-                Parsed::PermissionRequest { request_id, tool, input } => {
+                Parsed::QuestionRequest { request_id, input, questions } => {
+                    state.lock().unwrap().pending_questions.insert(
+                        request_id.clone(),
+                        PendingQuestion { input, questions: questions.clone() },
+                    );
+                    AgentEvent::QuestionAsked { question_id: request_id, questions }
+                }
+                Parsed::PermissionRequest { request_id, tool, input, needs_person } => {
                     let auto = {
                         let mut st = state.lock().unwrap();
-                        // A question always waits for a person, whatever the memory holds.
-                        if !is_user_question_tool(&tool) && st.always_allowed.contains(&tool) {
+                        // A tool that needs a person is never answered from the memory.
+                        if approval_policy(&tool, needs_person).remember_always && st.always_allowed.contains(&tool) {
                             true
                         } else {
-                            st.pending.insert(request_id.clone(), (tool.clone(), input.clone()));
+                            st.pending.insert(request_id.clone(), (tool.clone(), input.clone(), needs_person));
                             false
                         }
                     };
@@ -482,10 +602,12 @@ async fn read_stdout(
                         }
                         continue;
                     }
-                    AgentEvent::ApprovalRequested { approval_id: request_id, tool, input }
+                    AgentEvent::ApprovalRequested { approval_id: request_id, tool, input, needs_person }
                 }
                 Parsed::CancelRequest { request_id } => {
-                    state.lock().unwrap().pending.remove(&request_id);
+                    let mut st = state.lock().unwrap();
+                    st.pending.remove(&request_id);
+                    st.pending_questions.remove(&request_id);
                     continue;
                 }
                 Parsed::UnsupportedRequest { request_id, subtype } => {
@@ -501,6 +623,7 @@ async fn read_stdout(
                         st.interrupt_requested = false;
                         st.turn_active = false;
                         st.pending.clear();
+                        st.pending_questions.clear();
                         interrupted
                     };
                     // An interrupted turn ends with an error `result`
@@ -578,12 +701,13 @@ impl AgentRun for ClaudeRun {
     ) -> anyhow::Result<()> {
         let (tool, input) = {
             let mut st = self.state.lock().unwrap();
-            let (tool, input) = st
+            let (tool, input, needs_person) = st
                 .pending
                 .remove(approval_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-            // "Allow always" on a question is an allow-once: the next one asks again.
-            if decision == ApprovalDecision::AllowAlways && !is_user_question_tool(&tool) {
+            // "Allow always" on a tool that needs a person (a question, a plan) is an allow-once:
+            // the next one asks again.
+            if decision == ApprovalDecision::AllowAlways && approval_policy(&tool, needs_person).remember_always {
                 st.always_allowed.insert(tool.clone());
             }
             (tool, input)
@@ -599,18 +723,58 @@ impl AgentRun for ClaudeRun {
         write_line(&self.stdin, &msg).await
     }
 
+    async fn answer_question(&mut self, question_id: &str, answers: &[QuestionAnswer]) -> anyhow::Result<()> {
+        let msg = {
+            let mut st = self.state.lock().unwrap();
+            let pq = st
+                .pending_questions
+                .get(question_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown question {question_id}"))?;
+            let msg = question_reply(question_id, &pq.input, &pq.questions, answers)?;
+            st.pending_questions.remove(question_id);
+            msg
+        };
+        write_line(&self.stdin, &msg).await
+    }
+
+    async fn decline_question(&mut self, question_id: &str) -> anyhow::Result<()> {
+        let msg = {
+            let mut st = self.state.lock().unwrap();
+            let pq = st
+                .pending_questions
+                .remove(question_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown question {question_id}"))?;
+            allow_response(question_id, &pq.input)
+        };
+        write_line(&self.stdin, &msg).await
+    }
+
+    async fn restore_pending_questions(&mut self, pending: Vec<(String, Vec<Question>)>) {
+        if !self.reattached || pending.is_empty() {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        for (id, questions) in pending {
+            let input = input_from_questions(&questions);
+            st.pending_questions.entry(id).or_insert(PendingQuestion { input, questions });
+        }
+        st.turn_active = true;
+    }
+
     /// A rejoined CLI may be blocked on a permission prompt whose request line this process never
     /// saw (it was stored by the previous server). Rebuild the entry, so the answer can go out.
     async fn restore_pending_approvals(
         &mut self,
-        pending: Vec<(String, String, Value)>,
+        pending: Vec<(String, String, Value, bool)>,
     ) {
         if !self.reattached || pending.is_empty() {
             return;
         }
         let mut st = self.state.lock().unwrap();
-        for (id, tool, input) in pending {
-            st.pending.entry(id).or_insert((tool, input));
+        for (id, tool, input, needs_person) in pending {
+            // The stored flag is kept: a flagged tool the CLI marked as needing a person must not
+            // lose that safety net (approval_policy) across a server restart.
+            st.pending.entry(id).or_insert((tool, input, needs_person));
         }
         st.turn_active = true;
     }
@@ -686,6 +850,14 @@ pub enum Parsed {
         request_id: String,
         tool: String,
         input: Value,
+        /// `requires_user_interaction: true` on the frame (absent on ordinary tools).
+        needs_person: bool,
+    },
+    /// `control_request` / `can_use_tool` for `AskUserQuestion` whose input parses.
+    QuestionRequest {
+        request_id: String,
+        input: Value,
+        questions: Vec<Question>,
     },
     /// `control_cancel_request`: a pending permission prompt was withdrawn.
     CancelRequest {
@@ -814,11 +986,22 @@ impl LineParser {
                 let request_id = v["request_id"].as_str().unwrap_or_default().to_string();
                 let req = &v["request"];
                 match req["subtype"].as_str().unwrap_or_default() {
-                    "can_use_tool" => out.push(Parsed::PermissionRequest {
-                        request_id,
-                        tool: req["tool_name"].as_str().unwrap_or_default().to_string(),
-                        input: req["input"].clone(),
-                    }),
+                    "can_use_tool" => {
+                        let tool = req["tool_name"].as_str().unwrap_or_default().to_string();
+                        let input = req["input"].clone();
+                        let questions = if tool == "AskUserQuestion" { parse_questions(&input) } else { None };
+                        match questions {
+                            Some(questions) => {
+                                out.push(Parsed::QuestionRequest { request_id, input, questions })
+                            }
+                            None => out.push(Parsed::PermissionRequest {
+                                request_id,
+                                tool,
+                                input,
+                                needs_person: req["requires_user_interaction"].as_bool() == Some(true),
+                            }),
+                        }
+                    }
                     other => out.push(Parsed::UnsupportedRequest {
                         request_id,
                         subtype: other.to_string(),
@@ -931,7 +1114,7 @@ mod tests {
             native_id: "64224439-15e9-4763-942c-be8d6e8a9723".into()
         })));
         let perm = out.iter().find_map(|p| match p {
-            Parsed::PermissionRequest { request_id, tool, input } => {
+            Parsed::PermissionRequest { request_id, tool, input, .. } => {
                 Some((request_id.clone(), tool.clone(), input.clone()))
             }
             _ => None,
@@ -949,6 +1132,179 @@ mod tests {
             input_tokens: 18 + 12378 + 38098,
             output_tokens: 297,
         })));
+    }
+
+    const QUESTION_ANSWERED: &str = include_str!("../../tests/fixtures/claude/question_answered_2.1.319.jsonl");
+    const QUESTION_UNANSWERED: &str = include_str!("../../tests/fixtures/claude/question_unanswered_2.1.319.jsonl");
+
+    /// The recorded lines of one direction, as the `msg` objects.
+    fn recorded(text: &str, dir: &str) -> Vec<Value> {
+        text.lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|l| l["dir"] == dir)
+            .map(|l| l["msg"].clone())
+            .collect()
+    }
+
+    /// The recorded `control_request` line (compact JSON) and the parsed result.
+    fn recorded_question() -> (String, String, Vec<Question>, Value) {
+        let line = recorded(QUESTION_ANSWERED, "in")
+            .into_iter()
+            .find(|m| m["type"] == "control_request")
+            .unwrap()
+            .to_string();
+        match LineParser::default().parse(&line).remove(0) {
+            Parsed::QuestionRequest { request_id, input, questions } => (line, request_id, questions, input),
+            other => panic!("not a question: {other:?}"),
+        }
+    }
+
+    /// Measured on Claude Code 2.1.319: the recorded AskUserQuestion request becomes one question.
+    #[test]
+    fn fr_a5_recorded_ask_user_question_becomes_a_question() {
+        let (_, id, questions, _) = recorded_question();
+        assert_eq!(id, "364602b5-0a1e-4b36-9dc1-8910841b10ac");
+        assert_eq!(
+            questions,
+            vec![Question {
+                id: "q0".into(),
+                header: Some("Colour".into()),
+                text: "Which colour do you prefer?".into(),
+                options: vec![
+                    QuestionOption { label: "Red".into(), description: Some("Choose red".into()) },
+                    QuestionOption { label: "Blue".into(), description: Some("Choose blue".into()) },
+                ],
+                multi_select: false,
+                secret: false,
+                allow_other: true,
+            }]
+        );
+    }
+
+    /// Measured: the answer reply equals the recorded outgoing frame.
+    #[test]
+    fn fr_a5_question_reply_equals_the_recorded_answer_frame() {
+        let (_, id, questions, input) = recorded_question();
+        let want = recorded(QUESTION_ANSWERED, "out")
+            .into_iter()
+            .find(|m| m["type"] == "control_response")
+            .unwrap();
+        let answers = [QuestionAnswer { question_id: "q0".into(), values: vec!["blue".into()] }];
+        let got = question_reply(&id, &input, &questions, &answers).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(got["response"]["response"]["updatedInput"]["answers"], json!({"Which colour do you prefer?": "blue"}));
+        // Only the request id differs for another request.
+        let mut other = want.clone();
+        other["response"]["request_id"] = json!("another");
+        assert_eq!(question_reply("another", &input, &questions, &answers).unwrap(), other);
+    }
+
+    /// Measured: skipping a question replies allow with the original input (no `answers`).
+    #[test]
+    fn fr_a5_declining_a_question_equals_the_recorded_unanswered_frame() {
+        let line = recorded(QUESTION_UNANSWERED, "in")
+            .into_iter()
+            .find(|m| m["type"] == "control_request")
+            .unwrap()
+            .to_string();
+        let Parsed::QuestionRequest { request_id, input, .. } = LineParser::default().parse(&line).remove(0) else {
+            panic!("not a question")
+        };
+        let want = recorded(QUESTION_UNANSWERED, "out")
+            .into_iter()
+            .find(|m| m["type"] == "control_response")
+            .unwrap();
+        assert_eq!(allow_response(&request_id, &input), want);
+        assert!(want["response"]["response"]["updatedInput"].get("answers").is_none());
+    }
+
+    #[test]
+    fn fr_a5_question_reply_validates_and_joins_multi_select() {
+        let (_, id, _, _) = recorded_question();
+        let input = json!({"questions": [
+            {"question": "Pick one", "options": [{"label": "a"}]},
+            {"question": "Pick many", "multiSelect": true, "options": [{"label": "x"}, {"label": "y"}]},
+        ]});
+        let questions = parse_questions(&input).unwrap();
+        assert_eq!(questions.iter().map(|q| q.id.as_str()).collect::<Vec<_>>(), ["q0", "q1"]);
+        assert!(!questions[0].multi_select && questions[1].multi_select);
+        let ans = |q: &str, v: &[&str]| QuestionAnswer {
+            question_id: q.into(),
+            values: v.iter().map(|s| s.to_string()).collect(),
+        };
+        let reply = |a: &[QuestionAnswer]| question_reply(&id, &input, &questions, a);
+        // A multi-select question joins its values with ", ".
+        let ok = reply(&[ans("q0", &["a"]), ans("q1", &["x", "y"])]).unwrap();
+        assert_eq!(
+            ok["response"]["response"]["updatedInput"]["answers"],
+            json!({"Pick one": "a", "Pick many": "x, y"})
+        );
+        assert_eq!(ok["response"]["response"]["updatedInput"]["questions"], input["questions"]);
+        // Free text is passed as it is (trimmed).
+        let free = reply(&[ans("q0", &["  something else "]), ans("q1", &["z"])]).unwrap();
+        assert_eq!(free["response"]["response"]["updatedInput"]["answers"]["Pick one"], "something else");
+        // Validation.
+        assert_eq!(reply(&[ans("q0", &["a"])]).unwrap_err(), AnswerInvalid::MissingAnswer);
+        assert_eq!(
+            reply(&[ans("q0", &["a"]), ans("q1", &["x"]), ans("q7", &["x"])]).unwrap_err(),
+            AnswerInvalid::UnknownQuestion
+        );
+        assert_eq!(reply(&[ans("q0", &[]), ans("q1", &["x"])]).unwrap_err(), AnswerInvalid::ValueCount);
+        assert_eq!(reply(&[ans("q0", &["a"]), ans("q1", &["v"; 9])]).unwrap_err(), AnswerInvalid::ValueCount);
+        let long = "x".repeat(1001);
+        assert_eq!(reply(&[ans("q0", &[long.as_str()]), ans("q1", &["x"])]).unwrap_err(), AnswerInvalid::ValueLength);
+        assert_eq!(
+            reply(&[ans("q0", &["a", "b"]), ans("q1", &["x"])]).unwrap_err(),
+            AnswerInvalid::SingleSelect
+        );
+    }
+
+    #[test]
+    fn fr_a5_unparsable_question_input_stays_an_approval_that_needs_a_person() {
+        let frame = |input: Value| {
+            json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool",
+                "tool_name":"AskUserQuestion","input":input,"requires_user_interaction":true}})
+            .to_string()
+        };
+        for bad in [
+            json!({}),
+            json!({"questions": []}),
+            json!({"questions": "x"}),
+            json!({"questions": [{"header": "no text"}]}),
+            json!({"questions": [{"question": "q", "options": [{"description": "no label"}]}]}),
+            json!({"questions": [{"question": "same"}, {"question": "same"}]}),
+        ] {
+            assert_eq!(
+                LineParser::default().parse(&frame(bad.clone())),
+                [Parsed::PermissionRequest {
+                    request_id: "r".into(),
+                    tool: "AskUserQuestion".into(),
+                    input: bad,
+                    needs_person: true
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn fr_a5_needs_person_is_the_frames_flag_and_absent_means_false() {
+        let mut p = LineParser::default();
+        let flagged = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"p"},"requires_user_interaction":true}}"#;
+        let plain = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Write","input":{}}}"#;
+        let falsy = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Write","input":{},"requires_user_interaction":false}}"#;
+        let mut np = |l: &str| match p.parse(l).remove(0) {
+            Parsed::PermissionRequest { needs_person, .. } => needs_person,
+            other => panic!("{other:?}"),
+        };
+        assert!(np(flagged));
+        assert!(!np(plain));
+        assert!(!np(falsy));
+    }
+
+    #[test]
+    fn fr_a5_restored_question_input_has_the_recorded_shape() {
+        let (_, _, questions, input) = recorded_question();
+        assert_eq!(input_from_questions(&questions), input);
     }
 
     #[test]

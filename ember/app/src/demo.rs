@@ -1099,6 +1099,9 @@ struct GitState {
     stashes: Vec<DemoStash>,
     /// Unmerged files (FR-G7), in path order; resolving one removes it.
     conflicts: Vec<DemoConflict>,
+    /// Pull requests (FR-G8, FR-G10 to FR-G12), each as the node's detail JSON; the list op
+    /// strips the detail-only keys. Review, merge and create change this in memory.
+    prs: Vec<Value>,
 }
 
 /// One unmerged demo file: the blocks `git/conflict` answers, as the node's JSON.
@@ -1272,6 +1275,7 @@ impl GitState {
             fetched_age_secs: Some(300),
             commits: 0,
             conflicts: demo_conflicts(),
+            prs: demo_pr_details(now_ms() / 1000),
             stashes: {
                 let now = now_ms() / 1000;
                 let held = |path: &str, line: &str| DemoFile {
@@ -1307,6 +1311,103 @@ impl GitState {
 
     fn tidy(&mut self) {
         self.files.retain(|f| !(f.staged.is_empty() && f.unstaged.is_empty()));
+    }
+
+    /// The pull request ops of FR-G10 to FR-G12 on the in-memory list.
+    fn pr_op(&mut self, op: &str, body: &Value) -> Result<Value, GitError> {
+        let confirmed = body.get("confirm").and_then(Value::as_bool).unwrap_or(false);
+        if op == "pr/create" {
+            if !confirmed {
+                return Err(GitError::bad("확인이 필요합니다."));
+            }
+            let title = str_of(body, "title").unwrap_or("").trim();
+            if title.is_empty() {
+                return Err(GitError::bad("제목을 입력하세요."));
+            }
+            if title.chars().count() > 256 || title.chars().any(char::is_control) {
+                return Err(GitError::bad("제목은 한 줄, 256자 이내여야 합니다."));
+            }
+            let number = self.prs.iter().filter_map(|p| p["number"].as_u64()).max().unwrap_or(0) + 1;
+            let head = str_of(body, "head").map(str::trim).filter(|h| !h.is_empty()).unwrap_or(&self.current).to_string();
+            let base = str_of(body, "base").map(str::trim).filter(|b| !b.is_empty()).unwrap_or("develop").to_string();
+            let draft = body.get("draft").and_then(Value::as_bool).unwrap_or(false);
+            let url = format!("https://github.com/DarkPyonix/darkpyonix-ember/pull/{number}");
+            let gate = demo_gate("open", draft, "none", (0, 0, 0));
+            self.prs.insert(0, json!({
+                "number": number, "title": title, "state": "open", "draft": draft, "author": "demo",
+                "head": head, "base": base, "updated_at": iso_time(now_ms() / 1000).replace("+00:00", "Z"),
+                "review": "none", "checks": { "passed": 0, "failed": 0, "pending": 0 },
+                "merge": gate, "url": url,
+                "body": str_of(body, "body").unwrap_or(""), "check_runs": [], "reviews": [], "comments": [],
+                "requested_reviewers": [], "additions": 0, "deletions": 0, "changed_files": 0,
+                "head_sha": demo_head_sha(number),
+            }));
+            return Ok(json!({ "number": number, "url": url }));
+        }
+        let number = body.get("number").and_then(Value::as_u64).unwrap_or(0);
+        if number == 0 || number > 999_999 {
+            return Err(GitError::bad("풀 리퀘스트 번호는 1에서 999999 사이여야 합니다."));
+        }
+        let Some(at) = self.prs.iter().position(|p| p["number"] == number) else {
+            return Err(GitError::conflict("GitHub에서 저장소를 찾을 수 없습니다 (원격 주소와 접근 권한을 확인하세요).\nno pull requests found"));
+        };
+        if op == "pr" {
+            return Ok(self.prs[at].clone());
+        }
+        if !confirmed {
+            return Err(GitError::bad("확인이 필요합니다."));
+        }
+        let now = iso_time(now_ms() / 1000).replace("+00:00", "Z");
+        let pr = &mut self.prs[at];
+        if op == "pr/merge" {
+            let method = str_of(body, "method").unwrap_or("");
+            if !["merge", "squash", "rebase"].contains(&method) {
+                return Err(GitError::bad("method must be merge, squash or rebase"));
+            }
+            let sha = str_of(body, "head_sha").map(str::trim).unwrap_or("");
+            if sha.is_empty() {
+                return Err(GitError::bad("확인한 헤드가 필요합니다."));
+            }
+            if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(GitError::bad("head_sha는 40자리 16진수여야 합니다."));
+            }
+            if pr["merge"]["can_merge"] != true {
+                return Err(GitError::conflict(pr["merge"]["reason"].as_str().unwrap_or("병합할 수 없습니다.")));
+            }
+            if !pr["head_sha"].as_str().unwrap_or("").eq_ignore_ascii_case(sha) {
+                return Err(GitError::conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요."));
+            }
+            pr["state"] = json!("merged");
+            pr["merge"] = demo_gate("merged", false, "approved", (0, 0, 0));
+            pr["updated_at"] = json!(now);
+            return Ok(json!({ "number": number, "merged": true, "method": method }));
+        }
+        // pr/review
+        if pr["state"] != "open" {
+            return Err(GitError::conflict("열려 있지 않은 풀 리퀘스트에는 리뷰할 수 없습니다."));
+        }
+        let action = str_of(body, "action").unwrap_or("");
+        let text = str_of(body, "body").unwrap_or("").trim().to_string();
+        let state = match action {
+            "approve" => "approved",
+            "request_changes" => "changes_requested",
+            "comment" => "commented",
+            _ => return Err(GitError::bad("action must be approve, request_changes or comment")),
+        };
+        if state != "approved" && text.is_empty() {
+            return Err(GitError::bad("내용을 입력하세요. 변경 요청과 댓글에는 본문이 필요합니다."));
+        }
+        pr["reviews"].as_array_mut().expect("reviews is an array").push(json!({
+            "author": "demo", "state": state, "body": text, "submitted_at": now,
+        }));
+        if state != "commented" {
+            pr["review"] = json!(if state == "approved" { "approved" } else { "changes_requested" });
+        }
+        let c = &pr["checks"];
+        let counts = (c["passed"].as_u64().unwrap_or(0) as u32, c["failed"].as_u64().unwrap_or(0) as u32, c["pending"].as_u64().unwrap_or(0) as u32);
+        pr["merge"] = demo_gate("open", pr["draft"] == true, pr["review"].as_str().unwrap_or("none"), counts);
+        pr["updated_at"] = json!(now);
+        Ok(json!({ "number": number, "action": action }))
     }
 
     fn run(&mut self, op: &str, body: &Value) -> Result<Value, GitError> {
@@ -1523,13 +1624,22 @@ impl GitState {
                 if limit == 0 || limit > 200 {
                     return Err(GitError::bad("limit은 1에서 200 사이여야 합니다."));
                 }
-                let prs: Vec<Value> = demo_prs(now_ms() / 1000)
-                    .into_iter()
+                let prs: Vec<Value> = self
+                    .prs
+                    .iter()
                     .filter(|p| state == "all" || p["state"] == state)
                     .take(limit as usize)
+                    .map(|p| {
+                        let mut list = p.clone();
+                        for key in PR_DETAIL_KEYS {
+                            list.as_object_mut().expect("a pull request is an object").remove(*key);
+                        }
+                        list
+                    })
                     .collect();
                 Ok(json!({ "prs": prs }))
             }
+            "pr" | "pr/review" | "pr/merge" | "pr/create" => self.pr_op(op, body),
             _ => Err(GitError::new(404, "not_found", "unknown git operation")),
         }
     }
@@ -1571,10 +1681,10 @@ fn demo_prs(now: i64) -> Vec<Value> {
     // (number, title, state, draft, author, head, minutes ago, review, (passed, failed, pending), (can_merge, reason))
     type Row = (u64, &'static str, &'static str, bool, &'static str, &'static str, i64, &'static str, (u32, u32, u32), (bool, &'static str));
     const ROWS: &[Row] = &[
-        (412, "Feat: attach the session shim before routing", "open", false, "BREW", "feat/session-shim", 12, "approved", (4, 0, 0), (true, "병합할 수 있습니다.")),
-        (409, "Fix: stop egress when a session detaches", "open", false, "Minji Kim", "fix/egress-stop", 60 * 5, "review_required", (3, 1, 0), (false, "CI 체크가 실패했습니다 (실패 1개). 통과해야 병합할 수 있습니다.")),
+        (412, "Feat: attach the session shim before routing", "open", false, "BREW", "feat/session-shim", 12, "approved", (3, 0, 0), (true, "병합할 수 있습니다.")),
+        (409, "Fix: stop egress when a session detaches", "open", false, "Minji Kim", "fix/egress-stop", 60 * 5, "review_required", (2, 1, 0), (false, "CI 체크가 실패했습니다 (실패 1개). 통과해야 병합할 수 있습니다.")),
         (405, "Feat: channel feed with mentions", "open", true, "Jisoo Park", "feat/channel-feed", 60 * 26, "none", (1, 0, 2), (false, "초안 상태라 병합할 수 없습니다. 검토 준비 후 초안을 해제하세요.")),
-        (398, "Docs: describe the commit message rules", "merged", false, "Minji Kim", "docs/commit-rules", 60 * 24 * 3, "approved", (4, 0, 0), (false, "이미 병합되었습니다.")),
+        (398, "Docs: describe the commit message rules", "merged", false, "Minji Kim", "docs/commit-rules", 60 * 24 * 3, "approved", (3, 0, 0), (false, "이미 병합되었습니다.")),
     ];
     ROWS.iter()
         .map(|(number, title, state, draft, author, head, minutes, review, checks, merge)| {
@@ -1592,6 +1702,100 @@ fn demo_prs(now: i64) -> Vec<Value> {
                 "merge": { "can_merge": merge.0, "reason": merge.1 },
                 "url": format!("https://github.com/DarkPyonix/darkpyonix-ember/pull/{number}"),
             })
+        })
+        .collect()
+}
+
+/// Keys the detail has and the list does not.
+const PR_DETAIL_KEYS: &[&str] = &["body", "check_runs", "reviews", "comments", "requested_reviewers", "additions", "deletions", "changed_files", "head_sha"];
+
+/// The fixed fake head commit of a demo pull request: 40 hex characters.
+fn demo_head_sha(number: u64) -> String {
+    format!("{:040x}", 0xdec0de00_0000_0000u64 + number)
+}
+
+/// The merge gate of FR-L19 with the node's Korean texts (`ember/node/src/git_prs.rs`).
+fn demo_gate(state: &str, draft: bool, review: &str, checks: (u32, u32, u32)) -> Value {
+    let (can, reason) = if state == "merged" {
+        (false, "이미 병합되었습니다.".to_string())
+    } else if state != "open" {
+        (false, "닫힌 풀 리퀘스트입니다.".to_string())
+    } else if draft {
+        (false, "초안 상태라 병합할 수 없습니다. 검토 준비 후 초안을 해제하세요.".to_string())
+    } else if checks.1 > 0 {
+        (false, format!("CI 체크가 실패했습니다 (실패 {}개). 통과해야 병합할 수 있습니다.", checks.1))
+    } else if checks.2 > 0 {
+        (false, format!("CI 체크가 아직 진행 중입니다 (대기 {}개). 모두 통과해야 합니다.", checks.2))
+    } else if review == "approved" {
+        (true, "병합할 수 있습니다.".to_string())
+    } else if review == "changes_requested" {
+        (false, "변경 요청이 있습니다. 수정 후 다시 승인을 받아야 합니다.".to_string())
+    } else {
+        (false, "승인이 필요합니다. 리뷰어의 승인을 받아야 합니다.".to_string())
+    };
+    json!({ "can_merge": can, "reason": reason })
+}
+
+/// The demo pull requests with the detail the node adds (`/git/pr`, FR-G10): three checks per
+/// pull request (passed, then failed, then pending, named build, lint, e2e), reviews, comments.
+fn demo_pr_details(now: i64) -> Vec<Value> {
+    let at = |minutes: i64| iso_time(now - minutes * 60).replace("+00:00", "Z");
+    demo_prs(now)
+        .into_iter()
+        .map(|mut pr| {
+            let number = pr["number"].as_u64().unwrap_or(0);
+            let c = pr["checks"].clone();
+            let mut runs = Vec::new();
+            let names = ["build", "lint", "e2e"];
+            let mut k = 0;
+            for (state, n) in [("passed", c["passed"].as_u64()), ("failed", c["failed"].as_u64()), ("pending", c["pending"].as_u64())] {
+                for _ in 0..n.unwrap_or(0) {
+                    let name = names[k % 3];
+                    k += 1;
+                    runs.push(json!({ "name": name, "state": state, "detail_url": format!("https://github.com/DarkPyonix/darkpyonix-ember/actions/runs/{number}{k}") }));
+                }
+            }
+            let (reviews, comments, requested): (Vec<Value>, Vec<Value>, Vec<&str>) = match number {
+                412 => (
+                    vec![json!({ "author": "Minji Kim", "state": "approved", "body": "shim 순서가 명확해졌습니다. 병합해도 좋습니다.", "submitted_at": at(30) }),
+                         json!({ "author": "Jisoo Park", "state": "commented", "body": "", "submitted_at": at(50) })],
+                    vec![json!({ "author": "Jisoo Park", "body": "라우팅 전에 attach가 끝나는지 테스트가 있나요?", "created_at": at(90) }),
+                         json!({ "author": "BREW", "body": "fr_s3_* 테스트에 추가했습니다.", "created_at": at(60) })],
+                    vec![],
+                ),
+                409 => (
+                    vec![json!({ "author": "BREW", "state": "changes_requested", "body": "lint 실패를 먼저 고쳐 주세요.", "submitted_at": at(200) }),
+                         json!({ "author": "Jisoo Park", "state": "commented", "body": "분리된 세션에서도 재현됩니다.", "submitted_at": at(260) })],
+                    vec![json!({ "author": "Minji Kim", "body": "lint 수정 후 다시 올리겠습니다.", "created_at": at(240) }),
+                         json!({ "author": "BREW", "body": "확인했습니다.", "created_at": at(220) })],
+                    vec!["BREW"],
+                ),
+                405 => (
+                    vec![json!({ "author": "BREW", "state": "commented", "body": "초안이지만 방향은 좋습니다.", "submitted_at": at(1000) }),
+                         json!({ "author": "Minji Kim", "state": "pending", "body": "", "submitted_at": "" })],
+                    vec![json!({ "author": "Jisoo Park", "body": "멘션 파서는 다음 커밋에서 붙입니다.", "created_at": at(1200) }),
+                         json!({ "author": "BREW", "body": "e2e가 끝나면 초안을 해제하세요.", "created_at": at(1100) })],
+                    vec!["Minji Kim"],
+                ),
+                _ => (
+                    vec![json!({ "author": "BREW", "state": "approved", "body": "", "submitted_at": at(4400) }),
+                         json!({ "author": "Jisoo Park", "state": "approved", "body": "좋습니다.", "submitted_at": at(4350) })],
+                    vec![json!({ "author": "Minji Kim", "body": "병합 규칙 문서 반영했습니다.", "created_at": at(4380) }),
+                         json!({ "author": "BREW", "body": "병합합니다.", "created_at": at(4320) })],
+                    vec![],
+                ),
+            };
+            let o = pr.as_object_mut().expect("a pull request is an object");
+            o.insert("body".into(), json!(format!("데모 풀 리퀘스트 #{number}의 설명입니다.\n\n- 변경 범위\n- 확인 방법")));
+            o.insert("check_runs".into(), json!(runs));
+            o.insert("reviews".into(), json!(reviews));
+            o.insert("comments".into(), json!(comments));
+            o.insert("requested_reviewers".into(), json!(requested));
+            o.insert("additions".into(), json!(40 + number % 90));
+            o.insert("deletions".into(), json!(number % 30));
+            o.insert("changed_files".into(), json!(2 + number % 7));
+            o.insert("head_sha".into(), json!(demo_head_sha(number)));
+            pr
         })
         .collect()
 }
@@ -1869,6 +2073,112 @@ mod tests {
         let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
         assert_eq!(gs(&d, "prs", json!({ "state": "nope" })).unwrap_err().status, 400);
         assert_eq!(gs(&d, "prs", json!({ "limit": 0 })).unwrap_err().status, 400);
+    }
+
+    fn pr_detail(d: &DemoSource, number: u64) -> Value {
+        gs(d, "pr", json!({ "number": number })).unwrap()
+    }
+
+    #[test]
+    fn fr_g10_demo_detail_has_three_checks_two_reviews_two_comments_in_the_node_shape() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for number in [412, 409, 405, 398] {
+            let p = pr_detail(&d, number);
+            assert_eq!(p["check_runs"].as_array().unwrap().len(), 3, "{number}");
+            assert_eq!(p["reviews"].as_array().unwrap().len(), 2, "{number}");
+            assert_eq!(p["comments"].as_array().unwrap().len(), 2, "{number}");
+            assert!(p["body"].as_str().unwrap().contains(&number.to_string()));
+            let c = &p["checks"];
+            assert_eq!(c["passed"].as_u64().unwrap() + c["failed"].as_u64().unwrap() + c["pending"].as_u64().unwrap(), 3);
+            // The client decodes the same JSON.
+            let decoded: ember_client::api::GitPrDetail = serde_json::from_value(p).unwrap();
+            assert_eq!(decoded.pr.number, number);
+        }
+        let failing = pr_detail(&d, 409);
+        assert!(failing["check_runs"].as_array().unwrap().iter().any(|c| c["state"] == "failed"));
+        assert_eq!(gs(&d, "pr", json!({ "number": 0 })).unwrap_err().status, 400);
+        assert_eq!(gs(&d, "pr", json!({ "number": 77 })).unwrap_err().status, 409);
+        // The list does not carry the detail keys.
+        let list = prs(&d, json!({}));
+        assert!(list[0].get("check_runs").is_none() && list[0].get("reviews").is_none() && list[0].get("body").is_none());
+    }
+
+    #[test]
+    fn fr_g11_demo_review_changes_the_decision_and_the_gate() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let need = gs(&d, "pr/review", json!({ "number": 409, "action": "approve" })).unwrap_err();
+        assert_eq!(need.status, 400);
+        assert_eq!(gs(&d, "pr/review", json!({ "number": 409, "action": "comment", "confirm": true })).unwrap_err().status, 400);
+        let out = gs(&d, "pr/review", json!({ "number": 405, "action": "request_changes", "body": "고쳐 주세요", "confirm": true })).unwrap();
+        assert_eq!(out, json!({ "number": 405, "action": "request_changes" }));
+        let p = pr_detail(&d, 405);
+        assert_eq!(p["review"], "changes_requested");
+        assert_eq!(p["reviews"].as_array().unwrap().len(), 3);
+        assert_eq!(p["reviews"][2]["state"], "changes_requested");
+        // Approving 409 does not open the gate while a check fails.
+        gs(&d, "pr/review", json!({ "number": 409, "action": "approve", "confirm": true })).unwrap();
+        let p = pr_detail(&d, 409);
+        assert_eq!(p["review"], "approved");
+        assert_eq!(p["merge"]["can_merge"], false);
+        assert!(p["merge"]["reason"].as_str().unwrap().contains("CI"));
+        assert_eq!(prs(&d, json!({}))[1]["review"], "approved");
+    }
+
+    #[test]
+    fn fr_g11_demo_merge_follows_the_gate() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let h = |n: u64| pr_detail(&d, n)["head_sha"].as_str().unwrap().to_string();
+        let closed = gs(&d, "pr/merge", json!({ "number": 409, "method": "squash", "delete_branch": true, "head_sha": h(409), "confirm": true })).unwrap_err();
+        assert_eq!(closed.status, 409);
+        assert!(closed.message.contains("CI"), "{}", closed.message);
+        assert_eq!(gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "head_sha": h(412) })).unwrap_err().status, 400);
+        assert_eq!(gs(&d, "pr/merge", json!({ "number": 412, "method": "nope", "head_sha": h(412), "confirm": true })).unwrap_err().status, 400);
+        let out = gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "delete_branch": true, "head_sha": h(412), "confirm": true })).unwrap();
+        assert_eq!(out, json!({ "number": 412, "merged": true, "method": "squash" }));
+        assert_eq!(pr_detail(&d, 412)["state"], "merged");
+        assert_eq!(pr_detail(&d, 405)["head_sha"].as_str().unwrap().len(), 40);
+        assert_eq!(prs(&d, json!({})).len(), 2, "the open list lost it");
+        assert_eq!(prs(&d, json!({ "state": "merged" })).len(), 2);
+        let again = gs(&d, "pr/merge", json!({ "number": 412, "method": "merge", "head_sha": h(412), "confirm": true })).unwrap_err();
+        assert!(again.message.contains("병합"));
+    }
+
+    #[test]
+    fn fr_g11_demo_merge_without_a_head_sha_is_400() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for body in [json!({ "number": 412, "method": "squash", "confirm": true }), json!({ "number": 412, "method": "squash", "head_sha": "", "confirm": true })] {
+            let e = gs(&d, "pr/merge", body).unwrap_err();
+            assert_eq!(e.status, 400);
+            assert_eq!(e.message, "확인한 헤드가 필요합니다.");
+        }
+        assert_eq!(pr_detail(&d, 412)["state"], "open", "nothing merged");
+    }
+
+    #[test]
+    fn fr_g11_demo_merge_with_a_stale_head_sha_is_409() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let stale = gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "head_sha": "f".repeat(40), "confirm": true })).unwrap_err();
+        assert_eq!(stale.status, 409);
+        assert!(stale.message.contains("풀 리퀘스트가 바뀌었습니다"), "{}", stale.message);
+        assert_eq!(pr_detail(&d, 412)["state"], "open", "nothing merged");
+        let sha = pr_detail(&d, 412)["head_sha"].as_str().unwrap().to_string();
+        gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "head_sha": sha, "confirm": true })).unwrap();
+        assert_eq!(pr_detail(&d, 412)["state"], "merged");
+    }
+
+    #[test]
+    fn fr_g12_demo_create_adds_an_open_pull_request_to_the_list() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        assert_eq!(gs(&d, "pr/create", json!({ "title": "T" })).unwrap_err().status, 400);
+        assert_eq!(gs(&d, "pr/create", json!({ "title": "  ", "confirm": true })).unwrap_err().status, 400);
+        let out = gs(&d, "pr/create", json!({ "title": "Feat: demo", "body": "why", "draft": true, "confirm": true })).unwrap();
+        assert_eq!(out["number"], 413);
+        assert!(out["url"].as_str().unwrap().ends_with("/pull/413"));
+        let list = prs(&d, json!({}));
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0]["number"], 413);
+        assert_eq!((list[0]["draft"].clone(), list[0]["head"].clone(), list[0]["base"].clone()), (json!(true), json!("feat/git-api"), json!("develop")));
+        assert_eq!(pr_detail(&d, 413)["body"], "why");
     }
 
     fn stash_list(d: &DemoSource) -> Vec<Value> {

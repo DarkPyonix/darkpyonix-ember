@@ -20,6 +20,227 @@ pub const UNAVAILABLE: &str = "준비 중입니다";
 /// The built-in project that holds Home chats by default (FR-L13).
 pub const DEFAULT_PROJECT: &str = "기본 프로젝트";
 
+/// The Home integrations area (FR-L23, #498). Owner decision (2026-11-06): GitHub is the one
+/// integration in scope for November, its auth reuses the session computer's `gh` (Ember stores
+/// no token). Slack, Discord, Linear, calendar and mail come in December or later.
+pub const INTEGRATIONS_TITLE: &str = "연동";
+pub const GITHUB_NAME: &str = "GitHub";
+pub const GITHUB_NO_INFO: &str = "아직 정보가 없습니다";
+pub const GITHUB_NO_ACTIVITY: &str = "연동이 만든 일이 아직 없습니다";
+pub const GITHUB_LOGIN_HINT: &str = "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오";
+pub const GITHUB_INSTALL_HINT: &str = "gh를 설치하고 로그인하십시오";
+pub const GITHUB_UNAVAILABLE_HINT: &str = "연결 상태를 확인할 수 없습니다";
+/// The control only reveals the `gh auth login` guidance, so it does not say 연결 or 다시 로그인.
+pub const GITHUB_HOW: &str = "방법 보기";
+/// Repositories listed on the card; the server may send more.
+pub const GITHUB_MAX_REPOS: usize = 3;
+/// CI cells per repository, newest first.
+pub const GITHUB_MAX_CI: usize = 14;
+pub const LATER_PILL: &str = "준비 중입니다";
+pub const LATER_LINE: &str = "12월 이후에 지원합니다";
+/// The services that come after GitHub, in the mockup order.
+pub const LATER_INTEGRATIONS: [&str; 5] = ["Slack", "Discord", "Linear", "캘린더", "메일"];
+
+/// `GET /api/integrations/github` `state` (INTENT D41, FR-L35).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubConn {
+    /// Connected.
+    On,
+    /// Connected before, needs a new login.
+    Warn,
+    /// Not connected (no `gh`, or not logged in).
+    #[default]
+    Off,
+}
+
+/// One CI run result of a repository.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CiResult {
+    Success,
+    Failure,
+    Cancelled,
+    #[serde(other)]
+    Pending,
+}
+
+/// One repository of the body. A null number is unknown; `error` replaces the numbers.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct GithubRepo {
+    pub name_with_owner: String,
+    pub default_branch: String,
+    pub open_prs: Option<u32>,
+    pub review_requested: Option<u32>,
+    /// Newest first, up to 14.
+    pub ci: Option<Vec<CiResult>>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct GithubTotals {
+    pub repos: Option<u32>,
+    pub open_prs: Option<u32>,
+    pub review_requested: Option<u32>,
+    /// Percent, 0 to 100; null when no run is known.
+    pub ci_pass_percent: Option<f32>,
+}
+
+/// Mirror of the `GET /api/integrations/github` body. The server gives no activity list.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct GithubState {
+    pub state: GithubConn,
+    /// Korean sentence, set for `warn` and `off`.
+    pub reason: Option<String>,
+    pub account: Option<String>,
+    pub repos: Vec<GithubRepo>,
+    pub totals: GithubTotals,
+    /// Epoch seconds.
+    pub checked_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubPill {
+    /// Grey: the server cannot say yet.
+    Soon,
+    /// Grey: not connected.
+    Off,
+    /// Orange: needs a new login.
+    Warn,
+    /// Green: connected.
+    On,
+}
+
+/// One repository row: either numbers and CI cells, or the server's error.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubRepoRow {
+    pub name: String,
+    pub open_prs: String,
+    pub review_requested: String,
+    /// At most [`GITHUB_MAX_CI`], newest first.
+    pub ci: Vec<CiResult>,
+    pub error: Option<String>,
+}
+
+/// The 방법 보기 control. Pressing it only shows `guidance`; Ember never logs in itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubAction {
+    pub label: &'static str,
+    pub guidance: String,
+}
+
+/// What the GitHub card draws. Pure, so the honest states are testable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GithubCard {
+    pub pill: &'static str,
+    pub tone: GithubPill,
+    /// The count line under the area header.
+    pub header_line: String,
+    /// The server's reason under the title (warn and off).
+    pub note: Option<String>,
+    pub account: Option<String>,
+    pub action: Option<GithubAction>,
+    /// Repositories, open PRs, review requests, CI pass rate.
+    pub kpis: [(&'static str, String); 4],
+    pub repos: Vec<GithubRepoRow>,
+    /// "외 N개" under the listed rows when the server sent more than are shown.
+    pub more_repos: Option<String>,
+    pub activity_empty: &'static str,
+}
+
+/// "외 N개" when `total` repositories exist and only `shown` are listed. `total` is the
+/// server's count when known, else the length of the list it sent.
+pub fn more_repos_text(shown: usize, total: Option<usize>) -> Option<String> {
+    let extra = total?.checked_sub(shown).filter(|n| *n > 0)?;
+    Some(format!("외 {extra}개"))
+}
+
+impl GithubCard {
+    pub fn from_state(state: Option<&GithubState>) -> GithubCard {
+        let labels = ["저장소", "열린 PR", "리뷰 요청", "CI 통과율"];
+        let none = || GITHUB_NO_INFO.to_string();
+        let Some(g) = state else {
+            return GithubCard {
+                pill: UNAVAILABLE,
+                tone: GithubPill::Soon,
+                header_line: "GitHub 연결 확인 전".to_string(),
+                note: None,
+                account: None,
+                action: None,
+                kpis: labels.map(|l| (l, none())),
+                repos: Vec::new(),
+                more_repos: None,
+                activity_empty: GITHUB_NO_ACTIVITY,
+            };
+        };
+        let (pill, tone, header_line, label) = match g.state {
+            GithubConn::On => ("연결됨", GithubPill::On, "GitHub 연결됨", None),
+            GithubConn::Warn => ("재인증 필요", GithubPill::Warn, "GitHub 재인증 필요", Some(GITHUB_HOW)),
+            GithubConn::Off => ("연결 안 됨", GithubPill::Off, "GitHub 연결 안 됨", Some(GITHUB_HOW)),
+        };
+        let note = (g.state != GithubConn::On)
+            .then(|| g.reason.clone().unwrap_or_else(|| GITHUB_UNAVAILABLE_HINT.to_string()));
+        let action = label.map(|label| GithubAction {
+            label,
+            guidance: if g.reason.as_deref().is_some_and(|r| r.contains("설치")) {
+                GITHUB_INSTALL_HINT.to_string()
+            } else {
+                GITHUB_LOGIN_HINT.to_string()
+            },
+        });
+        let shows_numbers = g.state != GithubConn::Off;
+        let count = |v: Option<u32>| match v {
+            Some(n) if shows_numbers => n.to_string(),
+            _ => none(),
+        };
+        let t = &g.totals;
+        let rate = match t.ci_pass_percent {
+            Some(r) if shows_numbers => format!("{}%", r.round() as i64),
+            _ => none(),
+        };
+        let repos = if shows_numbers {
+            g.repos
+                .iter()
+                .take(GITHUB_MAX_REPOS)
+                .map(|r| GithubRepoRow {
+                    name: r.name_with_owner.clone(),
+                    open_prs: count(r.open_prs),
+                    review_requested: count(r.review_requested),
+                    ci: r.ci.iter().flatten().take(GITHUB_MAX_CI).copied().collect(),
+                    error: r.error.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let more_repos = if shows_numbers { more_repos_text(repos.len(), t.repos.map(|n| n as usize).or(Some(g.repos.len()))) } else { None };
+        GithubCard {
+            pill,
+            tone,
+            header_line: header_line.to_string(),
+            note,
+            account: g.account.clone(),
+            action,
+            kpis: [
+                (labels[0], count(t.repos)),
+                (labels[1], count(t.open_prs)),
+                (labels[2], count(t.review_requested)),
+                (labels[3], rate),
+            ],
+            repos,
+            more_repos,
+            activity_empty: GITHUB_NO_ACTIVITY,
+        }
+    }
+}
+
+/// What tapping the composer's attach button says (FR-L11, #500): picking files needs the
+/// toolkit's file picker (compose-rust#483, planned for v0.0.8).
+pub const ATTACH_UNSUPPORTED: &str = "파일 고르기는 아직 지원하지 않습니다";
+
 pub const GREETING: &str = "무엇을 도와줄까요?";
 pub const COMPOSER_PLACEHOLDER: &str =
     "무엇이든 물어보세요. 새 대화는 고른 프로젝트의 팀원이 됩니다.";
@@ -1001,6 +1222,176 @@ pub fn read_dash(state: &State) -> Dash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo(name: &str) -> GithubRepo {
+        GithubRepo {
+            name_with_owner: name.into(),
+            default_branch: "main".into(),
+            open_prs: Some(2),
+            review_requested: Some(0),
+            ci: Some(vec![CiResult::Success, CiResult::Failure]),
+            error: None,
+        }
+    }
+
+    fn ready_github() -> GithubState {
+        GithubState {
+            state: GithubConn::On,
+            reason: None,
+            account: Some("octo".into()),
+            repos: vec![repo("octo/a")],
+            totals: GithubTotals {
+                repos: Some(3),
+                open_prs: None,
+                review_requested: Some(0),
+                ci_pass_percent: None,
+            },
+            checked_at: Some(1_700_000_000),
+        }
+    }
+
+    #[test]
+    fn fr_l35_github_card_without_server_is_coming_soon() {
+        let c = GithubCard::from_state(None);
+        assert_eq!(c.pill, "준비 중입니다");
+        assert_eq!(c.tone, GithubPill::Soon);
+        assert_eq!(c.header_line, "GitHub 연결 확인 전");
+        assert!(!c.header_line.chars().any(|ch| ch.is_ascii_digit()), "no count");
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+        assert!(c.repos.is_empty() && c.action.is_none());
+        assert_eq!(c.activity_empty, "연동이 만든 일이 아직 없습니다");
+    }
+
+    #[test]
+    fn fr_l35_github_card_on_shows_numbers_and_null_is_no_information() {
+        let g = ready_github();
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "연결됨");
+        assert_eq!(c.tone, GithubPill::On);
+        assert_eq!(c.account.as_deref(), Some("octo"));
+        assert!(c.note.is_none() && c.action.is_none());
+        assert_eq!(c.kpis[0].1, "3");
+        assert_eq!(c.kpis[1].1, "아직 정보가 없습니다", "null is not 0");
+        assert_eq!(c.kpis[2].1, "0", "a real zero is shown as 0");
+        assert_eq!(c.kpis[3].1, "아직 정보가 없습니다");
+        let mut g = ready_github();
+        g.totals.ci_pass_percent = Some(87.6);
+        assert_eq!(GithubCard::from_state(Some(&g)).kpis[3].1, "88%");
+    }
+
+    #[test]
+    fn fr_l35_github_card_warn_shows_relogin_and_the_hint() {
+        let mut g = ready_github();
+        g.state = GithubConn::Warn;
+        g.reason = Some("로그인이 만료되었습니다".into());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "재인증 필요");
+        assert_eq!(c.tone, GithubPill::Warn);
+        assert_eq!(c.note.as_deref(), Some("로그인이 만료되었습니다"));
+        let a = c.action.unwrap();
+        assert_eq!(a.label, "방법 보기");
+        assert_eq!(a.guidance, "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오");
+    }
+
+    #[test]
+    fn fr_l35_github_card_off_says_how_and_shows_no_numbers() {
+        let mut g = ready_github();
+        g.state = GithubConn::Off;
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "연결 안 됨");
+        assert_eq!(c.action.as_ref().unwrap().label, "방법 보기");
+        assert!(c.action.as_ref().unwrap().guidance.contains("gh auth login"));
+        assert!(c.kpis.iter().all(|(_, v)| v == "아직 정보가 없습니다"));
+        assert!(c.repos.is_empty());
+        assert!(!c.header_line.contains("연결됨"));
+        g.reason = Some("gh가 설치되어 있지 않습니다. 설치해 주십시오".into());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.action.unwrap().guidance, "gh를 설치하고 로그인하십시오");
+        assert_eq!(c.note.as_deref(), Some("gh가 설치되어 있지 않습니다. 설치해 주십시오"));
+    }
+
+    #[test]
+    fn fr_l35_github_card_repo_error_row_replaces_numbers() {
+        let mut g = ready_github();
+        g.repos[0].error = Some("저장소를 읽지 못했습니다".into());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos[0].error.as_deref(), Some("저장소를 읽지 못했습니다"));
+        assert_eq!(c.repos[0].name, "octo/a");
+    }
+
+    #[test]
+    fn fr_l35_github_card_ci_cells_newest_first_and_at_most_14() {
+        let mut g = ready_github();
+        g.repos[0].ci = Some((0..20).map(|i| if i == 0 { CiResult::Failure } else { CiResult::Success }).collect());
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos[0].ci.len(), 14);
+        assert_eq!(c.repos[0].ci[0], CiResult::Failure, "newest first");
+        g.repos[0].ci = None;
+        assert!(GithubCard::from_state(Some(&g)).repos[0].ci.is_empty());
+    }
+
+    #[test]
+    fn fr_l35_github_card_lists_at_most_three_repos() {
+        let mut g = ready_github();
+        g.repos = (0..5).map(|i| repo(&format!("octo/r{i}"))).collect();
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.repos.len(), 3);
+        assert_eq!(c.repos[2].name, "octo/r2");
+        assert_eq!(c.repos[0].open_prs, "2");
+    }
+
+    #[test]
+    fn fr_l35_github_card_says_how_many_more_repos() {
+        assert_eq!(more_repos_text(3, Some(8)).as_deref(), Some("외 5개"));
+        assert_eq!(more_repos_text(3, Some(3)), None);
+        assert_eq!(more_repos_text(2, None), None);
+        let mut g = ready_github();
+        g.repos = (0..5).map(|i| repo(&format!("octo/r{i}"))).collect();
+        g.totals.repos = Some(9);
+        assert_eq!(GithubCard::from_state(Some(&g)).more_repos.as_deref(), Some("외 6개"));
+        g.totals.repos = None;
+        assert_eq!(GithubCard::from_state(Some(&g)).more_repos.as_deref(), Some("외 2개"));
+        g.repos.truncate(2);
+        assert_eq!(GithubCard::from_state(Some(&g)).more_repos, None);
+    }
+
+    #[test]
+    fn fr_l35_github_state_decodes_the_server_body() {
+        let g: GithubState = serde_json::from_str(
+            r#"{"state":"warn","reason":"재로그인","account":null,
+            "repos":[{"name_with_owner":"o/r","default_branch":"main","open_prs":null,
+            "review_requested":1,"ci":["success","failure","cancelled","pending"],"error":null}],
+            "totals":{"repos":1,"open_prs":0,"review_requested":1,"ci_pass_percent":null},
+            "checked_at":1700000000}"#,
+        )
+        .unwrap();
+        assert_eq!(g.state, GithubConn::Warn);
+        assert_eq!(g.repos[0].open_prs, None);
+        assert_eq!(
+            g.repos[0].ci.as_deref(),
+            Some(&[CiResult::Success, CiResult::Failure, CiResult::Cancelled, CiResult::Pending][..])
+        );
+        assert_eq!(g.totals.ci_pass_percent, None);
+        assert_eq!(g.checked_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn fr_l23_other_integrations_are_coming_soon() {
+        assert_eq!(LATER_INTEGRATIONS, ["Slack", "Discord", "Linear", "캘린더", "메일"]);
+        assert_eq!(LATER_PILL, "준비 중입니다");
+        assert_eq!(LATER_LINE, "12월 이후에 지원합니다");
+        assert_eq!(INTEGRATIONS_TITLE, "연동");
+        for s in [LATER_LINE, GITHUB_LOGIN_HINT, GITHUB_INSTALL_HINT, GITHUB_NO_INFO, GITHUB_NO_ACTIVITY] {
+            assert!(!s.contains('\u{2014}'));
+        }
+    }
+
+    #[test]
+    fn fr_l11_attach_is_disabled_with_a_reason() {
+        assert_ne!(ATTACH_UNSUPPORTED, UNAVAILABLE);
+        assert!(ATTACH_UNSUPPORTED.contains("지원하지 않습니다"));
+        assert!(ATTACH_UNSUPPORTED.ends_with("습니다"));
+    }
 
     #[test]
     fn fr_u7_hatch_lines_stay_inside_the_bar() {

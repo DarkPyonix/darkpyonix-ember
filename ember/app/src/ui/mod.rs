@@ -15,6 +15,7 @@ pub mod channels;
 pub mod components;
 pub mod conversation;
 pub mod editor;
+pub mod editor_icons;
 pub mod editor_workbench;
 pub mod files;
 pub mod fonts;

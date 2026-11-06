@@ -39,7 +39,9 @@ impl NodeConfig {
         self
     }
 
-    /// - `EMBER_NODE_TOKEN` (required, non-empty): bearer token.
+    /// - `EMBER_NODE_TOKEN` (non-empty): bearer token. When it is unset or empty, the `node_token`
+    ///   of `<state dir>/enrol.json` is used (written by `ember-node enrol`); the variable wins
+    ///   when both exist. See [`token_from`].
     /// - `EMBER_NODE_ROOTS`: colon-separated allowed roots (default `$HOME`).
     /// - `EMBER_NODE_DENY`: colon-separated paths the file API refuses (default none), see
     ///   [`parse_deny`].
@@ -49,15 +51,14 @@ impl NodeConfig {
     /// - `EMBER_NODE_EGRESS`, `EMBER_NODE_EGRESS_DENY`: the browser egress policy
     ///   ([`crate::egress::EgressPolicy::from_env`]).
     pub fn from_env() -> anyhow::Result<Self> {
-        let token = std::env::var("EMBER_NODE_TOKEN").unwrap_or_default();
-        anyhow::ensure!(!token.is_empty(), "EMBER_NODE_TOKEN must be set to a non-empty secret");
+        let state_dir = default_state_dir();
+        let token = token_from(std::env::var("EMBER_NODE_TOKEN").ok(), state_dir.as_deref())?;
         let roots: Vec<PathBuf> = match std::env::var_os("EMBER_NODE_ROOTS") {
             Some(v) if !v.is_empty() => std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect(),
             _ => vec![PathBuf::from(
                 std::env::var_os("HOME").ok_or_else(|| anyhow::anyhow!("neither EMBER_NODE_ROOTS nor HOME is set"))?,
             )],
         };
-        let state_dir = default_state_dir();
         let pty_keeper = match std::env::var("EMBER_NODE_KEEP_PTY").as_deref() {
             Ok("0") | Ok("false") | Ok("no") => None,
             _ => std::env::current_exe().ok(),
@@ -66,6 +67,21 @@ impl NodeConfig {
         let denied = parse_deny(std::env::var_os("EMBER_NODE_DENY").as_deref());
         Ok(Self { token, roots, denied, state_dir, pty_keeper, egress })
     }
+}
+
+/// The bearer token: a non-empty `env_token` (`EMBER_NODE_TOKEN`) wins; otherwise the
+/// `node_token` of `<state dir>/enrol.json`; otherwise an error. A malformed `enrol.json` is an
+/// error that names the file and never quotes it.
+pub fn token_from(env_token: Option<String>, state_dir: Option<&Path>) -> anyhow::Result<String> {
+    if let Some(t) = env_token.filter(|t| !t.is_empty()) {
+        return Ok(t);
+    }
+    if let Some(dir) = state_dir {
+        if let Some(e) = crate::enrol::read_enrolment(dir)? {
+            return Ok(e.node_token);
+        }
+    }
+    anyhow::bail!("EMBER_NODE_TOKEN must be set to a non-empty secret or this node enrolled (ember-node enrol)")
 }
 
 /// Splits an `EMBER_NODE_DENY` value like `PATH` (`:` on Unix, `;` on Windows), dropping empty
@@ -170,6 +186,52 @@ mod tests {
             parse_deny(Some(OsStr::new("/a/.ember::/b/ose-data:"))),
             vec![PathBuf::from("/a/.ember"), PathBuf::from("/b/ose-data")]
         );
+    }
+
+    fn enrolled_dir(token: &str) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let e = crate::enrol::Enrolment {
+            server: "http://s".into(),
+            node_token: token.into(),
+            server_peer_id: None,
+            name: "n".into(),
+            computer_id: "c".into(),
+            enrolled_ms: 1,
+        };
+        crate::enrol::write_enrolment(d.path(), &e, None, false).unwrap();
+        d
+    }
+
+    #[test]
+    fn fr_c2_node_config_env_token_wins_over_the_file() {
+        let d = enrolled_dir("from-file");
+        assert_eq!(token_from(Some("from-env".into()), Some(d.path())).unwrap(), "from-env");
+        assert_eq!(token_from(Some("from-env".into()), None).unwrap(), "from-env");
+    }
+
+    #[test]
+    fn fr_c2_node_config_falls_back_to_the_file_when_the_env_is_unset_or_empty() {
+        let d = enrolled_dir("from-file");
+        assert_eq!(token_from(None, Some(d.path())).unwrap(), "from-file");
+        assert_eq!(token_from(Some(String::new()), Some(d.path())).unwrap(), "from-file");
+    }
+
+    #[test]
+    fn fr_c2_node_config_without_env_or_file_keeps_the_error_text() {
+        let d = tempfile::tempdir().unwrap();
+        for (env, dir) in [(None, Some(d.path())), (Some(String::new()), Some(d.path())), (None, None)] {
+            let err = token_from(env, dir).unwrap_err().to_string();
+            assert!(err.contains("EMBER_NODE_TOKEN"), "{err}");
+            assert!(err.contains("ember-node enrol"), "{err}");
+        }
+    }
+
+    #[test]
+    fn fr_c2_node_config_malformed_file_is_an_error_naming_the_file_not_its_contents() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(crate::enrol::ENROL_FILE), "{\"node_token\": \"leaky-secret\" oops").unwrap();
+        let err = format!("{:#}", token_from(None, Some(d.path())).unwrap_err());
+        assert!(err.contains("enrol.json") && !err.contains("leaky-secret"), "{err}");
     }
 
     #[test]

@@ -421,3 +421,20 @@ mod title_strip {
         assert_eq!(given, if cfg!(target_os = "macos") { Chrome::FullSize } else { plain });
     }
 }
+
+// FR-E2 (D38 problems list): the tab carries the count, a row says where the problem is.
+mod problems {
+    use ember_app::ui::editor::{problem_location, problems_tab_label};
+
+    #[test]
+    fn fr_e2_problems_tab_shows_the_count_only_when_there_are_problems() {
+        assert_eq!(problems_tab_label(0), "문제");
+        assert_eq!(problems_tab_label(3), "문제 3");
+    }
+
+    #[test]
+    fn fr_e2_problem_row_location_is_the_project_relative_path_and_one_based_line() {
+        assert_eq!(problem_location("/w/p/src/lib.rs", "/w/p/", 0), "src/lib.rs:1");
+        assert_eq!(problem_location("/w/p/package.json", "/w/p", 11), "package.json:12");
+    }
+}

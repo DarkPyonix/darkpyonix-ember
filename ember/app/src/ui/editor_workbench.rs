@@ -235,7 +235,7 @@ pub mod page {
         // macOS opens the window FullSize (the page starts at the top and the top bar is the title
         // strip), so the page is the window's height; elsewhere the native chrome stays and the
         // page keeps its 76px allowance. TODO(#320): the height is fixed at launch (compose-rust#467).
-        let height = if cfg!(target_os = "macos") { "100vh" } else { "calc(100vh - 76px)" };
+        let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
         let ed_style = format!("width:100vw; height:{height}; {grid}");
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
@@ -331,7 +331,7 @@ pub mod page {
         let find_note = format!("{}: {SOON}", keymap.find_label());
         let open = *menu_open.read();
         // The traffic lights float over the top bar's left end under FullSize.
-        let strip_pad = if cfg!(target_os = "macos") { format!("padding-left:{}px;", crate::ui::safe_area::safe_area().leading) } else { String::new() };
+        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
         rsx! {
             header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }

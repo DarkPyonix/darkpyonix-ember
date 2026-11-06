@@ -165,25 +165,50 @@ pub fn tree_rows(
     rows
 }
 
-/// The editor page's grid tracks as inline style: the mockup's `.ed` grid with its `.no-left` and
-/// `.no-bottom` cases, a closed left column 0 wide and a closed bottom row 0 high.
+/// The editor page's grid tracks as inline style. An open tool window adds nothing: the
+/// stylesheet's tracks apply, including its width breakpoints. A closed left column is 0 wide and
+/// a closed bottom row is 0 high (the mockup's `.no-left` and `.no-bottom`).
 pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
-    format!(
-        "grid-template-columns:{}; grid-template-rows:{};",
-        if has_left { "var(--stw) 280px minmax(0,1fr) var(--stw)" } else { "var(--stw) 0 minmax(0,1fr) var(--stw)" },
-        if has_bottom { "52px minmax(0,1fr) 260px var(--sbh)" } else { "52px minmax(0,1fr) 0 var(--sbh)" },
-    )
+    let mut style = String::new();
+    if !has_left {
+        style.push_str("grid-template-columns:var(--stw) 0 minmax(0,1fr) var(--stw); ");
+    }
+    if !has_bottom {
+        style.push_str("grid-template-rows:52px minmax(0,1fr) 0 var(--sbh); ");
+    }
+    style
 }
 
 /// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row
 /// is 0 high and the bottom window takes its row and the one below.
 pub fn editor_grid_style_maximized() -> String {
-    "grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw); grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
+    "grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
 }
 
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
+}
+
+/// The status bar's agent dot: orange while waiting for approval, blue while running, green otherwise.
+pub fn agent_dot_class(state: &str) -> &'static str {
+    match state {
+        "승인 대기" => "dot wait",
+        "실행 중" => "dot run",
+        _ => "dot ok",
+    }
+}
+
+/// The status bar's path: the folder's name, then the directories of the open file below it.
+pub fn status_crumbs(folder: &str, current: Option<&str>) -> String {
+    let name = folder.trim_end_matches('/').rsplit('/').next().unwrap_or(folder);
+    let mut parts = vec![name.to_string()];
+    if let Some(path) = current {
+        let mut dirs = breadcrumb_segments(path, folder);
+        dirs.pop();
+        parts.extend(dirs);
+    }
+    parts.join(" \u{203A} ")
 }
 
 /// The status bar's agent field.

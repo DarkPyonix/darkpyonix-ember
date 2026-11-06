@@ -2036,13 +2036,65 @@ pub const CONFLICT_PREVIEW_LINES: usize = 40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictStep {
     Editing,
+    /// The merged text cut to `CONFLICT_PREVIEW_LINES` lines.
     Preview,
+    /// The whole merged text (전체 보기).
+    PreviewFull,
+}
+
+/// What a tap on 해결하고 스테이징 does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveTap {
+    Ignore,
+    /// Send this merged text to `git/resolve`.
+    Send(String),
+}
+
+/// The decision of a 해결하고 스테이징 tap: nothing while a request is in flight (a double tap
+/// sends once) or while a block is unchosen, else the merged text to send.
+pub fn resolve_tap(busy: bool, file: &ConflictFile) -> ResolveTap {
+    if busy {
+        return ResolveTap::Ignore;
+    }
+    match file.resolved_content() {
+        Some(text) => ResolveTap::Send(text),
+        None => ResolveTap::Ignore,
+    }
+}
+
+/// 해결하고 스테이징 on `step`: only a preview step sends.
+pub fn confirm(step: ConflictStep, busy: bool, file: &ConflictFile) -> ResolveTap {
+    if step.is_preview() { resolve_tap(busy, file) } else { ResolveTap::Ignore }
+}
+
+/// 취소: back to editing. The choices live in the file, so they are kept.
+pub fn cancel_preview(_step: ConflictStep) -> ConflictStep {
+    ConflictStep::Editing
 }
 
 impl ConflictStep {
     /// The step after tapping 해결 완료: the preview when every block is settled, else unchanged.
     pub fn enter_preview(self, file: &ConflictFile) -> ConflictStep {
         if file.is_resolved() { ConflictStep::Preview } else { self }
+    }
+
+    /// Whether the merged text is showing, cut or whole.
+    pub fn is_preview(self) -> bool {
+        matches!(self, ConflictStep::Preview | ConflictStep::PreviewFull)
+    }
+
+    /// How many lines the preview shows on this step.
+    pub fn preview_max(self) -> usize {
+        if self == ConflictStep::PreviewFull { usize::MAX } else { CONFLICT_PREVIEW_LINES }
+    }
+
+    /// 전체 보기 and 접기: flips between the cut and the whole text; editing is unchanged.
+    pub fn toggle_full(self) -> ConflictStep {
+        match self {
+            ConflictStep::Preview => ConflictStep::PreviewFull,
+            ConflictStep::PreviewFull => ConflictStep::Preview,
+            ConflictStep::Editing => ConflictStep::Editing,
+        }
     }
 }
 
@@ -3367,5 +3419,53 @@ rename to new.txt
         assert_eq!(section_count_with(Section::Stash, None, Some(9), Some(3)), Some(9));
         let snap = RepoSnapshot { branches: s(&["main"]), ..Default::default() };
         assert_eq!(section_count_with(Section::Branches, Some(&snap), None, Some(3)), Some(1));
+    }
+
+    // ---- conflict editor follow-ups (#382) ----
+
+    #[test]
+    fn fr_g7_a_second_tap_while_busy_is_ignored() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Ours);
+        assert!(matches!(resolve_tap(false, &f), ResolveTap::Send(_)));
+        assert_eq!(resolve_tap(true, &f), ResolveTap::Ignore);
+    }
+
+    #[test]
+    fn fr_g7_resolve_tap_is_ignored_until_every_block_is_chosen() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours);
+        assert_eq!(resolve_tap(false, &f), ResolveTap::Ignore);
+        assert_eq!(confirm(ConflictStep::Preview, false, &f), ResolveTap::Ignore);
+    }
+
+    #[test]
+    fn fr_g7_cancel_returns_to_editing_and_keeps_choices() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
+        let step = ConflictStep::Editing.enter_preview(&f);
+        assert_eq!(step, ConflictStep::Preview);
+        assert_eq!(cancel_preview(step), ConflictStep::Editing);
+        assert_eq!(cancel_preview(ConflictStep::PreviewFull), ConflictStep::Editing);
+        assert_eq!(f.resolved_count(), 2);
+    }
+
+    #[test]
+    fn fr_g7_confirm_sends_the_merged_text() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
+        let want = f.resolved_content().unwrap();
+        assert_eq!(confirm(ConflictStep::Preview, false, &f), ResolveTap::Send(want.clone()));
+        assert_eq!(confirm(ConflictStep::PreviewFull, false, &f), ResolveTap::Send(want));
+        assert_eq!(confirm(ConflictStep::Editing, false, &f), ResolveTap::Ignore);
+    }
+
+    #[test]
+    fn fr_g7_preview_expands_and_collapses() {
+        assert_eq!(ConflictStep::Preview.preview_max(), CONFLICT_PREVIEW_LINES);
+        let full = ConflictStep::Preview.toggle_full();
+        assert_eq!(full, ConflictStep::PreviewFull);
+        assert_eq!(full.preview_max(), usize::MAX);
+        assert_eq!(full.toggle_full(), ConflictStep::Preview);
+        assert_eq!(ConflictStep::Editing.toggle_full(), ConflictStep::Editing);
+        let long = "x\n".repeat(CONFLICT_PREVIEW_LINES + 5);
+        assert_eq!(preview_lines(&long, ConflictStep::Preview.preview_max()).1, 5);
+        assert_eq!(preview_lines(&long, full.preview_max()).1, 0);
     }
 }

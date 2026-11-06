@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, CONFLICT_PREVIEW_LINES, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, amend_warning, amend_button_label};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -1523,8 +1523,8 @@ fn ConflictsPane(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
                         AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry.set(retry.get() + 1));
                     }
                     ConflictLoad::Ready(file) => {
-                        if step.get() == ConflictStep::Preview {
-                            ConflictPreview(&file);
+                        if step.get().is_preview() {
+                            ConflictPreview(&file, &step);
                         } else {
                             ConflictBlocks(&file, layout, busy.get(), &state);
                         }
@@ -1621,9 +1621,9 @@ fn ConflictBlocks(file: &ConflictFile, layout: PaneLayout, is_busy: bool, state:
 }
 
 /// The merged text as it will be written, cut to `CONFLICT_PREVIEW_LINES` lines.
-fn ConflictPreview(file: &ConflictFile) {
+fn ConflictPreview(file: &ConflictFile, step: &MutableState<ConflictStep>) {
     let p = ember_theme().palette;
-    let Some((text, more)) = file.preview(CONFLICT_PREVIEW_LINES) else {
+    let Some((text, more)) = file.preview(step.get().preview_max()) else {
         Label("아직 해결하지 않은 충돌이 있습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
         return;
     };
@@ -1633,6 +1633,11 @@ fn ConflictPreview(file: &ConflictFile) {
             Txt(&text, TypeRole::Mono, Some(paint(p.text)), None, None, None, None);
             if more > 0 {
                 Label(&format!("... {more}줄 더 있습니다"), Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+            if more > 0 || step.get() == ConflictStep::PreviewFull {
+                let toggle = step.clone();
+                let text = if step.get() == ConflictStep::PreviewFull { "접기" } else { "전체 보기" };
+                AppButton(text, None, ButtonKind::Default, true, true, false, move || toggle.set(toggle.get().toggle_full()));
             }
         });
     });
@@ -1661,10 +1666,11 @@ fn ConflictActions(
     }
     cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
         let cancel = step.clone();
-        AppButton("취소", None, ButtonKind::Default, true, !is_busy, false, move || cancel.set(ConflictStep::Editing));
-        let (step, busy, open, actions, path, content) = (step.clone(), busy.clone(), open.clone(), actions.clone(), path.to_string(), content.clone());
+        AppButton("취소", None, ButtonKind::Default, true, !is_busy, false, move || cancel.set(cancel_preview(cancel.get())));
+        let (step, busy, open, actions, path, file) = (step.clone(), busy.clone(), open.clone(), actions.clone(), path.to_string(), file.clone());
         AppButton("해결하고 스테이징", None, ButtonKind::Primary, true, content.is_some() && !is_busy, false, move || {
-            let Some(text) = content.clone() else { return };
+            // Busy is set before the request is spawned, so a second quick tap is ignored.
+            let ResolveTap::Send(text) = confirm(step.get(), busy.get(), &file) else { return };
             let Some(a) = actions.clone() else {
                 open.set(None);
                 step.set(ConflictStep::Editing);
@@ -1678,11 +1684,14 @@ fn ConflictActions(
                         notice::post("충돌을 해결했습니다".to_string());
                         open.set(None);
                         step.set(ConflictStep::Editing);
+                        busy.set(false);
                         reload.set(reload.get() + 1);
                     }
-                    Err(line) => notice::post(line.clone()),
+                    Err(line) => {
+                        notice::post(line.clone());
+                        busy.set(false);
+                    }
                 }
-                busy.set(false);
             });
         });
     });
@@ -2954,7 +2963,7 @@ mod tests {
     fn conflicts_preview_composed() {
         let f = sample_conflict().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
         let step = mutable_state_of(ConflictStep::Preview);
-        ConflictPreview(&f);
+        ConflictPreview(&f, &step);
         ConflictActions(&f, false, &step, &mutable_state_of(false), &mutable_state_of(None), &None, "a.rs");
     }
 

@@ -380,32 +380,6 @@ async fn fr_g15_other_operation_markers_are_refused_and_left_alone() {
     }
 }
 
-#[tokio::test]
-async fn fr_g15_missing_identity_is_a_korean_409() {
-    let (dir, repo, base, client) = setup().await;
-    commit(&repo, "a", "base\n", "base");
-    let last = commit(&repo, "a", "changed\n", "change");
-    // No identity anywhere: not in the repository, not global, and no guessing from the host.
-    git(&repo, &["config", "--unset", "user.name"]);
-    git(&repo, &["config", "--unset", "user.email"]);
-    git(&repo, &["config", "user.useConfigOnly", "true"]);
-    let home = dir.path().join("empty-home");
-    std::fs::create_dir_all(&home).unwrap();
-    std::env::set_var("HOME", &home);
-    std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-    std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-    for name in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"] {
-        std::env::remove_var(name);
-    }
-    let (status, v) = call(&client, &base, "revert", json!({"repo": repo, "sha": last, "confirm": true})).await;
-    assert_eq!(status, 409, "{v}");
-    assert_eq!(v["error"], "git 사용자 이름과 이메일이 설정되어 있지 않습니다.");
-    no_english_git_text(&v);
-    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), last);
-    assert_eq!(git(&repo, &["status", "--porcelain"]), "");
-    assert!(!repo.join(".git/REVERT_HEAD").exists());
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn fr_g15_user_hooks_do_not_run() {

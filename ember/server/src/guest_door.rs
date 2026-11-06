@@ -35,19 +35,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue};
-use axum::middleware;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
 
-use crate::api::origin::host_of;
-use crate::door::config::parse_public_url;
-use crate::door::err;
-use crate::door::harden::{guard_layer, not_found, response_headers, Guard};
-use crate::door::limits::{limit_layer, normalize_ip};
+use crate::door::config::{DoorEnv, Spec};
+use crate::door::harden::{not_found, stack, Guard};
 
 pub use crate::door::harden::with_timeout;
 pub use crate::door::limits::{addr_key, client_ip, TokenBucket};
@@ -169,62 +164,21 @@ impl GuestDoor {
 
     /// As [`GuestDoor::from_env`] with the variables read through `get` (tests).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>, owner_listen: SocketAddr) -> Result<Option<Self>, DoorError> {
-        let raw = get(LISTEN_VAR).unwrap_or_default();
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Ok(None);
-        }
-        let listen: SocketAddr = match raw.parse() {
-            Ok(a) => a,
-            Err(_) => return err(format!("{LISTEN_VAR}={raw:?} is not an ip:port address")),
+        let spec = Spec {
+            listen_var: LISTEN_VAR,
+            allow_remote_var: ALLOW_REMOTE_VAR,
+            trusted_var: TRUSTED_PROXIES_VAR,
+            hosts_var: ALLOWED_HOSTS_VAR,
+            public_url_var: PUBLIC_URL_VAR,
+            noun: "guest door",
         };
-        // An unspecified address (0.0.0.0, ::) on either side takes the port on every interface.
-        let same_port = listen.port() == owner_listen.port();
-        if listen == owner_listen
-            || (same_port && (listen.ip().is_unspecified() || owner_listen.ip().is_unspecified()))
-        {
-            return err(format!("{LISTEN_VAR} must differ from EMBER_LISTEN ({owner_listen})"));
-        }
-        // A non-loopback bind needs the owner's explicit word; main.rs logs a warning when it happens.
-        if !listen.ip().is_loopback() && get(ALLOW_REMOTE_VAR).map(|v| v.trim() == "1") != Some(true) {
-            return err(format!(
-                "{LISTEN_VAR}={listen} is not a loopback address: set {ALLOW_REMOTE_VAR}=1 to expose the \
-                 guest door to a network (it speaks plain HTTP: put TLS in front of it)"
-            ));
-        }
-        let mut trusted: Vec<IpAddr> = Vec::new();
-        for e in get(TRUSTED_PROXIES_VAR).unwrap_or_default().split(',') {
-            let e = e.trim();
-            if e.is_empty() {
-                continue;
-            }
-            match e.parse::<IpAddr>() {
-                Ok(ip) => trusted.push(normalize_ip(ip)),
-                Err(_) => return err(format!("{TRUSTED_PROXIES_VAR}: {e:?} is not an IP address")),
-            }
-        }
-        let public_url = match get(PUBLIC_URL_VAR).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
-            Some(u) => Some(parse_public_url(&u)?),
-            None => None,
-        };
-        let mut hosts: HashSet<String> = HashSet::new();
-        if !listen.ip().is_unspecified() {
-            hosts.insert(listen.ip().to_string().to_ascii_lowercase());
-        }
-        if listen.ip().is_loopback() {
-            hosts.insert("localhost".into());
-        }
-        for h in get(ALLOWED_HOSTS_VAR).unwrap_or_default().split(',') {
-            let h = host_of(h.trim());
-            if !h.is_empty() {
-                hosts.insert(h);
-            }
-        }
-        if let Some(u) = &public_url {
-            let authority = u.split_once("://").map(|x| x.1).unwrap_or("");
-            hosts.insert(host_of(authority));
-        }
-        Ok(Some(Self { listen, public_url, hosts: Arc::new(hosts), trusted_proxies: Arc::new(trusted) }))
+        let Some(env) = DoorEnv::parse(get, &[("EMBER_LISTEN", owner_listen)], &spec)? else { return Ok(None) };
+        Ok(Some(Self {
+            listen: env.listen,
+            public_url: env.public_url,
+            hosts: Arc::new(env.hosts),
+            trusted_proxies: Arc::new(env.trusted),
+        }))
     }
 
     /// Wraps a guest router (`channels::guest::guest_router*`) with the door's routes and guards,
@@ -248,17 +202,9 @@ impl GuestDoor {
 
     fn build(&self, guest: Router, limits: Option<Arc<DoorLimits>>) -> Router {
         let _ = join_page(); // hashes computed once, at startup
-        let guard = Guard { hosts: self.hosts.clone() };
-        let app = guest
-            .route(JOIN_ROUTE.1, get(join))
-            .fallback(not_found)
-            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(middleware::from_fn_with_state(guard, guard_layer));
-        let mut app = with_timeout(app, REQUEST_TIMEOUT);
-        if let Some(l) = limits {
-            app = app.layer(middleware::from_fn_with_state(l, limit_layer));
-        }
-        app.layer(middleware::from_fn(response_headers))
+        let guard = Guard { hosts: self.hosts.clone(), max_body: MAX_BODY_BYTES };
+        let app = guest.route(JOIN_ROUTE.1, get(join)).fallback(not_found);
+        stack(app, guard, MAX_BODY_BYTES, REQUEST_TIMEOUT, limits)
     }
 
     /// Binds the door's socket.
@@ -297,7 +243,7 @@ impl GuestDoor {
         header_read_timeout: Duration,
         max_connections: usize,
     ) -> std::io::Result<()> {
-        crate::door::serve::serve_capped(listener, app, shutdown, header_read_timeout, max_connections).await
+        crate::door::serve::serve_capped("guest door", listener, app, shutdown, header_read_timeout, max_connections).await
     }
 
     /// The `guest_door` object of an invite response.

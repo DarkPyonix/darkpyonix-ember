@@ -45,7 +45,7 @@ pub const NODE_FINGERPRINT: &str = "기기 지문 (노드 화면과 대조)";
 pub const CONFIRMED_WAIT: &str = "확인했습니다. 기기가 응답하기를 기다리고 있습니다";
 pub const JOINED_LINE: &str = "컴퓨터가 추가되었습니다";
 pub const JOINED_NEXT: &str = "이제 프로젝트의 컴퓨터 목록에서 고를 수 있습니다";
-pub const NODE_CMD_PENDING: &str = "노드의 enrol 명령은 개발 중입니다. 노드 쪽이 준비되면 이 명령으로 가입합니다";
+pub const NODE_CMD_NOTE: &str = "이 명령은 추가할 다른 컴퓨터에서 실행합니다. --server-fingerprint 핀이 없으면 노드가 지문을 보여 주고 확인을 묻습니다";
 pub const ZSH_QUOTE_NOTE: &str = "주소에 [ ]가 있으면 따옴표로 감싸 실행하세요";
 pub const DENY_LABEL: &str = "거부";
 pub const DENIED_LINE: &str = "요청을 거부했습니다. 컴퓨터는 추가되지 않았습니다";
@@ -61,7 +61,7 @@ pub const WARN_INFORMS: &str = "경고는 알려 줄 뿐 추가를 막지 않습
 /// Every sentence of the code flow, for the NFR-L4 ending check in `ui::session`.
 pub const FLOW_STRINGS: &[&str] = &[
     NAME_HELP, STDIN_NOTE, WAITING_LINE, CODE_ONCE, DOOR_OFF, DOOR_URL_UNKNOWN, NO_COMMAND, HTTP_WARNING, CONFIRM_QUESTION, CONFIRM_CHECK,
-    CONFIRMED_WAIT, JOINED_LINE, JOINED_NEXT, NODE_CMD_PENDING, ZSH_QUOTE_NOTE, DENIED_LINE, EXPIRED_LINE, GONE_LINE, DEMO_LINE, WARN_ADDR_DIFFERS, WARN_NAME_DIFFERS,
+    CONFIRMED_WAIT, JOINED_LINE, JOINED_NEXT, NODE_CMD_NOTE, ZSH_QUOTE_NOTE, DENIED_LINE, EXPIRED_LINE, GONE_LINE, DEMO_LINE, WARN_ADDR_DIFFERS, WARN_NAME_DIFFERS,
     WARN_PUBLIC_ADDR, NOTE_PROPOSED, WARN_INFORMS,
 ];
 
@@ -381,6 +381,97 @@ pub fn code_font_size(len: usize, avail: f32) -> crate::ui::cr::theme::Fs {
     Fs::Lg
 }
 
+/// Which run the sheet may still act on. A mint answer, a poll, a confirm or a deny belongs to
+/// the sheet only while its generation and id still match; closing or starting over bumps the
+/// generation, so a late answer changes nothing and a late code is never stored.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RunGuard {
+    generation: u64,
+    open: bool,
+    run_id: Option<String>,
+}
+
+impl RunGuard {
+    /// The sheet opens.
+    pub fn open(&mut self) {
+        self.open = true;
+    }
+
+    /// A mint starts: the number its answer must still match.
+    pub fn begin_mint(&mut self) -> u64 {
+        self.generation += 1;
+        self.run_id = None;
+        self.generation
+    }
+
+    /// Whether the mint of `generation` is still the one the sheet waits for.
+    pub fn mint_current(&self, generation: u64) -> bool {
+        self.open && self.generation == generation
+    }
+
+    /// Takes the mint answer when the sheet is open and no newer mint or reset happened.
+    pub fn accept_mint(&mut self, generation: u64, id: &str) -> bool {
+        if !self.mint_current(generation) {
+            return false;
+        }
+        self.run_id = Some(id.to_string());
+        true
+    }
+
+    pub fn is_current(&self, id: &str) -> bool {
+        self.open && self.run_id.as_deref() == Some(id)
+    }
+
+    /// The run ended or the form restarted.
+    pub fn clear(&mut self) {
+        self.generation += 1;
+        self.run_id = None;
+    }
+
+    /// The sheet closes.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.clear();
+    }
+}
+
+/// Whether the view is an end state: the code and command are dropped there.
+pub fn is_end_state(v: &EnrolView) -> bool {
+    matches!(v, EnrolView::Joined | EnrolView::Denied | EnrolView::Expired | EnrolView::Failed(_))
+}
+
+/// The end state a failed confirm or deny leads to, `None` when the request stays open (a taken
+/// name, a connection problem).
+pub fn view_after_confirm_error(e: &EnrolCallError) -> Option<EnrolView> {
+    match e {
+        EnrolCallError::Expired => Some(EnrolView::Expired),
+        EnrolCallError::NotFound => Some(EnrolView::Failed(GONE_LINE.to_string())),
+        EnrolCallError::WrongState => Some(EnrolView::Failed(confirm_error_text(e).to_string())),
+        _ => None,
+    }
+}
+
+/// The view after the clock passed the code's time: a waiting code ends as expired at once.
+pub fn view_after_tick(v: &EnrolView, now_ms: i64) -> Option<EnrolView> {
+    match v {
+        EnrolView::WaitingForNode { expires_ms, .. } if remaining_secs(*expires_ms, now_ms) == 0 => Some(EnrolView::Expired),
+        _ => None,
+    }
+}
+
+/// Whether leaving the sheet cancels the enrolment on the server: only a code nobody redeemed or
+/// a request not yet confirmed. A confirmed one is left to finish, and a sample calls nothing.
+pub fn should_cancel_on_leave(view: Option<&EnrolView>, confirmed: bool, sample: bool) -> bool {
+    if sample {
+        return false;
+    }
+    match view {
+        Some(EnrolView::WaitingForNode { .. }) => true,
+        Some(EnrolView::AwaitingConfirm { .. }) => !confirmed,
+        _ => false,
+    }
+}
+
 /// Whether a node info carries anything worth showing.
 pub fn info_is_empty(i: &EnrolNodeInfo) -> bool {
     i.hostname.trim().is_empty()
@@ -557,7 +648,7 @@ mod tests {
         assert_eq!(review_stage(Some("enrol-name"), false), None);
         assert_eq!(demo_view(Stage::Name, 0), EnrolView::Naming);
         assert_eq!(DENY_LABEL, "거부");
-        assert!(ZSH_QUOTE_NOTE.contains("따옴표") && NODE_CMD_PENDING.contains("개발 중"));
+        assert!(ZSH_QUOTE_NOTE.contains("따옴표") && NODE_CMD_NOTE.contains("확인을 묻습니다"));
         assert!(JOINED_NEXT.contains("컴퓨터 목록"));
     }
 
@@ -571,5 +662,79 @@ mod tests {
                 "{t}"
             );
         }
+    }
+
+    #[test]
+    fn fr_c2_enrol_run_guard_drops_stale_answers() {
+        let mut g = RunGuard::default();
+        g.open();
+        let n = g.begin_mint();
+        assert!(g.accept_mint(n, "a"));
+        assert!(g.is_current("a") && !g.is_current("b"));
+        g.clear();
+        assert!(!g.is_current("a"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_run_guard_refuses_late_mints() {
+        let mut g = RunGuard::default();
+        g.open();
+        let first = g.begin_mint();
+        g.close();
+        assert!(!g.accept_mint(first, "a") && !g.is_current("a"));
+        g.open();
+        let old = g.begin_mint();
+        let newer = g.begin_mint();
+        assert!(!g.accept_mint(old, "x"));
+        assert!(g.accept_mint(newer, "y") && g.is_current("y"));
+        let again = g.begin_mint();
+        g.clear();
+        assert!(!g.accept_mint(again, "z"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_run_guard_end_states_clear_the_run() {
+        for v in [EnrolView::Joined, EnrolView::Denied, EnrolView::Expired, EnrolView::Failed("x".into())] {
+            assert!(is_end_state(&v));
+        }
+        assert!(!is_end_state(&EnrolView::Naming) && !should_poll(&EnrolView::Expired));
+        let mut g = RunGuard::default();
+        g.open();
+        let n = g.begin_mint();
+        g.accept_mint(n, "a");
+        g.clear();
+        assert!(!g.is_current("a"));
+        assert_eq!(view_after_confirm_error(&EnrolCallError::Expired), Some(EnrolView::Expired));
+        assert!(matches!(view_after_confirm_error(&EnrolCallError::NotFound), Some(EnrolView::Failed(_))));
+        assert!(matches!(view_after_confirm_error(&EnrolCallError::WrongState), Some(EnrolView::Failed(_))));
+        assert_eq!(view_after_confirm_error(&EnrolCallError::NameTaken), None);
+        let w = EnrolView::WaitingForNode { code: "c".into(), expires_ms: 5_000 };
+        assert_eq!(view_after_tick(&w, 3_999), None);
+        assert_eq!(view_after_tick(&w, 5_000), Some(EnrolView::Expired));
+        assert_eq!(view_after_tick(&EnrolView::Joined, 9_000), None);
+    }
+
+    #[test]
+    fn fr_c2_enrol_run_guard_close_bumps_the_generation() {
+        let mut g = RunGuard::default();
+        g.open();
+        let n = g.begin_mint();
+        g.accept_mint(n, "a");
+        g.close();
+        assert!(!g.mint_current(n) && !g.is_current("a"));
+        g.open();
+        assert!(!g.mint_current(n));
+    }
+
+    #[test]
+    fn fr_c2_enrol_run_guard_leave_after_confirm_does_not_cancel() {
+        let w = EnrolView::WaitingForNode { code: "c".into(), expires_ms: 1 };
+        let a = view_from_status(&awaiting(), "c", 1);
+        assert!(should_cancel_on_leave(Some(&w), false, false));
+        assert!(should_cancel_on_leave(Some(&a), false, false));
+        assert!(!should_cancel_on_leave(Some(&a), true, false));
+        assert!(!should_cancel_on_leave(Some(&w), false, true));
+        assert!(!should_cancel_on_leave(Some(&EnrolView::Joined), false, false));
+        assert!(!should_cancel_on_leave(None, false, false));
     }
 }

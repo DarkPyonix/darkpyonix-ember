@@ -91,7 +91,7 @@ pub const UI_STRINGS: &[&str] = &[
     crate::ui::enrol_flow::CONFIRMED_WAIT,
     crate::ui::enrol_flow::JOINED_LINE,
     crate::ui::enrol_flow::JOINED_NEXT,
-    crate::ui::enrol_flow::NODE_CMD_PENDING,
+    crate::ui::enrol_flow::NODE_CMD_NOTE,
     crate::ui::enrol_flow::ZSH_QUOTE_NOTE,
     crate::ui::enrol_flow::DENIED_LINE,
     crate::ui::enrol_flow::EXPIRED_LINE,

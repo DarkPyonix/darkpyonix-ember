@@ -19,7 +19,7 @@ use super::theme::*;
 use crate::model::now_ms;
 use crate::services::{run_shared, services};
 use crate::ui::add_computer::*;
-use crate::ui::enrol_flow::{self as flow, CommandView, ConfirmRows, EnrolView, Stage};
+use crate::ui::enrol_flow::{self as flow, CommandView, ConfirmRows, EnrolView, RunGuard, Stage};
 
 /// What the sheet keeps about the code it minted. No `Debug`: it holds the code.
 #[derive(Clone)]
@@ -45,6 +45,8 @@ pub struct AddUi {
     /// `None` shows the device list; otherwise the step of the code flow.
     view: MutableState<Option<EnrolView>>,
     run: MutableState<Option<Run>>,
+    /// Which run and mint answers the sheet may still take.
+    guard: MutableState<RunGuard>,
     name: MutableState<String>,
     /// The name field of the confirm card (empty keeps the name chosen at mint).
     confirm_name: MutableState<String>,
@@ -66,6 +68,7 @@ impl AddUi {
             devices: mutable_state_of(DevicesState::Loading),
             view: mutable_state_of(None),
             run: mutable_state_of(None),
+            guard: mutable_state_of(RunGuard::default()),
             name: mutable_state_of(String::new()),
             confirm_name: mutable_state_of(String::new()),
             busy: mutable_state_of(false),
@@ -118,6 +121,7 @@ impl AddUi {
     /// The 컴퓨터 추가 chip: open the sheet and read the devices.
     pub fn show(&self) {
         self.open.set(true);
+        self.with_guard(|g| g.open());
         if self.review {
             return;
         }
@@ -131,6 +135,7 @@ impl AddUi {
     fn reset_flow(&self) {
         self.view.set(None);
         self.run.set(None);
+        self.with_guard(|g| g.clear());
         self.name.set(String::new());
         self.confirm_name.set(String::new());
         self.busy.set(false);
@@ -138,21 +143,42 @@ impl AddUi {
         self.confirmed.set(false);
     }
 
+    fn with_guard<R>(&self, f: impl FnOnce(&mut RunGuard) -> R) -> R {
+        let mut g = self.guard.get_untracked();
+        let r = f(&mut g);
+        self.guard.set(g);
+        r
+    }
+
     /// True while `id` is the run on screen. An answer for an older run (the sheet was closed and
     /// a new code minted while the call was in flight) must change nothing.
     fn is_current(&self, id: &str) -> bool {
-        self.run.get_untracked().is_some_and(|r| r.id == id)
+        self.with_guard(|g| g.is_current(id))
     }
 
-    /// Closing drops the code. A code nobody redeemed is cancelled on the server.
+    /// The enrolment ended: the code and the command are dropped and answers for it are refused.
+    fn end_run(&self, view: EnrolView) {
+        self.run.set(None);
+        self.with_guard(|g| g.clear());
+        self.view.set(Some(view));
+    }
+
+    /// The clock passed a waiting code's time: it ends as expired now, not only in the renderer.
+    fn expire_if_due(&self, now: i64) {
+        if let Some(next) = self.view.get_untracked().and_then(|v| flow::view_after_tick(&v, now)) {
+            self.end_run(next);
+        }
+    }
+
+    /// Closing drops the code. A code nobody redeemed is cancelled on the server; one the owner
+    /// already confirmed is left to finish.
     fn leave(&self) {
-        // A code nobody redeemed, or one still awaiting the owner's decision, is cancelled so it
-        // does not sit on the server until it expires.
-        let open_request = matches!(self.view.get_untracked(), Some(EnrolView::WaitingForNode { .. } | EnrolView::AwaitingConfirm { .. }));
-        if let (true, Some(run), false) = (open_request, self.run.get_untracked(), self.sample()) {
+        let cancel = flow::should_cancel_on_leave(self.view.get_untracked().as_ref(), self.confirmed.get_untracked(), self.sample());
+        if let (true, Some(run)) = (cancel, self.run.get_untracked()) {
             run_shared(async move { services().client.api().enrol_cancel(&run.id).await }, |_| {});
         }
         self.reset_flow();
+        self.with_guard(|g| g.close());
         self.open.set(false);
     }
 }
@@ -175,10 +201,17 @@ fn mint(ui: AddUi, name: String) {
     }
     ui.busy.set(true);
     ui.failure.set(None);
+    let generation = ui.with_guard(|g| g.begin_mint());
     run_shared(async move { services().client.api().enrol_mint(&name).await }, move |r| {
-        ui.busy.set(false);
         match r {
+            Ok(m) if !ui.with_guard(|g| g.accept_mint(generation, &m.id)) => {
+                // The sheet closed or started over meanwhile: cancel the code now and drop it.
+                let id = m.id.clone();
+                run_shared(async move { services().client.api().enrol_cancel(&id).await }, |_| {});
+            }
+            _ if !ui.with_guard(|g| g.mint_current(generation)) => {}
             Ok(m) => {
+                ui.busy.set(false);
                 ui.run.set(Some(Run {
                     id: m.id.clone(),
                     code: m.code.clone(),
@@ -188,7 +221,10 @@ fn mint(ui: AddUi, name: String) {
                 }));
                 ui.view.set(Some(EnrolView::WaitingForNode { code: m.code.clone(), expires_ms: m.expires_ms }));
             }
-            Err(e) => ui.failure.set(Some(flow::mint_error_text(&e).to_string())),
+            Err(e) => {
+                ui.busy.set(false);
+                ui.failure.set(Some(flow::mint_error_text(&e).to_string()));
+            }
         }
     });
 }
@@ -223,10 +259,9 @@ fn apply_poll(ui: &AddUi, run: &Run, r: Result<ember_client::api::EnrolStatus, e
         notice::post("컴퓨터를 추가했습니다".to_string());
     }
     // The code and the command are secrets: drop them as soon as the enrolment ends.
-    if matches!(next, EnrolView::Joined | EnrolView::Denied | EnrolView::Expired | EnrolView::Failed(_)) {
-        ui.run.set(None);
-    }
-    if next != cur {
+    if flow::is_end_state(&next) {
+        ui.end_run(next);
+    } else if next != cur {
         ui.view.set(Some(next));
     }
 }
@@ -259,7 +294,10 @@ fn confirm(ui: AddUi, run: Run, rows: ConfirmRows) {
         ui.busy.set(false);
         match r {
             Ok(_) => ui.confirmed.set(true),
-            Err(e) => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
+            Err(e) => match flow::view_after_confirm_error(&e) {
+                Some(end) => ui.end_run(end),
+                None => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
+            },
         }
     });
 }
@@ -278,11 +316,11 @@ fn deny(ui: AddUi, run: Run) {
         }
         ui.busy.set(false);
         match r {
-            Ok(()) => {
-                ui.run.set(None);
-                ui.view.set(Some(EnrolView::Denied));
-            }
-            Err(e) => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
+            Ok(()) => ui.end_run(EnrolView::Denied),
+            Err(e) => match flow::view_after_confirm_error(&e) {
+                Some(end) => ui.end_run(end),
+                None => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
+            },
         }
     });
 }
@@ -316,10 +354,12 @@ pub fn AddComputerSheet(ui: &AddUi) {
     }
     {
         let tick = ui.tick.clone();
+        let u = ui.clone();
         let counting = polling || (sample && ui.view.get().as_ref().is_some_and(flow::should_poll));
         launched_effect(counting, move || async move {
             while counting {
                 tick.set(now_ms());
+                u.expire_if_due(now_ms());
                 delay(Duration::from_secs(1)).await;
             }
         });
@@ -441,7 +481,7 @@ fn WaitingBody(ui: &AddUi, code: &str, expires_ms: i64, sample: bool) {
         match &run.command {
             CommandView::Command { text, plain_http } => {
                 super::components::MonoLabel(text, Fs::Xs, Weight::Regular, Some(paint(p.text)));
-                Label(flow::NODE_CMD_PENDING, Fs::Xs, Weight::Regular, muted, Some(3));
+                Label(flow::NODE_CMD_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
                 Label(flow::ZSH_QUOTE_NOTE, Fs::Xs, Weight::Regular, muted, Some(2));
                 Label(flow::STDIN_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
                 if *plain_http {

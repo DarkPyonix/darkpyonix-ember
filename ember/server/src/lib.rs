@@ -12,6 +12,7 @@ pub mod channels;
 pub mod chatgpt;
 pub mod computers;
 pub mod devices;
+pub mod door;
 pub mod egress_proxy;
 pub mod events;
 pub mod fork;

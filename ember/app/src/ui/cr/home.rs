@@ -1358,7 +1358,7 @@ fn UnavailableH(icon: &'static str, title: &str, height: Option<f32>) {
 /// The hatched bars (Ember #190) are a `Canvas` at the card's width.
 fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     let p = ember_theme().palette;
-    let days = remember(|| mutable_state_of(7usize));
+    let days = remember(|| mutable_state_of(usage::DEFAULT_WINDOW));
     let _requested = remember(|| {
         crate::bridge::request_usage_summary();
         0u8
@@ -1387,10 +1387,19 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         CardHead(shell::ICON_GAUGE_SVG, "비용과 토큰 추이", || {
             for n in [7usize, 14] {
                 let d = days.clone();
-                AppButton(&format!("{n}일"), None, if days.get() == n { ButtonKind::Primary } else { ButtonKind::Default }, true, true, false, move || d.set(n));
+                // The mockup's toggle pill is 42 x 26.
+                let fill = if days.get() == n { p.sel } else { p.surface_2 };
+                cu::Button(&format!("{n}일"))
+                    .variant(ButtonVariant::Text)
+                    .max_lines(1)
+                    .color(paint(p.text_2))
+                    .modifier(Modifier::new().size(42.0, 26.0).background(paint(fill)).shape_role(ShapeRole::Full))
+                    .on_click(move || d.set(n));
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             }
         });
+        // Legend above the chart: says what the bars are.
+        Label(&usage::cost_legend(&load, days.get()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             Label(&first, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -1398,7 +1407,18 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
             Label(&last, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
         Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, None, None);
-        Label(usage::COST_UNKNOWN, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
+        // Four stats from the real data; a missing one reads "데이터 없음". Cache hits stay without
+        // data: the usage event has no cache tokens (FR-U7).
+        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (label, value) in usage::cost_stats(&load, days.get()) {
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label(&value, Fs::Sm, Weight::Semibold, None, Some(1));
+                });
+            }
+        });
+        // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
+        // toolkit has neither, so no day is selectable.
     });
 }
 

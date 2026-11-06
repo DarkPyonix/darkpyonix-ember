@@ -461,6 +461,29 @@ mod tests {
         assert_eq!(out[0]["result"]["content"][0]["text"], "Posted message m-1 in channel c1-x.y_z.");
     }
 
+    /// MEASURED 2026-11-06 (Claude Code 2.1.319, real turn): `tools/call` carries an extra
+    /// `params._meta` with `claudecode/toolUseId` and a `progressToken`. Unknown keys of `params`
+    /// are ignored, the call is served.
+    #[test]
+    fn fr_t12_mcp_tools_call_ignores_unknown_params_keys() {
+        let p = Fake::ok();
+        let frame = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "channel_post",
+                "arguments": { "channel": "dummy", "text": "hello" },
+                "_meta": { "claudecode/toolUseId": "toolu_01Vi7s3ZYhazPL3YJgSwPMjb", "progressToken": 2 },
+                "somethingNew": true
+            },
+            "jsonrpc": "2.0",
+            "id": 2
+        });
+        let out = run(&[frame], &p);
+        assert_eq!(*p.calls.borrow(), vec![("dummy".to_string(), "hello".to_string())]);
+        assert!(!tool_error(&out[0]), "{}", out[0]);
+        assert_eq!(out[0]["id"], 2);
+    }
+
     #[test]
     fn fr_t12_mcp_text_is_posted_as_given_and_the_limit_is_inclusive() {
         let p = Fake::ok();

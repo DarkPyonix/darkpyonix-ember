@@ -316,5 +316,42 @@ mod tree {
         let deep = rows.iter().find(|r| r.name == "deep").unwrap();
         assert!(deep.open);
         assert_eq!(rows.len(), 5);
+
+// FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
+// 0 high row, and the stripes decide which.
+mod grid {
+    use super::*;
+    use ember_app::ui::editor::editor_grid_style;
+
+    #[test]
+    fn fr_l31_open_left_and_bottom_keep_the_mockup_tracks() {
+        let g = editor_grid_style(true, true);
+        assert!(g.contains("grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw)"), "{g}");
+        assert!(g.contains("grid-template-rows:52px minmax(0,1fr) 260px var(--sbh)"), "{g}");
+    }
+
+    #[test]
+    fn fr_l31_closed_left_column_is_zero_wide() {
+        let g = editor_grid_style(false, true);
+        assert!(g.contains("grid-template-columns:var(--stw) 0 minmax(0,1fr) var(--stw)"), "{g}");
+    }
+
+    #[test]
+    fn fr_l31_closed_bottom_row_is_zero_high() {
+        let g = editor_grid_style(true, false);
+        assert!(g.contains("grid-template-rows:52px minmax(0,1fr) 0 var(--sbh)"), "{g}");
+    }
+
+    #[test]
+    fn fr_l31_stripe_toggles_decide_the_closed_tracks() {
+        let mut s = Stripes::default();
+        let grid = |s: &Stripes| editor_grid_style(s.selected(Side::Left).is_some(), s.selected(Side::Bottom).is_some());
+        assert_eq!(grid(&s), editor_grid_style(true, true));
+        s.toggle(ToolWindow::Project);
+        assert_eq!(grid(&s), editor_grid_style(false, true));
+        s.toggle(ToolWindow::Terminal);
+        assert_eq!(grid(&s), editor_grid_style(false, false));
+        s.toggle(ToolWindow::Git);
+        assert_eq!(grid(&s), editor_grid_style(true, false));
     }
 }

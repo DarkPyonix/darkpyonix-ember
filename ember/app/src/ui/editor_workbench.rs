@@ -215,11 +215,7 @@ pub mod page {
         );
         // The grid the mockup's `.ed.no-left` and `.ed.no-bottom` rules give, written inline so a
         // closed column is 0 wide and the areas stay as the stylesheet has them.
-        let ed_style = format!(
-            "width:100vw; height:calc(100vh - 76px); grid-template-columns:{}; grid-template-rows:{};",
-            if has_left { "var(--stw) 280px minmax(0,1fr) var(--stw)" } else { "var(--stw) 0 minmax(0,1fr) var(--stw)" },
-            if has_bottom { "52px minmax(0,1fr) 260px var(--sbh)" } else { "52px minmax(0,1fr) 0 var(--sbh)" },
-        );
+        let ed_style = format!("width:100vw; height:calc(100vh - 76px); {}", crate::ui::editor::editor_grid_style(has_left, has_bottom));
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
             div { class: "{ed_class}", tabindex: "0", style: "{ed_style}",

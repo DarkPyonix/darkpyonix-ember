@@ -502,7 +502,7 @@ async fn fr_t11_a_question_of_a_session_outside_the_channel_is_404_and_untouched
         let (st, resp) = call(&f.app, "POST", &qurl(&cid, "rb"), Some(body)).await;
         assert_eq!(st, StatusCode::NOT_FOUND, "{resp}");
         assert_eq!(resp["code"], "not_found");
-        assert_eq!(resp["error"], format!("pending question rb in channel {cid}"));
+        assert_eq!(resp["error"], format!("pending question rb in channel {cid} not found"));
     }
     assert!(log.lock().unwrap().is_empty(), "the agent was not told anything");
     assert_eq!(answered_count(&f, &b), 0);

@@ -12,7 +12,8 @@
 //! The poll limiter is per router (it lives in the routes' state). A test that polls one
 //! enrolment several times builds a fresh door router over the SAME `Arc<Enrol>` for each poll
 //! (`Fx::app`), so the 2 s limit does not get in its way and nothing sleeps; the tests of the limit
-//! itself use one router, or `PollLimiter` with an injected clock.
+//! itself use one router, or `PollLimiter` with an injected clock. The handler verifies the poll
+//! secret before it asks the limiter, so only a poll with a valid secret can take a slot.
 //!
 //! Not written, and why:
 //! - A 408 on the redeem route: the request timeout is the fixed `ENROL_REQUEST_TIMEOUT` (10 s)
@@ -784,12 +785,17 @@ async fn fr_c2_the_second_immediate_poll_on_the_door_is_429_with_retry_after() {
     assert_eq!(json_of(&second.2), json!({ "error": "too many requests", "code": "rate_limited" }));
     let wait: u64 = second.1["retry-after"].to_str().unwrap().parse().unwrap();
     assert!((1..=2).contains(&wait), "{wait}");
-    // The limit is per enrolment: another id on the same router is answered (404 for an unknown one).
-    let other = poll(&app, "5b0f2c2e-9a53-4a53-8f0e-2f9d2c1d0a11", Some(&o.secret)).await;
-    assert_eq!(other.0, StatusCode::NOT_FOUND);
-    // An unknown id is limited like a real one, so the limiter does not tell them apart.
-    let again = poll(&app, "5b0f2c2e-9a53-4a53-8f0e-2f9d2c1d0a11", Some(&o.secret)).await;
-    assert_eq!(again.0, StatusCode::TOO_MANY_REQUESTS);
+    // The limit is per enrolment: another enrolment on the same router is answered.
+    let o2 = open(&f, "second", PEER).await;
+    assert_eq!(poll(&app, &o2.id, Some(&o2.secret)).await.0, StatusCode::OK);
+    // An unknown id is never limited (it takes no slot): the same 404 every time, never a 429.
+    for _ in 0..3 {
+        let unknown = poll(&app, "5b0f2c2e-9a53-4a53-8f0e-2f9d2c1d0a11", Some(&o.secret)).await;
+        assert_eq!(unknown.0, StatusCode::NOT_FOUND);
+    }
+    // A wrong secret on the limited enrolment is the 404, not the 429: it is refused before the limiter.
+    let wrong = format!("dps_{}", "0".repeat(96));
+    assert_eq!(poll(&app, &o.id, Some(&wrong)).await.0, StatusCode::NOT_FOUND);
     // The refused poll did not touch the enrolment: the secret still works on a fresh router.
     assert_eq!(poll(&f.open_app(), &o.id, Some(&o.secret)).await.0, StatusCode::OK);
 }
@@ -822,6 +828,63 @@ fn fr_c2_the_poll_limiter_is_bounded_and_fails_closed() {
     assert_eq!(l.check_at("extra2", t0 + Duration::from_millis(61_100)), Ok(()));
     assert!(l.len() < ENROL_POLL_MAX_ENTRIES, "{}", l.len());
     assert!(l.len() <= 3, "only the recent entries are left: {}", l.len());
+}
+
+#[tokio::test]
+async fn fr_c2_wrong_secret_polls_never_take_a_poll_limiter_slot() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    // One router for everything, so one limiter. 1500 invented ids (more than the 1024 slots),
+    // alternately with a wrong secret and with none: every one is the same 404 and none is a 429.
+    let app = f.open_app();
+    let wrong = format!("dps_{}", "0".repeat(96));
+    for i in 0..1500 {
+        let id = format!("invented-{i}");
+        let secret = if i % 2 == 0 { Some(wrong.as_str()) } else { None };
+        let r = poll(&app, &id, secret).await;
+        assert_eq!(r.0, StatusCode::NOT_FOUND, "{i}");
+        assert_eq!(json_of(&r.2), not_found_body(), "{i}");
+    }
+    // A wrong secret on the real id takes no slot either.
+    assert_eq!(poll(&app, &o.id, Some(&wrong)).await.0, StatusCode::NOT_FOUND);
+    // The legitimate node's first poll is admitted (the table is not full of invented ids; with
+    // the old order it would be a 429), and only now does the real id take its slot.
+    let first = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", text(&first.2));
+    assert_eq!(json_of(&first.2), json!({ "status": "waiting" }));
+    assert_eq!(poll(&app, &o.id, Some(&o.secret)).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // The limiter's len() is not reachable from the door (it lives in the private routes state),
+    // so the property is asserted by behaviour: see above.
+}
+
+#[tokio::test]
+async fn fr_c2_a_rate_limited_poll_does_not_consume_the_credential() {
+    let f = fx();
+    let o = open(&f, "laptop", PEER).await;
+    let app = f.open_app();
+    // An admitted poll before the confirm takes the slot.
+    assert_eq!(poll(&app, &o.id, Some(&o.secret)).await.0, StatusCode::OK);
+    let (st, c) = owner(&f, "POST", &api(&o.id, "/confirm"), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    // Inside the interval, on the same router: 429, with Retry-After and no credential.
+    let limited = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited.1.contains_key("retry-after"));
+    assert!(!text(&limited.2).contains("node_token"), "{}", text(&limited.2));
+    let again = poll(&app, &o.id, Some(&o.secret)).await;
+    assert_eq!(again.0, StatusCode::TOO_MANY_REQUESTS);
+    // The credential was not taken: the owner still sees awaiting_confirmation, not joined.
+    let (_, s) = owner(&f, "GET", &api(&o.id, ""), None).await;
+    assert_eq!(s["status"], "awaiting_confirmation", "{s}");
+    // The clock cannot be injected into the handler, so "after 2 s" is a second router (a fresh
+    // limiter): the next admitted poll delivers the credential, once.
+    let token = f.fake.token(0);
+    let (st, _, body) = poll(&f.open_app(), &o.id, Some(&o.secret)).await;
+    assert_eq!(st, StatusCode::OK);
+    let b = json_of(&body);
+    assert_eq!(b["status"], "joined", "{b}");
+    assert_eq!(b["credential"]["node_token"], token.as_str());
+    assert_eq!(f.fake.count(), 1);
 }
 
 // ---- the route table and the classes of the limiter ----

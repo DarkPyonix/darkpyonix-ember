@@ -276,11 +276,14 @@ struct Routes {
 }
 
 /// One poll per [`ENROL_POLL_INTERVAL`] per enrol id, in a table of at most
-/// [`ENROL_POLL_MAX_ENTRIES`] ids. The core has no poll limit, so the door keeps it. The key is
-/// the id as given in the path, before any secret check, so an unknown id is limited like a real
-/// one and the limiter says nothing about which ids exist. When the table is full after pruning,
-/// a new id is refused (fail closed): the trade is that a flood of distinct ids can make polls
-/// for new ids wait, never that the table grows.
+/// [`ENROL_POLL_MAX_ENTRIES`] ids. The core has no poll limit, so the door keeps it. The handler
+/// asks the limiter only after `Enrol::verify_poll` accepted the secret, so the key space is only
+/// the enrolments whose poll secret the caller holds: an attacker without a valid secret cannot
+/// occupy a slot, and the limiter never learns an invented id. The residual risk is that probes
+/// with a wrong secret are no longer limited per id; they are bounded by the per-address loose
+/// limit and the global bucket of the door. When the table is full after pruning, a new id is
+/// refused (fail closed): the trade is that a flood of enrolments the caller holds secrets for
+/// can make polls for new ids wait, never that the table grows.
 pub struct PollLimiter {
     last: Mutex<HashMap<String, Instant>>,
 }
@@ -330,6 +333,14 @@ impl PollLimiter {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// An id taken from a request, made safe for a log line (FR-C2g): at most 64 characters, and
+/// every character that is not an ASCII letter, digit, `-` or `_` becomes `_`, so no control
+/// character, newline or escape sequence an attacker put in the path can reach a log. Used at
+/// every place the door logs an id, including the ids the core generated, for one uniform rule.
+fn log_id(id: &str) -> String {
+    id.chars().take(64).map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
 /// FR-C2g: a refused redeem is logged at warn at most once per address per minute. Bounded;
@@ -422,7 +433,7 @@ async fn redeem(State(st): State<Arc<Routes>>, req: Request) -> Response {
     let source = ip.to_string();
     match st.enrol.redeem(&b.code, &b.node_public_info, crate::store::now_ms(), &source) {
         Ok(r) => {
-            tracing::info!(enrol = %r.enrol_id, addr = %ip, "enrol code redeemed");
+            tracing::info!(enrol = %log_id(&r.enrol_id), addr = %ip, "enrol code redeemed");
             let mut res = (
                 StatusCode::OK,
                 axum::Json(json!({
@@ -470,15 +481,26 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
     if id.chars().count() > ENROL_MAX_ID_CHARS {
         return poll_not_found();
     }
+    // Verify first, limit second, deliver third. A missing or bad header runs the same work with
+    // an empty secret, which matches no stored hash. `verify_poll` has no side effect, so a
+    // refused or rate-limited poll never consumes the credential.
+    let secret = bearer(&headers).unwrap_or("");
+    match st.enrol.verify_poll(&id, secret, crate::store::now_ms()) {
+        Ok(true) => {}
+        Ok(false) => return poll_not_found(),
+        Err(_) => {
+            tracing::warn!(enrol = %log_id(&id), "enrol poll failed");
+            return poll_not_found();
+        }
+    }
+    // Only a poll whose secret verified reaches the limiter and can take a slot.
     if let Err(wait) = st.polls.check_at(&id, Instant::now()) {
         return too_many(wait);
     }
-    // A missing or bad header runs the same work with an empty secret, which matches no stored hash.
-    let secret = bearer(&headers).unwrap_or("");
     let delivery = match st.enrol.take_delivery(&id, secret, crate::store::now_ms()) {
         Ok(d) => d,
         Err(_) => {
-            tracing::warn!(enrol = ?id, "enrol poll failed");
+            tracing::warn!(enrol = %log_id(&id), "enrol poll failed");
             return poll_not_found();
         }
     };
@@ -490,7 +512,7 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
         Delivery::Expired => status("expired"),
         Delivery::Unknown => poll_not_found(),
         Delivery::Joined { token, name, computer_id } => {
-            tracing::info!(enrol = ?id, "enrol credential delivered");
+            tracing::info!(enrol = %log_id(&id), "enrol credential delivered");
             let mut res = (
                 StatusCode::OK,
                 axum::Json(json!({
@@ -508,6 +530,31 @@ async fn poll(State(st): State<Arc<Routes>>, id: Result<Path<String>, PathReject
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_id_keeps_only_a_short_safe_charset() {
+        let safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        assert_eq!(log_id("5b0f2c2e-9a53_X"), "5b0f2c2e-9a53_X");
+        for (what, raw) in [
+            ("newline", "a\nINFO forged line".to_string()),
+            ("esc", "a\x1b[31mred\x1b[0m".to_string()),
+            ("nul", "a\0b".to_string()),
+            ("long", "x".repeat(200)),
+            ("unicode", "\u{ac00}\u{1f600}e\u{301}".to_string()),
+            ("quote", "a\"b'c\\d".to_string()),
+        ] {
+            let out = log_id(&raw);
+            assert!(safe(&out), "{what}: {out:?}");
+            assert!(out.chars().count() <= 64, "{what}: {}", out.chars().count());
+        }
+        assert_eq!(log_id("a\nb"), "a_b");
+        assert_eq!(log_id("a\x1bb"), "a_b");
+        assert_eq!(log_id("a\0b"), "a_b");
+        assert_eq!(log_id("a\"b"), "a_b");
+        assert_eq!(log_id(&"x".repeat(200)), "x".repeat(64));
+        assert_eq!(log_id("\u{ac00}\u{1f600}"), "__", "one underscore per character");
+        assert_eq!(log_id(""), "");
+    }
 
     #[test]
     fn warn_once_is_once_per_address_per_minute_and_bounded() {

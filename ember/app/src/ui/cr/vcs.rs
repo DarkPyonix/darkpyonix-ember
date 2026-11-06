@@ -314,7 +314,7 @@ pub fn vcs_pill_width(text: &str) -> f32 {
     (super::home::text_px(text, VCS_CONTROL_FS.size()) + 28.0).max(64.0)
 }
 
-// TODO(compose-rust#372): toolkit `Button` and `PickChip` take no font size (v0.0.6 `ButtonScope`
+// TODO(compose-rust#500): toolkit `Button` and `PickChip` take no font size (v0.0.6 `ButtonScope`
 // has no `font_size`/`text_style`), so a chip is painted with a `Label` at the small step and an
 // invisible `FocusOverlay` button on top, as the stash pill does.
 /// A filter chip (`.chip`): 32 px pill, 13 px weight 500 text, `sel` fill when selected.

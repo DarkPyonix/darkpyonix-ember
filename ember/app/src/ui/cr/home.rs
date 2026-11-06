@@ -392,9 +392,12 @@ fn DotOrHatch(hatched: bool, hatch: compose_rust::Color, solid: compose_rust::Co
         Dot(solid);
         return;
     }
+    // The bars' pattern: same colour for fill and lines, same step (`legend_hatch_style`).
+    // TODO(compose-rust#428, #429): the dots have no accessible label; the Label beside them is the text.
+    let (step, _alpha) = usage::legend_hatch_style();
     let mut list = DrawList::builder().round_rect(paint(hatch), 0.0, 0.0, 8.0, 8.0, 2.0, 1.0);
-    for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, 8.0, 8.0, 3.0) {
-        list = list.line(paint(compose_rust::Color::argb(0x80ff_ffff)), x1, y1, x2, y2, 1.0);
+    for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(0.0, 0.0, 8.0, 8.0, step) {
+        list = list.line(paint(hatch), x1, y1, x2, y2, 1.0);
     }
     cu::Canvas(list.build()).modifier(Modifier::new().size(8.0, 8.0));
 }
@@ -1460,7 +1463,7 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         if h > 0.0 {
             let color = paint(if i == now { p.orange.strong } else { p.grey.strong });
             list = list.round_rect(color, x, y, w, h, 3.0, 1.0);
-            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, 5.0) {
+            for (x1, y1, x2, y2) in crate::ui::home::hatch_lines(x, y, w, h, usage::legend_hatch_style().0) {
                 list = list.line(color, x1, y1, x2, y2, 1.0);
             }
         }

@@ -281,6 +281,13 @@ pub struct CostLegendEntry {
     pub hatched: bool,
 }
 
+/// The hatch of a cost-card bar and of the 토큰 legend dot, one definition so they cannot drift:
+/// `(line step in dp, line alpha 0..=255)`. The lines are drawn in the bar's own colour
+/// (grey.strong; the 'today' bar is orange.strong and has no legend entry in the mockup).
+pub fn legend_hatch_style() -> (f32, u8) {
+    (5.0, 0xff)
+}
+
 /// The legend in the card head (mockup: a 비용 dot and a 토큰 hatch dot). 비용 only when cost data
 /// exists (never invented), 토큰 when tokens exist, nothing at all on a narrow card.
 pub fn cost_legend(has_cost: bool, has_tokens: bool, narrow: bool) -> Vec<CostLegendEntry> {
@@ -743,5 +750,11 @@ mod tests {
         assert_eq!(weekday_name("2026-11-06"), "금");
         assert_eq!(weekday_name("1970-01-01"), "목");
         assert_eq!(weekday_name("nope"), "");
+    }
+
+    #[test]
+    fn fr_u7_legend_dot_matches_the_bar_hatch() {
+        // The dot and the bars read the same step and alpha (FR-L23, #509 review).
+        assert_eq!(legend_hatch_style(), (5.0, 0xff));
     }
 }

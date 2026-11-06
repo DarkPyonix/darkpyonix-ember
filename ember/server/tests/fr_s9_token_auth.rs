@@ -50,6 +50,7 @@ fn router(dir: &std::path::Path) -> Router {
     ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
+        .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
@@ -95,6 +96,7 @@ const FAMILIES: &[(&str, &str)] = &[
     ("GET", "/api/agents"),
     ("GET", "/api/computers"),
     ("GET", "/api/computers/c1/terms"),
+    ("POST", "/api/computers/local/harnesses/detect"),
     ("GET", "/api/accounts"),
     ("GET", "/api/mcp"),
     ("GET", "/api/schedules"),

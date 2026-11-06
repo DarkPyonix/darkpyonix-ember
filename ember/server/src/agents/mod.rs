@@ -260,9 +260,48 @@ pub struct Detected {
     pub version: Option<String>,
 }
 
+/// A detection with where it found the CLI and when (FR-A6.1).
+#[derive(Debug, Clone, Serialize)]
+pub struct Probe {
+    pub kind: AgentKind,
+    pub installed: bool,
+    pub version: Option<String>,
+    /// The resolved executable, `None` when it is not found.
+    pub path: Option<String>,
+    /// Epoch milliseconds when the probe ran.
+    pub detected_at: i64,
+}
+
+/// A version token is accepted only when it starts with a digit (after an optional `v`), so
+/// that garbage output is never shown as a version (FR-A6.1).
+pub(crate) fn version_token(tok: &str) -> Option<String> {
+    let t = tok.trim();
+    let digits = t.strip_prefix('v').unwrap_or(t);
+    digits.chars().next().filter(char::is_ascii_digit).map(|_| t.to_string())
+}
+
+/// Resolve a command the way the OS would: a path with a separator is taken as it is when it is
+/// a file; a bare name is searched in `PATH`. `None` when nothing executable is found.
+pub fn resolve_executable(bin: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let ok = |p: &std::path::Path| {
+        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    };
+    if bin.components().count() > 1 || bin.is_absolute() {
+        return ok(bin).then(|| bin.to_path_buf());
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(bin)).find(|c| ok(c))
+}
+
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
     fn kind(&self) -> AgentKind;
+
+    /// The command `detect` runs, to report where the CLI was found (FR-A6.1). Default: none.
+    fn binary(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 
     /// Is the agent installed on this server, and which version? Missing is not an error.
     async fn detect(&self) -> Detected;

@@ -20,6 +20,7 @@ struct Shared {
     prompt_text: Signal<String>,
     prompt_at: Signal<u64>,
     palette_open: Signal<bool>,
+    palette_mode: Signal<crate::ui::palette::Mode>,
     palette_query: Signal<String>,
     palette_sel: Signal<usize>,
     theme: Signal<crate::ui::theme::ThemePref>,
@@ -63,6 +64,7 @@ fn init(target: EditorTarget) {
     let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
     let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
     let palette_open = use_hook(|| Signal::new_in_scope(false, root));
+    let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
     let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
     let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
     let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
@@ -74,7 +76,7 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -180,8 +182,8 @@ pub mod page {
     /// Do a keymap action. Closing a tab also tells the host; an action the editor cannot do
     /// says it is not ready.
     fn run_action(s: &Shared, action: Action) {
-        if matches!(action, Action::Palette | Action::Find) {
-            open_palette(s);
+        if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
+            open_palette(s, mode);
             return;
         }
         let mut tabs = s.tabs;
@@ -202,20 +204,42 @@ pub mod page {
         }
     }
 
-    fn open_palette(s: &Shared) {
-        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
+    fn open_palette(s: &Shared, mode: crate::ui::palette::Mode) {
+        let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
+        palette_mode.set(mode);
+        if mode != crate::ui::palette::Mode::Commands {
+            s.host.send(HostCommand::IndexFiles);
+        }
         query.set(String::new());
         sel.set(0);
         open.set(true);
+    }
+
+    /// Does what a chosen palette item says: runs the action, or opens the file in a tab.
+    fn choose_palette_item(s: &Shared, payload: crate::ui::palette::Payload) {
+        match payload {
+            crate::ui::palette::Payload::Action(action) => run_action(s, action),
+            crate::ui::palette::Payload::File(path) => {
+                let mut tabs = s.tabs;
+                tabs.write().open(&path);
+                s.host.send(HostCommand::Open(path));
+            }
+        }
     }
 
     /// The palette sheet: a search field over the editor's actions, ranked as the query is typed.
     /// Enter does the highlighted one, Escape or a click outside closes it. The design follows the
     /// app's sheet rules in the mockup's tokens (the mockup has no palette).
     fn palette_sheet(s: &Shared, keymap: Keymap) -> Element {
-        use crate::ui::palette::{action_items, highlight_segments, move_selection, rank, Payload};
+        use crate::ui::palette::{highlight_segments, items_for, move_selection, placeholder, rank, Payload};
         let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
-        let items = action_items(keymap, Os::current());
+        let mode = *s.palette_mode.read();
+        let (files, index_running, index_capped) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running, state.index_capped)
+        };
+        let items = items_for(mode, keymap, Os::current(), &files);
+        let hint_text = placeholder(mode, keymap);
         let text = query.read().clone();
         let ranked = rank(&text, &items);
         let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
@@ -231,7 +255,7 @@ pub mod page {
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
-                        "aria-label": "명령 검색", placeholder: "{keymap.palette_label()}", value: "{text}", autofocus: true,
+                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{text}", autofocus: true,
                         oninput: move |event| { query.set(event.value()); sel.set(0); },
                         onkeydown: move |event| {
                             match event.key() {
@@ -240,9 +264,9 @@ pub mod page {
                                 Key::ArrowUp => { event.stop_propagation(); sel.set(move_selection(chosen, count, false)); }
                                 Key::Enter => {
                                     event.stop_propagation();
-                                    if let Some(Payload::Action(action)) = enter_payload.clone() {
+                                    if let Some(payload) = enter_payload.clone() {
                                         open.set(false);
-                                        run_action(&run_s, action);
+                                        choose_palette_item(&run_s, payload);
                                     }
                                 }
                                 _ => {}
@@ -250,8 +274,14 @@ pub mod page {
                         },
                     }
                 }
+                if mode != crate::ui::palette::Mode::Commands && index_running && !shown.is_empty() {
+                    div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
+                }
+                if mode != crate::ui::palette::Mode::Commands && index_capped {
+                    div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
+                }
                 div { style: "max-height:320px; overflow:auto;", role: "listbox",
-                    if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "일치하는 항목이 없습니다." } }
+                    if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
                     for (row, r) in shown.iter().enumerate() {
                         {
                             let item = &items[r.index];
@@ -266,7 +296,7 @@ pub mod page {
                                 onclick: move |_| {
                                     if !enabled { return; }
                                     open.set(false);
-                                    if let Payload::Action(action) = payload.clone() { run_action(&click_s, action); }
+                                    choose_palette_item(&click_s, payload.clone());
                                 },
                                 for (i, (part, hit)) in segments.into_iter().enumerate() {
                                     span { key: "{i}", style: if hit { "font-weight:var(--fw-semibold); color:var(--text);" } else { "" }, "{part}" }
@@ -471,7 +501,7 @@ pub mod page {
         let branch = branch.to_string();
         let find = tooltip_text(keymap.find_label(), &keymap.hint(Action::Find, Os::current()));
         let find_hint = keymap.hint(Action::Find, Os::current());
-        let (palette_open, palette_query, palette_sel) = (s.palette_open, s.palette_query, s.palette_sel);
+        let find_s = s.clone();
         let open = *menu_open.read();
         // The traffic lights float over the top bar's left end under FullSize.
         let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
@@ -481,7 +511,7 @@ pub mod page {
                 button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
                 button { class: "ed-pj", title: "브랜치", onclick: move |_| notice(format!("브랜치: {SOON}")), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
                 div { class: "spacer" }
-                button { class: "ed-find", title: "{find}", onclick: move |_| { let (mut o, mut q, mut sl) = (palette_open, palette_query, palette_sel); q.set(String::new()); sl.set(0); o.set(true); },
+                button { class: "ed-find", title: "{find}", onclick: move |_| run_action(&find_s, Action::Find),
                     {icon("search")}
                     span { class: "hide-md", "{keymap.find_label()}" }
                     kbd { class: "ed-sc", "{find_hint}" }

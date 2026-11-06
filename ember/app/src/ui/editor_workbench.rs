@@ -236,18 +236,19 @@ pub mod page {
         let mode = *s.palette_mode.read();
         let files = s.host.state.lock().unwrap().file_index.clone();
         let items = items_for(mode, keymap, Os::current(), &s.folder, &files);
-        let hint_text = placeholder(mode);
+        let hint_text = placeholder(mode, keymap);
         let text = query.read().clone();
         let ranked = rank(&text, &items);
         let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
         let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
-        let enter_payload = shown.get(chosen).map(|r| items[r.index].payload.clone());
+        // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
+        let enter_payload = shown.get(chosen).filter(|r| items[r.index].enabled).map(|r| items[r.index].payload.clone());
         let count = shown.len();
         let run_s = s.clone();
         rsx! {
             div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
             div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
-                style: "position:fixed; z-index:40; top:60px; left:50%; margin-left:-280px; width:560px; right:auto; padding:var(--sp1);",
+                style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
                 div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
                     {icon("search")}
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
@@ -260,8 +261,10 @@ pub mod page {
                                 Key::ArrowUp => { event.stop_propagation(); sel.set(move_selection(chosen, count, false)); }
                                 Key::Enter => {
                                     event.stop_propagation();
-                                    open.set(false);
-                                    if let Some(payload) = enter_payload.clone() { choose_palette_item(&run_s, payload); }
+                                    if let Some(payload) = enter_payload.clone() {
+                                        open.set(false);
+                                        choose_palette_item(&run_s, payload);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -274,12 +277,15 @@ pub mod page {
                         {
                             let item = &items[r.index];
                             let segments = highlight_segments(&item.title, &r.matched);
-                            let hint = item.hint.clone();
+                            let enabled = item.enabled;
+                            let hint = if enabled { item.hint.clone() } else { "준비 중".to_string() };
                             let payload = item.payload.clone();
                             let click_s = s.clone();
                             let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
-                            rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", style: "--d:0; height:34px;",
+                            let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
+                            rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
                                 onclick: move |_| {
+                                    if !enabled { return; }
                                     open.set(false);
                                     choose_palette_item(&click_s, payload.clone());
                                 },

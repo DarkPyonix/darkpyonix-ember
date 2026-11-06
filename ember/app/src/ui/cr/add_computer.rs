@@ -183,7 +183,7 @@ fn DeviceRowView(r: &DeviceRow, ui: &AddUi, asking: bool, saving: bool) {
             if r.sample {
                 Pill("예시", super::components::PillTone::Grey, true);
             }
-            Pill(r.pill.0, r.pill.1, true);
+            Pill(r.pill.0, r.pill.1.into(), true);
         });
         if r.can_add && !asking {
             let (u, id) = (ui.clone(), r.endpoint_id.clone());

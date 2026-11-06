@@ -307,8 +307,10 @@ mod tests {
         let free = HubDevice { name: " ".into(), ..dev("0123456789") };
         let rows = device_rows(&[free, reg, me], false);
         assert_eq!(rows[0].endpoint_id, "me");
-        assert!(!rows[0].can_add && !rows[1].can_add && rows[2].can_add);
-        assert_eq!(rows[2].name, "01234567");
+        // The sort is stable: this server first, then the input order (free, reg).
+        assert_eq!(rows[1].endpoint_id, "0123456789");
+        assert!(!rows[0].can_add && rows[1].can_add && !rows[2].can_add);
+        assert_eq!(rows[1].name, "01234567");
         assert!(rows.iter().all(|r| !r.sample));
         assert!(device_rows(&[dev("x")], true)[0].sample);
     }

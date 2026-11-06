@@ -378,6 +378,8 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
                             ToolRow(theme_svg, &format!("테마: {}", pref.label()), rail, move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                             });
+                            let us = ui.clone();
+                            ToolRow(ICON_SEARCH_SVG, "검색", rail, move || us.go(Route::Search));
                             ToolRow(ICON_GEAR_SVG, "설정", rail, on_settings);
                             if demo_tools {
                                 let pl = plat_ios.clone();
@@ -516,6 +518,11 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                             menu_item(theme_svg, "테마 전환", move || {
                                 u.set_theme_pref(u.theme_pref.get_untracked().next());
                                 o.set(false);
+                            });
+                            let (u, o) = (ui.clone(), open.clone());
+                            menu_item(ICON_SEARCH_SVG, "검색", move || {
+                                o.set(false);
+                                u.go(Route::Search);
                             });
                             let (o, mut s) = (open.clone(), on_settings.clone());
                             menu_item(ICON_GEAR_SVG, "설정", move || {
@@ -714,6 +721,11 @@ pub fn shell() {
                     let u = ui.clone();
                     ToolRow(svg, &format!("테마: {}", ui.theme_pref.get().label()), false, move || {
                         u.set_theme_pref(u.theme_pref.get_untracked().next());
+                    });
+                    let (more, u) = (more_open.clone(), ui.clone());
+                    ToolRow(ICON_SEARCH_SVG, "검색", false, move || {
+                        more.set(false);
+                        u.go(Route::Search);
                     });
                     let (more, settings) = (more_open.clone(), settings_open.clone());
                     ToolRow(ICON_GEAR_SVG, "설정", false, move || {
@@ -927,6 +939,19 @@ mod tests {
     fn phone_menu_probe() {
         let open = remember(|| mutable_state_of(true));
         PhoneMenu(open, || {});
+    }
+
+    #[test]
+    fn fr_l10_sidebar_has_a_search_row() {
+        use compose_rust::protocol::decode_batch;
+        use compose_rust::{Host, Recomposer};
+        let _guard = crate::services::test_guard();
+        let mut host = Host::new(|| Box::new(Recomposer::new(sidebar_probe)));
+        let batch = decode_batch(host.rebuild().expect("rebuild")).expect("decode");
+        assert!(has_text(&batch, "검색"));
+        let mut host_p = Host::new(|| Box::new(Recomposer::new(phone_menu_probe)));
+        let batch_p = decode_batch(host_p.rebuild().expect("rebuild")).expect("decode");
+        assert!(has_text(&batch_p, "검색"));
     }
 
     #[test]

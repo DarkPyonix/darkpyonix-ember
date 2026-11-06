@@ -19,12 +19,14 @@ async fn setup() -> (tempfile::TempDir, PathBuf, String, reqwest::Client) {
     // there, so a plain directory below it is "not a repository".
     std::env::set_var("GIT_CEILING_DIRECTORIES", scratch.canonicalize().unwrap());
     let dir = tempfile::Builder::new().prefix("c").tempdir_in(scratch).unwrap();
-    let repo = dir.path().canonicalize().unwrap();
+    // The repository is a subdirectory, so `dir` also holds a sibling that is not a repository.
+    std::fs::create_dir_all(dir.path().join("repo")).unwrap();
+    let repo = dir.path().join("repo").canonicalize().unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.name", "Tester"]);
     git(&repo, &["config", "user.email", "tester@example.com"]);
     git(&repo, &["config", "commit.gpgsign", "false"]);
-    let node = Node::new(NodeConfig::new("token", vec![repo.clone(), dir.path().to_owned()])).unwrap();
+    let node = Node::new(NodeConfig::new("token", vec![dir.path().canonicalize().unwrap()])).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(api::serve(listener, node));
@@ -198,6 +200,8 @@ async fn fr_g15_cherry_pick_applies_a_commit_from_another_branch() {
     git(&repo, &["checkout", "-q", "-b", "other"]);
     let picked = commit(&repo, "b", "from other\n", "add b");
     git(&repo, &["checkout", "-q", "main"]);
+    // main moves on, so the pick has another parent and cannot reuse the original commit.
+    commit(&repo, "c", "main only\n", "add c");
     let (status, v) = call(&client, &base, "cherry-pick", json!({"repo": repo, "sha": picked, "confirm": true})).await;
     assert_eq!(status, 200, "{v}");
     assert_eq!(v["new_sha"], git(&repo, &["rev-parse", "HEAD"]));

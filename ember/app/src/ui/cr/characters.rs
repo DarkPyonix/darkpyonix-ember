@@ -60,11 +60,12 @@ pub fn Character(
         lead: crown_shown(project, leader),
         role: role.map(str::to_string),
         dark: theme.scheme == Scheme::Dark,
+        pin: None,
     };
     draw(&spec, size);
 }
 
-fn draw(spec: &CharSpec, size: f32) {
+pub fn draw(spec: &CharSpec, size: f32) {
     // The renderer draws an SVG at its own width and height, so the pixel size goes in.
     let px = format!("{}", size.round() as i32);
     let doc = svg(spec).replacen("width=\"100\" height=\"100\"", &format!("width=\"{px}\" height=\"{px}\""), 1);
@@ -97,6 +98,7 @@ pub fn StylePicker(seed_name: &str, current: CharStyle, on_pick: impl FnMut(Char
                                     lead: false,
                                     role: Some("리뷰어".into()),
                                     dark,
+                                    pin: None,
                                 },
                                 56.0,
                             );

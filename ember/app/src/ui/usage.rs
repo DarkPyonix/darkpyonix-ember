@@ -241,6 +241,175 @@ pub fn trend_line(load: &Load<UsageSummary>, window: usize) -> String {
     }
 }
 
+/// Which vendor colour a harness gets in the Home stack: Claude orange, Codex blue, Gemini sky,
+/// every other harness a neutral grey (#360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    Claude,
+    Codex,
+    Gemini,
+    Other,
+}
+
+impl Vendor {
+    pub fn of(kind: &str) -> Vendor {
+        match kind {
+            "claude-code" => Vendor::Claude,
+            "codex" => Vendor::Codex,
+            "gemini" => Vendor::Gemini,
+            _ => Vendor::Other,
+        }
+    }
+
+    fn rank(self) -> u8 {
+        self as u8
+    }
+}
+
+/// One harness's slice of a day's stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackSeg {
+    pub agent: String,
+    pub vendor: Vendor,
+    pub tokens: u64,
+    /// Share of the day's stack, 0..=1. The shares of one day sum to 1.
+    pub fraction: f32,
+}
+
+/// One UTC day of the Home stack: segments bottom to top in legend order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StackDay {
+    pub day: String,
+    pub weekday: &'static str,
+    /// Sum of the reported segments. 0 means nothing was reported that day.
+    pub total: u64,
+    pub segs: Vec<StackSeg>,
+}
+
+/// A harness that appears in the window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegendEntry {
+    pub agent: String,
+    pub label: String,
+    pub vendor: Vendor,
+}
+
+/// What the Home 하네스별 사용량 tile draws (FR-L23, #360).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HomeStack {
+    /// A state line instead of a chart: loading, failed or nothing reported.
+    pub notice: Option<String>,
+    /// "오늘 1.2M 토큰", or why there is no figure.
+    pub today: String,
+    /// "7일 평균 4.0K", over the days that reported.
+    pub average: String,
+    pub average_tokens: u64,
+    pub days: Vec<StackDay>,
+    pub legend: Vec<LegendEntry>,
+    /// Shown under the weekday axis: the days are UTC days.
+    pub axis_caption: &'static str,
+    /// The legend text of the dashed average line.
+    pub average_legend: &'static str,
+    /// A 다시 시도 button is shown (the load failed).
+    pub retry: bool,
+}
+
+pub const UTC_CAPTION: &str = "(UTC 기준)";
+pub const AVERAGE_LEGEND: &str = "7일 평균";
+pub const RETRY: &str = "다시 시도";
+
+/// Mon..Sun name of a `YYYY-MM-DD` UTC day, "" when it is not a date.
+pub fn weekday_name(day: &str) -> &'static str {
+    let mut it = day.split('-').map(|p| p.parse::<i64>().ok());
+    let (Some(Some(y)), Some(Some(m)), Some(Some(d))) = (it.next(), it.next(), it.next()) else { return "" };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return "";
+    }
+    // Days since 1970-01-01 (Thursday), civil-from-days inverse.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    ["일", "월", "화", "수", "목", "금", "토"][(days + 4).rem_euclid(7) as usize]
+}
+
+fn reported(a: &ember_client::api::AgentUsageRow) -> bool {
+    a.turns > 0 || a.total_tokens > 0
+}
+
+/// The stack for the last `window` UTC days. A harness that reported nothing on a day is left
+/// out of that day (unknown is not zero); the legend lists the harnesses that reported in the
+/// window, Claude, Codex, Gemini, then the others by name, so its order never jumps.
+pub fn home_stack(load: &Load<UsageSummary>, window: usize) -> HomeStack {
+    let blank = |notice: &str| HomeStack {
+        notice: Some(notice.to_string()),
+        today: format!("오늘 {UNKNOWN}"),
+        average: "-".to_string(),
+        average_tokens: 0,
+        days: Vec::new(),
+        legend: Vec::new(),
+        axis_caption: UTC_CAPTION,
+        average_legend: AVERAGE_LEGEND,
+        retry: false,
+    };
+    let s = match load {
+        Load::Loading => return blank(LOADING),
+        Load::Failed(_) => return HomeStack { retry: true, ..blank(FAILED) },
+        Load::Ready(s) => s,
+    };
+    let start = s.days.len().saturating_sub(window.max(1));
+    let rows = &s.days[start..];
+    let mut agents: Vec<String> = Vec::new();
+    for a in rows.iter().flat_map(|d| d.by_agent.iter()).filter(|a| reported(a)) {
+        if !agents.contains(&a.agent) {
+            agents.push(a.agent.clone());
+        }
+    }
+    agents.sort_by(|a, b| (Vendor::of(a).rank(), a).cmp(&(Vendor::of(b).rank(), b)));
+    let days: Vec<StackDay> = rows
+        .iter()
+        .map(|d| {
+            let mut segs: Vec<StackSeg> = Vec::new();
+            for kind in &agents {
+                let tokens: u64 = d.by_agent.iter().filter(|a| a.agent == *kind && reported(a)).map(|a| a.total_tokens).sum();
+                if d.by_agent.iter().any(|a| a.agent == *kind && reported(a)) && tokens > 0 {
+                    segs.push(StackSeg { agent: kind.clone(), vendor: Vendor::of(kind), tokens, fraction: 0.0 });
+                }
+            }
+            let total: u64 = segs.iter().map(|g| g.tokens).sum();
+            for g in &mut segs {
+                g.fraction = g.tokens as f32 / total as f32;
+            }
+            StackDay { day: d.day.clone(), weekday: weekday_name(&d.day), total, segs }
+        })
+        .collect();
+    let reported_days: Vec<u64> = days.iter().filter(|d| d.total > 0).map(|d| d.total).collect();
+    if reported_days.is_empty() {
+        return blank(NO_REPORT);
+    }
+    let average_tokens = reported_days.iter().sum::<u64>() / reported_days.len() as u64;
+    let today = match days.last() {
+        Some(d) if d.total > 0 => format!("오늘 {} 토큰", format_compact(d.total)),
+        _ => format!("오늘 {NO_REPORT}"),
+    };
+    HomeStack {
+        notice: None,
+        today,
+        average: format!("{}일 평균 {}", rows.len(), format_compact(average_tokens)),
+        average_tokens,
+        days,
+        legend: agents
+            .into_iter()
+            .map(|k| LegendEntry { label: agent_label(&k), vendor: Vendor::of(&k), agent: k })
+            .collect(),
+        axis_caption: UTC_CAPTION,
+        average_legend: AVERAGE_LEGEND,
+        retry: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +537,92 @@ mod tests {
         assert_eq!(agent_label("antigravity"), "agy");
         assert_eq!(agent_label("scripted"), "scripted");
         assert_eq!(agent_label("my-acp-agent"), "my-acp-agent");
+    }
+
+    fn agent_row(k: &str, t: u64, turns: u64) -> AgentUsageRow {
+        AgentUsageRow { agent: k.into(), total_tokens: t, turns, ..Default::default() }
+    }
+
+    #[test]
+    fn fr_l23_stack_fractions_sum_to_the_day_total() {
+        let l = summary(vec![day("2026-11-05", 3_000, 1_000, 2), day("2026-11-06", 1_000_000, 234_567, 4)]);
+        let m = home_stack(&l, 7);
+        assert!(m.notice.is_none());
+        for d in &m.days {
+            assert_eq!(d.segs.iter().map(|g| g.tokens).sum::<u64>(), d.total);
+            assert!((d.segs.iter().map(|g| g.fraction).sum::<f32>() - 1.0).abs() < 1e-4);
+        }
+        assert_eq!(m.days[0].segs[0].fraction, 0.75);
+        assert_eq!(m.today, "오늘 1.2M 토큰");
+    }
+
+    #[test]
+    fn fr_l23_unreported_harness_is_omitted_not_zero() {
+        let mut d1 = day("2026-11-05", 100, 0, 1);
+        d1.by_agent.push(agent_row("antigravity", 0, 0));
+        let m = home_stack(&summary(vec![d1, day("2026-11-06", 100, 100, 1)]), 7);
+        assert_eq!(m.days[0].segs.len(), 1);
+        assert_eq!(m.days[0].segs[0].agent, "claude-code");
+        assert!(m.legend.iter().all(|e| e.agent != "antigravity"));
+        // A day with no report has no segments, and the average skips it.
+        let m = home_stack(&summary(vec![day("2026-11-05", 0, 0, 0), day("2026-11-06", 400, 0, 1)]), 7);
+        assert!(m.days[0].segs.is_empty() && m.days[0].total == 0);
+        assert_eq!(m.average_tokens, 400);
+    }
+
+    #[test]
+    fn fr_l23_legend_order_is_stable_and_vendor_coloured() {
+        let mut a = day("2026-11-05", 1, 1, 1);
+        a.by_agent.insert(0, agent_row("zeta", 5, 1));
+        a.by_agent.push(agent_row("gemini", 5, 1));
+        a.by_agent.push(agent_row("antigravity", 5, 1));
+        let mut b = day("2026-11-06", 1, 1, 1);
+        b.by_agent.reverse();
+        let m1 = home_stack(&summary(vec![a.clone(), b.clone()]), 7);
+        let m2 = home_stack(&summary(vec![b, a]), 7);
+        let order: Vec<&str> = m1.legend.iter().map(|e| e.agent.as_str()).collect();
+        assert_eq!(order, ["claude-code", "codex", "gemini", "antigravity", "zeta"]);
+        assert_eq!(m1.legend.iter().map(|e| &e.agent).collect::<Vec<_>>(), m2.legend.iter().map(|e| &e.agent).collect::<Vec<_>>());
+        assert_eq!(m1.legend[3].label, "agy");
+        let v: Vec<Vendor> = m1.legend.iter().map(|e| e.vendor).collect();
+        assert_eq!(v, [Vendor::Claude, Vendor::Codex, Vendor::Gemini, Vendor::Other, Vendor::Other]);
+    }
+
+    #[test]
+    fn fr_l23_stack_states_loading_failed_empty() {
+        assert_eq!(home_stack(&Load::Loading, 7).notice.as_deref(), Some(LOADING));
+        assert_eq!(home_stack(&Load::Failed("x".into()), 7).notice.as_deref(), Some(FAILED));
+        assert!(home_stack(&Load::Failed("x".into()), 7).retry);
+        assert!(!home_stack(&Load::Loading, 7).retry);
+        assert!(!home_stack(&summary(vec![day("2026-11-06", 1, 1, 1)]), 7).retry);
+        let e = home_stack(&summary(vec![]), 7);
+        assert_eq!(e.notice.as_deref(), Some(NO_REPORT));
+        assert!(e.days.is_empty() && e.legend.is_empty());
+        assert!(!e.today.contains("0 토큰"));
+    }
+
+    #[test]
+    fn fr_u7_stack_average_text_and_window() {
+        let days: Vec<_> = (1..=9).map(|i| day(&format!("2026-11-{i:02}"), 1_000, 3_000, 1)).collect();
+        let m = home_stack(&summary(days), 7);
+        assert_eq!(m.days.len(), 7);
+        assert_eq!(m.average, "7일 평균 4.0K");
+        assert_eq!(m.days[0].day, "2026-11-03");
+    }
+
+    #[test]
+    fn fr_l23_stack_captions_name_utc_and_average() {
+        let m = home_stack(&summary(vec![day("2026-11-06", 1, 1, 1)]), 7);
+        assert_eq!(m.axis_caption, "(UTC 기준)");
+        assert_eq!(m.average_legend, "7일 평균");
+        assert_eq!(RETRY, "다시 시도");
+    }
+
+    #[test]
+    fn fr_u7_weekday_names_from_utc_days() {
+        assert_eq!(weekday_name("2025-10-25"), "토");
+        assert_eq!(weekday_name("2026-11-06"), "금");
+        assert_eq!(weekday_name("1970-01-01"), "목");
+        assert_eq!(weekday_name("nope"), "");
     }
 }

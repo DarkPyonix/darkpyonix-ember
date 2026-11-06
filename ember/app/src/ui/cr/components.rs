@@ -984,7 +984,7 @@ pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String)
             cu::Box().modifier(Modifier::new().weight(1.0).height(height).offset(search_field_offset(), 0.0)).content(move || {
                 EmberField(FieldOptions {
                     bare: true,
-                    type_role: if height < H_BTN { Some(TypeRole::Label) } else { None },
+                    type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
                     background: Some(Paint::Literal(Color::argb(0))),
                     border_width: Some(0.0),
                     border_color: Some(Paint::Literal(Color::argb(0))),

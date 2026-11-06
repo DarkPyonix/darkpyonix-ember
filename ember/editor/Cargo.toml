@@ -5,6 +5,9 @@ edition = "2021"
 description = "Ember editor core: the session layer between ember-editor-conn and the dioxus-compose code editor widget (M8, SPEC FR-E1..E4)"
 license = "Apache-2.0"
 publish = false
+# Test data (grammar copies with their own licences) never goes into a package. `publish = false` already
+# keeps the crate off crates.io; this keeps the folder out should it ever be packaged.
+exclude = ["tests/fixtures/**"]
 
 [lib]
 name = "ember_editor"

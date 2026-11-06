@@ -21,8 +21,8 @@ pub mod store;
 pub mod team;
 pub mod terminal;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,9 @@ pub const CHANNEL_MCP_SERVER: &str = "ember-channels";
 /// be concatenated; a unit test builds it from [`CHANNEL_MCP_SERVER`] and [`mcp::TOOL_NAME`] and
 /// compares, so the three cannot drift apart. It is the one tool the allow rule names.
 pub const CHANNEL_POST_TOOL: &str = "mcp__ember-channels__channel_post";
+
+/// The one notice a session gets when its start skipped the channel tool (FR-T12).
+const CHANNEL_FALLBACK_NOTICE: &str = "The channel tool could not be registered because a MCP server named ember-channels is already configured; replies use the ember-a2a command.";
 
 /// How many posts one session may make into one channel per minute (FR-T12, `channel post`).
 pub const CHANNEL_POSTS_PER_MINUTE: u32 = 6;
@@ -174,6 +177,158 @@ pub struct A2a {
     computer_setter: StdMutex<Option<ComputerSetter>>,
     /// Recent channel posts per (session, channel), for the rate limit of `channel post`.
     channel_posts: StdMutex<HashMap<(String, String), std::collections::VecDeque<Instant>>>,
+    /// Sessions whose last start skipped the `ember-channels` registration because the user's own
+    /// Claude Code configuration already names that server (FR-T12). The prompt builders read it
+    /// through [`A2a::channel_reply_by_tool`]. It lives in memory: after a server restart it is
+    /// empty, so a surviving agent is again told "by tool" (its prompt already carries the CLI
+    /// fallback sentence) until its next start runs the check again.
+    channel_fallback: StdMutex<HashSet<String>>,
+    /// Where the collision check looks outside the session directory.
+    claude_sources: StdMutex<ClaudeConfigSources>,
+}
+
+/// Fixed places the collision check reads besides the session's directories (FR-T12).
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeConfigSources {
+    /// `$HOME`, whose `.claude.json` is Claude Code's user file.
+    pub home: Option<PathBuf>,
+    /// `CLAUDE_CONFIG_DIR` of this server's own environment (a value in the start request wins).
+    pub config_dir: Option<PathBuf>,
+    /// Managed MCP files.
+    pub managed: Vec<PathBuf>,
+}
+
+impl ClaudeConfigSources {
+    pub fn from_env() -> ClaudeConfigSources {
+        ClaudeConfigSources {
+            home: std::env::var_os("HOME").filter(|v| !v.is_empty()).map(PathBuf::from),
+            config_dir: std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from),
+            managed: vec![
+                PathBuf::from("/Library/Application Support/ClaudeCode/managed-mcp.json"),
+                PathBuf::from("/etc/claude-code/managed-mcp.json"),
+            ],
+        }
+    }
+}
+
+/// Largest configuration file the collision check reads; a bigger one counts as unreadable.
+const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+const KIND_PROJECT: &str = "project .mcp.json";
+const KIND_USER: &str = "user config";
+const KIND_LOCAL: &str = "local config";
+const KIND_MANAGED: &str = "managed";
+const REASON_TAKEN: &str = "a server with this name is already configured";
+
+/// The fixed log reason for a file of `kind` that could not be read. Static on purpose: nothing
+/// read from a file reaches a log line.
+fn reason_unreadable(kind: &'static str) -> &'static str {
+    match kind {
+        KIND_PROJECT => "could not read project .mcp.json",
+        KIND_USER => "could not read user config",
+        KIND_LOCAL => "could not read local config",
+        _ => "could not read managed",
+    }
+}
+
+/// `Ok(None)` for a missing file, `Ok(Some(json))` for a regular JSON file of at most
+/// [`MAX_CONFIG_BYTES`], `Err(())` for everything else (cannot be sure).
+fn read_config_json(path: &Path) -> Result<Option<serde_json::Value>, ()> {
+    use std::io::Read;
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
+        return Err(());
+    }
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut buf))
+        .map_err(|_| ())?;
+    if buf.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(());
+    }
+    serde_json::from_slice(&buf).map(Some).map_err(|_| ())
+}
+
+/// Whether the `mcpServers` object `servers` has a key equal to [`CHANNEL_MCP_SERVER`], ignoring
+/// ASCII case.
+fn names_channel_server(servers: Option<&serde_json::Value>) -> bool {
+    servers
+        .and_then(|v| v.as_object())
+        .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(CHANNEL_MCP_SERVER)))
+}
+
+/// Whether the user's own Claude Code configuration already defines an MCP server named
+/// `ember-channels` (FR-T12). Returns the kind of file and a static reason, or `None` when it is
+/// sure there is no such server. It fails closed: a file that exists but cannot be read, is not
+/// valid JSON, is over 4 MiB or is not a regular file counts as "cannot be sure".
+///
+/// Sources: `.mcp.json` in `cwd` and every ancestor; `<config_dir>/.claude.json` and
+/// `<home>/.claude.json` (Claude Code keeps its user file at `$CLAUDE_CONFIG_DIR/.claude.json`
+/// when that variable is set and at `$HOME/.claude.json` otherwise), key `mcpServers` (user
+/// scope) and `projects.<dir>.mcpServers` (local scope) for `cwd` and every ancestor; the
+/// `managed` files, key `mcpServers`. Claude Code's own precedence between these is not measured.
+pub fn channel_server_name_taken(
+    cwd: &Path,
+    home: Option<&Path>,
+    config_dir: Option<&Path>,
+    managed: &[PathBuf],
+) -> Option<(&'static str, &'static str)> {
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir().map(|d| d.join(cwd)).unwrap_or_else(|_| cwd.to_path_buf())
+    };
+    let mut dirs: Vec<PathBuf> = cwd.ancestors().map(Path::to_path_buf).collect();
+    if let Ok(real) = cwd.canonicalize() {
+        for a in real.ancestors() {
+            if !dirs.iter().any(|d| d == a) {
+                dirs.push(a.to_path_buf());
+            }
+        }
+    }
+    for d in &dirs {
+        match read_config_json(&d.join(".mcp.json")) {
+            Err(()) => return Some((KIND_PROJECT, reason_unreadable(KIND_PROJECT))),
+            Ok(Some(v)) if names_channel_server(v.get("mcpServers")) => {
+                return Some((KIND_PROJECT, REASON_TAKEN));
+            }
+            Ok(_) => {}
+        }
+    }
+    let user_files = config_dir.iter().chain(home.iter()).map(|d| d.join(".claude.json"));
+    for file in user_files {
+        match read_config_json(&file) {
+            Err(()) => return Some((KIND_USER, reason_unreadable(KIND_USER))),
+            Ok(None) => {}
+            Ok(Some(v)) => {
+                if names_channel_server(v.get("mcpServers")) {
+                    return Some((KIND_USER, REASON_TAKEN));
+                }
+                if let Some(projects) = v.get("projects").and_then(|p| p.as_object()) {
+                    for d in &dirs {
+                        let hit = d.to_str().and_then(|k| projects.get(k));
+                        if names_channel_server(hit.and_then(|p| p.get("mcpServers"))) {
+                            return Some((KIND_LOCAL, REASON_TAKEN));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for file in managed {
+        match read_config_json(file) {
+            Err(()) => return Some((KIND_MANAGED, reason_unreadable(KIND_MANAGED))),
+            Ok(Some(v)) if names_channel_server(v.get("mcpServers")) => {
+                return Some((KIND_MANAGED, REASON_TAKEN));
+            }
+            Ok(_) => {}
+        }
+    }
+    None
 }
 
 const NOTICE_EVERY: Duration = Duration::from_secs(60);
@@ -197,6 +352,8 @@ impl A2a {
             last_notice: StdMutex::new(HashMap::new()),
             computer_setter: StdMutex::new(None),
             channel_posts: StdMutex::new(HashMap::new()),
+            channel_fallback: StdMutex::new(HashSet::new()),
+            claude_sources: StdMutex::new(ClaudeConfigSources::from_env()),
         })
     }
 
@@ -255,7 +412,15 @@ impl A2a {
     /// installed, and only on this computer: on another computer the MCP child would need the
     /// binary there, so those sessions keep the command. The start hook and both prompt builders
     /// ask this one function, so they cannot disagree. A lookup error counts as another computer.
+    /// A session whose last start found the server name taken in the user's own Claude Code
+    /// configuration answers `false` (see `channel_fallback`).
     fn channel_reply_by_tool(&self, rec: &SessionRecord) -> bool {
+        self.channel_reply_eligible(rec) && !self.channel_fallback.lock().unwrap().contains(&rec.id)
+    }
+
+    /// [`A2a::channel_reply_by_tool`] before the name-collision fallback: what the harness, the
+    /// binary and the computer allow. The start hook asks this one, then runs the collision check.
+    fn channel_reply_eligible(&self, rec: &SessionRecord) -> bool {
         if rec.agent != AgentKind::ClaudeCode || self.config.cli_path.is_none() {
             return false;
         }
@@ -288,7 +453,8 @@ impl A2a {
     /// Code writes an MCP entry with environment into a private file, never onto the command line.
     /// Never logs the token.
     fn channel_tool_config(&self, rec: &SessionRecord, req: &mut StartRequest) {
-        if !self.channel_reply_by_tool(rec) || req.remote.is_some() || req.computer.is_some() {
+        if !self.channel_reply_eligible(rec) || req.remote.is_some() || req.computer.is_some() {
+            self.channel_fallback.lock().unwrap().remove(&rec.id);
             return;
         }
         let Some(cli) = self.config.cli_path.as_ref() else { return };
@@ -298,9 +464,34 @@ impl A2a {
         let (Some(url), Some(token)) = (env_value("EMBER_URL"), env_value("EMBER_RUNTIME_TOKEN")) else {
             return;
         };
-        if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
-            tracing::warn!(session = %rec.id, "an MCP server named {CHANNEL_MCP_SERVER} already exists; not adding another");
+        let taken = if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
+            Some(("start request", REASON_TAKEN))
+        } else {
+            let sources = self.claude_sources.lock().unwrap().clone();
+            let config_dir = env_value("CLAUDE_CONFIG_DIR").map(PathBuf::from).or(sources.config_dir.clone());
+            channel_server_name_taken(&req.cwd, sources.home.as_deref(), config_dir.as_deref(), &sources.managed)
+        };
+        if let Some((kind, reason)) = taken {
+            // Never the file contents: `kind` and `reason` are static strings.
+            tracing::warn!(session = %rec.id, source = kind, "not registering {CHANNEL_MCP_SERVER}: {reason}");
+            let first = self.channel_fallback.lock().unwrap().insert(rec.id.clone());
+            // The instructions hook ran before this one and named the tool: put the command back.
+            if let Some(text) = req.instructions.as_mut() {
+                *text = text.replace(&self.instructions_with(true), &self.instructions_with(false));
+            }
+            if first {
+                let event = AgentEvent::Notice { message: CHANNEL_FALLBACK_NOTICE.to_string() };
+                if let Err(e) = self.sessions.record_event(&rec.id, &event) {
+                    tracing::warn!(session = %rec.id, "recording the channel fallback notice failed: {e:#}");
+                }
+            }
             return;
+        }
+        if self.channel_fallback.lock().unwrap().remove(&rec.id) {
+            // The instructions hook ran with the fallback still set: name the tool again.
+            if let Some(text) = req.instructions.as_mut() {
+                *text = text.replace(&self.instructions_with(false), &self.instructions_with(true));
+            }
         }
         req.mcp_servers.push(McpServer {
             name: CHANNEL_MCP_SERVER.to_string(),
@@ -878,7 +1069,10 @@ mod channel_tool_tests {
         let sessions = Sessions::new(store, vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
         let mut config = A2aConfig::new("http://127.0.0.1:8740");
         config.cli_path = cli.map(PathBuf::from);
-        A2a::new(sessions, A2aStore::open_in_memory().unwrap(), config)
+        let a = A2a::new(sessions, A2aStore::open_in_memory().unwrap(), config);
+        // Hermetic: never read the real home or managed files.
+        *a.claude_sources.lock().unwrap() = ClaudeConfigSources::default();
+        a
     }
 
     fn rec(a: &A2a, agent: AgentKind) -> SessionRecord {
@@ -887,7 +1081,7 @@ mod channel_tool_tests {
 
     /// A request as the start hooks leave it: runtime env made by `runtime_env`.
     fn request(a: &A2a, r: &SessionRecord) -> StartRequest {
-        StartRequest { cwd: ".".into(), env: a.runtime_env(r), ..Default::default() }
+        StartRequest { cwd: "/nonexistent-ember-test/proj".into(), env: a.runtime_env(r), ..Default::default() }
     }
 
     fn env_of(req: &StartRequest, name: &str) -> String {
@@ -1163,5 +1357,227 @@ mod channel_tool_tests {
         let cut = |s: &str| s[..s.rfind("To reply in the channel:").unwrap()].to_string();
         assert_eq!(cut(&claude), cut(&codex), "header and markers are byte-identical");
         assert!(claude.contains("UNTRUSTED input"));
+    }
+
+    // ---- name collision with the user's own Claude Code configuration (FR-T12) ----
+
+    fn put(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn with_server(key: &str) -> String {
+        format!(r#"{{"mcpServers":{{"{key}":{{"command":"x"}}}}}}"#)
+    }
+
+    fn taken(cwd: &Path, home: Option<&Path>, cfg: Option<&Path>, managed: &[PathBuf]) -> Option<(&'static str, &'static str)> {
+        channel_server_name_taken(cwd, home, cfg, managed)
+    }
+
+    #[test]
+    fn fr_t12_collision_in_the_project_mcp_json_of_cwd_and_of_a_parent() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("a/b");
+        std::fs::create_dir_all(&cwd).unwrap();
+        put(&cwd.join(".mcp.json"), &with_server("ember-channels"));
+        assert_eq!(taken(&cwd, None, None, &[]).unwrap().0, "project .mcp.json");
+        std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
+        assert_eq!(taken(&cwd, None, None, &[]), None);
+        put(&d.path().join("a/.mcp.json"), &with_server("ember-channels"));
+        assert_eq!(taken(&cwd, None, None, &[]).unwrap().0, "project .mcp.json");
+    }
+
+    #[test]
+    fn fr_t12_collision_in_the_user_config_at_both_locations() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (home, cfg) = (d.path().join("home"), d.path().join("cfgdir"));
+        put(&cfg.join(".claude.json"), &with_server("ember-channels"));
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]).unwrap().0, "user config");
+        std::fs::remove_file(cfg.join(".claude.json")).unwrap();
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), None);
+        put(&home.join(".claude.json"), &with_server("ember-channels"));
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]).unwrap().0, "user config");
+        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().0, "user config");
+    }
+
+    #[test]
+    fn fr_t12_collision_in_local_scope_projects_for_cwd_and_ancestors() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = d.path().join("home");
+        let key = cwd.to_str().unwrap();
+        put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{key}":{}}}}}"#, with_server("Ember-Channels")));
+        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().0, "local config");
+        let parent = d.path().join("proj");
+        let pkey = parent.to_str().unwrap();
+        put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{pkey}":{}}}}}"#, with_server("ember-channels")));
+        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().0, "local config");
+    }
+
+    #[test]
+    fn fr_t12_collision_in_a_managed_file_and_with_different_letter_case() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let m = d.path().join("managed-mcp.json");
+        put(&m, &with_server("EMBER-CHANNELS"));
+        assert_eq!(taken(&cwd, None, None, &[m.clone()]).unwrap().0, "managed");
+        put(&cwd.join(".mcp.json"), &with_server("Ember-Channels"));
+        assert_eq!(taken(&cwd, None, None, &[]).unwrap().0, "project .mcp.json");
+    }
+
+    #[test]
+    fn fr_t12_no_collision_when_files_are_absent_or_name_other_things() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (home, cfg) = (d.path().join("home"), d.path().join("cfg"));
+        let m = d.path().join("none.json");
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m.clone()]), None, "absent files");
+        put(&cwd.join(".mcp.json"), &with_server("github"));
+        put(&home.join(".claude.json"), &with_server("ember-channels-2"));
+        let other = d.path().join("elsewhere");
+        let okey = other.to_str().unwrap();
+        put(&cfg.join(".claude.json"), &format!(r#"{{"projects":{{"{okey}":{}}}}}"#, with_server("ember-channels")));
+        assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[m]), None);
+    }
+
+    #[test]
+    fn fr_t12_collision_check_fails_closed() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Invalid JSON.
+        put(&cwd.join(".mcp.json"), "{ not json");
+        assert_eq!(taken(&cwd, None, None, &[]), Some(("project .mcp.json", "could not read project .mcp.json")));
+        // Oversized.
+        std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
+        let home = d.path().join("home");
+        let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_CONFIG_BYTES as usize));
+        put(&home.join(".claude.json"), &big);
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), Some(("user config", "could not read user config")));
+        // Not a regular file (a directory).
+        std::fs::remove_file(home.join(".claude.json")).unwrap();
+        std::fs::create_dir_all(home.join(".claude.json")).unwrap();
+        assert_eq!(taken(&cwd, Some(&home), None, &[]).unwrap().1, "could not read user config");
+        // Managed file with invalid JSON.
+        let m = d.path().join("m.json");
+        put(&m, "[");
+        assert_eq!(taken(&cwd, None, None, &[m]), Some(("managed", "could not read managed")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fr_t12_collision_check_fails_closed_on_an_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads anything
+        }
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        put(&cwd.join(".mcp.json"), "{}");
+        std::fs::set_permissions(cwd.join(".mcp.json"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let r = taken(&cwd, None, None, &[]);
+        std::fs::set_permissions(cwd.join(".mcp.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(r, Some(("project .mcp.json", "could not read project .mcp.json")));
+    }
+
+    #[test]
+    fn fr_t12_collision_reasons_are_static_and_hold_no_file_contents() {
+        let d = tempfile::tempdir().unwrap();
+        let cwd = d.path().join("proj");
+        put(&cwd.join(".mcp.json"), "SECRET-CONTENT-123 {");
+        let (kind, reason) = taken(&cwd, None, None, &[]).unwrap();
+        for text in [kind, reason] {
+            assert!(!text.contains("SECRET"), "{text}");
+        }
+        let all = [KIND_PROJECT, KIND_USER, KIND_LOCAL, KIND_MANAGED].map(reason_unreadable);
+        assert_eq!(
+            all,
+            ["could not read project .mcp.json", "could not read user config", "could not read local config", "could not read managed"]
+        );
+    }
+
+    fn set_sources(a: &A2a, home: &Path) {
+        *a.claude_sources.lock().unwrap() = ClaudeConfigSources { home: Some(home.to_path_buf()), ..Default::default() };
+    }
+
+    #[test]
+    fn fr_t12_collision_hook_skips_registers_nothing_and_sets_the_fallback() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let cwd = d.path().join("proj");
+        put(&cwd.join(".mcp.json"), &with_server("ember-channels"));
+        let mut req = request(&a, &r);
+        req.cwd = cwd.clone();
+        req.instructions = Some(a.instructions_for(&r));
+        assert!(req.instructions.as_ref().unwrap().contains(CHANNEL_POST_TOOL));
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty());
+        assert!(a.channel_fallback.lock().unwrap().contains(&r.id));
+        assert!(!a.channel_reply_by_tool(&r));
+        // The prompt for this very start names the command, not the tool.
+        let text = req.instructions.unwrap();
+        assert!(!text.contains(CHANNEL_POST_TOOL), "{text}");
+        assert!(text.contains("run `ember-a2a channel post <channel-id>"));
+        assert_eq!(text, a.instructions_for(&r));
+        // A person mention footer is the CLI text too.
+        let m = a.render(&r, &[mention("m1", "chan1", None)]).unwrap();
+        assert!(m.contains("ember-a2a channel post chan1") && !m.contains(CHANNEL_POST_TOOL), "{m}");
+        // ONE notice, even when the check runs again.
+        let mut again = request(&a, &r);
+        again.cwd = cwd;
+        a.channel_tool_config(&r, &mut again);
+        let n = a.sessions.store().events_after(&r.id, 0).unwrap().iter()
+            .filter(|e| matches!(&e.event, AgentEvent::Notice { message } if message == CHANNEL_FALLBACK_NOTICE))
+            .count();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn fr_t12_collision_notice_text() {
+        assert_eq!(
+            CHANNEL_FALLBACK_NOTICE,
+            "The channel tool could not be registered because a MCP server named ember-channels is already configured; replies use the ember-a2a command."
+        );
+    }
+
+    #[test]
+    fn fr_t12_collision_hook_skips_for_a_user_config_found_through_sources() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        set_sources(&a, d.path());
+        put(&d.path().join(".claude.json"), &with_server("ember-channels"));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn fr_t12_a_later_start_without_the_collision_registers_again_and_clears_the_set() {
+        let d = tempfile::tempdir().unwrap();
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let cwd = d.path().join("proj");
+        put(&cwd.join(".mcp.json"), &with_server("ember-channels"));
+        let mut req = request(&a, &r);
+        req.cwd = cwd.clone();
+        a.channel_tool_config(&r, &mut req);
+        assert!(a.channel_fallback.lock().unwrap().contains(&r.id));
+        std::fs::remove_file(cwd.join(".mcp.json")).unwrap();
+        let mut req = request(&a, &r);
+        req.cwd = cwd;
+        req.instructions = Some(a.instructions_for(&r));
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1);
+        assert_eq!(req.allowed_tools, vec![CHANNEL_POST_TOOL.to_string()]);
+        assert!(a.channel_fallback.lock().unwrap().is_empty());
+        assert!(a.channel_reply_by_tool(&r));
+        assert!(req.instructions.unwrap().contains(CHANNEL_POST_TOOL), "prompt names the tool again");
     }
 }

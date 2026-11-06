@@ -22,7 +22,7 @@ pub use crate::ui::project::{
     agent_options, build_patch, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
-    effective_style, follow_rename, override_harnesses, override_label, override_options, CloseAction, SettingsGuard, DISCARD_QUESTION,
+    effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
     ProjectBox, SettingsDraft, SettingsPart, MAX_TILES, NOT_YET, SETTINGS_SAVE_AVAILABLE, SOON,
 };
 use super::characters::{CharState, Character, StylePicker};
@@ -1081,6 +1081,7 @@ fn save_settings(
     let ui = shared_ui().clone();
     let style_changed = patch.character_style.is_some();
     let renamed = patch.name.clone();
+    let sent = patch.clone();
     let saved_as = renamed.clone().unwrap_or_else(|| project.clone());
     let old = project.clone();
     run_shared(
@@ -1100,7 +1101,7 @@ fn save_settings(
                     }
                     closed.set(None);
                 }
-                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code()).to_string())),
+                Err(e) => failure.set(Some(patch_error_message(e.status(), e.code(), &sent).to_string())),
             }
         },
     );
@@ -1290,18 +1291,12 @@ fn SettingsSheet(
                             let opts = override_options(kind, &accounts);
                             let labels: Vec<String> = opts.iter().map(|(_, l)| l.clone()).collect();
                             let at = d.overrides.get(kind).and_then(|id| opts.iter().position(|(i, _)| i == id)).unwrap_or(0);
-                            let shown = override_label(&server, &d, kind, &accounts);
+                            let shown = override_label(&server, &d, kind, &accounts, AccountsState::of(&accounts));
                             FieldRow(name, || {
-                                let (dr, opts) = (draft.clone(), opts.clone());
+                                let (dr, opts, sv) = (draft.clone(), opts.clone(), server.clone());
                                 Select(&shown, &labels, at, 260.0, move |i| {
                                     if let Some((id, _)) = opts.get(i) {
-                                        dr.update(|s| {
-                                            if id.is_empty() {
-                                                s.overrides.remove(kind);
-                                            } else {
-                                                s.overrides.insert(kind.to_string(), id.clone());
-                                            }
-                                        });
+                                        dr.update(|s| pick_override(&sv, s, kind, id));
                                     }
                                 });
                             });

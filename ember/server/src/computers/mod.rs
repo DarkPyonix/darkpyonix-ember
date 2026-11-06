@@ -180,6 +180,10 @@ impl From<rusqlite::Error> for ComputerError {
 // ---------------------------------------------------------------------------------------------
 // Registry (SQLite)
 
+/// The fixed refusal text for a second computer with an already registered peer id (names no
+/// other computer).
+pub const DUPLICATE_PEER: &str = "a computer with this peer id is already registered";
+
 /// Computers and each session's current computer, in the main [`Store`]'s database (tables
 /// from store migration 3, [`schema::MIGRATION`]).
 pub struct Registry {
@@ -222,7 +226,23 @@ impl Registry {
             created_at: now_ms(),
         };
         let peer_json = c.peer.as_ref().map(serde_json::to_string).transpose().map_err(anyhow::Error::from)?;
-        let res = self.store.conn().execute(
+        // One hold of the connection for the duplicate check and the INSERT, so two concurrent
+        // registrations of one peer id cannot both pass the check.
+        let conn = self.store.conn();
+        if let Some(new_peer) = c.peer.as_ref().map(|p| p.peer) {
+            let mut stmt = conn.prepare("SELECT peer_json FROM computers WHERE peer_json IS NOT NULL")?;
+            let stored = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            // Only the PeerId is compared, never the address list. A row whose stored identity
+            // no longer parses carries no usable peer id (see `row_to_computer`) and is skipped.
+            let dup = stored
+                .iter()
+                .filter_map(|j| serde_json::from_str::<PeerAddr>(j).ok())
+                .any(|p| p.peer == new_peer);
+            if dup {
+                return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
+            }
+        }
+        let res = conn.execute(
             "INSERT INTO computers (id, name, url, token, created_at, peer_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![c.id, c.name, c.url, c.token, c.created_at, peer_json],
@@ -1434,6 +1454,70 @@ mod tests {
         assert_eq!(view["peer"], peer.to_string());
         // Without a transport, a peer computer cannot be reached.
         assert!(node_client(&back, None).is_err());
+    }
+
+    #[test]
+    fn fr_c2_insert_peer_refuses_a_second_computer_with_the_same_peer_id() {
+        let r = Registry::open_in_memory().unwrap();
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let first = r.insert_peer("one", &PeerAddr::new(id), "t1").unwrap();
+        match r.insert_peer("two", &PeerAddr::new(id), "t2") {
+            Err(ComputerError::BadRequest(m)) => {
+                assert_eq!(m, "a computer with this peer id is already registered");
+                assert!(!m.contains("one"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The first row is unchanged and nothing was added.
+        assert_eq!(r.list().unwrap().len(), 1);
+        assert_eq!(r.get(&first.id).unwrap().unwrap(), first);
+    }
+
+    #[test]
+    fn fr_c2_insert_peer_accepts_a_different_peer_id() {
+        let r = Registry::open_in_memory().unwrap();
+        let a = ember_transport::SecretKey::generate().peer_id();
+        let b = ember_transport::SecretKey::generate().peer_id();
+        r.insert_peer("one", &PeerAddr::new(a), "t1").unwrap();
+        r.insert_peer("two", &PeerAddr::new(b), "t2").unwrap();
+        // A URL computer has no peer id and never collides.
+        r.insert("three", "http://10.0.0.3:8741", "t3").unwrap();
+        assert_eq!(r.list().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn fr_c2_the_same_peer_id_with_other_addresses_is_still_a_duplicate() {
+        let r = Registry::open_in_memory().unwrap();
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let with_addrs = PeerAddr {
+            peer: id,
+            relays: vec!["https://relay.example".into()],
+            direct: vec!["192.0.2.1:7777".parse().unwrap()],
+        };
+        r.insert_peer("one", &PeerAddr::new(id), "t1").unwrap();
+        assert!(matches!(r.insert_peer("two", &with_addrs, "t2"), Err(ComputerError::BadRequest(_))));
+        // And the other way round.
+        let r = Registry::open_in_memory().unwrap();
+        r.insert_peer("one", &with_addrs, "t1").unwrap();
+        assert!(matches!(r.insert_peer("two", &PeerAddr::new(id), "t2"), Err(ComputerError::BadRequest(_))));
+        assert_eq!(r.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fr_c2_concurrent_registrations_of_one_peer_id_have_one_winner() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let wins: usize = (0..8)
+            .map(|i| {
+                let r = r.clone();
+                std::thread::spawn(move || r.insert_peer(&format!("c{i}"), &PeerAddr::new(id), "t").is_ok())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap() as usize)
+            .sum();
+        assert_eq!(wins, 1);
+        assert_eq!(r.list().unwrap().len(), 1);
     }
 
     #[test]

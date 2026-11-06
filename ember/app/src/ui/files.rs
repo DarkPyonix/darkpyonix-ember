@@ -36,8 +36,15 @@ pub const PICK_RECEIVER: &str = "받는 곳을 선택합니다";
 pub const PICK_FILES: &str = "보낼 파일을 선택합니다";
 pub const LOCK_LINE: &str = "연결된 장비 사이에서 암호화되어 전송됩니다";
 
-/// TODO(dioxus-compose): flip when the toolkit has a file picker (and drag and drop), then fill
-/// [`SendDraft::files`] from it.
+/// Why the "파일 고르기" button is disabled.
+pub const FILE_PICK_REASON: &str = "파일 선택은 준비 중입니다 (파일 대화상자 API 대기)";
+/// Shown when the chosen receiver is an agent: the service sends to a device id only.
+pub const AGENT_SEND_UNSUPPORTED: &str = "agent로 보내기는 아직 지원되지 않습니다";
+/// Shown beside an offline device chip.
+pub const OFFLINE_TAG: &str = "오프라인";
+
+/// TODO(compose-rust#483): flip when the toolkit has a file dialog API (requested for v0.0.7),
+/// then fill [`SendDraft::files`] from it. Dropped files stay with compose-rust#166.
 pub const FILE_PICKER_AVAILABLE: bool = false;
 
 // ---------------------------------------------------------------------------------------------
@@ -771,8 +778,28 @@ pub fn send_state(
             }
         }
     }
-    let can = blocker.is_none() && matches!(d.target, Some(SendTarget::Device(_)));
+    if blocker.is_none() && !matches!(d.target, Some(SendTarget::Device(_))) {
+        blocker = Some(AGENT_SEND_UNSUPPORTED);
+    }
+    let can = blocker.is_none();
     (blocker, can)
+}
+
+/// The text of a receiver chip: the name, cut to fit, plus the offline tag for an offline device
+/// so the state is read as text and not only as a dimmed look. `fit` cuts a name to a pixel width.
+pub fn chip_label(
+    name: &str,
+    offline: bool,
+    max_px: f32,
+    fit: impl Fn(&str, f32) -> String,
+) -> String {
+    if offline {
+        let tag = format!(" {OFFLINE_TAG}");
+        let room = (max_px - 3.0 * tag.chars().count() as f32 * 4.0).max(24.0);
+        format!("{}{tag}", fit(name, room))
+    } else {
+        fit(name, max_px)
+    }
 }
 
 /// The widest a chip's text may be so the whole chip stays within the mockup's 200 px
@@ -1250,7 +1277,7 @@ mod tests {
         assert_eq!(send_state(&d, &devs, true, true), (Some(TARGET_OFFLINE), false));
         // An agent target has files but the service sends to a device id only.
         d.target = Some(SendTarget::Agent("s1".into()));
-        assert_eq!(send_state(&d, &devs, true, true), (None, false));
+        assert_eq!(send_state(&d, &devs, true, true), (Some(AGENT_SEND_UNSUPPORTED), false));
         // Without a picker the draft never has files, so it never sends.
         let d = SendDraft { target: Some(SendTarget::Device("on".into())), files: vec![] };
         assert_eq!(send_state(&d, &devs, false, true), (Some(FILE_PICK_UNAVAILABLE), false));
@@ -1274,6 +1301,42 @@ mod tests {
         assert_eq!(chip_text_max(16.0), 152.0);
         assert_eq!(chip_text_max(22.0), 146.0);
         assert_eq!(12.0 + 16.0 + 8.0 + chip_text_max(16.0) + 12.0, 200.0);
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_a_disabled_send_always_has_a_reason() {
+        let devs = vec![dev("on", "a", Presence::Online), dev("off", "b", Presence::Offline)];
+        let targets = [
+            None,
+            Some(SendTarget::Device("on".into())),
+            Some(SendTarget::Device("off".into())),
+            Some(SendTarget::Device("zz".into())),
+            Some(SendTarget::Agent("s1".into())),
+        ];
+        for target in targets {
+            for files in [vec![], vec!["/a".to_string()]] {
+                for picker in [false, true] {
+                    for ready in [false, true] {
+                        let d = SendDraft { target: target.clone(), files: files.clone() };
+                        let (reason, can) = send_state(&d, &devs, picker, ready);
+                        assert_eq!(reason.is_none(), can, "{d:?} {picker} {ready}");
+                        if let Some(r) = reason {
+                            assert!(r.ends_with("니다") && !r.contains('\u{2014}'), "{r}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_an_offline_chip_says_so_in_text() {
+        let cut = |t: &str, px: f32| if t.chars().count() as f32 * 7.0 > px { format!("{}...", &t[..1]) } else { t.to_string() };
+        assert_eq!(chip_label("PC", false, 100.0, cut), "PC");
+        assert_eq!(chip_label("PC", true, 150.0, cut), "PC 오프라인");
+        assert!(chip_label("긴이름", true, 150.0, |t, _| t.to_string()).ends_with(OFFLINE_TAG));
     }
 
     #[test]

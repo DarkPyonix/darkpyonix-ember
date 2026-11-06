@@ -89,10 +89,11 @@ const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
 const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
-const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
-use crate::ui::session::timeline_summary;
+use crate::ui::session::{
+    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_menu_lines, web_pages_from, web_tap,
+};
 
 const POPUP_W: f32 = 280.0;
 
@@ -4226,6 +4227,7 @@ pub fn SessionScreen(focus: Option<String>) {
     let project_menu = remember(|| mutable_state_of(false));
     let more_menu = remember(|| mutable_state_of(false));
     let web_menu = remember(|| mutable_state_of(false));
+    let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
 
     let show_archived = ui.show_archived.get();
     let boxes = {
@@ -4273,6 +4275,48 @@ pub fn SessionScreen(focus: Option<String>) {
     let hide_view_lbl = window.width_dp < 1280.0 && !chips_below;
     let show_btn_lbl = window.width_dp >= 1400.0;
     let show_web_lbl = window.width_dp >= 1400.0;
+
+    // Opening the 웹 페이지 list reads the listening ports of the session's computer (FR-P7).
+    let open_web_menu = {
+        let web_menu = web_menu.clone();
+        let web_pages = web_pages.clone();
+        let sid = target.clone().or_else(|| members.first().map(|m| m.session_id.clone()));
+        move || {
+            web_menu.set(true);
+            web_pages.set(WebPagesLoad::Loading);
+            let done = web_pages.clone();
+            if services().demo.is_some() {
+                let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
+                done.set(web_pages_from(Ok(crate::demo::ports()), &host));
+                return;
+            }
+            let Some(sid) = sid.clone() else {
+                done.set(WebPagesLoad::Failed(NO_SESSION.to_string()));
+                return;
+            };
+            run_shared(
+                async move {
+                    let c = services().server.session_computer(&sid).await.map_err(|e| e.to_string())?;
+                    let host = computer_host(c.computer.local, "", &services().config.server_url);
+                    let ports = services().client.api().computer_ports(&c.computer.id).await.map_err(|e| e.to_string())?;
+                    Ok::<_, String>((ports, host))
+                },
+                move |r: Result<(ember_client::api::Ports, ComputerHost), String>| match r {
+                    Ok((ports, host)) => done.set(web_pages_from(Ok(ports), &host)),
+                    Err(e) => done.set(web_pages_from(Err(e), &ComputerHost::default())),
+                },
+            );
+        }
+    };
+
+    // `EMBER_CR_SESSION_WEB=1` opens the 웹 페이지 list at start, for captures without clicks.
+    if std::env::var("EMBER_CR_SESSION_WEB").as_deref() == Ok("1") {
+        let open = open_web_menu.clone();
+        launched_effect((), move || {
+            let open = open.clone();
+            async move { open() }
+        });
+    }
 
     let set_view = {
         let view = view.clone();
@@ -4521,13 +4565,13 @@ pub fn SessionScreen(focus: Option<String>) {
                                                 u.set_menu(NavMenu::VersionControl);
                                             },
                                         );
-                                        let wm = web_menu.clone();
+                                        let wm = open_web_menu.clone();
                                         ToolbarBtn(
                                             ICON_GLOBE_SVG,
                                             "웹 페이지",
                                             show_web_lbl,
                                             true,
-                                            move || wm.set(true),
+                                            move || wm(),
                                         );
                                     } else {
                                         let mm = more_menu.clone();
@@ -4661,10 +4705,8 @@ pub fn SessionScreen(focus: Option<String>) {
 
             // Web pages OptionSheet
             {
-                let web_opts = vec![
-                    "http://192.168.0.10:3000 (Ember 웹 미리보기)".to_string(),
-                    "http://192.168.0.10:6006 (컴포넌트 카탈로그)".to_string(),
-                ];
+                let load_now = web_pages.get();
+                let web_opts = web_menu_lines(&load_now);
                 let wm_d = web_menu.clone();
                 OptionSheet(
                     web_menu.get(),
@@ -4672,7 +4714,15 @@ pub fn SessionScreen(focus: Option<String>) {
                     None,
                     320.0,
                     move || wm_d.set(false),
-                    move |_| notice::post(WEB_SOON),
+                    move |idx| match web_tap(&load_now, idx) {
+                        WebTap::Open(url) => {
+                            if crate::ide::open_external(&url).is_err() {
+                                notice::post("브라우저를 열지 못했습니다");
+                            }
+                        }
+                        WebTap::Say(text) => notice::post(text),
+                        WebTap::Nothing => {}
+                    },
                 );
             }
 
@@ -4709,6 +4759,7 @@ pub fn SessionScreen(focus: Option<String>) {
                 let nm_m = new_member_open.clone();
                 let ui_m = ui.clone();
                 let cur_m = current.clone();
+                let open_web = open_web_menu.clone();
                 OptionSheet(
                     more_menu.get(),
                     &more_opts,
@@ -4721,7 +4772,7 @@ pub fn SessionScreen(focus: Option<String>) {
                             ui_m.set_selected_project(Some(cur_m.clone()));
                             ui_m.set_menu(NavMenu::VersionControl);
                         }
-                        2 => notice::post(WEB_SOON),
+                        2 => open_web(),
                         _ => {}
                     },
                 );

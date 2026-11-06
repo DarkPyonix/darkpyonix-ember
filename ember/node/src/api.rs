@@ -23,6 +23,7 @@
 //! | POST | `/git/branches` | [`GitRepoRequest`] → [`git_branches::GitBranchesResponse`] (FR-G9: local branches with upstream ahead/behind, last commit, default and worktree) |
 //! | POST | `/git/github` | [`git_github::GitGithubRequest`] → [`git_github::GitGithubResponse`] (FR-G13, through `gh`; each failed call nulls its own fields; 409 when gh is missing) |
 //! | POST | `/git/prs` | [`git_prs::GitPrsRequest`] → [`git_prs::GitPrsResponse`] (FR-G8, through `gh pr list`; 409 when gh is missing, not logged in or the repository has no GitHub remote) |
+//! | POST | `/git/pr`, `/git/pr/review`, `/git/pr/merge`, `/git/pr/create` | [`git_prs::GitPrRef`], [`git_prs::GitPrReviewRequest`], [`git_prs::GitPrMergeRequest`], [`git_prs::GitPrCreateRequest`] (FR-G10 to FR-G12, through `gh`; changing calls need `confirm: true`, merge answers 409 with the gate reason when closed) |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
 //! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
 //! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
@@ -168,6 +169,10 @@ pub fn router(node: Node) -> Router {
         .route("/git/branches", post(git_branches_handler))
         .route("/git/prs", post(git_prs_handler))
         .route("/git/github", post(git_github_handler))
+        .route("/git/pr", post(git_pr_handler))
+        .route("/git/pr/review", post(git_pr_review_handler))
+        .route("/git/pr/merge", post(git_pr_merge_handler))
+        .route("/git/pr/create", post(git_pr_create_handler))
         // End FR-G5.
         .route("/git/status", post(git_status))
         .route("/git/diff", post(git_diff))
@@ -422,6 +427,20 @@ async fn git_github_handler(State(n): State<Node>, Json(r): Json<git_github::Git
     Ok(Json(git_github::summarize(&n.0.policy, &r).await?))
 }
 // End FR-G13.
+// FR-G10 to FR-G12: pull request detail, review, merge and create (run `gh`, hold no lock).
+async fn git_pr_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrRef>) -> ApiResult<git_prs::GitPrDetail> {
+    Ok(Json(git_prs::detail(&n.0.policy, &r).await?))
+}
+async fn git_pr_review_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrReviewRequest>) -> ApiResult<git_prs::GitPrReviewResponse> {
+    Ok(Json(git_prs::review(&n.0.policy, &r).await?))
+}
+async fn git_pr_merge_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrMergeRequest>) -> ApiResult<git_prs::GitPrMergeResponse> {
+    Ok(Json(git_prs::merge(&n.0.policy, &r).await?))
+}
+async fn git_pr_create_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrCreateRequest>) -> ApiResult<git_prs::GitPrCreateResponse> {
+    Ok(Json(git_prs::create(&n.0.policy, &r).await?))
+}
+// End FR-G10 to FR-G12.
 
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))

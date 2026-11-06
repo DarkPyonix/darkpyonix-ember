@@ -636,7 +636,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                 AppButton(
                                     "IDE 열기",
                                     Some(IconRole::Forward),
-                                    ButtonKind::Primary,
+                                    ButtonKind::Default,
                                     true,
                                     true,
                                     false,
@@ -1542,7 +1542,8 @@ pub fn TranscriptRow(
                     cu::Box()
                         .modifier(Modifier::new().weight(1.0))
                         .content(|| {
-                            cu::Divider();
+                            // Token line: the toolkit divider is white in the dark scheme (#510).
+                            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(ember_theme().palette.line)));
                         });
                     Label(text, Fs::Xs, Weight::Regular, Some(paint(col)), Some(1));
                     if outcome == TurnOutcome::Completed {
@@ -1581,7 +1582,8 @@ pub fn TranscriptRow(
                     cu::Box()
                         .modifier(Modifier::new().weight(1.0))
                         .content(|| {
-                            cu::Divider();
+                            // Token line: the toolkit divider is white in the dark scheme (#510).
+                            cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(ember_theme().palette.line)));
                         });
                 });
         }

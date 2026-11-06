@@ -50,6 +50,21 @@ async fn handle(
             "checks": {"passed": 3, "failed": 1, "pending": 0},
             "merge": {"can_merge": false, "reason": "CI 체크가 실패했습니다 (실패 1개)."},
             "url": "https://github.com/o/r/pull/7"}]}))),
+        "pr" => (StatusCode::OK, Json(json!({
+            "number": 7, "title": "Add the pull request list", "state": "open", "draft": false, "author": "octo",
+            "head": "feat/prs", "base": "develop", "updated_at": "2026-11-05T10:00:00Z", "review": "approved",
+            "checks": {"passed": 1, "failed": 1, "pending": 1},
+            "merge": {"can_merge": false, "reason": "CI 체크가 실패했습니다 (실패 1개)."},
+            "url": "https://github.com/o/r/pull/7", "body": "text",
+            "check_runs": [{"name":"build", "state":"passed", "detail_url":"https://ci/build"}, {"name":"e2e", "state":"pending"}],
+            "reviews": [{"author":"a", "state":"changes_requested", "body":"fix", "submitted_at":"2026-11-05T09:00:00Z"}],
+            "comments": [{"author":"b", "body":"hi", "created_at":"2026-11-05T09:30:00Z"}],
+            "requested_reviewers": ["rev1"], "additions": 10, "deletions": 3, "changed_files": 2,
+            "head_sha": "0123456789abcdef0123456789abcdef01234567"}))),
+        "pr/review" => (StatusCode::OK, Json(json!({"number": body["number"], "action": body["action"]}))),
+        "pr/merge" if body["number"] == 9 => (StatusCode::CONFLICT, Json(json!({"error": "CI 체크가 실패했습니다 (실패 1개). 통과해야 병합할 수 있습니다."}))),
+        "pr/merge" => (StatusCode::OK, Json(json!({"number": body["number"], "merged": true, "method": body["method"]}))),
+        "pr/create" => (StatusCode::OK, Json(json!({"number": 42, "url": "https://github.com/o/r/pull/42"}))),
         "stash/list" => (StatusCode::OK, Json(json!([{"index":0, "message":"work", "branch":"main", "time":"2026-01-01"}]))),
         "conflict" => (StatusCode::OK, Json(json!({"blocks":[{"kind":"common", "text":"before"}, {"kind":"conflict", "ours":"a", "theirs":"b", "ours_label":"HEAD", "theirs_label":"other"}]}))),
         "stash/push" | "stash/apply" | "stash/pop" | "stash/drop" | "resolve" => (StatusCode::NO_CONTENT, Json(Value::Null)),
@@ -233,4 +248,45 @@ async fn fr_g13_github_summary_decodes_null_numbers_and_defaults() {
     assert_eq!(g.totals.review_requested, Some(3));
     assert_eq!(g.totals.ci_pass_percent, None);
     assert_eq!(g.checked_at, 1760000000);
+#[tokio::test]
+async fn fr_g10_pr_detail_call_decodes_the_nodes_shape() {
+    use ember_client::api::{GitPrCheckState, GitPrReviewState};
+    let (api, seen) = start().await;
+    let d = api.git_pr("ember", 7).await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("pr".into(), json!({"number":7})));
+    assert_eq!((d.pr.number, d.pr.head.as_str(), d.body.as_str()), (7, "feat/prs", "text"));
+    assert_eq!((d.pr.checks.passed, d.pr.checks.failed, d.pr.checks.pending), (1, 1, 1));
+    assert_eq!(d.check_runs[0].state, GitPrCheckState::Passed);
+    assert_eq!(d.check_runs[0].detail_url.as_deref(), Some("https://ci/build"));
+    assert_eq!((d.check_runs[1].state, d.check_runs[1].detail_url.clone()), (GitPrCheckState::Pending, None));
+    assert_eq!((d.reviews[0].state, d.reviews[0].author.as_str()), (GitPrReviewState::ChangesRequested, "a"));
+    assert_eq!(d.comments[0].body, "hi");
+    assert_eq!(d.requested_reviewers, vec!["rev1"]);
+    assert_eq!((d.additions, d.deletions, d.changed_files), (10, 3, 2));
+    assert_eq!(d.head_sha, "0123456789abcdef0123456789abcdef01234567");
+}
+
+#[tokio::test]
+async fn fr_g11_pr_review_and_merge_calls_send_confirm_and_carry_the_gate_reason() {
+    use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
+    let (api, seen) = start().await;
+    let r = api.git_pr_review("ember", 7, GitPrReviewAction::RequestChanges, Some("fix")).await.unwrap();
+    assert_eq!(r.action, GitPrReviewAction::RequestChanges);
+    assert_eq!((last(&seen).1, last(&seen).2), ("pr/review".into(), json!({"number":7, "action":"request_changes", "body":"fix", "confirm":true})));
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let m = api.git_pr_merge("ember", 7, GitPrMergeMethod::Squash, true, sha).await.unwrap();
+    assert!(m.merged && m.method == GitPrMergeMethod::Squash);
+    assert_eq!(last(&seen).2, json!({"number":7, "method":"squash", "delete_branch":true, "head_sha":sha, "confirm":true}));
+    api.git_pr_merge("ember", 7, GitPrMergeMethod::Merge, false, sha).await.unwrap();
+    assert_eq!(last(&seen).2, json!({"number":7, "method":"merge", "delete_branch":false, "head_sha":sha, "confirm":true}));
+    let err = api.git_pr_merge("ember", 9, GitPrMergeMethod::Merge, false, sha).await.unwrap_err();
+    assert!(err.to_string().contains("CI"), "{err}");
+}
+
+#[tokio::test]
+async fn fr_g12_pr_create_call_sends_the_fields_and_decodes_number_and_url() {
+    let (api, seen) = start().await;
+    let c = api.git_pr_create("ember", "Add x", Some("why"), Some("develop"), Some("feat/x"), true).await.unwrap();
+    assert_eq!((c.number, c.url.as_str()), (42, "https://github.com/o/r/pull/42"));
+    assert_eq!((last(&seen).1, last(&seen).2), ("pr/create".into(), json!({"title":"Add x", "body":"why", "base":"develop", "head":"feat/x", "draft":true, "confirm":true})));
 }

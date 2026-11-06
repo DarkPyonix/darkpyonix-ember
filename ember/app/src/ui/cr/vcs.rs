@@ -35,7 +35,7 @@ use crate::ui::shell::NavMenu;
 use crate::ui::Route;
 
 use super::components::{
-    AppButton, ButtonKind, EmberCard, Label, MenuRow, OptionSheet,
+    AppButton, ButtonKind, EmberCard, EmberField, FieldOptions, Label, MenuRow, OptionSheet,
     PickChip, Pill, PillTone, Txt,
 };
 use super::notice;
@@ -677,9 +677,13 @@ fn RepoBarWithActions(
                     }
                     let branch_value = new_branch.clone();
                     key(branch_generation.get(), || {
-                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
-                            .text(new_branch.get()).placeholder("새 브랜치 이름")
-                            .on_value_change(move |v| branch_value.set(v));
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            text: Some(new_branch.get()),
+                            placeholder: "새 브랜치 이름".to_string(),
+                            on_value_change: Some(Box::new(move |v| branch_value.set(v))),
+                            ..Default::default()
+                        });
                     });
                     let create_actions = actions.clone();
                     let create_value = new_branch.clone();
@@ -1216,23 +1220,33 @@ fn CommitBox(
             let s_state = sum_state.clone();
             let s_armed = armed.clone();
             key((field_generation.get(), 0_u8), || {
-                cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
-                    .text(sum_state.get()).placeholder("요약 (필수) 예: Feat: Wire shim")
-                    .on_value_change(move |v| {
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    text: Some(sum_state.get()),
+                    placeholder: "요약 (필수) 예: Feat: Wire shim".to_string(),
+                    on_value_change: Some(Box::new(move |v| {
                         s_armed.set(0);
                         s_state.set(v);
-                    });
+                    })),
+                    ..Default::default()
+                });
             });
 
             let b_state = body_state.clone();
             let b_armed = armed.clone();
             key((field_generation.get(), 1_u8), || {
-                cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
-                    .text(body_state.get()).placeholder("설명 (선택)").multiline(true)
-                    .on_value_change(move |v| {
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    height: Some(64.0),
+                    text: Some(body_state.get()),
+                    placeholder: "설명 (선택)".to_string(),
+                    multiline: true,
+                    on_value_change: Some(Box::new(move |v| {
                         b_armed.set(0);
                         b_state.set(v);
-                    });
+                    })),
+                    ..Default::default()
+                });
             });
 
             // Amend checkbox
@@ -2193,9 +2207,13 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
                     Label("새 브랜치", Fs::Md, Weight::Semibold, None, Some(1));
                     let value = name.clone();
                     key(generation.get(), || {
-                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
-                            .text(name.get()).placeholder("새 브랜치 이름")
-                            .on_value_change(move |v| value.set(v));
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            text: Some(name.get()),
+                            placeholder: "새 브랜치 이름".to_string(),
+                            on_value_change: Some(Box::new(move |v| value.set(v))),
+                            ..Default::default()
+                        });
                     });
                     let open = base_menu.clone();
                     AppButton(&base_text, None, ButtonKind::Default, false, !names.is_empty(), true, move || open.set(true));
@@ -2553,9 +2571,13 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                     Label("스태시 만들기", Fs::Md, Weight::Semibold, None, Some(1));
                     let value = message.clone();
                     key(generation.get(), || {
-                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
-                            .text(message.get()).placeholder("메시지 (선택)")
-                            .on_value_change(move |v| value.set(v));
+                        EmberField(FieldOptions {
+                            fill_max_width: true,
+                            text: Some(message.get()),
+                            placeholder: "메시지 (선택)".to_string(),
+                            on_value_change: Some(Box::new(move |v| value.set(v))),
+                            ..Default::default()
+                        });
                     });
                     cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                         let flag = untracked.clone();
@@ -2665,7 +2687,7 @@ fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed:
 /// A small pill whose visible text is `text` and whose accessible name is `access`.
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let s = super::components::button_style(kind, true, p);
+    let s = super::components::button_style_for(kind, true, enabled, p);
     let width = (super::home::text_px(text, s.fs.size()) + 28.0).max(64.0);
     cu::Box()
         .modifier(

@@ -180,6 +180,18 @@ impl From<rusqlite::Error> for ComputerError {
 // ---------------------------------------------------------------------------------------------
 // Registry (SQLite)
 
+/// The fixed refusal text for a second computer with an already registered peer id (names no
+/// other computer).
+pub const DUPLICATE_PEER: &str = "a computer with this peer id is already registered";
+
+/// Test hook (SPEC FR-C2c, mutation M8): called by `Registry::insert_with` with the peer id
+/// being inserted, after the duplicate check and before the INSERT, while the store connection
+/// is still held. Only the test `fr_c2_the_duplicate_check_and_the_insert_share_one_hold` sets
+/// it, under `HOOK_TEST_LOCK`; it is `None` otherwise and then does nothing.
+#[cfg(test)]
+pub(crate) static AFTER_DUP_CHECK: std::sync::Mutex<Option<Arc<dyn Fn(&ember_transport::PeerId) + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
 /// Computers and each session's current computer, in the main [`Store`]'s database (tables
 /// from store migration 3, [`schema::MIGRATION`]).
 pub struct Registry {
@@ -222,7 +234,31 @@ impl Registry {
             created_at: now_ms(),
         };
         let peer_json = c.peer.as_ref().map(serde_json::to_string).transpose().map_err(anyhow::Error::from)?;
-        let res = self.store.conn().execute(
+        // One hold of the connection for the duplicate check and the INSERT, so two concurrent
+        // registrations of one peer id cannot both pass the check.
+        let conn = self.store.conn();
+        if let Some(new_peer) = c.peer.as_ref().map(|p| p.peer) {
+            let mut stmt = conn.prepare("SELECT peer_json FROM computers WHERE peer_json IS NOT NULL")?;
+            let stored = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            // Only the PeerId is compared, never the address list. A row whose stored identity
+            // no longer parses carries no usable peer id (see `row_to_computer`) and is skipped.
+            let dup = stored
+                .iter()
+                .filter_map(|j| serde_json::from_str::<PeerAddr>(j).ok())
+                .any(|p| p.peer == new_peer);
+            if dup {
+                return Err(ComputerError::BadRequest(DUPLICATE_PEER.into()));
+            }
+        }
+        #[cfg(test)]
+        if let Some(p) = c.peer.as_ref() {
+            // Clone the hook out so its own mutex is not held while it runs.
+            let hook = AFTER_DUP_CHECK.lock().unwrap().clone();
+            if let Some(h) = hook {
+                h(&p.peer);
+            }
+        }
+        let res = conn.execute(
             "INSERT INTO computers (id, name, url, token, created_at, peer_json)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![c.id, c.name, c.url, c.token, c.created_at, peer_json],
@@ -1434,6 +1470,142 @@ mod tests {
         assert_eq!(view["peer"], peer.to_string());
         // Without a transport, a peer computer cannot be reached.
         assert!(node_client(&back, None).is_err());
+    }
+
+    #[test]
+    fn fr_c2_insert_peer_refuses_a_second_computer_with_the_same_peer_id() {
+        let r = Registry::open_in_memory().unwrap();
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let first = r.insert_peer("one", &PeerAddr::new(id), "t1").unwrap();
+        match r.insert_peer("two", &PeerAddr::new(id), "t2") {
+            Err(ComputerError::BadRequest(m)) => {
+                assert_eq!(m, "a computer with this peer id is already registered");
+                assert!(!m.contains("one"), "{m}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The first row is unchanged and nothing was added.
+        assert_eq!(r.list().unwrap().len(), 1);
+        assert_eq!(r.get(&first.id).unwrap().unwrap(), first);
+    }
+
+    #[test]
+    fn fr_c2_insert_peer_accepts_a_different_peer_id() {
+        let r = Registry::open_in_memory().unwrap();
+        let a = ember_transport::SecretKey::generate().peer_id();
+        let b = ember_transport::SecretKey::generate().peer_id();
+        r.insert_peer("one", &PeerAddr::new(a), "t1").unwrap();
+        r.insert_peer("two", &PeerAddr::new(b), "t2").unwrap();
+        // A URL computer has no peer id and never collides.
+        r.insert("three", "http://10.0.0.3:8741", "t3").unwrap();
+        assert_eq!(r.list().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn fr_c2_the_same_peer_id_with_other_addresses_is_still_a_duplicate() {
+        let r = Registry::open_in_memory().unwrap();
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let with_addrs = PeerAddr {
+            peer: id,
+            relays: vec!["https://relay.example".into()],
+            direct: vec!["192.0.2.1:7777".parse().unwrap()],
+        };
+        r.insert_peer("one", &PeerAddr::new(id), "t1").unwrap();
+        assert!(matches!(r.insert_peer("two", &with_addrs, "t2"), Err(ComputerError::BadRequest(_))));
+        // And the other way round.
+        let r = Registry::open_in_memory().unwrap();
+        r.insert_peer("one", &with_addrs, "t1").unwrap();
+        assert!(matches!(r.insert_peer("two", &PeerAddr::new(id), "t2"), Err(ComputerError::BadRequest(_))));
+        assert_eq!(r.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fr_c2_concurrent_registrations_of_one_peer_id_have_one_winner() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let wins: usize = (0..8)
+            .map(|i| {
+                let r = r.clone();
+                std::thread::spawn(move || r.insert_peer(&format!("c{i}"), &PeerAddr::new(id), "t").is_ok())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap() as usize)
+            .sum();
+        assert_eq!(wins, 1);
+        assert_eq!(r.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fr_c2_an_unparsable_stored_peer_row_is_skipped_by_the_duplicate_check() {
+        // Mutation M15: a stored row whose `peer_json` does not parse carries no peer id; it
+        // must neither block a new peer id nor count as a duplicate of it.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let r = Registry::new(store.clone());
+        store
+            .conn()
+            .execute(
+                "INSERT INTO computers (id, name, url, token, created_at, peer_json) VALUES ('bad', 'bad', '', 't', 0, ?1)",
+                params!["{not json"],
+            )
+            .unwrap();
+        let id = ember_transport::SecretKey::generate().peer_id();
+        r.insert_peer("fresh", &PeerAddr::new(id), "t").unwrap();
+        match r.insert_peer("again", &PeerAddr::new(id), "t") {
+            Err(ComputerError::BadRequest(m)) => assert_eq!(m, DUPLICATE_PEER),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(r.list().unwrap().len(), 2);
+    }
+
+    /// Serialises tests that set [`AFTER_DUP_CHECK`]. The hook also ignores every peer id but
+    /// its own, so other tests inserting concurrently are not disturbed.
+    static HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn fr_c2_the_duplicate_check_and_the_insert_share_one_hold() {
+        // Mutation M8: between the duplicate check and the INSERT a second registration of the
+        // same peer id starts. With one hold of the store connection it blocks until the first
+        // insert is done and then sees the duplicate; with two holds both would succeed.
+        let _serial = HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let id = ember_transport::SecretKey::generate().peer_id();
+        let (tx, rx) = std::sync::mpsc::channel::<std::thread::JoinHandle<Result<Computer, ComputerError>>>();
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook: Arc<dyn Fn(&ember_transport::PeerId) + Send + Sync> = {
+            let r = r.clone();
+            let fired = fired.clone();
+            let tx = std::sync::Mutex::new(tx);
+            Arc::new(move |p: &ember_transport::PeerId| {
+                if *p != id || fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let r = r.clone();
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let h = std::thread::spawn(move || {
+                    let res = r.insert_peer("second", &PeerAddr::new(id), "t");
+                    let _ = done_tx.send(());
+                    res
+                });
+                // Give the second registration time to run into the held connection. The wait
+                // result is not asserted: with the correct hold it simply times out.
+                let _ = done_rx.recv_timeout(std::time::Duration::from_millis(150));
+                let _ = tx.lock().unwrap().send(h);
+            })
+        };
+        *AFTER_DUP_CHECK.lock().unwrap() = Some(hook);
+        let first = r.insert_peer("first", &PeerAddr::new(id), "t");
+        *AFTER_DUP_CHECK.lock().unwrap() = None;
+        let second = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().join().unwrap();
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "the hook never ran");
+        assert_eq!([first.is_ok(), second.is_ok()].iter().filter(|b| **b).count(), 1, "{first:?} {second:?}");
+        let err = if first.is_err() { first } else { second };
+        match err {
+            Err(ComputerError::BadRequest(m)) => assert_eq!(m, DUPLICATE_PEER),
+            other => panic!("{other:?}"),
+        }
+        let with_id = r.list().unwrap().iter().filter(|c| c.peer.as_ref().is_some_and(|p| p.peer == id)).count();
+        assert_eq!(with_id, 1);
     }
 
     #[test]

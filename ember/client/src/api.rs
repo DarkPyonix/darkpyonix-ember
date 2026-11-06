@@ -234,6 +234,31 @@ pub struct GitCommitApplied {
     pub new_sha: String,
 }
 
+/// The merge in progress, for the conflict screen banner (`git/merge`, FR-G16).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitMergeState {
+    #[serde(default)]
+    pub in_progress: bool,
+    /// The branch or ref being merged in; null when unknown.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// The current branch; null on a detached HEAD.
+    #[serde(default)]
+    pub into: Option<String>,
+    #[serde(default)]
+    pub conflict_files: u32,
+    /// `in_progress` with no unmerged path left.
+    #[serde(default)]
+    pub can_commit: bool,
+}
+
+/// The answer of `git/merge/abort` (FR-G17).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitMergeAborted {
+    #[serde(default)]
+    pub ok: bool,
+}
+
 /// Local branches (`POST /projects/{id}/git/branches`, FR-G9).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GitBranches {
@@ -986,6 +1011,21 @@ impl Api {
     /// Cherry-pick a commit onto the current branch (FR-G15; 409 for a dirty tree or a conflict).
     pub async fn git_cherry_pick(&self, project: &str, sha: &str) -> ApiResult<GitCommitApplied> {
         Self::decode(self.git_post(project, "cherry-pick", json!({ "sha": sha, "confirm": true })).await?)
+    }
+
+    /// Whether a merge is in progress, what is merged into what, and how many files conflict (FR-G16).
+    pub async fn git_merge_state(&self, project: &str) -> ApiResult<GitMergeState> {
+        Self::decode(self.git_post(project, "merge", json!({})).await?)
+    }
+
+    /// Cancel the merge in progress (FR-G17; 409 when none is).
+    pub async fn git_merge_abort(&self, project: &str) -> ApiResult<GitMergeAborted> {
+        Self::decode(self.git_post(project, "merge/abort", json!({ "confirm": true })).await?)
+    }
+
+    /// Finish the merge in progress with a merge commit (FR-G17; 409 when none is or conflicts remain).
+    pub async fn git_merge_commit(&self, project: &str) -> ApiResult<GitCommitApplied> {
+        Self::decode(self.git_post(project, "merge/commit", json!({ "confirm": true })).await?)
     }
 
     /// List local branches with upstream ahead/behind, last commit, default and worktree (FR-G9).

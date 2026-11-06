@@ -509,6 +509,12 @@ pub struct StatusDetail {
     pub fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm_deadline_ms: Option<i64>,
+    /// How a confirm would register this node: `"url"` (its reported url, even when it also
+    /// reported a peer id), `"peer"` (its peer id over the transport) or `"observed"` (the
+    /// address the door saw). Present only while the optional detail fields are, and only when
+    /// a registrar is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registered_by: Option<&'static str>,
 }
 
 /// What the node gets when it asks for its credential (FR-C2d). Every wrong secret and every
@@ -550,6 +556,14 @@ pub enum EnrolError {
     WrongState { id: String, state: &'static str },
     #[error("enrolment {0} has expired")]
     Expired(String),
+    /// The `expect_fingerprint` the owner gave is not the fingerprint the node reported (or the
+    /// node reported none). Nothing was registered and the enrolment stays awaiting confirmation.
+    #[error("The fingerprint does not match the one the other machine reported; nothing was registered")]
+    FingerprintMismatch,
+    /// The computer would be registered by its peer id, so the owner must say which fingerprint
+    /// they compared. Nothing was registered.
+    #[error("This computer is registered by its peer id; confirm with expect_fingerprint set to the fingerprint shown on the other machine")]
+    FingerprintRequired,
     #[error("illegal enrolment transition {from} to {to}")]
     IllegalTransition { from: &'static str, to: &'static str },
     /// The enrol door is off: no code is minted, because a command could not work.
@@ -587,16 +601,73 @@ pub trait Registrar: Send + Sync {
     fn register(&self, name: &str, token: &str, info: &NodeInfo, observed_addr: &str) -> Result<String, RegisterError>;
     /// Undo a registration (when recording it failed). Best effort.
     fn remove(&self, computer_id: &str);
+    /// How [`Registrar::register`] would address this node: `Some("url")`, `Some("peer")` or
+    /// `Some("observed")`, `None` when it would refuse. The default is `None` (a registrar that
+    /// cannot say), which makes neither the confirm view nor the peer-path rule apply.
+    fn registers_by(&self, _info: &NodeInfo, _observed_addr: &str) -> Option<&'static str> {
+        None
+    }
+}
+
+/// Where a confirmed node is registered: by HTTP URL, or by its transport peer id.
+#[derive(Debug, PartialEq)]
+pub enum Target {
+    Url(String),
+    Peer(ember_transport::PeerId),
+}
+
+/// The address rule for a confirmed node (FR-C2c), pure so it is testable without a transport.
+/// 1. `info.url` present: by URL (it wins over a peer id).
+/// 2. No url, a peer id, and `transport_on`: by peer.
+/// 3. No url, a peer id, no transport: the observed URL (a LAN node enrolled with `--transport`
+///    against a server without the transport still works).
+/// 4. Neither: the observed URL, or the "no address" error when none can be derived.
+///
+/// A peer id equal to `server_id` (the node claims to be this server) is refused in every case.
+/// The peer id is the node's own claim; the owner compares its fingerprint at confirm.
+fn register_target(
+    info: &NodeInfo,
+    observed: &str,
+    transport_on: bool,
+    server_id: Option<&str>,
+) -> Result<Target, RegisterError> {
+    let peer = info.peer_id.as_ref().map(|p| p.parse::<ember_transport::PeerId>().ok());
+    if let (Some(Some(p)), Some(own)) = (&peer, server_id) {
+        if p.to_string() == own.to_ascii_lowercase() {
+            return Err(RegisterError::Failed("the node's peer id is this server's own".into()));
+        }
+    }
+    if let Some(url) = &info.url {
+        return Ok(Target::Url(url.clone()));
+    }
+    if transport_on {
+        match peer {
+            Some(Some(p)) => return Ok(Target::Peer(p)),
+            Some(None) => return Err(RegisterError::Failed("the node's peer id is not valid".into())),
+            None => {}
+        }
+    }
+    observed_node_url(observed)
+        .map(Target::Url)
+        .ok_or_else(|| RegisterError::Failed("the node reported no address and none could be derived".into()))
 }
 
 /// [`Registrar`] over the computers registry.
 pub struct ComputersRegistrar {
     computers: Arc<Computers>,
+    /// This server's own transport peer id, `None` when the transport is off.
+    server_peer_id: Option<String>,
 }
 
 impl ComputersRegistrar {
     pub fn new(computers: Arc<Computers>) -> ComputersRegistrar {
-        ComputersRegistrar { computers }
+        ComputersRegistrar { computers, server_peer_id: None }
+    }
+
+    /// With the server's own peer id, so a node that claims it is refused at register.
+    pub fn with_server_peer_id(mut self, server_peer_id: Option<String>) -> ComputersRegistrar {
+        self.server_peer_id = server_peer_id;
+        self
     }
 }
 
@@ -611,14 +682,27 @@ impl Registrar for ComputersRegistrar {
     }
 
     fn register(&self, name: &str, token: &str, info: &NodeInfo, observed_addr: &str) -> Result<String, RegisterError> {
-        let Some(url) = info.url.clone().or_else(|| observed_node_url(observed_addr)) else {
-            return Err(RegisterError::Failed("the node reported no address and none could be derived".into()));
+        let target = register_target(info, observed_addr, self.computers.dialer().is_some(), self.server_peer_id.as_deref())?;
+        let result = match target {
+            Target::Url(url) => self.computers.register(name, &url, token),
+            Target::Peer(peer) => self.computers.register_peer(name, &ember_transport::PeerAddr::from(peer), token),
         };
-        match self.computers.register(name, &url, token) {
+        match result {
             Ok(c) => Ok(c.id),
             Err(_) if self.name_taken(name) => Err(RegisterError::NameTaken),
+            Err(super::ComputerError::BadRequest(m)) if m == super::DUPLICATE_PEER => Err(RegisterError::Failed(m)),
             Err(_) => Err(RegisterError::Failed("the computer could not be registered at that address".into())),
         }
+    }
+
+    fn registers_by(&self, info: &NodeInfo, observed_addr: &str) -> Option<&'static str> {
+        let target =
+            register_target(info, observed_addr, self.computers.dialer().is_some(), self.server_peer_id.as_deref()).ok()?;
+        Some(match target {
+            Target::Peer(_) => "peer",
+            Target::Url(_) if info.url.is_some() => "url",
+            Target::Url(_) => "observed",
+        })
     }
 
     fn remove(&self, computer_id: &str) {
@@ -673,6 +757,17 @@ fn clean_addr(source: &str) -> String {
 }
 
 /// A computer name as the registry takes it, plus the shape rules the guest names use.
+/// An owner-typed fingerprint as 16 lowercase hex digits: spaces are dropped and case is
+/// ignored. Anything else is a 400, so a check the owner asked for is never skipped.
+fn normalise_fingerprint(fp: &str) -> Result<String, EnrolError> {
+    let n: String = fp.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    if n.len() == 16 && n.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(n)
+    } else {
+        Err(EnrolError::BadRequest("expect_fingerprint must be 16 hex digits, as 4 groups of 4".into()))
+    }
+}
+
 fn check_name(name: &str) -> Result<String, EnrolError> {
     let name = name.trim();
     let chars = name.chars().count();
@@ -1068,7 +1163,13 @@ impl Enrol {
             (Some(i), Some(o)) if i.url.is_none() => observed_node_url(o),
             _ => None,
         };
+        let registrar = self.registrar.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let registered_by = match (&registrar, &info, &observed) {
+            (Some(r), Some(i), o) => r.registers_by(i, o.as_deref().unwrap_or("unknown")),
+            _ => None,
+        };
         Ok(StatusDetail {
+            registered_by,
             status: row.state.into(),
             name: row.name,
             fingerprint: info.as_ref().and_then(|i| i.fingerprint()),
@@ -1092,10 +1193,18 @@ impl Enrol {
     /// [`RegisterError::NameTaken`] is the authoritative answer: it is [`EnrolError::NameTaken`]
     /// (409 `name_taken`) with the state unchanged, and the owner can confirm again with a new
     /// name. The early check only saves minting a token in the common case.
+    ///
+    /// `expect_fingerprint` is the fingerprint the owner read on the other machine. When given
+    /// it must be 16 hex digits (spaces and case are ignored, else 400) and equal the node's
+    /// reported fingerprint, else [`EnrolError::FingerprintMismatch`]; a node that reported no
+    /// peer id never matches. When the registrar would register the node by its peer id
+    /// (`registers_by` is `"peer"`), it is required ([`EnrolError::FingerprintRequired`]).
+    /// Both checks run before the token is minted and before anything is registered.
     pub fn confirm(
         &self,
         enrol_id: &str,
         name_override: Option<&str>,
+        expect_fingerprint: Option<&str>,
         now_ms: i64,
         registrar: &dyn Registrar,
     ) -> Result<ConfirmOutcome, EnrolError> {
@@ -1110,6 +1219,7 @@ impl Enrol {
         if row.confirm_deadline_ms.map_or(true, |d| now_ms >= d) {
             return Err(EnrolError::Expired(enrol_id.into()));
         }
+        let expected = expect_fingerprint.map(normalise_fingerprint).transpose()?;
         let name = check_name(name_override.unwrap_or(&row.name))?;
         if registrar.name_taken(&name) {
             return Err(EnrolError::NameTaken(name));
@@ -1120,6 +1230,18 @@ impl Enrol {
             .and_then(|j| serde_json::from_str(j).ok())
             .ok_or_else(|| EnrolError::Other(anyhow::anyhow!("enrolment {enrol_id} has no node information")))?;
         let observed = row.observed_addr.clone().unwrap_or_else(|| "unknown".into());
+        match &expected {
+            Some(want) => {
+                let reported = info.fingerprint().map(|f| f.replace(' ', "").to_ascii_lowercase());
+                if reported.as_ref() != Some(want) {
+                    return Err(EnrolError::FingerprintMismatch);
+                }
+            }
+            None if registrar.registers_by(&info, &observed) == Some("peer") => {
+                return Err(EnrolError::FingerprintRequired);
+            }
+            None => {}
+        }
         let token = Secret::new(long_secret(TOKEN_PREFIX));
         let computer_id = match registrar.register(&name, token.expose(), &info, &observed) {
             Ok(id) => id,
@@ -1300,6 +1422,8 @@ impl IntoResponse for ApiError {
                 (StatusCode::CONFLICT, Some("wrong_state"))
             }
             EnrolError::Expired(_) => (StatusCode::GONE, Some("expired")),
+            EnrolError::FingerprintMismatch => (StatusCode::CONFLICT, Some("fingerprint_mismatch")),
+            EnrolError::FingerprintRequired => (StatusCode::CONFLICT, Some("fingerprint_required")),
             EnrolError::DoorOff => (StatusCode::CONFLICT, Some("door_off")),
             EnrolError::DoorUrlUnknown => (StatusCode::CONFLICT, Some("door_url_unknown")),
             EnrolError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
@@ -1380,12 +1504,14 @@ async fn cancel(AxumState(s): AxumState<AppState>, Path(id): Path<String>) -> Re
 }
 
 /// Unknown fields are refused (422) rather than ignored, so a client cannot believe a check it
-/// asked for (such as a fingerprint) was made.
+/// asked for was made. `expect_fingerprint` is the check for the peer id (FR-C2c).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfirmBody {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    expect_fingerprint: Option<String>,
 }
 
 async fn confirm(
@@ -1393,8 +1519,8 @@ async fn confirm(
     Path(id): Path<String>,
     body: Option<Json<ConfirmBody>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let name = body.and_then(|Json(b)| b.name);
-    let out = s.enrol.confirm(&id, name.as_deref(), crate::store::now_ms(), &*s.registrar)?;
+    let (name, expect) = body.map(|Json(b)| (b.name, b.expect_fingerprint)).unwrap_or_default();
+    let out = s.enrol.confirm(&id, name.as_deref(), expect.as_deref(), crate::store::now_ms(), &*s.registrar)?;
     tracing::info!(enrol = %id, computer = %out.computer_id, "enrol confirmed");
     Ok(Json(json!({ "computer_id": out.computer_id, "name": out.name })))
 }
@@ -1488,7 +1614,7 @@ mod tests {
     fn joined_of(e: &Enrol, now: i64) -> Delivery {
         let fake = Fake::default();
         let (id, secret) = open(e, now);
-        e.confirm(&id, None, now + 10, &fake).unwrap();
+        e.confirm(&id, None, None, now + 10, &fake).unwrap();
         e.take_delivery(&id, &secret, now + 12).unwrap()
     }
 
@@ -2076,7 +2202,7 @@ mod tests {
         let (store, e) = svc();
         let fake = Fake::default();
         let (id, secret) = open(&e, T0);
-        let out = e.confirm(&id, None, T0 + 10, &fake).unwrap();
+        let out = e.confirm(&id, None, None, T0 + 10, &fake).unwrap();
         assert_eq!(out, ConfirmOutcome { computer_id: "computer-1".into(), name: "laptop".into() });
         assert_eq!(fake.count(), 1);
         // The owner still reads awaiting_confirmation until the node has the credential.
@@ -2108,18 +2234,18 @@ mod tests {
         let (_, e) = svc();
         let fake = Fake::default();
         let (id, secret) = open(&e, T0);
-        e.confirm(&id, None, T0 + 10, &fake).unwrap();
-        let again = e.confirm(&id, Some("other"), T0 + 11, &fake);
+        e.confirm(&id, None, None, T0 + 10, &fake).unwrap();
+        let again = e.confirm(&id, Some("other"), None, T0 + 11, &fake);
         assert!(matches!(again, Err(EnrolError::WrongState { .. })), "{again:?}");
         // After delivery too, and a deny after a confirm.
         let _ = e.take_delivery(&id, &secret, T0 + 12).unwrap();
-        assert!(matches!(e.confirm(&id, None, T0 + 13, &fake), Err(EnrolError::WrongState { .. })));
+        assert!(matches!(e.confirm(&id, None, None, T0 + 13, &fake), Err(EnrolError::WrongState { .. })));
         assert!(matches!(e.deny(&id, T0 + 14), Err(EnrolError::WrongState { .. })));
         assert_eq!(fake.count(), 1);
-        assert!(matches!(e.confirm("nope", None, T0, &fake), Err(EnrolError::NotFound(_))));
+        assert!(matches!(e.confirm("nope", None, None, T0, &fake), Err(EnrolError::NotFound(_))));
         // A code that was never redeemed cannot be confirmed.
         let m = mint(&e, T0);
-        assert!(matches!(e.confirm(&m.id, None, T0 + 1, &fake), Err(EnrolError::WrongState { .. })));
+        assert!(matches!(e.confirm(&m.id, None, None, T0 + 1, &fake), Err(EnrolError::WrongState { .. })));
     }
 
     #[test]
@@ -2130,7 +2256,7 @@ mod tests {
         e.deny(&id, T0 + 10).unwrap();
         assert!(matches!(e.take_delivery(&id, &secret, T0 + 11).unwrap(), Delivery::Denied));
         assert_eq!(e.status(&id, T0 + 12).unwrap(), EnrolStatus::Denied);
-        assert!(matches!(e.confirm(&id, None, T0 + 13, &fake), Err(EnrolError::WrongState { .. })));
+        assert!(matches!(e.confirm(&id, None, None, T0 + 13, &fake), Err(EnrolError::WrongState { .. })));
         assert!(matches!(e.deny(&id, T0 + 14), Err(EnrolError::WrongState { .. })));
         assert_eq!(fake.count(), 0);
         assert!(e.pending.lock().unwrap().is_empty());
@@ -2146,14 +2272,14 @@ mod tests {
         let (id, secret) = open(&e, T0);
         let redeemed_at = T0 + 1;
         let late = redeemed_at + CONFIRM_WINDOW_MS;
-        assert!(matches!(e.confirm(&id, None, late, &fake), Err(EnrolError::Expired(_))));
+        assert!(matches!(e.confirm(&id, None, None, late, &fake), Err(EnrolError::Expired(_))));
         assert_eq!(fake.count(), 0);
         assert!(matches!(e.take_delivery(&id, &secret, late + 1).unwrap(), Delivery::Expired));
         assert_eq!(e.status(&id, late + 2).unwrap(), EnrolStatus::Expired);
         assert!(matches!(e.deny(&id, late + 3), Err(EnrolError::Expired(_))));
         // One millisecond before the deadline still works.
         let (id2, _) = open(&e, T0);
-        assert!(e.confirm(&id2, None, T0 + 1 + CONFIRM_WINDOW_MS - 1, &fake).is_ok());
+        assert!(e.confirm(&id2, None, None, T0 + 1 + CONFIRM_WINDOW_MS - 1, &fake).is_ok());
     }
 
     #[test]
@@ -2162,16 +2288,16 @@ mod tests {
         let fake = Fake::default();
         fake.names.lock().unwrap().push("Laptop".into());
         let (id, secret) = open(&e, T0);
-        let r = e.confirm(&id, None, T0 + 10, &fake);
+        let r = e.confirm(&id, None, None, T0 + 10, &fake);
         assert!(matches!(r, Err(EnrolError::NameTaken(ref n)) if n == "laptop"), "{r:?}");
         assert_eq!(e.status(&id, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
         assert_eq!(fake.count(), 0);
         assert!(e.pending.lock().unwrap().is_empty());
         assert!(matches!(e.take_delivery(&id, &secret, T0 + 12).unwrap(), Delivery::Pending));
         // A bad replacement name is a bad request and changes nothing.
-        assert!(matches!(e.confirm(&id, Some("a\nb"), T0 + 13, &fake), Err(EnrolError::BadRequest(_))));
-        assert!(matches!(e.confirm(&id, Some("laptop"), T0 + 14, &fake), Err(EnrolError::NameTaken(_))));
-        let ok = e.confirm(&id, Some("laptop-2"), T0 + 15, &fake).unwrap();
+        assert!(matches!(e.confirm(&id, Some("a\nb"), None, T0 + 13, &fake), Err(EnrolError::BadRequest(_))));
+        assert!(matches!(e.confirm(&id, Some("laptop"), None, T0 + 14, &fake), Err(EnrolError::NameTaken(_))));
+        let ok = e.confirm(&id, Some("laptop-2"), None, T0 + 15, &fake).unwrap();
         assert_eq!(ok.name, "laptop-2");
         match e.take_delivery(&id, &secret, T0 + 16).unwrap() {
             Delivery::Joined { name, .. } => assert_eq!(name, "laptop-2"),
@@ -2200,7 +2326,7 @@ mod tests {
         }
         // The right secret answers; the same wrong secret still does not, in every later state.
         assert!(matches!(e.take_delivery(&id, &secret, T0 + 6).unwrap(), Delivery::Pending));
-        e.confirm(&id, None, T0 + 7, &fake).unwrap();
+        e.confirm(&id, None, None, T0 + 7, &fake).unwrap();
         assert!(matches!(e.take_delivery(&id, &wrong, T0 + 8).unwrap(), Delivery::Unknown));
         assert!(e.pending.lock().unwrap().len() == 1, "a wrong secret takes nothing");
         // Another enrolment's secret does not open this one.
@@ -2215,7 +2341,7 @@ mod tests {
         let fake = Fake::default();
         let (id, secret) = open(&e, T0);
         let wrong = format!("{POLL_PREFIX}{}", "0".repeat(96));
-        e.confirm(&id, None, T0 + 5, &fake).unwrap();
+        e.confirm(&id, None, None, T0 + 5, &fake).unwrap();
         assert_eq!(e.pending.lock().unwrap().len(), 1);
         assert!(e.verify_poll(&id, &secret, T0 + 6).unwrap());
         assert!(e.verify_poll(&id, &secret, T0 + 7).unwrap(), "verifying twice changes nothing");
@@ -2258,7 +2384,7 @@ mod tests {
         check(&e, "no-such-id", &secret, T0 + 6, "unknown id");
         // Confirmed (verify first, then take_delivery inside check delivers; Joined follows).
         let (id2, secret2) = open(&e, T0);
-        e.confirm(&id2, None, T0 + 7, &fake).unwrap();
+        e.confirm(&id2, None, None, T0 + 7, &fake).unwrap();
         check(&e, &id2, &secret2, T0 + 8, "confirmed");
         // Joined (already delivered by the check above).
         check(&e, &id2, &secret2, T0 + 9, "joined");
@@ -2282,7 +2408,7 @@ mod tests {
                 let (e, fake, id, b) = (e.clone(), fake.clone(), id.clone(), barrier.clone());
                 std::thread::spawn(move || {
                     b.wait();
-                    e.confirm(&id, None, T0 + 10, &*fake).is_ok()
+                    e.confirm(&id, None, None, T0 + 10, &*fake).is_ok()
                 })
             };
             let d = {
@@ -2420,7 +2546,7 @@ mod tests {
         let (store, e1) = svc();
         let fake = Fake::default();
         let (id, secret) = open(&e1, T0);
-        e1.confirm(&id, None, T0 + 10, &fake).unwrap();
+        e1.confirm(&id, None, None, T0 + 10, &fake).unwrap();
         assert_eq!(e1.pending.lock().unwrap().len(), 1);
         // A new service over the same store has no pending token.
         let e2 = Enrol::new(store.clone());
@@ -2443,7 +2569,7 @@ mod tests {
         let fake = Arc::new(Fake::default());
         e.set_registrar(fake.clone());
         let (id, _secret) = open(&e, T0);
-        e.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        e.confirm(&id, None, None, T0 + 10, &*fake).unwrap();
         assert!(fake.removed.lock().unwrap().is_empty());
         // Inside the grace nothing happens.
         assert_eq!(e.status(&id, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
@@ -2459,7 +2585,7 @@ mod tests {
         assert_eq!(fake.removed.lock().unwrap().len(), 1);
         // The same name can be enrolled again.
         let (id2, _) = open(&e, late + 3);
-        assert!(e.confirm(&id2, None, late + 10, &*fake).is_ok());
+        assert!(e.confirm(&id2, None, None, late + 10, &*fake).is_ok());
     }
 
     #[test]
@@ -2467,7 +2593,7 @@ mod tests {
         let (store, e1) = svc();
         let fake = Arc::new(Fake::default());
         let (id, _secret) = open(&e1, T0);
-        e1.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        e1.confirm(&id, None, None, T0 + 10, &*fake).unwrap();
         // A new service over the same store: no token in memory. The first read settles.
         let e2 = Enrol::new(store.clone());
         e2.set_registrar(fake.clone());
@@ -2483,7 +2609,7 @@ mod tests {
         let (store, e1) = svc();
         let fake = Arc::new(Fake::default());
         let (id, _) = open(&e1, T0);
-        e1.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        e1.confirm(&id, None, None, T0 + 10, &*fake).unwrap();
         let e2 = Enrol::new(store.clone());
         e2.set_registrar(fake.clone());
         e2.sweep(T0 + 11).unwrap();
@@ -2495,7 +2621,7 @@ mod tests {
         let (store, e1) = svc();
         let fake = Arc::new(Fake::default());
         let (id, _) = open(&e1, T0);
-        e1.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        e1.confirm(&id, None, None, T0 + 10, &*fake).unwrap();
         let e2 = Enrol::new(store.clone());
         e2.sweep(T0 + 11).unwrap();
         assert!(fake.removed.lock().unwrap().is_empty());
@@ -2510,7 +2636,7 @@ mod tests {
         let fake = Arc::new(Fake::default());
         e.set_registrar(fake.clone());
         let (id, secret) = open(&e, T0);
-        e.confirm(&id, None, T0 + 10, &*fake).unwrap();
+        e.confirm(&id, None, None, T0 + 10, &*fake).unwrap();
         assert!(matches!(e.take_delivery(&id, &secret, T0 + 11).unwrap(), Delivery::Joined { .. }));
         let far = T0 + 10 * DELIVERY_GRACE_MS;
         assert_eq!(e.status(&id, far).unwrap(), EnrolStatus::Joined);
@@ -2581,12 +2707,12 @@ mod tests {
         let (_, e) = svc();
         let reg = Lying(Fake::default());
         let (id, secret) = open(&e, T0);
-        let r = e.confirm(&id, None, T0 + 10, &reg);
+        let r = e.confirm(&id, None, None, T0 + 10, &reg);
         assert!(matches!(r, Err(EnrolError::NameTaken(ref n)) if n == "laptop"), "{r:?}");
         assert_eq!(e.status(&id, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
         assert!(e.pending.lock().unwrap().is_empty());
         assert!(matches!(e.take_delivery(&id, &secret, T0 + 12).unwrap(), Delivery::Pending));
-        assert!(e.confirm(&id, Some("laptop-2"), T0 + 13, &reg).is_ok());
+        assert!(e.confirm(&id, Some("laptop-2"), None, T0 + 13, &reg).is_ok());
     }
 
     #[test]
@@ -2594,7 +2720,7 @@ mod tests {
         let (_, e) = svc();
         let fake = Fake::default();
         let (id, secret) = open(&e, T0);
-        e.confirm(&id, None, T0 + 10, &fake).unwrap();
+        e.confirm(&id, None, None, T0 + 10, &fake).unwrap();
         let late = T0 + 10 + DELIVERY_GRACE_MS;
         assert!(matches!(e.take_delivery(&id, &secret, late).unwrap(), Delivery::Expired));
         assert!(e.pending.lock().unwrap().is_empty());
@@ -2607,7 +2733,7 @@ mod tests {
         let e = Enrol::new(store);
         let fake = Fake::default();
         let (id, secret) = open(&e, T0);
-        e.confirm(&id, None, T0 + 10, &fake).unwrap();
+        e.confirm(&id, None, None, T0 + 10, &fake).unwrap();
         let token = fake.token(0);
         let scan = |when: &str| {
             for entry in std::fs::read_dir(dir.path()).unwrap() {
@@ -2663,7 +2789,7 @@ mod tests {
         assert_eq!(json(e.status(&w.id, T0 + 600_000).unwrap()), "expired");
         let (a, secret) = open(&e, T0);
         assert_eq!(json(e.status(&a, T0 + 5).unwrap()), "awaiting_confirmation");
-        e.confirm(&a, None, T0 + 6, &fake).unwrap();
+        e.confirm(&a, None, None, T0 + 6, &fake).unwrap();
         assert_eq!(json(e.status(&a, T0 + 7).unwrap()), "awaiting_confirmation");
         let _ = e.take_delivery(&a, &secret, T0 + 8).unwrap();
         assert_eq!(json(e.status(&a, T0 + 9).unwrap()), "joined");
@@ -2683,7 +2809,7 @@ mod tests {
         let fake = Fake::default();
         let (id, secret) = open(&e, T0);
         let r = rd(&e, "dpe_wrong", T0, "z");
-        e.confirm(&id, None, T0 + 10, &fake).unwrap();
+        e.confirm(&id, None, None, T0 + 10, &fake).unwrap();
         let token = fake.token(0);
         let delivery = e.take_delivery(&id, &secret, T0 + 11).unwrap();
         let m = mint(&e, T0);
@@ -2717,7 +2843,7 @@ mod tests {
             let m = mint(&e, T0);
             let r = rd(&e, m.code.expose(), T0 + 1, SRC).unwrap();
             tracing::info!(redeemed = ?r, "after redeem");
-            e.confirm(&r.enrol_id, None, T0 + 2, &fake).unwrap();
+            e.confirm(&r.enrol_id, None, None, T0 + 2, &fake).unwrap();
             let d = e.take_delivery(&r.enrol_id, r.poll_secret.expose(), T0 + 3);
             tracing::info!(delivery = ?d, "after delivery");
             let _ = e.deny(&r.enrol_id, T0 + 4);
@@ -2755,10 +2881,391 @@ mod tests {
         let (store, e) = svc();
         let reg = Racing { inner: Fake::default(), store: store.clone(), hits: AtomicUsize::new(0) };
         let (id, _) = open(&e, T0);
-        let r = e.confirm(&id, None, T0 + 10, &reg);
+        let r = e.confirm(&id, None, None, T0 + 10, &reg);
         assert!(matches!(r, Err(EnrolError::WrongState { .. })), "{r:?}");
         assert_eq!(reg.hits.load(Ordering::SeqCst), 1);
         assert_eq!(reg.inner.removed.lock().unwrap().as_slice(), ["computer-1"]);
         assert!(e.pending.lock().unwrap().is_empty());
+    }
+
+    // ---- C4: register by the node's peer id (FR-C2c) ----
+
+    fn real_id() -> String {
+        ember_transport::SecretKey::generate().peer_id().to_string()
+    }
+
+    fn node(url: Option<&str>, peer: Option<&str>) -> NodeInfo {
+        let mut i = info();
+        i.url = url.map(String::from);
+        i.peer_id = peer.map(String::from);
+        i
+    }
+
+    #[test]
+    fn fr_c2_target_url_wins_over_a_peer_id() {
+        let id = real_id();
+        let i = node(Some("http://10.1.1.1:8741"), Some(&id));
+        for on in [true, false] {
+            assert_eq!(register_target(&i, SRC, on, None).unwrap(), Target::Url("http://10.1.1.1:8741".into()));
+        }
+    }
+
+    #[test]
+    fn fr_c2_target_peer_only_with_transport_registers_by_peer() {
+        let id = real_id();
+        let i = node(None, Some(&id));
+        let want: ember_transport::PeerId = id.parse().unwrap();
+        assert_eq!(register_target(&i, SRC, true, Some(&real_id())).unwrap(), Target::Peer(want));
+        // Upper-case hex from the node parses to the same peer.
+        let up = node(None, Some(&id.to_ascii_uppercase()));
+        assert_eq!(register_target(&up, SRC, true, None).unwrap(), Target::Peer(want));
+    }
+
+    #[test]
+    fn fr_c2_target_peer_only_without_transport_falls_back_to_the_observed_url() {
+        let i = node(None, Some(&real_id()));
+        assert_eq!(register_target(&i, "192.168.0.9:5000", false, None).unwrap(), Target::Url("http://192.168.0.9:8741".into()));
+    }
+
+    #[test]
+    fn fr_c2_target_neither_uses_the_observed_url_or_the_old_error() {
+        let i = node(None, None);
+        for on in [true, false] {
+            assert_eq!(register_target(&i, "10.0.0.7:5000", on, None).unwrap(), Target::Url("http://10.0.0.7:8741".into()));
+            match register_target(&i, "unknown", on, None) {
+                Err(RegisterError::Failed(m)) => {
+                    assert_eq!(m, "the node reported no address and none could be derived")
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fr_c2_target_refuses_the_servers_own_peer_id() {
+        let own = real_id();
+        for i in [node(None, Some(&own)), node(None, Some(&own.to_ascii_uppercase())), node(Some("http://10.1.1.1:8741"), Some(&own))] {
+            match register_target(&i, SRC, true, Some(&own)) {
+                Err(RegisterError::Failed(m)) => assert_eq!(m, "the node's peer id is this server's own"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fr_c2_target_an_invalid_peer_id_is_an_error_not_a_panic() {
+        // 64 hex digits that are not an Ed25519 point of large order (all 0xff: y >= p, refused).
+        for bad in ["ff".repeat(32), "zz".repeat(32), "ab".repeat(31)] {
+            let i = node(None, Some(&bad));
+            match register_target(&i, SRC, true, None) {
+                Err(RegisterError::Failed(m)) => assert_eq!(m, "the node's peer id is not valid", "{bad}"),
+                other => panic!("{other:?}"),
+            }
+            // Without the transport the peer id is not used at all.
+            assert!(matches!(register_target(&i, SRC, false, None), Ok(Target::Url(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn fr_c2_redeem_registers_nothing_only_confirm_does() {
+        let (_, e) = svc();
+        let fake = Fake::default();
+        let m = mint(&e, T0);
+        let r = e.redeem(m.code.expose(), &node(None, Some(&real_id())), T0 + 1, SRC).unwrap();
+        e.status_detail(&r.enrol_id, T0 + 2).unwrap();
+        assert_eq!(fake.count(), 0);
+        e.deny(&r.enrol_id, T0 + 3).unwrap();
+        assert_eq!(fake.count(), 0);
+        let (id, _) = open(&e, T0 + 10);
+        assert_eq!(fake.count(), 0);
+        e.confirm(&id, None, None, T0 + 12, &fake).unwrap();
+        assert_eq!(fake.count(), 1);
+    }
+
+    #[test]
+    fn fr_c2_confirm_view_carries_the_node_reported_fingerprint_only_while_awaiting() {
+        let (_, e) = svc();
+        let id = real_id();
+        let m = mint(&e, T0);
+        let r = e.redeem(m.code.expose(), &node(None, Some(&id)), T0 + 1, SRC).unwrap();
+        let d = e.status_detail(&r.enrol_id, T0 + 2).unwrap();
+        assert_eq!(d.status, EnrolStatus::AwaitingConfirmation);
+        assert_eq!(d.fingerprint, ember_transport::fingerprint_hex(&id));
+        assert_eq!(d.node_info.unwrap().peer_id.as_deref(), Some(id.as_str()));
+        e.deny(&r.enrol_id, T0 + 3).unwrap();
+        let d = e.status_detail(&r.enrol_id, T0 + 4).unwrap();
+        assert!(d.fingerprint.is_none() && d.node_info.is_none());
+    }
+    // ---- C5: confirm fingerprint, registered_by, duplicate peer, register failure ----
+
+    /// A registrar that answers `registers_by` with a fixed value, over a [`Fake`].
+    struct By {
+        inner: Fake,
+        by: Option<&'static str>,
+    }
+    impl Registrar for By {
+        fn name_taken(&self, n: &str) -> bool {
+            self.inner.name_taken(n)
+        }
+        fn register(&self, n: &str, t: &str, i: &NodeInfo, o: &str) -> Result<String, RegisterError> {
+            self.inner.register(n, t, i, o)
+        }
+        fn remove(&self, id: &str) {
+            self.inner.remove(id)
+        }
+        fn registers_by(&self, _i: &NodeInfo, _o: &str) -> Option<&'static str> {
+            self.by
+        }
+    }
+
+    fn by(by: Option<&'static str>) -> By {
+        By { inner: Fake::default(), by }
+    }
+
+    /// Redeem `info` on a fresh code; returns (enrol id, poll secret).
+    fn open_node(e: &Enrol, info: &NodeInfo, now: i64) -> (String, String) {
+        let m = mint(e, now);
+        let r = e.redeem(m.code.expose(), info, now + 1, SRC).unwrap();
+        (r.enrol_id, r.poll_secret.expose().to_string())
+    }
+
+    #[test]
+    fn fr_c2_confirm_with_a_matching_fingerprint_ignores_case_and_spaces() {
+        let id = real_id();
+        let fp = ember_transport::fingerprint_hex(&id).unwrap();
+        for given in [fp.clone(), fp.to_ascii_uppercase(), fp.replace(' ', ""), format!("  {}  ", fp.to_ascii_uppercase())] {
+            let (_, e) = svc();
+            let reg = by(Some("url"));
+            let (eid, _) = open_node(&e, &node(None, Some(&id)), T0);
+            let out = e.confirm(&eid, None, Some(&given), T0 + 10, &reg);
+            assert!(out.is_ok(), "{given:?}: {out:?}");
+            assert_eq!(reg.inner.count(), 1);
+        }
+    }
+
+    #[test]
+    fn fr_c2_confirm_with_a_wrong_fingerprint_is_a_mismatch_and_changes_nothing() {
+        let (_, e) = svc();
+        let reg = by(Some("url"));
+        let (eid, secret) = open_node(&e, &node(None, Some(&real_id())), T0);
+        let other = ember_transport::fingerprint_hex(&real_id()).unwrap();
+        let r = e.confirm(&eid, None, Some(&other), T0 + 10, &reg);
+        assert!(matches!(r, Err(EnrolError::FingerprintMismatch)), "{r:?}");
+        assert_eq!(reg.inner.count(), 0);
+        assert!(e.pending.lock().unwrap().is_empty());
+        assert_eq!(e.status(&eid, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+        assert!(matches!(e.take_delivery(&eid, &secret, T0 + 12).unwrap(), Delivery::Pending));
+        // The right one still confirms afterwards.
+        let fp = e.status_detail(&eid, T0 + 13).unwrap().fingerprint.unwrap();
+        assert!(e.confirm(&eid, None, Some(&fp), T0 + 14, &reg).is_ok());
+    }
+
+    #[test]
+    fn fr_c2_a_node_without_a_peer_id_never_matches_an_expected_fingerprint() {
+        let (_, e) = svc();
+        let reg = by(Some("url"));
+        let (eid, _) = open_node(&e, &node(Some("http://10.1.1.1:8741"), None), T0);
+        let fp = ember_transport::fingerprint_hex(&real_id()).unwrap();
+        let r = e.confirm(&eid, None, Some(&fp), T0 + 10, &reg);
+        assert!(matches!(r, Err(EnrolError::FingerprintMismatch)), "{r:?}");
+        assert_eq!(reg.inner.count(), 0);
+        assert_eq!(e.status(&eid, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+    }
+
+    #[test]
+    fn fr_c2_a_malformed_expected_fingerprint_is_a_bad_request_and_changes_nothing() {
+        let (_, e) = svc();
+        let reg = by(Some("url"));
+        let id = real_id();
+        let (eid, _) = open_node(&e, &node(None, Some(&id)), T0);
+        let good = ember_transport::fingerprint_hex(&id).unwrap();
+        let too_long = format!("{good}0");
+        let too_short = good[..good.len() - 1].to_string();
+        let bad = ["", "abab", "zzzz zzzz zzzz zzzz", too_long.as_str(), too_short.as_str(), "ab ab"];
+        for b in bad {
+            let r = e.confirm(&eid, None, Some(b), T0 + 10, &reg);
+            assert!(matches!(r, Err(EnrolError::BadRequest(_))), "{b:?}: {r:?}");
+        }
+        assert_eq!(reg.inner.count(), 0);
+        assert_eq!(e.status(&eid, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+    }
+
+    #[test]
+    fn fr_c2_the_peer_path_requires_the_fingerprint() {
+        let (_, e) = svc();
+        let reg = by(Some("peer"));
+        let id = real_id();
+        let (eid, secret) = open_node(&e, &node(None, Some(&id)), T0);
+        let r = e.confirm(&eid, None, None, T0 + 10, &reg);
+        assert!(matches!(r, Err(EnrolError::FingerprintRequired)), "{r:?}");
+        assert_eq!(reg.inner.count(), 0);
+        assert!(e.pending.lock().unwrap().is_empty());
+        assert_eq!(e.status(&eid, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+        assert!(matches!(e.take_delivery(&eid, &secret, T0 + 12).unwrap(), Delivery::Pending));
+        let fp = ember_transport::fingerprint_hex(&id).unwrap().to_ascii_uppercase();
+        assert!(e.confirm(&eid, None, Some(&fp), T0 + 13, &reg).is_ok());
+        assert_eq!(reg.inner.count(), 1);
+    }
+
+    #[test]
+    fn fr_c2_the_url_and_observed_paths_do_not_require_the_fingerprint() {
+        for path in [Some("url"), Some("observed"), None] {
+            let (_, e) = svc();
+            let reg = by(path);
+            let (eid, _) = open_node(&e, &node(None, Some(&real_id())), T0);
+            assert!(e.confirm(&eid, None, None, T0 + 10, &reg).is_ok(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn fr_c2_status_shows_how_the_node_would_be_registered_only_while_awaiting() {
+        let id = real_id();
+        let cases: [(NodeInfo, &'static str); 4] = [
+            // The silently-dropped case: a url wins over the peer id.
+            (node(Some("http://10.1.1.1:8741"), Some(&id)), "url"),
+            (node(Some("http://10.1.1.1:8741"), None), "url"),
+            (node(None, Some(&id)), "peer"),
+            (node(None, None), "observed"),
+        ];
+        for (n, want) in cases {
+            let (_, e) = svc();
+            // A stand-in for the real rule, which `register_target` tests cover.
+            let reg = Arc::new(by(Some(want)));
+            e.set_registrar(reg.clone());
+            let (eid, _) = open_node(&e, &n, T0);
+            let d = e.status_detail(&eid, T0 + 5).unwrap();
+            assert_eq!(d.registered_by, Some(want));
+            let v = serde_json::to_value(&d).unwrap();
+            assert_eq!(v["registered_by"], want);
+            if want == "url" && n.peer_id.is_some() {
+                assert_eq!(v["node_info"]["peer_id"], id.as_str());
+                assert_eq!(v["node_info"]["url"], "http://10.1.1.1:8741");
+            }
+            e.deny(&eid, T0 + 6).unwrap();
+            let d = e.status_detail(&eid, T0 + 7).unwrap();
+            assert_eq!(d.registered_by, None);
+            assert!(serde_json::to_value(&d).unwrap().get("registered_by").is_none());
+        }
+    }
+
+    #[test]
+    fn fr_c2_status_has_no_registered_by_without_a_registrar() {
+        let (_, e) = svc();
+        let (eid, _) = open_node(&e, &node(None, Some(&real_id())), T0);
+        let d = e.status_detail(&eid, T0 + 5).unwrap();
+        assert_eq!(d.registered_by, None);
+        assert!(serde_json::to_value(&d).unwrap().get("registered_by").is_none());
+        // A registrar that cannot say (the trait default) leaves the key out too.
+        e.set_registrar(Arc::new(Fake::default()));
+        let d = e.status_detail(&eid, T0 + 6).unwrap();
+        assert!(serde_json::to_value(&d).unwrap().get("registered_by").is_none());
+    }
+
+    #[test]
+    fn fr_c2_a_failed_register_leaves_the_enrolment_confirmable_with_no_token_left() {
+        // `register` fails after the name check. Pinned behaviour: the token is held only in a
+        // local until `register` succeeds, so a failure leaves no pending credential, nothing
+        // registered, the state `awaiting_confirmation`, and a 400 for the owner.
+        struct Failing {
+            inner: Fake,
+            fail: AtomicUsize,
+        }
+        impl Registrar for Failing {
+            fn name_taken(&self, n: &str) -> bool {
+                self.inner.name_taken(n)
+            }
+            fn register(&self, n: &str, t: &str, i: &NodeInfo, o: &str) -> Result<String, RegisterError> {
+                if self.fail.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(RegisterError::Failed("a computer with this peer id is already registered".into()));
+                }
+                self.inner.register(n, t, i, o)
+            }
+            fn remove(&self, id: &str) {
+                self.inner.remove(id)
+            }
+        }
+        let (store, e) = svc();
+        let reg = Failing { inner: Fake::default(), fail: AtomicUsize::new(0) };
+        let (eid, secret) = open_node(&e, &node(None, None), T0);
+        let r = e.confirm(&eid, None, None, T0 + 10, &reg);
+        assert!(
+            matches!(r, Err(EnrolError::BadRequest(ref m)) if m == "a computer with this peer id is already registered"),
+            "{r:?}"
+        );
+        assert_eq!(reg.inner.count(), 0);
+        assert!(reg.inner.removed.lock().unwrap().is_empty());
+        assert!(e.pending.lock().unwrap().is_empty());
+        assert_eq!(e.status(&eid, T0 + 11).unwrap(), EnrolStatus::AwaitingConfirmation);
+        // Nothing could be delivered, and the row records no computer.
+        assert!(matches!(e.take_delivery(&eid, &secret, T0 + 12).unwrap(), Delivery::Pending));
+        let n: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM enrol_codes WHERE computer_id IS NOT NULL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        // The same enrolment confirms on the next try.
+        assert!(e.confirm(&eid, None, None, T0 + 13, &reg).is_ok());
+        assert_eq!(reg.inner.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn fr_c2_the_real_registrar_maps_a_duplicate_peer_to_failed_and_reports_peer_by() {
+        // A `Computers` with a transport dialer, so the peer path is live.
+        let net = ember_transport::mem::MemNetwork::new();
+        let st = crate::transport::ServerTransport::new(net.transport());
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::with_transport(
+            crate::computers::Registry::new(store),
+            crate::computers::connector(Some(st.dialer.clone())),
+            None,
+            Some(st.dialer.clone()),
+        );
+        let reg = ComputersRegistrar::new(computers.clone());
+        let id = real_id();
+        let n = node(None, Some(&id));
+        assert_eq!(reg.registers_by(&n, SRC), Some("peer"));
+        assert_eq!(reg.registers_by(&node(Some("http://10.1.1.1:8741"), Some(&id)), SRC), Some("url"));
+        assert_eq!(reg.registers_by(&node(None, None), SRC), Some("observed"));
+        assert_eq!(reg.registers_by(&node(None, None), "unknown"), None);
+        reg.register("first", "tok", &n, SRC).unwrap();
+        match reg.register("second", "tok", &n, SRC) {
+            Err(RegisterError::Failed(m)) => assert_eq!(m, "a computer with this peer id is already registered"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(computers.registry().list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fr_c2_without_a_transport_a_peer_only_node_registers_by_its_observed_address() {
+        // Mutation M12: a real registrar over a `Computers` with no dialer. The mirror (the same
+        // node with a dialer gives "peer") is pinned by
+        // `fr_c2_the_real_registrar_maps_a_duplicate_peer_to_failed_and_reports_peer_by`; it is
+        // repeated here only for the stored shape.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let computers = Computers::new(crate::computers::Registry::new(store), crate::computers::connector(None));
+        assert!(computers.dialer().is_none());
+        let reg = ComputersRegistrar::new(computers.clone());
+        let n = node(None, Some(&real_id()));
+        assert_eq!(reg.registers_by(&n, SRC), Some("observed"));
+        let id = reg.register("plain", "tok", &n, SRC).unwrap();
+        let c = computers.registry().get(&id).unwrap().unwrap();
+        assert!(c.peer.is_none(), "{c:?}");
+        assert!(!c.url.is_empty(), "{c:?}");
+
+        // With the dialer the same node is registered by peer.
+        let net = ember_transport::mem::MemNetwork::new();
+        let st = crate::transport::ServerTransport::new(net.transport());
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let on = Computers::with_transport(
+            crate::computers::Registry::new(store),
+            crate::computers::connector(Some(st.dialer.clone())),
+            None,
+            Some(st.dialer.clone()),
+        );
+        let reg = ComputersRegistrar::new(on.clone());
+        assert_eq!(reg.registers_by(&n, SRC), Some("peer"));
+        let id = reg.register("viapeer", "tok", &n, SRC).unwrap();
+        let c = on.registry().get(&id).unwrap().unwrap();
+        assert!(c.peer.is_some() && c.url.is_empty(), "{c:?}");
     }
 }

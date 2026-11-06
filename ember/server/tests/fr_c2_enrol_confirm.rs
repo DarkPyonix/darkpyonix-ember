@@ -304,10 +304,10 @@ async fn fr_c2_unknown_ids_are_404_and_unknown_body_fields_are_refused() {
         let (st, _, _) = call(&f.app, Method::POST, &path("nope", tail), Some(&h), Some(json!({}))).await;
         assert_eq!(st, StatusCode::NOT_FOUND, "{tail}");
     }
-    // `expect_fingerprint` is specified but not built: it is refused, never silently ignored.
+    // An unknown field is refused, never silently ignored.
     let o = open(&f, "laptop").await;
     let (st, _, _) =
-        call(&f.app, Method::POST, &path(&o.id, "/confirm"), Some(&h), Some(json!({"expect_fingerprint": "ab12"}))).await;
+        call(&f.app, Method::POST, &path(&o.id, "/confirm"), Some(&h), Some(json!({"expect_fingerprints": "ab12"}))).await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(fake.count(), 0);
     let (_, b, _) = call(&f.app, Method::GET, &path(&o.id, ""), Some(&h), None).await;
@@ -376,4 +376,260 @@ async fn fr_c2_confirm_with_the_real_registry_adds_the_computer_with_the_deliver
     assert_eq!(st, StatusCode::OK);
     let guessed = computers.registry().get(body["computer_id"].as_str().unwrap()).unwrap().unwrap();
     assert_eq!(guessed.url, "http://192.168.0.44:8741");
+}
+
+
+// ---- C5: expect_fingerprint, registered_by, duplicate peer ----
+
+/// A registrar over [`Fake`] that says how it would register every node.
+struct By {
+    inner: Fake,
+    by: Option<&'static str>,
+}
+
+impl Registrar for By {
+    fn name_taken(&self, name: &str) -> bool {
+        self.inner.name_taken(name)
+    }
+    fn register(&self, name: &str, token: &str, i: &NodeInfo, o: &str) -> Result<String, RegisterError> {
+        self.inner.register(name, token, i, o)
+    }
+    fn remove(&self, id: &str) {
+        self.inner.remove(id)
+    }
+    fn registers_by(&self, _i: &NodeInfo, _o: &str) -> Option<&'static str> {
+        self.by
+    }
+}
+
+fn fx_by(by: Option<&'static str>) -> (Fx, Arc<By>) {
+    let reg = Arc::new(By { inner: Fake::default(), by });
+    (fx_with(|_| reg.clone()), reg)
+}
+
+fn peer_node(url: Option<&str>) -> (NodeInfo, String) {
+    let id = ember_transport::SecretKey::generate().peer_id().to_string();
+    let mut i = info();
+    i.url = url.map(String::from);
+    i.peer_id = Some(id.clone());
+    (i, id)
+}
+
+fn redeem_info(f: &Fx, name: &str, i: &NodeInfo) -> String {
+    let m = f.enrol.mint(name, now_ms(), None, BASE).unwrap();
+    f.enrol.redeem(m.code.expose(), i, now_ms(), SRC).unwrap().enrol_id
+}
+
+async fn status_of(f: &Fx, id: &str) -> Value {
+    let h = format!("Bearer {}", f.token);
+    let (st, b, _) = call(&f.app, Method::GET, &path(id, ""), Some(&h), None).await;
+    assert_eq!(st, StatusCode::OK);
+    b
+}
+
+#[tokio::test]
+async fn fr_c2_confirm_accepts_a_matching_expect_fingerprint_in_any_case_and_spacing() {
+    let h_of = |f: &Fx| format!("Bearer {}", f.token);
+    for style in 0..3 {
+        let (f, reg) = fx_by(Some("url"));
+        let (i, id) = peer_node(None);
+        let eid = redeem_info(&f, "box", &i);
+        let fp = ember_transport::fingerprint_hex(&id).unwrap();
+        let given = match style {
+            0 => fp.clone(),
+            1 => fp.to_ascii_uppercase(),
+            _ => fp.replace(' ', ""),
+        };
+        let (st, _, text) = call(
+            &f.app,
+            Method::POST,
+            &path(&eid, "/confirm"),
+            Some(&h_of(&f)),
+            Some(json!({ "expect_fingerprint": given })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{given:?}: {text}");
+        assert_eq!(reg.inner.count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn fr_c2_confirm_with_a_wrong_fingerprint_is_409_and_nothing_is_registered() {
+    let (f, reg) = fx_by(Some("url"));
+    let h = format!("Bearer {}", f.token);
+    let (i, _) = peer_node(None);
+    let eid = redeem_info(&f, "box", &i);
+    let other = ember_transport::fingerprint_hex(&ember_transport::SecretKey::generate().peer_id().to_string()).unwrap();
+    let (st, body, _) =
+        call(&f.app, Method::POST, &path(&eid, "/confirm"), Some(&h), Some(json!({ "expect_fingerprint": other }))).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "fingerprint_mismatch");
+    assert!(body["message"].is_string());
+    assert_eq!(reg.inner.count(), 0);
+    assert_eq!(status_of(&f, &eid).await["status"], "awaiting_confirmation");
+}
+
+#[tokio::test]
+async fn fr_c2_expect_fingerprint_for_a_node_without_a_peer_id_is_a_mismatch() {
+    let (f, reg) = fx_by(Some("url"));
+    let h = format!("Bearer {}", f.token);
+    let eid = redeem_info(&f, "box", &info());
+    let (st, body, _) = call(
+        &f.app,
+        Method::POST,
+        &path(&eid, "/confirm"),
+        Some(&h),
+        Some(json!({ "expect_fingerprint": "abab abab abab abab" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "fingerprint_mismatch");
+    assert_eq!(reg.inner.count(), 0);
+}
+
+#[tokio::test]
+async fn fr_c2_a_malformed_expect_fingerprint_is_400() {
+    let (f, reg) = fx_by(Some("url"));
+    let h = format!("Bearer {}", f.token);
+    let (i, _) = peer_node(None);
+    let eid = redeem_info(&f, "box", &i);
+    for bad in ["", "abab", "not hex at all!!!!", "abab abab abab abab ab"] {
+        let (st, _, text) =
+            call(&f.app, Method::POST, &path(&eid, "/confirm"), Some(&h), Some(json!({ "expect_fingerprint": bad }))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad:?}: {text}");
+    }
+    assert_eq!(reg.inner.count(), 0);
+    assert_eq!(status_of(&f, &eid).await["status"], "awaiting_confirmation");
+}
+
+#[tokio::test]
+async fn fr_c2_the_peer_path_needs_expect_fingerprint_and_a_url_path_does_not() {
+    let (f, reg) = fx_by(Some("peer"));
+    let h = format!("Bearer {}", f.token);
+    let (i, id) = peer_node(None);
+    let eid = redeem_info(&f, "box", &i);
+    for body in [None, Some(json!({})), Some(json!({ "name": "box" }))] {
+        let (st, b, _) = call(&f.app, Method::POST, &path(&eid, "/confirm"), Some(&h), body).await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        assert_eq!(b["error"], "fingerprint_required");
+        assert_eq!(
+            b["message"],
+            "This computer is registered by its peer id; confirm with expect_fingerprint set to the fingerprint shown on the other machine"
+        );
+    }
+    assert_eq!(reg.inner.count(), 0);
+    assert_eq!(status_of(&f, &eid).await["status"], "awaiting_confirmation");
+    let fp = ember_transport::fingerprint_hex(&id).unwrap();
+    let (st, _, text) =
+        call(&f.app, Method::POST, &path(&eid, "/confirm"), Some(&h), Some(json!({ "expect_fingerprint": fp }))).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+
+    // The url path confirms as before, with no fingerprint.
+    let (f, _) = fx_by(Some("url"));
+    let h = format!("Bearer {}", f.token);
+    let (i, _) = peer_node(Some("http://192.168.0.9:8741"));
+    let eid = redeem_info(&f, "box", &i);
+    let (st, _, text) = call(&f.app, Method::POST, &path(&eid, "/confirm"), Some(&h), None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+}
+
+#[tokio::test]
+async fn fr_c2_status_route_carries_registered_by_only_while_awaiting_and_only_with_a_registrar() {
+    let (f, _) = fx_by(Some("url"));
+    let h = format!("Bearer {}", f.token);
+    // A url and a peer id together: both are shown and the url is what would be used.
+    let (i, id) = peer_node(Some("http://192.168.0.9:8741"));
+    let eid = redeem_info(&f, "box", &i);
+    let b = status_of(&f, &eid).await;
+    assert_eq!(b["registered_by"], "url");
+    assert_eq!(b["node_info"]["peer_id"], id.as_str());
+    assert_eq!(b["node_info"]["url"], "http://192.168.0.9:8741");
+    let (st, _, _) = call(&f.app, Method::POST, &path(&eid, "/deny"), Some(&h), None).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(status_of(&f, &eid).await.get("registered_by").is_none());
+
+    let (f, _) = fx_by(Some("peer"));
+    let (i, _) = peer_node(None);
+    let eid = redeem_info(&f, "box", &i);
+    assert_eq!(status_of(&f, &eid).await["registered_by"], "peer");
+
+    let (f, _) = fx_by(Some("observed"));
+    let mut bare = info();
+    bare.url = None;
+    let eid = redeem_info(&f, "box", &bare);
+    assert_eq!(status_of(&f, &eid).await["registered_by"], "observed");
+
+    // A registrar that cannot say (the trait default, here the plain Fake): no key.
+    let f = fx(Arc::new(Fake::default()));
+    let eid = redeem_info(&f, "box", &info());
+    assert!(status_of(&f, &eid).await.get("registered_by").is_none());
+}
+
+/// A real `Computers` with a transport dialer on the in-memory network.
+fn computers_with_transport(store: &Arc<Store>) -> Arc<Computers> {
+    let net = ember_transport::mem::MemNetwork::new();
+    let st = ember_server::transport::ServerTransport::new(net.transport());
+    Computers::with_transport(
+        Registry::new(store.clone()),
+        ember_server::computers::connector(Some(st.dialer.clone())),
+        None,
+        Some(st.dialer.clone()),
+    )
+}
+
+#[tokio::test]
+async fn fr_c2_post_computers_with_a_duplicate_peer_is_400_and_the_real_confirm_refuses_it_too() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let computers = computers_with_transport(&store);
+    let sessions = ember_server::session::Sessions::new(
+        store.clone(),
+        vec![Arc::new(ember_server::agents::scripted::ScriptedAdapter) as Arc<dyn ember_server::agents::AgentAdapter>],
+    );
+    let api = ember_server::computers::api::router(computers.clone(), sessions);
+    let id = ember_transport::SecretKey::generate().peer_id().to_string();
+    let (st, _, text) =
+        call(&api, Method::POST, "/api/computers", None, Some(json!({ "name": "one", "peer": id, "token": "t1" }))).await;
+    assert_eq!(st, StatusCode::CREATED, "{text}");
+    // The same id again, as a full address with other relays, under another name.
+    let (st, body, _) = call(
+        &api,
+        Method::POST,
+        "/api/computers",
+        None,
+        Some(json!({ "name": "two", "peer": { "peer": id, "relays": ["https://relay.example"] }, "token": "t2" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "a computer with this peer id is already registered");
+    assert_eq!(computers.registry().list().unwrap().len(), 1);
+
+    // The enrol confirm over the same registry: a node with that peer id is refused (400) and the
+    // enrolment stays awaiting confirmation.
+    let enrol = Enrol::new(store.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let token = auth::load_or_create_token(dir.path()).unwrap();
+    let a = ServerAuth::new(token.clone(), LISTEN.parse::<SocketAddr>().unwrap(), []);
+    let app = auth::protect(
+        ember_server::computers::enrol::router(
+            enrol.clone(),
+            ember_server::computers::enrol::DoorUrl::Url(BASE.into()),
+            Arc::new(ComputersRegistrar::new(computers.clone())),
+        ),
+        a,
+    );
+    let h = format!("Bearer {token}");
+    let mut i = info();
+    i.url = None;
+    i.peer_id = Some(id.clone());
+    let m = enrol.mint("dup", now_ms(), None, BASE).unwrap();
+    let eid = enrol.redeem(m.code.expose(), &i, now_ms(), SRC).unwrap().enrol_id;
+    let fp = ember_transport::fingerprint_hex(&id).unwrap();
+    let (st, body, _) =
+        call(&app, Method::POST, &path(&eid, "/confirm"), Some(&h), Some(json!({ "expect_fingerprint": fp }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "a computer with this peer id is already registered");
+    assert_eq!(computers.registry().list().unwrap().len(), 1);
+    let (_, b, _) = call(&app, Method::GET, &path(&eid, ""), Some(&h), None).await;
+    assert_eq!(b["status"], "awaiting_confirmation");
+    assert_eq!(b["registered_by"], "peer");
 }

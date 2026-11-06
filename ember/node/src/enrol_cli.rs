@@ -73,6 +73,19 @@ ignored until the files are written: answer the fingerprint question with n, Ent
 
 /// The exact text printed for every http server (design 4.2).
 pub const PLAIN_HTTP_WARNING: &str = "This server speaks plain HTTP. Anyone on the network path can read the enrol code, the poll secret and the credential this node receives, and whoever reads the poll secret can fetch the credential before this node does. Use a network you trust, or an https address.";
+/// The plain-http notice for a server on THIS machine (a loopback address): the traffic does not
+/// leave the machine, so the warning is weaker, but it is still printed (supervisor, 2026-11-06).
+pub const LOOPBACK_HTTP_NOTE: &str = "This server speaks plain HTTP, but its address is on this machine: the enrol code, the poll secret and the credential travel only inside this machine. Use an https address if the server is not on this machine.";
+
+/// The plain-http text to print for `server` (only for http): the full warning, or the weaker note
+/// for a loopback address.
+pub fn plain_http_text(server: &ServerUrl) -> &'static str {
+    if server.loopback {
+        LOOPBACK_HTTP_NOTE
+    } else {
+        PLAIN_HTTP_WARNING
+    }
+}
 
 /// The only answer to a refused code, whatever the reason.
 pub const REFUSED_TEXT: &str = "this enrol code cannot be used";
@@ -80,7 +93,7 @@ const RATE_LIMITED_TEXT: &str = "too many attempts, wait and try again";
 const TIMEOUT_TEXT: &str = "timed out waiting for the owner";
 const FINGERPRINT_PROMPT: &str =
     "Does this match the fingerprint your Ember server prints at start and shows in the app? (n, Enter or Ctrl-D declines) [y/N] ";
-const INTERRUPTED_TEXT: &str = "interrupted; nothing was written on this node. The code was already redeemed: ask the owner to cancel the pending computer in Ember, or let it expire.";
+const INTERRUPTED_TEXT: &str = "interrupted; nothing was written on this node. The code may already have been redeemed: ask the owner to cancel the pending computer in Ember, or let it expire.";
 const UNVERIFIED_WARNING: &str = "Warning: this adds an unverified server to this node's allowed peers; the transport crosses NAT, so a rogue server could reach this node from anywhere.";
 
 // ---- options and arguments ----------------------------------------------------------------
@@ -247,6 +260,8 @@ pub struct ServerUrl {
     /// A loopback, private, link-local or unique-local IP literal, `localhost`, or a `.local`
     /// name. A name is never resolved.
     pub private: bool,
+    /// The host is this machine: a loopback IP literal or `localhost` (a name is never resolved).
+    pub loopback: bool,
 }
 
 enum Host {
@@ -347,12 +362,17 @@ pub(crate) fn classify_server_url(raw: &str) -> anyhow::Result<ServerUrl> {
         Host::V6(a) => (format!("[{a}]"), is_private_v6(*a)),
         Host::Name(n) => (n.clone(), n == "localhost" || n.ends_with(".local")),
     };
+    let loopback = match &host {
+        Host::V4(a) => a.is_loopback(),
+        Host::V6(a) => a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
+        Host::Name(n) => n == "localhost",
+    };
     let scheme = if https { "https" } else { "http" };
     let base = match port {
         Some(p) => format!("{scheme}://{host_text}:{p}"),
         None => format!("{scheme}://{host_text}"),
     };
-    Ok(ServerUrl { base, https, private })
+    Ok(ServerUrl { base, https, private, loopback })
 }
 
 /// Plain http to a public host is refused unless `allow_http`. Checked before any request.
@@ -680,6 +700,35 @@ pub async fn cli(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
+/// The three signals that end a terminal session or a process: SIGINT (Ctrl-C), SIGTERM and SIGHUP.
+/// Registered together, once, before the code is redeemed (see `run`).
+struct Signals {
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    fn register() -> anyhow::Result<Signals> {
+        use tokio::signal::unix::{signal, SignalKind};
+        let one = |k| signal(k).map_err(|_| anyhow!("cannot listen for Ctrl-C"));
+        Ok(Signals {
+            int: one(SignalKind::interrupt())?,
+            term: one(SignalKind::terminate())?,
+            hup: one(SignalKind::hangup())?,
+        })
+    }
+
+    /// Completes when any of the three arrives.
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.int.recv() => {}
+            _ = self.term.recv() => {}
+            _ = self.hup.recv() => {}
+        }
+    }
+}
+
 /// The whole flow (design section 2). Everything before the final write leaves nothing on disk
 /// (apart from the lock file and, with `--transport`, the node's own transport key).
 pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome> {
@@ -697,7 +746,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     io.say(&format!("TLS: {}", if server.https { "yes" } else { "no" }));
     io.say("This node will accept commands from this server.");
     if !server.https {
-        io.say(PLAIN_HTTP_WARNING);
+        io.say(plain_http_text(&server));
     }
     let interactive = io.interactive();
     if !opts.yes {
@@ -753,6 +802,18 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     }
 
     // 5. Redeem.
+    // Signal listeners are registered BEFORE the code is spent: from here until the process ends
+    // Ctrl-C (SIGINT), SIGTERM and SIGHUP (the terminal closed, the ssh link dropped) no longer
+    // kill the process (registering a tokio signal listener replaces the default action for the
+    // rest of the process). While the redeem request and the poll loop run, a signal is turned
+    // into a clean exit that writes nothing. After the delivery nothing reads the listeners any
+    // more, so no signal can kill the process in the middle of the write, which would lose the
+    // token; the cost is that the fingerprint question after the delivery is declined with n,
+    // Enter or Ctrl-D (FINGERPRINT_PROMPT says so), not Ctrl-C. `unix::signal` registers now
+    // (`ctrl_c()` would register on its first poll and a signal between two polls would be lost).
+    // Not covered by a test: it needs a signal sent to the test process. The server cannot cancel
+    // the pending enrolment (no such route, issue #617).
+    let mut signals = Signals::register()?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -760,12 +821,11 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         .build()
         .map_err(|_| anyhow!("cannot build the HTTP client"))?;
     tracing::info!(server = %server.base, "redeeming an enrol code");
-    let resp = client
-        .post(format!("{}/enrol/redeem", server.base))
-        .json(&json!({ "code": opts.code, "node_public_info": info }))
-        .send()
-        .await
-        .map_err(|e| anyhow!("{}", net_err(&e)))?;
+    let sent = client.post(format!("{}/enrol/redeem", server.base)).json(&json!({ "code": opts.code, "node_public_info": info })).send();
+    let resp = tokio::select! {
+        r = sent => r.map_err(|e| anyhow!("{}", net_err(&e)))?,
+        _ = signals.recv() => bail!("{INTERRUPTED_TEXT}"),
+    };
     match resp.status().as_u16() {
         200 => {}
         403 => bail!("{REFUSED_TEXT}"),
@@ -793,17 +853,6 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
         )),
         None => io.say("Waiting for the owner to confirm this computer in Ember."),
     }
-    // From here until the process ends Ctrl-C is handled by this listener and no longer kills the
-    // process (registering a tokio signal listener replaces the default SIGINT action for the
-    // rest of the process). While polling, the select below turns it into a clean exit. After the
-    // delivery nothing reads it any more, so a Ctrl-C can no longer kill the process in the middle
-    // of the write, which would lose the token; the cost is that the fingerprint question after
-    // the delivery is declined with n, Enter or Ctrl-D (FINGERPRINT_PROMPT says so), not Ctrl-C.
-    // `unix::signal` registers now (`ctrl_c()` would register on its first poll, and a signal
-    // between two polls would be lost). Not covered by a test: it needs a signal sent to the test
-    // process. The server cannot cancel the pending enrolment (no such route, issue #617).
-    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .map_err(|_| anyhow!("cannot listen for Ctrl-C"))?;
     let poll_url = format!("{}/enrol/status/{}", server.base, redeemed.enrol_id);
     let started = Instant::now();
     let mut delay = opts.poll_every;
@@ -821,7 +870,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
                 }
                 poll_once(&client, &poll_url, &redeemed.poll_secret).await
             } => r?,
-            _ = sigint.recv() => bail!("{INTERRUPTED_TEXT}"),
+            _ = signals.recv() => bail!("{INTERRUPTED_TEXT}"),
         };
         match polled {
             Polled::Answer(a) => {
@@ -1298,6 +1347,37 @@ mod tests {
         check_transport_policy(&classify_server_url("https://ember.example").unwrap(), false).unwrap();
         check_transport_policy(&classify_server_url("http://10.0.0.5").unwrap(), false).unwrap();
         check_transport_policy(&classify_server_url("http://localhost:1").unwrap(), false).unwrap();
+    }
+
+    #[test]
+    fn fr_c2_node_cli_a_loopback_server_gets_the_weaker_plain_http_note_others_the_full_warning() {
+        for (url, loopback) in [
+            ("http://127.0.0.1:8742", true),
+            ("http://127.1.2.3", true),
+            ("http://[::1]:8742", true),
+            ("http://localhost:1", true),
+            ("http://10.0.0.5:8742", false),
+            ("http://192.168.1.2", false),
+            ("http://169.254.1.1", false),
+            ("http://host.local", false),
+            ("http://ember.example", false),
+        ] {
+            let u = classify_server_url(url).unwrap();
+            assert_eq!(u.loopback, loopback, "{url}");
+            let text = plain_http_text(&u);
+            if loopback {
+                assert_eq!(text, LOOPBACK_HTTP_NOTE, "{url}");
+                assert!(text.contains("plain HTTP") && text.contains("on this machine"), "{url}");
+            } else {
+                assert_eq!(text, PLAIN_HTTP_WARNING, "{url}");
+            }
+        }
+        // The note is still a warning about plain HTTP, never silent, and has no em-dash.
+        assert!(LOOPBACK_HTTP_NOTE.starts_with("This server speaks plain HTTP"));
+        assert!(!LOOPBACK_HTTP_NOTE.contains('\u{2014}'));
+        // A loopback address is always private; the reverse is not true.
+        assert!(classify_server_url("http://127.0.0.1").unwrap().private);
+        assert!(!classify_server_url("http://10.0.0.5").unwrap().loopback);
     }
 
     #[test]

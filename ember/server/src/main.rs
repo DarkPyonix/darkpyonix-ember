@@ -191,7 +191,9 @@ async fn main() -> anyhow::Result<()> {
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
     let store_for_guest = store.clone();
-    let store_for_enrol = store.clone();
+    // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and, from step C3
+    // on, the enrol door share its failure windows and its pending-token map, which live per instance.
+    let enrol = computers::enrol::Enrol::new(store.clone());
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
@@ -469,7 +471,7 @@ async fn main() -> anyhow::Result<()> {
         // FR-C2c: the owner's confirm and deny are on this router too, and so is the registrar
         // that adds the confirmed computer to the registry.
         .merge(computers::enrol::router(
-            computers::enrol::Enrol::new(store_for_enrol),
+            enrol.clone(),
             enrol_base_url,
             Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
         ));

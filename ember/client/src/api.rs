@@ -181,6 +181,59 @@ pub enum GitLogRefKind {
     Head,
 }
 
+/// One commit with its changed files (FR-G14).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitDetail {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    #[serde(default)]
+    pub body: String,
+    pub author: String,
+    /// Author time, ISO 8601 strict.
+    pub time: String,
+    pub parents: Vec<String>,
+    #[serde(default)]
+    pub refs: Vec<GitLogRef>,
+    #[serde(default)]
+    pub files: Vec<GitCommitFile>,
+    #[serde(default)]
+    pub files_total: usize,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitFile {
+    pub path: String,
+    #[serde(default)]
+    pub old_path: Option<String>,
+    pub status: GitCommitFileStatus,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitCommitFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+}
+
+/// The new HEAD after a revert or cherry-pick (FR-G15).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitApplied {
+    pub new_sha: String,
+}
+
 /// Local branches (`POST /projects/{id}/git/branches`, FR-G9).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GitBranches {
@@ -918,6 +971,21 @@ impl Api {
     /// Read a page of repository history.
     pub async fn git_log(&self, project: &str, limit: u32, skip: u64, branch: Option<&str>) -> ApiResult<GitLog> {
         Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
+    }
+
+    /// One commit with its message, refs and changed files (FR-G14).
+    pub async fn git_commit_show(&self, project: &str, sha: &str) -> ApiResult<GitCommitDetail> {
+        Self::decode(self.git_post(project, "commit/show", json!({ "sha": sha })).await?)
+    }
+
+    /// Revert a commit on the current branch (FR-G15; 409 for a dirty tree or a conflict).
+    pub async fn git_revert(&self, project: &str, sha: &str) -> ApiResult<GitCommitApplied> {
+        Self::decode(self.git_post(project, "revert", json!({ "sha": sha, "confirm": true })).await?)
+    }
+
+    /// Cherry-pick a commit onto the current branch (FR-G15; 409 for a dirty tree or a conflict).
+    pub async fn git_cherry_pick(&self, project: &str, sha: &str) -> ApiResult<GitCommitApplied> {
+        Self::decode(self.git_post(project, "cherry-pick", json!({ "sha": sha, "confirm": true })).await?)
     }
 
     /// List local branches with upstream ahead/behind, last commit, default and worktree (FR-G9).

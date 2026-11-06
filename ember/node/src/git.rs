@@ -13,6 +13,8 @@
 
 #[path = "git_branches.rs"]
 pub mod git_branches;
+#[path = "git_commit.rs"]
+pub mod git_commit;
 #[path = "git_github.rs"]
 pub mod git_github;
 #[path = "git_log.rs"]
@@ -158,6 +160,9 @@ pub enum GitError {
     Bad(String),
     #[error("{0}")]
     Conflict(String),
+    /// The named object (a commit) does not exist (404 `not_found`).
+    #[error("{0}")]
+    NotFound(String),
     #[error("{0}")]
     Internal(String),
     /// A network operation did not finish in time (504).
@@ -258,6 +263,9 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        // A revert or cherry-pick never opens an editor for its message.
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
         .env("SSH_ASKPASS_REQUIRE", "never")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")

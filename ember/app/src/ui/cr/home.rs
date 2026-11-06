@@ -43,6 +43,9 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 const POPUP_WIDTH: f32 = 280.0;
 /// The permission popup is wider: each row carries a description line.
 const MODE_POPUP_WIDTH: f32 = 340.0;
+/// The model popover: a rail of harnesses beside the search and the rows.
+const MODEL_POPOVER_WIDTH: f32 = 560.0;
+const MODEL_RAIL_WIDTH: f32 = 128.0;
 
 /// The permission-mode popup (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
 /// one row per mode with a shield, the title, a one-line description and a check on the chosen
@@ -659,11 +662,43 @@ impl Composer {
                 selection.set(s);
             });
         }
-        self.model_sheet(ui, &sel, open == Some(Pick::Model), close);
+        // Compact widths keep the modal (a bottom sheet in the spec); wider ones use the popover
+        // under the chip, drawn in the composer card.
+        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
     }
 
-    /// The model picker: harness filter, search and the rows with their reasons (FR-L15).
+    /// The model picker as a modal (compact widths, where the spec asks for a bottom sheet):
+    /// harness chips on top, search and the rows with their reasons (FR-L15).
     fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
+        EmberSheet("모델 선택", open, close.clone(), None, || {
+            self.model_body(ui, sel, false, close);
+        });
+    }
+
+    /// The model picker as a popover hanging under the model chip (FR-L15, mockup v8 `.mpick`):
+    /// a left rail of harnesses, then search and the rows. The toolkit `Menu` places its popup
+    /// below its anchor since compose-rust v0.0.5 (#383), with any content as its entries.
+    /// Not built: the rail's favourites group, favourite stars and profile names, which need
+    /// stored favourites and FR-L17 profiles (SPEC FR-L15 note).
+    fn model_popover(&self, ui: &SharedUi, sel: &Selection, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
+        let open = self.open.get() == Some(Pick::Model);
+        let dismiss = {
+            let o = self.open.clone();
+            move || {
+                if o.get_untracked() == Some(Pick::Model) {
+                    o.set(None);
+                }
+            }
+        };
+        cu::Menu(open).on_dismiss(dismiss).anchor(anchor).content(|| {
+            self.model_body(ui, sel, true, close);
+        });
+    }
+
+    /// The picker's contents. With `rail` the harness filter is a vertical rail at the left
+    /// and the list is a fixed-width column beside it; without, chips run along the top.
+    fn model_body(&self, ui: &SharedUi, sel: &Selection, rail: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
         let agents: Vec<(String, bool)> = ui.live.agents.get().iter().map(|a| (a.kind.clone(), a.installed)).collect();
         let limited: Vec<String> = {
@@ -682,17 +717,17 @@ impl Composer {
         let filter = self.harness_filter.get();
         let query = self.query.get();
         let rows = filter_models(&all, filter, &query);
-        EmberSheet("모델 선택", open, close.clone(), None, || {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
-                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                    let f = self.harness_filter.clone();
-                    FilterChip("전체", filter.is_none(), move || f.set(None));
-                    for h in Harness::ALL {
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                        let f = self.harness_filter.clone();
-                        FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
-                    }
-                });
+        let filters = || {
+            let f = self.harness_filter.clone();
+            FilterChip("전체", filter.is_none(), move || f.set(None));
+            for h in Harness::ALL {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]).height(SP[0]));
+                let f = self.harness_filter.clone();
+                FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
+            }
+        };
+        let list = || {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                 let q = self.query.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -745,7 +780,28 @@ impl Composer {
                     });
                 });
             });
-        });
+        };
+        if rail {
+            let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
+                .width(MODEL_POPOVER_WIDTH)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_MD)
+                .padding(SP[1]);
+            cu::Row().modifier(surface).content(|| {
+                cu::Column().spacing(SP[0]).modifier(Modifier::new().width(MODEL_RAIL_WIDTH).padding(SP[1])).content(|| {
+                    filters();
+                });
+                cu::Box().modifier(Modifier::new().weight(1.0).padding(SP[1])).content(list);
+            });
+        } else {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
+                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
+                    filters();
+                });
+                list();
+            });
+        }
     }
 }
 
@@ -908,7 +964,15 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     cu::Box().modifier(Modifier::new().size(36.0, 36.0)).content(add);
                     cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
                         chip(&sel.project, IconRole::Library, Pick::Project, false);
-                        chip(&model_text, IconRole::Compose, Pick::Model, false);
+                        if l.compact {
+                            chip(&model_text, IconRole::Compose, Pick::Model, false);
+                        } else {
+                            let close = {
+                                let o = c.open.clone();
+                                move || o.set(None)
+                            };
+                            c.model_popover(ui, &sel, || chip(&model_text, IconRole::Compose, Pick::Model, false), close);
+                        }
                         chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
                         chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
                     });

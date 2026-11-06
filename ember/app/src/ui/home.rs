@@ -179,18 +179,18 @@ pub struct ModelOption {
 }
 
 impl ModelOption {
-    /// "Opus 5.5 (High)", the row title; a harness without effort shows the name alone.
+    /// "Opus 5.5 (높음)", the row title; a harness without effort shows the name alone.
     pub fn row_title(&self) -> String {
         match self.effort {
-            Some(e) => format!("{} ({})", self.name, e),
+            Some(e) => format!("{} ({})", self.name, effort_name(e)),
             None => self.name.to_string(),
         }
     }
 
-    /// "Claude Code · Opus 5.5 · High", the chip text.
+    /// "Claude Code · Opus 5.5 · 높음", the chip text.
     pub fn chip_label(&self) -> String {
         match self.effort {
-            Some(e) => format!("{} · {} · {}", self.harness.label(), self.name, e),
+            Some(e) => format!("{} · {} · {}", self.harness.label(), self.name, effort_name(e)),
             None => format!("{} · {}", self.harness.label(), self.name),
         }
     }
@@ -218,6 +218,18 @@ const GEMINI_MODELS: [(&str, &str); 2] = [
 
 /// The efforts of a harness that has them, lowest first.
 pub const EFFORTS: [&str; 3] = ["Low", "Medium", "High"];
+
+/// The Korean name of an effort, as in mockup v8 (낮음, 보통, 높음). The English key stays the
+/// id handed to the agent and kept in settings; only what the user reads is Korean (FR-L15).
+/// An unknown key is shown as it is.
+pub fn effort_name(key: &str) -> &str {
+    match key {
+        "Low" => "낮음",
+        "Medium" => "보통",
+        "High" => "높음",
+        other => other,
+    }
+}
 
 fn models_of(h: Harness) -> &'static [(&'static str, &'static str)] {
     match h {
@@ -285,11 +297,12 @@ pub fn filter_models(
                 harness.is_none_or(|h| o.harness == h)
             } else {
                 let hay = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     o.name,
                     o.model,
                     o.harness.label(),
-                    o.effort.unwrap_or("")
+                    o.effort.unwrap_or(""),
+                    o.effort.map(effort_name).unwrap_or("")
                 )
                 .to_lowercase();
                 q.split_whitespace().all(|w| hay.contains(w))
@@ -1042,10 +1055,40 @@ mod tests {
     }
 
     #[test]
+    fn fr_l15_effort_names_are_korean() {
+        assert_eq!(effort_name("Low"), "낮음");
+        assert_eq!(effort_name("Medium"), "보통");
+        assert_eq!(effort_name("High"), "높음");
+        assert_eq!(effort_name("Max"), "Max");
+        for e in EFFORTS {
+            assert_ne!(effort_name(e), e);
+        }
+    }
+
+    #[test]
+    fn fr_l15_no_row_or_chip_shows_an_english_effort() {
+        for o in model_catalog() {
+            for t in [o.row_title(), o.chip_label()] {
+                for en in EFFORTS {
+                    assert!(!t.contains(en), "{t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l15_search_finds_a_row_by_its_korean_effort() {
+        let all = model_catalog();
+        let hits = filter_models(&all, None, "높음");
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|o| o.effort == Some("High")));
+    }
+
+    #[test]
     fn fr_l15_chip_and_row_text() {
         let o = default_option(Harness::ClaudeCode);
-        assert_eq!(o.chip_label(), "Claude Code · Opus 5.5 · High");
-        assert_eq!(o.row_title(), "Opus 5.5 (High)");
+        assert_eq!(o.chip_label(), "Claude Code · Opus 5.5 · 높음");
+        assert_eq!(o.row_title(), "Opus 5.5 (높음)");
         let g = default_option(Harness::Gemini);
         assert_eq!(g.chip_label(), "Gemini · Gemini Pro");
         assert_eq!(g.row_title(), "Gemini Pro");

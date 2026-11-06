@@ -63,12 +63,26 @@ pub const TYPED_FINGERPRINT_HELP: &str = "노드 화면의 지문을 직접 읽�
 pub const NODE_FINGERPRINT_PEER: &str = "노드가 보고한 지문";
 pub const FINGERPRINT_MISMATCH: &str = "입력한 지문이 노드가 보고한 지문과 다릅니다. 아무것도 추가되지 않았습니다. 노드 화면의 지문을 다시 확인하세요";
 pub const FINGERPRINT_REQUIRED: &str = "이 노드는 지문 확인이 필요합니다. 노드 화면의 지문을 입력하세요";
+/// Under the command in its standard-input form: the owner pastes the code when the node asks.
+pub const STDIN_FORM_NOTE: &str = "위에 표시된 코드를 노드가 물을 때 붙여 넣습니다. 프로세스 목록에 남지 않습니다";
+/// Label of the second, muted line: the command with the code as an argument.
+pub const ARG_LABEL: &str = "코드를 인자로 줄 때";
+/// A cancel on leave failed: the request stays on the server until it expires.
+pub const CANCEL_FAILED: &str = "요청을 취소하지 못했습니다. 서버에서 최대 10분 뒤 만료됩니다";
+/// Under the argument-form command: the code lands in shell history and the process list.
+pub const ARG_WARNING: &str = "코드를 인자로 주면 셸 기록과 프로세스 목록에 남습니다";
+/// Notice when the computer was added.
+pub const ADDED_NOTICE: &str = "컴퓨터를 추가했습니다";
+/// Notice when a confirm that outlived the closed sheet failed.
+pub const CONFIRM_FAILED_LATE: &str = "컴퓨터를 추가하지 못했습니다. 컴퓨터 목록을 확인하세요";
+/// A confirm whose answer never came (transport error): the server may have accepted it.
+pub const CONFIRM_UNKNOWN: &str = "연결이 끊겨 결과를 알 수 없습니다. 컴퓨터 목록을 확인하세요";
 pub const FINGERPRINT_PENDING_HINT: &str = "노드 화면의 지문과 같아질 때까지 추가할 수 없습니다";
 pub const WARN_INFORMS: &str = "경고는 알려 줄 뿐 추가를 막지 않습니다";
 
 /// Every sentence of the code flow, for the NFR-L4 ending check in `ui::session`.
 pub const FLOW_STRINGS: &[&str] = &[
-    NAME_HELP, STDIN_NOTE, WAITING_LINE, CODE_ONCE, DOOR_OFF, DOOR_URL_UNKNOWN, NO_COMMAND, HTTP_WARNING, CONFIRM_QUESTION, CONFIRM_CHECK,
+    NAME_HELP, STDIN_NOTE, STDIN_FORM_NOTE, ARG_LABEL, ARG_WARNING, ADDED_NOTICE, CONFIRM_FAILED_LATE, CONFIRM_UNKNOWN, CANCEL_FAILED, WAITING_LINE, CODE_ONCE, DOOR_OFF, DOOR_URL_UNKNOWN, NO_COMMAND, HTTP_WARNING, CONFIRM_QUESTION, CONFIRM_CHECK,
     CONFIRMED_WAIT, JOINED_LINE, JOINED_NEXT, NODE_CMD_NOTE, ZSH_QUOTE_NOTE, DENIED_LINE, EXPIRED_LINE, GONE_LINE, DEMO_LINE, WARN_ADDR_DIFFERS, WARN_NAME_DIFFERS,
     WARN_PUBLIC_ADDR, NOTE_PROPOSED, WARN_INFORMS, PEER_ID_UNUSED, PEER_ONLY_NOTE, TYPED_FINGERPRINT_HELP, FINGERPRINT_MISMATCH,
     FINGERPRINT_REQUIRED, FINGERPRINT_PENDING_HINT,
@@ -505,6 +519,10 @@ impl RunGuard {
         true
     }
 
+    pub fn run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
+    }
+
     pub fn is_current(&self, id: &str) -> bool {
         self.open && self.run_id.as_deref() == Some(id)
     }
@@ -538,6 +556,12 @@ pub fn view_after_confirm_error(e: &EnrolCallError) -> Option<EnrolView> {
     }
 }
 
+/// A confirm that failed with no HTTP status (the connection broke): the server may have
+/// accepted it, so the outcome is unknown and the request must not be cancelled.
+pub fn confirm_is_unknown(e: &EnrolCallError) -> bool {
+    matches!(e, EnrolCallError::Api(_)) && e.status().is_none()
+}
+
 /// The view after the clock passed the code's time: a waiting code ends as expired at once.
 pub fn view_after_tick(v: &EnrolView, now_ms: i64) -> Option<EnrolView> {
     match v {
@@ -547,16 +571,183 @@ pub fn view_after_tick(v: &EnrolView, now_ms: i64) -> Option<EnrolView> {
 }
 
 /// Whether leaving the sheet cancels the enrolment on the server: only a code nobody redeemed or
-/// a request not yet confirmed. A confirmed one is left to finish, and a sample calls nothing.
-pub fn should_cancel_on_leave(view: Option<&EnrolView>, confirmed: bool, sample: bool) -> bool {
+/// a request not yet confirmed. A confirmed one is left to finish, a confirm still in flight
+/// counts as confirmed (the owner just pressed it), and a sample calls nothing.
+pub fn should_cancel_on_leave(view: Option<&EnrolView>, confirmed: bool, confirm_in_flight: bool, sample: bool) -> bool {
     if sample {
         return false;
     }
     match view {
         Some(EnrolView::WaitingForNode { .. }) => true,
-        Some(EnrolView::AwaitingConfirm { .. }) => !confirmed,
+        Some(EnrolView::AwaitingConfirm { .. }) => !confirmed && !confirm_in_flight,
         _ => false,
     }
+}
+
+/// The command with the code argument replaced by `-` (the code on standard input), for the
+/// display only. `None` when the code is not a whole argument of the command (a quoted code
+/// counts), so nothing is guessed.
+pub fn stdin_form(command: &str, code: &str) -> Option<String> {
+    if code.is_empty() {
+        return None;
+    }
+    let (single, double) = (format!("'{code}'"), format!("\"{code}\""));
+    let mut found = false;
+    let parts: Vec<&str> = command
+        .split(' ')
+        .map(|t| {
+            if t == code || t == single || t == double {
+                found = true;
+                "-"
+            } else {
+                t
+            }
+        })
+        .collect();
+    found.then(|| parts.join(" "))
+}
+
+/// What the sheet knows for the async-order decisions. The widget glue copies it from its
+/// states, calls `reduce` and writes it back.
+#[derive(Debug, Clone, Default)]
+pub struct SheetState {
+    pub guard: RunGuard,
+    pub view: Option<EnrolView>,
+    pub confirmed: bool,
+    pub confirm_in_flight: bool,
+    /// A confirm failed without an answer: it may have been accepted, so Leave does not cancel.
+    pub confirm_unknown: bool,
+    /// The run whose confirm was in flight when the sheet closed: its answer is still reported,
+    /// once.
+    pub detached_confirm: Option<String>,
+    pub sample: bool,
+}
+
+/// Something that happened to the sheet. An answer names the run (or mint generation) it is for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    MintAnswered { generation: u64, id: String },
+    /// A status answer mapped to a view; also used for the end state a failed confirm or deny
+    /// leads to.
+    PollAnswered { id: String, view: EnrolView },
+    ConfirmAnswered { id: String, ok: bool },
+    /// The confirm call failed without an HTTP answer (transport error).
+    ConfirmUnknown { id: String },
+    DenyAnswered { id: String, ok: bool },
+    Tick { now_ms: i64 },
+    Leave,
+}
+
+/// What the glue does for the reducer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    /// Cancel this enrolment on the server.
+    Cancel(String),
+    /// A new confirm card is on screen: start the 600 ms delay.
+    ArmConfirm,
+    RefreshComputers,
+    /// Tell the owner something in a notice.
+    Notice(String),
+    /// Drop the typed fingerprint (the confirm was accepted).
+    ClearTypedFingerprint,
+    /// Drop the code, the command and the typed fingerprint.
+    ClearSecrets,
+    SetView(EnrolView),
+}
+
+fn end(s: &mut SheetState, v: EnrolView, out: &mut Vec<Effect>) {
+    s.guard.clear();
+    s.confirm_in_flight = false;
+    s.view = Some(v.clone());
+    out.push(Effect::ClearSecrets);
+    out.push(Effect::SetView(v));
+}
+
+/// The single place that orders the sheet's async answers. A late or stale answer returns no
+/// effect (a late mint returns a cancel), every end state clears the secrets.
+pub fn reduce(s: &mut SheetState, ev: Event) -> Vec<Effect> {
+    let mut out = Vec::new();
+    match ev {
+        Event::MintAnswered { generation, id } => {
+            if !s.guard.accept_mint(generation, &id) {
+                out.push(Effect::Cancel(id));
+            }
+        }
+        Event::PollAnswered { id, view: next } => {
+            if !s.guard.is_current(&id) {
+                return out;
+            }
+            let Some(cur) = s.view.clone() else { return out };
+            if matches!(next, EnrolView::AwaitingConfirm { .. }) && !matches!(cur, EnrolView::AwaitingConfirm { .. }) {
+                out.push(Effect::ArmConfirm);
+            }
+            if next == EnrolView::Joined && cur != EnrolView::Joined {
+                out.push(Effect::RefreshComputers);
+                out.push(Effect::Notice(ADDED_NOTICE.to_string()));
+            }
+            if is_end_state(&next) {
+                end(s, next, &mut out);
+            } else if next != cur {
+                s.view = Some(next.clone());
+                out.push(Effect::SetView(next));
+            }
+        }
+        Event::ConfirmAnswered { id, ok } => {
+            if s.guard.is_current(&id) {
+                s.confirm_in_flight = false;
+                s.confirm_unknown = false;
+                if ok {
+                    s.confirmed = true;
+                    out.push(Effect::ClearTypedFingerprint);
+                }
+            } else if s.detached_confirm.as_deref() == Some(id.as_str()) {
+                s.detached_confirm = None;
+                if ok {
+                    out.push(Effect::RefreshComputers);
+                    out.push(Effect::Notice(ADDED_NOTICE.to_string()));
+                } else {
+                    out.push(Effect::Notice(CONFIRM_FAILED_LATE.to_string()));
+                }
+            }
+        }
+        Event::ConfirmUnknown { id } => {
+            if s.guard.is_current(&id) {
+                s.confirm_in_flight = false;
+                s.confirm_unknown = true;
+            } else if s.detached_confirm.as_deref() == Some(id.as_str()) {
+                s.detached_confirm = None;
+                out.push(Effect::RefreshComputers);
+                out.push(Effect::Notice(CONFIRM_UNKNOWN.to_string()));
+            }
+        }
+        Event::DenyAnswered { id, ok } => {
+            if ok && s.guard.is_current(&id) {
+                end(s, EnrolView::Denied, &mut out);
+            }
+        }
+        Event::Tick { now_ms } => {
+            if let Some(next) = s.view.as_ref().and_then(|v| view_after_tick(v, now_ms)) {
+                end(s, next, &mut out);
+            }
+        }
+        Event::Leave => {
+            let cancel = should_cancel_on_leave(s.view.as_ref(), s.confirmed, s.confirm_in_flight, s.sample) && !s.confirm_unknown;
+            let run = s.guard.run_id().map(str::to_string);
+            if s.confirm_in_flight && !s.sample {
+                s.detached_confirm = run.clone();
+            }
+            if let (true, Some(id)) = (cancel, run) {
+                out.push(Effect::Cancel(id));
+            }
+            s.guard.close();
+            s.view = None;
+            s.confirmed = false;
+            s.confirm_in_flight = false;
+            s.confirm_unknown = false;
+            out.push(Effect::ClearSecrets);
+        }
+    }
+    out
 }
 
 /// Whether a node info carries anything worth showing.
@@ -947,11 +1138,155 @@ mod tests {
     fn fr_c2_enrol_run_guard_leave_after_confirm_does_not_cancel() {
         let w = EnrolView::WaitingForNode { code: "c".into(), expires_ms: 1 };
         let a = view_from_status(&awaiting(), "c", 1);
-        assert!(should_cancel_on_leave(Some(&w), false, false));
-        assert!(should_cancel_on_leave(Some(&a), false, false));
-        assert!(!should_cancel_on_leave(Some(&a), true, false));
-        assert!(!should_cancel_on_leave(Some(&w), false, true));
-        assert!(!should_cancel_on_leave(Some(&EnrolView::Joined), false, false));
-        assert!(!should_cancel_on_leave(None, false, false));
+        assert!(should_cancel_on_leave(Some(&w), false, false, false));
+        assert!(should_cancel_on_leave(Some(&a), false, false, false));
+        assert!(!should_cancel_on_leave(Some(&a), true, false, false));
+        assert!(!should_cancel_on_leave(Some(&a), false, true, false));
+        assert!(!should_cancel_on_leave(Some(&w), false, false, true));
+        assert!(!should_cancel_on_leave(Some(&EnrolView::Joined), false, false, false));
+        assert!(!should_cancel_on_leave(None, false, false, false));
+    }
+
+    fn open_sheet(view: EnrolView) -> SheetState {
+        let mut s = SheetState::default();
+        s.guard.open();
+        let n = s.guard.begin_mint();
+        assert!(reduce(&mut s, Event::MintAnswered { generation: n, id: "a".into() }).is_empty());
+        s.view = Some(view);
+        s
+    }
+
+    fn waiting() -> EnrolView {
+        EnrolView::WaitingForNode { code: "c".into(), expires_ms: 5_000 }
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_late_mint_after_leave_is_refused_and_cancelled() {
+        let mut s = SheetState::default();
+        s.guard.open();
+        let n = s.guard.begin_mint();
+        reduce(&mut s, Event::Leave);
+        let fx = reduce(&mut s, Event::MintAnswered { generation: n, id: "late".into() });
+        assert_eq!(fx, vec![Effect::Cancel("late".into())]);
+        assert!(!s.guard.is_current("late"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_stale_answers_are_ignored() {
+        let mut s = open_sheet(waiting());
+        let a = view_from_status(&awaiting(), "c", 1);
+        assert!(reduce(&mut s, Event::PollAnswered { id: "old".into(), view: a }).is_empty());
+        assert!(reduce(&mut s, Event::PollAnswered { id: "old".into(), view: EnrolView::Joined }).is_empty());
+        assert!(reduce(&mut s, Event::ConfirmAnswered { id: "old".into(), ok: true }).is_empty());
+        assert!(!s.confirmed);
+        assert!(reduce(&mut s, Event::DenyAnswered { id: "old".into(), ok: true }).is_empty());
+        assert_eq!(s.view, Some(waiting()));
+        assert!(s.guard.is_current("a"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_every_end_state_clears_secrets() {
+        for v in [EnrolView::Joined, EnrolView::Denied, EnrolView::Expired, EnrolView::Failed("x".into())] {
+            let mut s = open_sheet(waiting());
+            let fx = reduce(&mut s, Event::PollAnswered { id: "a".into(), view: v.clone() });
+            assert!(fx.contains(&Effect::ClearSecrets) && fx.contains(&Effect::SetView(v)), "{fx:?}");
+            assert!(!s.guard.is_current("a"));
+        }
+        let mut s = open_sheet(waiting());
+        let fx = reduce(&mut s, Event::DenyAnswered { id: "a".into(), ok: true });
+        assert_eq!(fx, vec![Effect::ClearSecrets, Effect::SetView(EnrolView::Denied)]);
+        let mut s = open_sheet(waiting());
+        assert!(reduce(&mut s, Event::Tick { now_ms: 3_999 }).is_empty());
+        let fx = reduce(&mut s, Event::Tick { now_ms: 5_000 });
+        assert_eq!(fx, vec![Effect::ClearSecrets, Effect::SetView(EnrolView::Expired)]);
+        let mut s = open_sheet(waiting());
+        assert!(reduce(&mut s, Event::Leave).contains(&Effect::ClearSecrets));
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_poll_arms_the_confirm_and_refreshes_on_join() {
+        let mut s = open_sheet(waiting());
+        let a = view_from_status(&awaiting(), "c", 1);
+        let fx = reduce(&mut s, Event::PollAnswered { id: "a".into(), view: a.clone() });
+        assert_eq!(fx, vec![Effect::ArmConfirm, Effect::SetView(a.clone())]);
+        assert!(reduce(&mut s, Event::PollAnswered { id: "a".into(), view: a }).is_empty());
+        let fx = reduce(&mut s, Event::PollAnswered { id: "a".into(), view: EnrolView::Joined });
+        assert_eq!(fx[0], Effect::RefreshComputers);
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_leave_cancels_only_unconfirmed() {
+        let mut s = open_sheet(waiting());
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::Cancel("a".into()), Effect::ClearSecrets]);
+        let a = view_from_status(&awaiting(), "c", 1);
+        let mut s = open_sheet(a.clone());
+        reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true });
+        assert!(s.confirmed);
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+        let mut s = open_sheet(a);
+        s.confirm_in_flight = true;
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+    }
+
+    fn left_during_confirm() -> SheetState {
+        let mut s = open_sheet(view_from_status(&awaiting(), "c", 1));
+        s.confirm_in_flight = true;
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+        s
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_confirm_after_leave_is_still_reported() {
+        let mut s = left_during_confirm();
+        let fx = reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true });
+        assert_eq!(fx, vec![Effect::RefreshComputers, Effect::Notice(ADDED_NOTICE.into())]);
+        assert!(!fx.iter().any(|e| matches!(e, Effect::SetView(_))));
+        assert!(reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true }).is_empty());
+        let mut s = left_during_confirm();
+        let fx = reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: false });
+        assert_eq!(fx, vec![Effect::Notice(CONFIRM_FAILED_LATE.into())]);
+        assert!(reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: false }).is_empty());
+        let mut s = left_during_confirm();
+        assert!(reduce(&mut s, Event::ConfirmAnswered { id: "other".into(), ok: true }).is_empty());
+        assert!(!reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true }).is_empty());
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_unknown_confirm_is_never_cancelled() {
+        let mut s = open_sheet(view_from_status(&awaiting(), "c", 1));
+        s.confirm_in_flight = true;
+        reduce(&mut s, Event::ConfirmUnknown { id: "a".into() });
+        assert!(s.confirm_unknown && !s.confirm_in_flight);
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::ClearSecrets]);
+        let mut s = left_during_confirm();
+        let fx = reduce(&mut s, Event::ConfirmUnknown { id: "a".into() });
+        assert_eq!(fx, vec![Effect::RefreshComputers, Effect::Notice(CONFIRM_UNKNOWN.into())]);
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_accepted_confirm_clears_the_typed_fingerprint() {
+        let mut s = open_sheet(view_from_status(&awaiting(), "c", 1));
+        s.confirm_in_flight = true;
+        let fx = reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: true });
+        assert_eq!(fx, vec![Effect::ClearTypedFingerprint]);
+    }
+
+    #[test]
+    fn fr_c2_enrol_reducer_confirm_answer_clears_the_flight_flag() {
+        let mut s = open_sheet(view_from_status(&awaiting(), "c", 1));
+        s.confirm_in_flight = true;
+        reduce(&mut s, Event::ConfirmAnswered { id: "a".into(), ok: false });
+        assert!(!s.confirm_in_flight && !s.confirmed);
+        assert_eq!(reduce(&mut s, Event::Leave), vec![Effect::Cancel("a".into()), Effect::ClearSecrets]);
+    }
+
+    #[test]
+    fn fr_c2_enrol_stdin_form_replaces_only_the_whole_code_argument() {
+        assert_eq!(stdin_form("ember-node enrol AB12 --server http://h:1", "AB12").as_deref(), Some("ember-node enrol - --server http://h:1"));
+        assert_eq!(stdin_form("ember-node enrol 'AB12' --server x", "AB12").as_deref(), Some("ember-node enrol - --server x"));
+        // The code inside another argument is not an argument of its own.
+        assert_eq!(stdin_form("ember-node enrol --server http://AB12.example", "AB12"), None);
+        assert_eq!(stdin_form("ember-node enrol X", "AB12"), None);
+        assert_eq!(stdin_form("ember-node enrol AB12", ""), None);
     }
 }

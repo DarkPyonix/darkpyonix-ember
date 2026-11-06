@@ -321,6 +321,10 @@ impl AgentAdapter for AcpAdapter {
         translate_drained_lines(lines)
     }
 
+    fn binary(&self) -> Option<PathBuf> {
+        Some(self.config.command.clone())
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -443,7 +447,7 @@ pub(crate) fn translate_drained_lines(lines: &[String]) -> Vec<AgentEvent> {
 
 /// `omp 18.5.0` / `18.5.0` → `18.5.0`: the last word of the first non-empty line.
 fn parse_version(stdout: &str) -> Option<String> {
-    stdout.lines().find(|l| !l.trim().is_empty())?.split_whitespace().last().map(str::to_string)
+    stdout.lines().find(|l| !l.trim().is_empty())?.split_whitespace().last().and_then(super::version_token)
 }
 
 /// What [`connect`] needs besides the byte streams.

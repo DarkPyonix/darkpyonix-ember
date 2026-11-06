@@ -19,7 +19,9 @@
 //!
 //! Bodies and events are the node's (`ember_node::proto`), unchanged. A node error keeps its
 //! status and body; an unreachable node is 502; an unknown computer is 404. The local
-//! computer (this server) has no node client, so its terminal routes answer 400.
+//! computer (this server) is served by an in-process node on a loopback listener with a random
+//! in-memory token, started on first use ([`Computers::local_node_client`], FR-W4, #455), so
+//! its terminal routes behave like any node's.
 //!
 //! Attach: the client sends a `TermHello` as its first text frame, then `TermInput`s. The
 //! server opens the node attachment with that hello and answers with the node's `TermEvent`s
@@ -94,6 +96,9 @@ impl From<ClientError> for Failure {
 type R<T> = Result<T, Failure>;
 
 fn node(c: &Computers, id: &str) -> R<NodeClient> {
+    if id == super::LOCAL {
+        return Ok(c.local_node_client()?);
+    }
     Ok(c.client(id)?)
 }
 

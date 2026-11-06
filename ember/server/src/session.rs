@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, Probe, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, SessionStatus};
 use crate::projects::Project;
 use crate::schedules::{Schedule, ScheduleRun};
@@ -280,6 +280,29 @@ impl Sessions {
             if adapter.kind() != AgentKind::Scripted {
                 out.push(adapter.detect().await);
             }
+        }
+        out.sort_by_key(|d| d.kind.as_str());
+        out
+    }
+
+    /// [`Sessions::detect_agents`] with where each CLI was found and when (FR-A6.1). Runs every
+    /// probe now; nothing is cached.
+    pub async fn probe_agents(&self) -> Vec<Probe> {
+        let mut out = Vec::new();
+        for adapter in self.adapters.values() {
+            if adapter.kind() == AgentKind::Scripted {
+                continue;
+            }
+            let d = adapter.detect().await;
+            let path = adapter
+                .binary()
+                .and_then(|b| crate::agents::resolve_executable(&b))
+                .map(|p| p.to_string_lossy().into_owned());
+            let detected_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|t| t.as_millis() as i64)
+                .unwrap_or(0);
+            out.push(Probe { kind: d.kind, installed: d.installed, version: d.version, path, detected_at });
         }
         out.sort_by_key(|d| d.kind.as_str());
         out

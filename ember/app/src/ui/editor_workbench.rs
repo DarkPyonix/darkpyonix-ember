@@ -232,7 +232,11 @@ pub mod page {
         // closed column is 0 wide and the areas stay as the stylesheet has them.
         let maximized = has_bottom && *s.bottom_max.read();
         let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
-        let ed_style = format!("width:100vw; height:calc(100vh - 76px); {grid}");
+        // macOS opens the window FullSize (the page starts at the top and the top bar is the title
+        // strip), so the page is the window's height; elsewhere the native chrome stays and the
+        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch (compose-rust#467).
+        let height = if cfg!(target_os = "macos") { "100vh" } else { "calc(100vh - 76px)" };
+        let ed_style = format!("width:100vw; height:{height}; {grid}");
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
             div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "0", style: "{ed_style}",
@@ -268,7 +272,7 @@ pub mod page {
                     }
                 },
                 if let Some(error) = error {
-                    div { style: "padding:20px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
+                    div { style: "padding:20px; grid-column:1 / -1; padding-top:76px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
                     {top_bar(&s, &branch, keymap)}
                     div { class: "ed-rail",
@@ -326,8 +330,10 @@ pub mod page {
         let find_hint = keymap.hint(Action::Find, Os::current());
         let find_note = format!("{}: {SOON}", keymap.find_label());
         let open = *menu_open.read();
+        // The traffic lights float over the top bar's left end under FullSize.
+        let strip_pad = if cfg!(target_os = "macos") { format!("padding-left:{}px;", crate::ui::safe_area::safe_area().leading) } else { String::new() };
         rsx! {
-            header { class: "ed-top",
+            header { class: "ed-top", style: "{strip_pad}",
                 img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
                 button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
                 button { class: "ed-pj", title: "브랜치", onclick: move |_| notice(format!("브랜치: {SOON}")), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }

@@ -1302,8 +1302,8 @@ fn SettingsSheet(
                         closed.set(None);
                         u.open_characters(&id);
                     });
-                    if !patch.is_empty() {
-                        Label("저장하지 않은 변경이 있습니다. 저장한 뒤 열 수 있습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
+                        Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                     }
                 });
                 if leader_choice_visible(&b.id) {

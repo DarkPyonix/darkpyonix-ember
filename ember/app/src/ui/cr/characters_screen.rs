@@ -163,7 +163,11 @@ pub fn CharactersScreen() {
                             let c = chosen.clone();
                             let kind = if s == style { ButtonKind::Primary } else { ButtonKind::Default };
                             let text = if s == current { "현재 스타일" } else if s == style { "선택됨" } else { "보기" };
-                            AppButton(text, None, kind, true, true, false, move || c.set(Some(s)));
+                            let m = message.clone();
+                            AppButton(text, None, kind, true, true, false, move || {
+                                c.set(Some(s));
+                                m.set(None);
+                            });
                         });
                     });
                 });

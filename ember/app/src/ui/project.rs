@@ -624,6 +624,11 @@ pub fn effective_style(server: Option<&str>, device: Option<CharStyle>) -> CharS
     server.and_then(CharStyle::from_id).or(device).unwrap_or_default()
 }
 
+/// Why the link to the character screen is disabled: the draft is dirty (FR-L22).
+pub fn characters_link_reason(dirty: bool) -> Option<&'static str> {
+    dirty.then_some("저장하지 않은 변경 사항이 있어 열 수 없습니다")
+}
+
 /// What closing the settings sheet does (FR-L26).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {
@@ -760,6 +765,12 @@ pub fn validate_settings(d: &SettingsDraft, project_id: &str) -> Vec<SettingsErr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l22_disabled_characters_link_says_why() {
+        assert_eq!(characters_link_reason(true), Some("저장하지 않은 변경 사항이 있어 열 수 없습니다"));
+        assert_eq!(characters_link_reason(false), None);
+    }
+
     use super::*;
 
     fn member(id: &str, status: LauncherStatus, at: i64) -> Member {

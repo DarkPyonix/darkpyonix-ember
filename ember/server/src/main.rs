@@ -197,6 +197,8 @@ async fn main() -> anyhow::Result<()> {
     // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
     let enrol = computers::enrol::Enrol::with_server_peer_id(store.clone(), server_peer_id);
     let sessions = Sessions::new(store, adapters);
+    // Per-harness memory limits stored by the settings API (FR-L20, FR-S8).
+    sessions.load_settings();
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
     let shim = computers::find_shim();

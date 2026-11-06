@@ -4377,6 +4377,8 @@ rename to new.txt
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, None), None);
         assert_eq!(section_count_with_team(Section::Team, None, None, None, None, Some(3)), Some(3));
         assert_eq!(section_count_with_team(Section::Branches, None, None, None, Some(4), Some(3)), Some(4));
+    }
+
     // ---- FR-G10 to FR-G12: pull request detail, review, merge, create (#483) ----
 
     use ember_client::api::{GitPrCheck, GitPrComment};

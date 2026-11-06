@@ -875,3 +875,19 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Why.** A code that dies after one use and ten minutes leaves nothing worth stealing, and the server never keeps it in a form that can be replayed.
 
 **Status.** Specified only (`FR-C1`, `FR-C2`, Draft; issue #491). Not built.
+
+### D40: The Gemini CLI is a harness through the ACP adapter
+
+**Decision.** [user, 2026-11-06, option "(a) Gemini CLI 어댑터 추가" chosen by the owner] Ember adds the Gemini CLI as a harness on top of the generic ACP adapter (`ember/server/src/agents/acp.rs`, issue #53). The mockup's Gemini card and the Home chip stay. Until the adapter is verified against the real CLI, the app shows the card as "preparing" (준비 중입니다). The requirements are `FR-A10` to `FR-A10g` (issue #53).
+
+- [provisional] The harness is an ACP agent named `gemini` with a built-in preset (command `gemini`, ACP flag per `SPEC.md` "Gemini CLI facts"), not a new protocol adapter. This keeps `FR-A3`: adding the agent needs a preset only.
+- [provisional] Authentication stays the user's own: Ember never stores or reads Gemini credentials.
+- [provisional] Usage limits come from the CLI and its documentation, never from an Ember estimate.
+
+**Rejected** (the owner chose adding the adapter over each of these). Removing the Gemini card from the mockup and the Home chip. Keeping the card as a permanent "preparing" placeholder with no adapter behind it.
+
+**Why.** The owner wants Gemini in the harness list as a working harness, and the ACP adapter already exists, so the cost is a preset plus verification.
+
+**Risk found on 2026-11-06 (research, not a decision).** Google's Gemini CLI announcement says that since 2026-06-18 the Gemini CLI no longer serves Google AI Pro, Google AI Ultra and free-tier individual accounts (replaced by the Antigravity CLI, `agy`); Enterprise Code Assist licences and API-key authentication are stated as unaffected, and Vertex AI is not addressed (`SPEC.md` "Gemini CLI facts"). So "Login with Google" may no longer work for most individuals, and the Antigravity harness (D14) is the successor for them. The owner is told in the report; whether D40 still stands for API-key and Enterprise users is the owner's call. [provisional]
+
+**Status.** Specified only (`FR-A10`, Draft; issue #53). Not built.

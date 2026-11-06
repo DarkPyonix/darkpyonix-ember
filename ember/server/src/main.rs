@@ -243,14 +243,14 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
         .parse()?;
-    // The server's own externally reachable URL is not known to it: EMBER_PUBLIC_URL, else the
-    // listen address (FR-C1). The enrol command and its owner warning print it.
-    let enrol_base_url = std::env::var("EMBER_PUBLIC_URL").unwrap_or_else(|_| format!("http://{addr}"));
     // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
     let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
     // The enrol door (FR-C2e): off unless EMBER_ENROL_LISTEN is set. A bad value, or an address
     // that clashes with the owner's or the guest door's, is a startup error.
     let enrol_door = ember_server::enrol_door::EnrolDoor::from_env(addr, guest_door.as_ref().map(|d| d.listen))?;
+    // The URL the enrol command prints is the DOOR's (EMBER_ENROL_PUBLIC_URL, else its specific
+    // listen address), never the owner API address: that port serves no /enrol/redeem (FR-C1).
+    let enrol_door_url = ember_server::enrol_door::EnrolDoor::door_url(enrol_door.as_ref());
     // This server as seen from this machine (an unspecified address replaced by loopback).
     let local_url = {
         let mut local = addr;
@@ -474,7 +474,7 @@ async fn main() -> anyhow::Result<()> {
         // that adds the confirmed computer to the registry.
         .merge(computers::enrol::router(
             enrol.clone(),
-            enrol_base_url,
+            enrol_door_url,
             Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
         ));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.

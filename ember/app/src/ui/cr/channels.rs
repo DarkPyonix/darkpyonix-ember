@@ -286,10 +286,9 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
 pub fn list_title_size() -> Fs {
     Fs::Xl
 }
-/// A room row is a 44 icon with 10 above and below, so 64 high (FR-L12); 16 at the sides.
+/// A room row is a 44 icon with 10 above and below, so 64 high (FR-L12); the list insets the sides.
 pub const ROOM_ICON: f32 = 44.0;
 pub const ROOM_ROW_PAD_V: f32 = 10.0;
-pub const ROOM_ROW_PAD_H: f32 = 16.0;
 pub const ROOM_ROW_HEIGHT: f32 = ROOM_ICON + 2.0 * ROOM_ROW_PAD_V;
 
 fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool) {
@@ -394,8 +393,8 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
         },
         || {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                // Row = 44 icon + 2 x 10 padding = 64 high; the extra 6 makes the side gap 16.
-                cu::Spacer().modifier(Modifier::new().width(ROOM_ROW_PAD_H - ROOM_ROW_PAD_V));
+                // Row = 44 icon + 2 x 10 padding = 64 high. The list already insets the row, so the
+                // side gap is the 10 of the padding (the capture showed a 6 spacer pushed the icon to 22+).
                 RoomIcon(project, ROOM_ICON);
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
@@ -750,7 +749,6 @@ mod tests {
     fn fr_l12_channels_row_is_64_high() {
         assert_eq!(ROOM_ICON, 44.0);
         assert_eq!(ROOM_ROW_HEIGHT, 64.0);
-        assert_eq!(ROOM_ROW_PAD_H, 16.0);
     }
 
     fn text_of(content: fn()) -> String {

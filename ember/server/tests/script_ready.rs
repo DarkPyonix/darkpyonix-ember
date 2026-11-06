@@ -88,6 +88,14 @@ fn concurrent_writers_beside_a_forking_thread_never_see_text_file_busy() {
     let forks = forker.join().unwrap();
     let line = format!("script_ready: 200 scripts, {forks} concurrent forks, {} busy retries", busy.load(Ordering::Relaxed));
     eprintln!("{line}");
+    // The test harness captures print!/eprintln! only; a direct write to the real stdout reaches the
+    // CI log of a passing test, as a GitHub `notice` annotation.
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "::notice title=script_ready::{line}");
+        let _ = out.flush();
+    }
     // `cargo test` hides stderr of a passing test, which would throw away the only measurement of
     // the ETXTBSY hypothesis (#546, #555). On GitHub Actions the line is appended to the job summary
     // instead; without the variable (local runs) nothing is written.

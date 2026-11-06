@@ -1,7 +1,10 @@
 //! The door-agnostic code shared by the doors, moved without change out of `guest_door.rs`:
 //! the startup error (here), the hardening pieces (`harden`) and the limit pieces (`limits`).
-//! Step C0 moved the mixed items too (`serve`, `config`, the limiter and `limit_layer`, `guard_layer`);
-//! they still import the guest constants from `crate::guest_door` until step C1 removes that.
+//! Step C0 moved the mixed items too (`serve`, `config`, the limiter and `limit_layer`, `guard_layer`).
+//! `limits` still imports the guest door's constants from `crate::guest_door`: `LimitConfig::default`
+//! and the sweep and strict-path code use them. Step C1 did not remove that import. A door other
+//! than the guest door must build its `LimitConfig` field by field and use
+//! `DoorLimits::with_strict_path` (the enrol door does).
 //! The guest door keeps its constants, its configuration and everything that names the guest.
 
 pub mod config;

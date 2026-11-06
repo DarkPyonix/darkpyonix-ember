@@ -881,6 +881,91 @@ pub const NO_CWD_NOTICE: &str =
 pub const FROZEN_NOTICE: &str =
     "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 바꿀 수 없어 프롬프트와 일정만 저장했습니다";
 
+/// The `PATCH` body for an edit: only what differs from the stored routine (FR-L25, #493). The
+/// server patches the prompt and the schedule only, so a changed project, agent or computer is
+/// not part of it (see [`changes_frozen_fields`]). An empty patch means nothing to send.
+pub fn changed_patch(d: &FormDraft, old: &Routine) -> SchedulePatch {
+    let prompt = d.prompt.trim();
+    let cron = d.cron.trim();
+    let schedule_changed = d.trigger != old.trigger || cron != old.cron.trim();
+    SchedulePatch {
+        prompt: (prompt != old.prompt.trim()).then(|| prompt.to_string()),
+        kind: schedule_changed.then(|| ScheduleKind::Cron {
+            expr: cron.to_string(),
+            tz: "UTC".to_string(),
+        }),
+        catch_up: None,
+    }
+}
+
+/// Whether a patch carries no change.
+pub fn patch_is_empty(p: &SchedulePatch) -> bool {
+    p.prompt.is_none() && p.kind.is_none() && p.catch_up.is_none()
+}
+
+/// The line above an edit field that shows the stored value, because the toolkit's text field
+/// has no initial value (compose-rust#374). Empty for an empty value.
+pub fn current_value_line(value: &str) -> String {
+    let v = value.trim();
+    if v.is_empty() {
+        String::new()
+    } else {
+        format!("현재 값: {v}")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Simulated run in the demo (FR-L25, #494)
+// ---------------------------------------------------------------------------------------------
+
+/// How long the simulated run shows "실행 중" before it finishes.
+pub const DEMO_RUN_MS: u64 = 2500;
+/// The id prefix the demo gives a session it creates; a run linked to one is a simulation.
+pub const DEMO_SESSION_PREFIX: &str = "demo-new-";
+pub const DEMO_RUN_STARTED: &str = "예시 실행을 시작했습니다. 데모에서 시뮬레이션하는 실행입니다";
+pub const DEMO_RUN_DONE: &str = "예시 실행이 끝났습니다. 예시 세션이 목록에 추가되었습니다";
+pub const DEMO_RUN_BUSY: &str = "이 루틴은 이미 실행 중입니다";
+/// The flag shown beside a simulated run.
+pub const SAMPLE_FLAG: &str = "예시";
+
+/// Whether the simulated run is allowed: only in demo mode, never with a server.
+pub fn demo_run_allowed(demo_active: bool, sample_entry: bool) -> bool {
+    demo_active && sample_entry
+}
+
+/// A run is a simulation while it is running in the demo, or when it links a demo session.
+pub fn run_is_simulated(r: &Run, demo_active: bool) -> bool {
+    demo_active
+        && (r.status == RunStatus::Running
+            || r.session.as_deref().is_some_and(|s| s.starts_with(DEMO_SESSION_PREFIX)))
+}
+
+/// Puts a "실행 중" run first in the history. Refuses when one is already running.
+pub fn begin_demo_run(e: &mut Entry, now: Minutes) -> Result<(), &'static str> {
+    if e.runs.iter().any(|r| r.status == RunStatus::Running) {
+        return Err(DEMO_RUN_BUSY);
+    }
+    e.runs.insert(0, Run { at: now, status: RunStatus::Running, session: None });
+    Ok(())
+}
+
+/// Turns the running run into a finished one that links `session`. `false` when none runs.
+pub fn finish_demo_run(e: &mut Entry, session: Option<String>) -> bool {
+    match e.runs.iter_mut().find(|r| r.status == RunStatus::Running) {
+        Some(r) => {
+            r.status = RunStatus::Done;
+            r.session = session;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The title of the sample session a simulated run creates.
+pub fn demo_session_title(routine_name: &str) -> String {
+    format!("{} ({SAMPLE_FLAG})", routine_name.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1592,5 +1677,88 @@ mod tests {
                 "{s}"
             );
         }
+    }
+
+    // ---- edit patch and simulated run (#493, #494) --------------------------------------------
+
+    #[test]
+    fn fr_l25_edit_patch_carries_only_changed_fields() {
+        let old = routine("r1", "a", "ember", "0 9 * * *");
+        let mut d = FormDraft::from_routine(&old);
+        assert!(patch_is_empty(&changed_patch(&d, &old)), "nothing changed");
+        d.prompt = " 새 지시 ".into();
+        let p = changed_patch(&d, &old);
+        assert_eq!(p.prompt.as_deref(), Some("새 지시"));
+        assert!(p.kind.is_none());
+        d.prompt = old.prompt.clone();
+        d.cron = "30 8 * * 1".into();
+        let p = changed_patch(&d, &old);
+        assert!(p.prompt.is_none());
+        assert_eq!(p.kind, Some(cron_kind("30 8 * * 1")));
+    }
+
+    #[test]
+    fn fr_l25_edit_form_is_prefilled_from_the_routine() {
+        let mut old = routine("r1", "CI 요약", "ember", "0 9 * * *");
+        old.sel.computer = Some("c1".into());
+        let d = FormDraft::from_routine(&old);
+        assert_eq!(d.name, "CI 요약");
+        assert_eq!(d.cron, "0 9 * * *");
+        assert_eq!(d.prompt, old.prompt);
+        assert_eq!(d.sel, old.sel, "project, harness, model, mode and computer");
+        assert_eq!(current_value_line(" CI 요약 "), "현재 값: CI 요약");
+        assert_eq!(current_value_line("  "), "");
+        // Project, agent and computer can change and travel with the draft.
+        let mut d2 = d.clone();
+        d2.sel.project = "core".into();
+        d2.sel.computer = None;
+        assert_eq!(d2.into_routine("r1", true).sel.project, "core");
+        assert!(changes_frozen_fields(&{
+            let mut x = d.clone();
+            x.sel.computer = None;
+            x
+        }, &old));
+    }
+
+    #[test]
+    fn fr_l25_demo_run_goes_running_then_done_with_a_session() {
+        let mut e = entry(routine("r1", "a", "ember", "0 9 * * *"), vec![run(10, RunStatus::Done)]);
+        assert!(begin_demo_run(&mut e, 100).is_ok());
+        assert_eq!(e.runs.len(), 2);
+        assert_eq!(e.runs[0].status, RunStatus::Running);
+        assert_eq!(e.runs[0].at, 100);
+        assert!(run_is_simulated(&e.runs[0], true));
+        assert!(finish_demo_run(&mut e, Some("demo-new-1".into())));
+        assert_eq!(e.runs[0].status, RunStatus::Done);
+        assert_eq!(e.runs[0].session.as_deref(), Some("demo-new-1"));
+        assert!(run_is_simulated(&e.runs[0], true));
+        assert!(!run_is_simulated(&e.runs[1], true), "recorded history is not flagged");
+        assert!(!finish_demo_run(&mut e, None), "nothing is running any more");
+    }
+
+    #[test]
+    fn fr_l25_demo_run_refuses_a_second_run_while_one_is_running() {
+        let mut e = entry(routine("r1", "a", "ember", "0 9 * * *"), vec![]);
+        begin_demo_run(&mut e, 1).unwrap();
+        assert_eq!(begin_demo_run(&mut e, 2), Err(DEMO_RUN_BUSY));
+        assert_eq!(e.runs.len(), 1);
+    }
+
+    #[test]
+    fn fr_l25_demo_run_is_never_reachable_outside_demo_mode() {
+        assert!(demo_run_allowed(true, true));
+        assert!(!demo_run_allowed(false, true));
+        assert!(!demo_run_allowed(true, false));
+        let r = Run { at: 1, status: RunStatus::Running, session: None };
+        assert!(!run_is_simulated(&r, false), "no flag, and no simulation, without the demo");
+    }
+
+    #[test]
+    fn fr_l25_demo_run_session_is_flagged_as_a_sample() {
+        assert_eq!(demo_session_title(" 아침 요약 "), "아침 요약 (예시)");
+        for s in [DEMO_RUN_STARTED, DEMO_RUN_DONE, DEMO_RUN_BUSY] {
+            assert!(!s.contains('\u{2014}'));
+        }
+        assert!(DEMO_RUN_STARTED.contains("시뮬레이션"));
     }
 }

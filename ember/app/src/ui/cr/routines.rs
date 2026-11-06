@@ -23,6 +23,9 @@ use compose_rust::{Alignment, ButtonVariant, Color, DrawList, IconRole, Paint, S
 use ember_client::api::ApiError;
 
 pub use crate::ui::routines::{
+    begin_demo_run, changed_patch, current_value_line, demo_run_allowed, demo_session_title,
+    finish_demo_run, patch_is_empty, run_is_simulated, DEMO_RUN_DONE, DEMO_RUN_MS,
+    DEMO_RUN_STARTED, SAMPLE_FLAG,
     ago, big_time, changes_frozen_fields, civil_from_days, cron_valid, days_from_civil,
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
@@ -82,6 +85,57 @@ fn sample_mode() -> bool {
         std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
         crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some()),
     )
+}
+
+/// Whether the demo is on. The simulated run needs this, not just the sample route (#494).
+fn demo_active() -> bool {
+    crate::demo::active_from_env() || try_services().is_some_and(|s| s.demo.is_some())
+}
+
+/// The simulated run of the demo (#494): a "실행 중" entry now, then a finished one linking a new
+/// sample session. Called only when [`demo_run_allowed`] says so.
+fn demo_run(id: &str, entries_st: &MutableState<Vec<Entry>>, tick: &MutableState<u32>) {
+    let mut list = entries_st.get();
+    let Some(e) = list.iter_mut().find(|e| e.routine.id == id) else {
+        notice::post("루틴을 찾을 수 없습니다");
+        return;
+    };
+    if let Err(msg) = begin_demo_run(e, now_local()) {
+        notice::post(msg);
+        return;
+    }
+    let r = e.routine.clone();
+    entries_st.set(list);
+    tick.update(|v| *v += 1);
+    notice::post(DEMO_RUN_STARTED);
+    if try_services().is_none() {
+        return;
+    }
+    let (entries_st, tick) = (entries_st.clone(), tick.clone());
+    let id = id.to_string();
+    run_shared(
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(DEMO_RUN_MS)).await;
+            let body = crate::server::CreateSession {
+                project: r.sel.project.clone(),
+                agent: r.sel.option.harness.kind().to_string(),
+                cwd: String::new(),
+                model: Some(r.sel.option.model.to_string()),
+                title: Some(demo_session_title(&r.name)),
+                account: None,
+            };
+            services().create_session(&body).await.ok().map(|rec| rec.id)
+        },
+        move |session| {
+            let mut list = entries_st.get();
+            if let Some(e) = list.iter_mut().find(|e| e.routine.id == id) {
+                finish_demo_run(e, session);
+            }
+            entries_st.set(list);
+            tick.update(|v| *v += 1);
+            notice::post(DEMO_RUN_DONE);
+        },
+    );
 }
 
 /// What the server last answered: `online` is false until a load succeeds.
@@ -262,6 +316,58 @@ pub fn list_pane_width(width_dp: f32) -> f32 {
     }
 }
 
+/// How the detail header lays out its actions (FR-L25, #492).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailHeader {
+    /// Title, trigger pill and the three actions in one row.
+    Inline,
+    /// The actions move under the title because the panel is too narrow for one row.
+    Stacked,
+    /// Phone: a back button and icon-only actions.
+    Icons,
+}
+
+/// The detail panel is narrower than this and its actions move under the title.
+pub const DETAIL_STACK_BELOW: f32 = 420.0;
+/// The three tiles sit in one row from this panel width, and stack below it.
+pub const DETAIL_TILES_ROW_FROM: f32 = 520.0;
+/// The inset panel's own chrome on both sides: its padding, the 4 dp rails and the 12 dp inner.
+pub const INSET_CHROME: f32 = 56.0;
+
+/// The width of the detail panel: the content column, less the list column and the gap beside it
+/// when both show.
+pub fn detail_panel_width(window_dp: f32, content_dp: f32, compact: bool) -> f32 {
+    if compact {
+        content_dp
+    } else {
+        (content_dp - list_pane_width(window_dp) - SP[4]).max(0.0)
+    }
+}
+
+pub fn detail_header_layout(panel_w: f32, compact: bool) -> DetailHeader {
+    if compact {
+        DetailHeader::Icons
+    } else if panel_w < DETAIL_STACK_BELOW {
+        DetailHeader::Stacked
+    } else {
+        DetailHeader::Inline
+    }
+}
+
+pub fn detail_tile_columns(panel_w: f32) -> usize {
+    if panel_w >= DETAIL_TILES_ROW_FROM {
+        3
+    } else {
+        1
+    }
+}
+
+/// The width the prompt text has inside the detail panel.
+pub fn detail_prompt_width(panel_w: f32, compact: bool) -> f32 {
+    let pad = if compact { SP[2] } else { SP[3] };
+    (panel_w - 2.0 * pad - INSET_CHROME).max(0.0)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Panel {
     #[default]
@@ -405,6 +511,11 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         d.set(compact && current.is_some());
     }
     let pad = if compact { SP[3] } else { SP[6] };
+    let panel_w = detail_panel_width(
+        window.width_dp,
+        super::home::content_width(window.width_dp, pad),
+        compact,
+    );
 
     let on_toggle = {
         let entries_st = entries_state.clone();
@@ -440,6 +551,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
 
     let on_run_now = {
         let tick_ref = tick.clone();
+        let entries_st = entries_state.clone();
         move |id: String| {
             if is_remote(&id) {
                 remote_action(tick_ref.clone(), async move {
@@ -448,7 +560,12 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 });
                 return;
             }
-            if sample_mode() && sample_entries().iter().any(|e| e.routine.id == id) {
+            let sample = sample_entries().iter().any(|e| e.routine.id == id);
+            if demo_run_allowed(demo_active(), sample) {
+                demo_run(&id, &entries_st, &tick_ref);
+                return;
+            }
+            if sample_mode() && sample {
                 notice::post(RUN_NOTICE);
                 return;
             }
@@ -474,8 +591,21 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                         .find(|e| e.routine.id == id)
                         .map(|e| e.routine.clone())
                 });
-                let frozen = old.is_some_and(|o| changes_frozen_fields(&draft, &o));
-                let patch = schedule_patch(&draft);
+                let frozen = old.as_ref().is_some_and(|o| changes_frozen_fields(&draft, o));
+                let patch = match &old {
+                    Some(o) => changed_patch(&draft, o),
+                    None => schedule_patch(&draft),
+                };
+                if patch_is_empty(&patch) {
+                    // Nothing the server can store changed; do not send an empty PATCH.
+                    panel_ref.set(Panel::View);
+                    notice::post(if frozen {
+                        "프로젝트, 에이전트, 컴퓨터는 만든 뒤에 서버에서 바꿀 수 없어 저장하지 않았습니다"
+                    } else {
+                        "바뀐 내용이 없습니다"
+                    });
+                    return;
+                }
                 remote_action(tick_ref.clone(), async move {
                     services().client.api().update_schedule(&id, &patch).await?;
                     Ok(frozen.then(|| FROZEN_NOTICE.to_string()))
@@ -644,6 +774,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         detail.as_ref(),
                                         now,
                                         false,
+                                        panel_w,
                                         &computers,
                                         cur_entries.is_empty(),
                                         {
@@ -692,6 +823,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                 detail.as_ref(),
                                 now,
                                 true,
+                                panel_w,
                                 &computers,
                                 cur_entries.is_empty(),
                                 {
@@ -1275,6 +1407,7 @@ fn DetailPane(
     entry: Option<&Entry>,
     now: Minutes,
     compact: bool,
+    panel_w: f32,
     computers: &[(String, String)],
     empty: bool,
     on_back: impl Fn() + 'static,
@@ -1316,6 +1449,9 @@ fn DetailPane(
     let prompt_text = r.prompt.clone();
     let computer = computer_chip_text(r.sel.computer.as_deref(), computers);
 
+    let layout = detail_header_layout(panel_w, compact);
+    let tile_cols = detail_tile_columns(panel_w);
+    let demo = demo_active();
     let rate = success_percent(&entry.runs);
     let when_big = match routine_trigger {
         Trigger::Time if !cron_valid(&routine_cron) => routine_cron.clone(),
@@ -1349,6 +1485,7 @@ fn DetailPane(
     let on_edit = std::sync::Arc::new(on_edit);
     let on_run = std::sync::Arc::new(on_run);
     let routine_name_c = routine_name.clone();
+    let routine_name_w = routine_name.clone();
     let toggle_id_c = toggle_id.clone();
     let edit_id_c = edit_id.clone();
     let run_id_c = run_id.clone();
@@ -1359,7 +1496,7 @@ fn DetailPane(
     EmberCard(false, true, None, Some(0.0), None, move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             // Header: Topbar with bottom border
-            if compact {
+            if layout == DetailHeader::Icons {
                 let back_cmd = DrawList::builder()
                     .line(paint(p.text_2), 20.0, 16.0, 11.0, 16.0, 2.0)
                     .line(paint(p.text_2), 16.0, 11.0, 11.0, 16.0, 2.0)
@@ -1416,6 +1553,30 @@ fn DetailPane(
                                 FocusOverlay("지금 실행", move || run_fn(run_id_c.clone()));
                             });
                     });
+            } else if layout == DetailHeader::Stacked {
+                // Narrow panel (768): the title and pill on top, the actions on their own row,
+                // so none of them is clipped.
+                let toggle_fn = on_toggle;
+                let edit_fn = on_edit;
+                let run_fn = on_run;
+                let title_name = routine_name.clone();
+                cu::Column()
+                    .spacing(SP[2])
+                    .modifier(Modifier::new().fill_max_width().padding(SP[3]))
+                    .content(move || {
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                                Label(&title_name, Fs::Lg, Weight::Semibold, None, Some(2));
+                            });
+                            TriggerPill(routine_trigger, true);
+                        });
+                        cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                            RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
+                            cu::Spacer().modifier(Modifier::new().weight(1.0));
+                            AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
+                            AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
+                        });
+                    });
             } else {
                 let toggle_fn = on_toggle;
                 let edit_fn = on_edit;
@@ -1425,10 +1586,13 @@ fn DetailPane(
                     .spacing(SP[2])
                     .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
                     .content(move || {
-                        Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
+                        // The title takes what the actions leave and ellipsizes, so the actions
+                        // never leave the panel.
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(move || {
+                            Label(&routine_name, Fs::Xl, Weight::Semibold, None, Some(1));
+                        });
                         TriggerPill(routine_trigger, true);
-                        cu::Spacer().modifier(Modifier::new().weight(1.0));
-                        RoutineSwitch(&routine_name, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
+                        RoutineSwitch(&routine_name_w, routine_enabled, move |v| toggle_fn(toggle_id.clone(), v));
                         AppButton("편집", None, ButtonKind::Default, true, true, false, move || edit_fn(edit_id.clone()));
                         AppButton("지금 실행", None, ButtonKind::Primary, true, true, false, move || run_fn(run_id.clone()));
                     });
@@ -1465,7 +1629,7 @@ fn DetailPane(
                     });
 
                     // Inset cards: 3 cards in one row on wide
-                    if compact {
+                    if tile_cols < 3 {
                         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
                             KeyValue("프로젝트", &project_name, "");
                             KeyValue("에이전트", &harness_label, &model_title);
@@ -1496,7 +1660,7 @@ fn DetailPane(
                         Label("아직 실행하지 않았습니다", Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
                     }
                     for run in &entry.runs {
-                        RunTile(run, now);
+                        RunTile(run, now, run_is_simulated(run, demo));
                     }
                 });
         });
@@ -1514,7 +1678,8 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
             .modifier(Modifier::new().fill_max_width().padding(SP[2]))
             .content(move || {
                 Label(&t, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                Label(&v, Fs::Sm, Weight::Medium, None, Some(1));
+                // Two lines, then an ellipsis: the tile is at least a third of the panel.
+                Label(&v, Fs::Sm, Weight::Medium, None, Some(2));
                 if !s.is_empty() {
                     Label(&s, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
                 }
@@ -1522,7 +1687,7 @@ fn KeyValue(title: &str, value: &str, sub: &str) {
     });
 }
 
-fn RunTile(run: &Run, now: Minutes) {
+fn RunTile(run: &Run, now: Minutes, simulated: bool) {
     let p = ember_theme().palette;
     let tone = status_tone(run.status);
     let session = run.session.clone();
@@ -1535,6 +1700,9 @@ fn RunTile(run: &Run, now: Minutes) {
             .modifier(Modifier::new().fill_max_width().padding(SP[2]))
             .content(move || {
                 Pill(status_lbl, tone, true);
+                if simulated {
+                    Pill(SAMPLE_FLAG, PillTone::Grey, true);
+                }
                 Label(&ago_lbl, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 if let Some(id) = session {
@@ -1615,14 +1783,20 @@ fn RoutineForm(
                                 None,
                             );
                         }
+                        // TODO(compose-rust#374): the text field has no initial value, so each
+                        // text field shows the stored value on a "현재 값" line above it and stays
+                        // empty; typing replaces the value, leaving it empty keeps it. The chips
+                        // below already start on the stored project, harness, model, mode and
+                        // computer (the draft is built by `FormDraft::from_routine`).
                         FormLabel("이름");
+                        CurrentValue(editing.is_some(), &initial.name);
                         let draft_name = draft.clone();
                         EmberField(FieldOptions {
                             fill_max_width: true,
-                            placeholder: if initial.name.is_empty() {
-                                "예: develop CI 실패 요약".to_string()
+                            placeholder: if editing.is_some() {
+                                "바꾸려면 새 이름을 입력하세요".to_string()
                             } else {
-                                initial.name.clone()
+                                "예: develop CI 실패 요약".to_string()
                             },
                             on_value_change: Some(Box::new(move |v| {
                                 draft_name.update(|d| d.name = v);
@@ -1653,9 +1827,10 @@ fn RoutineForm(
                             }
                         });
                         FormLabel(if d.trigger == Trigger::Time { "일정 (cron)" } else { "이벤트" });
+                        CurrentValue(editing.is_some() && initial.trigger == d.trigger, &initial.cron);
                         let sel_cron = draft.clone();
-                        let ph = if initial.trigger == d.trigger && !initial.cron.is_empty() {
-                            initial.cron.clone()
+                        let ph = if editing.is_some() && initial.trigger == d.trigger {
+                            "바꾸려면 새 값을 입력하세요".to_string()
                         } else if d.trigger == Trigger::Time {
                             "0 9 * * *".to_string()
                         } else {
@@ -1730,15 +1905,16 @@ fn RoutineForm(
                                 }
                             });
                         FormLabel("프롬프트");
+                        CurrentValue(editing.is_some(), &initial.prompt);
                         let sel_p = draft.clone();
                         EmberField(FieldOptions {
                             fill_max_width: true,
                             height: Some(120.0),
                             multiline: true,
-                            placeholder: if initial.prompt.is_empty() {
-                                "에이전트에게 매번 줄 지시를 적어 주세요".to_string()
+                            placeholder: if editing.is_some() {
+                                "바꾸려면 새 지시를 입력하세요".to_string()
                             } else {
-                                initial.prompt.clone()
+                                "에이전트에게 매번 줄 지시를 적어 주세요".to_string()
                             },
                             on_value_change: Some(Box::new(move |v| {
                                 sel_p.update(|d| d.prompt = v);
@@ -1768,6 +1944,14 @@ fn RoutineForm(
             });
         });
     });
+}
+
+/// The stored value of a text field in the edit form, as a muted line above the field (#493).
+fn CurrentValue(show: bool, value: &str) {
+    let line = current_value_line(value);
+    if show && !line.is_empty() {
+        Label(&line, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.text_2)), Some(4));
+    }
 }
 
 fn FormLabel(text: &str) {
@@ -2259,6 +2443,61 @@ mod tests {
         assert_eq!(pane_mode(false, true), PaneMode::Both);
         assert_eq!(pane_mode(true, false), PaneMode::ListOnly);
         assert_eq!(pane_mode(true, true), PaneMode::DetailOnly);
+    }
+
+    // ---- detail layout by width (#492) -------------------------------------------------------
+
+    /// The content width the screen has at a window width: the window less the navigation (234
+    /// sidebar from 1280, 72 rail from 600, none on a phone) and the page padding.
+    fn content_at(w: f32) -> (f32, bool) {
+        let compact = w < 600.0;
+        let nav = if w >= 1280.0 { 234.0 } else if compact { 0.0 } else { 72.0 };
+        let pad = if compact { SP[3] } else { SP[6] };
+        (w - nav - 2.0 * pad, compact)
+    }
+
+    #[test]
+    fn fr_l25_detail_layout_follows_the_panel_width() {
+        let cases = [
+            (1440.0, 722.0, DetailHeader::Inline, 3),
+            (1024.0, 548.0, DetailHeader::Inline, 3),
+            (768.0, 312.0, DetailHeader::Stacked, 1),
+            (390.0, 358.0, DetailHeader::Icons, 1),
+        ];
+        for (w, panel, header, cols) in cases {
+            let (content, compact) = content_at(w);
+            let pw = detail_panel_width(w, content, compact);
+            assert_eq!(pw, panel, "panel width at {w}");
+            assert_eq!(detail_header_layout(pw, compact), header, "header at {w}");
+            assert_eq!(detail_tile_columns(pw), cols, "tiles at {w}");
+        }
+    }
+
+    #[test]
+    fn fr_l25_detail_prompt_has_paragraph_width_at_every_size() {
+        for w in [1440.0, 1024.0, 768.0, 390.0] {
+            let (content, compact) = content_at(w);
+            let pw = detail_panel_width(w, content, compact);
+            let text = detail_prompt_width(pw, compact);
+            assert!(text >= 200.0, "the prompt is {text} dp wide at {w}, not a 60 dp column");
+        }
+    }
+
+    #[test]
+    fn fr_l25_detail_inset_panel_fills_its_width() {
+        let src = include_str!("components.rs");
+        let inset = src.split("pub fn InsetPanel(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        assert!(inset.contains("cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width))"));
+        assert!(inset.contains("cu::Column().modifier(Modifier::new().weight(1.0)).content(content)"));
+    }
+
+    #[test]
+    fn fr_l25_demo_run_button_reaches_the_simulation_only_in_the_demo() {
+        let src = include_str!("routines.rs");
+        let handler = src.split("let on_run_now = {").nth(1).unwrap().split("let on_save = {").next().unwrap();
+        let demo = handler.find("demo_run_allowed(demo_active(), sample)").expect("gated on demo mode");
+        let honest = handler.find("notice::post(RUN_NOTICE)").expect("the honest toast stays");
+        assert!(demo < honest, "the demo branch comes first and the toast stays for no server");
     }
 
     // ---- form -------------------------------------------------------------------------------

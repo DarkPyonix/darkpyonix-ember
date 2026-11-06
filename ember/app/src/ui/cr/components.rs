@@ -697,9 +697,15 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
         )
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
-            cu::Row().content(|| {
+            // The Row and the Column take the panel's width (a Column with no weight shrinks to
+            // its widest word, which broke the routine prompt into one word per line, #492).
+            cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width)).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                cu::Column().content(content);
+                if fill_max_width {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                } else {
+                    cu::Column().content(content);
+                }
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             });
         });

@@ -20,7 +20,7 @@ pub enum DevicesState {
 pub const HUB_OFF: &str = "허브가 꺼져 있어 기기를 불러올 수 없습니다";
 pub const NO_DEVICES: &str = "계정에 등록된 기기가 없습니다";
 /// Under the list: the honest status of adding a computer (D39).
-pub const ENROL_NOTE: &str = "새 컴퓨터는 1회용 코드로 추가합니다. 이 화면의 코드 방식은 준비 중입니다.";
+pub const ENROL_NOTE: &str = "코드를 받은 컴퓨터는 서버 사용자와 같은 권한을 가지므로, 요청이 오면 내용을 확인하고 추가합니다.";
 
 pub const MAX_NAME_CHARS: usize = 64;
 pub const MAX_ADDRESS_CHARS: usize = 80;
@@ -272,7 +272,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_ne!(list_error_text(Some(500)), list_error_text(None));
-        assert!(ENROL_NOTE.contains("1회용 코드") && ENROL_NOTE.contains("준비 중"));
+        assert!(ENROL_NOTE.contains("확인") && !ENROL_NOTE.contains("준비 중"));
     }
 
     #[test]

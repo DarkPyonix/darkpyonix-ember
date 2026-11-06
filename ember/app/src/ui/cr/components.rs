@@ -267,6 +267,20 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
     drop(t);
 }
 
+/// A short mono string at a scale size (the one-time code): selectable text, never broken.
+pub fn MonoLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
+    let theme = ember_theme();
+    let color = color.unwrap_or_else(|| paint(theme.palette.text));
+    drop(
+        cu::Text(text)
+            .type_role(TypeRole::Mono)
+            .font_size(fs.size())
+            .line_height(fs.line_height())
+            .font_weight(weight.value())
+            .color(color),
+    );
+}
+
 /// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
 /// and a role colour maps to its token in the current scheme.
 pub fn Txt(

@@ -83,15 +83,17 @@ pub struct ChannelsCtx {
     pub jsonl: Option<Arc<super::jsonl::JsonlLog>>,
     /// Delivers a person's mentions to the mentioned agents (FR-T12); `None` delivers nothing.
     pub a2a: Option<Arc<crate::a2a::A2a>>,
+    /// The guest door's configuration, for the invite link (FR-T14); `None` when the door is off.
+    pub door: Option<crate::guest_door::GuestDoor>,
 }
 
 pub fn router(store: Arc<Store>, sessions: Arc<Sessions>) -> Router {
-    build(ChannelsCtx { store, sessions, jsonl: None, a2a: None })
+    build(ChannelsCtx { store, sessions, jsonl: None, a2a: None, door: None })
 }
 
 /// As [`router`], and human messages are also appended under `<data_dir>/channels/` (FR-T16).
 pub fn router_with_dir(store: Arc<Store>, sessions: Arc<Sessions>, data_dir: &std::path::Path) -> Router {
-    build(ChannelsCtx { store, sessions, jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))), a2a: None })
+    build(ChannelsCtx { store, sessions, jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))), a2a: None, door: None })
 }
 
 /// As [`router_with_dir`], and a person's `@name` mentions are delivered to the mentioned agents
@@ -102,12 +104,34 @@ pub fn router_with_a2a(
     data_dir: &std::path::Path,
     a2a: Arc<crate::a2a::A2a>,
 ) -> Router {
+    router_with_a2a_door(store, sessions, data_dir, a2a, None)
+}
+
+/// As [`router_with_a2a`], and the invite link and the `guest_door` state follow `door`
+/// (`None`: the door is off and the link stays relative).
+pub fn router_with_a2a_door(
+    store: Arc<Store>,
+    sessions: Arc<Sessions>,
+    data_dir: &std::path::Path,
+    a2a: Arc<crate::a2a::A2a>,
+    door: Option<crate::guest_door::GuestDoor>,
+) -> Router {
     build(ChannelsCtx {
         store,
         sessions,
         jsonl: Some(Arc::new(super::jsonl::JsonlLog::new(data_dir))),
         a2a: Some(a2a),
+        door,
     })
+}
+
+/// As [`router`], with the guest door's configuration for the invite link (tests; no data dir, no A2A).
+pub fn router_with_door(
+    store: Arc<Store>,
+    sessions: Arc<Sessions>,
+    door: Option<crate::guest_door::GuestDoor>,
+) -> Router {
+    build(ChannelsCtx { store, sessions, jsonl: None, a2a: None, door })
 }
 
 fn build(ctx: ChannelsCtx) -> Router {
@@ -367,12 +391,15 @@ async fn create_invite(
 ) -> ApiResult<impl IntoResponse> {
     let ttl = body.and_then(|Json(b)| b.ttl_hours);
     let (invite, token) = c.store.create_invite(&id, USER, ttl)?;
+    let (link, link_warning, guest_door) = crate::guest_door::invite_link(c.door.as_ref(), &token);
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "id": invite.id,
             "token": token,
-            "link": format!("/join#{token}"),
+            "link": link,
+            "link_warning": link_warning,
+            "guest_door": guest_door,
             "expires_at": invite.expires_at,
         })),
     ))

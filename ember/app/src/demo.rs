@@ -84,7 +84,8 @@ pub fn ide_launch_with(
         launch: (kind == "ember" && ose.is_some()).then(|| ember_client::wire::EmberLaunch {
             session: session.to_string(),
             project: project.to_string(),
-            computer: "이 컴퓨터".to_string(),
+            // No server and no registry in the demo: there is no computer id, so no terminal relay is attempted.
+            computer: String::new(),
             folder: cwd.to_string(),
             server_url: None,
             ose: ose.clone(),
@@ -1887,6 +1888,7 @@ mod tests {
         let l = ide_launch_with("s", "p", "/w", Some(ose));
         let c = crate::server::IdeLaunch::editor_connection(Some(&Ok(l)));
         assert_eq!(c.endpoint.as_deref(), Some("127.0.0.1:18765"));
+        assert_eq!(c.computer, None, "the demo has no computer id, so the editor must not try a terminal relay");
         let none = ide_launch_with("s", "p", "/w", None);
         assert!(none.target("ember").unwrap().launch.is_none());
     }

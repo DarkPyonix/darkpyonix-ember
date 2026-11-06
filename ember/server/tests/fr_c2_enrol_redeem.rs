@@ -558,10 +558,17 @@ async fn fr_c2_head_on_the_poll_route_is_405() {
     }
 }
 
-/// MEASUREMENT (Q1): does the Host and Origin guard also cover the method-not-allowed path? One
-/// `GUARD_MATRIX` line per request goes to the real stdout (the only way a line of a passing test
-/// reaches the CI log). Asserts only what the code makes certain: the two requests that reach a
-/// handler with a good Host and no Origin. Everything else is printed, not pinned, until read.
+/// Does the Host and Origin guard also cover the method-not-allowed path? YES, MEASURED in CI on
+/// #591 (run on head 7d62d63, 42 requests): a foreign Host, or a good Host with a foreign Origin,
+/// is a 403 for EVERY wrong method on both registered paths and for the two real routes; with a good
+/// Host a wrong method is a 404, except HEAD, which is a 405 (the guard's bare answer). `Allow` is
+/// added by axum's `RouteFuture` after the fallback answered, whatever its status (axum 0.8.9
+/// route.rs 163-164), so it is on the 403s too; it is `POST` for the redeem path and `GET,HEAD` for
+/// the poll path, and absent where a route matched (the two real routes, and HEAD on the poll route,
+/// which axum routes to the GET route where the guard answers). The values below are what CI
+/// printed, not what was read: reading this table got it wrong twice before it was measured. One
+/// `GUARD_MATRIX` line per request still goes to the real stdout (the only way a line of a passing
+/// test reaches the CI log), so a change in axum shows up in the log as well as in an assertion.
 #[tokio::test]
 async fn fr_c2_guard_matrix_is_measured() {
     use std::io::Write;
@@ -608,13 +615,26 @@ async fn fr_c2_guard_matrix_is_measured() {
                 "GUARD_MATRIX|{method}|{uri}|{variant}|{}|{names:?}|allow={allow}",
                 parts.status.as_u16()
             );
-            // Only the pairs that reach a handler are pinned.
-            if variant == "good_host" && *method == "POST" && *uri == "/enrol/redeem" {
-                assert_eq!(parts.status, StatusCode::FORBIDDEN, "unknown code: the generic 403");
-            }
-            if variant == "good_host" && *method == "GET" && *uri == "/enrol/status/x" {
-                assert_eq!(parts.status, StatusCode::NOT_FOUND, "no secret: the poll 404");
-            }
+            // Pinned to the CI measurement (see the doc comment).
+            let is_route = (*method == "POST" && *uri == "/enrol/redeem") || (*method == "GET" && *uri == "/enrol/status/x");
+            let want_status = if variant != "good_host" {
+                StatusCode::FORBIDDEN // the guard ran: a foreign Host or Origin, on every path and method
+            } else if *method == "POST" && *uri == "/enrol/redeem" {
+                StatusCode::FORBIDDEN // the real route, an unknown code: the generic 403
+            } else if *method == "HEAD" {
+                StatusCode::METHOD_NOT_ALLOWED // the guard's bare 405
+            } else {
+                StatusCode::NOT_FOUND // a wrong method, or the poll without a secret
+            };
+            assert_eq!(parts.status, want_status, "{method} {uri} {variant}");
+            let want_allow = if is_route || (*method == "HEAD" && *uri == "/enrol/status/x") {
+                "-"
+            } else if *uri == "/enrol/redeem" {
+                "POST"
+            } else {
+                "GET,HEAD"
+            };
+            assert_eq!(allow, want_allow, "{method} {uri} {variant}: Allow");
         }
     }
 }

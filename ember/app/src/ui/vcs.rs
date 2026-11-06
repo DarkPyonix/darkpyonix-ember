@@ -988,6 +988,8 @@ pub struct RepoSnapshot {
     pub staged: BTreeSet<String>,
     /// Paths with unresolved merge conflicts (`git/conflicts`).
     pub conflicts: Vec<String>,
+    /// Korean lines under the bar about what the snapshot left out (#268).
+    pub notes: Vec<String>,
 }
 
 /// The state of the repository view of one project.
@@ -1119,6 +1121,7 @@ pub fn build_snapshot(
         changes,
         staged: already,
         conflicts: Vec::new(),
+        notes: Vec::new(),
     }
 }
 
@@ -1148,8 +1151,45 @@ pub fn diff_body(staged: bool, include_untracked: bool) -> Value {
 }
 
 async fn git_diff_of(project: &str, staged: bool) -> Result<String, ApiError> {
-    let d: GitDiff = git_call(project, "diff", diff_body(staged, !staged)).await?;
+    git_diff_with(project, staged, !staged).await
+}
+
+async fn git_diff_with(project: &str, staged: bool, include_untracked: bool) -> Result<String, ApiError> {
+    let d: GitDiff = git_call(project, "diff", diff_body(staged, include_untracked)).await?;
     Ok(d.patch)
+}
+
+/// The line shown when the untracked files' diffs were skipped (#268).
+pub const UNTRACKED_SKIPPED_NOTE: &str = "추적하지 않는 파일이 너무 많아 내용을 건너뛰었습니다. 파일 목록만 표시합니다.";
+
+/// The work tree diff from its two reads: `tracked` (tracked files only) and `with_untracked`
+/// (the untracked files' diffs added). A 413 (output cap) on the second keeps the first and
+/// returns the note; the untracked files stay listed by the status, without hunks. Any other
+/// error of either read fails as before.
+pub fn merge_untracked_diff(
+    tracked: Result<String, ApiError>,
+    with_untracked: Result<String, ApiError>,
+) -> Result<(String, Option<&'static str>), ApiError> {
+    match with_untracked {
+        Ok(patch) => Ok((patch, None)),
+        Err(e) if e.status() == Some(413) => Ok((tracked?, Some(UNTRACKED_SKIPPED_NOTE))),
+        Err(e) => Err(e),
+    }
+}
+
+/// The warning under the amend checkbox when HEAD is already on the upstream (#269): there is an
+/// upstream and the branch is not ahead of it.
+pub fn amend_warning(snap: &RepoSnapshot) -> Option<&'static str> {
+    if snap.upstream.is_some() && snap.ahead == 0 {
+        Some("이 커밋은 이미 원격에 올라가 있습니다. 수정하면 다음 올리기에서 기록을 덮어써야 합니다.")
+    } else {
+        None
+    }
+}
+
+/// The commit button's label: the armed second tap of a pushed amend reads "그래도 수정합니다".
+pub fn amend_button_label(base: &str, warning: Option<&str>, armed: bool) -> String {
+    if warning.is_some() && armed { "그래도 수정합니다".to_string() } else { base.to_string() }
 }
 
 /// Read a project's repository: status, the work tree diff (untracked files included, in one
@@ -1164,10 +1204,18 @@ pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
             Vec::new()
         }
     };
-    let unstaged = git_diff_of(project, false).await?;
+    let full = git_diff_with(project, false, true).await;
+    // The tracked-only read happens only after a 413, so the usual path stays one call.
+    let tracked = if matches!(&full, Err(e) if e.status() == Some(413)) {
+        git_diff_with(project, false, false).await
+    } else {
+        Ok(String::new())
+    };
+    let (unstaged, note) = merge_untracked_diff(tracked, full)?;
     let staged = git_diff_of(project, true).await?;
     let mut snap = build_snapshot(&status, &unstaged, &staged, &BTreeMap::new());
     snap.conflicts = conflicts;
+    snap.notes.extend(note.map(str::to_string));
     Ok(snap)
 }
 
@@ -2691,6 +2739,47 @@ rename to new.txt
         assert_eq!(snap.changes[2].status, FileStatus::Added);
         // Only the file whose index changed and work tree is clean starts staged.
         assert_eq!(snap.staged, ["docs/new.md".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn fr_g3_a_413_on_untracked_keeps_the_tracked_changes_and_notes_it() {
+        let too_big = ApiError::Status { status: 413, message: "출력이 너무 큽니다".into() };
+        let (patch, note) = merge_untracked_diff(Ok(SAMPLE.to_string()), Err(too_big)).unwrap();
+        assert_eq!(patch, SAMPLE);
+        assert_eq!(note, Some("추적하지 않는 파일이 너무 많아 내용을 건너뛰었습니다. 파일 목록만 표시합니다."));
+        let (patch, note) = merge_untracked_diff(Ok(String::new()), Ok("full".to_string())).unwrap();
+        assert_eq!((patch.as_str(), note), ("full", None));
+        // The untracked files stay listed by the status, with no hunks.
+        let st = status(vec![gf("src/a.rs", '.', 'M'), gf("notes.txt", '?', '?')]);
+        let snap = build_snapshot(&st, SAMPLE, "", &BTreeMap::new());
+        assert!(snap.changes.iter().any(|d| d.path == "notes.txt" && d.hunks.is_empty()));
+    }
+
+    #[test]
+    fn fr_g3_other_untracked_errors_still_fail() {
+        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        assert!(merge_untracked_diff(Ok(String::new()), Err(boom)).is_err());
+        let tracked_fail = ApiError::Status { status: 413, message: "x".into() };
+        let too_big = ApiError::Status { status: 413, message: "y".into() };
+        assert!(merge_untracked_diff(Err(tracked_fail), Err(too_big)).is_err(), "no tracked diff to keep");
+    }
+
+    #[test]
+    fn fr_g3_amend_warns_when_head_is_on_the_upstream() {
+        let snap = RepoSnapshot { upstream: Some("origin/x".into()), ahead: 0, ..Default::default() };
+        let text = amend_warning(&snap).unwrap();
+        assert_eq!(text, "이 커밋은 이미 원격에 올라가 있습니다. 수정하면 다음 올리기에서 기록을 덮어써야 합니다.");
+        assert_eq!(amend_button_label("main에 커밋", Some(text), false), "main에 커밋");
+        assert_eq!(amend_button_label("main에 커밋", Some(text), true), "그래도 수정합니다");
+    }
+
+    #[test]
+    fn fr_g3_amend_does_not_warn_when_ahead_or_no_upstream() {
+        let ahead = RepoSnapshot { upstream: Some("origin/x".into()), ahead: 1, ..Default::default() };
+        let none = RepoSnapshot { upstream: None, ahead: 0, ..Default::default() };
+        assert_eq!(amend_warning(&ahead), None);
+        assert_eq!(amend_warning(&none), None);
+        assert_eq!(amend_button_label("main에 커밋", None, true), "main에 커밋");
     }
 
     #[test]

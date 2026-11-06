@@ -724,7 +724,7 @@ pub const SHARE_NOTE: &str =
 pub const SHARE_AGENTS_NOTE: &str = "에이전트가 일하는 내 컴퓨터의 작업 폴더로 보냅니다";
 
 /// A tile name wraps to this many lines before it is cut with an ellipsis.
-pub const SHARE_NAME_LINES: usize = 2;
+pub const SHARE_NAME_LINES: u32 = 2;
 
 /// The sheet's own actions (the mockup's list); none of them exists without the transfer
 /// service, so each says [`UNAVAILABLE`].

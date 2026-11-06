@@ -209,7 +209,9 @@ pub struct Token {
 pub struct LineTokens {
     pub tokens: Vec<Token>,
     pub end_state: StateStack,
-    /// The line was longer than [`MAX_LINE_BYTES`]: it has one token and the state is unchanged.
+    /// Highlighting stopped on this line: it was longer than [`MAX_LINE_BYTES`] (one token, the state
+    /// unchanged), or [`MAX_STACK_DEPTH`] rules were open and another would have been entered (the rest of
+    /// the line keeps the scopes in force).
     pub skipped: bool,
 }
 
@@ -550,12 +552,32 @@ impl Grammar {
         }
     }
 
-    fn dynamic_pattern(&self, source: &str) -> Arc<Pattern> {
+    /// The pattern for an end or while source that was filled in from a begin match, and whether it is shared
+    /// (kept in the cache: the same `Arc` comes back for the same source, so its address stays valid). A
+    /// long source, or a full cache, gives a pattern for one use.
+    fn dynamic_pattern(&self, source: &str) -> (Arc<Pattern>, bool) {
+        if source.len() > 1024 {
+            return (Arc::new(Pattern::new(source.to_owned())), false);
+        }
         let mut cache = self.dynamic.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.len() > 4096 {
+        if let Some(p) = cache.get(source) {
+            return (p.clone(), true);
+        }
+        if cache.len() >= 4096 {
+            return (Arc::new(Pattern::new(source.to_owned())), false);
+        }
+        let p = Arc::new(Pattern::new(source.to_owned()));
+        cache.insert(source.to_owned(), p.clone());
+        (p, true)
+    }
+
+    /// Forgets the cached dynamic patterns when there are many: done between lines, never while a line is
+    /// being tokenized, so an address handed out during a line stays valid for it.
+    fn trim_dynamic(&self) {
+        let mut cache = self.dynamic.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 4096 {
             cache.clear();
         }
-        cache.entry(source.to_owned()).or_insert_with(|| Arc::new(Pattern::new(source.to_owned()))).clone()
     }
 
     // ---- tokenizing -----------------------------------------------------------------------------------
@@ -577,9 +599,12 @@ impl Grammar {
             f.enter_pos = None;
             f.anchor_pos = None;
         }
-        let mut out = Out { tokens: Vec::new(), last_end: 0 };
+        let mut out = Out { tokens: Vec::new(), last_end: 0, stack_limit_hit: false };
         let mut guard = Guard { steps: 0, limit: 20 * (text.len() + 1) + 2000 };
-        self.tokenize_string(&text, first_line, 0, &mut stack, &mut out, true, &mut guard);
+        self.trim_dynamic();
+        let mut cache = SearchCache::new();
+        self.tokenize_string(&text, first_line, 0, &mut stack, &mut out, true, &mut guard, &mut cache);
+        let out_limit = out.stack_limit_hit;
         // The appended line break is not part of the line.
         let len = line.len();
         let mut tokens: Vec<Token> = Vec::with_capacity(out.tokens.len());
@@ -589,7 +614,7 @@ impl Grammar {
                 tokens.push(Token { start, end, scopes });
             }
         }
-        LineTokens { tokens, end_state: stack, skipped: false }
+        LineTokens { tokens, end_state: stack, skipped: out_limit }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -602,6 +627,7 @@ impl Grammar {
         out: &mut Out,
         check_while: bool,
         guard: &mut Guard,
+        cache: &mut SearchCache,
     ) {
         let len = text.len();
         let mut anchor: Option<usize> = None;
@@ -617,12 +643,7 @@ impl Grammar {
                 out.produce(stack, len);
                 return;
             }
-            if stack.frames.len() > MAX_STACK_DEPTH {
-                // Too many rules open: leave the rest of the line as it is.
-                out.produce(stack, len);
-                return;
-            }
-            let Some(found) = self.match_rule(text, is_first_line, pos, stack, anchor) else {
+            let Some(found) = self.match_rule(text, is_first_line, pos, stack, anchor, cache) else {
                 out.produce(stack, len);
                 return;
             };
@@ -650,6 +671,13 @@ impl Grammar {
                 }
             } else {
                 let rule = &self.rules[found.rule];
+                if stack.frames.len() >= MAX_STACK_DEPTH && !matches!(rule.kind, Kind::Match { .. }) {
+                    // Too many rules open: do not open another. The rest of the line keeps the scopes in force
+                    // and the line is reported as skipped, so a caller can show that highlighting stopped.
+                    out.produce(stack, len);
+                    out.stack_limit_hit = true;
+                    return;
+                }
                 out.produce(stack, m_start);
                 let before = stack.frames.last().expect("a frame").clone();
                 let name_scopes = push_scopes(&before.content_scopes, rule.name.as_ref().map(|n| expand_name(n, text, caps)));
@@ -724,57 +752,45 @@ impl Grammar {
 
     /// The best match of the rule on top of the stack at `pos`: the earliest start, the first pattern
     /// among equals. The rule's own end pattern comes first unless `applyEndPatternLast` says otherwise.
-    fn match_rule(&self, text: &str, is_first_line: bool, pos: usize, stack: &StateStack, anchor: Option<usize>) -> Option<Found> {
+    #[allow(clippy::too_many_arguments)]
+    fn match_rule(&self, text: &str, is_first_line: bool, pos: usize, stack: &StateStack, anchor: Option<usize>, cache: &mut SearchCache) -> Option<Found> {
         let frame = stack.frames.last()?;
         let rule = &self.rules[frame.rule];
-        let allow_a = is_first_line && pos == 0;
-        let allow_g = anchor == Some(pos);
-        let mut best: Option<(usize, usize, Found)> = None; // (start, order, found)
+        let allow = (is_first_line && pos == 0, anchor == Some(pos));
+        let mut best: Option<Best> = None;
         let mut order = 0usize;
-        let consider = |regex: &Regex, id: RuleId, order: usize, best: &mut Option<(usize, usize, Found)>| {
-            let mut region = Region::new();
-            if let Some(start) = search(regex, text, pos, &mut region) {
-                let better = match best {
-                    Some((s, o, _)) => start < *s || (start == *s && order < *o),
-                    None => true,
-                };
-                if better {
-                    let caps = (0..region.len()).map(|i| region.pos(i)).collect();
-                    *best = Some((start, order, Found { rule: id, caps }));
-                }
-            }
-        };
-        let (end_pattern, end_last): (Option<Arc<Pattern>>, bool) = match &rule.kind {
+        let dynamic_end = frame.end.as_deref().map(|source| self.dynamic_pattern(source));
+        let (end_pattern, end_last): (Option<(&Pattern, bool)>, bool) = match &rule.kind {
             Kind::BeginEnd { end, apply_end_last, .. } => {
-                let source = frame.end.as_deref().or(end.as_ref().map(|p| p.source.as_str()));
-                (source.map(|s| self.dynamic_pattern(s)), *apply_end_last)
+                let found = match &dynamic_end {
+                    Some((p, shared)) => Some((p.as_ref(), *shared)),
+                    None => end.as_ref().map(|p| (p, true)),
+                };
+                (found, *apply_end_last)
             }
             _ => (None, false),
         };
-        if let (Some(p), false) = (&end_pattern, end_last) {
-            if let Some(re) = p.regex(allow_a, allow_g) {
-                consider(re, END_RULE, order, &mut best);
-            }
+        if let (Some((p, shared)), false) = (end_pattern, end_last) {
+            consider(cache, text, pos, allow, p, shared, END_RULE, order, &mut best);
             order += 1;
         }
-        let flat: Vec<RuleId> = self.flat(frame.rule).to_vec();
-        for id in flat {
+        for &id in self.flat(frame.rule) {
             let pattern = match &self.rules[id].kind {
                 Kind::Match { pattern, .. } => pattern.as_ref(),
                 Kind::BeginEnd { begin, .. } | Kind::BeginWhile { begin, .. } => begin.as_ref(),
                 Kind::Group { .. } => None,
             };
-            if let Some(re) = pattern.and_then(|p| p.regex(allow_a, allow_g)) {
-                consider(re, id, order, &mut best);
+            if let Some(p) = pattern {
+                consider(cache, text, pos, allow, p, true, id, order, &mut best);
             }
             order += 1;
         }
-        if let (Some(p), true) = (&end_pattern, end_last) {
-            if let Some(re) = p.regex(allow_a, allow_g) {
-                consider(re, END_RULE, order, &mut best);
-            }
+        if let (Some((p, shared)), true) = (end_pattern, end_last) {
+            consider(cache, text, pos, allow, p, shared, END_RULE, order, &mut best);
         }
-        best.map(|(_, _, f)| f)
+        let best = best?;
+        let region = cache.get(&best.key).and_then(|e| e.hit.as_ref())?;
+        Some(Found { rule: best.rule, caps: (0..region.len()).map(|i| region.pos(i)).collect() })
     }
 
     /// `begin`/`while` rules on the stack must match at the start of each line, from the outermost in; the
@@ -795,8 +811,8 @@ impl Grammar {
             let frame = stack.frames[index].clone();
             let Kind::BeginWhile { while_, while_captures, .. } = &self.rules[frame.rule].kind else { continue };
             let pattern = match (&frame.end, while_) {
-                (Some(source), _) => Some(self.dynamic_pattern(source)),
-                (None, Some(p)) => Some(self.dynamic_pattern(&p.source)),
+                (Some(source), _) => Some(self.dynamic_pattern(source).0),
+                (None, Some(p)) => Some(self.dynamic_pattern(&p.source).0),
                 _ => None,
             };
             let allow_a = is_first_line && pos == 0;
@@ -879,7 +895,9 @@ impl Grammar {
                     anchor_pos: None,
                     begin_captured_eol: false,
                 });
-                self.tokenize_string(&text[..end], is_first_line && start == 0, start, &mut inner, out, false, guard);
+                // A shorter text is a different search: the results kept for the whole line do not apply to it.
+                let mut sub_cache = SearchCache::new();
+                self.tokenize_string(&text[..end], is_first_line && start == 0, start, &mut inner, out, false, guard, &mut sub_cache);
                 continue;
             }
             if let Some(name) = &capture.name {
@@ -901,9 +919,67 @@ struct Guard {
     limit: usize,
 }
 
+/// A search result kept for the rest of the line: the position it was made from and what it found (`None`:
+/// nothing from there on). Searching again from a later position finds the same match as long as the match
+/// starts at or after it, so most patterns are searched once per line instead of once per token.
+struct CacheEntry {
+    from: usize,
+    hit: Option<Region>,
+}
+
+/// By the address of the compiled regular expression.
+type SearchCache = HashMap<usize, CacheEntry>;
+
+struct Best {
+    start: usize,
+    order: usize,
+    rule: RuleId,
+    key: usize,
+}
+
+/// Runs one candidate pattern (or reuses its cached result) and keeps it if it beats `best`.
+#[allow(clippy::too_many_arguments)]
+fn consider(
+    cache: &mut SearchCache,
+    text: &str,
+    pos: usize,
+    (allow_a, allow_g): (bool, bool),
+    pattern: &Pattern,
+    shared: bool,
+    rule: RuleId,
+    order: usize,
+    best: &mut Option<Best>,
+) {
+    let Some(regex) = pattern.regex(allow_a, allow_g) else { return };
+    let key = regex as *const Regex as usize;
+    // `\G` matches where the search starts, so a result for it is only good for that start.
+    let cacheable = shared && !(pattern.uses_g && allow_g);
+    let valid = cacheable
+        && cache
+            .get(&key)
+            .is_some_and(|e| e.from <= pos && e.hit.as_ref().is_none_or(|r| r.pos(0).is_some_and(|(start, _)| start >= pos)));
+    if !valid {
+        let mut region = Region::new();
+        let hit = search(regex, text, pos, &mut region).map(|_| region);
+        cache.insert(key, CacheEntry { from: pos, hit });
+    }
+    if let Some(CacheEntry { hit: Some(region), .. }) = cache.get(&key) {
+        if let Some((start, _)) = region.pos(0) {
+            let better = match best {
+                Some(b) => start < b.start || (start == b.start && order < b.order),
+                None => true,
+            };
+            if better {
+                *best = Some(Best { start, order, rule, key });
+            }
+        }
+    }
+}
+
 struct Out {
     tokens: Vec<(usize, usize, Vec<Scope>)>,
     last_end: usize,
+    stack_limit_hit: bool,
 }
 
 impl Out {

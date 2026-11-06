@@ -47,3 +47,5 @@ const fn = async <T,>(x: T): Promise<T> => { await null; return x; };
 /* block comment
    spanning lines */
 label: for (let i = 0; i < 3; i++) { if (i === 1) break label; }
+const greeting = "안녕 😀 world"; // 한글 주석 😀 ok
+const tpl = `이모지 ${"😀"} 끝`;

@@ -38,3 +38,5 @@ Setext heading
 [ref]: https://example.com/ref  "Ref title"
 Line with trailing backslash\
 and html <b>bold</b> <!-- comment --> end.
+
+Korean *강조* and emoji 😀 and `코드 😀` end.

@@ -30,6 +30,7 @@ pub use crate::ui::files::{
     Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
+use crate::ui::files::{choose_target, chip_text_max, files_line, send_state};
 use super::characters::{CharState, Character};
 use super::components::{EmberSheetSized, AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
@@ -1245,19 +1246,20 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
     let draft = st.sheet.get();
     let open = draft.is_some();
     let d = draft.unwrap_or_default();
-    let mut blocker = send_blocker(&d, FILE_PICKER_AVAILABLE, ready);
+    let (blocker, can_send) = send_state(&d, devices, FILE_PICKER_AVAILABLE, ready);
     let target_device = match &d.target {
         Some(SendTarget::Device(id)) => Some(id.clone()),
         _ => None,
     };
-    let offline_target = target_device
-        .as_deref()
-        .and_then(|id| devices.iter().find(|x| x.id == id))
-        .is_some_and(|x| x.presence != Presence::Online);
-    if blocker.is_none() && offline_target {
-        blocker = Some("이 장비는 지금 연결되어 있지 않습니다");
-    }
-    let can_send = blocker.is_none() && target_device.is_some();
+    // The full name of the chosen receiver: a chip may end in an ellipsis, this line never does.
+    let chosen_name = match &d.target {
+        Some(SendTarget::Device(id)) => devices.iter().find(|x| x.id == *id).map(|x| x.name.clone()),
+        Some(SendTarget::Agent(id)) => members
+            .iter()
+            .find(|m| m.id == *id)
+            .map(|m| crate::ui::project::member_name(None, &m.project, &m.agent, &m.title)),
+        None => None,
+    };
     let sheet_w = super::components::sheet_width(w, super::components::SHEET_WIDTH_DEFAULT);
     let inner = sheet_w - 2.0 * SP[4];
     let close = {
@@ -1277,7 +1279,10 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
     }
     let widths: Vec<f32> = chips
         .iter()
-        .map(|(l, icon, ..)| target_chip_width(&fit_label(l, 160.0, Fs::Sm.size()), if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 }))
+        .map(|(l, icon, ..)| {
+            let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
+            target_chip_width(&fit_label(l, chip_text_max(glyph), Fs::Sm.size()), glyph)
+        })
         .collect();
     let lines = super::project::wrap_lines(&widths, SP[1], inner);
     EmberSheet("파일 보내기", open, close.clone(), None, || {
@@ -1292,22 +1297,28 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                         let (label, icon, sel, dim, target) = &chips[i];
                         let (s, base) = (st.sheet.clone(), d.clone());
                         let target = target.clone();
-                        let shown = fit_label(label, 160.0, Fs::Sm.size());
+                        let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
+                        let shown = fit_label(label, chip_text_max(glyph), Fs::Sm.size());
+                        let devs: Vec<Device> = devices.to_vec();
                         let icon = match icon {
                             TargetIcon::Kind(k) => TargetIcon::Kind(*k),
                             TargetIcon::Agent(m) => TargetIcon::Agent(m.clone()),
                         };
                         TargetChip(&shown, icon, *sel, *dim, move || {
-                            let mut next = base.clone();
-                            next.target = Some(target.clone());
-                            s.set(Some(next));
+                            match choose_target(&base, &devs, target.clone()) {
+                                Ok(next) => s.set(Some(next)),
+                                Err(note) => notice::post(note),
+                            }
                         });
                     }
                 });
             }
             Label("파일", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
-            // TODO(compose-rust): a file picker and drag and drop; until then the files stay empty.
-            Label(&format!("{}개 선택됨", d.files.len()), Fs::Sm, Weight::Regular, None, Some(1));
+            // TODO(compose-rust#166): a file picker and drag and drop; until then the files stay empty.
+            if let Some(name) = &chosen_name {
+                Label(&format!("받는 곳: {name}"), Fs::Sm, Weight::Regular, None, Some(2));
+            }
+            Label(&files_line(d.files.len(), FILE_PICKER_AVAILABLE), Fs::Sm, Weight::Regular, None, Some(2));
             if let Some(text) = blocker {
                 Label(text, Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(2));
             }

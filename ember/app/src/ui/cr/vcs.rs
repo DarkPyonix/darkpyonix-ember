@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -718,11 +718,11 @@ pub fn SectionList(
     snap: Option<&RepoSnapshot>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
-    SectionListWithSample(active, snap, false, None, None, None, on_pick);
+    SectionListWithSample(active, snap, false, None, None, None, None, on_pick);
 }
 
 fn SectionListWithSample(
-    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>, branch_count: Option<usize>,
+    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>, branch_count: Option<usize>, team_count: Option<usize>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
@@ -731,13 +731,13 @@ fn SectionListWithSample(
             let is_active = sec == active;
             let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
             let fg = if is_active { p.text } else { p.muted };
-            let count = section_count_with_branches(sec, snap, stash_count, pr_count, branch_count).or_else(|| {
+            let count = section_count_with_team(sec, snap, stash_count, pr_count, branch_count, team_count).or_else(|| {
                 if is_sample {
                     match sec {
                         Section::PullRequests => Some(sample_pr_count()),
                         Section::Stash => Some(2),
                         Section::Conflicts => Some(2),
-                        Section::Team => Some(6),
+                        Section::Team => Some(sample_team_len()),
                         _ => None,
                     }
                 } else {
@@ -1449,6 +1449,8 @@ fn SectionContent(
     stash_count: MutableState<Option<usize>>,
     pr_count: MutableState<Option<usize>>,
     branch_count: MutableState<Option<usize>>,
+    team_count: MutableState<Option<usize>>,
+    pr_list: MutableState<Vec<PrEntry>>,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -1464,7 +1466,8 @@ fn SectionContent(
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
         (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
-        (Some(_), Section::PullRequests) => PullRequestsPane(actions, pr_count, layout),
+        (Some(_), Section::PullRequests) => PullRequestsPane(actions, pr_count, pr_list, layout),
+        (Some(_), Section::Team) => TeamPane(actions, team_count, pr_list, layout),
         (Some(_), Section::Branches) => BranchesPane(actions, branch_count, layout),
         _ => Unavailable(sec),
     }
@@ -1998,14 +2001,14 @@ fn PullRequestRow(e: &PrEntry) {
 /// 풀 리퀘스트: the repository's pull requests with checks, review and the merge gate. `actions`
 /// is the project and the screen's reload counter; `None` shows sample pull requests. `count` is
 /// written for the section list (the open ones).
-fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
+fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>, shared: MutableState<Vec<PrEntry>>, layout: PaneLayout) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
     let state = remember_with_key(key_project, || mutable_state_of(PrLoad::Loading));
     let filter = remember(|| mutable_state_of(PrFilter::Open));
     let retry = remember(|| mutable_state_of(0_u64));
     if let Some(a) = actions.clone() {
-        let (st, cnt, shown) = (state.clone(), count.clone(), filter.get());
+        let (st, cnt, shown, shared) = (state.clone(), count.clone(), filter.get(), shared.clone());
         launched_effect((a.project.clone(), a.reload.get(), retry.get(), shown.arg()), move || async move {
             if crate::services::try_services().is_some() {
                 st.set(PrLoad::Loading);
@@ -2013,6 +2016,8 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                 crate::services::run_shared(async move { prs_from(fetch_prs(&name, shown).await, now) }, move |result| {
                     if shown == PrFilter::Open {
                         cnt.set(if let PrLoad::Ready(list) = &result { Some(list.len()) } else { None });
+                        // 팀 작업 shows the open pull requests of the branches (no extra read).
+                        shared.set(if let PrLoad::Ready(list) = &result { list.clone() } else { Vec::new() });
                     }
                     st.set(result);
                 });
@@ -2276,6 +2281,161 @@ fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, la
         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(content);
     } else {
         content();
+    }
+}
+
+/// The project's sessions with their folders, for matching to worktrees. The client state holds
+/// each session's `cwd`; the computer a session runs on is not in the record, so it is not shown.
+fn member_cwds(state: &ember_client::State, project: &str) -> Vec<MemberCwd> {
+    project_boxes(state)
+        .into_iter()
+        .find(|b| b.id == project)
+        .map(|b| {
+            b.members
+                .iter()
+                .filter_map(|m| {
+                    let cwd = state.session(&m.session_id)?.record.cwd.clone();
+                    Some(MemberCwd { name: m.name.clone(), harness: m.agent.clone(), leader: m.leader, cwd, state_text: crate::ui::project::status_pill(m.status).0.to_string(), status: m.status })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sessions for the review captures: one in the main checkout, one in the ui worktree.
+fn sample_members() -> Vec<MemberCwd> {
+    use ember_client::LauncherStatus as S;
+    let m = |name: &str, harness: &str, leader: bool, cwd: &str, status: S| MemberCwd {
+        name: name.to_string(),
+        harness: harness.to_string(),
+        leader,
+        cwd: cwd.to_string(),
+        state_text: crate::ui::project::status_pill(status).0.to_string(),
+        status,
+    };
+    vec![
+        m("ember-리더", "claude-code", true, "/Users/demo/darkpyonix-ember/ember/app", S::Running),
+        m("ember-codex", "codex", false, "/Users/demo/worktrees/ui-phase-6", S::WaitingForApproval),
+    ]
+}
+
+/// The sample rows of 팀 작업 (the sample branches, members and pull requests).
+fn sample_team_rows() -> Vec<TeamRow> {
+    let (BranchLoad::Ready(branches), PrLoad::Ready(prs)) = (sample_branches(), sample_prs()) else { return Vec::new() };
+    team_rows(&branches, &sample_members(), &prs)
+}
+
+fn sample_team_len() -> usize {
+    sample_team_rows().len()
+}
+
+/// One worktree: the member's character, name and state, the branch, the worktree folder, the
+/// ahead/behind text and the branch's pull request.
+fn TeamRowView(r: &TeamRow, project: &str) {
+    let p = ember_theme().palette;
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+        match &r.member {
+            Some(m) => super::characters::Character(&m.harness, m.leader, 36.0, &m.name, project, super::characters::CharState::from_status(m.status), None),
+            None => super::channels::Avatar("-", "", 36.0),
+        }
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                match &r.member {
+                    Some(m) => {
+                        Txt(&m.name, TypeRole::BodyStrong, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                        if m.leader {
+                            Pill("리더", PillTone::Orange, true);
+                        }
+                        Pill(&m.state_text, crate::ui::project::status_pill(m.status).1.into(), true);
+                    }
+                    None => Txt("담당 없음", TypeRole::BodyStrong, Some(paint(p.text_2)), Some(1), None, None, None),
+                }
+            });
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Txt(&r.branch, TypeRole::Caption, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                if r.current {
+                    Pill("현재", PillTone::Green, true);
+                }
+                if let Some(pr) = &r.pr_text {
+                    Pill(pr, PillTone::Blue, true);
+                }
+            });
+            Txt(&r.worktree, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+            Txt(&r.sync_text, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+        });
+    });
+}
+
+/// 팀 작업: one row per worktree with its member, branch, ahead/behind and pull request. The
+/// branches come from the branches API; the members from the project's sessions (a session belongs
+/// to the worktree that holds its folder). `prs` are the pull requests the 풀 리퀘스트 section has
+/// read (none until it has been opened). `None` actions show sample rows. `count` is written for
+/// the section list.
+fn TeamPane(actions: Option<Actions>, count: MutableState<Option<usize>>, prs: MutableState<Vec<PrEntry>>, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    let key_project = actions.as_ref().map(|a| a.project.clone());
+    let state = remember_with_key(key_project, || mutable_state_of(BranchLoad::Loading));
+    let retry = remember(|| mutable_state_of(0_u64));
+    if let Some(a) = actions.clone() {
+        let (st, cnt) = (state.clone(), count.clone());
+        launched_effect((a.project.clone(), a.reload.get(), retry.get()), move || async move {
+            if crate::services::try_services().is_some() {
+                if !matches!(st.get(), BranchLoad::Ready(_)) {
+                    st.set(BranchLoad::Loading);
+                }
+                let (project, now) = (a.project.clone(), crate::demo::now_ms() / 1000);
+                crate::services::run_shared(async move { branches_from(fetch_branches(&project).await, now) }, move |result| {
+                    cnt.set(if let BranchLoad::Ready(list) = &result { Some(list.iter().filter(|b| b.worktree.is_some()).count()) } else { None });
+                    st.set(result);
+                });
+            } else {
+                st.set(BranchLoad::Failed("서버에 연결되어 있지 않아 팀 작업을 불러올 수 없습니다.".to_string()));
+            }
+        });
+    }
+    let project = actions.as_ref().map(|a| a.project.clone()).unwrap_or_default();
+    let status = if actions.is_some() { state.get() } else { sample_branches() };
+    let members = match &actions {
+        // Demo sessions run in temporary folders that no demo worktree path can match, so demo
+        // mode uses the sample members (the same two as the sample route).
+        Some(_) if crate::services::try_services().is_some_and(|s| s.demo.is_some()) => sample_members(),
+        Some(a) => crate::services::try_services().map(|s| s.client.read(|st| member_cwds(st, &a.project))).unwrap_or_default(),
+        None => sample_members(),
+    };
+    let prs = if actions.is_some() { prs.get() } else if let PrLoad::Ready(l) = sample_prs() { l } else { Vec::new() };
+    let retry_state = retry.clone();
+    let list = move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || match status {
+            BranchLoad::Loading => {
+                Label("팀 작업을 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+            BranchLoad::Failed(text) => {
+                Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry_state.set(retry_state.get() + 1));
+            }
+            BranchLoad::Ready(entries) => {
+                let rows = team_rows(&entries, &members, &prs);
+                if rows.is_empty() {
+                    EmberCard(false, true, None, Some(SP[3]), None, || {
+                        Label("작업 중인 워크트리가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    });
+                    return;
+                }
+                VcsCard(|| {
+                    for (i, r) in rows.iter().enumerate() {
+                        if i > 0 {
+                            cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                        }
+                        TeamRowView(r, &project);
+                    }
+                });
+            }
+        });
+    };
+    if layout == PaneLayout::Two {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
+    } else {
+        list();
     }
 }
 
@@ -2601,6 +2761,9 @@ fn VcsScreenWithLoad(
     let stash_count = remember(|| mutable_state_of(None::<usize>));
     let pr_count = remember(|| mutable_state_of(None::<usize>));
     let branch_count = remember(|| mutable_state_of(None::<usize>));
+    let team_count = remember(|| mutable_state_of(None::<usize>));
+    // Keyed by the project: the PR pills of another project's branches must not carry over.
+    let pr_list = remember_with_key(selected_proj.get(), || mutable_state_of(Vec::<PrEntry>::new()));
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
@@ -2655,10 +2818,10 @@ fn VcsScreenWithLoad(
                         cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
                             cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
-                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), move |s| sec_state.set(s));
+                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), team_count.get(), move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone());
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone());
                             });
                         });
                     } else {
@@ -2669,7 +2832,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone());
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone(), team_count.clone(), pr_list.clone());
                         });
                     }
                 } else {
@@ -3160,12 +3323,12 @@ mod tests {
 
     #[compose_rust::runtime::composable]
     fn prs_sample_wide() {
-        PullRequestsPane(None, mutable_state_of(None), PaneLayout::Two);
+        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Vec::new()), PaneLayout::Two);
     }
 
     #[compose_rust::runtime::composable]
     fn prs_sample_compact() {
-        PullRequestsPane(None, mutable_state_of(None), PaneLayout::Tabs);
+        PullRequestsPane(None, mutable_state_of(None), mutable_state_of(Vec::new()), PaneLayout::Tabs);
     }
 
     #[test]

@@ -31,7 +31,8 @@ pub use crate::ui::routines::{
     describe_cron, filter_projects, format_next, group_by_project, kind_text, kpis,
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
-    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bars, DayBar,
+    schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bar_radius,
+    weekday_bars, weekday_card_height, weekday_chart_size, DayBar,
     Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
     ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout,
     model_choices, schedule_description, when_big_max_lines, LocalStore, Minutes, PaneMode, Routine, RoutineKpi,
@@ -1178,9 +1179,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     }
     let ring_cmd = ring.build();
 
-    let chart_w = if compact { 148.0 } else { 228.0 };
-    let chart_h = if compact { 96.0 } else { 100.0 };
-    let chart_gap = if compact { 6.0 } else { 10.0 };
+    let (chart_w, chart_h, chart_gap) = weekday_chart_size(compact);
     let totals: Vec<usize> = bars.iter().map(|b| b.ok + b.fail).collect();
     let mut chart = DrawList::builder().rect(paint(p.line), 0.0, chart_h, chart_w, 1.0, 0.0);
     for (b, (x, y, w, h)) in bars.iter().zip(bar_rects(&totals, chart_w, chart_h, chart_gap)) {
@@ -1189,18 +1188,20 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
         }
         let total = (b.ok + b.fail) as f32;
         let fail_h = h * b.fail as f32 / total;
-        chart = chart.round_rect(paint(p.blue.strong), x, y + fail_h, w, h - fail_h, 4.0, 0.0);
+        let r = weekday_bar_radius(w, h);
+        chart = chart.round_rect(paint(p.blue.strong), x, y + fail_h, w, h - fail_h, r, 0.0);
         if fail_h > 0.0 {
-            chart = chart.round_rect(paint(p.orange.strong), x, y, w, fail_h, 4.0, 0.0);
+            chart = chart.round_rect(paint(p.orange.strong), x, y, w, fail_h, r, 0.0);
         }
     }
     let chart_cmd = chart.build();
+    let card_h = weekday_card_height(compact).max(174.0);
     let busy = totals.iter().any(|t| *t > 0);
 
     let kpis_content = move || {
         cu::Column()
             .spacing(SP[2])
-            .modifier(Modifier::new().fill_max_width().height(174.0))
+            .modifier(Modifier::new().fill_max_width().height(card_h))
             .content(|| {
                 cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
                     RoutineKpiView(&k[0], 0);
@@ -1215,7 +1216,7 @@ fn Dashboard(entries: &[Entry], now: Minutes, compact: bool, width_dp: f32) {
     };
 
     let hero_content = move || {
-        HeroCardContent(&ring_cmd, rate, &chart_cmd, &bars, busy, chart_w, chart_h);
+        HeroCardContent(&ring_cmd, rate, &chart_cmd, &bars, busy, chart_w, chart_h, card_h);
     };
 
     if width_dp > 1279.0 {
@@ -1239,12 +1240,13 @@ fn HeroCardContent(
     busy: bool,
     chart_w: f32,
     chart_h: f32,
+    card_h: f32,
 ) {
     let p = ember_theme().palette;
     cu::Row()
         .spacing(SP[3])
         .alignment(Alignment::CenterStart)
-        .modifier(Modifier::new().fill_max_width().height(174.0))
+        .modifier(Modifier::new().fill_max_width().height(card_h))
         .content(|| {
             cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
                 Label("성공률 (전체 기록)", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -2617,7 +2619,7 @@ mod tests {
         assert_eq!(last_run_text(&[], now), "실행 기록 없음");
         assert_eq!(
             last_run_text(&[run(now - 180, RunStatus::Done)], now),
-            "성공 · 3시간 전"
+            "완료 · 3시간 전"
         );
         assert_eq!(
             last_run_text(&[run(now - 5, RunStatus::Failed)], now),

@@ -46,6 +46,7 @@ fn render(event: &AgentEvent) -> Option<String> {
         AgentEvent::QuestionAnswered { answers, .. } => {
             if answers.is_empty() { "[question skipped]".to_string() } else { "[question answered]".to_string() }
         }
+        AgentEvent::PromptWithdrawn { .. } => "[prompt withdrawn]".to_string(),
         AgentEvent::TurnEnded { outcome } => format!("[turn ended: {outcome:?}]"),
         AgentEvent::Error { message } => format!("error: {message}"),
         AgentEvent::TurnError { code, message } => format!("error ({code}): {message}"),

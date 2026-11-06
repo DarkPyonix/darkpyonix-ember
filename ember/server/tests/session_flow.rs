@@ -432,8 +432,9 @@ async fn fr_a5_approve_all_does_not_answer_a_question_but_answers_a_normal_appro
     let id = new_session(&s);
     s.set_approve_all(&id, true).await.unwrap();
     s.send(&id, "go").await.unwrap();
+    // The agent emits q1 before b1 and the pump handles events in order, so once b1 is answered
+    // (the sentinel) q1 has been handled: if the mode had answered it, it would be logged.
     wait_answered(&answered, 1).await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string()], "the question was not answered");
     let n: Vec<_> = notices(&s, &id).into_iter().filter(|m| m == QUESTION_NOTICE).collect();
     assert_eq!(n.len(), 1, "one notice says why the question waits");
@@ -462,9 +463,10 @@ async fn fr_a5_switching_approve_all_on_skips_a_pending_question() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // `set_approve_all` answers every pending approval before it returns, so nothing is in
+    // flight afterwards.
     s.set_approve_all(&id, true).await.unwrap();
     wait_answered(&answered, 1).await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(*answered.lock().unwrap(), vec!["b1".to_string()]);
 }
 
@@ -477,6 +479,30 @@ async fn fr_a5_switching_approve_all_on_skips_a_pending_question() {
 struct Scripted {
     script: Vec<AgentEvent>,
     log: Arc<std::sync::Mutex<Vec<String>>>,
+    knobs: Arc<Knobs>,
+}
+
+/// What a test can tell the fake to do when it is answered.
+#[derive(Default)]
+struct Knobs {
+    /// The next `answer_question` / `decline_question` fails once (the CLI withdrew the question,
+    /// or the write to its stdin failed).
+    fail_next_answer: std::sync::atomic::AtomicBool,
+    /// Every question answer waits for `release` after signalling `entered`.
+    gated: std::sync::atomic::AtomicBool,
+    /// When gated, the fake first emits a `TurnEnded` (the question is withdrawn mid-answer).
+    end_turn_when_entered: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl Knobs {
+    fn set(flag: &std::sync::atomic::AtomicBool) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn is_set(flag: &std::sync::atomic::AtomicBool) -> bool {
+        flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
@@ -494,7 +520,12 @@ impl AgentAdapter for Scripted {
         _req: ember_server::agents::StartRequest,
         events: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> anyhow::Result<Box<dyn ember_server::agents::AgentRun>> {
-        Ok(Box::new(ScriptedRun { script: self.script.clone(), events, log: self.log.clone() }))
+        Ok(Box::new(ScriptedRun {
+            script: self.script.clone(),
+            events,
+            log: self.log.clone(),
+            knobs: self.knobs.clone(),
+        }))
     }
 }
 
@@ -502,6 +533,24 @@ struct ScriptedRun {
     script: Vec<AgentEvent>,
     events: tokio::sync::mpsc::Sender<AgentEvent>,
     log: Arc<std::sync::Mutex<Vec<String>>>,
+    knobs: Arc<Knobs>,
+}
+
+impl ScriptedRun {
+    /// The failure and the gate of [`Knobs`], before a question answer is logged.
+    async fn before_question_answer(&self) -> anyhow::Result<()> {
+        if Knobs::is_set(&self.knobs.gated) {
+            if Knobs::is_set(&self.knobs.end_turn_when_entered) {
+                self.events.send(AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }).await?;
+            }
+            self.knobs.entered.notify_one();
+            self.knobs.release.notified().await;
+        }
+        if self.knobs.fail_next_answer.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("the CLI withdrew the question");
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -519,12 +568,14 @@ impl ember_server::agents::AgentRun for ScriptedRun {
     }
 
     async fn answer_question(&mut self, question_id: &str, answers: &[QuestionAnswer]) -> anyhow::Result<()> {
+        self.before_question_answer().await?;
         let a: Vec<String> = answers.iter().map(|a| format!("{}={}", a.question_id, a.values.join("|"))).collect();
         self.log.lock().unwrap().push(format!("q:{question_id}:{}", a.join(";")));
         Ok(())
     }
 
     async fn decline_question(&mut self, question_id: &str) -> anyhow::Result<()> {
+        self.before_question_answer().await?;
         self.log.lock().unwrap().push(format!("d:{question_id}"));
         Ok(())
     }
@@ -539,9 +590,34 @@ impl ember_server::agents::AgentRun for ScriptedRun {
 }
 
 fn scripted_sessions(script: Vec<AgentEvent>) -> (Arc<Sessions>, Arc<std::sync::Mutex<Vec<String>>>) {
+    let (s, log, _) = scripted_sessions_with(script, Arc::new(Store::open_in_memory().unwrap()));
+    (s, log)
+}
+
+fn scripted_sessions_with(
+    script: Vec<AgentEvent>,
+    store: Arc<Store>,
+) -> (Arc<Sessions>, Arc<std::sync::Mutex<Vec<String>>>, Arc<Knobs>) {
     let log: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-    let adapters: Vec<Arc<dyn AgentAdapter>> = vec![Arc::new(Scripted { script, log: log.clone() })];
-    (Sessions::new(Arc::new(Store::open_in_memory().unwrap()), adapters), log)
+    let knobs: Arc<Knobs> = Arc::default();
+    let adapters: Vec<Arc<dyn AgentAdapter>> =
+        vec![Arc::new(Scripted { script, log: log.clone(), knobs: knobs.clone() })];
+    (Sessions::new(store, adapters), log, knobs)
+}
+
+/// Poll until `cond` holds, for at most 5 s. Positive waits only: nothing here asserts an absence.
+async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..1000 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("never happened within 5 s: {what}");
+}
+
+fn stored_kinds(s: &Sessions, id: &str) -> Vec<AgentEvent> {
+    s.store().events_after(id, 0).unwrap().into_iter().map(|e| e.event).collect()
 }
 
 fn approval(id: &str, tool: &str, needs_person: bool) -> AgentEvent {
@@ -587,8 +663,9 @@ async fn fr_a5_approve_all_allows_a_plan_with_a_notice_and_never_a_flagged_unkno
     let id = new_session(&s);
     s.set_approve_all(&id, true).await.unwrap();
     s.send(&id, "go").await.unwrap();
+    // Order p1, n1, b1: the pump decides n1 before it handles b1, so once the b1 sentinel is
+    // answered the flagged tool has been handled.
     wait_log(&log, 2).await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
     let mut got = log.lock().unwrap().clone();
     got.sort();
     // Allowed once each, never "always"; the flagged unknown tool was not answered.
@@ -609,8 +686,8 @@ async fn fr_a5_switching_approve_all_on_allows_a_pending_plan_and_skips_a_flagge
     s.send(&id, "go").await.unwrap();
     wait_events(&s, &id, 3).await;
     s.set_approve_all(&id, true).await.unwrap();
+    // `set_approve_all` answers every pending approval before it returns.
     wait_log(&log, 1).await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
     assert_eq!(*log.lock().unwrap(), vec!["a:p1:AllowOnce".to_string()]);
     assert_eq!(notices(&s, &id).iter().filter(|m| *m == PLAN_NOTICE).count(), 1);
 }
@@ -649,13 +726,15 @@ fn ans(q: &str, v: &str) -> QuestionAnswer {
 /// validated, recorded (a secret value as `***`) and sent to the agent with the real values.
 #[tokio::test]
 async fn fr_a5_a_question_is_answered_recorded_and_its_secret_is_not_stored() {
-    let (s, log) = scripted_sessions(vec![colour_question()]);
+    // The script ends with a normal Bash approval (b1). Events are handled in order, so once b1
+    // has been answered by the mode, the question before it has been handled and left alone.
+    let (s, log) = scripted_sessions(vec![colour_question(), approval("b1", "Bash", false)]);
     let id = new_session(&s);
     s.set_approve_all(&id, true).await.unwrap();
     s.send(&id, "go").await.unwrap();
-    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(log.lock().unwrap().is_empty(), "approve-everything did not answer the question");
+    wait_log(&log, 1).await;
+    let sentinel = vec!["a:b1:AllowOnce".to_string()];
+    assert_eq!(*log.lock().unwrap(), sentinel, "approve-everything answered b1 and not the question");
     let pending = s.pending_questions(&id).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].0, "r1");
@@ -669,11 +748,14 @@ async fn fr_a5_a_question_is_answered_recorded_and_its_secret_is_not_stored() {
     assert!(matches!(e, QuestionError::NotPending(_)), "{e:?}");
     let e = s.answer_question("no-session", "r1", vec![]).await.unwrap_err();
     assert!(matches!(e, QuestionError::NoSession(_)), "{e:?}");
-    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(*log.lock().unwrap(), sentinel);
 
     s.answer_question(&id, "r1", vec![ans("q0", "Red"), ans("q1", "hunter2")]).await.unwrap();
-    assert_eq!(*log.lock().unwrap(), vec!["q:r1:q0=Red;q1=hunter2".to_string()]);
-    wait_status(&s, &id, SessionStatus::Running).await;
+    assert_eq!(*log.lock().unwrap(), vec!["a:b1:AllowOnce".to_string(), "q:r1:q0=Red;q1=hunter2".to_string()]);
+    wait_until("QuestionAnswered stored", || {
+        stored_kinds(&s, &id).iter().any(|e| matches!(e, AgentEvent::QuestionAnswered { .. }))
+    })
+    .await;
     let stored = s
         .store()
         .events_after(&id, 0)
@@ -804,4 +886,212 @@ async fn fr_a5_question_route_declines() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(body, serde_json::json!({"status": "declined"}));
     assert_eq!(*log.lock().unwrap(), vec!["d:r1".to_string()]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Question answer ordering and withdrawn prompts (follow-ups of the question events review).
+// ---------------------------------------------------------------------------------------------
+
+fn valid_colour_answers() -> Vec<QuestionAnswer> {
+    vec![ans("q0", "Red"), ans("q1", "x")]
+}
+
+fn answered_events(s: &Sessions, id: &str) -> usize {
+    stored_kinds(s, id).iter().filter(|e| matches!(e, AgentEvent::QuestionAnswered { .. })).count()
+}
+
+/// FR-A5: when the agent fails the answer, nothing is recorded and the key is released, so the
+/// retry (and a decline) succeed. The question is recorded only after the agent accepted it.
+#[tokio::test]
+async fn fr_a5_an_adapter_failure_leaves_no_answer_event_and_the_retry_succeeds() {
+    use ember_server::session::QuestionError;
+    let (s, log, knobs) = scripted_sessions_with(vec![colour_question()], Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+
+    Knobs::set(&knobs.fail_next_answer);
+    let e = s.answer_question(&id, "r1", valid_colour_answers()).await.unwrap_err();
+    assert!(matches!(e, QuestionError::Other(_)), "{e:?}");
+    assert_eq!(answered_events(&s, &id), 0, "a refused answer is not recorded");
+    assert_eq!(s.questions_taken_len(), 0, "the key was released");
+    assert_eq!(s.pending_questions(&id).unwrap().len(), 1, "the question is still pending");
+    assert!(log.lock().unwrap().is_empty());
+
+    // The retry goes through.
+    s.answer_question(&id, "r1", valid_colour_answers()).await.unwrap();
+    assert_eq!(*log.lock().unwrap(), vec!["q:r1:q0=Red;q1=x".to_string()]);
+    wait_until("QuestionAnswered stored", || answered_events(&s, &id) == 1).await;
+    assert_eq!(s.questions_taken_len(), 0, "an answered question holds no key");
+    assert!(s.pending_questions(&id).unwrap().is_empty());
+}
+
+/// FR-A5: a failed skip releases the key too, so a later answer can follow.
+#[tokio::test]
+async fn fr_a5_a_failed_decline_can_be_followed_by_an_answer() {
+    let (s, log, knobs) = scripted_sessions_with(vec![colour_question()], Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    Knobs::set(&knobs.fail_next_answer);
+    s.decline_question(&id, "r1").await.unwrap_err();
+    assert_eq!(answered_events(&s, &id), 0);
+    s.answer_question(&id, "r1", valid_colour_answers()).await.unwrap();
+    assert_eq!(*log.lock().unwrap(), vec!["q:r1:q0=Red;q1=x".to_string()]);
+}
+
+/// FR-A5: a second answer (or a skip) is refused while the first is in flight, and the question is
+/// answered exactly once. The first answer is held inside the agent by a gate, not by a sleep.
+#[tokio::test]
+async fn fr_a5_a_double_answer_is_refused_while_the_first_is_in_flight() {
+    use ember_server::session::QuestionError;
+    let (s, log, knobs) = scripted_sessions_with(vec![colour_question()], Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+
+    Knobs::set(&knobs.gated);
+    let first = {
+        let (s, id) = (s.clone(), id.clone());
+        tokio::spawn(async move { s.answer_question(&id, "r1", valid_colour_answers()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), knobs.entered.notified())
+        .await
+        .expect("the first answer reached the agent");
+
+    let e = s.answer_question(&id, "r1", valid_colour_answers()).await.unwrap_err();
+    assert!(matches!(e, QuestionError::NotPending(_)), "{e:?}");
+    let e = s.decline_question(&id, "r1").await.unwrap_err();
+    assert!(matches!(e, QuestionError::NotPending(_)), "{e:?}");
+    assert_eq!(answered_events(&s, &id), 0, "nothing is recorded before the agent accepted");
+
+    knobs.release.notify_one();
+    first.await.unwrap().unwrap();
+    wait_until("QuestionAnswered stored", || answered_events(&s, &id) == 1).await;
+    assert_eq!(*log.lock().unwrap(), vec!["q:r1:q0=Red;q1=x".to_string()], "answered once");
+    assert_eq!(s.questions_taken_len(), 0);
+}
+
+/// FR-A5: a turn end releases the keys of its session, even with an answer still in flight, and a
+/// withdrawn question is NotPending, not stuck.
+#[tokio::test]
+async fn fr_a5_a_turn_end_releases_the_keys_of_its_session() {
+    use ember_server::session::QuestionError;
+    let (s, _log, knobs) = scripted_sessions_with(vec![colour_question()], Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+
+    Knobs::set(&knobs.gated);
+    Knobs::set(&knobs.end_turn_when_entered);
+    let first = {
+        let (s, id) = (s.clone(), id.clone());
+        tokio::spawn(async move { s.answer_question(&id, "r1", valid_colour_answers()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), knobs.entered.notified())
+        .await
+        .expect("the first answer reached the agent");
+    wait_until("TurnEnded stored", || {
+        stored_kinds(&s, &id).iter().any(|e| matches!(e, AgentEvent::TurnEnded { .. }))
+    })
+    .await;
+    assert_eq!(s.questions_taken_len(), 0, "the turn end released the key while the answer was in flight");
+    let e = s.answer_question(&id, "r1", valid_colour_answers()).await.unwrap_err();
+    assert!(matches!(e, QuestionError::NotPending(_)), "{e:?}");
+
+    knobs.release.notify_one();
+    first.await.unwrap().unwrap();
+    wait_until("QuestionAnswered stored", || answered_events(&s, &id) == 1).await;
+    assert_eq!(s.questions_taken_len(), 0);
+}
+
+/// FR-A5: ending a session releases its keys.
+#[tokio::test]
+async fn fr_a5_session_end_releases_the_keys_of_its_session() {
+    let (s, _log, knobs) = scripted_sessions_with(vec![colour_question()], Arc::new(Store::open_in_memory().unwrap()));
+    let id = new_session(&s);
+    s.send(&id, "go").await.unwrap();
+    wait_status(&s, &id, SessionStatus::WaitingForApproval).await;
+    Knobs::set(&knobs.gated);
+    let first = {
+        let (s, id) = (s.clone(), id.clone());
+        tokio::spawn(async move { s.answer_question(&id, "r1", valid_colour_answers()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), knobs.entered.notified())
+        .await
+        .expect("the first answer reached the agent");
+    assert_eq!(s.questions_taken_len(), 1);
+    s.session_ended(&id);
+    assert_eq!(s.questions_taken_len(), 0);
+    knobs.release.notify_one();
+    first.await.unwrap().unwrap();
+}
+
+fn withdrawn(id: &str) -> AgentEvent {
+    AgentEvent::PromptWithdrawn { prompt_id: id.into() }
+}
+
+/// Feed items of kind `kind` in the default channel of project `core`.
+async fn feed_items(app: &axum::Router, kind: &str) -> Vec<serde_json::Value> {
+    let res = app
+        .clone()
+        .oneshot(Request::get("/api/channels/default-core/feed").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let feed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    feed.as_array().unwrap().iter().filter(|i| i["kind"] == kind).cloned().collect()
+}
+
+/// Run `script` in a session of project `core` and wait until the last event of it is stored.
+async fn run_withdraw_script(script: Vec<AgentEvent>) -> (Arc<Sessions>, axum::Router, String) {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let n = script.len();
+    let (s, _log, _knobs) = scripted_sessions_with(script, store.clone());
+    let app = ember_server::channels::api::router(store.clone(), s.clone());
+    let id = store
+        .create_session("core", AgentKind::Scripted, &std::env::temp_dir().to_string_lossy(), None, "alpha")
+        .unwrap()
+        .id;
+    s.send(&id, "go").await.unwrap();
+    // UserMessage plus the script (plus nothing else: no turn end).
+    wait_until("the script is stored", || stored_kinds(&s, &id).len() >= n + 1).await;
+    (s, app, id)
+}
+
+/// FR-A5: a question the agent withdrew (Claude Code `control_cancel_request`) leaves
+/// `pending_questions` and the feed while the turn is still running. The sentinel approval after
+/// it stays pending, so the absence is observed after the withdrawal was handled.
+#[tokio::test]
+async fn fr_a5_a_withdrawn_question_leaves_the_pending_list_and_the_feed_while_the_turn_runs() {
+    let (s, app, id) =
+        run_withdraw_script(vec![colour_question(), withdrawn("r1"), approval("sentinel", "Bash", false)]).await;
+    assert!(s.pending_questions(&id).unwrap().is_empty());
+    assert!(feed_items(&app, "question").await.is_empty());
+    let approvals = feed_items(&app, "approval").await;
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["approval_id"], "sentinel");
+    assert!(!stored_kinds(&s, &id).iter().any(|e| matches!(e, AgentEvent::TurnEnded { .. })), "the turn is running");
+    // Answering the withdrawn question is NotPending.
+    let e = s.answer_question(&id, "r1", valid_colour_answers()).await.unwrap_err();
+    assert!(matches!(e, ember_server::session::QuestionError::NotPending(_)), "{e:?}");
+}
+
+/// FR-A5: the same for a plain approval: withdrawn is neither pending nor denied.
+#[tokio::test]
+async fn fr_a5_a_withdrawn_approval_leaves_the_feed_while_the_turn_runs() {
+    let (s, app, id) = run_withdraw_script(vec![
+        approval("a1", "Bash", false),
+        withdrawn("a1"),
+        approval("sentinel", "Write", false),
+    ])
+    .await;
+    let approvals = feed_items(&app, "approval").await;
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["approval_id"], "sentinel");
+    assert!(!stored_kinds(&s, &id).iter().any(|e| matches!(
+        e,
+        AgentEvent::ApprovalResolved { .. } | AgentEvent::TurnEnded { .. }
+    )));
 }

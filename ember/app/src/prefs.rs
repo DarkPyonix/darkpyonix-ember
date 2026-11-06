@@ -102,6 +102,26 @@ impl Prefs {
         }
     }
 
+    /// A rename moves every per-project entry to the new name (FR-L26, #412): last-used
+    /// combination, pane tabs, character style and the last selected project. If the new name
+    /// already has an entry, it is kept and the old one is dropped, because the new key is the
+    /// one this device used most recently under that name.
+    pub fn rename_project_keys(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        if let Some(v) = self.last_used.remove(old) {
+            self.last_used.entry(new.to_string()).or_insert(v);
+        }
+        if let Some(v) = self.panes.remove(old) {
+            self.panes.entry(new.to_string()).or_insert(v);
+        }
+        self.move_character_style(old, new);
+        if self.last_project.as_deref() == Some(old) {
+            self.last_project = Some(new.to_string());
+        }
+    }
+
     pub fn set_character_style(&mut self, project: &str, style: crate::ui::characters::CharStyle) {
         self.character_styles.insert(project.to_string(), style);
     }
@@ -224,5 +244,50 @@ mod tests {
         assert_eq!(p.saved_character_style("old"), None);
         p.move_character_style("missing", "x");
         assert_eq!(p.saved_character_style("x"), None);
+    }
+
+    #[test]
+    fn fr_l26_rename_moves_last_used() {
+        let mut p = Prefs::default();
+        p.last_used.insert("old".into(), LastUsed { agent: "claude".into(), ..Default::default() });
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.last_used.get("new").map(|l| l.agent.as_str()), Some("claude"));
+        assert!(!p.last_used.contains_key("old"));
+    }
+
+    #[test]
+    fn fr_l26_rename_moves_pane_tabs() {
+        use crate::ui::session::ProjectPanes;
+        let mut p = Prefs::default();
+        p.panes.insert("old".into(), ProjectPanes { tabs: Vec::new(), active: 3 });
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.panes.get("new").map(|v| v.active), Some(3));
+        assert!(!p.panes.contains_key("old"));
+    }
+
+    #[test]
+    fn fr_l26_rename_moves_character_style_and_last_project() {
+        use crate::ui::characters::CharStyle;
+        let mut p = Prefs::default();
+        p.set_character_style("old", CharStyle::Crew);
+        p.last_project = Some("old".into());
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.saved_character_style("new"), Some(CharStyle::Crew));
+        assert_eq!(p.saved_character_style("old"), None);
+        assert_eq!(p.last_project.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn fr_l26_rename_keeps_existing_new_entry() {
+        use crate::ui::session::ProjectPanes;
+        let mut p = Prefs::default();
+        p.panes.insert("old".into(), ProjectPanes { tabs: Vec::new(), active: 1 });
+        p.panes.insert("new".into(), ProjectPanes { tabs: Vec::new(), active: 2 });
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.panes.get("new").map(|v| v.active), Some(2));
+        assert!(!p.panes.contains_key("old"));
+        p.last_project = Some("other".into());
+        p.rename_project_keys("old", "new");
+        assert_eq!(p.last_project.as_deref(), Some("other"));
     }
 }

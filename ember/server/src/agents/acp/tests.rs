@@ -17,6 +17,7 @@ fn setup(cwd: &Path) -> Setup {
         mcp_servers: Vec::new(),
         computer: None,
         prepend_instructions: None,
+        agent: "acp".into(),
     }
 }
 
@@ -408,7 +409,8 @@ fn configs_parse_presets_overrides_and_custom_agents() {
     assert_eq!(configs[1].args, ["--experimental-acp"]);
     assert_eq!(configs[1].version_args, ["--version"]);
     assert_eq!(configs[1].env, [("A".to_string(), "1".to_string())]);
-    assert!(configs[1].model_args.is_empty());
+    // The override keeps the preset's other fields (the Gemini model template, FR-A10e).
+    assert_eq!(configs[1].model_args, ["-m", "{model}"]);
 
     // An object named like a preset overrides only what it sets.
     let c = parse_configs(r#"[{"name": "omp", "args": ["acp", "--no-lsp"]}]"#, |_| None).unwrap();
@@ -600,4 +602,207 @@ fn fr_s8_acp_adapter_drains_a_surviving_agent_and_does_not_rejoin_it() {
     let adapter = AcpAdapter::new(AcpConfig::preset("omp", None).unwrap()).unwrap();
     assert!(adapter.drains_shim());
     assert!(!adapter.rejoins_shim());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gemini CLI preset (FR-A10..FR-A10f); the real CLI is not available, so the agent is the fake.
+
+const GEMINI_AUTH_TEXT: &str =
+    "sign in needed: set GEMINI_API_KEY (individual Google accounts are no longer served by the Gemini CLI, use Antigravity)";
+
+fn gemini_setup(cwd: &Path) -> Setup {
+    Setup { agent: "gemini".into(), ..setup(cwd) }
+}
+
+fn typed(events: &[AgentEvent]) -> Option<(String, String)> {
+    events.iter().find_map(|e| match e {
+        AgentEvent::TurnError { code, message } => Some((code.clone(), message.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn fr_a10_gemini_preset_fields() {
+    let g = AcpConfig::preset("gemini", None).unwrap();
+    assert_eq!(g.name, "gemini");
+    assert_eq!(g.command, PathBuf::from("gemini"));
+    assert_eq!(g.args, ["--acp"]);
+    assert_eq!(g.version_args, ["--version"]);
+    assert_eq!(g.model_args, ["-m", "{model}"]);
+    assert!(g.instructions_args.is_empty(), "instructions go in front of the first prompt (FR-A10f)");
+    assert_eq!(AcpConfig::preset("gemini", Some("/opt/g".into())).unwrap().command, PathBuf::from("/opt/g"));
+}
+
+#[test]
+fn fr_a10_gemini_process_args_carry_the_model_and_no_instructions_flag() {
+    let g = AcpConfig::preset("gemini", None).unwrap();
+    assert_eq!(g.process_args(&StartRequest::default()), ["--acp"]);
+    let req = StartRequest { model: Some("gemini-2.5-pro".into()), instructions: Some("x".into()), ..Default::default() };
+    assert_eq!(g.process_args(&req), ["--acp", "-m", "gemini-2.5-pro"]);
+    assert_eq!(g.process_args_with(&["--experimental-acp".to_string()], &req), ["--experimental-acp", "-m", "gemini-2.5-pro"]);
+}
+
+#[test]
+fn fr_a10_gemini_is_opt_in_like_omp_and_overridable() {
+    let c = parse_configs(r#"["gemini"]"#, |n| (n == "gemini").then(|| PathBuf::from("/opt/g"))).unwrap();
+    assert_eq!(c, [AcpConfig::preset("gemini", Some("/opt/g".into())).unwrap()]);
+    let o = parse_configs(r#"[{"name": "gemini", "args": ["--experimental-acp"], "model_args": []}]"#, |_| None).unwrap();
+    assert_eq!(o[0].args, ["--experimental-acp"]);
+    assert!(o[0].model_args.is_empty());
+    assert_eq!(o[0].fallback_args(), None, "an overridden argument list is never retried");
+    assert_eq!(c[0].fallback_args(), Some(vec!["--experimental-acp".to_string()]));
+    assert_eq!(AcpConfig::preset("omp", None).unwrap().fallback_args(), None);
+}
+
+#[test]
+fn fr_a10_flag_rejection_is_decided_from_the_output() {
+    for rejected in [
+        "Unknown argument: acp\n",
+        "error: unknown option '--acp'",
+        "gemini: unrecognized option `--acp'",
+        "Unrecognised flag --acp",
+        "Invalid argument: --acp",
+        "\nUsage: gemini [options]\nUnknown arguments: acp, a\n",
+    ] {
+        assert!(rejects_acp_flag(rejected), "{rejected:?}");
+    }
+    for other in [
+        "",
+        "Error: GEMINI_API_KEY is not set",
+        "listening on stdio",
+        "ECONNREFUSED 127.0.0.1:443",
+        "Authentication required",
+    ] {
+        assert!(!rejects_acp_flag(other), "{other:?}");
+    }
+}
+
+#[test]
+fn fr_a10_rpc_errors_are_classified_by_a_heuristic() {
+    let e = |code: i64, m: &str| RpcError::new(code, m);
+    use ErrorClass::*;
+    assert_eq!(classify_rpc_error(&e(-32000, "Authentication required")), Some(AuthRequired));
+    assert_eq!(classify_rpc_error(&e(-32603, "Please set an Auth method in your settings")), None);
+    assert_eq!(classify_rpc_error(&e(-32603, "Failed to login. API key not valid")), Some(AuthRequired));
+    assert_eq!(classify_rpc_error(&e(-32603, "request failed with status 401")), Some(AuthRequired));
+    assert_eq!(classify_rpc_error(&e(-32603, "RESOURCE_EXHAUSTED: Quota exceeded")), Some(QuotaExceeded));
+    assert_eq!(classify_rpc_error(&e(-32603, "[429 Too Many Requests]")), Some(QuotaExceeded));
+    assert_eq!(classify_rpc_error(&e(-32603, "You have exhausted your quota")), Some(QuotaExceeded));
+    assert_eq!(classify_rpc_error(&e(-32000, "API key quota exceeded")), Some(QuotaExceeded), "quota wins");
+    let with_data = RpcError { data: Some("{\"status\":\"RESOURCE_EXHAUSTED\"}".into()), ..e(-32603, "Internal error") };
+    assert_eq!(classify_rpc_error(&with_data), Some(QuotaExceeded), "the data is read too");
+    assert_eq!(classify_rpc_error(&e(-32603, "boom")), None);
+    assert_eq!(classify_rpc_error(&e(-32603, "error 4290 in parser")), None, "429 only as a whole number");
+}
+
+#[tokio::test]
+async fn fr_a10b_an_authentication_error_on_a_prompt_is_the_typed_auth_required_and_the_session_lives() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut run, mut rx) = start(FakeOptions::default(), gemini_setup(dir.path())).await.unwrap();
+    assert_eq!(next(&mut rx).await, AgentEvent::NativeSession { native_id: "fake-session-1".into() });
+    let events = turn(&mut run, &mut rx, "auth-fail", ApprovalDecision::AllowOnce).await;
+    assert_eq!(typed(&events), Some(("auth_required".into(), GEMINI_AUTH_TEXT.into())));
+    assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Failed }));
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
+    let events = turn(&mut run, &mut rx, "echo again", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "echo again");
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10b_another_agent_gets_the_generic_sign_in_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut run, mut rx) = new_session(FakeOptions::default(), dir.path()).await;
+    let events = turn(&mut run, &mut rx, "auth-fail", ApprovalDecision::AllowOnce).await;
+    let (code, message) = typed(&events).unwrap();
+    assert_eq!(code, "auth_required");
+    assert!(message.starts_with("sign in needed:") && !message.contains("GEMINI"), "{message}");
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10b_session_new_asking_for_authentication_calls_authenticate_with_the_listed_key_method() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = FakeOptions { require_auth: true, key_ok: true, ..Default::default() };
+    let (mut run, mut rx) = start(opts, gemini_setup(dir.path())).await.unwrap();
+    assert_eq!(next(&mut rx).await, AgentEvent::NativeSession { native_id: "fake-session-1".into() });
+    let events = turn(&mut run, &mut rx, "hello", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "Hi there");
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10b_without_a_key_the_session_start_does_not_crash_and_every_turn_says_auth_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let opts = FakeOptions { require_auth: true, key_ok: false, ..Default::default() };
+    let (mut run, mut rx) = start(opts, gemini_setup(dir.path())).await.unwrap();
+    for _ in 0..2 {
+        let events = turn(&mut run, &mut rx, "hello", ApprovalDecision::AllowOnce).await;
+        assert_eq!(typed(&events), Some(("auth_required".into(), GEMINI_AUTH_TEXT.into())));
+        assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Failed }));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::NativeSession { .. })));
+    }
+    // Interrupting before a session exists is harmless.
+    run.interrupt().await.unwrap();
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10b_other_start_failures_still_fail_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = start(FakeOptions { version: 2, ..Default::default() }, gemini_setup(dir.path())).await.err().unwrap();
+    assert!(format!("{err:#}").contains("protocol version"));
+}
+
+#[tokio::test]
+async fn fr_a10c_a_quota_error_ends_the_turn_typed_and_the_next_turn_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut run, mut rx) = start(FakeOptions::default(), gemini_setup(dir.path())).await.unwrap();
+    assert!(matches!(next(&mut rx).await, AgentEvent::NativeSession { .. }));
+    let events = turn(&mut run, &mut rx, "quota", ApprovalDecision::AllowOnce).await;
+    let (code, message) = typed(&events).expect("a typed error");
+    assert_eq!(code, "quota_exceeded");
+    assert!(message.contains("RESOURCE_EXHAUSTED"), "the agent's own message is kept: {message}");
+    assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Failed }));
+    let events = turn(&mut run, &mut rx, "echo next", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&events), "echo next");
+    assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10c_an_unclassified_error_stays_a_plain_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut run, mut rx) = start(FakeOptions::default(), gemini_setup(dir.path())).await.unwrap();
+    assert!(matches!(next(&mut rx).await, AgentEvent::NativeSession { .. }));
+    let events = turn(&mut run, &mut rx, "boom", ApprovalDecision::AllowOnce).await;
+    assert!(typed(&events).is_none());
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("boom"))));
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10d_usage_is_reported_only_when_the_agent_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut run, mut rx) = start(FakeOptions::default(), gemini_setup(dir.path())).await.unwrap();
+    assert!(matches!(next(&mut rx).await, AgentEvent::NativeSession { .. }));
+    let silent = turn(&mut run, &mut rx, "echo quiet", ApprovalDecision::AllowOnce).await;
+    assert!(!silent.iter().any(|e| matches!(e, AgentEvent::Usage { .. })), "no invented usage: {silent:?}");
+    let reported = turn(&mut run, &mut rx, "hello", ApprovalDecision::AllowOnce).await;
+    assert!(reported.contains(&AgentEvent::Usage { input_tokens: 10, output_tokens: 5 }));
+    run.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fr_a10f_instructions_go_in_front_of_the_first_prompt_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = gemini_setup(dir.path());
+    s.prepend_instructions = Some("echo INSTR".into());
+    let (mut run, mut rx) = start(FakeOptions::default(), s).await.unwrap();
+    assert!(matches!(next(&mut rx).await, AgentEvent::NativeSession { .. }));
+    let first = turn(&mut run, &mut rx, "one", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&first), "echo INSTR\n\none");
+    let second = turn(&mut run, &mut rx, "echo two", ApprovalDecision::AllowOnce).await;
+    assert_eq!(last_message(&second), "echo two");
+    run.shutdown().await.unwrap();
 }

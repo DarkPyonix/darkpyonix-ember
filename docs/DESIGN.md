@@ -529,6 +529,25 @@ Server side is written (not compiled yet). The app still has to change two thing
   없습니다". The client needs `Api::detect_harnesses(computer_id)` and the extra `path` and
   `detected_at` fields on `DetectedAgent` (tolerant defaults).
 
+#### Gemini harness card (hand-off to the app session, `FR-A10`)
+
+Server side is written (not compiled, real CLI never run: `FR-A10g` UNVERIFIED), so the card stays
+"preparing" in the app until the owner or a runner has run `ember/server/tests/acp_gemini.rs`.
+`gemini` is opt-in (`EMBER_ACP_AGENTS=["gemini"]`) and then appears in `GET /api/agents` and in the
+detect route like the other harnesses. The app has to render:
+
+- The card label **"API key / Enterprise only"** (`INTENT.md` D40), with the line "Individual Google
+  accounts are no longer served by the Gemini CLI, use Antigravity" and a link to the Antigravity card.
+- A new event kind `{"kind": "turn_error", "code": "auth_required" | "quota_exceeded", "message": ...}`,
+  always followed by `turn_ended` with `outcome: "failed"`. Until the client knows it, an older client
+  decodes it as `Unknown` and shows only the failed turn.
+  - `auth_required`: show the message verbatim, `sign in needed: set GEMINI_API_KEY (individual Google
+    accounts are no longer served by the Gemini CLI, use Antigravity)`, with a "use Antigravity" action.
+  - `quota_exceeded`: show the agent's message as a quota or rate-limit notice. The session stays usable
+    and the next message runs.
+- The usage chip for a gemini session says "not measured" while `GET /api/sessions/{id}/usage` has
+  `reported: false` (`FR-U7`); never a zero.
+
 ### 6.8 파일 (Files)
 
 The screen for file transfer between the user's devices (D24 and `FR-F1`..`FR-F9`, in PR #153).

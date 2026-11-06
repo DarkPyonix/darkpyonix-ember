@@ -50,6 +50,8 @@ pub struct AddUi {
     name: MutableState<String>,
     /// The name field of the confirm card (empty keeps the name chosen at mint).
     confirm_name: MutableState<String>,
+    /// What the owner typed from the node's screen (peer-only node); never prefilled.
+    typed_fp: MutableState<String>,
     busy: MutableState<bool>,
     failure: MutableState<Option<String>>,
     /// The owner confirmed; the node has not taken its credential yet.
@@ -71,6 +73,7 @@ impl AddUi {
             guard: mutable_state_of(RunGuard::default()),
             name: mutable_state_of(String::new()),
             confirm_name: mutable_state_of(String::new()),
+            typed_fp: mutable_state_of(String::new()),
             busy: mutable_state_of(false),
             failure: mutable_state_of(None),
             confirmed: mutable_state_of(false),
@@ -80,7 +83,7 @@ impl AddUi {
         }
     }
 
-    /// The debug review hook (`EMBER_CR_PROJECT_SHEET=add-computer|enrol-name|enrol-waiting|enrol-confirm|enrol-joined`).
+    /// The debug review hook (`EMBER_CR_PROJECT_SHEET=add-computer|enrol-name|enrol-waiting|enrol-confirm|enrol-confirm-peer|enrol-joined`).
     pub fn for_review() -> AddUi {
         let sheet = std::env::var("EMBER_CR_PROJECT_SHEET").ok();
         let debug = cfg!(debug_assertions);
@@ -138,6 +141,7 @@ impl AddUi {
         self.with_guard(|g| g.clear());
         self.name.set(String::new());
         self.confirm_name.set(String::new());
+        self.typed_fp.set(String::new());
         self.busy.set(false);
         self.failure.set(None);
         self.confirmed.set(false);
@@ -287,7 +291,8 @@ fn confirm(ui: AddUi, run: Run, rows: ConfirmRows) {
     ui.busy.set(true);
     ui.failure.set(None);
     let id = run.id.clone();
-    run_shared(async move { services().client.api().enrol_confirm(&run.id, &name).await }, move |r| {
+    let expect = flow::expect_fingerprint(&rows, &ui.typed_fp.get_untracked());
+    run_shared(async move { services().client.api().enrol_confirm(&run.id, &name, expect.as_deref()).await }, move |r| {
         if !ui.is_current(&id) {
             return;
         }
@@ -510,11 +515,35 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
     if let Some(a) = &rows.reported_addr {
         KV(flow::REPORTED_ADDR, a);
     }
-    if let Some(a) = &rows.proposed_addr {
+    let peer_only = flow::peer_only(rows);
+    if flow::peer_id_unused(rows) {
+        Label(flow::PEER_ID_UNUSED, Fs::Xs, Weight::Regular, muted, Some(3));
+    }
+    if let Some(a) = rows.proposed_addr.as_ref().filter(|_| !peer_only) {
         KV(flow::PROPOSED_ADDR, a);
         Label(flow::NOTE_PROPOSED, Fs::Xs, Weight::Regular, muted, Some(3));
     }
-    if let Some(fp) = &rows.fingerprint {
+    if peer_only {
+        Label(flow::PEER_ONLY_NOTE, Fs::Xs, Weight::Medium, Some(paint(p.red.strong)), Some(4));
+        if let Some(fp) = &rows.fingerprint {
+            Label(flow::NODE_FINGERPRINT_PEER, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            Label(fp, Fs::Xl, Weight::Semibold, None, Some(1));
+        }
+        Label(flow::TYPED_FINGERPRINT_LABEL, Fs::Xs, Weight::Medium, Some(paint(p.text_2)), Some(1));
+        let (t, f) = (ui.typed_fp.clone(), ui.failure.clone());
+        EmberField(FieldOptions {
+            fill_max_width: true,
+            placeholder: "0000 0000 0000 0000".to_string(),
+            text: Some(ui.typed_fp.get()),
+            enabled: Some(!confirmed),
+            on_value_change: Some(Box::new(move |v| {
+                f.set(None);
+                t.set(v)
+            })),
+            ..Default::default()
+        });
+        Label(flow::TYPED_FINGERPRINT_HELP, Fs::Xs, Weight::Regular, muted, Some(3));
+    } else if let Some(fp) = &rows.fingerprint {
         KV(flow::NODE_FINGERPRINT, fp);
     }
     // Warnings follow the name the owner is typing.
@@ -550,7 +579,7 @@ fn ConfirmBody(ui: &AddUi, rows: &ConfirmRows) {
         let (u, r) = (ui.clone(), run.clone());
         AppButton(flow::DENY_LABEL, None, ButtonKind::Default, true, !busy && !confirmed, false, move || deny(u.clone(), r.clone()));
         let (u, r, rows) = (ui.clone(), run.clone(), rows.clone());
-        let ok = !busy && !confirmed && flow::validate_name(&chosen).is_ok();
+        let ok = !busy && !confirmed && flow::validate_name(&chosen).is_ok() && flow::fingerprint_ok(&rows, &ui.typed_fp.get());
         AppButton(if busy { "추가하는 중" } else { "확인하고 추가" }, None, ButtonKind::Primary, true, ok, false, move || {
             if !flow::confirm_counts(u.armed_at.get_untracked(), now_ms()) {
                 return;

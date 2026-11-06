@@ -2269,6 +2269,10 @@ pub struct EnrolStatus {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub confirm_deadline_ms: Option<i64>,
+    /// How the server will register the computer: `url`, `peer` or `observed`. Appears while the
+    /// owner can decide; absent from an older server.
+    #[serde(default)]
+    pub registered_by: Option<String>,
 }
 
 impl fmt::Debug for EnrolStatus {
@@ -2300,6 +2304,9 @@ pub enum EnrolCallError {
     NameTaken,
     /// 409 `wrong_state`: it is no longer awaiting confirmation.
     WrongState,
+    /// 409 `fingerprint_mismatch`: the typed fingerprint differs from the node's (or the node has
+    /// no peer id). Nothing changed; the enrolment stays awaiting confirmation.
+    FingerprintMismatch,
     /// 410: the enrolment expired.
     Expired,
     Api(ApiError),
@@ -2310,7 +2317,7 @@ impl EnrolCallError {
         match self {
             EnrolCallError::Off => Some(503),
             EnrolCallError::NotFound => Some(404),
-            EnrolCallError::NameTaken | EnrolCallError::WrongState | EnrolCallError::DoorOff | EnrolCallError::DoorUrlUnknown => Some(409),
+            EnrolCallError::NameTaken | EnrolCallError::WrongState | EnrolCallError::FingerprintMismatch | EnrolCallError::DoorOff | EnrolCallError::DoorUrlUnknown => Some(409),
             EnrolCallError::Expired => Some(410),
             EnrolCallError::Api(e) => e.status(),
         }
@@ -2327,6 +2334,7 @@ impl From<ApiError> for EnrolCallError {
             ApiError::Status { status: 409, message, .. } if message == "door_url_unknown" => EnrolCallError::DoorUrlUnknown,
             ApiError::Status { status: 409, message, .. } if message == "name_taken" => EnrolCallError::NameTaken,
             ApiError::Status { status: 409, message, .. } if message == "wrong_state" => EnrolCallError::WrongState,
+            ApiError::Status { status: 409, message, .. } if message == "fingerprint_mismatch" => EnrolCallError::FingerprintMismatch,
             _ => EnrolCallError::Api(e),
         }
     }
@@ -2346,9 +2354,14 @@ pub(crate) fn enrol_mint_body(name: &str) -> serde_json::Value {
     json!({ "name": name })
 }
 
-/// `POST .../confirm` body: `{name}` only. The server refuses unknown fields (422).
-pub(crate) fn enrol_confirm_body(name: &str) -> serde_json::Value {
-    json!({ "name": name })
+/// `POST .../confirm` body: `{name}` and, only when given, `expect_fingerprint` (the text the owner
+/// typed from the node's screen; mandatory for a node that reported a peer id and no url). The
+/// server refuses other unknown fields (422).
+pub(crate) fn enrol_confirm_body(name: &str, expect_fingerprint: Option<&str>) -> serde_json::Value {
+    match expect_fingerprint {
+        Some(fp) => json!({ "name": name, "expect_fingerprint": fp }),
+        None => json!({ "name": name }),
+    }
 }
 
 impl Api {
@@ -2361,9 +2374,10 @@ impl Api {
         Ok(self.get(&enrol_code_path(id, "")).await?)
     }
 
-    /// Confirms the enrolment under `name` (the owner may rename).
-    pub async fn enrol_confirm(&self, id: &str, name: &str) -> Result<EnrolConfirmed, EnrolCallError> {
-        Ok(Self::decode(self.post(&enrol_code_path(id, "/confirm"), enrol_confirm_body(name)).await?)?)
+    /// Confirms the enrolment under `name` (the owner may rename). `expect_fingerprint` is the text
+    /// the owner typed from the node's screen, sent only for a peer-only node.
+    pub async fn enrol_confirm(&self, id: &str, name: &str, expect_fingerprint: Option<&str>) -> Result<EnrolConfirmed, EnrolCallError> {
+        Ok(Self::decode(self.post(&enrol_code_path(id, "/confirm"), enrol_confirm_body(name, expect_fingerprint)).await?)?)
     }
 
     pub async fn enrol_deny(&self, id: &str) -> Result<(), EnrolCallError> {
@@ -2430,6 +2444,9 @@ mod enrol_tests {
         .unwrap();
         assert_eq!(st.node_info.as_ref().map(|n| n.hostname.as_str()), Some("box"));
         assert!(!format!("{st:?}").contains("ab12"));
+        assert_eq!(st.registered_by, None);
+        let st: EnrolStatus = serde_json::from_value(json!({"status": "awaiting_confirmation", "registered_by": "peer"})).unwrap();
+        assert_eq!(st.registered_by.as_deref(), Some("peer"));
     }
 
     #[test]
@@ -2437,9 +2454,10 @@ mod enrol_tests {
         assert_eq!(enrol_codes_path(), "/computers/enrol-codes");
         assert_eq!(enrol_code_path("e1", "/confirm"), "/computers/enrol-codes/e1/confirm");
         assert_eq!(enrol_mint_body("lab"), json!({"name": "lab"}));
-        let c = enrol_confirm_body("lab");
+        let c = enrol_confirm_body("lab", None);
         assert_eq!(c, json!({"name": "lab"}));
         assert!(c.get("expect_fingerprint").is_none());
+        assert_eq!(enrol_confirm_body("lab", Some("ab12 cd34")), json!({"name": "lab", "expect_fingerprint": "ab12 cd34"}));
         assert!(!enrol_code_path("a/b", "").contains("a/b"));
     }
 
@@ -2451,6 +2469,8 @@ mod enrol_tests {
         assert!(matches!(EnrolCallError::from(st(410, "expired")), EnrolCallError::Expired));
         assert!(matches!(EnrolCallError::from(st(409, "name_taken")), EnrolCallError::NameTaken));
         assert!(matches!(EnrolCallError::from(st(409, "wrong_state")), EnrolCallError::WrongState));
+        assert!(matches!(EnrolCallError::from(st(409, "fingerprint_mismatch")), EnrolCallError::FingerprintMismatch));
+        assert_eq!(EnrolCallError::FingerprintMismatch.status(), Some(409));
         assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
         assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
         assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));

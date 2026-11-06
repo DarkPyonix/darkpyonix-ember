@@ -51,7 +51,7 @@ pub use config::{
 };
 pub use dialer::Dialer;
 pub use gate::PeerGate;
-pub use key::{PeerId, SecretKey};
+pub use key::{fingerprint_hex, PeerId, SecretKey};
 pub use signal::{
     pkarr_signable, verify_pkarr_payload, MemoryPkarrStore, MemorySignal, MemorySignalHub, PkarrStore,
     SignalChannel, SIGNAL_MAX,

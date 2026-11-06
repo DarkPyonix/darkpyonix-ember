@@ -278,8 +278,8 @@ States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C
 
 - **D12, door auto-close.** Open and close the door at runtime for the life of a pending code (needs a bind and unbind path the guest door lacks).
 - **D7, sealed delivery.** The node sends an ephemeral X25519 key in `node_public_info`; the server seals the credential with an AEAD to it. Removes the passive-sniffer case; an active MITM still needs TLS.
-- **D8, server fingerprint pinning.** `--server-fingerprint` in the command, checked against the server's reply; needs the server to expose its peer id first.
+- **D8, server fingerprint pinning.** `--server-fingerprint` in the command, checked against the server's reply; the server now exposes its peer id in the `joined` answer (C3b, written, not compiled), so the pin can be checked once `ember-node enrol` exists; requirements R1 to R4 are in `INTENT.md` D39.
 
 ### Not verified
 
-Nothing of the FR-C2 design is built, compiled or run. The unknowns are how the server exposes its own peer id, whether an X25519 crate is already in `Cargo.lock`, whether the node's reqwest has TLS, and whether 8741 is the node port everywhere. The LAN path, a real browser confirm, a node behind NAT, TLS in front of the door, XFF behind a real proxy and sniffing need two real machines and are UNVERIFIED.
+Nothing of the FR-C2 design is built, compiled or run. The unknowns are whether an X25519 crate is already in `Cargo.lock`, whether the node's reqwest has TLS, and whether 8741 is the node port everywhere. The LAN path, a real browser confirm, a node behind NAT, TLS in front of the door, XFF behind a real proxy and sniffing need two real machines and are UNVERIFIED.

@@ -353,9 +353,8 @@ impl NodeInfo {
 
     /// A short, readable form of the peer id for the owner to compare, `None` without one.
     pub fn fingerprint(&self) -> Option<String> {
-        let p = self.peer_id.as_ref()?;
-        let head: Vec<&str> = (0..4).filter_map(|i| p.get(i * 4..i * 4 + 4)).collect();
-        Some(head.join(" "))
+        // `peer_id` passed validation as 64 hex digits of either case; the shared function wants lowercase.
+        ember_transport::fingerprint_hex(&self.peer_id.as_ref()?.to_ascii_lowercase())
     }
 }
 
@@ -519,7 +518,8 @@ pub enum Delivery {
     /// Still waiting for the owner.
     Pending,
     /// The credential, handed over once and wiped from the server's memory.
-    Joined { token: Secret, name: String, computer_id: String },
+    /// `server_peer_id` is the server's own public transport id, `None` when the transport is off.
+    Joined { token: Secret, name: String, computer_id: String, server_peer_id: Option<String> },
     /// The credential was already delivered.
     Delivered,
     Denied,
@@ -732,6 +732,9 @@ pub struct Enrol {
     /// Serializes every state change after the redeem (confirm, deny, delivery, expiry), so
     /// exactly one of two racing calls wins and no registration is made for the loser.
     gate: Mutex<()>,
+    /// The server's own transport peer id (public, 64 lowercase hex), set once at construction by
+    /// [`Enrol::with_server_peer_id`] and `None` when the transport is off. Never per request.
+    server_peer_id: Option<String>,
 }
 
 impl Enrol {
@@ -749,7 +752,19 @@ impl Enrol {
             registrar: Mutex::new(None),
             orphans: Mutex::new(Vec::new()),
             gate: Mutex::new(()),
+            server_peer_id: None,
         })
+    }
+
+    /// Like [`Enrol::new`] (default limits), with the server's transport peer id for the `joined` delivery
+    /// (FR-C2). The id is kept only when it is exactly 64 lowercase hex chars (the shape
+    /// [`ember_transport::fingerprint_hex`] accepts); a malformed value is dropped to `None`, never
+    /// stored. `None` is the transport being off.
+    pub fn with_server_peer_id(store: Arc<Store>, server_peer_id: Option<String>) -> Arc<Enrol> {
+        let server_peer_id = server_peer_id.filter(|id| ember_transport::fingerprint_hex(id).is_some());
+        let mut e = Self::new(store);
+        Arc::get_mut(&mut e).expect("a fresh Arc has one owner").server_peer_id = server_peer_id;
+        e
     }
 
     /// Give the service the registry, so a computer registered by a confirm whose credential was
@@ -1186,6 +1201,7 @@ impl Enrol {
                             token,
                             name: row.final_name.unwrap_or(row.name),
                             computer_id: row.computer_id.unwrap_or_default(),
+                            server_peer_id: self.server_peer_id.clone(),
                         }
                     }
                     _ => {
@@ -1415,6 +1431,76 @@ mod tests {
         let m = mint(e, now);
         let r = rd(e, m.code.expose(), now + 1, SRC).unwrap();
         (r.enrol_id, r.poll_secret.expose().to_string())
+    }
+
+    // ---- C3b: the server peer id in the joined delivery ----
+
+    /// Confirm and take the delivery of one enrolment on `e`.
+    fn joined_of(e: &Enrol, now: i64) -> Delivery {
+        let fake = Fake::default();
+        let (id, secret) = open(e, now);
+        e.confirm(&id, None, now + 10, &fake).unwrap();
+        e.take_delivery(&id, &secret, now + 12).unwrap()
+    }
+
+    fn server_id_of(d: Delivery) -> Option<String> {
+        match d {
+            Delivery::Joined { server_peer_id, .. } => server_peer_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn enrol_with(id: Option<&str>) -> Arc<Enrol> {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        Enrol::with_server_peer_id(store, id.map(String::from))
+    }
+
+    #[test]
+    fn joined_carries_the_server_peer_id_when_set() {
+        let id = "ab".repeat(32);
+        let e = enrol_with(Some(&id));
+        assert_eq!(server_id_of(joined_of(&e, T0)), Some(id));
+    }
+
+    #[test]
+    fn joined_has_none_without_a_transport() {
+        let (_, e) = svc();
+        assert_eq!(server_id_of(joined_of(&e, T0)), None);
+        let e = enrol_with(None);
+        assert_eq!(server_id_of(joined_of(&e, T0)), None);
+    }
+
+    #[test]
+    fn a_malformed_server_peer_id_is_dropped_never_stored() {
+        for bad in ["zz".repeat(32), "a".repeat(63), "a".repeat(65), "AB".repeat(32), String::new(), " ".repeat(64)] {
+            let e = enrol_with(Some(&bad));
+            assert_eq!(e.server_peer_id, None, "{bad:?}");
+            assert_eq!(server_id_of(joined_of(&e, T0)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_server_peer_id_is_not_per_request() {
+        let id = "cd".repeat(32);
+        let e1 = enrol_with(Some(&id));
+        let e2 = enrol_with(Some(&id));
+        let a = server_id_of(joined_of(&e1, T0));
+        let b = server_id_of(joined_of(&e2, T0));
+        assert_eq!(a, b);
+        assert_eq!(a, Some(id.clone()));
+        // A second delivery on the same instance gives the same value.
+        assert_eq!(server_id_of(joined_of(&e1, T0 + 1_000_000)), Some(id));
+    }
+
+    #[test]
+    fn fingerprint_of_hex_matches_nodeinfo_fingerprint() {
+        for id in ["ab".repeat(32), format!("0123456789abcdef{}", "e".repeat(48))] {
+            let mut i = info();
+            i.peer_id = Some(id.clone());
+            assert_eq!(ember_transport::fingerprint_hex(&id), i.fingerprint());
+            assert!(i.fingerprint().is_some());
+        }
+        assert_eq!(info().fingerprint(), None);
     }
 
     #[test]
@@ -1787,7 +1873,7 @@ mod tests {
         assert!(!dump(&store).contains(&token));
 
         match e.take_delivery(&id, &secret, T0 + 12).unwrap() {
-            Delivery::Joined { token: t, name, computer_id } => {
+            Delivery::Joined { token: t, name, computer_id, .. } => {
                 assert_eq!(t.expose(), token);
                 assert_eq!(name, "laptop");
                 assert_eq!(computer_id, "computer-1");

@@ -282,6 +282,12 @@ pub fn request_usage_summary() {
 const GITHUB_MIN_GAP: Duration = Duration::from_secs(90);
 static GITHUB_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
+/// Whether the timer may read the GitHub card now (FR-G13): only while Home is shown, never in
+/// the demo, and not before the server cache time has passed since the last read.
+pub fn should_poll_github(route_is_home: bool, last_fetch_age: Option<Duration>, min_gap: Duration, demo: bool) -> bool {
+    route_is_home && !demo && last_fetch_age.is_none_or(|a| a >= min_gap)
+}
+
 /// Ask for the GitHub card now (Home opened, FR-L35). Not in the demo, which shows a sample.
 pub fn request_github_summary() {
     let s = services();
@@ -299,7 +305,8 @@ async fn fetch_github(s: &'static Services, force: bool) {
     }
     {
         let mut last = GITHUB_LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !force && last.is_some_and(|t| t.elapsed() < GITHUB_MIN_GAP) {
+        let home = s.ui.menu.get_untracked() == crate::ui::shell::NavMenu::Home;
+        if !force && !should_poll_github(home, last.map(|t| t.elapsed()), GITHUB_MIN_GAP, false) {
             return;
         }
         *last = Some(std::time::Instant::now());
@@ -512,5 +519,20 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
             s.client.apply(Input::ComputersLoaded(merged));
         }
         Err(e) => tracing::debug!("computers refresh failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod github_poll_tests {
+    use super::*;
+
+    #[test]
+    fn fr_g13_github_poll_only_on_home() {
+        let gap = Duration::from_secs(90);
+        assert!(should_poll_github(true, None, gap, false));
+        assert!(should_poll_github(true, Some(Duration::from_secs(100)), gap, false));
+        assert!(!should_poll_github(false, Some(Duration::from_secs(100)), gap, false));
+        assert!(!should_poll_github(true, Some(Duration::from_secs(100)), gap, true));
+        assert!(!should_poll_github(true, Some(Duration::from_secs(10)), gap, false));
     }
 }

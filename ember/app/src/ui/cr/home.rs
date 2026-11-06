@@ -1237,7 +1237,7 @@ fn IntegrationsArea() {
                 Label(account, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
             if let Some(note) = &card.note {
-                Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+                Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
             }
             if let Some(action) = &card.action {
                 // Pressing only shows how to log in; Ember runs nothing and stores no token.

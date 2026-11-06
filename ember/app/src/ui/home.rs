@@ -142,6 +142,28 @@ pub fn sample_header(line: &str) -> String {
     format!("{line} {GITHUB_SAMPLE_MARK}")
 }
 
+/// Server text shown on the card: control and bidi characters removed, whitespace collapsed,
+/// capped at `max` characters with an ellipsis (FR-L35).
+pub fn clean_text(s: &str, max: usize) -> String {
+    let kept: String = s
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c as u32, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF)
+                || c.is_whitespace() && *c != '\u{85}'
+        })
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let one = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        let mut cut: String = one.chars().take(max.saturating_sub(1)).collect();
+        cut.push('\u{2026}');
+        cut
+    }
+}
+
 /// Map the client's `GET /api/integrations/github` body to the card's state. Nulls stay null.
 pub fn github_state_from(s: &ember_client::api::GithubSummary) -> GithubState {
     use ember_client::api::GithubState as Conn;
@@ -152,13 +174,13 @@ pub fn github_state_from(s: &ember_client::api::GithubSummary) -> GithubState {
             Conn::Warn => GithubConn::Warn,
             Conn::Off => GithubConn::Off,
         },
-        reason: s.reason.clone(),
+        reason: s.reason.as_deref().map(|r| clean_text(r, 120)),
         account: s.account.clone(),
         repos: s
             .repos
             .iter()
             .map(|r| GithubRepo {
-                name_with_owner: r.name_with_owner.clone().unwrap_or_default(),
+                name_with_owner: clean_text(r.name_with_owner.as_deref().unwrap_or_default(), 80),
                 default_branch: r.default_branch.clone().unwrap_or_default(),
                 open_prs: n(r.open_prs),
                 review_requested: n(r.review_requested),
@@ -1383,6 +1405,28 @@ mod tests {
         let a = c.action.unwrap();
         assert_eq!(a.label, "방법 보기");
         assert_eq!(a.guidance, "이 컴퓨터의 터미널에서 gh auth login을 실행하십시오");
+    }
+
+    #[test]
+    fn fr_l35_github_card_warn_kpis_read_unknown() {
+        let mut g = ready_github();
+        g.state = GithubConn::Warn;
+        g.totals = GithubTotals::default();
+        let c = GithubCard::from_state(Some(&g));
+        assert_eq!(c.pill, "재인증 필요");
+        assert!(c.kpis.iter().all(|(_, v)| v == "알 수 없음"));
+    }
+
+    #[test]
+    fn fr_l35_github_text_is_cleaned_and_capped() {
+        assert_eq!(clean_text("a\u{202E}b\u{0007}c\n\t d", 80), "abc d");
+        assert_eq!(clean_text("  x   y ", 80), "x y");
+        let long = "가".repeat(200);
+        let r = clean_text(&long, 120);
+        assert_eq!(r.chars().count(), 120);
+        assert!(r.ends_with('\u{2026}'));
+        assert_eq!(clean_text(&"n".repeat(80), 80).chars().count(), 80);
+        assert_eq!(clean_text(&"n".repeat(81), 80).chars().count(), 80);
     }
 
     #[test]

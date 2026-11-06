@@ -266,8 +266,8 @@ States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C
 
 ### Build order
 
-1. Confirm at join in the core and the admin confirm and deny routes, the global failure cap, name-clash check at confirm. No door needed. **Written, not compiled** (branch `feat/enrol-confirm-core`): migration `enrol::CONFIRM_MIGRATION` (columns on `enrol_codes`, no token column), `Enrol::redeem` returning `{enrol_id, poll_secret, expires_ms}`, `confirm`, `deny`, `take_delivery`, `status_detail`, `Registrar` trait, `LimitConfig` with the global cap, routes `POST .../{id}/confirm` and `.../deny`. The pending token lives in memory only; a restart before delivery makes the enrolment `expired`. The name-clash check at mint is not done yet (the check at confirm is the arbiter).
-2. Door skeleton and limits (shared module extracted from `guest_door.rs`; guest tests stay green). Security review.
+1. Confirm at join in the core and the admin confirm and deny routes, the global failure cap, name-clash check at confirm. No door needed. **Merged** (#543, #548): migration `enrol::CONFIRM_MIGRATION` (columns on `enrol_codes`, no token column), `Enrol::redeem` returning `{enrol_id, poll_secret, expires_ms}`, `confirm`, `deny`, `take_delivery`, `status_detail`, `Registrar` trait, `LimitConfig` with the global cap, routes `POST .../{id}/confirm` and `.../deny`. The pending token lives in memory only; a restart before delivery makes the enrolment `expired`. The name-clash check at mint is not done yet (the check at confirm is the arbiter).
+2. Door skeleton and limits (shared module extracted from `guest_door.rs`; guest tests stay green). Security review. The shared module is merged (#562, #566, #569, #571). The skeleton `EnrolDoor` (`src/enrol_door.rs`, wired in `main.rs` as its own task) is written, not compiled: it answers 404 to everything and has no redeem route, no poll route and no `Enrol`.
 3. Redeem and poll routes. Security review.
 4. `ember-node enrol`, the token-file fallback and the TLS feature; dependants' `Cargo.lock` files in the same PR.
 5. App: mint dialog with command and warning, the "wants to join" card, rename on a name clash.

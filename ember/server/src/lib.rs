@@ -14,6 +14,7 @@ pub mod computers;
 pub mod devices;
 pub mod door;
 pub mod egress_proxy;
+pub mod enrol_door;
 pub mod events;
 pub mod fork;
 pub mod guest_door;

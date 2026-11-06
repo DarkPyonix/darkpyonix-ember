@@ -13,7 +13,7 @@ use compose_rust::runtime::{launched_effect, mutable_state_of, remember_with_key
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, SpaceRole};
-use ember_client::channels::{CreatedInvite, Guest, Invite};
+use ember_client::channels::{CreatedInvite, Guest, GuestDoorState, Invite};
 
 use super::components::{
     AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, Pill, PillTone, SheetFooter,
@@ -51,22 +51,107 @@ pub struct OwnerState {
     busy: MutableState<bool>,
     /// The last action's outcome sentence (a fixed text, never the server's).
     note: MutableState<Option<String>>,
+    /// Review-window sample data is shown: nothing is fetched and no action reaches a server.
+    sample: bool,
+}
+
+/// What a review window shows in the owner sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSample {
+    pub invites: Vec<Invite>,
+    pub guests: Vec<Guest>,
+    pub created: Option<CreatedInvite>,
+    pub note: Option<String>,
+}
+
+/// SAMPLE DATA FOR REVIEW WINDOWS ONLY. Built relative to `now_ms` so the remaining times read
+/// plausibly. `door` is `off`, `warn`, `on` or anything else for "unknown".
+pub fn review_sample_data(now_ms: i64, door: &str) -> ReviewSample {
+    const H: i64 = 3_600_000;
+    let invite = |id: &str, expires: i64, used: Option<i64>, revoked: Option<i64>, name: Option<&str>| Invite {
+        id: id.into(),
+        channel_id: "sample".into(),
+        created_by: "user".into(),
+        created_at: now_ms - 4 * H,
+        expires_at: expires,
+        used_at: used,
+        revoked_at: revoked,
+        guest_name: name.map(str::to_string),
+    };
+    let guest = |id: &str, name: &str, allow: Option<i64>| Guest {
+        id: id.into(),
+        name: name.into(),
+        created_at: now_ms - 6 * H,
+        expires_at: now_ms + 48 * H,
+        revoked_at: None,
+        allow_until: allow,
+    };
+    let link = "https://ember.example/join#sample-token";
+    let (door_state, warning, shown) = match door {
+        "off" => (Some("off"), false, true),
+        "warn" => (Some("on"), true, true),
+        "on" => (Some("on"), false, true),
+        _ => (None, false, false),
+    };
+    let created = shown.then(|| CreatedInvite {
+        id: "inv-new".into(),
+        token: "sample-token".into(),
+        link: link.into(),
+        expires_at: now_ms + 24 * H,
+        link_warning: warning,
+        guest_door: door_state.map(|s| GuestDoorState { state: s.into(), listen: None, public_url: None }),
+    });
+    ReviewSample {
+        invites: vec![
+            invite("inv-pending", now_ms + 20 * H, None, None, None),
+            invite("inv-used", now_ms + 10 * H, Some(now_ms - 2 * H), None, Some("민수")),
+            invite("inv-expired", now_ms - H, None, None, None),
+            invite("inv-revoked", now_ms + 5 * H, None, Some(now_ms - 3 * H), None),
+        ],
+        guests: vec![
+            guest("g-allowed", "민수", Some(now_ms + 3 * H)),
+            guest("g-plain", "소라", None),
+            guest("g-capped", "지우", Some(now_ms + 48 * H)),
+        ],
+        created,
+        note: capped_note(true).map(str::to_string),
+    }
+}
+
+/// The sample, only when the review window asked for it: `EMBER_CR_ROUTE=channels` and
+/// `EMBER_CR_OWNER_SHEET=1`. The inputs are passed in so the gate is testable.
+pub fn review_sample_from(route: Option<&str>, sheet: Option<&str>, door: Option<&str>, now_ms: i64) -> Option<ReviewSample> {
+    (route == Some("channels") && sheet == Some("1")).then(|| review_sample_data(now_ms, door.unwrap_or("unknown")))
+}
+
+fn review_sample() -> Option<ReviewSample> {
+    let get = |k: &str| std::env::var(k).ok();
+    review_sample_from(
+        get("EMBER_CR_ROUTE").as_deref(),
+        get("EMBER_CR_OWNER_SHEET").as_deref(),
+        get("EMBER_CR_OWNER_DOOR").as_deref(),
+        crate::model::now_ms(),
+    )
 }
 
 impl OwnerState {
     pub fn new(room_id: &str) -> OwnerState {
-        remember_with_key(room_id.to_string(), || OwnerState {
-            open: mutable_state_of(false),
+        remember_with_key(room_id.to_string(), || {
+            let sample = review_sample();
+            OwnerState {
+            sample: sample.is_some(),
+            open: mutable_state_of(sample.is_some()),
             ttl: mutable_state_of(DEFAULT_TTL_HOURS),
-            created: mutable_state_of(None),
-            invites: mutable_state_of(Vec::new()),
-            guests: mutable_state_of(Vec::new()),
-            load: mutable_state_of(OwnerLoad::Idle),
+            created: mutable_state_of(sample.as_ref().and_then(|s| s.created.clone())),
+            invites: mutable_state_of(sample.as_ref().map(|s| s.invites.clone()).unwrap_or_default()),
+            guests: mutable_state_of(sample.as_ref().map(|s| s.guests.clone()).unwrap_or_default()),
+            load: mutable_state_of(if sample.is_some() { OwnerLoad::Ready } else { OwnerLoad::Idle }),
             hours: mutable_state_of(DEFAULT_TTL_HOURS),
             custom: mutable_state_of(String::new()),
             custom_gen: mutable_state_of(0),
             busy: mutable_state_of(false),
-            note: mutable_state_of(None),
+            note: mutable_state_of(sample.and_then(|s| s.note)),
+            }
         })
     }
 
@@ -111,7 +196,7 @@ impl OwnerState {
         work: impl std::future::Future<Output = Result<T, ember_client::api::ApiError>> + Send + 'static,
         ok: impl FnOnce(&OwnerState, T) + Send + 'static,
     ) {
-        if self.busy.get_untracked() {
+        if self.sample || self.busy.get_untracked() {
             return;
         }
         self.busy.set(true);
@@ -179,11 +264,14 @@ impl OwnerState {
 /// The sheet. `live` is false in demo and review windows: there is no server to ask, so nothing
 /// is fetched and the sheet says so.
 pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bool) {
+    // Review sample data stands in for a server; it is never fetched over.
+    let live = live || st.sample;
+    let fetch = live && !st.sample;
     // Fetch when the sheet opens (the key changes with the open flag).
     {
         let (st2, c, open) = (st.clone(), channel.to_string(), st.open.get());
         launched_effect(format!("{channel}:{open}"), move || async move {
-            if open && live {
+            if open && fetch {
                 st2.refresh(&c);
             }
         });
@@ -382,5 +470,39 @@ mod tests {
         let text = text_of(open_sheet);
         assert!(text.contains("멤버/게스트") && text.contains("서버에 연결되어 있지 않아"), "{text}");
         assert!(!text.contains("허용 중"));
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use crate::ui::channel_owner::{allowance_badge, guest_rows, invite_rows};
+
+    const NOW: i64 = 1_000_000_000_000;
+
+    #[test]
+    fn fr_t14_review_sample_has_every_invite_state_and_the_badge() {
+        let s = review_sample_from(Some("channels"), Some("1"), Some("warn"), NOW).expect("sample");
+        let states: Vec<_> = invite_rows(&s.invites, NOW).iter().map(|r| r.state).collect();
+        for want in [InviteState::Pending, InviteState::Used, InviteState::Expired, InviteState::Revoked] {
+            assert!(states.contains(&want), "{want:?}");
+        }
+        let guests = guest_rows(&s.guests, NOW);
+        assert!(guests.iter().any(|g| g.badge.as_deref() == Some("허용 중 · 3시간 남음")));
+        assert!(guests.iter().any(|g| g.badge.is_none()));
+        assert!(allowance_badge(s.guests[0].allow_until, NOW).is_some());
+        assert!(s.created.expect("created").link_warning);
+        // The door variants.
+        assert!(review_sample_data(NOW, "unknown").created.is_none());
+        let off = review_sample_data(NOW, "off").created.expect("off");
+        assert!(!off.guest_door.expect("door").is_on());
+    }
+
+    #[test]
+    fn fr_t14_review_sample_never_leaks_without_the_review_vars() {
+        assert!(review_sample_from(None, None, None, NOW).is_none());
+        assert!(review_sample_from(Some("channels"), None, Some("on"), NOW).is_none());
+        assert!(review_sample_from(Some("home"), Some("1"), None, NOW).is_none());
+        assert!(review_sample_from(None, Some("1"), None, NOW).is_none());
     }
 }

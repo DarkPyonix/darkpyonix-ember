@@ -306,6 +306,24 @@ mod tests {
         }
     }
 
+    /// FR-S8 (#311): the per-harness settings routes are owner routes, never exempt. The nearby
+    /// exempt `/api/agents/antigravity/hook` is matched by its whole path only.
+    #[test]
+    fn fr_s8_settings_paths_are_not_token_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::PUT, Method::POST, Method::DELETE] {
+            for p in [
+                "/api/agents/settings",
+                "/api/agents/codex/settings",
+                "/api/agents/claude-code/settings",
+                "/api/agents/antigravity/settings",
+                "/api/agents/scripted/settings",
+            ] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
+
     /// FR-C2e: the enrol routes and the mint and owner routes are never exempt from the token.
     /// The enrol door is not behind `protect` at all (its own listener), so an exemption here would
     /// only ever open an owner route.

@@ -916,7 +916,6 @@ mod tests {
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         let batch = decode_batch(bytes).expect("decode");
-        assert!(has_text(&batch, "BottomTabs") || format!("{batch:?}").contains("BottomTabs") || true);
 
         // The modifiers each node carries, by node id (Debug names of the decoded variants).
         let mut by_node: HashMap<u32, Vec<String>> = HashMap::new();

@@ -129,6 +129,29 @@ const GEMINI_ACP_FLAG: &str = "--acp";
 const GEMINI_ACP_FALLBACK_FLAG: &str = "--experimental-acp";
 /// A start that fails within this long may have been a rejected flag.
 const FLAG_PROBE_WINDOW: Duration = Duration::from_secs(2);
+/// Extra spawn tries when the probe command is "text file busy" (ETXTBSY), and the pause between.
+const BUSY_RETRIES: u32 = 3;
+const BUSY_PAUSE: Duration = Duration::from_millis(20);
+
+/// What the one-off flag probe saw. Only `StillRunning` means the start flag was accepted
+/// (FR-A10); the other three say nothing about the flag.
+#[derive(Debug)]
+enum ProbeOutcome {
+    /// The command exited within the window: success flag and stderr plus stdout.
+    Exited { ok: bool, text: String },
+    /// The command was still running after [`FLAG_PROBE_WINDOW`]: the flag is accepted.
+    StillRunning,
+    /// The command could not be started: the io error kind and its redacted text.
+    SpawnFailed(std::io::ErrorKind, String),
+    /// Waiting for the command failed, or its pipes were missing: redacted text.
+    WaitFailed(String),
+}
+
+/// True for ETXTBSY ("text file busy"): an executable written a moment ago while another thread
+/// forks. Short-lived, so the spawn is worth retrying.
+fn is_busy(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ExecutableFileBusy
+}
 
 /// The ACP major version this client speaks.
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -455,9 +478,26 @@ impl AgentAdapter for AcpAdapter {
                 if began.elapsed() > FLAG_PROBE_WINDOW {
                     return Err(first);
                 }
-                let Some((success, output)) = self.probe_start_args().await else { return Err(first) };
-                if success || !rejects_acp_flag(&output) {
-                    return Err(first);
+                match self.probe_start_args().await {
+                    // Still running after the window: the flag is accepted, the first error stands.
+                    ProbeOutcome::StillRunning => return Err(first),
+                    ProbeOutcome::Exited { ok, text } => {
+                        if ok || !rejects_acp_flag(&text) {
+                            return Err(first);
+                        }
+                    }
+                    // The probe itself failed: nothing is known about the flag, so no retry.
+                    outcome @ (ProbeOutcome::SpawnFailed(..) | ProbeOutcome::WaitFailed(_)) => {
+                        let (name, kind) = match &outcome {
+                            ProbeOutcome::SpawnFailed(kind, _) => ("spawn_failed", format!("{kind:?}")),
+                            _ => ("wait_failed", "n/a".to_string()),
+                        };
+                        tracing::warn!(
+                            target: "acp", agent = %self.config.name, outcome = name, io_error_kind = %kind,
+                            "the flag probe could not run; not retrying with {GEMINI_ACP_FALLBACK_FLAG}"
+                        );
+                        return Err(first);
+                    }
                 }
                 tracing::warn!(
                     target: "acp", agent = %self.config.name,
@@ -474,21 +514,43 @@ impl AgentAdapter for AcpAdapter {
 }
 
 impl AcpAdapter {
-    /// Run the command once with its start arguments and no stdin, to see why a fast start failed:
-    /// `(exited successfully, stdout and stderr)`, or `None` if it was still running after
-    /// [`FLAG_PROBE_WINDOW`] (so the flag was accepted).
-    async fn probe_start_args(&self) -> Option<(bool, String)> {
-        let mut cmd = Command::new(&self.config.command);
-        apply_env(&mut cmd, &self.config.child_env());
-        let mut child = cmd
-            .args(&self.config.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
-        let (mut stdout, mut stderr) = (child.stdout.take()?, child.stderr.take()?);
+    /// Run the command once with its start arguments and no stdin, to see why a fast start failed.
+    /// Only [`ProbeOutcome::StillRunning`] means the flag was accepted; see [`ProbeOutcome`].
+    async fn probe_start_args(&self) -> ProbeOutcome {
+        let mut child = None;
+        for attempt in 0..=BUSY_RETRIES {
+            let mut cmd = Command::new(&self.config.command);
+            apply_env(&mut cmd, &self.config.child_env());
+            cmd.args(&self.config.args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            match cmd.spawn() {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                // A script written a moment ago can be "text file busy" for a few ms while
+                // another thread forks: wait and try again, a few times only.
+                Err(e) if is_busy(&e) && attempt < BUSY_RETRIES => {
+                    tracing::debug!(
+                        target: "acp", agent = %self.config.name, attempt = attempt + 1,
+                        "probe spawn hit ETXTBSY; retrying in {BUSY_PAUSE:?}"
+                    );
+                    tokio::time::sleep(BUSY_PAUSE).await;
+                }
+                Err(e) => return ProbeOutcome::SpawnFailed(e.kind(), redact_upstream(&e.to_string())),
+            }
+        }
+        let Some(mut child) = child else {
+            return ProbeOutcome::SpawnFailed(std::io::ErrorKind::ExecutableFileBusy, "spawn kept failing".into());
+        };
+        let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return ProbeOutcome::WaitFailed("the probe child had no stdout or stderr pipe".into());
+        };
         let finished = tokio::time::timeout(FLAG_PROBE_WINDOW, async {
             let (mut o, mut e) = (Vec::new(), Vec::new());
             let _ = tokio::join!(stdout.read_to_end(&mut o), stderr.read_to_end(&mut e));
@@ -500,11 +562,15 @@ impl AcpAdapter {
         // child already exited and was reaped) are of no interest and nothing is logged.
         let _ = child.kill().await;
         let _ = child.wait().await;
-        let (status, out, err) = finished.ok()?;
+        let Ok((status, out, err)) = finished else { return ProbeOutcome::StillRunning };
+        let status = match status {
+            Ok(s) => s,
+            Err(e) => return ProbeOutcome::WaitFailed(redact_upstream(&e.to_string())),
+        };
         let mut text = String::from_utf8_lossy(&err).into_owned();
         text.push('\n');
         text.push_str(&String::from_utf8_lossy(&out));
-        Some((status.ok()?.success(), text))
+        ProbeOutcome::Exited { ok: status.success(), text }
     }
 
     async fn start_with(

@@ -54,9 +54,20 @@ async fn call(app: &Router, method: Method, path: &str) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
-fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+/// Write an executable script: flush to disk and close the handle before chmod and use, because a
+/// script still open for writing is "text file busy" (ETXTBSY) when executed (#546).
+fn write_exec(path: &Path, content: &str) {
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn script(path: &Path, body: &str) {
+    write_exec(path, &format!("#!/bin/sh\n{body}\n"));
 }
 
 // ---- FR-A10a: detection ------------------------------------------------------------------

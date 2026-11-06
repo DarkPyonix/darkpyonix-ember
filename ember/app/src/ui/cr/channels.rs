@@ -223,7 +223,10 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     });
     let window = compose_rust::runtime::current_window_size();
     let split = split_view(window.class);
-    let cur = open.get();
+    // Side by side with nothing open, the first listed room is shown (FR-L12, #509); the
+    // compact layout keeps the list first.
+    let order: Vec<String> = Vec::new();
+    let cur = open.get().or_else(|| crate::ui::channels::initial_room(&rooms, &order, &filter.get(), split));
     let show_room = compact_shows_room(&cur);
 
     // Nothing to draw yet (loading) or nothing could be read (failed): say so, plainly. An empty
@@ -247,9 +250,8 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
             }
         });
     }
-    let order: Vec<String> = Vec::new();
     let room = cur.as_ref().and_then(|id| rooms.iter().find(|r| &r.id == id)).cloned();
-    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0, &load, &new_ch, feed.is_some());
+    let list = || RoomList(&rooms, &order, &filter, &open, cur.clone(), window.width_dp <= 900.0, &load, &new_ch, feed.is_some());
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
@@ -265,7 +267,12 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
             cu::Box()
                 .alignment(Alignment::Center)
                 .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .content(|| Label("채널을 선택하십시오", Fs::Md, Weight::Regular, Some(paint(p.muted)), None));
+                .content(|| {
+                    // The mockup opens the first room, so its only empty wording is the list's
+                    // "채널이 없습니다". A filter that hides every room keeps the old prompt.
+                    let text = if rooms.is_empty() { "채널이 없습니다" } else { "채널을 선택하십시오" };
+                    Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None)
+                });
         }
     };
     if split {
@@ -282,12 +289,12 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     super::new_channel::NewChannelSheet(&new_ch, &rooms, feed.clone(), &open);
 }
 
-fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool) {
+fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, current_room: Option<String>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool) {
     let p = ember_theme().palette;
     let current = filter.get();
     let sections = group_rooms(rooms, order, &current);
     let chips = filter_chips(rooms, order);
-    let selected = open.get();
+    let selected = current_room;
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         // Header: the title at 15 px and a round "+" (new channel).
         cu::Row()
@@ -354,16 +361,33 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
     });
 }
 
-/// The room's mark: a 40 px rounded tile in the project's colour family with a hash glyph.
-/// TODO(channel icons): each channel gets its own animated mark (`channels.js` roomIcon).
-fn RoomIcon(project: &str, size: f32) {
+const ROOM_PULSE_SVG: &str = include_str!("../../../assets/nav/room-pulse.svg");
+const ROOM_BARS_SVG: &str = include_str!("../../../assets/nav/room-bars.svg");
+const ROOM_RADAR_SVG: &str = include_str!("../../../assets/nav/room-radar.svg");
+const ROOM_ORBIT_SVG: &str = include_str!("../../../assets/nav/room-orbit.svg");
+const ROOM_WAVE_SVG: &str = include_str!("../../../assets/nav/room-wave.svg");
+const ROOM_SPARK_SVG: &str = include_str!("../../../assets/nav/room-spark.svg");
+
+/// The room's mark (`channels.js` roomIcon): a rounded tile in the project's colour with the
+/// room's own motif, chosen from the room id (`room_motif`). The motifs are drawn still; the
+/// mockup's animation is not built (TODO(channel icons)).
+fn RoomIcon(room_id: &str, project: &str, size: f32) {
+    use crate::ui::channels::{room_motif, RoomMotif};
     let p = ember_theme().palette;
     let tones = [p.blue, p.orange, p.green, p.sky, p.red];
     let a = tones[(crate::ui::characters::seed_hash(project) as usize) % tones.len()];
+    let svg = match room_motif(room_id) {
+        RoomMotif::Pulse => ROOM_PULSE_SVG,
+        RoomMotif::Bars => ROOM_BARS_SVG,
+        RoomMotif::Radar => ROOM_RADAR_SVG,
+        RoomMotif::Orbit => ROOM_ORBIT_SVG,
+        RoomMotif::Wave => ROOM_WAVE_SVG,
+        RoomMotif::Spark => ROOM_SPARK_SVG,
+    };
     cu::Box()
         .alignment(Alignment::Center)
         .modifier(Modifier::new().size(size, size).background(paint(a.soft)).corner_radius(CORNER_MD))
-        .content(|| super::shell::NavIcon(super::shell::ICON_HASH_SVG, a.strong.to_argb(), size * 0.5));
+        .content(|| super::shell::NavIcon(svg, a.strong.to_argb(), size * 0.6));
 }
 
 /// One room in the list. TODO(compose-rust#372): the row is a pointer-up `Clickable`.
@@ -384,7 +408,7 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
         },
         || {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                RoomIcon(project, 40.0);
+                RoomIcon(&row.id, project, 40.0);
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
@@ -423,7 +447,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                     // TODO(compose-rust#429): accessible name (back).
                     AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
                 }
-                RoomIcon(&room.project, 36.0);
+                RoomIcon(&room.id, &room.project, 36.0);
                 cu::Column().content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&room.name, Fs::Md, Weight::Semibold, None, Some(1));
@@ -479,7 +503,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                         }
                         FeedItem::Bubble(b) => {
                             let harness = room.member(&b.from).map(|m| m.harness.clone()).unwrap_or_default();
-                            BubbleRow(b, &harness);
+                            BubbleRow(b, &harness, &room.project);
                         }
                     }
                 }
@@ -583,7 +607,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
     });
 }
 
-fn BubbleRow(bubble: &BubbleView, harness: &str) {
+fn BubbleRow(bubble: &BubbleView, harness: &str, project: &str) {
     let p = ember_theme().palette;
     let mine = bubble.side == Side::Right;
     let (fill, ink) = if mine { (p.ink, p.ink_text) } else { (p.surface_2, p.text) };
@@ -619,7 +643,14 @@ fn BubbleRow(bubble: &BubbleView, harness: &str) {
             .modifier(Modifier::new().fill_max_width())
             .content(|| {
                 if bubble.show_avatar {
-                    Avatar(&bubble.name.clone().unwrap_or_default(), harness, 36.0);
+                    let name = bubble.name.clone().unwrap_or_default();
+                    match crate::ui::channels::avatar_kind(bubble.is_agent, harness) {
+                        // The agent's team character, like the session list (FR-L22).
+                        crate::ui::channels::AvatarKind::Character => {
+                            super::characters::Character(harness, false, 36.0, &name, project, super::characters::CharState::Idle, None)
+                        }
+                        crate::ui::channels::AvatarKind::Letter => Avatar(&name, harness, 36.0),
+                    }
                 } else {
                     cu::Spacer().modifier(Modifier::new().width(36.0));
                 }

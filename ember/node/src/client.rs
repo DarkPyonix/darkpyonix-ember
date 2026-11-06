@@ -397,6 +397,11 @@ impl NodeClient {
         }
     }
 
+    /// Listening TCP ports of processes under this node's terminals and jobs (FR-P7).
+    pub async fn ports(&self) -> Result<PortsResponse> {
+        self.get("/ports").await
+    }
+
     pub async fn stat(&self, path: impl AsRef<Path>) -> Result<Stat> {
         self.post("/fs/stat", &PathRequest { path: path.as_ref().into() }).await
     }

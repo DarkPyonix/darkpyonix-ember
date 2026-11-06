@@ -323,6 +323,7 @@ async fn act(policy: &PathPolicy, r: &GitCommitActionRequest, action: Action) ->
         }
         Action::CherryPick => ("cherry-pick", vec!["cherry-pick", &full]),
     };
+    let before = run_k(&dir, &["rev-parse", "HEAD"], GENERIC_FAILURE).await?.stdout.trim().to_owned();
     let args: Vec<&str> = NO_HOOKS.iter().copied().chain(op_args).collect();
     let out = run(&dir, &args, None).await?;
     if out.code != 0 {
@@ -338,6 +339,15 @@ async fn act(policy: &PathPolicy, r: &GitCommitActionRequest, action: Action) ->
                 tracing::debug!(git_text = %message(&abort), verb, "git abort failed");
             }
             return Err(abort_outcome(abort.code, msg));
+        }
+        // Nothing is paused, yet git may have left the change staged (a missing identity stops
+        // the commit after the apply). The tracked tree was clean before, so put it back.
+        let now = run(&dir, &["rev-parse", "HEAD"], None).await?;
+        if now.code == 0 && now.stdout.trim() == before {
+            let reset = run(&dir, &["reset", "--hard", "-q", &before], None).await?;
+            if reset.code != 0 {
+                tracing::debug!(git_text = %message(&reset), verb, "git reset after failure failed");
+            }
         }
         return Err(GitError::Conflict(msg.to_owned()));
     }

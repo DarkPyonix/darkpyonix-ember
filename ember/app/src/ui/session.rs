@@ -381,6 +381,25 @@ pub fn toolbar_fold_level(toolbar_dp: f32) -> usize {
     }
 }
 
+/// Width of the left session drawer (mockup `.sside`, #582): `min(300, 86% of the window)` at
+/// phone width, 290 between 561 and 900 where the 64 px rail stays and the drawer opens over it.
+pub fn drawer_width(window_dp: f32) -> f32 {
+    // The window size reads 0 until the renderer reports it: the widest phone drawer then.
+    if window_dp <= 0.0 {
+        300.0
+    } else if window_dp > 560.0 {
+        290.0
+    } else {
+        (window_dp * 0.86).min(300.0)
+    }
+}
+
+/// Whether the session list opens as an overlay drawer rather than sitting as a column (the
+/// column shows only above 900 dp, FR-L18).
+pub fn drawer_is_overlay(window_dp: f32) -> bool {
+    window_dp <= 900.0
+}
+
 /// Whether the 멀티/싱글/상태 chips move to their own row: at the bottom-bar width (mockup
 /// `max-width:560px`) the toolbar has no room for them beside the project and IDE 열기 (#218).
 pub fn view_chips_below(window_dp: f32) -> bool {
@@ -1412,6 +1431,25 @@ mod tests {
         assert!(view_chips_below(390.0));
         assert!(view_chips_below(560.0));
         assert!(!view_chips_below(768.0));
+    }
+
+    #[test]
+    fn fr_l18_drawer_width_is_86_percent_capped_at_300_then_290() {
+        assert_eq!(drawer_width(0.0), 300.0);
+        assert_eq!(drawer_width(300.0), 300.0 * 0.86);
+        assert_eq!(drawer_width(360.0), 300.0);
+        assert_eq!(drawer_width(390.0), 300.0);
+        assert_eq!(drawer_width(560.0), 300.0);
+        assert_eq!(drawer_width(561.0), 290.0);
+        assert_eq!(drawer_width(900.0), 290.0);
+    }
+
+    #[test]
+    fn fr_l18_drawer_is_an_overlay_unless_the_list_is_a_column() {
+        assert!(drawer_is_overlay(390.0));
+        assert!(drawer_is_overlay(561.0));
+        assert!(drawer_is_overlay(900.0));
+        assert!(!drawer_is_overlay(901.0));
     }
 
     #[test]

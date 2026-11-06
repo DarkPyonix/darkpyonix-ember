@@ -2,7 +2,7 @@
 //! the editor's own actions it starts with. No renderer.
 
 use ember_app::ui::keymap::{Action, Keymap, Os};
-use ember_app::ui::palette::{action_items, highlight_segments, move_selection, rank, Item, Payload};
+use ember_app::ui::palette::{action_items, empty_text, file_items, highlight_segments, items_for, mode_for, move_selection, placeholder, rank, search_label, skipped_directory, Item, Mode, Payload};
 
 fn items(titles: &[&str]) -> Vec<Item> {
     titles
@@ -119,4 +119,75 @@ fn fr_l31_the_arrow_keys_move_the_highlight_and_stop_at_the_ends() {
     assert_eq!(move_selection(0, 3, false), 0);
     assert_eq!(move_selection(2, 3, false), 1);
     assert_eq!(move_selection(0, 0, true), 0);
+}
+
+#[test]
+fn fr_l31_find_opens_files_in_vs_code_and_everything_in_jetbrains_and_the_palette_opens_commands() {
+    assert_eq!(mode_for(Action::Palette, Keymap::VsCode), Some(Mode::Commands));
+    assert_eq!(mode_for(Action::Palette, Keymap::JetBrains), Some(Mode::Commands));
+    assert_eq!(mode_for(Action::Find, Keymap::VsCode), Some(Mode::Files));
+    assert_eq!(mode_for(Action::Find, Keymap::JetBrains), Some(Mode::Everything));
+    assert_eq!(mode_for(Action::Save, Keymap::VsCode), None);
+}
+
+#[test]
+fn fr_l31_the_index_skips_version_control_dependencies_and_build_output() {
+    let none: Vec<(String, u32)> = Vec::new();
+    for name in [".git", "node_modules", ".hg", "__pycache__"] {
+        assert!(skipped_directory(name, &none), "{name}");
+    }
+    for name in ["src", ".github", ".vscode", "docs", "build", "target"] {
+        assert!(!skipped_directory(name, &none), "{name} is an ordinary directory with nothing beside it that says otherwise");
+    }
+    let rust = vec![("Cargo.toml".to_string(), 1u32), ("target".to_string(), 2)];
+    assert!(skipped_directory("target", &rust), "build output beside a Cargo.toml");
+    let maven = vec![("pom.xml".to_string(), 1u32)];
+    assert!(skipped_directory("target", &maven));
+    assert!(!skipped_directory("src", &rust));
+}
+
+#[test]
+fn fr_l31_files_are_listed_by_their_path_below_the_project_folder_sorted_by_name() {
+    let paths = vec!["/w/p/src/b.rs".to_string(), "/w/p/README.md".to_string(), "/w/p/src/A.rs".to_string()];
+    let items = file_items("/w/p/", &paths);
+    let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+    assert_eq!(titles, vec!["README.md", "src/A.rs", "src/b.rs"]);
+    assert_eq!(items[1].payload, Payload::File("/w/p/src/A.rs".to_string()), "the payload is the full path");
+}
+
+#[test]
+fn fr_l31_a_file_is_found_by_the_letters_of_its_path() {
+    let paths = vec!["/w/p/src/main.rs".to_string(), "/w/p/src/lib.rs".to_string(), "/w/p/README.md".to_string()];
+    let list = file_items("/w/p", &paths);
+    let ranked = rank("smr", &list);
+    assert_eq!(list[ranked[0].index].title, "src/main.rs");
+    let list = file_items("/w/p", &paths);
+    assert_eq!(list[rank("read", &list)[0].index].title, "README.md");
+}
+
+#[test]
+fn fr_l31_everything_lists_the_actions_then_the_files() {
+    let files = file_items("/w/p", &["/w/p/a.rs".to_string()]);
+    let all = items_for(Mode::Everything, Keymap::JetBrains, Os::Mac, &files);
+    let commands = items_for(Mode::Commands, Keymap::JetBrains, Os::Mac, &files);
+    assert_eq!(all.len(), commands.len() + 1);
+    assert_eq!(all.last().unwrap().payload, Payload::File("/w/p/a.rs".to_string()));
+    assert!(items_for(Mode::Files, Keymap::VsCode, Os::Mac, &files).iter().all(|i| matches!(i.payload, Payload::File(_))));
+}
+
+#[test]
+fn fr_l31_the_field_and_the_empty_list_say_what_is_going_on() {
+    assert_ne!(search_label(Mode::Files), search_label(Mode::Commands));
+    assert_ne!(search_label(Mode::Everything), search_label(Mode::Files));
+    assert_eq!(empty_text(Mode::Files, true), "파일을 찾는 중입니다…", "an index still being built is not 'nothing matches'");
+    assert_eq!(empty_text(Mode::Everything, true), "파일을 찾는 중입니다…");
+    assert_eq!(empty_text(Mode::Files, false), "일치하는 항목이 없습니다.");
+    assert_eq!(empty_text(Mode::Commands, true), "일치하는 항목이 없습니다.", "commands do not wait for the index");
+}
+#[test]
+fn fr_l31_the_field_names_what_opened_the_palette_in_the_keymaps_words() {
+    assert_eq!(placeholder(Mode::Commands, Keymap::VsCode), "명령 팔레트");
+    assert_eq!(placeholder(Mode::Commands, Keymap::JetBrains), "동작 찾기");
+    assert_eq!(placeholder(Mode::Files, Keymap::VsCode), "파일로 이동");
+    assert_eq!(placeholder(Mode::Everything, Keymap::JetBrains), "모든 곳에서 찾기");
 }

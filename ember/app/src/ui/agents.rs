@@ -893,6 +893,86 @@ impl Default for LocalStore {
     }
 }
 
+/// What the client knows about one computer beyond its name and reachability. The client holds
+/// no OS, IP or per-computer session counts (`ember_client::state::Computer`), so a live
+/// computer has every field `None` (FR-L20); only a sample capture fills them, marked 예시.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComputerFacts {
+    pub os: Option<String>,
+    pub ip: Option<String>,
+    pub sessions: Option<u32>,
+    pub connections: Option<u32>,
+    /// The computer the sessions move to when this one drops (sample only).
+    pub fallback: Option<String>,
+}
+
+/// The facts for a computer. Live (`sample == false`) is always empty; the name-keyed table
+/// is the review window's sample data.
+pub fn computer_facts(name: &str, sample: bool) -> ComputerFacts {
+    if !sample {
+        return ComputerFacts::default();
+    }
+    let s = |v: &str| Some(v.to_string());
+    match name {
+        "mac-mini" => ComputerFacts { os: s("macOS 26 · 메인 서버"), ip: s("211.36.142.18"), sessions: Some(7), connections: Some(12), fallback: None },
+        "ws-linux-01" => ComputerFacts { os: s("Ubuntu 24.04"), ip: s("121.134.77.205"), sessions: Some(6), connections: Some(9), fallback: None },
+        "macbook-pro" => ComputerFacts { os: s("macOS 26"), ip: s("175.223.10.91"), sessions: Some(0), connections: Some(0), fallback: None },
+        "win-desktop" => ComputerFacts { os: s("Windows 11"), ip: None, sessions: Some(3), connections: Some(0), fallback: s("mac-mini") },
+        _ => ComputerFacts::default(),
+    }
+}
+
+/// A fact's text: the value, or [`NO_INFO`]. A sample value carries 예시.
+pub fn fact_text(value: Option<&str>, sample: bool) -> String {
+    match value {
+        Some(v) if sample => format!("{v} (예시)"),
+        Some(v) => v.to_string(),
+        None => NO_INFO.to_string(),
+    }
+}
+
+/// A count's number, or [`NO_INFO`]; never zero by default.
+pub fn count_text(value: Option<u32>) -> String {
+    value.map_or_else(|| NO_INFO.to_string(), |n| n.to_string())
+}
+
+/// The sentence under an unreachable computer: only when it is really offline and its session
+/// count and fallback are known.
+pub fn disconnect_note(r: Reachability, facts: &ComputerFacts) -> Option<String> {
+    if r != Reachability::Offline {
+        return None;
+    }
+    let n = facts.sessions.filter(|n| *n > 0)?;
+    let to = facts.fallback.as_deref()?;
+    Some(format!("연결이 끊겨 세션 {n}개가 {to}(으)로 연결됩니다. (예시)"))
+}
+
+/// The account tile's second line: the harness, and a reset time only when one is known. The
+/// accounts API carries none, so only a sample shows one, marked 예시.
+pub fn account_reset_line(harness_label: &str, sample: bool) -> String {
+    if sample {
+        format!("{harness_label} · 리셋 3일 뒤 (예시)")
+    } else {
+        format!("{harness_label} · 리셋 시각 {NO_INFO}")
+    }
+}
+
+/// The default harness, model and account the Models card shows as selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultPick {
+    pub harness: AgentHarness,
+    /// The model id kept in this device's settings for that harness, if any.
+    pub model: Option<String>,
+    pub account: String,
+}
+
+/// The selection comes from the account the server marks default (`is_default`) and this
+/// device's stored model for its harness. `None` when no account is marked default.
+pub fn default_pick(accounts: &[AccountInfo], default_ids: &[String], store: &LocalStore) -> Option<DefaultPick> {
+    let a = default_ids.iter().find_map(|id| accounts.iter().find(|a| &a.id == id))?;
+    Some(DefaultPick { harness: a.harness, model: store.settings(a.harness).model.clone(), account: a.label.clone() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1521,5 +1601,51 @@ mod tests {
         assert_eq!(pin_verdict(Some("1.2.16"), PINNED_ANTIGRAVITY_VERSION), Some("일치"));
         assert_eq!(pin_verdict(Some("v1.2.16"), PINNED_ANTIGRAVITY_VERSION), Some("일치"));
         assert_eq!(pin_verdict(Some("1.3.0"), PINNED_ANTIGRAVITY_VERSION), Some("다름"));
+    }
+
+    #[test]
+    fn fr_l20_live_computer_has_no_invented_facts() {
+        assert_eq!(computer_facts("mac-mini", false), ComputerFacts::default());
+        assert_eq!(computer_facts("win-desktop", false), ComputerFacts::default());
+        assert_eq!(fact_text(None, false), NO_INFO);
+        assert_eq!(count_text(None), NO_INFO);
+    }
+
+    #[test]
+    fn fr_l20_sample_computer_facts_are_marked_example() {
+        let f = computer_facts("mac-mini", true);
+        assert_eq!(fact_text(f.ip.as_deref(), true), "211.36.142.18 (예시)");
+        assert_eq!(count_text(f.sessions), "7");
+        assert_eq!(computer_facts("gpu-box", true), ComputerFacts::default());
+    }
+
+    #[test]
+    fn fr_l20_disconnect_note_needs_an_offline_computer_with_sessions() {
+        let w = computer_facts("win-desktop", true);
+        assert!(disconnect_note(Reachability::Offline, &w).unwrap().contains("세션 3개"));
+        assert_eq!(disconnect_note(Reachability::Online, &w), None);
+        assert_eq!(disconnect_note(Reachability::Unknown, &w), None);
+        assert_eq!(disconnect_note(Reachability::Offline, &ComputerFacts::default()), None);
+        let zero = ComputerFacts { sessions: Some(0), fallback: Some("x".into()), ..Default::default() };
+        assert_eq!(disconnect_note(Reachability::Offline, &zero), None);
+    }
+
+    #[test]
+    fn fr_x6_reset_text_only_when_a_source_exists() {
+        assert!(!account_reset_line("Codex", false).contains("3일"));
+        assert!(account_reset_line("Codex", false).contains(NO_INFO));
+        assert!(account_reset_line("Codex", true).contains("(예시)"));
+    }
+
+    #[test]
+    fn fr_l20_default_pick_comes_from_the_default_account_and_settings() {
+        let store = LocalStore::new();
+        assert_eq!(default_pick(&[], &[], &store), None);
+        let a = AccountInfo { id: "c1".into(), label: "Claude Max".into(), harness: AgentHarness::ClaudeCode, left_percent: None, limited: false };
+        assert_eq!(default_pick(&[a.clone()], &[], &store), None);
+        let pick = default_pick(&[a], &["c1".to_string()], &store).unwrap();
+        assert_eq!(pick.harness, AgentHarness::ClaudeCode);
+        assert_eq!(pick.account, "Claude Max");
+        assert_eq!(pick.model, store.settings(AgentHarness::ClaudeCode).model);
     }
 }

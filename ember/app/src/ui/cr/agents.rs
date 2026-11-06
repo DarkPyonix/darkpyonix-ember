@@ -287,9 +287,9 @@ pub fn AgentsScreenWith(
                             .content(|| {
                                 match cur_sec {
                                     Section::Harness => HarnessSection(&store, &live, compact),
-                                    Section::Models => ModelsSection(&store, compact),
+                                    Section::Models => ModelsSection(&store, &live, compact),
                                     Section::Profiles => ProfilesSection(&store, &live, compact),
-                                    Section::Network => NetworkSection(&computers, compact),
+                                    Section::Network => NetworkSection(&computers, live.sample, compact),
                                     Section::Usage => UsageSection(&live, &bars, &usage_load, compact),
                                 }
                             });
@@ -308,9 +308,9 @@ pub fn AgentsScreenWith(
                                     .content(|| {
                                         match cur_sec {
                                             Section::Harness => HarnessSection(&store, &live, compact),
-                                            Section::Models => ModelsSection(&store, compact),
+                                            Section::Models => ModelsSection(&store, &live, compact),
                                             Section::Profiles => ProfilesSection(&store, &live, compact),
-                                            Section::Network => NetworkSection(&computers, compact),
+                                            Section::Network => NetworkSection(&computers, live.sample, compact),
                                             Section::Usage => UsageSection(&live, &bars, &usage_load, compact),
                                         }
                                     });
@@ -1028,7 +1028,7 @@ fn HarnessCard(
             if h == AgentHarness::Antigravity {
                 SettingRow(
                     "고정 버전",
-                    "Ember가 검증한 버전은 1.2.16입니다. 다른 버전은 읽기 전용으로만 실행됩니다.",
+                    &format!("Ember가 검증한 버전은 {}입니다. 다른 버전은 읽기 전용으로만 실행됩니다.", crate::ui::agents::PINNED_ANTIGRAVITY_VERSION),
                     || {
                         // A verdict only for a version the server reported; nothing is shown
                         // for an undetected harness.
@@ -1200,7 +1200,32 @@ const GEMINI_SPECS: [ModelSpec; 2] = [
     },
 ];
 
-fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
+/// The catalog name for a stored model id, else the id itself.
+fn model_name(h: AgentHarness, id: &str) -> String {
+    let specs: &[ModelSpec] = match h {
+        AgentHarness::ClaudeCode => &CLAUDE_SPECS,
+        AgentHarness::Codex => &CODEX_SPECS,
+        AgentHarness::Gemini => &GEMINI_SPECS,
+        _ => &[],
+    };
+    specs.iter().find(|m| m.id == id).map_or_else(|| id.to_string(), |m| m.name.to_string())
+}
+
+fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: bool) {
+    // The selection comes from the account the server marks default and this device's stored
+    // model; with none, the pills say so instead of showing a default as chosen.
+    let pick = crate::ui::agents::default_pick(&live.accounts, &live.default_ids, &store.get());
+    let harness_pill = match &pick {
+        Some(d) => {
+            let model = d.model.as_deref().map(|m| model_name(d.harness, m));
+            match model {
+                Some(m) => format!("{} · {m}", d.harness.label()),
+                None => d.harness.label().to_string(),
+            }
+        }
+        None => crate::ui::agents::NO_INFO.to_string(),
+    };
+    let account_pill = pick.as_ref().map_or_else(|| crate::ui::agents::NO_INFO.to_string(), |d| d.account.clone());
     // "새 팀원 기본값" card
     EmberCard(false, true, None, None, None, || {
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1216,10 +1241,10 @@ fn ModelsSection(store: &MutableState<LocalStore>, compact: bool) {
                 None,
             );
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                ModelPickerPill("Claude Code · Opus 5.5", Some(ICON_SPARK_SVG), move || {
+                ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || {
                     post_notice("기본 하네스와 모델을 선택합니다");
                 });
-                ModelPickerPill("ncmnd · Max", Some(ICON_USER_SVG), move || {
+                ModelPickerPill(&account_pill, Some(ICON_USER_SVG), move || {
                     post_notice("기본 계정을 선택합니다");
                 });
             });
@@ -1323,7 +1348,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                     Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
                 cu::Box().modifier(Modifier::new().width(120.0)).alignment(Alignment::CenterEnd).content(|| {
-                    Label("플랜별 사용", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                    Label("플랜별 사용 (Ember 참고 목록)", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
                 cu::Box().modifier(Modifier::new().width(60.0)).alignment(Alignment::CenterEnd).content(|| {
                     Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
@@ -1385,7 +1410,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
 // 3. 프로필 (Profiles)
 // ---------------------------------------------------------------------------------------------
 
-fn AccountTile(x: &AccountInfo, extra: Option<&str>) {
+fn AccountTile(x: &AccountInfo, extra: Option<&str>, sample: bool) {
     let p = ember_theme().palette;
     InsetPanel(true, || {
         cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -1401,14 +1426,14 @@ fn AccountTile(x: &AccountInfo, extra: Option<&str>) {
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                     VendorDot(x.harness);
                     Label(&x.label, Fs::Md, Weight::Semibold, None, Some(1));
-                    Pill(
-                        if x.label.contains("Max") { "Max" } else if x.label.contains("Plus") { "Plus" } else { "Pro" },
-                        PillTone::Grey,
-                        true,
-                    );
+                    // A plan pill only when the account's own label names the plan; a guessed
+                    // "Pro" would be an invented fact.
+                    if let Some(plan) = ["Max", "Plus", "Pro"].into_iter().find(|n| x.label.contains(*n)) {
+                        Pill(plan, PillTone::Grey, true);
+                    }
                 });
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                let reset_str = format!("{} · 리셋 3일 뒤", x.harness.label());
+                let reset_str = crate::ui::agents::account_reset_line(x.harness.label(), sample);
                 Label(&reset_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
                 if let Some(left) = x.left_percent {
@@ -1500,7 +1525,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
             if compact {
                 for a in &live.accounts {
                     let extra = if a.limited { Some("한도 가까움") } else { None };
-                    AccountTile(a, extra);
+                    AccountTile(a, extra, live.sample);
                 }
             } else {
                 let chunks: Vec<_> = live.accounts.chunks(3).collect();
@@ -1509,7 +1534,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
                         for a in chunk {
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                                 let extra = if a.limited { Some("한도 가까움") } else { None };
-                                AccountTile(a, extra);
+                                AccountTile(a, extra, live.sample);
                             });
                         }
                     });
@@ -1893,7 +1918,7 @@ fn ProfileCard(
 // 4. 네트워크 (Network)
 // ---------------------------------------------------------------------------------------------
 
-fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
+fn NetworkSection(computers: &[(String, Reachability)], sample: bool, compact: bool) {
     let p = ember_theme().palette;
 
     // Card 1: API 트래픽 내보내기 
@@ -1966,7 +1991,7 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
                 Pending("컴퓨터 목록은");
             } else if compact {
                 for (name, r) in computers {
-                    ComputerTile(name, *r);
+                    ComputerTile(name, *r, sample);
                 }
             } else {
                 let chunks: Vec<_> = computers.chunks(3).collect();
@@ -1974,7 +1999,7 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
                     cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                         for (name, r) in chunk {
                             cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                                ComputerTile(name, *r);
+                                ComputerTile(name, *r, sample);
                             });
                         }
                     });
@@ -1985,61 +2010,48 @@ fn NetworkSection(computers: &[(String, Reachability)], compact: bool) {
     });
 }
 
-fn ComputerTile(name: &str, r: Reachability) {
+fn ComputerTile(name: &str, r: Reachability, sample: bool) {
     let p = ember_theme().palette;
     let (status_text, tone) = computer_status(r);
-    let os_str = match name {
-        "mac-mini" => "macOS 26 · 메인 서버",
-        "ws-linux-01" => "Ubuntu 24.04",
-        "macbook-pro" => "macOS 26",
-        "win-desktop" => "Windows 11",
-        _ => "Linux (확인 중)",
-    };
-    let ip_str = match name {
-        "mac-mini" => "211.36.142.18",
-        "ws-linux-01" => "121.134.77.205",
-        "macbook-pro" => "175.223.10.91",
-        _ => "IP 없음",
-    };
-    let sessions_num = match name {
-        "mac-mini" => "7",
-        "ws-linux-01" => "6",
-        _ => "0",
-    };
-    let tunnels_num = match name {
-        "mac-mini" => "12",
-        "ws-linux-01" => "9",
-        _ => "0",
-    };
+    // The client holds only a name and reachability; the rest reads 아직 정보가 없습니다 on the
+    // live path and comes from the sample table (marked 예시) in a review window.
+    let facts = crate::ui::agents::computer_facts(name, sample);
+    let os_str = crate::ui::agents::fact_text(facts.os.as_deref(), sample);
+    let ip_str = crate::ui::agents::fact_text(facts.ip.as_deref(), sample);
+    let sessions_num = crate::ui::agents::count_text(facts.sessions);
+    let tunnels_num = crate::ui::agents::count_text(facts.connections);
+    let note = crate::ui::agents::disconnect_note(r, &facts);
     let name_owned = name.to_string();
-    let ip_owned = ip_str.to_string();
+    let ip_known = facts.ip.clone();
 
     InsetPanel(true, || {
         cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     Label(name, Fs::Md, Weight::Semibold, None, Some(1));
-                    Label(os_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label(&os_str, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 Pill(status_text, tone.into(), true);
             });
             cu::Spacer().modifier(Modifier::new().height(SP[0]));
-            Label(ip_str, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
+            Label(&ip_str, Fs::Sm, Weight::Regular, Some(paint(p.text)), Some(1));
             cu::Spacer().modifier(Modifier::new().height(SP[0]));
             cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                Label(sessions_num, Fs::Sm, Weight::Medium, None, Some(1));
+                Label(&sessions_num, Fs::Sm, Weight::Medium, None, Some(1));
                 Label(" 세션", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                Label(tunnels_num, Fs::Sm, Weight::Medium, None, Some(1));
+                Label(&tunnels_num, Fs::Sm, Weight::Medium, None, Some(1));
                 Label(" 열린 연결", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                AppButton("IP 확인", None, ButtonKind::Default, true, r == Reachability::Online, false, move || {
-                    post_notice(&format!("{name_owned} 세션이 본 IP: {ip_owned}"));
+                AppButton("IP 확인", None, ButtonKind::Default, true, r == Reachability::Online && ip_known.is_some(), false, move || {
+                    if let Some(ip) = &ip_known {
+                        post_notice(&format!("{name_owned} 세션이 본 IP: {ip}"));
+                    }
                 });
             });
-            if name == "win-desktop" {
+            if let Some(note) = &note {
                 cu::Spacer().modifier(Modifier::new().height(SP[0]));
-                Label("연결이 끊겨 세션 3개가 메인 서버(mac-mini)로 연결됩니다.", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+                Label(note, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
             }
         });
     });
@@ -3010,7 +3022,7 @@ mod tests {
         for (w, class) in [(1440.0, W::Expanded), (390.0, W::Compact)] {
             let names: Vec<String> =
                 button_texts_at(w, class, Section::Models).into_iter().map(|(_, t)| t).collect();
-            for want in ["명령마다 확인", "ncmnd · Max"] {
+            for want in ["명령마다 확인", "Claude Max"] {
                 assert!(names.iter().any(|n| n == want), "missing button {want} at {w} dp: {names:?}");
             }
             // A radio and a switch name their model.

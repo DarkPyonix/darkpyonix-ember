@@ -350,9 +350,9 @@ fn project_error(e: ProjectError) -> Response {
 }
 
 /// Fields of the settings sheet whose server side is not built yet. They are refused by name so
-/// the client sees a clean error and not a silent no-op (leader and profile override: #384 PR 3,
-/// archive: PR 4).
-const NOT_YET_PROJECT_FIELDS: [&str; 3] = ["leader_session", "profile_overrides", "archived"];
+/// the client sees a clean error and not a silent no-op (leader: blocked on an owner decision,
+/// archive: #384 PR 4).
+const NOT_YET_PROJECT_FIELDS: [&str; 2] = ["leader_session", "archived"];
 
 /// FR-L26: change project settings. Body fields are optional; unknown fields are 400
 /// `unknown_field`, unbuilt ones 400 `not_yet`. Pushes `project_updated` with the new state.

@@ -187,7 +187,6 @@ async fn fr_l26_fields_built_later_are_400_not_yet() {
     for body in [
         json!({ "leader_session": null }),
         json!({ "leader_session": "s1" }),
-        json!({ "profile_overrides": {} }),
         json!({ "archived": true }),
         json!({ "name": "q", "archived": false }),
     ] {

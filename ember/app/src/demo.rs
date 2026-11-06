@@ -330,6 +330,21 @@ pub fn computers() -> Vec<Computer> {
     ]
 }
 
+/// The listening ports of the demo computer (FR-P7): two LAN ports and one loopback port, so the
+/// 웹 페이지 list shows both an openable row and a note-only row. The demo computer reads as
+/// `DEMO_HOST`, not local.
+pub fn ports() -> ember_client::api::Ports {
+    use ember_client::api::{ListeningPort, PortScope};
+    let lp = |port, scope, process: &str| ListeningPort { port, scope, process: process.into(), ..Default::default() };
+    ember_client::api::Ports {
+        ports: vec![lp(3000, PortScope::Lan, "node"), lp(6006, PortScope::Lan, "storybook"), lp(5173, PortScope::Loopback, "vite")],
+        supported: true,
+    }
+}
+
+/// The address the demo computer's ports are served on.
+pub const DEMO_HOST: &str = "192.168.0.10";
+
 pub fn agents() -> Vec<DetectedAgent> {
     vec![
         DetectedAgent {
@@ -1438,6 +1453,21 @@ fn demo_prs(now: i64) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_demo_ports_show_open_and_note_only_rows() {
+        use crate::ui::session::{web_pages_from, ComputerHost, WebPagesLoad};
+        let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.into()) };
+        let WebPagesLoad::Ready(pages) = web_pages_from(Ok(crate::demo::ports()), &host) else {
+            panic!("demo ports are ready");
+        };
+        let urls: Vec<_> = pages.iter().map(|p| p.url.as_deref()).collect();
+        assert_eq!(
+            urls,
+            [Some("http://192.168.0.10:3000"), None, Some("http://192.168.0.10:6006")]
+        );
+        assert!(pages[1].note.is_some());
+    }
+
     #[test]
     fn fr_l31_demo_ember_target_carries_the_given_ose_connection() {
         let ose = ember_client::wire::EmberOseConnection {

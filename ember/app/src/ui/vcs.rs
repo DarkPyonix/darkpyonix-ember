@@ -3326,6 +3326,36 @@ impl ConflictFile {
     }
 }
 
+/// The line under 모두 현재 것 / 모두 들어오는 것 when a block already has a choice.
+pub const PICK_ALL_NOTE: &str = "이미 고른 블록의 선택이 바뀝니다";
+
+/// The note under the pick-all chips: `Some` only when some block is already chosen, because
+/// only then does one tap replace a choice the user made.
+pub fn pick_all_note(file: &ConflictFile) -> Option<&'static str> {
+    if file.resolved_count() > 0 { Some(PICK_ALL_NOTE) } else { None }
+}
+
+/// The key of a pick-all button in the armed state (`delete_tap`); one key per choice, so only
+/// one of the two can be armed at a time.
+pub fn pick_all_key(choice: ConflictChoice) -> usize {
+    match choice {
+        ConflictChoice::Ours => 1,
+        ConflictChoice::Theirs => 2,
+        _ => 0,
+    }
+}
+
+/// The visible text of a pick-all button; the armed second tap asks again.
+pub fn pick_all_text(base: &'static str, armed: bool) -> &'static str {
+    if armed { "정말 모두 바꿉니다" } else { base }
+}
+
+/// Whether the answer of a merge abort or commit makes the screen read the state again. Both
+/// answers do: after an error (a 409 means the state on screen was stale) as after success.
+pub fn merge_answer_reloads(_result: &Result<String, String>) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4502,6 +4532,38 @@ rename to new.txt
         assert_eq!(f.resolved_count(), 1);
         assert_eq!(f.resolved_content(), None);
         assert_eq!(two_blocks().resolved_content(), None);
+    }
+
+    #[test]
+    fn fr_g7_pick_all_asks_twice_when_a_choice_exists() {
+        // The two buttons have their own keys, so arming one never confirms the other.
+        assert_ne!(pick_all_key(ConflictChoice::Ours), pick_all_key(ConflictChoice::Theirs));
+        let (ours, theirs) = (pick_all_key(ConflictChoice::Ours), pick_all_key(ConflictChoice::Theirs));
+        assert_eq!(delete_tap(None, ours, 10_000), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((ours, 10_000)), ours, 10_100), DeleteTap::Wait);
+        assert_eq!(delete_tap(Some((ours, 10_000)), ours, 10_600), DeleteTap::Confirm);
+        assert_eq!(delete_tap(Some((ours, 10_000)), theirs, 10_900), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((ours, 10_000)), ours, 14_000), DeleteTap::Expired);
+        assert!(armed_label_visible(Some((ours, 10_000)), ours, 10_000));
+        assert!(!armed_label_visible(Some((ours, 10_000)), theirs, 10_000));
+        assert_eq!(pick_all_text("모두 현재 것", true), "정말 모두 바꿉니다");
+        assert_eq!(pick_all_text("모두 현재 것", false), "모두 현재 것");
+    }
+
+    #[test]
+    fn fr_g7_pick_all_note_only_when_a_block_is_chosen() {
+        let f = two_blocks();
+        assert_eq!(pick_all_note(&f), None);
+        assert_eq!(pick_all_note(&f.with_choice(1, ConflictChoice::Both)), Some("이미 고른 블록의 선택이 바뀝니다"));
+    }
+
+    #[test]
+    fn fr_g17_a_409_answer_reloads_the_state() {
+        let stale = ApiError::Status { status: 409, message: "병합 중이 아닙니다.".into(), code: None };
+        let answer = merge_abort_result(Err(stale));
+        assert!(answer.is_err());
+        assert!(merge_answer_reloads(&answer));
+        assert!(merge_answer_reloads(&Ok("병합을 취소했습니다".to_string())));
     }
 
     #[test]

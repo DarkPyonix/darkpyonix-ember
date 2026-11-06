@@ -580,14 +580,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fr_l7_fr_w4_launch_starts_and_reuses_server() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("server");
-        std::fs::write(&script, r##"#!/bin/sh
+        crate::test_exec::write_exec_ready(&script, r##"#!/bin/sh
 exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
 while True: s.accept()[0].close()' "$@"
-"##).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+"##);
         let manager = OseManager::with_data_root(Some(script), dir.path().join("ose-data"));
         let computer = ComputerIde { local: true, ..Default::default() };
         let first = launch_targets(&record(dir.path()), "local", &computer, None, &manager);

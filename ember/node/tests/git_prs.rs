@@ -5,6 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
+
+mod common;
+
 use ember_node::git::git_prs::{check_class, merge_gate, parse_prs, CheckClass, GitPrChecks, GitPrReview, GitPrState};
 use ember_node::{api::{self, Node}, config::NodeConfig};
 use serde_json::{json, Value};
@@ -19,12 +22,7 @@ fn install_fake_gh() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let script = scratch().join("fake-gh.sh");
-        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\" > .gh-args\nif [ -f .gh-fail ]; then cat .gh-fail >&2; exit 1; fi\ncat .gh-json\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        common::write_exec_ready(&script, "#!/bin/sh\nprintf '%s\\n' \"$@\" > .gh-args\nif [ -f .gh-fail ]; then cat .gh-fail >&2; exit 1; fi\ncat .gh-json\n");
         std::env::set_var("EMBER_GH_BIN", &script);
         // A plain directory under `.scratch/` must not find the checkout's own repository.
         std::env::set_var("GIT_CEILING_DIRECTORIES", scratch());

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Once;
 
+mod common;
+
 use ember_node::api::{self, Node};
 use ember_node::config::NodeConfig;
 use ember_node::git::*;
@@ -910,11 +912,7 @@ async fn fr_g3_a_configured_ssh_command_is_used_with_batch_mode() {
     // A stand-in for the user's ssh: records its arguments and fails like an unreachable host.
     let script = f.root.join("my-ssh.sh");
     let record = f.root.join("ssh-args.txt");
-    std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 255\n", s(&record))).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    common::write_exec_ready(&script, &format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 255\n", s(&record)));
     git(&repo, &["config", "core.sshCommand", &s(&script)]);
     git(&repo, &["remote", "add", "origin", "ssh://example.invalid/x.git"]);
     let body = GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) };
@@ -938,11 +936,7 @@ async fn fr_g3_a_timeout_kills_the_ssh_child() {
     one_commit(&repo);
     let script = f.root.join("slow-ssh.sh");
     let record = f.root.join("ssh-pid.txt");
-    std::fs::write(&script, format!("#!/bin/sh\necho $$ > '{}'\nsleep 300\n", s(&record))).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    common::write_exec_ready(&script, &format!("#!/bin/sh\necho $$ > '{}'\nsleep 300\n", s(&record)));
     git(&repo, &["config", "core.sshCommand", &s(&script)]);
     git(&repo, &["remote", "add", "origin", "ssh://example.invalid/x.git"]);
     let body = GitRemoteRequest { repo: s(&repo), remote: Some("origin".into()) };
@@ -1001,11 +995,7 @@ async fn fr_g3_a_users_credential_helper_is_used() {
     // The user's askpass: records that it ran and gives no answer.
     let script = f.root.join("askpass.sh");
     let record = f.root.join("askpass-ran.txt");
-    std::fs::write(&script, format!("#!/bin/sh\necho \"$1\" >> '{}'\nexit 1\n", s(&record))).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    common::write_exec_ready(&script, &format!("#!/bin/sh\necho \"$1\" >> '{}'\nexit 1\n", s(&record)));
     git(&repo, &["config", "core.askPass", &s(&script)]);
     git(&repo, &["remote", "add", "origin", &format!("http://127.0.0.1:{port}/x.git")]);
     let t = std::time::Instant::now();

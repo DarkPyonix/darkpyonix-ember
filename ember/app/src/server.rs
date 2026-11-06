@@ -188,10 +188,9 @@ impl IdeLaunch {
             folder: l.folder.clone(),
             endpoint: ose.map(|o| host_port(&o.endpoint)),
             token: ose.map(|o| o.connection_token.clone()),
-            computer: ember
-                .map(|e| e.computer.clone())
-                .filter(|c| !c.is_empty())
-                .or_else(|| Some(l.computer.name.clone()).filter(|c| !c.is_empty())),
+            // The relay path takes the computer's registry id. The display name (`l.computer.name`) is not
+            // an id, and writing it into `/api/computers/{id}/terminal` asked for a computer that does not exist.
+            computer: ember.map(|e| e.computer.clone()).filter(|c| !c.is_empty()),
             server_url: ember
                 .and_then(|e| e.server_url.clone())
                 .filter(|u| !u.is_empty())
@@ -261,12 +260,12 @@ mod editor_connection_tests {
     }
 
     #[test]
-    fn fr_l31_editor_connection_computer_falls_back_to_the_ide_computer() {
+    fn fr_l31_editor_connection_never_uses_the_display_name_as_the_computer_id() {
         let mut l = launch(None).unwrap();
         l.targets[0].launch.as_mut().unwrap().computer = String::new();
-        l.computer.name = "fallback".into();
+        l.computer.name = "이 컴퓨터".into();
         let c = IdeLaunch::editor_connection(Some(&Ok(l)));
-        assert_eq!(c.computer.as_deref(), Some("fallback"));
+        assert_eq!(c.computer, None, "the terminal relay path takes an id; a display name asks for a computer that does not exist");
     }
 
     #[test]

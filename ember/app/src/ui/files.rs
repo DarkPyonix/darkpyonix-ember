@@ -709,6 +709,126 @@ pub fn send_blocker(
     None
 }
 
+// ---------------------------------------------------------------------------------------------
+// The share sheet (FR-L27.7)
+// ---------------------------------------------------------------------------------------------
+
+/// The share sheet's title text for the shared file when nothing can be shared yet.
+pub const SHARE_NO_FILE: &str = "공유할 파일이 없습니다";
+
+/// The explanation under the share sheet (the mockup's note).
+pub const SHARE_NOTE: &str =
+    "휴대폰에서 공유 버튼을 누르면 이 시트가 뜹니다. 받는 장비에서 수락하면 전송이 시작됩니다.";
+
+/// The sheet's own actions (the mockup's list); none of them exists without the transfer
+/// service, so each says [`UNAVAILABLE`].
+pub const SHARE_ACTIONS: [&str; 3] = ["파일에 저장", "채널에 올리기", "프로젝트에 넣기"];
+
+/// What the sheet says when the chosen device is not connected.
+pub const SHARE_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";
+
+/// The mockup shows at most three agents under "팀원에게".
+pub const SHARE_AGENTS_MAX: usize = 3;
+
+/// A device in the sheet's "Ember로 보내기" row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareDevice {
+    pub id: String,
+    pub name: String,
+    pub kind: DeviceKind,
+    pub online: bool,
+    /// The small line under the name: the path when known, else the kind; "꺼짐" when not online.
+    pub caption: String,
+}
+
+/// Every device for the row, online ones first (then by name), so the reachable ones are
+/// at the left. An offline device stays in the row, dimmed, as in the mockup.
+pub fn share_devices(devices: &[Device]) -> Vec<ShareDevice> {
+    let mut rows: Vec<&Device> = devices.iter().collect();
+    rows.sort_by(|a, b| {
+        (a.presence != Presence::Online)
+            .cmp(&(b.presence != Presence::Online))
+            .then_with(|| a.presence.rank().cmp(&b.presence.rank()))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows.into_iter()
+        .map(|d| {
+            let online = d.presence == Presence::Online;
+            let caption = if online {
+                path_label(d.path, None).unwrap_or_else(|| d.kind.label().to_string())
+            } else {
+                "꺼짐".to_string()
+            };
+            ShareDevice {
+                id: d.id.clone(),
+                name: d.name.clone(),
+                kind: d.kind,
+                online,
+                caption,
+            }
+        })
+        .collect()
+}
+
+/// The agents shown under "팀원에게": the first [`SHARE_AGENTS_MAX`], in the order given.
+pub fn share_agents<T: Clone>(agents: &[T]) -> Vec<T> {
+    agents.iter().take(SHARE_AGENTS_MAX).cloned().collect()
+}
+
+/// What a tap on a receiver does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareTap {
+    /// Nothing is sent; the sheet says why.
+    Blocked(&'static str),
+    /// Hand the files to the service for this receiver.
+    Send(SendTarget),
+}
+
+/// A tap on a device or an agent. An offline device and a missing service or file are
+/// blocked with their reason; nothing reports success without the service.
+pub fn share_tap(
+    target: &SendTarget,
+    devices: &[Device],
+    files: &[String],
+    picker_available: bool,
+    service_ready: bool,
+) -> ShareTap {
+    if let SendTarget::Device(id) = target {
+        let online = devices
+            .iter()
+            .find(|d| d.id == *id)
+            .is_some_and(|d| d.presence == Presence::Online);
+        if !online {
+            return ShareTap::Blocked(SHARE_OFFLINE);
+        }
+    }
+    let draft = SendDraft {
+        target: Some(target.clone()),
+        files: files.to_vec(),
+    };
+    match send_blocker(&draft, picker_available, service_ready) {
+        Some(why) => ShareTap::Blocked(why),
+        None => ShareTap::Send(target.clone()),
+    }
+}
+
+/// What the file card of the sheet shows: the title, and the reason when it has no file.
+pub fn share_file_card(files: &[String], picker_available: bool) -> (String, Option<&'static str>) {
+    match files {
+        [] => (
+            SHARE_NO_FILE.to_string(),
+            Some(if picker_available {
+                PICK_FILES
+            } else {
+                FILE_PICK_UNAVAILABLE
+            }),
+        ),
+        [one] => (one.clone(), None),
+        [first, rest @ ..] => (format!("{first} 외 {}개", rest.len()), None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,6 +1302,67 @@ mod tests {
                 "plain ending: {text}"
             );
             assert!(!text.contains('\u{2014}'), "em-dash: {text}");
+        }
+    }
+
+    #[test]
+    fn fr_l27_7_share_devices_list_online_first_and_dim_the_rest() {
+        let mut a = dev("a", "Zeta", Presence::Online);
+        a.path = Some(PathKind::Direct);
+        let b = dev("b", "alpha", Presence::Offline);
+        let c = dev("c", "Beta", Presence::Online);
+        let d = dev("d", "mid", Presence::Sleeping);
+        let rows = share_devices(&[b, a, d, c]);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["c", "a", "d", "b"]);
+        assert_eq!(rows[0].caption, "컴퓨터");
+        assert_eq!(rows[1].caption, "직접 연결");
+        assert!(!rows[2].online && rows[2].caption == "꺼짐");
+        assert!(share_devices(&[]).is_empty());
+    }
+
+    #[test]
+    fn fr_l27_7_share_agents_are_capped_at_three_in_order() {
+        let v: Vec<u32> = (1..=6).collect();
+        assert_eq!(share_agents(&v), vec![1, 2, 3]);
+        assert_eq!(share_agents(&v[..2]), vec![1, 2]);
+    }
+
+    #[test]
+    fn fr_l27_7_a_tap_never_sends_without_the_service_or_a_file() {
+        let on = dev("on", "맥", Presence::Online);
+        let off = dev("off", "PC", Presence::Offline);
+        let devs = [on, off];
+        let t_on = SendTarget::Device("on".into());
+        let t_off = SendTarget::Device("off".into());
+        let file = vec!["a.png".to_string()];
+        assert_eq!(share_tap(&t_off, &devs, &file, true, true), ShareTap::Blocked(SHARE_OFFLINE));
+        assert_eq!(share_tap(&SendTarget::Device("none".into()), &devs, &file, true, true), ShareTap::Blocked(SHARE_OFFLINE));
+        assert_eq!(share_tap(&t_on, &devs, &file, true, false), ShareTap::Blocked(UNAVAILABLE));
+        assert_eq!(share_tap(&t_on, &devs, &[], false, true), ShareTap::Blocked(FILE_PICK_UNAVAILABLE));
+        assert_eq!(share_tap(&t_on, &devs, &file, true, true), ShareTap::Send(t_on.clone()));
+        // An agent is always online, the other blockers still apply.
+        let ag = SendTarget::Agent("s1".into());
+        assert_eq!(share_tap(&ag, &devs, &[], false, false), ShareTap::Blocked(UNAVAILABLE));
+        assert_eq!(share_tap(&ag, &devs, &file, true, true), ShareTap::Send(ag.clone()));
+    }
+
+    #[test]
+    fn fr_l27_7_the_file_card_says_why_it_is_empty() {
+        let (t, why) = share_file_card(&[], false);
+        assert_eq!(t, SHARE_NO_FILE);
+        assert_eq!(why, Some(FILE_PICK_UNAVAILABLE));
+        assert_eq!(share_file_card(&["a.png".into()], true), ("a.png".to_string(), None));
+        assert_eq!(share_file_card(&["a.png".into(), "b".into(), "c".into()], true).0, "a.png 외 2개");
+    }
+
+    #[test]
+    fn fr_l27_7_the_share_texts_are_polite_and_have_no_em_dash() {
+        let mut all: Vec<&str> = vec![SHARE_NO_FILE, SHARE_NOTE, SHARE_OFFLINE];
+        all.extend(SHARE_ACTIONS);
+        for t in all {
+            assert!(!t.ends_with('다') || t.ends_with("니다"), "plain ending: {t}");
+            assert!(!t.contains('\u{2014}'), "em-dash: {t}");
         }
     }
 }

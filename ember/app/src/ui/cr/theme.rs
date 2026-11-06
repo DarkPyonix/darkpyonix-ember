@@ -163,6 +163,23 @@ impl EmberTheme {
     }
 }
 
+/// WCAG relative luminance of an opaque colour (the alpha byte is ignored).
+pub fn luminance(c: Color) -> f64 {
+    let lin = |v: u32| {
+        let s = v as f64 / 255.0;
+        if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    };
+    let v = c.to_argb();
+    0.2126 * lin((v >> 16) & 0xff) + 0.7152 * lin((v >> 8) & 0xff) + 0.0722 * lin(v & 0xff)
+}
+
+/// WCAG contrast ratio of two opaque colours, 1.0 to 21.0 (NFR-L3 contrast checks).
+pub fn contrast_ratio(a: Color, b: Color) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 pub fn paint(c: Color) -> Paint {
     Paint::Literal(c)
 }
@@ -627,5 +644,67 @@ mod tests {
         let expected = Modifier::new().shadow(css[1]).shadow(css[0]);
         assert_eq!(with_shadows(Modifier::new(), css.clone()), expected);
         assert_ne!(expected, Modifier::new().shadow(css[0]).shadow(css[1]));
+    }
+
+    // NFR-L3, #510: dark inputs, dividers and the disabled primary button follow the mockup
+    // tokens. The contrast numbers are in the failure messages.
+
+    #[test]
+    fn nfr_l3_dark_field_tokens_are_dark() {
+        // Fields draw `surface` on a `line` border, the chip frame `surface_2`; the composer
+        // and searches are bare on a `surface` card. None may be the light grey of the toolkit.
+        for (name, c) in [("surface", DARK.surface), ("surface_2", DARK.surface_2), ("line", DARK.line), ("hover", DARK.hover), ("bg", DARK.bg)] {
+            assert!(luminance(c) < 0.03, "dark {name} is not dark: luminance {:.3}", luminance(c));
+        }
+        assert!(luminance(LIGHT.surface) > 0.8);
+    }
+
+    #[test]
+    fn nfr_l3_placeholder_reads_on_its_field_in_both_themes() {
+        // The mockup sets `.field::placeholder` in `--muted`.
+        for (scheme, p) in [("light", &LIGHT), ("dark", &DARK)] {
+            for (field, fill) in [("surface", p.surface), ("surface_2", p.surface_2)] {
+                let r = contrast_ratio(p.muted, fill);
+                assert!(r >= 3.0, "{scheme} muted on {field} is {r:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn nfr_l3_disabled_primary_button_reads_in_both_themes() {
+        use super::super::components::{button_style_for, ButtonKind};
+        for (scheme, p) in [("light", &LIGHT), ("dark", &DARK)] {
+            let s = button_style_for(ButtonKind::Primary, false, false, p);
+            let r = contrast_ratio(s.text, s.fill);
+            assert!(r >= 3.0, "{scheme} disabled primary text on fill is {r:.2}:1");
+            // Still a filled button, not the surface it sits on.
+            assert!(contrast_ratio(s.fill, p.surface) >= 1.5, "{scheme} disabled fill vanishes");
+            // Enabled stays the ink pair; only disabled changed.
+            assert_eq!(button_style_for(ButtonKind::Primary, false, true, p).fill, p.ink);
+            assert_eq!(button_style_for(ButtonKind::Default, false, false, p).fill, p.surface);
+        }
+    }
+
+    #[test]
+    fn nfr_l3_ide_split_is_a_default_button_not_inverted() {
+        use super::super::session::ide_split_style;
+        for p in [&LIGHT, &DARK] {
+            let s = ide_split_style(p);
+            assert_eq!(s.fill, p.surface);
+            assert_eq!(s.border, p.line);
+            assert_eq!(s.divider, p.line);
+            assert!(contrast_ratio(s.ink, s.fill) >= 4.5);
+        }
+        assert!(luminance(ide_split_style(&DARK).fill) < 0.03);
+    }
+
+    #[test]
+    fn nfr_l3_contrast_ratio_matches_wcag_reference_values() {
+        let white = Color::rgb(0xffffff);
+        let black = Color::rgb(0x000000);
+        assert!((contrast_ratio(white, black) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(white, white) - 1.0).abs() < 1e-9);
+        // #767676 on white is the 4.54:1 reference.
+        assert!((contrast_ratio(Color::rgb(0x767676), white) - 4.54).abs() < 0.02);
     }
 }

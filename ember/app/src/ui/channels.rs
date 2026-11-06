@@ -488,6 +488,12 @@ pub const NO_MEMBERS_HINT: &str = "고른 에이전트가 없으면 에이전트
 /// The reason the 만들기 button is off in demo mode, which has no channel list to write to.
 pub const DEMO_NO_CREATE: &str = "데모에서는 채널을 만들 수 없습니다";
 
+/// Whether the 새 채널 sheet opens at start for a review capture: `EMBER_CR_NEWCHANNEL=1` with
+/// `EMBER_CR_ROUTE=channels`, in debug builds only.
+pub fn new_channel_review_hook(env: Option<&str>, route: Option<&str>, debug: bool) -> bool {
+    debug && env == Some("1") && route == Some("channels")
+}
+
 /// The server's `is_forbidden_name_char` (`ember/server/src/channels/invites.rs`): a channel name
 /// is placed in headers an agent reads, so no control, format or line-separator character.
 pub fn is_forbidden_name_char(c: char) -> bool {
@@ -1093,6 +1099,15 @@ mod layout_tests {
         d.set_project("other");
         assert!(d.members.is_empty());
         assert_eq!(d.project, "other");
+    }
+
+    #[test]
+    fn fr_t10_new_channel_review_hook_is_debug_only() {
+        assert!(new_channel_review_hook(Some("1"), Some("channels"), true));
+        assert!(!new_channel_review_hook(Some("1"), Some("channels"), false));
+        assert!(!new_channel_review_hook(None, Some("channels"), true));
+        assert!(!new_channel_review_hook(Some("1"), Some("agents"), true));
+        assert!(!new_channel_review_hook(Some("0"), Some("channels"), true));
     }
 
     #[test]

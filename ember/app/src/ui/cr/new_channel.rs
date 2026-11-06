@@ -33,17 +33,31 @@ pub struct NewChannelState {
     /// The last failure, a fixed sentence.
     failure: MutableState<Option<String>>,
     confirm: MutableState<bool>,
+    /// A review window (debug builds, `EMBER_CR_NEWCHANNEL=1`): sample choices, 만들기 never sends.
+    review: bool,
 }
 
 impl NewChannelState {
     pub fn new() -> NewChannelState {
-        remember(|| NewChannelState {
-            open: mutable_state_of(false),
-            draft: mutable_state_of(NewChannelDraft::default()),
-            generation: mutable_state_of(0),
-            busy: mutable_state_of(false),
-            failure: mutable_state_of(None),
-            confirm: mutable_state_of(false),
+        remember(|| {
+            let review = review_hook();
+            let draft = if review {
+                let (projects, _) = review_sources();
+                let mut d = NewChannelDraft::new(projects.first().map(String::as_str).unwrap_or(""));
+                d.name = "리뷰 채널 (예시)".to_string();
+                d
+            } else {
+                NewChannelDraft::default()
+            };
+            NewChannelState {
+                open: mutable_state_of(review),
+                draft: mutable_state_of(draft),
+                generation: mutable_state_of(0),
+                busy: mutable_state_of(false),
+                failure: mutable_state_of(None),
+                confirm: mutable_state_of(false),
+                review,
+            }
         })
     }
 
@@ -61,6 +75,32 @@ impl NewChannelState {
         self.open.set(false);
         self.confirm.set(false);
     }
+}
+
+/// The review hook (debug builds only): `EMBER_CR_NEWCHANNEL=1` with `EMBER_CR_ROUTE=channels`.
+fn review_hook() -> bool {
+    crate::ui::channels::new_channel_review_hook(
+        std::env::var("EMBER_CR_NEWCHANNEL").ok().as_deref(),
+        std::env::var("EMBER_CR_ROUTE").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+/// Review sample choices: the sample rooms' projects and their agent members.
+fn review_sources() -> (Vec<String>, Vec<AgentChoice>) {
+    let mut projects: Vec<String> = Vec::new();
+    let mut agents: Vec<AgentChoice> = Vec::new();
+    for r in super::channels::sample_rooms() {
+        if !projects.contains(&r.project) {
+            projects.push(r.project.clone());
+        }
+        for m in r.members.iter().filter(|m| m.is_agent) {
+            if !agents.iter().any(|a| a.id == m.id && a.project == r.project) {
+                agents.push(AgentChoice { id: m.id.clone(), project: r.project.clone(), label: m.name.clone(), harness: m.harness.clone() });
+            }
+        }
+    }
+    (projects, agents)
 }
 
 fn project_names() -> Vec<String> {
@@ -174,10 +214,15 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
             CloseAction::Close => st.close(),
         }
     };
-    let projects = project_names();
-    let agents = agent_choices(&all_sessions(), &draft.project);
+    let review = st.review;
+    let (projects, agents) = if review {
+        let (ps, all) = review_sources();
+        (ps, all.into_iter().filter(|a| a.project == draft.project).collect::<Vec<_>>())
+    } else {
+        (project_names(), agent_choices(&all_sessions(), &draft.project))
+    };
     let problem = draft.problem(rooms);
-    let valid = problem.is_none() && feed.is_some() && !busy;
+    let valid = problem.is_none() && (feed.is_some() || review) && !busy;
     let failure = st.failure.get();
     let sheet_open = st.open.get();
 
@@ -249,7 +294,7 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
                 if let Some(f) = failure.as_ref() {
                     Label(f, Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
                 }
-                if feed.is_none() {
+                if feed.is_none() && !review {
                     Label(DEMO_NO_CREATE, Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
                 }
             });
@@ -259,7 +304,9 @@ pub fn NewChannelSheet(st: &NewChannelState, rooms: &[Room], feed: Option<Feed>,
             let (s2, f2, o2) = (st.clone(), feed.clone(), open.clone());
             let (rooms2, agents2) = (rooms.to_vec(), agents.clone());
             AppButton(if busy { "만드는 중" } else { "만들기" }, None, ButtonKind::Primary, true, valid, false, move || {
-                if let Some(f) = &f2 {
+                if s2.review {
+                    notice::post(DEMO_NO_CREATE);
+                } else if let Some(f) = &f2 {
                     create(&s2, f, &o2, &rooms2, &agents2);
                 }
             });

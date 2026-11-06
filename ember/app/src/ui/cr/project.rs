@@ -557,7 +557,7 @@ fn OpenSessionButton(b: &ProjectBox, ui: &SharedUi, small: bool) {
 
 /// A 32 px round icon button from the app's own SVG set (the mockup's `.icon-btn.sm`), named
 /// for assistive technology by `label`.
-fn IconAction(svg: &'static str, label: &'static str, on_click: impl FnMut() + 'static) {
+fn IconAction(svg: &'static str, _label: &'static str, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     Clickable(
         Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),

@@ -54,7 +54,7 @@ use super::components::{
     AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
     FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter,
 };
-use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
+use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
 use super::notice;
 use super::shell::{
     ICON_CHEVRON_DOWN_SVG, ICON_CLOSE_SVG, ICON_CPU_SVG, ICON_PLUS_SVG, ICON_USERS_SVG, NavIcon,
@@ -87,6 +87,7 @@ const NO_PROJECT: &str = "프로젝트가 없습니다";
 const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
+const ICON_CHAT_SVG: &str = include_str!("../../../assets/nav/chat.svg");
 const TERMINAL_SOON: &str = "터미널은 준비 중입니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
 const NO_SESSION: &str = "세션이 없습니다";
@@ -1187,53 +1188,6 @@ pub fn PaneComposer(session: &str, busy: bool) {
         });
 }
 
-/// Compact segmented switcher inside a pane header (`.mini-seg`).
-fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
-    let p = ember_theme().palette;
-    cu::Row()
-        .alignment(Alignment::Center)
-        .modifier(
-            Modifier::new()
-                .height(26.0)
-                .background(paint(p.surface))
-                .border(1.0, paint(p.line))
-                .corner_radius(13.0)
-                .padding(2.0),
-        )
-        .content(move || {
-            for t in PaneToggle::ALL {
-                let selected = cur == t;
-                let (bg, fg) = if selected {
-                    (paint(p.ink), p.ink_text)
-                } else {
-                    (paint(Color::argb(0)), p.muted)
-                };
-                let cb = on_pick.clone();
-                Clickable(
-                    Modifier::new()
-                        .height(22.0)
-                        .background(bg)
-                        .corner_radius(11.0),
-                    Alignment::Center,
-                    move || cb(t),
-                    move || {
-                        cu::Row().alignment(Alignment::Center).content(|| {
-                            cu::Spacer().modifier(Modifier::new().width(8.0));
-                            Label(
-                                t.label(),
-                                Fs::Xs,
-                                if selected { Weight::Semibold } else { Weight::Regular },
-                                Some(paint(fg)),
-                                Some(1),
-                            );
-                            cu::Spacer().modifier(Modifier::new().width(8.0));
-                        });
-                    },
-                );
-            }
-        });
-}
-
 /// One pane of the multi view: header, transcript with approvals, composer.
 pub fn Pane(
     project: &str,
@@ -1342,8 +1296,23 @@ pub fn Pane(
                             } else {
                                 Pill(label, tone.into(), true);
                             }
+                            // One icon button (`.ph-mode`): shows the view it opens, so the
+                            // title keeps the remaining width. TODO(compose-rust#460): the
+                            // accessible name `switch_label()` cannot be set on a Clickable.
                             let tg_seg = toggle.clone();
-                            MiniSeg(cur_toggle, move |t| tg_seg.set(t));
+                            let to = cur_toggle.other();
+                            Clickable(
+                                Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
+                                Alignment::Center,
+                                move || tg_seg.set(to),
+                                move || {
+                                    let icon = match to {
+                                        PaneToggle::Terminal => ICON_TERMINAL_SVG,
+                                        PaneToggle::Conversation => ICON_CHAT_SVG,
+                                    };
+                                    NavIcon(icon, p.muted.to_argb(), 14.0)
+                                },
+                            );
 
                             let enl = on_enlarge.clone();
                             let id_enl = id.clone();
@@ -4272,7 +4241,7 @@ pub fn SessionScreen(focus: Option<String>) {
     let show_rail = is_tablet_rail || (!is_phone && rail_collapsed.get());
     let show_column = !is_phone && !show_rail;
     let chips_below = view_chips_below(window.width_dp);
-    let hide_view_lbl = window.width_dp < 1280.0 && !chips_below;
+    let hide_view_lbl = crate::ui::session::view_seg_icon_only(window.width_dp);
     let show_btn_lbl = window.width_dp >= 1400.0;
     let show_web_lbl = window.width_dp >= 1400.0;
 
@@ -4618,7 +4587,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                     )
                                     .content(|| {
                                         let sv = set_view.clone();
-                                        ViewSeg(view_now, false, true, move |v| sv(v));
+                                        ViewSeg(view_now, hide_view_lbl, true, move |v| sv(v));
                                     });
                             }
 

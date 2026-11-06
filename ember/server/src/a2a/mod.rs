@@ -15,6 +15,7 @@
 pub mod api;
 pub mod channel;
 pub mod client;
+pub mod mcp;
 pub mod mention;
 pub mod store;
 pub mod team;

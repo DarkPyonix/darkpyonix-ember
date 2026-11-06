@@ -1770,6 +1770,9 @@ pub fn stash_button_text(action: StashAction, armed: bool) -> &'static str {
 /// The line under an entry whose 적용 or 꺼내기 is armed on a dirty tree.
 pub const STASH_DIRTY_WARNING: &str = "작업 중인 변경이 있습니다. 충돌할 수 있습니다.";
 
+/// Added under the warning when 꺼내기 is armed: unlike 적용 it removes the stash on success.
+pub const STASH_POP_NOTE: &str = "꺼내기는 성공하면 이 스태시를 삭제합니다.";
+
 /// The accessible name of one entry's button: it names the entry, so a screen reader hears more
 /// than three identical "적용" buttons (#350).
 pub fn stash_button_label(index: u32, message: &str, verb: &str) -> String {
@@ -3377,6 +3380,7 @@ rename to new.txt
         assert_eq!(stash_button_text(StashAction::Apply, true), "그래도 적용합니다");
         assert_eq!(stash_button_text(StashAction::Pop, true), "그래도 꺼냅니다");
         assert_eq!(STASH_DIRTY_WARNING, "작업 중인 변경이 있습니다. 충돌할 수 있습니다.");
+        assert!(STASH_POP_NOTE.contains("삭제"), "the pop warning says the stash is removed");
     }
 
     #[test]

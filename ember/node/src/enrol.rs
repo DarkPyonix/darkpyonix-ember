@@ -243,14 +243,15 @@ pub enum WriteError {
     RolledBack(anyhow::Error),
     /// The undo failed too: `enrol.json` now holds the NEW enrolment.
     NewKept(anyhow::Error),
-    /// Both files are in place; only the final directory fsync failed. Nothing is undone.
-    NotSynced(anyhow::Error),
+    /// Both files are in place; only the final directory fsync failed. Nothing is undone. The
+    /// report says what the write did, so the caller can still tell the user about a new peer.
+    NotSynced(anyhow::Error, WriteReport),
 }
 
 impl WriteError {
     fn inner(&self) -> &anyhow::Error {
         match self {
-            WriteError::Refused(e) | WriteError::RolledBack(e) | WriteError::NewKept(e) | WriteError::NotSynced(e) => e,
+            WriteError::Refused(e) | WriteError::RolledBack(e) | WriteError::NewKept(e) | WriteError::NotSynced(e, _) => e,
         }
     }
 }
@@ -399,10 +400,10 @@ fn commit(
     // The data renames succeeded; a failed sync is reported but the files are kept.
     // On macOS `sync_all` is fsync, not F_FULLFSYNC: the drive may still hold the data in its cache.
     sync(dir).map_err(|e| {
-        WriteError::NotSynced(anyhow::anyhow!(
-            "enrol.json was written, but syncing {} failed ({e}); the files are kept",
-            dir.display()
-        ))
+        WriteError::NotSynced(
+            anyhow::anyhow!("enrol.json was written, but syncing {} failed ({e}); the files are kept", dir.display()),
+            WriteReport { peer_added: stage.peers.is_some() },
+        )
     })
 }
 
@@ -440,6 +441,94 @@ fn write_with(
     result.map(|()| WriteReport { peer_added: stage.peers.is_some() })
 }
 
+/// The existing `enrol.json` as `write_with` keeps it for a roll back: its bytes and mode. The
+/// same checks run in [`preflight`] before the redeem, so the two cannot drift. `open_regular_owned`
+/// already refuses a link, a non-regular file and a foreign owner; the caller's own `lstat` checks
+/// elsewhere are kept as a second layer on purpose (defence in depth), not because either alone is
+/// insufficient.
+fn read_previous_enrol(path: &Path) -> anyhow::Result<(Vec<u8>, u32)> {
+    let file = open_regular_owned(path)?;
+    let mode = file.metadata().with_context(|| format!("cannot stat {}", path.display()))?.permissions().mode() & 0o777;
+    Ok((read_capped(file, path)?, mode))
+}
+
+/// The existing `allowed-peers` as (text, mode), `Ok(None)` when it is missing. A symlink, a
+/// non-regular file, a file of another user, an oversized or non-UTF-8 file is an error. Shared by
+/// [`prepare`] and [`preflight`] so the two cannot drift. The `lstat` checks here and the
+/// `O_NOFOLLOW` open in `open_regular_owned` overlap on purpose: two layers (defence in depth),
+/// the first gives the clearer message, the second closes the window between stat and open.
+fn read_peers_file(peers_dst: &Path) -> anyhow::Result<Option<(String, u32)>> {
+    match fs::symlink_metadata(peers_dst) {
+        Ok(m) => {
+            anyhow::ensure!(
+                !m.file_type().is_symlink(),
+                "{} is a symbolic link; it is not replaced (point the state directory at the real file)",
+                peers_dst.display()
+            );
+            anyhow::ensure!(m.file_type().is_file(), "{} is not a regular file; it is not replaced", peers_dst.display());
+            anyhow::ensure!(m.uid() == euid(), "{} is not owned by this user; it is not replaced", peers_dst.display());
+            let file = open_regular_owned(peers_dst)?;
+            let mode = file.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+            // Capped like enrol.json: a bigger file is refused, never read whole.
+            let bytes = read_capped(file, peers_dst)?;
+            let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", peers_dst.display()))?;
+            Ok(Some((text, mode)))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow::Error::new(err).context(format!("cannot stat {}", peers_dst.display()))),
+    }
+}
+
+/// Refuses, before the server hands the credential over, what [`write_enrolment`] would refuse
+/// afterwards (the server gives the credential out once, so a refusal after delivery loses it).
+/// Under the same lock; changes nothing and leaves no file behind. Checks:
+/// - with `replace`, an existing `enrol.json` that the hardened reader cannot read (link, not
+///   regular, foreign owner, over 64 KiB). Without `replace` the plain "already exists" refusal
+///   stays in the caller.
+/// - an existing `allowed-peers` that is a link, not regular, foreign, over 64 KiB, not UTF-8, or
+///   does not parse. It is checked whether or not the server will turn out to be trusted: whether
+///   the id is added is only known after the delivery.
+/// - the state dir is writable (a `.enrol-preflight.<16 hex>.tmp` is created with mode 0600 and
+///   removed again).
+pub fn preflight(lock: &EnrolLock, replace: bool) -> anyhow::Result<()> {
+    let dir = lock.dir();
+    let enrol_dst = dir.join(ENROL_FILE);
+    if replace {
+        match fs::symlink_metadata(&enrol_dst) {
+            Ok(_) => {
+                read_previous_enrol(&enrol_dst).map_err(|e| {
+                    anyhow::anyhow!("cannot replace the existing enrolment: {e:#}; move or remove that file, then run enrol again")
+                })?;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context(format!("cannot stat {}", enrol_dst.display())));
+            }
+        }
+    }
+    let peers_dst = crate::transport::allowed_peers_file(dir);
+    let fix = |e: anyhow::Error| {
+        anyhow::anyhow!("{e:#}; fix or move that file, then run enrol again (nothing was redeemed)")
+    };
+    if let Some((text, _)) = read_peers_file(&peers_dst).map_err(fix)? {
+        crate::transport::parse_peer_list(&text).map_err(|e| fix(e.context(format!("{} does not parse", peers_dst.display()))))?;
+    }
+    let probe = temp_name(dir, ".enrol-preflight", &suffix());
+    match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&probe) {
+        Ok(f) => {
+            drop(f);
+            let _ = fs::remove_file(&probe);
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "the state directory {} is not writable; fix its permissions, then run enrol again (nothing was redeemed)",
+                dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Every check and the staging of both files, under the lock. Anything that fails here changed
 /// nothing (staged temps are removed).
 fn prepare(
@@ -460,37 +549,13 @@ fn prepare(
         anyhow::bail!("{} already exists; pass --replace to replace it", enrol_dst.display());
     }
     // What to put back if the second rename fails.
-    let previous: Option<(Vec<u8>, u32)> = if exists {
-        let file = open_regular_owned(&enrol_dst)?;
-        let mode = file.metadata().with_context(|| format!("cannot stat {}", enrol_dst.display()))?.permissions().mode() & 0o777;
-        Some((read_capped(file, &enrol_dst)?, mode))
-    } else {
-        None
-    };
+    let previous: Option<(Vec<u8>, u32)> = if exists { Some(read_previous_enrol(&enrol_dst)?) } else { None };
 
     // The new allowed-peers text, decided before anything is created.
     let peers_dst = crate::transport::allowed_peers_file(dir);
     let mut peers_new: Option<(String, u32)> = None;
     if let Some(id) = allow_peer {
-        let (existing, mode) = match fs::symlink_metadata(&peers_dst) {
-            Ok(m) => {
-                anyhow::ensure!(
-                    !m.file_type().is_symlink(),
-                    "{} is a symbolic link; it is not replaced (point the state directory at the real file)",
-                    peers_dst.display()
-                );
-                anyhow::ensure!(m.file_type().is_file(), "{} is not a regular file; it is not replaced", peers_dst.display());
-                anyhow::ensure!(m.uid() == euid(), "{} is not owned by this user; it is not replaced", peers_dst.display());
-                let file = open_regular_owned(&peers_dst)?;
-                let mode = file.metadata().map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
-                // Capped like enrol.json: a bigger file is refused, never read whole.
-                let bytes = read_capped(file, &peers_dst)?;
-                let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{} is not valid UTF-8", peers_dst.display()))?;
-                (text, mode)
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => (String::new(), 0o600),
-            Err(err) => return Err(anyhow::Error::new(err).context(format!("cannot stat {}", peers_dst.display()))),
-        };
+        let (existing, mode) = read_peers_file(&peers_dst)?.unwrap_or((String::new(), 0o600));
         if let Some(text) = append_allowed_peer(&existing, id)? {
             peers_new = Some((text, mode));
         }
@@ -1039,7 +1104,7 @@ mod tests {
         let new = peer();
         let failing_sync = |_: &Path| -> io::Result<()> { Err(io::Error::other("injected sync")) };
         let err = put_sync(d.path(), &sample(), Some(&new), &failing_sync).unwrap_err();
-        assert!(matches!(err, WriteError::NotSynced(_)), "{err:?}");
+        assert!(matches!(&err, WriteError::NotSynced(_, r) if r.peer_added), "{err:?}");
         assert!(err.to_string().contains("the files are kept"), "{err}");
         assert_eq!(read_enrolment(d.path()).unwrap(), Some(sample()), "enrol.json holds the new enrolment");
         assert_eq!(
@@ -1135,5 +1200,139 @@ mod tests {
         fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
         drop(lock_state_dir(&existing).unwrap());
         assert_eq!(mode(&existing), 0o755, "an existing dir is not chmodded");
+    }
+
+    // ---- preflight (N2b): every refusal comes before any network ------------------------------
+
+    fn locked(d: &Path) -> EnrolLock {
+        lock_state_dir(d).unwrap()
+    }
+
+    #[test]
+    fn fr_c2_node_preflight_passes_on_a_clean_dir_and_leaves_no_file() {
+        let d = tempfile::tempdir().unwrap();
+        let lock = locked(d.path());
+        preflight(&lock, false).unwrap();
+        preflight(&lock, true).unwrap();
+        assert!(names(d.path()).is_empty(), "{:?}", names(d.path()));
+    }
+
+    #[test]
+    fn fr_c2_node_preflight_passes_with_a_good_enrol_json_and_allowed_peers() {
+        let d = tempfile::tempdir().unwrap();
+        put(d.path(), &sample(), None, false).unwrap();
+        fs::write(crate::transport::allowed_peers_file(d.path()), format!("# mine\n{}\n", peer())).unwrap();
+        let lock = locked(d.path());
+        preflight(&lock, true).unwrap();
+        assert_eq!(names(d.path()), vec!["allowed-peers".to_string(), ENROL_FILE.to_string()]);
+    }
+
+    #[test]
+    fn fr_c2_node_preflight_replace_refuses_an_unreadable_enrol_json() {
+        // A symlink.
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("elsewhere");
+        fs::write(&target, b"{}").unwrap();
+        std::os::unix::fs::symlink(&target, d.path().join(ENROL_FILE)).unwrap();
+        let lock = locked(d.path());
+        let err = preflight(&lock, true).unwrap_err().to_string();
+        assert!(err.contains("symbolic link") && err.contains("enrol again"), "{err}");
+        // Without replace the plain "exists" refusal is the caller's: preflight does not look.
+        preflight(&lock, false).unwrap();
+        drop(lock);
+        // A directory (not a regular file).
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join(ENROL_FILE)).unwrap();
+        let lock = locked(d.path());
+        let err = preflight(&lock, true).unwrap_err().to_string();
+        assert!(err.contains("not a regular file") || err.contains("cannot open"), "{err}");
+        drop(lock);
+        // Over 64 KiB.
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join(ENROL_FILE), vec![b' '; (MAX_FILE_BYTES + 1) as usize]).unwrap();
+        let lock = locked(d.path());
+        let err = preflight(&lock, true).unwrap_err().to_string();
+        assert!(err.contains("larger than"), "{err}");
+        assert!(!names(d.path()).iter().any(|n| n.contains("preflight")));
+    }
+
+    #[test]
+    fn fr_c2_node_preflight_refuses_a_bad_allowed_peers() {
+        let cases: Vec<(&str, Box<dyn Fn(&Path)>, &str)> = vec![
+            (
+                "symlink",
+                Box::new(|d: &Path| {
+                    let t = d.join("real");
+                    fs::write(&t, b"").unwrap();
+                    std::os::unix::fs::symlink(&t, crate::transport::allowed_peers_file(d)).unwrap();
+                }),
+                "symbolic link",
+            ),
+            (
+                "dangling symlink",
+                Box::new(|d: &Path| {
+                    std::os::unix::fs::symlink(d.join("nowhere"), crate::transport::allowed_peers_file(d)).unwrap();
+                }),
+                "symbolic link",
+            ),
+            (
+                "directory",
+                Box::new(|d: &Path| fs::create_dir(crate::transport::allowed_peers_file(d)).unwrap()),
+                "not a regular file",
+            ),
+            (
+                "too big",
+                Box::new(|d: &Path| {
+                    fs::write(crate::transport::allowed_peers_file(d), vec![b'#'; (MAX_FILE_BYTES + 1) as usize]).unwrap()
+                }),
+                "larger than",
+            ),
+            (
+                "not utf-8",
+                Box::new(|d: &Path| fs::write(crate::transport::allowed_peers_file(d), [0xffu8, 0xfe, b'\n']).unwrap()),
+                "UTF-8",
+            ),
+            (
+                "does not parse",
+                Box::new(|d: &Path| fs::write(crate::transport::allowed_peers_file(d), b"not-a-key\n").unwrap()),
+                "does not parse",
+            ),
+        ];
+        for (label, plant, want) in cases {
+            let d = tempfile::tempdir().unwrap();
+            plant(d.path());
+            let lock = locked(d.path());
+            let err = preflight(&lock, false).unwrap_err().to_string();
+            assert!(err.contains(want), "{label}: {err}");
+            assert!(err.contains("nothing was redeemed"), "{label}: says what to do: {err}");
+            assert!(!names(d.path()).iter().any(|n| n.contains("preflight")), "{label}: no probe file left");
+        }
+    }
+
+    #[test]
+    fn fr_c2_node_preflight_refuses_a_state_dir_that_is_not_writable() {
+        if euid() == 0 {
+            return; // root can write anywhere
+        }
+        let d = tempfile::tempdir().unwrap();
+        let lock = locked(d.path());
+        fs::set_permissions(d.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let err = preflight(&lock, false).unwrap_err().to_string();
+        fs::set_permissions(d.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(err.contains("not writable"), "{err}");
+        assert!(!names(d.path()).iter().any(|n| n.contains("preflight")));
+    }
+
+    /// `preflight` and `prepare` use the same readers: whatever the one refuses, the other does.
+    #[test]
+    fn fr_c2_node_preflight_and_write_refuse_the_same_allowed_peers() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(crate::transport::allowed_peers_file(d.path()), b"garbage\n").unwrap();
+        let lock = locked(d.path());
+        assert!(preflight(&lock, false).is_err());
+        let mut e = sample();
+        e.server_peer_id = Some(peer());
+        let id = e.server_peer_id.clone().unwrap();
+        assert!(matches!(write_enrolment(&lock, &e, Some(&id), false), Err(WriteError::Refused(_))));
     }
 }

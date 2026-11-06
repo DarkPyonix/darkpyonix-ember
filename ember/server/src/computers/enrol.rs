@@ -1829,6 +1829,41 @@ mod tests {
         assert!(code_has_shape(mint(&e, T0).code.expose()));
     }
 
+    /// Both kinds of refusal are the same `Refused::Generic` and spend the same budgets, so the
+    /// only difference from outside is that a well-shaped unknown code goes to the store and a
+    /// wrong-shaped one never does. The test makes that visible: it holds the store's connection
+    /// lock. A wrong-shaped code must still be answered at once; a well-shaped one must wait for
+    /// the lock (it can only finish after the lock is released). A `code_has_shape` that always
+    /// said "yes" would block the first call.
+    #[test]
+    fn fr_c2_a_wrong_shaped_code_never_touches_the_store_but_a_well_shaped_one_does() {
+        use std::sync::mpsc;
+        let (store, e) = svc();
+        let wrong = "dpe_wrong".to_string();
+        let well_shaped_unknown = format!("{CODE_PREFIX}{}", "a".repeat(CODE_BODY_CHARS));
+        assert!(code_has_shape(&well_shaped_unknown) && !code_has_shape(&wrong));
+
+        let guard = store.conn();
+        let (tx, rx) = mpsc::channel::<(&'static str, Result<Redeemed, Refused>)>();
+        for (label, code) in [("wrong", wrong), ("shaped", well_shaped_unknown)] {
+            let (e, tx) = (e.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send((label, e.redeem(&code, &info(), T0, "m")));
+            });
+        }
+        let (label, result) = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the wrong-shaped code is answered while the store is locked");
+        assert_eq!(label, "wrong", "the first answer comes from the code that never touches the store");
+        assert_eq!(result, Err(Refused::Generic));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "the well-shaped code needs the store, which is locked"
+        );
+        drop(guard);
+        let (label, result) = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("answered once the lock is free");
+        assert_eq!(label, "shaped");
+        assert_eq!(result, Err(Refused::Generic), "the same refusal in the end");
+    }
+
     #[test]
     fn fr_c1_expired_unknown_and_used_get_the_same_refusal() {
         let (_, e) = svc();

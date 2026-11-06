@@ -331,6 +331,10 @@ impl AgentAdapter for AntigravityAdapter {
         true
     }
 
+    fn binary(&self) -> Option<PathBuf> {
+        Some(self.bin.clone())
+    }
+
     async fn detect(&self) -> Detected {
         let out = Command::new(&self.bin)
             .arg("--version")
@@ -345,7 +349,7 @@ impl AgentAdapter for AntigravityAdapter {
                 version: String::from_utf8_lossy(&o.stdout)
                     .split_whitespace()
                     .next()
-                    .map(String::from),
+                    .and_then(super::version_token),
             },
             _ => Detected { kind: AgentKind::Antigravity, installed: false, version: None },
         }

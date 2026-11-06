@@ -296,7 +296,8 @@ while True: s.accept()[0].close()' "$@"
     let v: Vec<String> =
         std::fs::read_to_string(dir.path().join("start-argv.txt")).unwrap().lines().map(String::from).collect();
     assert_eq!(arg_after(&v, "--server-data-dir"), root.join("local").to_str().unwrap());
-    assert!(v.contains(&"--connection-token".to_string()));
+    assert!(v.contains(&"--connection-token-file".to_string()));
+    assert!(!v.contains(&"--connection-token".to_string()));
     let env = std::fs::read_to_string(dir.path().join("start-env.txt")).unwrap();
     assert!(!env.contains("CARGO_MANIFEST_DIR"), "the server environment leaked into the OSE start:\n{env}");
     assert!(env.lines().any(|l| l.starts_with("PATH=")), "{env}");
@@ -392,4 +393,80 @@ async fn fr_w4_ose_data_dir_a_second_concurrent_install_is_409() {
     let _ = std::fs::remove_file(&started);
     let (st, _) = post(&f.app, "local", r#"{"id":"c.d"}"#, Some(&h)).await;
     assert_ne!(st, StatusCode::CONFLICT);
+}
+
+/// FR-W4 (#461): the connection token is passed as a 0600 file, never on the command line.
+#[tokio::test]
+async fn fr_w4_ose_token_file_keeps_the_token_out_of_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("fake-ose");
+    std::fs::write(
+        &bin,
+        r##"#!/bin/sh
+D="$(dirname "$0")"
+printf '%s\n' "$@" > "$D/start-argv.txt"
+exec python3 -c 'import socket,sys,os
+d=sys.argv[1]; a=sys.argv[2:]
+f=a[a.index("--connection-token-file")+1]
+open(d+"/start-token.txt","w").write(open(f).read())
+open(d+"/start-mode.txt","w").write("%o %o" % (os.stat(f).st_mode & 0o777, os.stat(os.path.dirname(f)).st_mode & 0o777))
+p=int(a[a.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen()
+while True: s.accept()[0].close()' "$D" "$@"
+"##,
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = dir.path().join("ose-data");
+    let folder = dir.path().join("proj");
+    std::fs::create_dir(&folder).unwrap();
+    let m = OseManager::with_data_root(Some(bin), root.clone());
+    let (m, first, second) = tokio::task::spawn_blocking(move || {
+        let first = m.connection(&folder).unwrap();
+        let second = m.connection(&folder).unwrap();
+        (m, first, second)
+    })
+    .await
+    .unwrap();
+    let v: Vec<String> =
+        std::fs::read_to_string(dir.path().join("start-argv.txt")).unwrap().lines().map(String::from).collect();
+    let file = PathBuf::from(arg_after(&v, "--connection-token-file"));
+    assert!(file.starts_with(root.join("local").join("tokens")), "{file:?}");
+    assert!(!v.iter().any(|a| a == "--connection-token"), "{v:?}");
+    assert!(!v.iter().any(|a| a.contains(&first.connection_token)), "token in argv: {v:?}");
+    assert_eq!(first.connection_token.len(), 64);
+    assert_eq!(std::fs::read_to_string(dir.path().join("start-token.txt")).unwrap(), first.connection_token);
+    assert_eq!(std::fs::read_to_string(dir.path().join("start-mode.txt")).unwrap(), "600 700");
+    assert_eq!(mode(&file), 0o600);
+    assert_eq!(mode(&root.join("local").join("tokens")), 0o700);
+    assert_eq!(second.connection_token, first.connection_token, "the running process is reused");
+    assert_eq!(second.endpoint, first.endpoint);
+    drop(m);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while file.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!file.exists(), "the token file must be removed when the manager is dropped");
+}
+
+/// A stale file at the token path is replaced, and nothing is left when the start fails.
+#[tokio::test]
+async fn fr_w4_ose_token_file_replaces_a_stale_file_and_is_removed_when_the_start_fails() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("fake-ose");
+    std::fs::write(&bin, "#!/bin/sh\nexit 3\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = dir.path().join("ose-data");
+    let folder = dir.path().join("proj");
+    std::fs::create_dir(&folder).unwrap();
+    let canonical = folder.canonicalize().unwrap();
+    let hex: String = Sha256::digest(canonical.as_os_str().as_encoded_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let tokens = root.join("local").join("tokens");
+    std::fs::create_dir_all(&tokens).unwrap();
+    let stale = tokens.join(format!("{hex}.token"));
+    std::fs::write(&stale, "old").unwrap();
+    let m = OseManager::with_data_root(Some(bin), root.clone());
+    let err = tokio::task::spawn_blocking(move || m.connection(&folder).unwrap_err()).await.unwrap();
+    assert!(err.contains("exited") || err.contains("start"), "{err}");
+    assert!(!stale.exists(), "the file of a failed start is removed");
 }

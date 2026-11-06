@@ -19,6 +19,8 @@ pub mod git_commit;
 pub mod git_github;
 #[path = "git_log.rs"]
 pub mod git_log;
+#[path = "git_merge.rs"]
+pub mod git_merge;
 #[path = "git_prs.rs"]
 pub mod git_prs;
 #[path = "git_stash.rs"]

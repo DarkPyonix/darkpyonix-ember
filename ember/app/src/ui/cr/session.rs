@@ -45,7 +45,6 @@ use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
 use crate::ui::project::{Member, display_name, project_boxes, project_boxes_with_archived, status_pill};
-use crate::ui::shell::NavMenu;
 
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
@@ -4290,6 +4289,9 @@ pub fn SessionScreen(focus: Option<String>) {
     let project_menu = remember(|| mutable_state_of(false));
     let more_menu = remember(|| mutable_state_of(false));
     let web_menu = remember(|| mutable_state_of(false));
+    // 버전 관리 opens as a sheet over the conversation (FR-L18, #495); `EMBER_CR_SESSION_VCS=1`
+    // opens it at start for captures.
+    let vcs_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_VCS").as_deref() == Ok("1")));
     let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
 
     let show_archived = ui.show_archived.get();
@@ -4622,17 +4624,13 @@ pub fn SessionScreen(focus: Option<String>) {
                                             false,
                                             move || nm.set(true),
                                         );
-                                        let u = ui.clone();
-                                        let c = current.clone();
+                                        let vo = vcs_open.clone();
                                         ToolbarBtn(
                                             ICON_GIT_SVG,
                                             "버전 관리",
                                             show_btn_lbl,
                                             false,
-                                            move || {
-                                                u.set_selected_project(Some(c.clone()));
-                                                u.set_menu(NavMenu::VersionControl);
-                                            },
+                                            move || vo.set(true),
                                         );
                                         let wm = open_web_menu.clone();
                                         ToolbarBtn(
@@ -4790,6 +4788,12 @@ pub fn SessionScreen(focus: Option<String>) {
                 NewMemberSheet(&current, new_member_open.get(), move || nm_d.set(false));
             }
 
+            // 버전 관리 sheet over the conversation (#495)
+            {
+                let vo_d = vcs_open.clone();
+                super::vcs::VcsSheet(&current, vcs_open.get(), move || vo_d.set(false));
+            }
+
             // Web pages OptionSheet
             {
                 let load_now = web_pages.get();
@@ -4844,8 +4848,7 @@ pub fn SessionScreen(focus: Option<String>) {
                 ];
                 let mm_d = more_menu.clone();
                 let nm_m = new_member_open.clone();
-                let ui_m = ui.clone();
-                let cur_m = current.clone();
+                let vcs_m = vcs_open.clone();
                 let open_web = open_web_menu.clone();
                 OptionSheet(
                     more_menu.get(),
@@ -4855,10 +4858,7 @@ pub fn SessionScreen(focus: Option<String>) {
                     move || mm_d.set(false),
                     move |idx| match idx {
                         0 => nm_m.set(true),
-                        1 => {
-                            ui_m.set_selected_project(Some(cur_m.clone()));
-                            ui_m.set_menu(NavMenu::VersionControl);
-                        }
+                        1 => vcs_m.set(true),
                         2 => open_web(),
                         _ => {}
                     },

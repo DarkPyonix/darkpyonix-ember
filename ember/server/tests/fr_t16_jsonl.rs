@@ -253,7 +253,10 @@ async fn fr_t16_recovery_does_not_repair_a_gap_in_the_middle() {
     post(&store, &core, "two");
     let m3 = post(&store, &core, "three");
     let (a, b) = (expected(&store, &core, m1.seq), expected(&store, &core, m3.seq));
-    let without_middle = format!("{a}{}", &b[b.rfind("{\"seq\":").unwrap()..]);
+    // `expected` is cumulative (every human row up to the seq): the file without the middle line is
+    // the first line plus the last line of the cumulative text.
+    let last = b.lines().last().unwrap();
+    let without_middle = format!("{a}{last}\n");
     write_file(dir.path(), &core, without_middle.as_bytes());
     let report = JsonlLog::new(dir.path()).recover(&store);
     assert_eq!((report.repaired_lines, report.truncated_bytes), (0, 0));
@@ -334,7 +337,8 @@ async fn fr_t16_recovery_never_writes_agent_or_system_messages() {
     store.post_channel_message(&core, &agent, "agent says").unwrap();
     store.post_channel_system_message(&core, "not reached").unwrap();
     let m = post(&store, &core, "human");
-    store.post_channel_message(&web, &agent, "only an agent").unwrap();
+    // The agent is a member of the first channel only; the other channel gets a system message.
+    store.post_channel_system_message(&web, "only a system message").unwrap();
     let report = JsonlLog::new(dir.path()).recover(&store);
     assert_eq!(report.repaired_lines, 1);
     assert_eq!(std::fs::read_to_string(file_of(dir.path(), &core)).unwrap(), expected(&store, &core, m.seq));

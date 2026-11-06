@@ -2965,7 +2965,7 @@ pub fn merge_tap(action: MergeAction, armed: Option<(usize, i64)>, now: i64) -> 
 }
 
 /// The visible text of a banner button.
-pub fn merge_button_text(action: MergeAction, armed: bool) -> &'static str {
+pub fn banner_button_text(action: MergeAction, armed: bool) -> &'static str {
     match (action, armed) {
         (MergeAction::Abort, false) => "병합 취소",
         (MergeAction::Abort, true) => "정말 취소합니다",
@@ -4867,9 +4867,9 @@ rename to new.txt
         assert_eq!(merge_tap(MergeAction::Abort, armed, 1_600), DeleteTap::Confirm);
         assert_eq!(merge_tap(MergeAction::Abort, armed, 5_000), DeleteTap::Expired);
         assert_eq!(merge_tap(MergeAction::Commit, armed, 1_600), DeleteTap::Arm);
-        assert_eq!(merge_button_text(MergeAction::Abort, true), "정말 취소합니다");
-        assert_eq!(merge_button_text(MergeAction::Commit, true), "정말 커밋합니다");
-        assert_eq!(merge_button_text(MergeAction::Commit, false), "병합 커밋");
+        assert_eq!(banner_button_text(MergeAction::Abort, true), "정말 취소합니다");
+        assert_eq!(banner_button_text(MergeAction::Commit, true), "정말 커밋합니다");
+        assert_eq!(banner_button_text(MergeAction::Commit, false), "병합 커밋");
     }
 
     #[test]

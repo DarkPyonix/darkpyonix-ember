@@ -343,8 +343,9 @@ async fn main() -> anyhow::Result<()> {
             let l = d.bind().await.map_err(|e| anyhow::anyhow!("guest door: cannot bind {}: {e}", d.listen))?;
             if d.is_remote() {
                 tracing::warn!(
-                    "guest door on {} is reachable from that network; it speaks plain HTTP and anyone \
-                     with an invite link can join a channel; put TLS in front of it",
+                    "guest door on {} is reachable from that network (EMBER_GUEST_LISTEN_ALLOW_REMOTE=1); it \
+                     speaks plain HTTP and anyone with an invite link can join a channel; put TLS in \
+                     front of it",
                     d.listen
                 );
             } else {
@@ -382,12 +383,15 @@ async fn main() -> anyhow::Result<()> {
     // The guest router is built only when the door is on, wrapped only by the door's guards, and
     // never merged into `app` (not under auth::protect either).
     let guest_app = guest_door.as_ref().map(|d| {
-        d.wrap(ember_server::channels::guest::guest_router_with_a2a(
-            store_for_guest.clone(),
-            sessions.clone(),
-            &data_dir,
-            a2a.clone(),
-        ))
+        d.wrap_limited(
+            ember_server::channels::guest::guest_router_with_a2a(
+                store_for_guest.clone(),
+                sessions.clone(),
+                &data_dir,
+                a2a.clone(),
+            ),
+            d.limits(),
+        )
     });
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))

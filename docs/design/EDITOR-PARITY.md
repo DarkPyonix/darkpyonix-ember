@@ -60,7 +60,7 @@ Written from `.scratch/pz/editor-parity-server-facts.md` (file and line evidence
 |---|---|---|---|---|
 | 1 | IDE computer from the registry and the session's current computer | small | terminal for any computer; prerequisite for 2 and 4 | #454 (built in the PR: `ide.rs` resolves registry plus `EMBER_IDE_COMPUTERS`; `launch.computer` is the registry id; tests `fr_w4_ide_computers.rs`) |
 | 2 | In-process node for the local computer's terminal relay | small to medium | terminal and tasks on the server machine | #455 |
-| 3 | Server relay of node file operations incl. glob and grep | small to medium | native search, tree and read/write for other computers | #456 |
+| 3 | Server relay of node file operations incl. glob and grep | small to medium | native search, tree and read/write for other computers | #456 (built for the read-only subset: `stat`, `lstat`, `read`, `list`, `readlink`, `glob`, `grep` at `POST /api/computers/{id}/fs/{op}`, `computers/fs.rs`, tests `fr_w4_fs_relay_*`, not yet run; the write operations are deliberately not routed and follow in a later change with their own review) |
 | 4 | **Decision**: remote-files model, OSE on the node (large) or the server OSE on the project mount (medium) | decision | remote files, language servers, extensions per computer | #457 |
 | 5 | Authenticated relay of the OSE socket | medium | phone and second computer can connect | #458 |
 | 6 | Extension install route and a data dir per computer (built, not yet compiled or run, see below) | small | extensions view, stable extensions across folders | #459 |

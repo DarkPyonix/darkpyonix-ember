@@ -330,10 +330,32 @@ pub enum RunStatus {
     Missed,
 }
 
+/// Size of the weekday bar chart as `(width, height, gap)` in dp (mockup `.bars2`): 150 tall with
+/// 24 dp bars at 10 dp gaps, and 120 tall with 16 dp bars at 6 dp gaps on a narrow layout.
+pub fn weekday_chart_size(compact: bool) -> (f32, f32, f32) {
+    if compact {
+        (148.0, 120.0, 6.0)
+    } else {
+        (228.0, 150.0, 10.0)
+    }
+}
+
+/// Height of the weekday card content in dp: heading (16) + gap (4) + chart (+1 baseline) + the
+/// 24 dp day-label row + 2 x 16 dp padding, so the card grows to hold the labels (FR-L25).
+pub fn weekday_card_height(narrow: bool) -> f32 {
+    let (_, chart_h, _) = weekday_chart_size(narrow);
+    16.0 + 4.0 + chart_h + 1.0 + 24.0 + 2.0 * 16.0
+}
+
+/// Corner radius of a weekday bar: a pill (half the width), never more than half the height.
+pub fn weekday_bar_radius(w: f32, h: f32) -> f32 {
+    (w / 2.0).min(h / 2.0).max(0.0)
+}
+
 impl RunStatus {
     pub fn label(self) -> &'static str {
         match self {
-            RunStatus::Done => "성공",
+            RunStatus::Done => "완료",
             RunStatus::Failed => "실패",
             RunStatus::Running => "실행 중",
             RunStatus::Skipped => "건너뜀",
@@ -369,7 +391,7 @@ pub fn schedule_line(r: &Routine) -> String {
     }
 }
 
-/// "실행 기록 없음", or "성공 · 3시간 전" from the newest run.
+/// "실행 기록 없음", or "완료 · 3시간 전" from the newest run.
 pub fn last_run_text(runs: &[Run], now: Minutes) -> String {
     match runs.first() {
         None => "실행 기록 없음".into(),
@@ -1355,7 +1377,7 @@ mod tests {
         assert_eq!(last_run_text(&[], now), "실행 기록 없음");
         assert_eq!(
             last_run_text(&[run(now - 180, RunStatus::Done)], now),
-            "성공 · 3시간 전"
+            "완료 · 3시간 전"
         );
         assert_eq!(
             last_run_text(&[run(now - 5, RunStatus::Failed)], now),
@@ -1988,5 +2010,33 @@ mod tests {
             assert!(!s.contains('\u{2014}'));
         }
         assert!(DEMO_RUN_STARTED.contains("시뮬레이션"));
+    }
+
+    #[test]
+    fn fr_l25_routine_run_pill_says_done() {
+        assert_eq!(RunStatus::Done.label(), "완료");
+        assert_eq!(RunStatus::Failed.label(), "실패");
+        assert!(!RunStatus::Done.label().contains("성공"));
+    }
+
+    #[test]
+    fn fr_l25_weekday_card_fits_chart_and_labels() {
+        for narrow in [false, true] {
+            let (_, chart_h, _) = weekday_chart_size(narrow);
+            assert!(weekday_card_height(narrow) >= chart_h + 24.0 + 16.0 + 2.0 * 16.0);
+        }
+    }
+
+    #[test]
+    fn fr_l25_weekday_bars_geometry() {
+        assert_eq!(weekday_chart_size(false), (228.0, 150.0, 10.0));
+        assert_eq!(weekday_chart_size(true), (148.0, 120.0, 6.0));
+        // 24 dp and 16 dp bars, as in the mockup.
+        let bar_w = |(w, _, g): (f32, f32, f32)| (w - 6.0 * g) / 7.0;
+        assert_eq!(bar_w(weekday_chart_size(false)), 24.0);
+        assert_eq!(bar_w(weekday_chart_size(true)), 16.0);
+        assert_eq!(weekday_bar_radius(24.0, 100.0), 12.0);
+        assert_eq!(weekday_bar_radius(24.0, 10.0), 5.0);
+        assert_eq!(weekday_bar_radius(24.0, 0.0), 0.0);
     }
 }

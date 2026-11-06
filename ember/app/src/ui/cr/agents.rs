@@ -1348,7 +1348,7 @@ fn ModelCard(h: AgentHarness, store: &MutableState<LocalStore>, _compact: bool) 
                     Label("모델", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
                 });
                 cu::Box().modifier(Modifier::new().width(120.0)).alignment(Alignment::CenterEnd).content(|| {
-                    Label("플랜별 사용 (Ember 참고 목록)", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));
+                    Label("플랜별 사용 (Ember 참고 목록)", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(2));
                 });
                 cu::Box().modifier(Modifier::new().width(60.0)).alignment(Alignment::CenterEnd).content(|| {
                     Label("목록에 표시", Fs::Xs, Weight::Medium, Some(paint(p.muted)), Some(1));

@@ -1245,12 +1245,12 @@ fn set_default_account(id: String) {
                     reload_accounts().await;
                     None
                 }
-                Err(e) => Some(e.to_string()),
+                Err(e) => Some(crate::ui::agents::server_error_status(&e)),
             }
         },
         |failed| {
-            if let Some(e) = failed {
-                post_notice(&format!("기본 계정을 바꾸지 못했습니다: {e}"));
+            if let Some(status) = failed {
+                post_notice(&format!("기본 계정을 바꾸지 못했습니다. {}", crate::ui::agents::account_error_ko(status)));
             }
         },
     );
@@ -1493,7 +1493,7 @@ fn create_account(add: &MutableState<crate::ui::agents::AddAccount>, example: bo
     crate::services::run_shared(
         async move {
             let s = crate::services::services();
-            let r = s.server.create_account(kind, &label).await.map_err(|e| e.to_string());
+            let r = s.server.create_account(kind, &label).await.map_err(|e| crate::ui::agents::server_error_status(&e));
             if r.is_ok() {
                 reload_accounts().await;
             }
@@ -1503,7 +1503,7 @@ fn create_account(add: &MutableState<crate::ui::agents::AddAccount>, example: bo
             let mut n = st.get_untracked();
             n.phase = match r {
                 Ok(a) => created_phase(&a),
-                Err(e) => AddPhase::Failed(format!("{ADD_FAILED}: {e}")),
+                Err(status) => AddPhase::Failed(format!("{ADD_FAILED}. {}", crate::ui::agents::account_error_ko(status))),
             };
             st.set(n);
         },
@@ -1527,7 +1527,7 @@ fn check_login(add: &MutableState<crate::ui::agents::AddAccount>, id: String) {
     crate::services::run_shared(
         async move {
             let s = crate::services::services();
-            let r = s.server.check_account(&id).await.map(|a| a.account.status).map_err(|e| e.to_string());
+            let r = s.server.check_account(&id).await.map(|a| a.account.status).map_err(|e| crate::ui::agents::server_error_status(&e));
             if r.is_ok() {
                 reload_accounts().await;
             }
@@ -1536,7 +1536,7 @@ fn check_login(add: &MutableState<crate::ui::agents::AddAccount>, id: String) {
         move |r| {
             let line = match r {
                 Ok(status) => check_line(&status),
-                Err(e) => format!("{CHECK_FAILED}: {e}"),
+                Err(status) => format!("{CHECK_FAILED}. {}", crate::ui::agents::account_error_ko(status)),
             };
             set(&st, false, Some(line));
         },

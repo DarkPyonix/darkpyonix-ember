@@ -59,7 +59,7 @@ pub struct Login {
 
 impl std::fmt::Debug for Login {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Login").field("note", &self.note).finish_non_exhaustive()
+        f.debug_struct("Login").finish_non_exhaustive()
     }
 }
 

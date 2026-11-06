@@ -19,7 +19,7 @@ use crate::server::ChatGptAccount;
 
 /// Said on every screen part whose settings are kept on this device only.
 pub const LOCAL_STORE_NOTE: &str =
-    "서버에 저장하는 API가 없어 이 기기에만 보관합니다. 서버가 준비되면 옮겨집니다.";
+    "이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670)";
 
 // ---------------------------------------------------------------------------------------------
 // Sections (FR-L20)
@@ -975,8 +975,10 @@ pub const NO_ACCOUNTS: &str = "계정이 없습니다";
 /// The only row of the account sheet when there is no account.
 pub const ADD_ACCOUNT_FIRST: &str = "계정 추가에서 먼저 추가하세요";
 /// Under the default chips: what is stored where (the server keeps only the default account).
+/// TODO(server): the server has no default-harness or default-model field (#670); the choice
+/// lives in memory for this run only.
 pub const DEFAULTS_STORAGE_NOTE: &str =
-    "고른 하네스와 모델은 이 기기에만 저장됩니다. 기본 계정만 서버에 저장됩니다.";
+    "고른 하네스와 모델은 이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670). 기본 계정만 서버에 저장됩니다.";
 /// Why a harness cannot be picked: the server found no binary.
 pub const NOT_INSTALLED_REASON: &str = "감지되지 않았습니다";
 /// Why Gemini cannot be picked: the server has no adapter yet (D40).
@@ -994,6 +996,29 @@ pub const DEMO_CHOICE_NOTE: &str = "예시입니다. 서버를 호출하지 않�
 pub const ADD_FAILED: &str = "계정을 만들지 못했습니다";
 /// The check call failed.
 pub const CHECK_FAILED: &str = "로그인을 확인하지 못했습니다";
+
+/// A fixed Korean sentence per HTTP status. The client's error text is English and may carry the
+/// server body or a URL, so it is never drawn (NFR-L4, FR-L17).
+pub fn account_error_ko(status: Option<u16>) -> &'static str {
+    match status {
+        Some(400) | Some(422) => "입력을 확인하세요",
+        Some(401) | Some(403) => "권한이 없습니다",
+        Some(404) => "계정을 찾을 수 없습니다",
+        Some(409) => "이미 있는 이름입니다",
+        Some(s) if s >= 500 => "서버가 처리하지 못했습니다",
+        Some(_) => "서버가 요청을 받아들이지 않았습니다",
+        None => "서버에 연결하지 못했습니다",
+    }
+}
+
+/// The HTTP status of a server error, if the server answered at all.
+pub fn server_error_status(e: &crate::server::ServerError) -> Option<u16> {
+    match e {
+        crate::server::ServerError::Status { status, .. } => Some(*status),
+        crate::server::ServerError::Unauthorized(_) => Some(401),
+        _ => None,
+    }
+}
 
 /// What the two chips of the 새 팀원 기본값 card show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2179,6 +2204,25 @@ mod tests {
         let old = ["계정 추가 창이", " 열립니다"].concat();
         assert!(!production.contains(&old));
         assert!(NO_LOGIN_WINDOW_NOTE.contains("로그인 창을 여는 기능은 아직 없습니다"));
-        assert!(DEFAULTS_STORAGE_NOTE.contains("이 기기에만 저장됩니다"));
+        assert!(DEFAULTS_STORAGE_NOTE.contains("이번 실행에서만 유지됩니다. 서버 저장은 준비 중입니다 (#670)"));
+    }
+
+    #[test]
+    fn fr_l17_account_errors_are_fixed_korean() {
+        assert_eq!(account_error_ko(Some(400)), "입력을 확인하세요");
+        assert_eq!(account_error_ko(Some(422)), "입력을 확인하세요");
+        assert_eq!(account_error_ko(Some(401)), "권한이 없습니다");
+        assert_eq!(account_error_ko(Some(403)), "권한이 없습니다");
+        assert_eq!(account_error_ko(Some(404)), "계정을 찾을 수 없습니다");
+        assert_eq!(account_error_ko(Some(409)), "이미 있는 이름입니다");
+        assert_eq!(account_error_ko(Some(503)), "서버가 처리하지 못했습니다");
+        assert_eq!(account_error_ko(None), "서버에 연결하지 못했습니다");
+        let e = crate::server::ServerError::Status { status: 409, message: "dup http://x".into() };
+        assert_eq!(server_error_status(&e), Some(409));
+        let source = include_str!("cr/agents.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("{ADD_FAILED}: {e}"));
+        assert!(!production.contains("{CHECK_FAILED}: {e}"));
+        assert!(!production.contains("바꾸지 못했습니다: {e}"));
     }
 }

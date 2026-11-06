@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::wire::{AgentEvent, ApprovalDecision, StoredEvent, TurnOutcome};
+use crate::wire::{AgentEvent, ApprovalDecision, Question, QuestionAnswer, StoredEvent, TurnOutcome};
 
 /// A rendered entry of the conversation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,6 +22,9 @@ pub enum TranscriptItem {
     /// A tool-call card; `result` fills in when the tool finishes.
     ToolCall { seq: i64, call_id: String, name: String, input: serde_json::Value, result: Option<ToolOutput> },
     Approval { seq: i64, approval_id: String, tool: String, input: serde_json::Value, state: ApprovalState },
+    /// The agent asks the person questions (FR-T11). `Answered` holds the values as the server
+    /// stored them: `***` for a secret question.
+    Question { seq: i64, question_id: String, questions: Vec<Question>, state: QuestionState },
     TurnEnded { seq: i64, outcome: TurnOutcome },
     Error { seq: i64, message: String },
     /// A note from Ember in this session (mention outcome, loop-protection refusal, teammate
@@ -41,6 +44,17 @@ pub enum ApprovalState {
     Pending,
     Resolved(ApprovalDecision),
     /// The turn ended without an answer (e.g. interrupted); it can no longer be answered.
+    Abandoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "answers", rename_all = "snake_case")]
+pub enum QuestionState {
+    Pending,
+    Answered(Vec<QuestionAnswer>),
+    /// Answered with no values: the person skipped it.
+    Skipped,
+    /// The turn ended without an answer; it can no longer be answered.
     Abandoned,
 }
 
@@ -74,6 +88,8 @@ pub struct Transcript {
     tool_index: HashMap<String, usize>,
     #[serde(skip)]
     approval_index: HashMap<String, usize>,
+    #[serde(skip)]
+    question_index: HashMap<String, usize>,
     /// Index of the assistant item currently streaming, if any.
     #[serde(skip)]
     streaming: Option<usize>,
@@ -89,6 +105,13 @@ impl Transcript {
         self.items
             .iter()
             .filter(|i| matches!(i, TranscriptItem::Approval { state: ApprovalState::Pending, .. }))
+    }
+
+    /// Questions still waiting for an answer, oldest first.
+    pub fn pending_questions(&self) -> impl Iterator<Item = &TranscriptItem> {
+        self.items
+            .iter()
+            .filter(|i| matches!(i, TranscriptItem::Question { state: QuestionState::Pending, .. }))
     }
 
     /// Whether events past `last_seq` are being held for a missing one.
@@ -186,6 +209,23 @@ impl Transcript {
                     *state = ApprovalState::Resolved(*decision);
                 }
             }
+            AgentEvent::QuestionAsked { question_id, questions } => {
+                self.end_stream();
+                self.question_index.insert(question_id.clone(), self.items.len());
+                self.items.push(TranscriptItem::Question {
+                    seq,
+                    question_id: question_id.clone(),
+                    questions: questions.clone(),
+                    state: QuestionState::Pending,
+                });
+            }
+            AgentEvent::QuestionAnswered { question_id, answers } => {
+                if let Some(TranscriptItem::Question { state, .. }) =
+                    self.question_index.get(question_id).and_then(|&i| self.items.get_mut(i))
+                {
+                    *state = if answers.is_empty() { QuestionState::Skipped } else { QuestionState::Answered(answers.clone()) };
+                }
+            }
             AgentEvent::Usage { input_tokens, output_tokens } => {
                 self.usage.input_tokens += input_tokens;
                 self.usage.output_tokens += output_tokens;
@@ -195,6 +235,9 @@ impl Transcript {
                 for item in &mut self.items {
                     if let TranscriptItem::Approval { state: s @ ApprovalState::Pending, .. } = item {
                         *s = ApprovalState::Abandoned;
+                    }
+                    if let TranscriptItem::Question { state: s @ QuestionState::Pending, .. } = item {
+                        *s = QuestionState::Abandoned;
                     }
                 }
                 self.items.push(TranscriptItem::TurnEnded { seq, outcome: *outcome });
@@ -281,6 +324,52 @@ mod tests {
         assert_eq!(t.pending_approvals().count(), 0);
         let TranscriptItem::Approval { state, .. } = &t.items[1] else { panic!() };
         assert_eq!(*state, ApprovalState::Abandoned);
+    }
+
+    fn asked(id: &str) -> AgentEvent {
+        AgentEvent::QuestionAsked {
+            question_id: id.into(),
+            questions: vec![Question {
+                id: "q0".into(),
+                header: None,
+                text: "Colour?".into(),
+                options: vec![],
+                multi_select: false,
+                secret: true,
+                allow_other: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn fr_t11_question_asked_then_answered_updates_item() {
+        let mut t = Transcript::new();
+        t.apply(&ev(1, asked("r1")));
+        assert_eq!(t.pending_questions().count(), 1);
+        let ans = vec![QuestionAnswer { question_id: "q0".into(), values: vec!["***".into()] }];
+        t.apply(&ev(2, AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: ans.clone() }));
+        assert_eq!(t.pending_questions().count(), 0);
+        let TranscriptItem::Question { state, .. } = &t.items[0] else { panic!() };
+        assert_eq!(*state, QuestionState::Answered(ans));
+    }
+
+    #[test]
+    fn fr_t11_question_skipped_has_empty_answers() {
+        let mut t = Transcript::new();
+        t.apply(&ev(1, asked("r1")));
+        t.apply(&ev(2, AgentEvent::QuestionAnswered { question_id: "r1".into(), answers: vec![] }));
+        let TranscriptItem::Question { state, .. } = &t.items[0] else { panic!() };
+        assert_eq!(*state, QuestionState::Skipped);
+    }
+
+    #[test]
+    fn fr_t11_question_abandoned_on_turn_end() {
+        let mut t = Transcript::new();
+        t.apply(&ev(1, asked("r1")));
+        t.apply(&ev(2, AgentEvent::TurnEnded { outcome: TurnOutcome::Interrupted }));
+        assert_eq!(t.pending_questions().count(), 0);
+        let TranscriptItem::Question { state, .. } = &t.items[0] else { panic!() };
+        assert_eq!(*state, QuestionState::Abandoned);
     }
 
     #[test]

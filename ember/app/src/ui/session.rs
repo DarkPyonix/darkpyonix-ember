@@ -77,6 +77,11 @@ pub fn timeline_summary(demo: bool) -> &'static str {
 }
 
 pub const UI_STRINGS: &[&str] = &[
+    crate::ui::question::SECRET_ON_TERMINAL,
+    crate::ui::question::SECRET_ONLY_SKIP,
+    crate::ui::question::SAMPLE_NOTE,
+    crate::ui::question::SENT_WAITING,
+    crate::ui::question::ABANDONED_LINE,
     crate::ui::home::INTEGRATIONS_TITLE,
     crate::ui::enrol_flow::NAME_HELP,
     crate::ui::enrol_flow::STDIN_NOTE,

@@ -27,6 +27,7 @@ pub mod home;
 pub mod keymap;
 pub mod monitor;
 pub mod project;
+pub mod question;
 pub mod routines;
 pub mod safe_area;
 pub mod session;

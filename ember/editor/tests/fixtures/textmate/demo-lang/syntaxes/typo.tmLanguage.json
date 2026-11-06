@@ -1,0 +1,7 @@
+{
+  "scopeName": "text.typo",
+  "patterns": [
+    { "begin": "<%--", "end": "--%>", "name": "comment.block.typo",
+      "captures": { "0": { "name": "punctuation.definition.comment.typo" }, "end": "--%>", "name": "comment.block.typo" } }
+  ]
+}

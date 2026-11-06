@@ -438,3 +438,32 @@ mod problems {
         assert_eq!(problem_location("/w/p/package.json", "/w/p", 11), "package.json:12");
     }
 }
+
+// FR-L31 (D38, #438): explorer edits: where a new item goes, the delete wording, which tabs go.
+mod explorer_edit {
+    use ember_app::ui::editor::{delete_confirmation, is_at_or_below, new_item_parent};
+
+    #[test]
+    fn fr_l31_new_item_goes_in_the_selected_directory_or_beside_the_selected_file() {
+        assert_eq!(new_item_parent(Some(("/w/p/src", true)), "/w/p"), "/w/p/src");
+        assert_eq!(new_item_parent(Some(("/w/p/src/a.rs", false)), "/w/p"), "/w/p/src");
+        assert_eq!(new_item_parent(Some(("/a.rs", false)), "/w/p"), "/");
+        assert_eq!(new_item_parent(None, "/w/p"), "/w/p");
+    }
+
+    #[test]
+    fn fr_l31_delete_confirmation_says_it_cannot_be_undone_and_names_the_contents_of_a_folder() {
+        let file = delete_confirmation("/w/p/src/a.rs", "/w/p", false);
+        assert!(file.contains("src/a.rs") && file.contains("되돌릴 수 없습니다"), "{file}");
+        let dir = delete_confirmation("/w/p/src", "/w/p", true);
+        assert!(dir.contains("그 안의 모든 파일") && dir.contains("되돌릴 수 없습니다"), "{dir}");
+    }
+
+    #[test]
+    fn fr_l31_a_deleted_path_closes_its_own_tab_and_the_tabs_below_it_only() {
+        assert!(is_at_or_below("/w/p/src/a.rs", "/w/p/src/a.rs"));
+        assert!(is_at_or_below("/w/p/src/a.rs", "/w/p/src"));
+        assert!(!is_at_or_below("/w/p/src2/a.rs", "/w/p/src"));
+        assert!(!is_at_or_below("/w/p/a.rs", "/w/p/src"));
+    }
+}

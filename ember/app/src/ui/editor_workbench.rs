@@ -15,6 +15,9 @@ struct Shared {
     directory: Signal<String>,
     expanded: Signal<std::collections::HashSet<String>>,
     bottom_max: Signal<bool>,
+    tree_sel: Signal<Option<(String, bool)>>,
+    prompt: Signal<Option<crate::ui::editor::TreePrompt>>,
+    prompt_text: Signal<String>,
     theme: Signal<crate::ui::theme::ThemePref>,
     position: Signal<(usize, usize)>,
     stripes: Signal<Stripes>,
@@ -53,6 +56,9 @@ fn init(target: EditorTarget) {
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
     let theme = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().theme, root));
+    let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
+    let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
+    let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
     let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
@@ -60,7 +66,7 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -188,10 +194,21 @@ pub mod page {
     fn workbench_page() -> Element {
         let s = shared();
         let _ = *s.revision.read();
-        let (error, updates) = {
+        let (error, updates, edit_errors, gone) = {
             let mut state = s.host.state.lock().unwrap();
-            (state.error.clone(), std::mem::take(&mut state.updates))
+            (state.error.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone))
         };
+        for message in edit_errors { notice(message); }
+        for path in gone {
+            let doomed: Vec<String> = s.tabs.read().paths().into_iter().filter(|tab| crate::ui::editor::is_at_or_below(tab, &path)).map(str::to_owned).collect();
+            for tab in doomed {
+                let mut tabs = s.tabs;
+                tabs.write().close(&tab);
+                s.host.send(HostCommand::Close(tab));
+            }
+            let mut tree_sel = s.tree_sel;
+            tree_sel.set(None);
+        }
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
@@ -447,36 +464,108 @@ pub mod page {
     }
 
     fn project_tree(s: &Shared, current: Option<&str>) -> Element {
+        use crate::ui::editor::TreePrompt;
         let mut tabs = s.tabs;
         let mut expanded = s.expanded;
         let mut stripes = s.stripes;
+        let mut tree_sel = s.tree_sel;
+        let mut prompt = s.prompt;
+        let mut prompt_text = s.prompt_text;
         let root = s.folder.clone();
         let rows = {
             let state = s.host.state.lock().unwrap();
             crate::ui::editor::tree_rows(&root, &state.listings, &expanded.read())
         };
         let root_name = base_name(&root).to_string();
+        let selected: Option<(String, bool)> = tree_sel.read().clone();
+        let pending = prompt.read().clone();
+        let parent_for_new = crate::ui::editor::new_item_parent(selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &root);
+        let (new_file_parent, new_dir_parent) = (parent_for_new.clone(), parent_for_new);
+        let submit_host = s.host.clone();
+        let submit_root = root.clone();
+        let mut submit = move |pending: TreePrompt| {
+            let name = prompt_text.read().trim().to_string();
+            match pending {
+                TreePrompt::NewFile { parent } => {
+                    expanded.write().insert(parent.clone());
+                    submit_host.send(HostCommand::CreateFile { parent, name });
+                }
+                TreePrompt::NewDir { parent } => {
+                    expanded.write().insert(parent.clone());
+                    submit_host.send(HostCommand::CreateDir { parent, name });
+                }
+                TreePrompt::Rename { path } => { submit_host.send(HostCommand::Rename { path, new_name: name }); }
+                TreePrompt::Delete { path, is_dir } => { submit_host.send(HostCommand::Delete { path, is_dir }); }
+            }
+            let _ = &submit_root;
+            prompt.set(None);
+            prompt_text.set(String::new());
+        };
+        let mut submit_enter = submit.clone();
+        let mut submit_ok = submit.clone();
+        let prompt_row = match pending.clone() {
+            None => rsx! {},
+            Some(TreePrompt::Delete { path, is_dir }) => {
+                let message = crate::ui::editor::delete_confirmation(&path, &root, is_dir);
+                let confirm = TreePrompt::Delete { path, is_dir };
+                rsx! {
+                    div { class: "ed-tn", role: "alertdialog", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                        div { style: "flex:1 1 100%;", "{message}" }
+                        button { class: "ed-pj", style: "background:var(--c-red); color:var(--ink-text);", onclick: move |_| submit_ok(confirm.clone()), "삭제" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface);", onclick: move |_| prompt.set(None), "취소" }
+                    }
+                }
+            }
+            Some(other) => {
+                let label = match &other { TreePrompt::NewFile { .. } => "새 파일 이름", TreePrompt::NewDir { .. } => "새 폴더 이름", _ => "새 이름" };
+                let enter = other.clone();
+                rsx! {
+                    div { class: "ed-tn", style: "--d:0;",
+                        {icon_px("file", 15)}
+                        input { style: "flex:1; min-width:0; height:22px; border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); color:var(--text); padding:0 6px;",
+                            "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}",
+                            oninput: move |event| prompt_text.set(event.value()),
+                            onkeydown: move |event| {
+                                match event.key() {
+                                    Key::Enter => { event.stop_propagation(); submit_enter(enter.clone()); }
+                                    Key::Escape => { event.stop_propagation(); prompt.set(None); }
+                                    _ => {}
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        };
         rsx! {
             section { class: "ed-tw ed-left", "aria-label": "프로젝트",
                 div { class: "ed-twh",
                     b { class: "ed-twt", "프로젝트" }
                     div { class: "spacer" }
+                    button { class: "ed-ib", title: "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
+                    button { class: "ed-ib", title: "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
                     button { class: "ed-ib", title: "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
                     button { class: "ed-ib", title: "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
                     button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
                 }
                 div { class: "ed-tree", role: "tree",
                     div { class: "ed-tn", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
+                    {prompt_row}
                     for row in rows {
                         {
                             let path = row.path.clone();
                             let host = s.host.clone();
                             let is_dir = row.is_dir;
-                            let class = if current == Some(row.path.as_str()) { "ed-tn sel" } else { "ed-tn" };
+                            let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
+                            let class = if chosen || (selected.is_none() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
                             let depth = row.depth + 1;
+                            let rename_path = row.path.clone();
+                            let delete_path = row.path.clone();
+                            let rename_name = row.name.clone();
                             rsx! { div { key: "{row.path}", class, role: "treeitem", style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 onclick: move |_| {
+                                    tree_sel.set(Some((path.clone(), is_dir)));
                                     if is_dir {
                                         let was_open = expanded.read().contains(&path);
                                         if was_open { expanded.write().remove(&path); }
@@ -486,6 +575,13 @@ pub mod page {
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
                                 "{row.name}"
+                                if chosen {
+                                    div { class: "spacer" }
+                                    button { class: "ed-ib", title: "이름 변경", style: "width:22px; height:22px;",
+                                        onclick: move |event| { event.stop_propagation(); prompt_text.set(rename_name.clone()); prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() })); }, {icon_px("edit", 13)} }
+                                    button { class: "ed-ib", title: "삭제", style: "width:22px; height:22px; color:var(--c-red);",
+                                        onclick: move |event| { event.stop_propagation(); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
+                                }
                             } }
                         }
                     }

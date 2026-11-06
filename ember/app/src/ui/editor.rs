@@ -202,6 +202,45 @@ pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
 }
 
+/// A pending explorer edit the tree is asking a name or a confirmation for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreePrompt {
+    NewFile { parent: String },
+    NewDir { parent: String },
+    Rename { path: String },
+    Delete { path: String, is_dir: bool },
+}
+
+/// The directory a new file or folder goes in: the selected directory, the directory of the
+/// selected file, or the project folder when nothing is selected.
+pub fn new_item_parent(selected: Option<(&str, bool)>, root: &str) -> String {
+    match selected {
+        Some((path, true)) => path.to_string(),
+        Some((path, false)) => match path.trim_end_matches('/').rsplit_once('/') {
+            Some(("", _)) | None => "/".to_string(),
+            Some((parent, _)) => parent.to_string(),
+        },
+        None => root.to_string(),
+    }
+}
+
+/// What the delete confirmation says. There is no trash, so it says the deletion cannot be undone,
+/// and a directory is deleted with everything in it.
+pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool) -> String {
+    let name = breadcrumb_segments(path, folder).join("/");
+    if is_dir {
+        format!("폴더 {name}와 그 안의 모든 파일을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    } else {
+        format!("파일 {name}을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    }
+}
+
+/// Whether closing `tab` is needed after `gone` was deleted or renamed: it is that path or below it.
+pub fn is_at_or_below(tab: &str, gone: &str) -> bool {
+    let gone = gone.trim_end_matches('/');
+    tab == gone || tab.strip_prefix(gone).is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// The problems tab's label: the tool window's name, with the count when there is one.
 pub fn problems_tab_label(count: usize) -> String {
     if count == 0 { ToolWindow::Problems.label().to_string() } else { format!("{} {count}", ToolWindow::Problems.label()) }

@@ -14,6 +14,11 @@ pub enum HostCommand {
     Focus(String),
     Widget(UriComponents, u64, WidgetEvent),
     Resync(UriComponents),
+    /// Explorer edits through the OSE file channel; each lists the parent directory again after.
+    CreateFile { parent: String, name: String },
+    CreateDir { parent: String, name: String },
+    Rename { path: String, new_name: String },
+    Delete { path: String, is_dir: bool },
 }
 
 #[derive(Default)]
@@ -23,6 +28,10 @@ pub struct HostState {
     pub entries: Vec<(String, u32)>,
     /// Every directory listed so far, by path, for the explorer tree.
     pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
+    /// Failures of explorer edits, for the window to show once.
+    pub edit_errors: Vec<String>,
+    /// Paths an explorer edit removed or moved away, for the window to close their tabs.
+    pub gone: Vec<String>,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -75,6 +84,23 @@ impl HostState {
     }
 }
 
+fn parent_of(path: &str) -> String {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+    }
+}
+
+/// After an explorer edit: record a failure for the window, then list the parent again so the tree
+/// shows what is on disk.
+async fn finish_edit(session: &ember_editor::EditorSession, shared: &Arc<Mutex<HostState>>, parent: &str, result: Result<(), ember_editor::Error>) {
+    if let Err(error) = result {
+        shared.lock().unwrap().edit_errors.push(error.to_string());
+    }
+    let listed = session.read_dir(&session.uri(parent)).await;
+    shared.lock().unwrap().set_dir_listing(parent, listed);
+}
+
 #[derive(Clone)]
 pub struct EditorHost {
     pub state: Arc<Mutex<HostState>>,
@@ -117,6 +143,26 @@ impl EditorHost {
                         Some(HostCommand::List(path)) => {
                             let result = session.read_dir(&session.uri(&path)).await;
                             shared.lock().unwrap().set_dir_listing(&path, result);
+                        }
+                        Some(HostCommand::CreateFile { parent, name }) => {
+                            let result = session.create_file(&parent, &name).await;
+                            finish_edit(&session, &shared, &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::CreateDir { parent, name }) => {
+                            let result = session.create_dir(&parent, &name).await;
+                            finish_edit(&session, &shared, &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::Rename { path, new_name }) => {
+                            let parent = parent_of(&path);
+                            let result = session.rename_path(&path, &new_name).await;
+                            if result.is_ok() { shared.lock().unwrap().gone.push(path); }
+                            finish_edit(&session, &shared, &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::Delete { path, is_dir }) => {
+                            let parent = parent_of(&path);
+                            let result = session.delete_path(&path, is_dir).await;
+                            if result.is_ok() { shared.lock().unwrap().gone.push(path); }
+                            finish_edit(&session, &shared, &parent, result).await;
                         }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }

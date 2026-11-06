@@ -231,3 +231,70 @@ async fn live_session_json_diagnostics_save_and_reload() {
 fn uuid_short() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..8].to_owned()
 }
+
+/// Explorer edits through the OSE file channel (D38, #438): create, rename and delete on disk, never
+/// overwriting, and refusing paths the explorer must not touch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a real OSE server: EMBER_OSE_SERVER=<unpacked build>/bin/dpx-ose-server"]
+async fn live_session_explorer_create_rename_delete() {
+    let Some(bin) = std::env::var_os("EMBER_OSE_SERVER").map(PathBuf::from) else {
+        eprintln!("[live-session] EMBER_OSE_SERVER not set; skipping");
+        return;
+    };
+    let root = std::env::temp_dir().join(format!("ember-explorer-{}", uuid_short()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws = root.join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws_str = ws.to_str().unwrap().to_string();
+
+    let server = Server::start(&bin, &root);
+    let addr = format!("127.0.0.1:{}", server.port);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while tokio::net::TcpStream::connect(&addr).await.is_err() {
+        assert!(Instant::now() < deadline, "server not listening on {addr}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let config = SessionConfig::new(addr.clone(), ws_str.clone());
+    let (session, _rx) = tokio::time::timeout(Duration::from_secs(120), EditorSession::connect_tcp(config))
+        .await
+        .expect("connect timed out")
+        .unwrap_or_else(|e| panic!("connect: {e}"));
+
+    // Create a file and a directory; an existing name is an error and the file is left as it was.
+    let file = session.create_file(&ws_str, "a.txt").await.expect("create_file");
+    assert_eq!(file, format!("{ws_str}/a.txt"));
+    assert!(ws.join("a.txt").is_file());
+    std::fs::write(ws.join("a.txt"), "keep").unwrap();
+    assert!(session.create_file(&ws_str, "a.txt").await.is_err(), "an existing file is not overwritten");
+    assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "keep");
+    let dir = session.create_dir(&ws_str, "sub").await.expect("create_dir");
+    assert!(ws.join("sub").is_dir());
+    session.create_file(&dir, "inner.txt").await.expect("create in a subdirectory");
+
+    // Rename: new name in the same directory; an existing target is an error, nothing is lost.
+    let renamed = session.rename_path(&file, "b.txt").await.expect("rename");
+    assert_eq!(renamed, format!("{ws_str}/b.txt"));
+    assert!(!ws.join("a.txt").exists() && ws.join("b.txt").is_file());
+    std::fs::write(ws.join("c.txt"), "other").unwrap();
+    assert!(session.rename_path(&renamed, "c.txt").await.is_err(), "rename never overwrites");
+    assert_eq!(std::fs::read_to_string(ws.join("c.txt")).unwrap(), "other");
+    assert!(ws.join("b.txt").is_file());
+
+    // Delete a file, then a directory with its contents.
+    session.delete_path(&renamed, false).await.expect("delete file");
+    assert!(!ws.join("b.txt").exists());
+    session.delete_path(&dir, true).await.expect("delete directory");
+    assert!(!ws.join("sub").exists());
+
+    // Paths the explorer must not touch are refused before anything is sent.
+    use ember_editor::paths::PathError;
+    let refused = |r: Result<String, ember_editor::Error>| matches!(r, Err(ember_editor::Error::Path(_)));
+    assert!(refused(session.create_file(&ws_str, "../escape.txt").await));
+    assert!(refused(session.create_file(root.to_str().unwrap(), "x.txt").await));
+    assert!(refused(session.rename_path(&ws_str, "x").await));
+    assert!(matches!(session.delete_path(&ws_str, true).await, Err(ember_editor::Error::Path(PathError::FolderRoot))));
+    assert!(ws.is_dir());
+    assert!(!root.join("escape.txt").exists());
+    session.shutdown().await;
+}

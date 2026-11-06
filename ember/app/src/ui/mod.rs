@@ -18,6 +18,7 @@ pub mod conversation;
 pub mod editor;
 pub mod editor_icons;
 pub mod editor_workbench;
+pub mod palette;
 pub mod files;
 pub mod fonts;
 pub mod home;

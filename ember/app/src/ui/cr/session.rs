@@ -482,10 +482,25 @@ pub fn ide_main_click(
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
 /// button role (compose-rust#372) but no label. Touch target 26x32, under 44 px: #323.
+/// The colours of the "IDE 열기" split button (`.btn.sm` in the mockup): `surface` fill and a
+/// `line` border with `text` ink, the same default button as every other header action. It was
+/// drawn with the `ink` fill, which is a light inverted button in the dark scheme (NFR-L3, #510).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdeSplitStyle {
+    pub fill: Color,
+    pub ink: Color,
+    pub border: Color,
+    pub divider: Color,
+}
+
+pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
+    IdeSplitStyle { fill: p.surface, ink: p.text, border: p.line, divider: p.line }
+}
+
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
-        (p.ink_text.to_argb(), Modifier::new().size(26.0, 32.0))
+        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, 32.0))
     } else {
         (
             p.text_2.to_argb(),
@@ -509,6 +524,7 @@ pub fn IdeMenu(session: &str) {
     let ui = shared_ui().clone();
     let window = current_window_size();
     let p = ember_theme().palette;
+    let split = ide_split_style(p);
     let sid = session.to_string();
     let ide = remember_with_key(sid.clone(), || {
         mutable_state_of(None::<Result<IdeLaunch, String>>)
@@ -571,7 +587,8 @@ pub fn IdeMenu(session: &str) {
                     Clickable(
                         Modifier::new()
                             .size(32.0, 32.0)
-                            .background(paint(p.ink))
+                            .background(paint(split.fill))
+                            .border(1.0, paint(split.border))
                             .shape_role(ShapeRole::Full),
                         Alignment::Center,
                         move || {
@@ -579,7 +596,7 @@ pub fn IdeMenu(session: &str) {
                                 launch_ide_shared(&ui_main, kind, launch_main.clone())
                             })
                         },
-                        || NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0),
+                        || NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0),
                     );
                 });
         } else {
@@ -588,7 +605,8 @@ pub fn IdeMenu(session: &str) {
                 .modifier(
                     Modifier::new()
                         .height(32.0)
-                        .background(paint(p.ink))
+                        .background(paint(split.fill))
+                        .border(1.0, paint(split.border))
                         .shape_role(ShapeRole::Full),
                 )
                 .content(move || {
@@ -606,12 +624,12 @@ pub fn IdeMenu(session: &str) {
                                 .spacing(6.0)
                                 .content(|| {
                                     cu::Spacer().modifier(Modifier::new().width(6.0));
-                                    NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0);
+                                    NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0);
                                     Label(
                                         "IDE 열기",
                                         Fs::Sm,
                                         Weight::Medium,
-                                        Some(paint(p.ink_text)),
+                                        Some(paint(split.ink)),
                                         Some(1),
                                     );
                                     if show_cur {
@@ -620,7 +638,7 @@ pub fn IdeMenu(session: &str) {
                                                 cur_label,
                                                 Fs::Xs,
                                                 Weight::Regular,
-                                                Some(paint(p.ink_text)),
+                                                Some(paint(split.ink)),
                                                 Some(1),
                                             );
                                         }
@@ -632,7 +650,7 @@ pub fn IdeMenu(session: &str) {
                     cu::Box().modifier(
                         Modifier::new()
                             .size(1.0, 18.0)
-                            .background(paint(p.muted)),
+                            .background(paint(split.divider)),
                     );
                     IdeChevron(o, true);
                 });
@@ -4592,7 +4610,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         AppButton(
                                             "IDE 열기",
                                             Some(IconRole::Forward),
-                                            ButtonKind::Primary,
+                                            ButtonKind::Default,
                                             true,
                                             false,
                                             false,

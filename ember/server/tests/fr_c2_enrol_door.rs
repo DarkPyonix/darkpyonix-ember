@@ -450,7 +450,7 @@ async fn fr_c2_the_enrol_routes_are_404_on_the_owner_listener() {
         .merge(computers::api::router(comps.clone(), sessions.clone()))
         .merge(computers::enrol::router(
             enrol,
-            "http://127.0.0.1:8740".into(),
+            computers::enrol::DoorUrl::Url("http://127.0.0.1:8740".into()),
             Arc::new(computers::enrol::ComputersRegistrar::new(comps)),
         ));
     let token = auth::load_or_create_token(dir.path()).unwrap();
@@ -478,7 +478,7 @@ async fn fr_c2_redeem_is_not_token_exempt() {
     let comps = Computers::new(Registry::new(store.clone()), computers::default_connector());
     let owner = computers::enrol::router(
         computers::enrol::Enrol::new(store),
-        "http://127.0.0.1:8740".into(),
+        computers::enrol::DoorUrl::Url("http://127.0.0.1:8740".into()),
         Arc::new(computers::enrol::ComputersRegistrar::new(comps)),
     );
     let token = auth::load_or_create_token(dir.path()).unwrap();

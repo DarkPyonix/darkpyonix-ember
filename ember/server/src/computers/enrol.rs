@@ -1456,14 +1456,14 @@ mod tests {
     }
 
     #[test]
-    fn joined_carries_the_server_peer_id_when_set() {
+    fn fr_c2_joined_carries_the_server_peer_id_when_set() {
         let id = "ab".repeat(32);
         let e = enrol_with(Some(&id));
         assert_eq!(server_id_of(joined_of(&e, T0)), Some(id));
     }
 
     #[test]
-    fn joined_has_none_without_a_transport() {
+    fn fr_c2_joined_has_none_without_a_transport() {
         let (_, e) = svc();
         assert_eq!(server_id_of(joined_of(&e, T0)), None);
         let e = enrol_with(None);
@@ -1471,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_server_peer_id_is_dropped_never_stored() {
+    fn fr_c2_a_malformed_server_peer_id_is_dropped_never_stored() {
         for bad in ["zz".repeat(32), "a".repeat(63), "a".repeat(65), "AB".repeat(32), String::new(), " ".repeat(64)] {
             let e = enrol_with(Some(&bad));
             assert_eq!(e.server_peer_id, None, "{bad:?}");
@@ -1480,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn the_server_peer_id_is_not_per_request() {
+    fn fr_c2_the_server_peer_id_is_not_per_request() {
         let id = "cd".repeat(32);
         let e1 = enrol_with(Some(&id));
         let e2 = enrol_with(Some(&id));
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_of_hex_matches_nodeinfo_fingerprint() {
+    fn fr_c2_fingerprint_of_hex_matches_nodeinfo_fingerprint() {
         for id in ["ab".repeat(32), format!("0123456789abcdef{}", "e".repeat(48))] {
             let mut i = info();
             i.peer_id = Some(id.clone());

@@ -578,7 +578,9 @@ fn RepoBarWithActions(
                     });
                 });
             } else {
-                cu::Row().modifier(Modifier::new().fill_max_width().height(114.0)).alignment(Alignment::CenterStart).content(move || {
+                // No fixed height (#407): the row sizes to its tallest column and `equal_height` stretches the
+                // others, so the URL line and the ahead/behind line are never cut.
+                cu::Row().modifier(Modifier::new().fill_max_width()).alignment(Alignment::TopStart).equal_height(true).content(move || {
                     let p_open = project_menu_c.clone();
                     let p_name = proj_name.clone();
                     let r_line = repo_line.clone();

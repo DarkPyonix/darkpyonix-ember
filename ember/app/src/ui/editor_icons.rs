@@ -31,8 +31,9 @@ fn path(name: &str) -> &'static str {
 /// The SVG document of an icon stroked in `color` (e.g. `#56534d`).
 fn svg(name: &str, color: &str) -> String {
     // `<name>-w` is the icon in white, for a dark pill (the active tab).
+    // The ink pill is light in the dark palette, so its icon is the dark ink colour there.
     if let Some(base) = name.strip_suffix("-w") {
-        return svg(base, "#ffffff");
+        return svg(base, if color == "#c3bfb7" { "#151514" } else { "#ffffff" });
     }
     if name == "chev-dn" {
         // The mockup turns the right chevron a quarter turn for an open node.
@@ -61,10 +62,16 @@ impl dioxus_compose::html::prelude::ImageResolver for IconResolver {
         if let Some(id) = self.ids.get(name) {
             return Some(*id);
         }
-        let doc: String = if name == "mark" {
+        let (base, dark) = match name.strip_suffix("@dark") {
+            Some(base) => (base, true),
+            None => (name, false),
+        };
+        let doc: String = if base == "mark" {
             include_str!("../../assets/brand/mark-sm.svg").to_string()
+        } else if dark {
+            svg(base, "#c3bfb7")
         } else {
-            svg(name, "#56534d")
+            svg(base, "#56534d")
         };
         let bytes: &'static [u8] = Box::leak(doc.into_boxed_str().into_boxed_bytes());
         let id = dioxus_compose::html::prelude::AssetId(compose_rust::asset(compose_rust::schema::AssetKind::Svg, bytes));

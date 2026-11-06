@@ -11,5 +11,6 @@
     "list": [1, 2, [3, 4], { "deep": false }],
     "path": "C:\\dir\\file.txt"
   },
+  "한글": "안녕 😀",
   "bad": [1, 2,]
 }

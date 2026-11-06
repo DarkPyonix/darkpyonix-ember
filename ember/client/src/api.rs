@@ -1204,14 +1204,14 @@ mod tests {
             status: StatusCode::BAD_REQUEST,
             body: Bytes::from_static(br#"{"error":"hours must be a whole number from 1 to 168","code":"invalid_hours"}"#),
         };
-        let e = Api::check(raw).unwrap_err();
+        let e = Api::check(raw).err().expect("an error");
         assert_eq!(e.code(), Some("invalid_hours"));
         assert_eq!(e.status(), Some(400));
         assert_eq!(e.to_string(), "server answered 400: hours must be a whole number from 1 to 168");
         let raw = Raw { status: StatusCode::NOT_FOUND, body: Bytes::from_static(br#"{"error":"invite i1 not found","code":"not_found"}"#) };
-        assert_eq!(Api::check(raw).unwrap_err().code(), Some("not_found"));
+        assert_eq!(Api::check(raw).err().expect("an error").code(), Some("not_found"));
         let raw = Raw { status: StatusCode::INTERNAL_SERVER_ERROR, body: Bytes::from_static(b"plain") };
-        assert_eq!(Api::check(raw).unwrap_err().code(), None);
+        assert_eq!(Api::check(raw).err().expect("an error").code(), None);
     }
 
     #[test]

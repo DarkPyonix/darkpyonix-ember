@@ -7,7 +7,7 @@ use ember_app::ui::palette::{action_items, highlight_segments, move_selection, r
 fn items(titles: &[&str]) -> Vec<Item> {
     titles
         .iter()
-        .map(|t| Item { payload: Payload::File((*t).to_string()), title: (*t).to_string(), hint: String::new() })
+        .map(|t| Item { payload: Payload::File((*t).to_string()), title: (*t).to_string(), hint: String::new(), enabled: true })
         .collect()
 }
 
@@ -75,14 +75,31 @@ fn fr_l31_the_palette_starts_with_the_editors_actions_and_not_itself() {
     let list = action_items(Keymap::VsCode, Os::Mac);
     let actions: Vec<Action> = list.iter().filter_map(|i| if let Payload::Action(a) = &i.payload { Some(*a) } else { None }).collect();
     assert!(!actions.contains(&Action::Palette), "the palette does not list itself");
+    assert!(!actions.contains(&Action::Find), "find is the quick open, not a row: choosing it would close the sheet and open it again");
     assert!(actions.contains(&Action::Save) && actions.contains(&Action::GotoLine));
     let save = list.iter().find(|i| i.payload == Payload::Action(Action::Save)).unwrap();
     assert_eq!(save.title, "저장");
     assert_eq!(save.hint, Keymap::VsCode.hint(Action::Save, Os::Mac));
-    let find = list.iter().find(|i| i.payload == Payload::Action(Action::Find)).unwrap();
-    assert_eq!(find.title, Keymap::VsCode.find_label(), "find is named the way the keymap says it");
-    let jb = action_items(Keymap::JetBrains, Os::Mac);
-    assert_eq!(jb.iter().find(|i| i.payload == Payload::Action(Action::Find)).unwrap().title, "모든 곳에서 찾기");
+}
+
+#[test]
+fn fr_l31_commands_the_editor_cannot_do_yet_are_marked_and_listed_after_the_working_ones() {
+    let list = action_items(Keymap::VsCode, Os::Mac);
+    let enabled = |a: Action| list.iter().find(|i| i.payload == Payload::Action(a)).unwrap().enabled;
+    assert!(enabled(Action::Terminal) && enabled(Action::Close) && enabled(Action::HideTool));
+    for a in [Action::Save, Action::Recent, Action::RunConfig, Action::Stop, Action::GotoLine, Action::Format, Action::Ask, Action::NewTerminal, Action::MaximizeTool] {
+        assert!(!enabled(a), "{a:?} is not implemented");
+    }
+    let ranked = rank("", &list);
+    let first_disabled = ranked.iter().position(|r| !list[r.index].enabled).unwrap();
+    assert!(ranked[..first_disabled].iter().all(|r| list[r.index].enabled));
+    assert!(ranked[first_disabled..].iter().all(|r| !list[r.index].enabled), "the working commands come first");
+    // A query ranks a working command above a not-ready one with the same score.
+    let two = vec![
+        Item { payload: Payload::File("a".into()), title: "Run".into(), hint: String::new(), enabled: false },
+        Item { payload: Payload::File("b".into()), title: "Run".into(), hint: String::new(), enabled: true },
+    ];
+    assert_eq!(rank("run", &two)[0].index, 1);
 }
 
 #[test]

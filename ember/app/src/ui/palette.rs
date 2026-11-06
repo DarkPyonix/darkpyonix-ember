@@ -23,6 +23,9 @@ pub struct Item {
     pub title: String,
     /// The shortcut, or empty.
     pub hint: String,
+    /// False for a command the editor cannot do yet: it is listed after the working ones, shown as
+    /// not ready, and choosing it does nothing.
+    pub enabled: bool,
 }
 
 /// An item that matched: its index in the list, its score, and the character positions of the title
@@ -121,7 +124,9 @@ fn best_match(query: &[char], title: &[char]) -> Option<(i32, Vec<usize>)> {
 pub fn rank(query: &str, items: &[Item]) -> Vec<Ranked> {
     let query: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect();
     if query.is_empty() {
-        return (0..items.len()).map(|index| Ranked { index, score: 0, matched: Vec::new() }).collect();
+        let mut all: Vec<Ranked> = (0..items.len()).map(|index| Ranked { index, score: 0, matched: Vec::new() }).collect();
+        all.sort_by_key(|r| !items[r.index].enabled);
+        return all;
     }
     let mut ranked: Vec<Ranked> = items
         .iter()
@@ -135,21 +140,25 @@ pub fn rank(query: &str, items: &[Item]) -> Vec<Ranked> {
     ranked.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
+            .then(items[b.index].enabled.cmp(&items[a.index].enabled))
             .then(items[a.index].title.chars().count().cmp(&items[b.index].title.chars().count()))
             .then(a.index.cmp(&b.index))
     });
     ranked
 }
 
-/// The editor's own actions, with the shortcut of `keymap` on `os`. The palette does not list itself.
+/// The editor's own actions, with the shortcut of `keymap` on `os`. Neither the palette nor find is a
+/// row (find is the quick open the file modes do); the actions the editor cannot do yet are marked.
 pub fn action_items(keymap: Keymap, os: Os) -> Vec<Item> {
+    // Find is the quick open the palette's own file and everything modes do, so it is not a row.
     Action::ALL
         .into_iter()
-        .filter(|a| *a != Action::Palette)
+        .filter(|a| !matches!(a, Action::Palette | Action::Find))
         .map(|a| Item {
             payload: Payload::Action(a),
-            title: if a == Action::Find { keymap.find_label().to_string() } else { a.label().to_string() },
+            title: a.label().to_string(),
             hint: keymap.hint(a, os),
+            enabled: super::editor::is_implemented(a),
         })
         .collect()
 }

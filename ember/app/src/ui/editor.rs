@@ -529,10 +529,20 @@ impl Stripes {
 }
 
 
+/// Whether the editor does something for `action` today ([`apply_action`] returns true for it
+/// when it can act). The palette shows the others as not ready instead of as live commands.
+pub fn is_implemented(action: Action) -> bool {
+    // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
+    ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right) || matches!(action, Action::Close | Action::HideTool)
+}
+
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
 /// caller says "준비 중입니다"). The key handler calls this with `Keymap::action_for`.
 pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes) -> bool {
     if let Some(w) = ToolWindow::from_action(action) {
+        if w.side() == Side::Right {
+            return false;
+        }
         stripes.toggle(w);
         return true;
     }
@@ -565,6 +575,16 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
 mod tests {
     use super::*;
     use crate::ui::keymap::{Keymap, Os};
+
+    #[test]
+    fn fr_l31_is_implemented_matches_what_apply_action_does() {
+        for action in Action::ALL {
+            let mut tabs = EditorTabs::default();
+            tabs.open("/w/p/a.rs");
+            let mut stripes = Stripes::default();
+            assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
+        }
+    }
 
     #[test]
     fn fr_l31_actions_toggle_tool_windows_and_close_tabs() {

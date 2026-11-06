@@ -18,6 +18,8 @@
 //! | `pr/create` | `{title, body?, base?, head?, draft, confirm}` (FR-G12) |
 //! | `commit/show` | `{sha}` (FR-G14) |
 //! | `revert`, `cherry-pick` | `{sha, confirm}` (FR-G15) |
+//! | `merge` | `{}` (FR-G16) |
+//! | `merge/abort`, `merge/commit` | `{confirm}` (FR-G17) |
 //!
 //! The server does not interpret the body. It adds `repo`, the working directory of the
 //! project's most recent unarchived session (or of the session named by `?session=<id>`), and
@@ -46,7 +48,7 @@ use crate::session::Sessions;
 
 /// Every operation the node serves under `/git/`.
 pub const OPS: &[&str] =
-    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "commit/show", "revert", "cherry-pick", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
+    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "commit/show", "revert", "cherry-pick", "merge", "merge/abort", "merge/commit", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
 
 #[derive(Clone)]
 struct GitState {

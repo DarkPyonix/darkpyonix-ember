@@ -875,3 +875,19 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Why.** A code that dies after one use and ten minutes leaves nothing worth stealing, and the server never keeps it in a form that can be replayed.
 
 **Status.** Specified only (`FR-C1`, `FR-C2`, Draft; issue #491). Not built.
+
+### D40: The Gemini CLI is a harness through the ACP adapter
+
+**Decision.** [user, 2026-11-06, option "(a) Gemini CLI 어댑터 추가" chosen by the owner] Ember adds the Gemini CLI as a harness on top of the generic ACP adapter (`ember/server/src/agents/acp.rs`, issue #53). The mockup's Gemini card and the Home chip stay. Until the adapter is verified against the real CLI, the app shows the card as "preparing" (준비 중입니다). The requirements are `FR-A10` to `FR-A10g` (issue #53).
+
+- [provisional] The harness is an ACP agent named `gemini` with a built-in preset (command `gemini`, ACP flag per `SPEC.md` "Gemini CLI facts"), not a new protocol adapter. This keeps `FR-A3`: adding the agent needs a preset only.
+- [provisional] Authentication stays the user's own: Ember never stores or reads Gemini credentials.
+- [provisional] Usage limits come from the CLI and its documentation, never from an Ember estimate.
+
+**Rejected** (the owner chose adding the adapter over each of these). Removing the Gemini card from the mockup and the Home chip. Keeping the card as a permanent "preparing" placeholder with no adapter behind it.
+
+**Why.** The owner wants Gemini in the harness list as a working harness, and the ACP adapter already exists, so the cost is a preset plus verification.
+
+**Owner and leader decision, 2026-11-06 (option "(c) 카드 유지 + API 키·엔터프라이즈 전용" tag [user, relayed by the supervisor]).** Research found that Google's Gemini CLI announcement says that since 2026-06-18 the Gemini CLI no longer serves Google AI Pro, Google AI Ultra and free-tier individual accounts (replaced by the Antigravity CLI, `agy`); Enterprise Code Assist licences and API-key authentication are stated as unaffected, and Vertex AI is not addressed. Sources, read on 2026-11-06: <https://github.com/google-gemini/gemini-cli/discussions/28017> (announcement of 2026-06-18) and <https://9to5google.com/2026/06/17/gemini-cli-code-assist-shutting-down/> (consumer accounts only, shutdown on 2026-06-18). The decision: the Gemini card stays, it is marked as for API-key and Enterprise (Code Assist) accounts only, and a user with an individual account is pointed to the Antigravity harness (D14). The adapter authenticates with an API key (and Code Assist) over the ACP adapter; "Login with Google" for individuals is not supported. This narrows the earlier choice "(a) Gemini CLI 어댑터 추가": the adapter is still built, for the accounts the CLI still serves. Rejected: building the adapter around "Login with Google" for individuals (the CLI does not serve them); removing the card; merging it into the Antigravity card.
+
+**Status.** Specified only (`FR-A10`, Draft; issue #53). Not built.

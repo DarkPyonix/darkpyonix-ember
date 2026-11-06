@@ -144,6 +144,7 @@ const MIGRATIONS: &[&str] = &[
     crate::projects::schema::SETTINGS_MIGRATION,
     crate::channels::invites::MIGRATION,
     crate::projects::schema::PROFILE_OVERRIDES_MIGRATION,
+    crate::computers::enrol::MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.

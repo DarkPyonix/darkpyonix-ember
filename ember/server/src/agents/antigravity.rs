@@ -133,7 +133,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::proc::{reattach_agent, spawn_agent, AgentCommand, AgentProc};
 use super::{AgentAdapter, AgentKind, AgentRun, Detected, McpServer, StartRequest};
-use crate::events::{AgentEvent, ApprovalDecision, TurnOutcome};
+use crate::events::{is_user_question_tool, AgentEvent, ApprovalDecision, TurnOutcome};
 
 /// The route agy's `PreToolUse` hook calls (local listener only).
 pub const HOOK_ROUTE: &str = "/api/agents/antigravity/hook";
@@ -789,7 +789,7 @@ impl RunApprovals {
         let call = HookCall::from_payload(payload);
         let (open, policy, timeout, always) = {
             let st = self.state.lock().unwrap();
-            (st.open, st.policy, st.timeout, st.always_allowed.contains(&call.tool))
+            (st.open, st.policy, st.timeout, !is_user_question_tool(&call.tool) && st.always_allowed.contains(&call.tool))
         };
         if !open {
             return deny_reply("No Ember turn is running for this Antigravity session.");
@@ -881,7 +881,7 @@ impl RunApprovals {
             .pending
             .remove(approval_id)
             .ok_or_else(|| anyhow::anyhow!("unknown approval {approval_id}"))?;
-        if decision == ApprovalDecision::AllowAlways {
+        if decision == ApprovalDecision::AllowAlways && !is_user_question_tool(&tool) {
             st.always_allowed.insert(tool);
         }
         // The hook may have given up already; nothing to do then.

@@ -28,3 +28,8 @@ pub mod session_shim;
 pub mod store;
 pub mod transport;
 pub mod usage;
+
+/// Shared script helper for unit tests (one source with `tests/common/mod.rs`).
+#[cfg(all(test, unix))]
+#[path = "../tests/common/mod.rs"]
+pub(crate) mod test_exec;

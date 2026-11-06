@@ -49,6 +49,10 @@ pub struct SharedLive {
     /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
     pub chatgpt: MutableState<Vec<ChatGptAccount>>,
     pub agents: MutableState<Vec<DetectedAgent>>,
+    /// The 다시 찾기 state of the 에이전트 screen (FR-L21).
+    pub agents_rescan: MutableState<crate::ui::agents::Rescan>,
+    /// When the agent detection last answered (ms since epoch); `None` before the first answer.
+    pub agents_checked_ms: MutableState<Option<u64>>,
     /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
     pub usage: MutableState<Vec<DailyUsage>>,
     /// Tokens per UTC day over the last 14 days, all harnesses (FR-U7, #332).
@@ -73,6 +77,8 @@ impl SharedLive {
             accounts: mutable_state_of(Vec::new()),
             chatgpt: mutable_state_of(Vec::new()),
             agents: mutable_state_of(Vec::new()),
+            agents_rescan: mutable_state_of(Default::default()),
+            agents_checked_ms: mutable_state_of(None),
             usage: mutable_state_of(Vec::new()),
             usage_summary: mutable_state_of(Default::default()),
             project_day: mutable_state_of(Default::default()),
@@ -129,6 +135,10 @@ pub struct SharedUi {
     /// A phone screen shows a detail view (an open room): the shell hides its top-right menu
     /// there (`body.view-detail .phonemenu { display: none }`).
     pub detail_open: MutableState<bool>,
+    /// `Some(project)` while the team character screen is open (FR-L22); empty means the
+    /// screen picks the project. Not a menu: it opens from the project settings sheet and
+    /// replaces the content with a back button (INTENT D26, #503).
+    pub characters: MutableState<Option<String>>,
     /// `true` when this process was launched directly with `--editor <project> <folder>`, so
     /// closing the editor exits the process instead of leaving a blank window.
     pub standalone_editor: MutableState<bool>,
@@ -151,6 +161,7 @@ impl SharedUi {
             theme_pref: mutable_state_of(theme),
             notice: mutable_state_of(None),
             detail_open: mutable_state_of(false),
+            characters: mutable_state_of(None),
             standalone_editor: mutable_state_of(false),
             mirrors: Arc::new(OnceLock::new()),
         }
@@ -326,6 +337,14 @@ impl SharedUi {
         if standalone {
             on_exit_standalone();
         }
+    }
+
+    pub fn open_characters(&self, project: &str) {
+        self.characters.set(Some(project.to_string()));
+    }
+
+    pub fn close_characters(&self) {
+        self.characters.set(None);
     }
 
     pub fn open_new_session(&self, project: Option<String>) {

@@ -1093,7 +1093,7 @@ fn save_settings(
                         ui.set_selected_project(follow_rename(ui.selected_project.get_untracked().as_deref(), &old, new));
                         let open = follow_rename(full.get_untracked().as_deref(), &old, new);
                         full.set(open);
-                        ui.update_prefs(|pr| pr.move_character_style(&old, new));
+                        ui.update_prefs(|pr| pr.rename_project_keys(&old, new));
                     }
                     if let (true, Some(st)) = (style_changed, style) {
                         ui.update_prefs(|pr| pr.set_character_style(&saved_as, st));

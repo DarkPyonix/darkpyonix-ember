@@ -42,6 +42,10 @@ fn render(event: &AgentEvent) -> Option<String> {
         }
         AgentEvent::ApprovalRequested { tool, .. } => format!("[waiting for approval: {tool}]"),
         AgentEvent::ApprovalResolved { decision, .. } => format!("[approval: {decision:?}]"),
+        AgentEvent::QuestionAsked { .. } => "[waiting for an answer to a question]".to_string(),
+        AgentEvent::QuestionAnswered { answers, .. } => {
+            if answers.is_empty() { "[question skipped]".to_string() } else { "[question answered]".to_string() }
+        }
         AgentEvent::TurnEnded { outcome } => format!("[turn ended: {outcome:?}]"),
         AgentEvent::Error { message } => format!("error: {message}"),
         AgentEvent::TurnError { code, message } => format!("error ({code}): {message}"),

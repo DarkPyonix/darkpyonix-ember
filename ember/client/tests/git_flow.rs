@@ -248,6 +248,8 @@ async fn fr_g13_github_summary_decodes_null_numbers_and_defaults() {
     assert_eq!(g.totals.review_requested, Some(3));
     assert_eq!(g.totals.ci_pass_percent, None);
     assert_eq!(g.checked_at, 1760000000);
+}
+
 #[tokio::test]
 async fn fr_g10_pr_detail_call_decodes_the_nodes_shape() {
     use ember_client::api::{GitPrCheckState, GitPrReviewState};

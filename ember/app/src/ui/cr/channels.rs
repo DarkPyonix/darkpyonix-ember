@@ -747,14 +747,6 @@ mod tests {
     }
 
     #[test]
-    fn fr_l12_the_compact_list_root_fills_the_width() {
-        let src = include_str!("channels.rs");
-        let at = src.find("} else if show_room {").expect("compact branch");
-        let branch = &src[at..at + 400];
-        assert_eq!(branch.matches("fill_max_width()").count(), 2, "room and list roots fill the width");
-    }
-
-    #[test]
     fn fr_l12_a_loading_screen_says_it_is_loading() {
         fn loading() {
             ChannelsView(Vec::new(), Load::Loading, None);

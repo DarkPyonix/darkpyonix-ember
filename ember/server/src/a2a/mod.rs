@@ -1452,7 +1452,7 @@ mod channel_tool_tests {
         assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Free);
         put(&home.join(".claude.json"), &with_server("ember-channels"));
         assert_eq!(taken(&cwd, Some(&home), Some(&cfg), &[]), NameCheck::Taken { kind: KIND_USER });
-        assert_eq!(taken(&cwd, Some(&home), NameCheck::Free, &[]), NameCheck::Taken { kind: KIND_USER });
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_USER });
     }
 
     #[test]
@@ -1463,11 +1463,11 @@ mod channel_tool_tests {
         let home = d.path().join("home");
         let key = cwd.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{key}":{}}}}}"#, with_server("Ember-Channels")));
-        assert_eq!(taken(&cwd, Some(&home), NameCheck::Free, &[]), NameCheck::Taken { kind: KIND_LOCAL });
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
         let parent = d.path().join("proj");
         let pkey = parent.to_str().unwrap();
         put(&home.join(".claude.json"), &format!(r#"{{"projects":{{"{pkey}":{}}}}}"#, with_server("ember-channels")));
-        assert_eq!(taken(&cwd, Some(&home), NameCheck::Free, &[]), NameCheck::Taken { kind: KIND_LOCAL });
+        assert_eq!(taken(&cwd, Some(&home), None, &[]), NameCheck::Taken { kind: KIND_LOCAL });
     }
 
     #[test]

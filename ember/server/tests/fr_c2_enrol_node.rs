@@ -2,8 +2,8 @@
 //! loopback TCP listener (`EnrolDoor::serve`), with the owner's side (`Enrol::confirm` / `deny`)
 //! driven from the test through a fake registrar over an in-memory store.
 //!
-//! CI compiled and ran the tests of PR #614 (before the two write-failure tests below were added,
-//! which have not been compiled). Every expected value was read from
+//! CI compiled and ran the tests of PR #614. The write-failure tests and everything from the N2b
+//! follow-up (the preflight tests and the scripted STUB door at the end) have not been compiled. Every expected value was read from
 //! `ember/server/src/enrol_door.rs`, `ember/server/src/computers/enrol.rs` and
 //! `ember/node/src/enrol_cli.rs`.
 //!
@@ -245,6 +245,11 @@ async fn fr_c2_node_enrol_writes_enrol_json_0600_and_allowed_peers() {
     assert!(!said.contains(&code), "the code is never printed");
     assert!(said.contains("SIGHUP") && !said.contains("short pin"), "{said}");
     assert!(said.contains(&fp(&sid)), "{said}");
+    // The preflight probe and the staging files are gone.
+    let mut left: Vec<String> =
+        std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, vec![".enrol.lock".to_string(), "allowed-peers".to_string(), ENROL_FILE.to_string()]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -310,17 +315,28 @@ async fn fr_c2_node_enrol_pin_without_a_server_id_aborts() {
 
 /// The server wiped the credential when it delivered it, so a refused write loses the token: the
 /// node says so in plain words, names the computer, and prints neither the token nor the secrets.
+/// (The failing write is provoked by planting the symlink after the redeem: a symlink planted
+/// before is caught by the preflight, see the next test.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fr_c2_node_enrol_a_refused_write_after_delivery_says_the_token_is_lost() {
     let sid = peer_id();
     let h = start(Some(sid.clone())).await;
     let (code, id) = h.mint("build-box");
-    let confirm = h.confirm_soon(&id);
     let dir = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let target = other.path().join("real-peers");
     std::fs::write(&target, format!("{}\n", peer_id())).unwrap();
-    std::os::unix::fs::symlink(&target, peers_path(dir.path())).unwrap();
+    // The preflight would refuse a symlink planted beforehand, before the redeem. The symlink
+    // appears after the node redeemed (a race the preflight cannot see), just before the owner
+    // confirms, so the final write is what refuses.
+    let confirm = {
+        let (enrol, fake, id, link, target) = (h.enrol.clone(), h.fake.clone(), id.clone(), peers_path(dir.path()), target.clone());
+        tokio::spawn(async move {
+            wait_redeemed(&enrol, &id).await;
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            enrol.confirm(&id, None, now_ms(), &*fake).unwrap();
+        })
+    };
     let mut o = h.opts(&code, dir.path());
     o.pin = Some(sid.clone());
     let mut io = Script::new(false, &[]);
@@ -596,4 +612,244 @@ async fn fr_c2_node_enrol_token_is_the_one_the_node_config_reads() {
     let token = h.fake.token_of("build-box");
     assert_eq!(ember_node::config::token_from(None, Some(dir.path())).unwrap(), token);
     assert_eq!(ember_node::config::token_from(Some("env-wins".into()), Some(dir.path())).unwrap(), "env-wins");
+}
+
+// ---- the preflight (N2b) --------------------------------------------------------------------
+
+/// An `allowed-peers` that is a symlink is found before the redeem: the door never sees a
+/// request and the code is still good afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_preflight_refuses_a_symlinked_allowed_peers_before_the_redeem() {
+    let sid = peer_id();
+    let h = start(Some(sid.clone())).await;
+    let (code, _id) = h.mint("build-box");
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let target = other.path().join("real-peers");
+    std::fs::write(&target, format!("{}\n", peer_id())).unwrap();
+    std::os::unix::fs::symlink(&target, peers_path(dir.path())).unwrap();
+    let mut o = h.opts(&code, dir.path());
+    o.pin = Some(sid);
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(o, &mut io).await.unwrap_err());
+    assert!(err.contains("symbolic link") && err.contains("nothing was redeemed"), "{err}");
+    assert_eq!(h.cap.redeems.load(Ordering::SeqCst), 0, "the door was never called");
+    assert!(h.enrol.redeem(&code, &NodeInfo::minimal("probe"), now_ms(), "127.0.0.1").is_ok(), "the code is still good");
+    assert!(!dir.path().join(ENROL_FILE).exists());
+    assert!(std::fs::symlink_metadata(peers_path(dir.path())).unwrap().file_type().is_symlink());
+}
+
+// ---- a scripted STUB door -------------------------------------------------------------------
+//
+// The real door cannot misbehave on demand, so these tests run `run` against a small axum server
+// that answers `POST /enrol/redeem` and `GET /enrol/status/{id}` from a script and counts the
+// requests per route. Not tested here: `no_proxy` (it needs a process-wide environment variable,
+// which would leak into the other tests of this binary).
+
+#[derive(Clone)]
+enum Payload {
+    Text(String),
+    /// A body of this many bytes with a Content-Length.
+    Big(usize),
+    /// A chunked body that never ends.
+    Endless,
+}
+
+#[derive(Clone)]
+struct Reply {
+    status: u16,
+    payload: Payload,
+    delay_ms: u64,
+    location: Option<String>,
+}
+
+impl Reply {
+    fn json(status: u16, body: &str) -> Reply {
+        Reply { status, payload: Payload::Text(body.to_string()), delay_ms: 0, location: None }
+    }
+    fn big(n: usize) -> Reply {
+        Reply { status: 200, payload: Payload::Big(n), delay_ms: 0, location: None }
+    }
+    fn endless() -> Reply {
+        Reply { status: 200, payload: Payload::Endless, delay_ms: 0, location: None }
+    }
+    fn redirect(to: &str) -> Reply {
+        Reply { status: 302, payload: Payload::Text(String::new()), delay_ms: 0, location: Some(to.to_string()) }
+    }
+}
+
+#[derive(Default)]
+struct Route {
+    script: Mutex<VecDeque<Reply>>,
+    hits: AtomicUsize,
+}
+
+impl Route {
+    fn with(replies: Vec<Reply>) -> Route {
+        Route { script: Mutex::new(replies.into()), ..Route::default() }
+    }
+    /// The next reply; the last one repeats.
+    fn next(&self) -> Reply {
+        self.hits.fetch_add(1, Ordering::SeqCst);
+        let mut q = self.script.lock().unwrap();
+        if q.len() > 1 {
+            q.pop_front().unwrap()
+        } else {
+            q.front().cloned().unwrap_or_else(|| Reply::json(500, "{}"))
+        }
+    }
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+}
+
+struct Stub {
+    redeem: Route,
+    status: Route,
+}
+
+async fn reply_of(r: Reply) -> Response {
+    if r.delay_ms > 0 {
+        tokio::time::sleep(Duration::from_millis(r.delay_ms)).await;
+    }
+    let mut b = Response::builder().status(r.status).header("content-type", "application/json");
+    if let Some(l) = &r.location {
+        b = b.header("location", l.as_str());
+    }
+    let body = match r.payload {
+        Payload::Text(t) => Body::from(t),
+        Payload::Big(n) => Body::from(vec![b' '; n]),
+        Payload::Endless => {
+            use futures::StreamExt;
+            let chunks = futures::stream::repeat_with(|| Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(vec![b' '; 8192])))
+                .then(|c| async move {
+                    tokio::task::yield_now().await;
+                    c
+                });
+            Body::from_stream(chunks)
+        }
+    };
+    b.body(body).unwrap()
+}
+
+/// A stub door on a loopback port: (its base URL, its counters).
+async fn stub(redeem: Vec<Reply>, status: Vec<Reply>) -> (String, Arc<Stub>) {
+    let st = Arc::new(Stub { redeem: Route::with(redeem), status: Route::with(status) });
+    let app = axum::Router::new()
+        .route(
+            "/enrol/redeem",
+            axum::routing::post(|State(st): State<Arc<Stub>>| async move { reply_of(st.redeem.next()).await }),
+        )
+        .route(
+            "/enrol/status/{id}",
+            axum::routing::get(|State(st): State<Arc<Stub>>| async move { reply_of(st.status.next()).await }),
+        )
+        .with_state(st.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (base, st)
+}
+
+const REDEEM_OK: &str = r#"{"enrol_id":"enrol-1","poll_secret":"poll-secret-1","expires_ms":4102444800000}"#;
+const STUB_TOKEN: &str = "tok_stub-token.1";
+
+fn joined(server_peer_id: Option<&str>) -> String {
+    let peer = server_peer_id.map(|p| format!(r#","server_peer_id":"{p}""#)).unwrap_or_default();
+    format!(
+        r#"{{"status":"joined","credential":{{"node_token":"{STUB_TOKEN}","name":"stub-box","computer_id":"computer-1"{peer}}}}}"#
+    )
+}
+
+fn stub_opts(base: &str, dir: &Path) -> Options {
+    let mut o = Options::new("dpe_stubcode".to_string(), base.to_string(), dir.to_path_buf());
+    o.yes = true;
+    o.poll_every = Duration::from_millis(40);
+    o.deadline = Some(Duration::from_secs(10));
+    o
+}
+
+/// N7: a redirect is not followed, so the code never reaches another host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_stub_a_redirect_from_the_redeem_is_not_followed() {
+    let (second, second_st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::json(200, &joined(None))]).await;
+    let (first, first_st) = stub(vec![Reply::redirect(&format!("{second}/enrol/redeem"))], vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(stub_opts(&first, dir.path()), &mut io).await.unwrap_err());
+    assert!(err.contains("302"), "{err}");
+    assert_eq!(first_st.redeem.hits(), 1);
+    assert_eq!(second_st.redeem.hits(), 0, "the redirect target received nothing");
+    assert_eq!(second_st.status.hits(), 0);
+    nothing_written(dir.path());
+    assert!(!io.text().contains("dpe_stubcode"));
+}
+
+/// N12: a response body over 64 KiB is refused, with a Content-Length and when chunked without end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_stub_an_oversized_redeem_answer_is_refused() {
+    for reply in [Reply::big(70 * 1024), Reply::endless()] {
+        let (base, st) = stub(vec![reply], vec![]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut io = Script::new(false, &[]);
+        let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
+        assert!(err.contains("the server's answer is too large"), "{err}");
+        assert_eq!(st.status.hits(), 0, "no poll after a refused redeem");
+        nothing_written(dir.path());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_stub_an_oversized_poll_answer_is_refused() {
+    for reply in [Reply::big(70 * 1024), Reply::endless()] {
+        let (base, st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![reply]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut io = Script::new(false, &[]);
+        let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
+        assert!(err.contains("the server's answer is too large"), "{err}");
+        assert_eq!(st.status.hits(), 1, "the oversized answer stops the run at once");
+        nothing_written(dir.path());
+    }
+}
+
+/// Two 429 answers double the delay (40 ms, then 80, then 160 ms before the third poll); the run
+/// still succeeds. No upper bound is asserted. Without a delivered server id nothing is trusted
+/// and only `enrol.json` is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_stub_429_answers_back_the_polling_off() {
+    let (base, st) = stub(
+        vec![Reply::json(200, REDEEM_OK)],
+        vec![Reply::json(429, "{}"), Reply::json(429, "{}"), Reply::json(200, &joined(None))],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut io = Script::new(false, &[]);
+    let t0 = std::time::Instant::now();
+    let out = run(stub_opts(&base, dir.path()), &mut io).await.unwrap();
+    let elapsed = t0.elapsed();
+    assert_eq!(st.status.hits(), 3);
+    assert!(!out.server_trusted && !out.peer_added);
+    assert!(elapsed >= Duration::from_millis(40 + 80 + 160), "the delay doubled: {elapsed:?}");
+    let e = read_enrolment(dir.path()).unwrap().expect("enrol.json");
+    assert_eq!(e.node_token, STUB_TOKEN);
+    assert!(!peers_path(dir.path()).exists());
+    assert!(!io.text().contains(STUB_TOKEN));
+}
+
+/// A delivered server id that is not 64 lowercase hex aborts with nothing written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fr_c2_node_stub_a_malformed_delivered_server_id_aborts() {
+    let bad = "zz".repeat(32);
+    let (base, _st) = stub(vec![Reply::json(200, REDEEM_OK)], vec![Reply::json(200, &joined(Some(&bad)))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut io = Script::new(false, &[]);
+    let err = format!("{:#}", run(stub_opts(&base, dir.path()), &mut io).await.unwrap_err());
+    let said = io.text();
+    assert!(err.contains("malformed") && err.contains("nothing was written"), "{err}");
+    assert!(said.contains("malformed"), "{said}");
+    nothing_written(dir.path());
+    assert!(!said.contains(STUB_TOKEN) && !err.contains(STUB_TOKEN), "the token is in no output");
+    assert!(!said.contains(&bad), "the malformed id is not echoed");
 }

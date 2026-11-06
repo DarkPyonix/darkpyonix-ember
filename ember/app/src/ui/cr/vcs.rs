@@ -2687,7 +2687,7 @@ fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed:
 /// A small pill whose visible text is `text` and whose accessible name is `access`.
 fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
-    let s = super::components::button_style(kind, true, p);
+    let s = super::components::button_style_for(kind, true, enabled, p);
     let width = (super::home::text_px(text, s.fs.size()) + 28.0).max(64.0);
     cu::Box()
         .modifier(

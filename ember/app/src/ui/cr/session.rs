@@ -479,10 +479,6 @@ pub fn ide_main_click(
     }
 }
 
-/// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
-/// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
-/// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
-/// button role (compose-rust#372) but no label. Touch target 26x32, under 44 px: #323.
 /// The colours of the "IDE 열기" split button (`.btn.sm` in the mockup): `surface` fill and a
 /// `line` border with `text` ink, the same default button as every other header action. It was
 /// drawn with the `ink` fill, which is a light inverted button in the dark scheme (NFR-L3, #510).
@@ -494,10 +490,15 @@ pub struct IdeSplitStyle {
     pub divider: Color,
 }
 
+/// The `IdeSplitStyle` of the current palette.
 pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
     IdeSplitStyle { fill: p.surface, ink: p.text, border: p.line, divider: p.line }
 }
 
+/// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
+/// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
+/// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
+/// button role (compose-rust#372) but no label. Touch target 26x32, under 44 px: #323.
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
@@ -1206,6 +1207,69 @@ pub fn PaneComposer(session: &str, busy: bool) {
         });
 }
 
+/// Width of one pane in the multi view: the window less the nav, the page padding on both sides
+/// and the gaps between `columns` panes. An unknown window (0 dp on this toolkit version at 390)
+/// gives 0, which counts as narrow (FR-L18, #585).
+pub fn pane_width(window_dp: f32, columns: usize, nav_dp: f32) -> f32 {
+    if window_dp <= 0.0 {
+        return 0.0;
+    }
+    let n = columns.max(1) as f32;
+    let body = window_dp - nav_dp - 2.0 * status_page_pad(window_dp);
+    ((body - SP[2] * (n - 1.0)) / n).max(0.0)
+}
+
+/// Whether the pane header shows the single icon toggle (`.ph-mode`) instead of the 대화/터미널
+/// segment (`.ph-seg`): at 420 dp and below, or when the width is unknown (mockup
+/// `@container pane (max-width:420px)`, FR-L18, #585).
+pub fn pane_header_uses_icon_toggle(pane_w: f32) -> bool {
+    pane_w <= 0.0 || pane_w <= 420.0
+}
+
+/// Compact segmented switcher inside a pane header (`.ph-seg`).
+fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
+    let p = ember_theme().palette;
+    cu::Row()
+        .alignment(Alignment::Center)
+        .modifier(
+            Modifier::new()
+                .height(26.0)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(13.0)
+                .padding(2.0),
+        )
+        .content(move || {
+            for t in PaneToggle::ALL {
+                let selected = cur == t;
+                let (bg, fg) = if selected {
+                    (paint(p.ink), p.ink_text)
+                } else {
+                    (paint(Color::argb(0)), p.muted)
+                };
+                let cb = on_pick.clone();
+                Clickable(
+                    Modifier::new().height(22.0).background(bg).corner_radius(11.0),
+                    Alignment::Center,
+                    move || cb(t),
+                    move || {
+                        cu::Row().alignment(Alignment::Center).content(|| {
+                            cu::Spacer().modifier(Modifier::new().width(8.0));
+                            Label(
+                                t.label(),
+                                Fs::Xs,
+                                if selected { Weight::Semibold } else { Weight::Regular },
+                                Some(paint(fg)),
+                                Some(1),
+                            );
+                            cu::Spacer().modifier(Modifier::new().width(8.0));
+                        });
+                    },
+                );
+            }
+        });
+}
+
 /// One pane of the multi view: header, transcript with approvals, composer.
 pub fn Pane(
     project: &str,
@@ -1223,6 +1287,14 @@ pub fn Pane(
     let all_owned = all.to_vec();
     let order_owned = order.to_vec();
     let narrow_pane = window.width_dp < 1150.0;
+    let pane_cols = if window.width_dp >= 700.0 { 2 } else { 1 };
+    let nav_dp = match crate::ui::shell::nav_mode(window.width_dp, false) {
+        crate::ui::shell::ShellMode::BottomTabs => 0.0,
+        crate::ui::shell::ShellMode::Rail => RAIL_W,
+        crate::ui::shell::ShellMode::Sidebar => SIDE_W,
+    };
+    let icon_toggle =
+        pane_header_uses_icon_toggle(pane_width(window.width_dp, pane_cols, nav_dp));
 
     let toggle = remember_with_key(id.clone(), || mutable_state_of(PaneToggle::Conversation));
     let menu = remember_with_key(id.clone(), || mutable_state_of(false));
@@ -1314,23 +1386,27 @@ pub fn Pane(
                             } else {
                                 Pill(label, tone.into(), true);
                             }
-                            // One icon button (`.ph-mode`): shows the view it opens, so the
-                            // title keeps the remaining width. TODO(compose-rust#460): the
-                            // accessible name `switch_label()` cannot be set on a Clickable.
                             let tg_seg = toggle.clone();
-                            let to = cur_toggle.other();
-                            Clickable(
-                                Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
-                                Alignment::Center,
-                                move || tg_seg.set(to),
-                                move || {
-                                    let icon = match to {
-                                        PaneToggle::Terminal => ICON_TERMINAL_SVG,
-                                        PaneToggle::Conversation => ICON_CHAT_SVG,
-                                    };
-                                    NavIcon(icon, p.muted.to_argb(), 14.0)
-                                },
-                            );
+                            if icon_toggle {
+                                // One icon button (`.ph-mode`): shows the view it opens, so the
+                                // title keeps the remaining width. TODO(compose-rust#460): the
+                                // accessible name `switch_label()` cannot be set on a Clickable.
+                                let to = cur_toggle.other();
+                                Clickable(
+                                    Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
+                                    Alignment::Center,
+                                    move || tg_seg.set(to),
+                                    move || {
+                                        let icon = match to {
+                                            PaneToggle::Terminal => ICON_TERMINAL_SVG,
+                                            PaneToggle::Conversation => ICON_CHAT_SVG,
+                                        };
+                                        NavIcon(icon, p.muted.to_argb(), 14.0)
+                                    },
+                                );
+                            } else {
+                                MiniSeg(cur_toggle, move |t| tg_seg.set(t));
+                            }
 
                             let enl = on_enlarge.clone();
                             let id_enl = id.clone();
@@ -4769,6 +4845,23 @@ pub fn SessionScreen(focus: Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_pane_header_icon_toggle_at_420_and_below_segment_above() {
+        assert!(super::pane_header_uses_icon_toggle(360.0));
+        assert!(super::pane_header_uses_icon_toggle(420.0));
+        assert!(!super::pane_header_uses_icon_toggle(421.0));
+        assert!(!super::pane_header_uses_icon_toggle(600.0));
+        assert!(super::pane_header_uses_icon_toggle(0.0));
+    }
+
+    #[test]
+    fn fr_l18_pane_width_unknown_window_is_narrow_and_columns_split_the_body() {
+        assert_eq!(super::pane_width(0.0, 2, 72.0), 0.0);
+        assert!(super::pane_header_uses_icon_toggle(super::pane_width(0.0, 1, 0.0)));
+        assert_eq!(super::pane_width(390.0, 1, 0.0), 366.0);
+        assert!(!super::pane_header_uses_icon_toggle(super::pane_width(1440.0, 2, 234.0)));
+    }
+
     #[test]
     fn fr_l18_status_cards_equal_height_only_when_multi_column() {
         assert!(!super::status_cards_equal_height(super::status_grid_columns(390.0)));

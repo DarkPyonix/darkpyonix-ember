@@ -90,6 +90,38 @@ pub fn deck_label(n: usize) -> String {
     format!("외 {n}명")
 }
 
+/// Names listed on the deck card.
+pub const DECK_NAMES: usize = 3;
+/// Overlapped avatars on the deck card.
+pub const DECK_AVATARS: usize = 4;
+
+/// The first `n` hidden members' names joined by ", " (the deck card's second line).
+pub fn deck_names(rest: &[Member], n: usize) -> String {
+    rest.iter().take(n).map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// The hidden members that get an avatar on the deck card: at most `n`.
+pub fn deck_avatars(rest: &[Member], n: usize) -> &[Member] {
+    &rest[..rest.len().min(n)]
+}
+
+/// The list header shows a search button up to 900 dp; above it the inline field is drawn
+/// instead, so the header has one search (FR-L26).
+pub fn list_search_button_visible(width_dp: f32) -> bool {
+    width_dp <= 900.0
+}
+
+/// The computer strip shows scroll arrows only when its content overflows.
+pub fn strip_arrows_visible(max_offset: f32) -> bool {
+    max_offset > 0.0
+}
+
+/// Where an arrow scrolls the strip: 80 % of the viewport in `dir` (-1 or 1), clamped to the
+/// content.
+pub fn strip_scroll_target(offset: f32, viewport: f32, content: f32, dir: f32) -> f32 {
+    (offset + dir * 0.8 * viewport).clamp(0.0, (content - viewport).max(0.0))
+}
+
 /// Cells that fill the last row of a grid so every card keeps the same width.
 pub fn row_padding(items: usize, columns: usize) -> usize {
     if columns == 0 || items % columns == 0 {
@@ -951,6 +983,61 @@ mod tests {
         assert_eq!((visible_tiles(5, false), deck_count(5, false)), (5, 0));
         assert_eq!((visible_tiles(8, false), deck_count(8, false)), (5, 3));
         assert_eq!(deck_label(3), "외 3명");
+    }
+
+    fn mem(n: &str) -> Member {
+        Member {
+            session_id: n.into(),
+            name: n.into(),
+            task: String::new(),
+            agent: "claude-code".into(),
+            status: LauncherStatus::Idle,
+            leader: false,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn fr_l1_deck_names_lists_first_three() {
+        let rest: Vec<Member> = ["a", "b", "c", "d"].iter().map(|n| mem(n)).collect();
+        assert_eq!(deck_names(&rest, DECK_NAMES), "a, b, c");
+        assert_eq!(deck_names(&rest[..2], DECK_NAMES), "a, b");
+        assert_eq!(deck_names(&[], DECK_NAMES), "");
+    }
+
+    #[test]
+    fn fr_l1_deck_avatars_caps_at_four() {
+        let rest: Vec<Member> = (0..7).map(|i| mem(&format!("m{i}"))).collect();
+        assert_eq!(deck_avatars(&rest, DECK_AVATARS).len(), 4);
+        assert_eq!(deck_avatars(&rest[..2], DECK_AVATARS).len(), 2);
+    }
+
+    #[test]
+    fn fr_l1_deck_card_keeps_label_and_click() {
+        assert_eq!(deck_label(3), "외 3명");
+        let src = include_str!("cr/project.rs");
+        let card = src.split("fn DeckCard(").nth(1).unwrap().split("
+}
+").next().unwrap();
+        assert!(card.contains("on_click,") && card.contains("deck_label(count)"));
+    }
+
+    #[test]
+    fn fr_l26_strip_scroll_step_is_80_percent() {
+        assert_eq!(strip_scroll_target(0.0, 500.0, 2000.0, 1.0), 400.0);
+        assert_eq!(strip_scroll_target(800.0, 500.0, 2000.0, -1.0), 400.0);
+    }
+
+    #[test]
+    fn fr_l26_strip_scroll_clamps() {
+        assert_eq!(strip_scroll_target(100.0, 500.0, 2000.0, -1.0), 0.0);
+        assert_eq!(strip_scroll_target(1400.0, 500.0, 2000.0, 1.0), 1500.0);
+    }
+
+    #[test]
+    fn fr_l26_strip_arrows_hidden_when_it_fits() {
+        assert!(!strip_arrows_visible(0.0));
+        assert!(strip_arrows_visible(120.0));
     }
 
     #[test]

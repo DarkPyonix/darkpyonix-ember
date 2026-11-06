@@ -19,7 +19,7 @@ use ember_client::wire::Project;
 use ember_client::LauncherStatus;
 
 pub use crate::ui::project::{
-    agent_options, build_patch, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
+    agent_options, build_patch, deck_avatars, deck_names, DECK_AVATARS, DECK_NAMES, list_search_button_visible, strip_arrows_visible, strip_scroll_target, chip_line, computer_chips, danger_allowed, mode_options, patch_error_message, deck_count, deck_label, display_name, filter_members,
     is_default_project, leader_choice_visible, part_supported, project_boxes, project_boxes_with_archived,
     reach_pill, status_pill, validate_settings, visible_tiles, ComputerChip, Member, MemberFilter,
     effective_style, follow_rename, override_harnesses, override_label, override_options, pick_override, AccountsState, CloseAction, SettingsGuard, DISCARD_QUESTION,
@@ -319,15 +319,17 @@ pub fn ThemeButton(ui: &SharedUi) {
 /// the search is a button, up to 900 the labels of the first two drop, and on a phone 새 팀원
 /// is a round button too (`hide-md`).
 fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
-    if w > 900.0 {
+    if !list_search_button_visible(w) {
         let q = st.query.clone();
         // TODO(compose-rust#376, #374): the "/" key hint.
         cu::Column().modifier(Modifier::new().width(240.0)).content(|| {
             SearchField("팀원 검색", H_BTN, move |v| q.set(v));
         });
     }
-    let u_search = ui.clone();
-    IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
+    if list_search_button_visible(w) {
+        let u_search = ui.clone();
+        IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
+    }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
     let can_create = services().demo.is_some();
@@ -393,24 +395,61 @@ fn ComputerStrip(chips: &[ComputerChip], st: &Ui) {
         Label("등록된 컴퓨터가 없습니다", Fs::Md, Weight::Regular, Some(paint(p.text_2)), None);
         return;
     }
-    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
-        for c in chips {
-            let (open, id) = (st.computer.clone(), c.id.clone());
-            ComputerChipView(c, move || open.set(Some(id.clone())));
-            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+    let scroll = compose_rust::ui::remember_scroll_state();
+    let viewport = content_width(compose_rust::runtime::current_window_size().width_dp, SP[6]);
+    let (offset, max) = (scroll.offset(), scroll.max_offset());
+    let arrows = strip_arrows_visible(max);
+    cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width().height(64.0)).content(|| {
+        if arrows {
+            let s = scroll.clone();
+            StripArrow(ICON_ARROW_LEFT_SVG, offset > 0.0, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, -1.0)));
         }
-        // The hub's devices, registered with the node's token (FR-X7, #490).
-        let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
-        let ui = st.add.clone();
-        Clickable(add, Alignment::CenterStart, move || ui.show(), || {
-            cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
-                cu::Spacer().modifier(Modifier::new().width(SP[2]));
-                NavIcon(shell::ICON_PLUS_SVG, p.text_2.to_argb(), 18.0);
-                Label("컴퓨터 추가", Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
-                cu::Spacer().modifier(Modifier::new().width(SP[3]));
+        cu::ScrollRow().scroll_state(&scroll).modifier(Modifier::new().weight(1.0).height(64.0)).content(|| {
+            for c in chips {
+                let (open, id) = (st.computer.clone(), c.id.clone());
+                ComputerChipView(c, move || open.set(Some(id.clone())));
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            }
+            // The hub's devices, registered with the node's token (FR-X7, #490).
+            // TODO(compose-rust): no dashed border or stroke-dash API, so the add chip keeps a solid 1 px border.
+            let add = Modifier::new().height(56.0).border(1.0, paint(p.line)).corner_radius(CORNER_MD);
+            let ui = st.add.clone();
+            Clickable(add, Alignment::CenterStart, move || ui.show(), || {
+                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).content(|| {
+                    cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                    NavIcon(shell::ICON_PLUS_SVG, p.text_2.to_argb(), 18.0);
+                    Label("컴퓨터 추가", Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().width(SP[3]));
+                });
             });
         });
+        if arrows {
+            let s = scroll.clone();
+            StripArrow(ICON_ARROW_RIGHT_SVG, offset < max, move || s.animate_scroll_to(strip_scroll_target(offset, viewport, max + viewport, 1.0)));
+        }
     });
+}
+
+const ICON_ARROW_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>"#;
+const ICON_ARROW_RIGHT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>"#;
+
+/// A scroll arrow of the computer strip. Dimmed and inert at the end it points to.
+/// TODO(compose-rust#460): no label modifier for icon-only controls, so this control has no accessible name.
+fn StripArrow(svg: &'static str, enabled: bool, mut on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let color = if enabled { p.text_2 } else { p.line };
+    Clickable(
+        Modifier::new().size(H_CTL, H_CTL).background(paint(p.surface)).border(1.0, paint(p.line)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        move || {
+            if enabled {
+                on_click()
+            }
+        },
+        move || {
+            NavIcon(svg, color.to_argb(), 16.0);
+        },
+    );
 }
 
 /// `.cchip`: 56 px, an icon tile with a status dot, the name and the status line.
@@ -519,9 +558,9 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                                 .collect();
                             Cols(team_cols(w), SP[1], tiles);
                             if deck > 0 {
-                                let e = st.expanded.clone();
-                                let id = b.id.clone();
-                                AppButton(&deck_label(deck), None, ButtonKind::Default, true, true, true, move || {
+                                let rest = &b.members[shown..];
+                                let (e, id) = (st.expanded.clone(), b.id.clone());
+                                DeckCard(rest, &b.id, deck, move || {
                                     let mut v = e.get_untracked();
                                     v.push(id.clone());
                                     e.set(v);
@@ -539,6 +578,36 @@ fn ProjectBoxView(b: &ProjectBox, st: &Ui, ui: &SharedUi, w: f32, inner: f32) {
                     });
             });
         });
+}
+
+/// The deck: overlapped avatars of the first hidden members, `외 N명` and the first three names.
+/// Clicking it expands the box. TODO(compose-rust#372): a pointer-up `Clickable`.
+fn DeckCard(rest: &[Member], project_id: &str, count: usize, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    const AV: f32 = 26.0;
+    const STEP: f32 = 16.0;
+    Clickable(
+        Modifier::new().fill_max_width().background(paint(p.surface)).border(1.0, paint(p.line)).corner_radius(CORNER_MD).padding(10.0),
+        Alignment::CenterStart,
+        on_click,
+        || {
+            cu::Row().spacing(SP[2]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                let avatars = deck_avatars(rest, DECK_AVATARS);
+                let width = AV + STEP * avatars.len().saturating_sub(1) as f32;
+                cu::Box().modifier(Modifier::new().size(width, AV)).content(|| {
+                    for (i, m) in avatars.iter().enumerate() {
+                        cu::Box().modifier(Modifier::new().size(AV, AV).offset(STEP * i as f32, 0.0)).content(|| {
+                            Character(&m.agent, m.leader, AV, &m.name, project_id, CharState::from_status(m.status), None);
+                        });
+                    }
+                });
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(&deck_label(count), Fs::Sm, Weight::Semibold, None, Some(1));
+                    Label(&deck_names(rest, DECK_NAMES), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(1));
+                });
+            });
+        },
+    );
 }
 
 /// 세션 열기: the first member's conversation, or a new session when the project has none.
@@ -1704,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l9_wide_header_renders_global_search_icon_button_beside_inline_filter() {
+    fn fr_l26_list_header_has_one_search_at_1440() {
         use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
@@ -1727,15 +1796,52 @@ mod tests {
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");
         let batch = decode_batch(bytes).expect("decode");
-        // Verify both the inline "팀원 검색" placeholder and the Search icon button exist at 1440dp.
         let has_placeholder = batch.iter().any(|m| {
             matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
         });
         let has_search_icon = batch.iter().any(|m| {
-            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. })
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, value: PropertyValue::Integer(i), .. } if *i == IconRole::Search as i64)
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
-        assert!(has_search_icon, "expected global search icon button at 1440dp");
+        assert!(!has_search_icon, "the magnifier button must not repeat beside the inline field");
+        assert!(!list_search_button_visible(1440.0));
+        compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l26_list_header_search_button_below_900() {
+        use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
+        let _guard = crate::services::test_guard();
+        let ui = shared_ui();
+        ui.go(crate::ui::Route::Projects);
+        compose_rust::window::reset_window_size();
+        let mut host = Host::new(|| Box::new(Recomposer::new(ProjectScreen)));
+        let _ = host.rebuild().expect("rebuild");
+        let event = HostEvent {
+            node_id: 0,
+            handler_id: 0,
+            payload: EventPayload::WindowSizeChanged {
+                width_dp: 800.0,
+                height_dp: 900.0,
+                class: WindowSizeClass::Medium,
+                height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
+            },
+        };
+        let (bytes, _) = host.dispatch(event).expect("dispatch");
+        let batch = decode_batch(bytes).expect("decode");
+        let has_placeholder = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
+        });
+        let has_search_icon = batch.iter().any(|m| {
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, value: PropertyValue::Integer(i), .. } if *i == IconRole::Search as i64)
+        });
+        assert!(has_search_icon, "expected the search icon button at 800dp");
+        assert!(!has_placeholder, "no inline field at 800dp");
+        assert!(list_search_button_visible(800.0));
+        assert!(list_search_button_visible(900.0));
         compose_rust::window::reset_window_size();
     }
 

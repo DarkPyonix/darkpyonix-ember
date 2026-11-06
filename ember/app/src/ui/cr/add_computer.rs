@@ -56,6 +56,8 @@ pub struct AddUi {
     failure: MutableState<Option<String>>,
     /// The owner confirmed; the node has not taken its credential yet.
     confirmed: MutableState<bool>,
+    /// The confirm call has not answered yet: closing must not cancel the request.
+    confirm_in_flight: MutableState<bool>,
     armed_at: MutableState<i64>,
     /// Ticks once a second while a view counts down.
     tick: MutableState<i64>,
@@ -77,6 +79,7 @@ impl AddUi {
             busy: mutable_state_of(false),
             failure: mutable_state_of(None),
             confirmed: mutable_state_of(false),
+            confirm_in_flight: mutable_state_of(false),
             armed_at: mutable_state_of(0),
             tick: mutable_state_of(0),
             review: false,
@@ -145,6 +148,7 @@ impl AddUi {
         self.busy.set(false);
         self.failure.set(None);
         self.confirmed.set(false);
+        self.confirm_in_flight.set(false);
     }
 
     fn with_guard<R>(&self, f: impl FnOnce(&mut RunGuard) -> R) -> R {
@@ -160,32 +164,58 @@ impl AddUi {
         self.with_guard(|g| g.is_current(id))
     }
 
-    /// The enrolment ended: the code and the command are dropped and answers for it are refused.
-    fn end_run(&self, view: EnrolView) {
-        self.run.set(None);
-        self.with_guard(|g| g.clear());
-        self.typed_fp.set(String::new());
-        self.view.set(Some(view));
+    /// Feeds one event to the reducer and carries out its effects. The order decisions are in
+    /// `flow::reduce`; this only copies state in and out.
+    fn step(&self, ev: flow::Event) {
+        let mut st = flow::SheetState {
+            guard: self.guard.get_untracked(),
+            view: self.view.get_untracked(),
+            confirmed: self.confirmed.get_untracked(),
+            confirm_in_flight: self.confirm_in_flight.get_untracked(),
+            sample: self.sample(),
+        };
+        let effects = flow::reduce(&mut st, ev);
+        self.guard.set(st.guard);
+        self.confirmed.set(st.confirmed);
+        self.confirm_in_flight.set(st.confirm_in_flight);
+        for e in effects {
+            match e {
+                flow::Effect::Cancel(id) => cancel_on_server(id),
+                flow::Effect::ArmConfirm => self.armed_at.set(now_ms()),
+                flow::Effect::RefreshComputers => {
+                    refresh_computers();
+                    notice::post("컴퓨터를 추가했습니다".to_string());
+                }
+                flow::Effect::ClearSecrets => {
+                    self.run.set(None);
+                    self.typed_fp.set(String::new());
+                }
+                flow::Effect::SetView(v) => self.view.set(Some(v)),
+            }
+        }
     }
 
     /// The clock passed a waiting code's time: it ends as expired now, not only in the renderer.
     fn expire_if_due(&self, now: i64) {
-        if let Some(next) = self.view.get_untracked().and_then(|v| flow::view_after_tick(&v, now)) {
-            self.end_run(next);
-        }
+        self.step(flow::Event::Tick { now_ms: now });
     }
 
     /// Closing drops the code. A code nobody redeemed is cancelled on the server; one the owner
-    /// already confirmed is left to finish.
+    /// already confirmed (or is confirming) is left to finish.
     fn leave(&self) {
-        let cancel = flow::should_cancel_on_leave(self.view.get_untracked().as_ref(), self.confirmed.get_untracked(), self.sample());
-        if let (true, Some(run)) = (cancel, self.run.get_untracked()) {
-            run_shared(async move { services().client.api().enrol_cancel(&run.id).await }, |_| {});
-        }
+        self.step(flow::Event::Leave);
         self.reset_flow();
-        self.with_guard(|g| g.close());
         self.open.set(false);
     }
+}
+
+/// Cancels an enrolment; a failure is told, because the request then lives until it expires.
+fn cancel_on_server(id: String) {
+    run_shared(async move { services().client.api().enrol_cancel(&id).await }, |r| {
+        if r.is_err() {
+            notice::post(flow::CANCEL_FAILED.to_string());
+        }
+    });
 }
 
 /// Reads the devices; the demo serves samples and calls nothing.
@@ -208,12 +238,12 @@ fn mint(ui: AddUi, name: String) {
     ui.failure.set(None);
     let generation = ui.with_guard(|g| g.begin_mint());
     run_shared(async move { services().client.api().enrol_mint(&name).await }, move |r| {
+        if let Ok(m) = &r {
+            // A late code (the sheet closed or started over) is cancelled by the reducer.
+            ui.step(flow::Event::MintAnswered { generation, id: m.id.clone() });
+        }
         match r {
-            Ok(m) if !ui.with_guard(|g| g.accept_mint(generation, &m.id)) => {
-                // The sheet closed or started over meanwhile: cancel the code now and drop it.
-                let id = m.id.clone();
-                run_shared(async move { services().client.api().enrol_cancel(&id).await }, |_| {});
-            }
+            Ok(m) if !ui.is_current(&m.id) => {}
             _ if !ui.with_guard(|g| g.mint_current(generation)) => {}
             Ok(m) => {
                 ui.busy.set(false);
@@ -256,19 +286,8 @@ fn apply_poll(ui: &AddUi, run: &Run, r: Result<ember_client::api::EnrolStatus, e
         Ok(st) => flow::view_from_status(&st, &run.code, run.expires_ms),
         Err(e) => flow::view_after_poll_error(&cur, &e),
     };
-    if matches!(next, EnrolView::AwaitingConfirm { .. }) && !matches!(cur, EnrolView::AwaitingConfirm { .. }) {
-        ui.armed_at.set(now_ms());
-    }
-    if next == EnrolView::Joined && cur != EnrolView::Joined {
-        refresh_computers();
-        notice::post("컴퓨터를 추가했습니다".to_string());
-    }
-    // The code and the command are secrets: drop them as soon as the enrolment ends.
-    if flow::is_end_state(&next) {
-        ui.end_run(next);
-    } else if next != cur {
-        ui.view.set(Some(next));
-    }
+    // The code and the command are secrets: the reducer drops them when the enrolment ends.
+    ui.step(flow::Event::PollAnswered { id: run.id.clone(), view: next });
 }
 
 fn refresh_computers() {
@@ -291,6 +310,7 @@ fn confirm(ui: AddUi, run: Run, rows: ConfirmRows) {
     let name = flow::confirm_name(&ui.confirm_name.get_untracked(), &rows.chosen_name);
     ui.busy.set(true);
     ui.failure.set(None);
+    ui.confirm_in_flight.set(true);
     let id = run.id.clone();
     let expect = flow::expect_fingerprint(&rows, &ui.typed_fp.get_untracked());
     run_shared(async move { services().client.api().enrol_confirm(&run.id, &name, expect.as_deref()).await }, move |r| {
@@ -298,12 +318,12 @@ fn confirm(ui: AddUi, run: Run, rows: ConfirmRows) {
             return;
         }
         ui.busy.set(false);
-        match r {
-            Ok(_) => ui.confirmed.set(true),
-            Err(e) => match flow::view_after_confirm_error(&e) {
-                Some(end) => ui.end_run(end),
+        ui.step(flow::Event::ConfirmAnswered { id: id.clone(), ok: r.is_ok() });
+        if let Err(e) = r {
+            match flow::view_after_confirm_error(&e) {
+                Some(end) => ui.step(flow::Event::PollAnswered { id: id.clone(), view: end }),
                 None => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
-            },
+            }
         }
     });
 }
@@ -321,12 +341,12 @@ fn deny(ui: AddUi, run: Run) {
             return;
         }
         ui.busy.set(false);
-        match r {
-            Ok(()) => ui.end_run(EnrolView::Denied),
-            Err(e) => match flow::view_after_confirm_error(&e) {
-                Some(end) => ui.end_run(end),
+        ui.step(flow::Event::DenyAnswered { id: id.clone(), ok: r.is_ok() });
+        if let Err(e) = r {
+            match flow::view_after_confirm_error(&e) {
+                Some(end) => ui.step(flow::Event::PollAnswered { id: id.clone(), view: end }),
                 None => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
-            },
+            }
         }
     });
 }
@@ -486,10 +506,20 @@ fn WaitingBody(ui: &AddUi, code: &str, expires_ms: i64, sample: bool) {
     if let Some(run) = ui.run.get() {
         match &run.command {
             CommandView::Command { text, plain_http } => {
-                super::components::MonoLabel(text, Fs::Xs, Weight::Regular, Some(paint(p.text)));
+                match flow::stdin_form(text, &run.code) {
+                    Some(stdin) => {
+                        super::components::MonoLabel(&stdin, Fs::Xs, Weight::Regular, Some(paint(p.text)));
+                        Label(flow::STDIN_FORM_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
+                        Label(flow::ARG_LABEL, Fs::Xs, Weight::Medium, muted, Some(1));
+                        super::components::MonoLabel(text, Fs::Xs, Weight::Regular, muted);
+                    }
+                    None => {
+                        super::components::MonoLabel(text, Fs::Xs, Weight::Regular, Some(paint(p.text)));
+                        Label(flow::STDIN_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
+                    }
+                }
                 Label(flow::NODE_CMD_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
                 Label(flow::ZSH_QUOTE_NOTE, Fs::Xs, Weight::Regular, muted, Some(2));
-                Label(flow::STDIN_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
                 if *plain_http {
                     Label(flow::HTTP_WARNING, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), Some(3));
                 }

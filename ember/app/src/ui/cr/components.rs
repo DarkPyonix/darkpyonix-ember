@@ -747,9 +747,17 @@ pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, moni
     }
 }
 
+/// The body height used while the window height is unknown (not yet reported).
+const SHEET_BODY_UNKNOWN_H: f32 = 240.0;
+
 /// The one formula for a sheet body's height: what is left of the sheet's maximum height after
 /// the header (and any footer), never negative. Every sheet body sizes itself with this.
 pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool, chrome_h: f32) -> f32 {
+    // A window that has not reported its height yet (0) is not a zero-high window: keep the body
+    // visible instead of collapsing it.
+    if window_height_dp <= 0.0 {
+        return SHEET_BODY_UNKNOWN_H;
+    }
     (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h).max(0.0)
 }
 
@@ -1095,6 +1103,15 @@ mod tests {
         assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0);
         // With a 65 dp footer as well.
         assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0);
+        // The real call sites at 390x844 and 390x640 keep a body well above 300 (header 60, footer 65).
+        for h in [844.0, 640.0] {
+            assert!(sheet_body_max_height(390.0, h, false, 60.0).min(900.0) > 300.0, "project {h}");
+            assert!(sheet_body_max_height(390.0, h, false, 125.0).min(600.0) > 300.0, "routines {h}");
+            assert!(sheet_body_max_height(390.0, h, false, 125.0).min(900.0) > 300.0, "new session {h}");
+            assert!(sheet_body_max_height(390.0, h, true, 60.0).min(1200.0) > 300.0, "monitor {h}");
+        }
+        // A window that has not reported its height does not collapse the body.
+        assert_eq!(sheet_body_max_height(390.0, 0.0, false, 60.0), 240.0);
         // Never negative.
         assert_eq!(sheet_body_max_height(390.0, 50.0, false, 125.0), 0.0);
         // The monitor fills the screen at 390; a dialog keeps 32 dp of margin.

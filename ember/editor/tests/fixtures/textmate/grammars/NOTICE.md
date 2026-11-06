@@ -19,6 +19,11 @@ copyright holders are listed below the table, each with the licence text.
 | MagicRegExp.tmLanguage.json | github.com/MagicStack/MagicPython | grammars/MagicRegExp.tmLanguage | c9b3409deb69acec31bbf7913830e93a046b30cc | MagicStack Inc. |
 | markdown.tmLanguage.json | github.com/microsoft/vscode-markdown-tm-grammar | syntaxes/markdown.tmLanguage | 0812fc4b190efc17bfed0d5b4ff918eff8e4e377 | Microsoft |
 
+Two more files are Code-OSS's own and carry no upstream repository of their own: `jsdoc.ts.injection.tmLanguage.json`
+and `jsdoc.js.injection.tmLanguage.json` come from `extensions/typescript-basics/syntaxes/` of github.com/microsoft/vscode
+(Code-OSS 1.139.1), MIT, Copyright (c) Microsoft Corporation (the text above). `injection-host.tmLanguage.json` and
+`injection-guest.tmLanguage.json` were written for these tests and are part of this repository.
+
 (The upstream file is the plist or YAML original; Code-OSS converted each to JSON, which is the file here.
 `JavaScript.tmLanguage.json` is the conversion of TypeScript-TmLanguage's `TypeScriptReact.tmLanguage`.)
 

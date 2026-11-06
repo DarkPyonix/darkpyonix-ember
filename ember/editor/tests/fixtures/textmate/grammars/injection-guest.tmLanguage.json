@@ -1,0 +1,8 @@
+{
+  "scopeName": "source.guest",
+  "injectionSelector": "L:source.host string.quoted.host - meta.interp.host",
+  "patterns": [
+    { "match": "\\b[A-Z][a-z]+\\b", "name": "variable.guest" },
+    { "begin": "\\(", "end": "\\)", "name": "meta.paren.guest", "patterns": [ { "match": "\\d+", "name": "constant.numeric.guest" } ] }
+  ]
+}

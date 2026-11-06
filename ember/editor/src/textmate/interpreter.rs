@@ -7,7 +7,10 @@
 //! that pushes or pops without advancing. Regular expressions run on Oniguruma, the engine the
 //! grammars are written for.
 //!
-//! Not done yet: `injections` and `injectionSelector` (the rules are parsed but not applied).
+//! Injections: the root grammar's `injections` (a scope selector per rule), and the grammars that name the root
+//! in `injectTo` and carry an `injectionSelector`, add rules that compete with the rules of the scope they are
+//! injected into, as in vscode-textmate. As there, only the root grammar's own `injections` count, not those of
+//! the grammars it includes.
 //!
 //! A line goes in without its line break; the interpreter appends the `\n` grammars expect and removes
 //! it from the result. Offsets in the result are byte offsets into the line.
@@ -18,6 +21,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use onig::{MatchParam, Regex, RegexOptions, Region, SearchOptions, Syntax};
 
 use super::grammar::{RawGrammar, RawRule};
+use super::selector::{Matcher, Selector};
 
 /// A line longer than this many bytes is not tokenized: it gets one token with the scopes in force and the
 /// state is left as it was. Minified files have lines of megabytes, and a search is linear in the line for
@@ -170,6 +174,8 @@ struct Rule {
 #[derive(Debug, Clone, Default)]
 pub struct GrammarSet {
     grammars: HashMap<String, RawGrammar>,
+    /// Grammars injected into a scope (what their `injectTo` says), by that scope.
+    injectors: HashMap<String, Vec<String>>,
 }
 
 impl GrammarSet {
@@ -181,14 +187,34 @@ impl GrammarSet {
         self.grammars.insert(grammar.scope_name.clone(), grammar);
     }
 
+    /// Declares that the grammar `injector` (its `injectionSelector` and its patterns) is injected into `target`.
+    pub fn add_injector(&mut self, target: &str, injector: &str) {
+        let list = self.injectors.entry(target.to_owned()).or_default();
+        if !list.iter().any(|s| s == injector) {
+            list.push(injector.to_owned());
+        }
+    }
+
     pub fn contains(&self, scope: &str) -> bool {
         self.grammars.contains_key(scope)
     }
 }
 
+/// A rule that competes with the rules of the scopes its selector matches.
+struct Injection {
+    matcher: Matcher,
+    /// `-1` for `L:` (wins a tie with the grammar's own rules), `1` for `R:`, else 0.
+    priority: i8,
+    rule: RuleId,
+}
+
+/// The most injections one grammar may have (selector alternatives count one each).
+pub const MAX_INJECTIONS: usize = 256;
+
 /// A grammar ready to tokenize.
 pub struct Grammar {
     rules: Vec<Rule>,
+    injections: Vec<Injection>,
     root: RuleId,
     root_scope: Scope,
     /// End and while patterns resolved against a begin match, by source.
@@ -249,6 +275,12 @@ const END_RULE: RuleId = usize::MAX;
 struct Found {
     rule: RuleId,
     caps: Vec<Option<(usize, usize)>>,
+}
+
+struct Injected {
+    found: Found,
+    /// The injection was declared `L:`.
+    priority_match: bool,
 }
 
 // ---- compiling ----------------------------------------------------------------------------------------
@@ -482,6 +514,41 @@ impl Grammar {
             too_many: false,
         };
         let root_id = builder.root_of(root)?;
+        let mut injections: Vec<Injection> = Vec::new();
+        {
+            let root_grammar = set.grammars.get(root)?;
+            let ctx = Ctx { grammar: &root_grammar.scope_name, locals: Vec::new() };
+            // The root grammar's own `injections`: a selector for each rule.
+            for (selector, raw) in &root_grammar.injections {
+                let Some(parsed) = Selector::parse(selector) else {
+                    builder.problems.push(format!("{root}: injection selector over the limits ({})", truncate(selector)));
+                    continue;
+                };
+                let Some(rule) = builder.rule(raw, &ctx) else { continue };
+                for (matcher, priority) in parsed.alternatives {
+                    if injections.len() < MAX_INJECTIONS {
+                        injections.push(Injection { matcher, priority, rule });
+                    }
+                }
+            }
+            // Grammars injected into the root: their `injectionSelector` and their patterns.
+            for injector in set.injectors.get(root).into_iter().flatten() {
+                let Some(grammar) = set.grammars.get(injector) else { continue };
+                let Some(selector) = grammar.injection_selector.as_deref() else { continue };
+                let Some(parsed) = Selector::parse(selector) else {
+                    builder.problems.push(format!("{injector}: injection selector over the limits ({})", truncate(selector)));
+                    continue;
+                };
+                let Some(rule) = builder.root_of(injector) else { continue };
+                for (matcher, priority) in parsed.alternatives {
+                    if injections.len() < MAX_INJECTIONS {
+                        injections.push(Injection { matcher, priority, rule });
+                    }
+                }
+            }
+        }
+        // L: before the grammar's own rules, R: after (a stable sort keeps the declared order within a priority).
+        injections.sort_by_key(|i| i.priority);
         if builder.too_many {
             builder.problems.push(format!("{root}: more than {MAX_COMPILED_RULES} rules; the rest were left out"));
         }
@@ -490,7 +557,7 @@ impl Grammar {
             .into_iter()
             .map(|r| r.unwrap_or(Rule { name: None, content_name: None, kind: Kind::Group { patterns: Vec::new() }, flat: OnceLock::new() }))
             .collect();
-        Some(Self { rules, root: root_id, root_scope: Arc::from(root), dynamic: Mutex::new(HashMap::new()), problems: builder.problems })
+        Some(Self { rules, injections, root: root_id, root_scope: Arc::from(root), dynamic: Mutex::new(HashMap::new()), problems: builder.problems })
     }
 
     /// What could not be compiled, one sentence each.
@@ -643,7 +710,7 @@ impl Grammar {
                 out.produce(stack, len);
                 return;
             }
-            let Some(found) = self.match_rule(text, is_first_line, pos, stack, anchor, cache) else {
+            let Some(found) = self.match_rule_or_injections(text, is_first_line, pos, stack, anchor, cache) else {
                 out.produce(stack, len);
                 return;
             };
@@ -748,6 +815,62 @@ impl Grammar {
                 is_first_line = false;
             }
         }
+    }
+
+    /// The grammar's own best match, or an injected rule's when that starts earlier (or at the same place with `L:`).
+    #[allow(clippy::too_many_arguments)]
+    fn match_rule_or_injections(&self, text: &str, is_first_line: bool, pos: usize, stack: &StateStack, anchor: Option<usize>, cache: &mut SearchCache) -> Option<Found> {
+        let normal = self.match_rule(text, is_first_line, pos, stack, anchor, cache);
+        if self.injections.is_empty() {
+            return normal;
+        }
+        let Some(injected) = self.match_injections(text, is_first_line, pos, stack, anchor, cache) else {
+            return normal;
+        };
+        let Some(normal) = normal else { return Some(injected.found) };
+        let normal_start = normal.caps[0].map_or(usize::MAX, |c| c.0);
+        let injected_start = injected.found.caps[0].map_or(usize::MAX, |c| c.0);
+        if injected_start < normal_start || (injected.priority_match && injected_start == normal_start) {
+            Some(injected.found)
+        } else {
+            Some(normal)
+        }
+    }
+
+    /// The earliest match among the injections whose selector matches the scopes in force.
+    #[allow(clippy::too_many_arguments)]
+    fn match_injections(&self, text: &str, is_first_line: bool, pos: usize, stack: &StateStack, anchor: Option<usize>, cache: &mut SearchCache) -> Option<Injected> {
+        let frame = stack.frames.last()?;
+        let allow = (is_first_line && pos == 0, anchor == Some(pos));
+        let mut best: Option<(usize, Injected)> = None;
+        for injection in &self.injections {
+            if !injection.matcher.matches(&frame.content_scopes) {
+                continue;
+            }
+            let mut local: Option<Best> = None;
+            for (order, &id) in self.flat(injection.rule).iter().enumerate() {
+                let pattern = match &self.rules[id].kind {
+                    Kind::Match { pattern, .. } => pattern.as_ref(),
+                    Kind::BeginEnd { begin, .. } | Kind::BeginWhile { begin, .. } => begin.as_ref(),
+                    Kind::Group { .. } => None,
+                };
+                if let Some(p) = pattern {
+                    consider(cache, text, pos, allow, p, true, id, order, &mut local);
+                }
+            }
+            let Some(found) = local else { continue };
+            let Some(region) = cache.get(&found.key).and_then(|e| e.hit.as_ref()) else { continue };
+            let caps: Vec<Option<(usize, usize)>> = (0..region.len()).map(|i| region.pos(i)).collect();
+            let start = found.start;
+            if best.as_ref().is_some_and(|(s, _)| start >= *s) {
+                continue;
+            }
+            best = Some((start, Injected { found: Found { rule: found.rule, caps }, priority_match: injection.priority == -1 }));
+            if start == pos {
+                break;
+            }
+        }
+        best.map(|(_, i)| i)
     }
 
     /// The best match of the rule on top of the stack at `pos`: the earliest start, the first pattern

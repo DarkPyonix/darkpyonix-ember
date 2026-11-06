@@ -46,8 +46,12 @@ fn fr_e6_every_vendored_grammar_is_in_the_notice_with_its_source_commit() {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             assert!(notice.contains(&name), "{name} is not in NOTICE.md");
             let grammar: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            let commit = grammar["version"].as_str().unwrap().rsplit('/').next().unwrap().to_owned();
-            assert!(notice.contains(&commit), "{name}: commit {commit} is not in NOTICE.md");
+            // Grammars that carry no upstream `version` (Code-OSS's own JSDoc injections, the two written for the
+            // injection tests) are described in NOTICE.md by name only.
+            if let Some(version) = grammar["version"].as_str() {
+                let commit = version.rsplit('/').next().unwrap().to_owned();
+                assert!(notice.contains(&commit), "{name}: commit {commit} is not in NOTICE.md");
+            }
         }
     }
 }

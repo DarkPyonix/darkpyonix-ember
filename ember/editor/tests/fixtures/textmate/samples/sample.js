@@ -1,7 +1,11 @@
 'use strict';
 const path = require('path');
 
-// Utilities for paths.
+/**
+ * Joins path parts.
+ * @param {...string} parts the pieces
+ * @returns {string} the path
+ */
 function join(...parts) {
   return parts.filter(Boolean).join(path.sep);
 }

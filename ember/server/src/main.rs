@@ -70,6 +70,10 @@ use ember_server::store::Store;
 ///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides
 ///   the relay derived from the hub URL; `EMBER_HUB_SYNC_DEVICES=1` keeps the devices
 ///   allow-list in sync with the account's devices
+/// - `EMBER_GUEST_LISTEN`: the guest door (FR-T14), off when unset: a second listener that serves
+///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
+///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
+///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -185,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
     let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
+    let store_for_guest = store.clone();
     let sessions = Sessions::new(store, adapters);
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
@@ -232,6 +237,8 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
         .parse()?;
+    // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
+    let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
     // This server as seen from this machine (an unspecified address replaced by loopback).
     let local_url = {
         let mut local = addr;
@@ -330,6 +337,23 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ember server listening on http://{addr}");
+    // Bound before the owner server starts serving, so a bind failure aborts the start.
+    let guest_listener = match &guest_door {
+        Some(d) => {
+            let l = d.bind().await.map_err(|e| anyhow::anyhow!("guest door: cannot bind {}: {e}", d.listen))?;
+            if d.is_remote() {
+                tracing::warn!(
+                    "guest door on {} is reachable from that network; it speaks plain HTTP and anyone \
+                     with an invite link can join a channel; put TLS in front of it",
+                    d.listen
+                );
+            } else {
+                tracing::info!("guest door on {} (loopback)", d.listen);
+            }
+            Some(l)
+        }
+        None => None,
+    };
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
@@ -355,6 +379,16 @@ async fn main() -> anyhow::Result<()> {
     // EMBER_IDE_COMPUTERS; derive them from the computers registry (and the session's current
     // computer) instead of a second, hand-maintained list.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    // The guest router is built only when the door is on, wrapped only by the door's guards, and
+    // never merged into `app` (not under auth::protect either).
+    let guest_app = guest_door.as_ref().map(|d| {
+        d.wrap(ember_server::channels::guest::guest_router_with_a2a(
+            store_for_guest.clone(),
+            sessions.clone(),
+            &data_dir,
+            a2a.clone(),
+        ))
+    });
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
@@ -364,7 +398,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
-        .merge(ember_server::channels::api::router_with_a2a(store_for_channels, sessions.clone(), &data_dir, a2a.clone()))
+        .merge(ember_server::channels::api::router_with_a2a_door(store_for_channels, sessions.clone(), &data_dir, a2a.clone(), guest_door.clone()))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
@@ -419,11 +453,34 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
         }
     }
-    axum::serve(listener, local_app)
+    // The guest door stops with the owner server. Its failure never stops the owner server.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let guest_task = match (guest_listener, guest_app) {
+        (Some(listener), Some(app)) => {
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                if let Err(e) = ember_server::guest_door::GuestDoor::serve(listener, app, shutdown).await {
+                    tracing::error!("guest door failed and is closed: {e}");
+                }
+            }))
+        }
+        _ => None,
+    };
+    let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .await;
+    let _ = stop_tx.send(true);
+    if let Some(mut task) = guest_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+    served?;
     if let Some(task) = transport_task {
         task.abort();
     }

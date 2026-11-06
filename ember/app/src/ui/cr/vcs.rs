@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -209,6 +209,7 @@ pub fn sample_snapshot() -> RepoSnapshot {
         changes: parse_unified(SAMPLE_DIFF),
         staged: Default::default(),
         conflicts: Vec::new(),
+        notes: Vec::new(),
     }
 }
 
@@ -1163,6 +1164,10 @@ fn CommitBox(
     let is_amend = amend.get();
     let branch_name = branch.to_string();
     let can_commit = commit_enabled(&summary.get(), staged_files, is_amend);
+    // Amending a commit already on the upstream asks twice (#269): the armed flag is the first tap.
+    let armed = remember(|| mutable_state_of(false));
+    let warning = if is_amend { commit.as_ref().and_then(|(_, snap, _)| amend_warning(snap)) } else { None };
+    let is_armed = warning.is_some() && armed.get();
 
     cu::Column()
         .modifier(
@@ -1174,31 +1179,47 @@ fn CommitBox(
         .spacing(SP[2])
         .content(move || {
             let s_state = sum_state.clone();
+            let s_armed = armed.clone();
             key((field_generation.get(), 0_u8), || {
                 cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
                     .text(sum_state.get()).placeholder("요약 (필수) 예: Feat: Wire shim")
-                    .on_value_change(move |v| s_state.set(v));
+                    .on_value_change(move |v| {
+                        s_armed.set(false);
+                        s_state.set(v);
+                    });
             });
 
             let b_state = body_state.clone();
+            let b_armed = armed.clone();
             key((field_generation.get(), 1_u8), || {
                 cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
                     .text(body_state.get()).placeholder("설명 (선택)").multiline(true)
-                    .on_value_change(move |v| b_state.set(v));
+                    .on_value_change(move |v| {
+                        b_armed.set(false);
+                        b_state.set(v);
+                    });
             });
 
             // Amend checkbox
             cu::Row().modifier(Modifier::new().fill_max_width().height(32.0)).alignment(Alignment::CenterStart).spacing(SP[1]).content(|| {
                 let am = amend_state.clone();
+                let am_armed = armed.clone();
                 // TODO(compose-rust#428): Checkbox has no ink fill or tick style, so staging looks hollow.
                 cu::Checkbox(is_amend)
                     .modifier(Modifier::new().size(18.0, 18.0))
-                    .on_change(move |v| am.set(v));
+                    .on_change(move |v| {
+                        am_armed.set(false);
+                        am.set(v);
+                    });
                 Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
             });
+            if let Some(text) = warning {
+                Label(text, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), None);
+            }
 
+            let click_armed = armed.clone();
             AppButton(
-                &commit_label(&branch_name, staged_files),
+                &amend_button_label(&commit_label(&branch_name, staged_files), warning, is_armed),
                 Some(IconRole::Check),
                 ButtonKind::Primary,
                 false,
@@ -1206,6 +1227,11 @@ fn CommitBox(
                 true,
                 move || {
                     if let Some((actions, snap, staging)) = &commit {
+                        if amend_state.get() && amend_warning(snap).is_some() && !click_armed.get() {
+                            click_armed.set(true);
+                            return;
+                        }
+                        click_armed.set(false);
                         let req = commit_request(snap, &staging.get(), &sum_state.get(), &body_state.get(), amend_state.get());
                         let project = actions.project.clone();
                         let submitted_summary = req.summary.clone();
@@ -2305,6 +2331,11 @@ fn VcsScreenWithLoad(
                         actions.clone(),
                     );
 
+                    if let Some(snapshot) = load.snapshot() {
+                        for n in &snapshot.notes {
+                            Label(n, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        }
+                    }
                     if let Some(note) = load.note() {
                         Label(&note, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                         if matches!(load, Load::Failed(_)) {

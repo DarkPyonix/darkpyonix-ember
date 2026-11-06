@@ -43,8 +43,9 @@
 //! A guest's post is also appended to the channel's JSONL file when the router is built with a data
 //! dir ([`guest_router_with_dir`], FR-T16): `from` is `guest:<id>` and the line gains `name`.
 //!
-//! [`guest_router`] is built apart from the owner router and is not merged into any listener yet
-//! (the guest listener `EMBER_GUEST_LISTEN` is a later step), so nothing here is reachable.
+//! [`guest_router`] is built apart from the owner router. The only socket that serves it is the
+//! guest door (`EMBER_GUEST_LISTEN`, [`crate::guest_door`], off by default), wrapped by the
+//! door's Host and Origin guard and never by `auth::protect`.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -66,6 +67,16 @@ use crate::a2a::channel::sanitize_label;
 use super::{mention, ChannelError, SYSTEM, USER, USER_LABEL};
 use crate::session::Sessions;
 use crate::store::{now_ms, Store};
+
+/// Every (method, path pattern) the guest router serves. The guest door serves these and
+/// `GET /join`, nothing else; `fr_t14_guest_door_serves_exactly_the_route_table` probes the real
+/// router against this table, so a route added to [`build`] without a row here fails that test.
+pub const GUEST_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/api/guest/accept"),
+    ("GET", "/api/guest/channels/{id}"),
+    ("GET", "/api/guest/channels/{id}/messages"),
+    ("POST", "/api/guest/channels/{id}/messages"),
+];
 
 /// Longest message text a guest may post, in bytes.
 pub const MAX_TEXT_BYTES: usize = 8192;

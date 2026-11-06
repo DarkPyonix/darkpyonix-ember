@@ -33,6 +33,13 @@ pub struct ChannelMessage {
     /// Session ids of the agents the message mentions (FR-T12); absent on an older server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
+    /// Display name of the author, resolved by the server at read time (FR-T15). A guest's `from`
+    /// is an opaque `guest:<id>`, so show this instead. Empty on an older server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author_name: String,
+    /// `person`, `agent`, `guest` or `system`; empty on an older server.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author_kind: String,
 }
 
 /// A channel as the list and detail routes return it. `messages` is empty in a list.
@@ -51,6 +58,144 @@ pub struct Channel {
     pub messages: Vec<ChannelMessage>,
     #[serde(default)]
     pub unread: u32,
+    /// Usable guests of the channel (FR-T17); empty on an older server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guests: Vec<ChannelGuest>,
+}
+
+/// A guest present in a channel, as `Channel.guests` carries it (FR-T17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelGuest {
+    pub id: String,
+    pub name: String,
+    /// Unix ms the allowance ends; `None` when none is in force now.
+    #[serde(default)]
+    pub allow_until: Option<i64>,
+}
+
+/// Body of `POST /api/channels/{id}/invites`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NewInvite {
+    /// Whole hours 1..=168; the server default is 24.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_hours: Option<u32>,
+}
+
+/// The `guest_door` object of a create-invite answer; absent on a server without the guest door.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestDoorState {
+    /// `on` or `off`.
+    pub state: String,
+    #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
+    pub public_url: Option<String>,
+}
+
+impl GuestDoorState {
+    pub fn is_on(&self) -> bool {
+        self.state == "on"
+    }
+}
+
+/// Answer of `POST /api/channels/{id}/invites`. `token` and `link` exist only here: the server
+/// keeps just a hash. `expires_at` is Unix ms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedInvite {
+    pub id: String,
+    pub token: String,
+    /// Absolute when the guest door is on; the relative `/join#<token>` when it is off.
+    pub link: String,
+    pub expires_at: i64,
+    /// True when the link uses the listen address (no public URL): ask the owner to check reach.
+    #[serde(default)]
+    pub link_warning: bool,
+    #[serde(default)]
+    pub guest_door: Option<GuestDoorState>,
+}
+
+/// One entry of `GET /api/channels/{id}/invites`: no token and no link. Times are Unix ms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Invite {
+    pub id: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub expires_at: i64,
+    #[serde(default)]
+    pub used_at: Option<i64>,
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
+    /// The name the guest chose; absent while the invite is unused.
+    #[serde(default)]
+    pub guest_name: Option<String>,
+}
+
+/// One entry of `GET /api/channels/{id}/guests`, revoked and expired ones included. Times are
+/// Unix ms; `allow_until` is the stored value and may lie in the past.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guest {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub expires_at: i64,
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
+    #[serde(default)]
+    pub allow_until: Option<i64>,
+}
+
+/// Body of `PUT /api/channels/{id}/guests/{guest_id}/allow`: whole hours, 1..=168.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowanceBody {
+    pub hours: u32,
+}
+
+/// Answer of the set-allowance route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Allowance {
+    pub guest_id: String,
+    /// Unix ms.
+    pub allow_until: i64,
+    /// True when the guest credential's own expiry cut the allowance short.
+    #[serde(default)]
+    pub capped: bool,
+}
+
+/// `/channels/{id}/invites`
+pub fn invites_path(channel: &str) -> String {
+    format!("/channels/{}/invites", crate::api::seg(channel))
+}
+
+/// `/channels/{id}/invites/{invite_id}`
+pub fn invite_path(channel: &str, invite: &str) -> String {
+    format!("{}/{}", invites_path(channel), crate::api::seg(invite))
+}
+
+/// `/channels/{id}/guests`
+pub fn guests_path(channel: &str) -> String {
+    format!("/channels/{}/guests", crate::api::seg(channel))
+}
+
+/// `/channels/{id}/guests/{guest_id}`
+pub fn guest_path(channel: &str, guest: &str) -> String {
+    format!("{}/{}", guests_path(channel), crate::api::seg(guest))
+}
+
+/// `/channels/{id}/guests/{guest_id}/allow`
+pub fn guest_allow_path(channel: &str, guest: &str) -> String {
+    format!("{}/allow", guest_path(channel, guest))
+}
+
+/// Body of the create-invite request: `{}` without a TTL, never an empty body with a content type.
+pub fn new_invite_body(ttl_hours: Option<u32>) -> serde_json::Value {
+    serde_json::to_value(NewInvite { ttl_hours }).expect("NewInvite serialises")
 }
 
 /// Body of `POST /api/channels`.
@@ -338,5 +483,103 @@ mod tests {
     fn fr_t10_client_mentions_paths() {
         assert_eq!(mentions_preview_path("c1"), "/channels/c1/mentions/preview");
         assert_eq!(mentions_preview_path("a/b"), "/channels/a%2Fb/mentions/preview");
+    }
+
+    #[test]
+    fn fr_t15_client_message_decodes_author_fields() {
+        let j = json!({"id":"3","seq":3,"from":"guest:g1","text":"hi","at":9,"unread":0,"author_name":"Mina","author_kind":"guest"});
+        let m: ChannelMessage = serde_json::from_value(j.clone()).unwrap();
+        assert_eq!((m.author_name.as_str(), m.author_kind.as_str()), ("Mina", "guest"));
+        assert_eq!(serde_json::to_value(&m).unwrap(), j);
+        let old: ChannelMessage = serde_json::from_value(json!({"id":"1","seq":1,"from":"user","text":"x","at":1})).unwrap();
+        assert!(old.author_name.is_empty() && old.author_kind.is_empty());
+    }
+
+    #[test]
+    fn fr_t17_client_channel_guests_decode_and_default() {
+        let c: Channel = serde_json::from_value(json!({
+            "id":"c","name":"n","project":"p",
+            "guests":[{"id":"g1","name":"Mina","allow_until":1700000000000i64},{"id":"g2","name":"Jun","allow_until":null},{"id":"g3","name":"Sol"}]
+        }))
+        .unwrap();
+        assert_eq!(c.guests.len(), 3);
+        assert_eq!(c.guests[0].allow_until, Some(1_700_000_000_000));
+        assert!(c.guests[1].allow_until.is_none() && c.guests[2].allow_until.is_none());
+        let old: Channel = serde_json::from_value(json!({"id":"c","name":"n","project":"p"})).unwrap();
+        assert!(old.guests.is_empty());
+    }
+
+    #[test]
+    fn fr_t14_client_new_invite_body() {
+        assert_eq!(new_invite_body(None), json!({}));
+        assert_eq!(new_invite_body(Some(48)), json!({"ttl_hours":48}));
+    }
+
+    #[test]
+    fn fr_t14_client_created_invite_decodes_with_and_without_door() {
+        let old: CreatedInvite =
+            serde_json::from_value(json!({"id":"i1","token":"dpi_abc","link":"/join#dpi_abc","expires_at":1700000000000i64})).unwrap();
+        assert!(!old.link_warning && old.guest_door.is_none());
+        let on: CreatedInvite = serde_json::from_value(json!({
+            "id":"i2","token":"dpi_x","link":"http://127.0.0.1:7071/join#dpi_x","expires_at":5,"link_warning":true,
+            "guest_door":{"state":"on","listen":"127.0.0.1:7071","public_url":null}
+        }))
+        .unwrap();
+        assert!(on.link_warning);
+        let d = on.guest_door.unwrap();
+        assert!(d.is_on() && d.listen.as_deref() == Some("127.0.0.1:7071") && d.public_url.is_none());
+        let off: CreatedInvite = serde_json::from_value(json!({
+            "id":"i3","token":"t","link":"/join#t","expires_at":5,"link_warning":false,
+            "guest_door":{"state":"off","listen":null,"public_url":null}
+        }))
+        .unwrap();
+        assert!(!off.guest_door.unwrap().is_on());
+    }
+
+    #[test]
+    fn fr_t14_client_invite_list_decodes() {
+        let v: Vec<Invite> = serde_json::from_value(json!([
+            {"id":"i2","channel_id":"c","created_by":"user","created_at":20,"expires_at":90,"used_at":30,"revoked_at":null,"guest_name":"Mina"},
+            {"id":"i1","channel_id":"c","created_by":"user","created_at":10,"expires_at":80,"used_at":null,"revoked_at":null}
+        ]))
+        .unwrap();
+        assert_eq!(v[0].guest_name.as_deref(), Some("Mina"));
+        assert_eq!(v[0].used_at, Some(30));
+        assert!(v[1].guest_name.is_none() && v[1].used_at.is_none() && v[1].revoked_at.is_none());
+    }
+
+    #[test]
+    fn fr_t14_client_invite_paths() {
+        assert_eq!(invites_path("c1"), "/channels/c1/invites");
+        assert_eq!(invites_path("a/b"), "/channels/a%2Fb/invites");
+        assert_eq!(invite_path("c1", "i 1"), "/channels/c1/invites/i%201");
+    }
+
+    #[test]
+    fn fr_t17_client_guest_list_decodes() {
+        let v: Vec<Guest> = serde_json::from_value(json!([
+            {"id":"g1","name":"Mina","created_at":10,"expires_at":99,"revoked_at":null,"allow_until":50},
+            {"id":"g2","name":"Jun","created_at":5,"expires_at":99,"revoked_at":60,"allow_until":null}
+        ]))
+        .unwrap();
+        assert_eq!(v[0].allow_until, Some(50));
+        assert_eq!(v[1].revoked_at, Some(60));
+        assert!(v[1].allow_until.is_none());
+    }
+
+    #[test]
+    fn fr_t17_client_allowance_body_and_answer() {
+        assert_eq!(serde_json::to_value(AllowanceBody { hours: 4 }).unwrap(), json!({"hours":4}));
+        let a: Allowance = serde_json::from_value(json!({"guest_id":"g1","allow_until":1700000000000i64,"capped":true})).unwrap();
+        assert!(a.capped && a.guest_id == "g1");
+        let b: Allowance = serde_json::from_value(json!({"guest_id":"g1","allow_until":7,"capped":false})).unwrap();
+        assert!(!b.capped);
+    }
+
+    #[test]
+    fn fr_t17_client_guest_paths() {
+        assert_eq!(guests_path("c1"), "/channels/c1/guests");
+        assert_eq!(guest_path("c1", "g/1"), "/channels/c1/guests/g%2F1");
+        assert_eq!(guest_allow_path("c1", "g1"), "/channels/c1/guests/g1/allow");
     }
 }

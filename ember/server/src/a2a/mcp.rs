@@ -9,7 +9,9 @@
 //! Like `ember-a2a channel post`, this server sends the runtime token over plain HTTP to the host
 //! `EMBER_URL` names. It does not refuse a non-loopback host (an operator may publish a LAN
 //! address); [`run_stdio`] prints one warning line to stderr naming the host (see
-//! [`non_loopback_host`]). The CLI has the same property and is unchanged.
+//! [`non_loopback_host`]). The CLI has the same property. Both build their client with
+//! `Client::new`, which refuses a URL with userinfo, `\`, `?` or `#` before the path, so the host
+//! it connects to is the host the warning names.
 //!
 //! Measured on 2026-11-06 (Claude Code 2.1.319, Codex 0.164.0): Claude Code sends
 //! `server/discover` first and `initialize` with protocol 2025-11-25; Codex sends `initialize`

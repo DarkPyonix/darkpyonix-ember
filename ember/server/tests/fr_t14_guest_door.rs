@@ -13,7 +13,7 @@ use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind};
 use ember_server::channels::guest::{guest_router, GUEST_ROUTES};
 use ember_server::guest_door::{
-    invite_link, with_timeout, GuestDoor, JOIN_CSP, JOIN_ROUTE, MAX_BODY_BYTES, REQUEST_TIMEOUT,
+    invite_link, join_page, with_timeout, GuestDoor, JOIN_ROUTE, MAX_BODY_BYTES, REQUEST_TIMEOUT,
 };
 use ember_server::session::Sessions;
 use ember_server::store::Store;
@@ -238,15 +238,16 @@ async fn fr_t14_join_page_has_csp_nosniff_and_no_referrer() {
     let (s, h, body) = send(&app(&d), "GET", "/join", LOCAL).await;
     assert_eq!(s, StatusCode::OK);
     let get = |n: &str| h.get(n).unwrap().to_str().unwrap().to_string();
-    assert_eq!(get("content-security-policy"), JOIN_CSP);
-    assert!(JOIN_CSP.contains("default-src 'none'") && JOIN_CSP.contains("frame-ancestors 'none'"));
-    assert!(JOIN_CSP.contains("connect-src 'self'") && !JOIN_CSP.contains("unsafe"));
+    let csp = join_page().csp.as_str();
+    assert_eq!(get("content-security-policy"), csp);
+    assert!(csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("connect-src 'self'") && !csp.contains("unsafe"));
     assert_eq!(get("referrer-policy"), "no-referrer");
     assert_eq!(get("x-content-type-options"), "nosniff");
     assert_eq!(get("cache-control"), "no-store");
     assert!(get("content-type").starts_with("text/html"));
     let page = String::from_utf8(body).unwrap();
-    assert!(!page.contains("<script") && !page.contains("<style") && !page.contains("http://"));
+    assert!(!page.contains("http://") && !page.contains("https://"));
     // The API and the fallback carry nosniff and no-store too.
     let (_, h, _) = send(&app(&d), "GET", "/api/guest/channels/x", LOCAL).await;
     assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");

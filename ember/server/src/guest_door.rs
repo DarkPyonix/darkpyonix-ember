@@ -18,7 +18,9 @@
 //! a refusal of `Upgrade` requests (no WebSocket for guests), and response headers. It is never
 //! wrapped by `auth::protect`: the server token is not the guest credential class.
 //!
-//! `GET /join` serves an embedded placeholder page.
+//! `GET /join` serves the guest page (`guest_door/join.html` with `join.js` inlined). Its policy
+//! allows the one inline script and the one style block by SHA-256, computed at startup from the
+//! embedded text. The page adds no route: it talks to the four guest routes only.
 //!
 //! Limits (PR 5b, [`GuestDoor::wrap_limited`], numbers are a leader decision and adjustable):
 //! per remote address (IPv4 exact, IPv6 reduced to its /64) accept attempts 5 a minute and 20 an
@@ -83,15 +85,61 @@ pub const MAX_BODY_BYTES: usize = 16 * 1024;
 /// on the connection itself is [`HEADER_READ_TIMEOUT`], set by [`GuestDoor::serve_with`].
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `Content-Security-Policy` of `/join`: no script, no style, nothing framed, requests to the
-/// door itself only. The real guest page (a later client task) needs its own policy.
-pub const JOIN_CSP: &str = "default-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/// The page template and its script, embedded. The script is inlined into the page, so the page
+/// is one request and the script hash in the policy is directly valid in `script-src`.
+const JOIN_HTML: &str = include_str!("guest_door/join.html");
+const JOIN_JS: &str = include_str!("guest_door/join.js");
+const SCRIPT_MARK: &str = "__JOIN_JS__";
 
-const JOIN_PAGE: &str = "<!doctype html>\n<html lang=\"ko\"><head><meta charset=\"utf-8\">\
-<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-<title>Ember</title></head><body>\
-<p>Ember 채널 초대 링크입니다. 게스트 화면은 아직 준비 중입니다.</p>\
-</body></html>\n";
+/// The `/join` page, its policy and the exact texts the policy hashes.
+pub struct JoinPage {
+    pub html: String,
+    pub script: String,
+    pub style: String,
+    pub csp: String,
+}
+
+fn sha256_source(text: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    format!("'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(Sha256::digest(text.as_bytes())))
+}
+
+/// Builds the page once: the hashes are computed from the embedded text itself, so the header
+/// cannot drift from the content. `script-src` and `style-src` allow exactly those two texts and
+/// nothing else (no `unsafe-inline`, no `unsafe-eval`); requests go to the door itself only.
+fn build_join_page() -> JoinPage {
+    build_join_page_from(JOIN_HTML, JOIN_JS)
+}
+
+/// Line endings as a browser sees them: CRLF and a lone CR become LF (the HTML parser does this
+/// to inline script text, so the hash must be of the LF text whatever the checkout's endings).
+pub fn normalize_eol(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// [`build_join_page`] over given texts (public so a test can feed CRLF input).
+pub fn build_join_page_from(html_template: &str, js: &str) -> JoinPage {
+    let js = normalize_eol(js);
+    let html = normalize_eol(html_template).replacen(SCRIPT_MARK, &js, 1);
+    let style = {
+        let s = html.find("<style>").expect("join.html has a style block") + "<style>".len();
+        let e = html[s..].find("</style>").expect("style block closes") + s;
+        html[s..e].to_string()
+    };
+    let csp = format!(
+        "default-src 'none'; script-src {}; style-src {}; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        sha256_source(&js),
+        sha256_source(&style),
+    );
+    JoinPage { html, script: js, style, csp }
+}
+
+/// The `/join` page, built on first use (the door builds it at startup).
+pub fn join_page() -> &'static JoinPage {
+    static PAGE: std::sync::OnceLock<JoinPage> = std::sync::OnceLock::new();
+    PAGE.get_or_init(build_join_page)
+}
 
 /// A startup error of the door's configuration.
 #[derive(Debug, thiserror::Error)]
@@ -200,6 +248,7 @@ impl GuestDoor {
     }
 
     fn build(&self, guest: Router, limits: Option<Arc<DoorLimits>>) -> Router {
+        let _ = join_page(); // hashes computed once, at startup
         let guard = Guard { hosts: self.hosts.clone() };
         let app = guest
             .route(JOIN_ROUTE.1, get(join))
@@ -461,10 +510,11 @@ async fn not_found() -> Response {
 }
 
 async fn join() -> Response {
-    let mut r = Response::new(Body::from(JOIN_PAGE));
+    let page = join_page();
+    let mut r = Response::new(Body::from(page.html.clone()));
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(JOIN_CSP));
+    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_str(&page.csp).expect("csp is ascii"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

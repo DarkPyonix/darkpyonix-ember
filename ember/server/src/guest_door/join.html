@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>Ember</title>
+<style>
+:root{--bg:#fff;--fg:#1c1c1e;--mute:#6b6b70;--line:#d8d8dc;--card:#f4f4f6;--me:#dbe9ff;--acc:#2a5bd7;--err:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--fg:#ececf0;--mute:#9a9aa2;--line:#34343a;--card:#222226;--me:#23365e;--acc:#7da2ff;--err:#ff8a80}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,sans-serif}
+.hidden{display:none}
+main{max-width:40rem;margin:0 auto;height:100%;display:flex;flex-direction:column;padding:12px 16px}
+h1{font-size:1.1rem;margin:0 0 4px}
+p{margin:0 0 8px}
+.mute{color:var(--mute);font-size:.85rem}
+.err{color:var(--err);min-height:1.4em}
+form{display:flex;gap:8px;margin:8px 0}
+input,textarea{flex:1;font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
+textarea{resize:none;height:3.2rem}
+button{font:inherit;border:0;border-radius:8px;padding:8px 14px;background:var(--acc);color:var(--bg)}
+button:disabled{opacity:.5}
+#log{flex:1;overflow-y:auto;padding:8px 0}
+.msg{background:var(--card);border-radius:10px;padding:6px 10px;margin:6px 0;max-width:90%;overflow-wrap:anywhere;white-space:pre-wrap}
+.msg.you{background:var(--me);margin-left:auto}
+.msg.system{color:var(--mute);font-size:.85rem}
+.who{display:block;font-size:.8rem;color:var(--mute)}
+</style>
+</head><body><main>
+<section id="ended" class="hidden">
+<h1>Ember</h1>
+<p id="endedtext"></p>
+</section>
+<section id="nameview" class="hidden">
+<h1>Ember 채널에 참여</h1>
+<p class="mute">채널에서 쓸 이름을 입력하세요.</p>
+<form id="nameform"><input id="name" type="text" maxlength="64" autocomplete="off" aria-label="이름"><button id="namego" type="submit">참여</button></form>
+<p id="nameerr" class="err"></p>
+</section>
+<section id="chatview" class="hidden">
+<h1 id="chname"></h1>
+<p id="chmembers" class="mute"></p>
+<div id="log" aria-live="polite"></div>
+<p id="chaterr" class="err"></p>
+<form id="chatform"><textarea id="text" aria-label="메시지"></textarea><button id="send" type="submit">보내기</button></form>
+</section>
+<script>__JOIN_JS__</script>
+</main></body></html>

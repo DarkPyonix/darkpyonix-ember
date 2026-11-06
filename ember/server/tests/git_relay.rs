@@ -123,7 +123,7 @@ fn fr_g4_the_contract_ops_are_all_routed() {
     let mut ops = computers_ops();
     ops.sort();
     let mut want =
-        vec!["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
+        vec!["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "pr", "pr/review", "pr/merge", "pr/create", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
     want.sort();
     assert_eq!(ops, want);
 }
@@ -157,6 +157,18 @@ async fn fr_g8_prs_is_relayed_with_repo_state_and_limit() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0].0, "prs");
     assert_eq!(seen[0].2, json!({ "repo": "/work/alpha", "state": "merged", "limit": 5 }));
+}
+
+#[tokio::test]
+async fn fr_g11_pr_ops_with_a_slash_are_relayed() {
+    let (f, seen) = on_node("/work/alpha").await;
+    let body = json!({ "number": 7, "method": "squash", "delete_branch": true, "confirm": true });
+    let (st, out) = call(&f.app, "/api/projects/alpha/git/pr/merge", Some(body)).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(out["op"], "pr/merge");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0].0, "pr/merge");
+    assert_eq!(seen[0].2, json!({ "repo": "/work/alpha", "number": 7, "method": "squash", "delete_branch": true, "confirm": true }));
 }
 
 #[tokio::test]

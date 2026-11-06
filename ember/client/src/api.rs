@@ -277,6 +277,114 @@ pub struct GitPrMerge {
     pub reason: String,
 }
 
+/// One pull request in full (`POST /projects/{id}/git/pr`, FR-G10). The list fields of
+/// [`GitPr`] are flattened in (`checks` is the summary count); `check_runs` lists every check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPrDetail {
+    #[serde(flatten)]
+    pub pr: GitPr,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub check_runs: Vec<GitPrCheck>,
+    #[serde(default)]
+    pub reviews: Vec<GitPrReviewItem>,
+    /// Oldest first, at most the newest 50.
+    #[serde(default)]
+    pub comments: Vec<GitPrComment>,
+    #[serde(default)]
+    pub requested_reviewers: Vec<String>,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub changed_files: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrCheck {
+    pub name: String,
+    pub state: GitPrCheckState,
+    #[serde(default)]
+    pub detail_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrCheckState {
+    Passed,
+    Failed,
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+    Pending,
+}
+
+/// A review, its body cut at 2000 characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrReviewItem {
+    #[serde(default)]
+    pub author: String,
+    pub state: GitPrReviewState,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub submitted_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrComment {
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReviewAction {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrReviewed {
+    pub number: u64,
+    pub action: GitPrReviewAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrMerged {
+    pub number: u64,
+    pub merged: bool,
+    pub method: GitPrMergeMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrCreated {
+    pub number: u64,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitStashEntry {
     pub index: u32,
@@ -744,6 +852,28 @@ impl Api {
     /// computer's own `gh`; a missing or logged-out `gh` answers 409 with a Korean message.
     pub async fn git_prs(&self, project: &str, state: &str, limit: u32) -> ApiResult<GitPrs> {
         Self::decode(self.git_post(project, "prs", json!({ "state": state, "limit": limit })).await?)
+    }
+
+    /// One pull request in full (FR-G10).
+    pub async fn git_pr(&self, project: &str, number: u64) -> ApiResult<GitPrDetail> {
+        Self::decode(self.git_post(project, "pr", json!({ "number": number })).await?)
+    }
+
+    /// Approve, request changes or comment (FR-G11). `request_changes` and `comment` need a
+    /// body. The call sends `confirm: true`, so call it only after the person confirmed.
+    pub async fn git_pr_review(&self, project: &str, number: u64, action: GitPrReviewAction, body: Option<&str>) -> ApiResult<GitPrReviewed> {
+        Self::decode(self.git_post(project, "pr/review", json!({ "number": number, "action": action, "body": body, "confirm": true })).await?)
+    }
+
+    /// Merge (FR-G11). A closed merge gate answers 409 with the Korean reason. The call sends
+    /// `confirm: true`, so call it only after the person confirmed.
+    pub async fn git_pr_merge(&self, project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool) -> ApiResult<GitPrMerged> {
+        Self::decode(self.git_post(project, "pr/merge", json!({ "number": number, "method": method, "delete_branch": delete_branch, "confirm": true })).await?)
+    }
+
+    /// Create a pull request from a branch that already exists on the remote (FR-G12).
+    pub async fn git_pr_create(&self, project: &str, title: &str, body: Option<&str>, base: Option<&str>, head: Option<&str>, draft: bool) -> ApiResult<GitPrCreated> {
+        Self::decode(self.git_post(project, "pr/create", json!({ "title": title, "body": body, "base": base, "head": head, "draft": draft, "confirm": true })).await?)
     }
 
     pub async fn git_stash_list(&self, project: &str) -> ApiResult<Vec<GitStashEntry>> {

@@ -5,3 +5,6 @@ html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font
  .ed-left{bottom:calc(var(--sbh) + 76px)}
 }
 .ed{color:var(--text);font-family:var(--font)}
+/* The top bar is the window's title strip under FullSize: a drag region, with its controls cut out. */
+.ed-top{-webkit-app-region:drag}
+.ed-top button,.ed-top .ed-menu{-webkit-app-region:no-drag}

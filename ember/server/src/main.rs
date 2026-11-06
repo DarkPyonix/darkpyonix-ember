@@ -442,7 +442,13 @@ async fn main() -> anyhow::Result<()> {
         .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()))
         // FR-C1: minting an enrol code is an admin act, local and token-protected only. There is
         // no redeem route (docs/design/COMPUTERS.md, "Adding a computer with an enrol code").
-        .merge(computers::enrol::router(computers::enrol::Enrol::new(store_for_enrol), enrol_base_url));
+        // FR-C2c: the owner's confirm and deny are on this router too, and so is the registrar
+        // that adds the confirmed computer to the registry.
+        .merge(computers::enrol::router(
+            computers::enrol::Enrol::new(store_for_enrol),
+            enrol_base_url,
+            Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
+        ));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {

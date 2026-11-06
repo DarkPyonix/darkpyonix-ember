@@ -17,6 +17,18 @@ struct Fx {
     tokens: PathBuf,
 }
 
+/// Write an executable script: flush to disk and close the handle before chmod and use, because a
+/// script still open for writing is "text file busy" (ETXTBSY) when executed (#546).
+fn write_exec(path: &Path, content: &str) {
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 fn set_mode(p: &Path, mode: u32) {
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
 }
@@ -30,8 +42,7 @@ fn mode(p: &Path) -> u32 {
 fn fx(computer_mode: u32, tokens_mode: u32) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("fake-ose");
-    std::fs::write(&bin, "#!/bin/sh\necho ran >> \"$(dirname \"$0\")/runs.txt\"\n").unwrap();
-    set_mode(&bin, 0o755);
+    write_exec(&bin, "#!/bin/sh\necho ran >> \"$(dirname \"$0\")/runs.txt\"\n");
     let root = dir.path().join("ose-data");
     let computer = root.join("local");
     let tokens = computer.join("tokens");

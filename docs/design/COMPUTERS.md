@@ -202,6 +202,8 @@ whose node is unreachable fails with "computer … is unreachable".
 
 Code: `ember/server/src/computers/enrol.rs`. Merged in #523; CI compiled it and ran the `fr_c1_*` tests. It has not run between two real machines.
 
+Step 1 of FR-C2 (branch `feat/enrol-confirm-core`, written, not compiled) changes three of the bullets below: `redeem(code, node_info, now, source_key)` now moves the row to `awaiting_confirmation` and answers `{enrol_id, poll_secret, expires_ms}` (the poll secret stored only as a SHA-256 hash); `status` gives `waiting`, `awaiting_confirmation`, `joined`, `denied` or `expired`, and `GET /api/computers/enrol-codes/{id}` adds the untrusted node information; `joined` now needs the owner's confirm and the node's delivery, not `complete` alone. The failure limiter gains the global cap of 60 failures per 10 minutes.
+
 - Store migration `crate::computers::enrol::MIGRATION` (appended last to `store::MIGRATIONS`): `enrol_codes(id, code_hash BLOB UNIQUE, name, created_ms, expires_ms, used_ms, computer_id)`. The code is never stored, only its SHA-256 digest.
 - `Enrol::mint(name, now, ttl, base_url)` returns `{id, code, expires_ms, command}`. The code is `dpe_` plus 244 random bits made like the channel invite secrets (`channels::invites::new_secret`). The lifetime defaults to 10 minutes and is clamped to 10 minutes; zero is refused. The name is checked like a computer name (not empty, not `local` or `this server`) plus the guest-name shape rules. Expired rows older than one hour are deleted on mint.
 - `command` is `ember-node enrol <code> --server <base_url>`. The server does not know its own externally reachable URL, so the caller passes it: `main.rs` reads `EMBER_PUBLIC_URL` and falls back to `http://<EMBER_LISTEN>`. The mint answer carries a warning to check that this address is reachable from the other machine, like the guest door. The URL is checked to be plain http(s) with no shell characters, because it lands in a command line.
@@ -264,7 +266,7 @@ States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C
 
 ### Build order
 
-1. Confirm at join in the core and the admin confirm and deny routes, the global failure cap, name-clash check at mint and confirm. No door needed.
+1. Confirm at join in the core and the admin confirm and deny routes, the global failure cap, name-clash check at confirm. No door needed. **Written, not compiled** (branch `feat/enrol-confirm-core`): migration `enrol::CONFIRM_MIGRATION` (columns on `enrol_codes`, no token column), `Enrol::redeem` returning `{enrol_id, poll_secret, expires_ms}`, `confirm`, `deny`, `take_delivery`, `status_detail`, `Registrar` trait, `LimitConfig` with the global cap, routes `POST .../{id}/confirm` and `.../deny`. The pending token lives in memory only; a restart before delivery makes the enrolment `expired`. The name-clash check at mint is not done yet (the check at confirm is the arbiter).
 2. Door skeleton and limits (shared module extracted from `guest_door.rs`; guest tests stay green). Security review.
 3. Redeem and poll routes. Security review.
 4. `ember-node enrol`, the token-file fallback and the TLS feature; dependants' `Cargo.lock` files in the same PR.

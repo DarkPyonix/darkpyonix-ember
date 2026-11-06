@@ -697,9 +697,15 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
         )
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
-            cu::Row().content(|| {
+            // The Row and the Column take the panel's width (a Column with no weight shrinks to
+            // its widest word, which broke the routine prompt into one word per line, #492).
+            cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width)).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                cu::Column().content(content);
+                if fill_max_width {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                } else {
+                    cu::Column().content(content);
+                }
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             });
         });
@@ -753,6 +759,11 @@ pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, moni
 }
 
 /// The body height used while the window height is unknown (not yet reported).
+///
+/// TODO(compose-rust#467, compose-rust#479): at 390x844 the implicit window never reports its dp
+/// size (`current_window_size()` reads 0x0 with class Compact, measured on v0.0.6 with the shell
+/// and with a sheet opened by a real press), so every sheet body is this constant. Remove it and
+/// check the 85 percent formula at 390 once the implicit window can opt in to `report_size`.
 const SHEET_BODY_UNKNOWN_H: f32 = 240.0;
 
 /// The one formula for a sheet body's height: what is left of the sheet's maximum height after

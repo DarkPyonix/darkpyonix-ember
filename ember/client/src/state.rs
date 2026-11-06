@@ -870,6 +870,18 @@ mod tests {
         assert_eq!(c.computers()[0].projects, vec!["empty".to_string()]);
     }
 
+    #[test]
+    fn fr_l22_a_project_answer_replaces_the_character_style() {
+        let mut s = State::default();
+        let mut p = Project { name: "alpha".into(), created_at: 0, ..Default::default() };
+        p.character_style = Some("crew".into());
+        s.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        p.character_style = Some("cream".into());
+        let ch = s.apply(Input::Push(Push::ProjectUpdated { project: p }));
+        assert!(ch.projects);
+        assert_eq!(s.project("alpha").and_then(|p| p.character_style.clone()).as_deref(), Some("cream"));
+    }
+
     fn member(sid: &str, name: &str, role: crate::wire::TeamRole, ended: Option<i64>) -> crate::wire::TeamMember {
         crate::wire::TeamMember {
             session_id: sid.into(),

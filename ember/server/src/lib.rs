@@ -12,6 +12,7 @@ pub mod channels;
 pub mod chatgpt;
 pub mod computers;
 pub mod devices;
+pub mod door;
 pub mod egress_proxy;
 pub mod events;
 pub mod fork;
@@ -28,3 +29,8 @@ pub mod session_shim;
 pub mod store;
 pub mod transport;
 pub mod usage;
+
+/// Shared script helper for unit tests (one source with `tests/common/mod.rs`).
+#[cfg(all(test, unix))]
+#[path = "../tests/common/mod.rs"]
+pub(crate) mod test_exec;

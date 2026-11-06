@@ -97,11 +97,17 @@ fn apply_text_change(text: &str, range: WidgetRange, insert: &str) -> Option<Str
 pub struct WidgetBridge {
     docs: HashMap<String, DocumentWidgetState>,
     active: Option<String>,
+    problems: Vec<crate::diagnostics::Problem>,
 }
 
 impl WidgetBridge {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The problems list as the session last reported it.
+    pub fn problems(&self) -> &[crate::diagnostics::Problem] {
+        &self.problems
     }
 
     /// Apply one [`SessionUpdate`] and return any [`BridgeAction`] the UI layer must handle.
@@ -201,6 +207,10 @@ impl WidgetBridge {
                 BridgeAction::None
             }
             SessionUpdate::ConnectionLost { reason } => BridgeAction::ConnectionLost(reason),
+            SessionUpdate::Problems { problems } => {
+                self.problems = problems;
+                BridgeAction::None
+            }
         }
     }
 

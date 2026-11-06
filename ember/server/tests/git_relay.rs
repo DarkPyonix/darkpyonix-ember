@@ -162,13 +162,13 @@ async fn fr_g8_prs_is_relayed_with_repo_state_and_limit() {
 #[tokio::test]
 async fn fr_g11_pr_ops_with_a_slash_are_relayed() {
     let (f, seen) = on_node("/work/alpha").await;
-    let body = json!({ "number": 7, "method": "squash", "delete_branch": true, "confirm": true });
+    let body = json!({ "number": 7, "method": "squash", "delete_branch": true, "head_sha": "0123456789abcdef0123456789abcdef01234567", "confirm": true });
     let (st, out) = call(&f.app, "/api/projects/alpha/git/pr/merge", Some(body)).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(out["op"], "pr/merge");
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0].0, "pr/merge");
-    assert_eq!(seen[0].2, json!({ "repo": "/work/alpha", "number": 7, "method": "squash", "delete_branch": true, "confirm": true }));
+    assert_eq!(seen[0].2, json!({ "repo": "/work/alpha", "number": 7, "method": "squash", "delete_branch": true, "head_sha": "0123456789abcdef0123456789abcdef01234567", "confirm": true }));
 }
 
 #[tokio::test]

@@ -1364,16 +1364,18 @@ impl GitState {
             if !["merge", "squash", "rebase"].contains(&method) {
                 return Err(GitError::bad("method must be merge, squash or rebase"));
             }
+            let sha = str_of(body, "head_sha").map(str::trim).unwrap_or("");
+            if sha.is_empty() {
+                return Err(GitError::bad("확인한 헤드가 필요합니다."));
+            }
+            if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(GitError::bad("head_sha는 40자리 16진수여야 합니다."));
+            }
             if pr["merge"]["can_merge"] != true {
                 return Err(GitError::conflict(pr["merge"]["reason"].as_str().unwrap_or("병합할 수 없습니다.")));
             }
-            if let Some(sha) = str_of(body, "head_sha").map(str::trim).filter(|s| !s.is_empty()) {
-                if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    return Err(GitError::bad("head_sha는 40자리 16진수여야 합니다."));
-                }
-                if !pr["head_sha"].as_str().unwrap_or("").eq_ignore_ascii_case(sha) {
-                    return Err(GitError::conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요."));
-                }
+            if !pr["head_sha"].as_str().unwrap_or("").eq_ignore_ascii_case(sha) {
+                return Err(GitError::conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요."));
             }
             pr["state"] = json!("merged");
             pr["merge"] = demo_gate("merged", false, "approved", (0, 0, 0));
@@ -2125,19 +2127,31 @@ mod tests {
     #[test]
     fn fr_g11_demo_merge_follows_the_gate() {
         let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
-        let closed = gs(&d, "pr/merge", json!({ "number": 409, "method": "squash", "delete_branch": true, "confirm": true })).unwrap_err();
+        let h = |n: u64| pr_detail(&d, n)["head_sha"].as_str().unwrap().to_string();
+        let closed = gs(&d, "pr/merge", json!({ "number": 409, "method": "squash", "delete_branch": true, "head_sha": h(409), "confirm": true })).unwrap_err();
         assert_eq!(closed.status, 409);
         assert!(closed.message.contains("CI"), "{}", closed.message);
-        assert_eq!(gs(&d, "pr/merge", json!({ "number": 412, "method": "squash" })).unwrap_err().status, 400);
-        assert_eq!(gs(&d, "pr/merge", json!({ "number": 412, "method": "nope", "confirm": true })).unwrap_err().status, 400);
-        let out = gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "delete_branch": true, "confirm": true })).unwrap();
+        assert_eq!(gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "head_sha": h(412) })).unwrap_err().status, 400);
+        assert_eq!(gs(&d, "pr/merge", json!({ "number": 412, "method": "nope", "head_sha": h(412), "confirm": true })).unwrap_err().status, 400);
+        let out = gs(&d, "pr/merge", json!({ "number": 412, "method": "squash", "delete_branch": true, "head_sha": h(412), "confirm": true })).unwrap();
         assert_eq!(out, json!({ "number": 412, "merged": true, "method": "squash" }));
         assert_eq!(pr_detail(&d, 412)["state"], "merged");
         assert_eq!(pr_detail(&d, 405)["head_sha"].as_str().unwrap().len(), 40);
         assert_eq!(prs(&d, json!({})).len(), 2, "the open list lost it");
         assert_eq!(prs(&d, json!({ "state": "merged" })).len(), 2);
-        let again = gs(&d, "pr/merge", json!({ "number": 412, "method": "merge", "confirm": true })).unwrap_err();
+        let again = gs(&d, "pr/merge", json!({ "number": 412, "method": "merge", "head_sha": h(412), "confirm": true })).unwrap_err();
         assert!(again.message.contains("병합"));
+    }
+
+    #[test]
+    fn fr_g11_demo_merge_without_a_head_sha_is_400() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for body in [json!({ "number": 412, "method": "squash", "confirm": true }), json!({ "number": 412, "method": "squash", "head_sha": "", "confirm": true })] {
+            let e = gs(&d, "pr/merge", body).unwrap_err();
+            assert_eq!(e.status, 400);
+            assert_eq!(e.message, "확인한 헤드가 필요합니다.");
+        }
+        assert_eq!(pr_detail(&d, 412)["state"], "open", "nothing merged");
     }
 
     #[test]

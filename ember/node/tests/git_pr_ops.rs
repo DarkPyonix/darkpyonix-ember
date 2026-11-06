@@ -219,7 +219,7 @@ async fn fr_g11_review_needs_a_body_and_a_confirmation() {
 async fn fr_g11_merge_is_refused_with_the_gate_reason_when_a_check_failed() {
     let f = setup().await;
     f.set_pr(detail("APPROVED", vec![run("SUCCESS", "build"), run("FAILURE", "lint")]));
-    let (status, body) = f.post("merge", json!({"number": 7, "method": "squash", "delete_branch": true, "confirm": true})).await;
+    let (status, body) = f.post("merge", json!({"number": 7, "method": "squash", "delete_branch": true, "head_sha": HEAD, "confirm": true})).await;
     assert_eq!(status, 409, "{body}");
     assert!(body["error"].as_str().unwrap().contains("CI"), "{body}");
     let calls = f.calls();
@@ -232,7 +232,7 @@ async fn fr_g11_merge_is_refused_with_the_gate_reason_when_a_check_failed() {
 async fn fr_g11_merge_squash_with_branch_delete_when_allowed() {
     let f = setup().await;
     f.set_pr(detail("APPROVED", vec![run("SUCCESS", "build")]));
-    let (status, body) = f.post("merge", json!({"number": 7, "method": "squash", "delete_branch": true, "confirm": true})).await;
+    let (status, body) = f.post("merge", json!({"number": 7, "method": "squash", "delete_branch": true, "head_sha": HEAD, "confirm": true})).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body, json!({"number": 7, "merged": true, "method": "squash"}));
     let calls = f.calls();
@@ -242,9 +242,9 @@ async fn fr_g11_merge_squash_with_branch_delete_when_allowed() {
         assert!(!call.iter().any(|a| a == "--admin" || a == "--auto"), "{call:?}");
     }
     // Without delete_branch, and with the other methods.
-    let (status, _) = f.post("merge", json!({"number": 7, "method": "rebase", "delete_branch": false, "confirm": true})).await;
+    let (status, _) = f.post("merge", json!({"number": 7, "method": "rebase", "delete_branch": false, "head_sha": HEAD, "confirm": true})).await;
     assert_eq!(status, 200);
-    let (status, _) = f.post("merge", json!({"number": 7, "method": "merge", "delete_branch": false, "confirm": true})).await;
+    let (status, _) = f.post("merge", json!({"number": 7, "method": "merge", "delete_branch": false, "head_sha": HEAD, "confirm": true})).await;
     assert_eq!(status, 200);
     let calls = f.calls();
     assert_eq!(calls[3], vec!["pr", "merge", "7", "--rebase", &format!("--match-head-commit={HEAD}")]);
@@ -394,4 +394,20 @@ async fn fr_g12_create_with_an_open_pr_for_the_head_is_409() {
     let (status, _) = f.post("create", json!({"title": "T", "confirm": true})).await;
     assert_eq!(status, 200);
     assert!(!f.calls().iter().skip(1).any(|c| c.get(1).map(String::as_str) == Some("list")));
+}
+
+#[tokio::test]
+async fn fr_g11_merge_without_a_head_sha_is_400_and_never_calls_gh() {
+    let f = setup().await;
+    f.set_pr(detail("APPROVED", vec![run("SUCCESS", "build")]));
+    for body in [
+        json!({"number": 7, "method": "merge", "confirm": true}),
+        json!({"number": 7, "method": "merge", "head_sha": "", "confirm": true}),
+        json!({"number": 7, "method": "merge", "head_sha": "  ", "confirm": true}),
+    ] {
+        let (status, out) = f.post("merge", body).await;
+        assert_eq!(status, 400, "{out}");
+        assert_eq!(out["error"], "확인한 헤드가 필요합니다.");
+    }
+    assert!(f.calls().is_empty(), "nothing reached gh");
 }

@@ -14,7 +14,7 @@
 //! | `prs` | `{state?, limit?}` (FR-G8, through `gh` on the project's computer) |
 //! | `pr` | `{number}` (FR-G10) |
 //! | `pr/review` | `{number, action, body?, confirm}` (FR-G11) |
-//! | `pr/merge` | `{number, method, delete_branch, confirm}` (FR-G11) |
+//! | `pr/merge` | `{number, method, delete_branch, head_sha, confirm}` (FR-G11) |
 //! | `pr/create` | `{title, body?, base?, head?, draft, confirm}` (FR-G12) |
 //!
 //! The server does not interpret the body. It adds `repo`, the working directory of the

@@ -602,10 +602,11 @@ pub struct GitPrMergeRequest {
     pub method: GitPrMergeMethod,
     #[serde(default)]
     pub delete_branch: bool,
-    /// The head commit the user saw (40 hex characters). When it differs from the current head
-    /// the merge is refused with 409.
+    /// The head commit the user saw (40 hex characters). Required: a missing or empty value is a
+    /// 400 from `merge`; when it differs from the current head the merge is refused with 409.
+    /// `default` keeps a missing field a 400 of ours instead of a deserializer 422.
     #[serde(default)]
-    pub head_sha: Option<String>,
+    pub head_sha: String,
     #[serde(default)]
     pub confirm: bool,
 }
@@ -615,8 +616,7 @@ pub struct GitPrMergeResponse { pub number: u64, pub merged: bool, pub method: G
 
 /// FR-G11: merge. The pull request is read again first and the merge gate is never bypassed:
 /// a closed gate answers 409 with its reason and `gh pr merge` is not run. No `--admin`, no
-/// `--auto`. The merge always carries `--match-head-commit=<sha>` (the sha the caller saw, else
-/// the one just read), so a push after the read cannot be merged unreviewed.
+/// `--auto`. The merge always carries `--match-head-commit=<sha>` (the sha the caller saw), so a push after the read cannot be merged unreviewed.
 ///
 /// `--delete-branch` is gh's: it deletes the remote branch, and when the merged branch is the one
 /// checked out in the project's working directory gh may also delete the local branch and switch
@@ -624,27 +624,21 @@ pub struct GitPrMergeResponse { pub number: u64, pub merged: bool, pub method: G
 pub async fn merge(policy: &PathPolicy, r: &GitPrMergeRequest) -> Result<GitPrMergeResponse, GitError> {
     need_confirm(r.confirm)?;
     let number = check_number(r.number)?;
+    let given = r.head_sha.trim();
+    if given.is_empty() {
+        return Err(GitError::Bad("확인한 헤드가 필요합니다.".into()));
+    }
+    if !is_sha(given) {
+        return Err(GitError::Bad("head_sha는 40자리 16진수여야 합니다.".into()));
+    }
     let current = fetch_detail(policy, &r.repo, r.number).await?;
     if !current.pr.merge.can_merge {
         return Err(GitError::Conflict(current.pr.merge.reason));
     }
-    let sha = match r.head_sha.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(given) => {
-            if !is_sha(given) {
-                return Err(GitError::Bad("head_sha는 40자리 16진수여야 합니다.".into()));
-            }
-            if !current.head_sha.eq_ignore_ascii_case(given) {
-                return Err(GitError::Conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요.".into()));
-            }
-            given.to_ascii_lowercase()
-        }
-        None => {
-            if !is_sha(&current.head_sha) {
-                return Err(GitError::Internal("gh가 헤드 커밋을 알려주지 않았습니다.".into()));
-            }
-            current.head_sha.to_ascii_lowercase()
-        }
-    };
+    if !current.head_sha.eq_ignore_ascii_case(given) {
+        return Err(GitError::Conflict("풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요.".into()));
+    }
+    let sha = given.to_ascii_lowercase();
     let mut args = argv(["pr", "merge"]);
     args.push(number.into());
     args.push(match r.method {

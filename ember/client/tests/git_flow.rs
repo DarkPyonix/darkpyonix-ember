@@ -239,13 +239,13 @@ async fn fr_g11_pr_review_and_merge_calls_send_confirm_and_carry_the_gate_reason
     let r = api.git_pr_review("ember", 7, GitPrReviewAction::RequestChanges, Some("fix")).await.unwrap();
     assert_eq!(r.action, GitPrReviewAction::RequestChanges);
     assert_eq!((last(&seen).1, last(&seen).2), ("pr/review".into(), json!({"number":7, "action":"request_changes", "body":"fix", "confirm":true})));
-    let m = api.git_pr_merge("ember", 7, GitPrMergeMethod::Squash, true, None).await.unwrap();
-    assert!(m.merged && m.method == GitPrMergeMethod::Squash);
-    assert_eq!(last(&seen).2, json!({"number":7, "method":"squash", "delete_branch":true, "confirm":true}));
     let sha = "0123456789abcdef0123456789abcdef01234567";
-    api.git_pr_merge("ember", 7, GitPrMergeMethod::Merge, false, Some(sha)).await.unwrap();
+    let m = api.git_pr_merge("ember", 7, GitPrMergeMethod::Squash, true, sha).await.unwrap();
+    assert!(m.merged && m.method == GitPrMergeMethod::Squash);
+    assert_eq!(last(&seen).2, json!({"number":7, "method":"squash", "delete_branch":true, "head_sha":sha, "confirm":true}));
+    api.git_pr_merge("ember", 7, GitPrMergeMethod::Merge, false, sha).await.unwrap();
     assert_eq!(last(&seen).2, json!({"number":7, "method":"merge", "delete_branch":false, "head_sha":sha, "confirm":true}));
-    let err = api.git_pr_merge("ember", 9, GitPrMergeMethod::Merge, false, None).await.unwrap_err();
+    let err = api.git_pr_merge("ember", 9, GitPrMergeMethod::Merge, false, sha).await.unwrap_err();
     assert!(err.to_string().contains("CI"), "{err}");
 }
 

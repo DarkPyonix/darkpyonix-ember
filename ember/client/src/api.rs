@@ -869,14 +869,11 @@ impl Api {
     }
 
     /// Merge (FR-G11). A closed merge gate answers 409 with the Korean reason. The call sends
-    /// `confirm: true`, so call it only after the person confirmed. `head_sha` is the
-    /// `GitPrDetail::head_sha` the person saw: when the head moved since, the node answers 409
+    /// `confirm: true`, so call it only after the person confirmed. `head_sha` is required: the
+    /// `GitPrDetail::head_sha` the person saw (empty answers 400). When the head moved since, the node answers 409
     /// ("풀 리퀘스트가 바뀌었습니다...") and merges nothing.
-    pub async fn git_pr_merge(&self, project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: Option<&str>) -> ApiResult<GitPrMerged> {
-        let mut body = json!({ "number": number, "method": method, "delete_branch": delete_branch, "confirm": true });
-        if let Some(sha) = head_sha {
-            body["head_sha"] = json!(sha);
-        }
+    pub async fn git_pr_merge(&self, project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: &str) -> ApiResult<GitPrMerged> {
+        let body = json!({ "number": number, "method": method, "delete_branch": delete_branch, "head_sha": head_sha, "confirm": true });
         Self::decode(self.git_post(project, "pr/merge", body).await?)
     }
 

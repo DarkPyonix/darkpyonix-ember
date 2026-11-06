@@ -391,7 +391,8 @@ pub fn FilesScreen() {
 pub fn FilesScreenWith(model: &FilesModel, pending: Vec<Offer>, members: Vec<CrewMember>, extras: &Extras) {
     let ui = shared_ui().clone();
     let st = remember(State::new);
-    let share_open = remember(|| mutable_state_of(false));
+    // `EMBER_CR_FILES_SHEET=share` opens the share sheet at the start, for review captures.
+    let share_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_FILES_SHEET").as_deref() == Ok("share")));
     let window = compose_rust::runtime::current_window_size();
     let w = window.width_dp;
     let compact = w <= 560.0;

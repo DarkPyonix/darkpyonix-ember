@@ -1249,7 +1249,9 @@ mod tests {
 
     #[test]
     fn fr_l15_fit_text_cuts_with_an_ellipsis_only_over_the_budget() {
-        assert_eq!(composer_fit_text("가나다라마바사", 40.0), "가나\u{2026}");
+        // The ellipsis counts like a Korean glyph (13.5): two glyphs plus it would be 40.5 > 40.
+        assert_eq!(composer_fit_text("가나다라마바사", 40.0), "가\u{2026}");
+        assert_eq!(composer_fit_text("가나다라마바사", 41.0), "가나\u{2026}");
         assert_eq!(composer_fit_text("abc", 100.0), "abc");
     }
 
@@ -1271,8 +1273,8 @@ mod tests {
 
     #[test]
     fn fr_l15_chip_width_counts_the_frame_and_the_text() {
-        assert_eq!(composer_chip_width(""), 48.0);
-        assert_eq!(composer_chip_width("가나"), 48.0 + 32.0);
+        assert_eq!(composer_chip_width(""), CHIP_FRAME);
+        assert_eq!(composer_chip_width("가나"), CHIP_FRAME + 27.0);
     }
 
     #[test]

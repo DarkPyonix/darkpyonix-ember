@@ -32,7 +32,8 @@ pub use crate::ui::routines::{
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
     schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bars, DayBar,
-    Entry, FormDraft, FormError, FormField, FormLayout, Group, FORM_FIELDS, form_layout,
+    Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
+    ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout,
     model_choices, schedule_description, when_big_max_lines, LocalStore, Minutes, PaneMode, Routine, RoutineKpi,
     RoutineStore, Run, RunStatus, StoreError, Trigger, LOCAL_NOTE, LOCAL_OFFSET_MIN, OFFLINE_NOTE,
 };
@@ -507,7 +508,23 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         mutable_state_of(preset)
     });
     let panel_preset = capture_edit_panel(selected.get().as_deref());
+    let preset_initial = match &panel_preset {
+        Panel::Edit(id) => entries_for_preset
+            .iter()
+            .find(|e| e.routine.id == *id)
+            .map(|e| FormDraft::from_routine(&e.routine)),
+        _ => None,
+    }
+    .unwrap_or_else(|| FormDraft::new(DEFAULT_PROJECT));
     let panel = remember_with_key(launch_tick, move || mutable_state_of(panel_preset));
+    // The form's draft and the draft it opened with live here, so every route out of the form
+    // can ask whether it holds changes (FR-L25, #511).
+    let form_draft = remember_with_key(launch_tick, {
+        let d = preset_initial.clone();
+        move || mutable_state_of(d)
+    });
+    let form_init = remember_with_key(launch_tick, move || mutable_state_of(preset_initial));
+    let pending_leave = remember_with_key(launch_tick, || mutable_state_of(None::<Leave>));
     let filter = remember_with_key(launch_tick, || mutable_state_of(None::<String>));
     let query = remember_with_key(launch_tick, || mutable_state_of(String::new()));
     let capture_sel = selected.get();
@@ -732,14 +749,57 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let form_panel = panel.get();
     let form_initial = match &form_panel {
         Panel::View => None,
-        Panel::New => Some((
-            FormDraft::new(filter.get().as_deref().unwrap_or(DEFAULT_PROJECT)),
-            None,
-        )),
+        Panel::New => Some((form_init.get(), None)),
         Panel::Edit(id) => cur_entries
             .iter()
-            .find(|e| e.routine.id == *id)
-            .map(|e| (FormDraft::from_routine(&e.routine), Some(id.clone()))),
+            .any(|e| e.routine.id == *id)
+            .then(|| (form_init.get(), Some(id.clone()))),
+    };
+    let form_dirty = form_initial.is_some() && routine_form_dirty(&form_init.get(), &form_draft.get());
+
+    // Opening a form starts it from the stored routine (or an empty draft) and remembers that
+    // starting point, which is what "changed" is measured against.
+    let perform = {
+        let (panel, selected, form_draft, form_init) =
+            (panel.clone(), selected.clone(), form_draft.clone(), form_init.clone());
+        let (entries_st, filter) = (entries_state.clone(), filter.clone());
+        move |leave: Leave| {
+            let open_form = |p: Panel| {
+                let init = match &p {
+                    Panel::Edit(id) => entries_st
+                        .get()
+                        .iter()
+                        .find(|e| e.routine.id == *id)
+                        .map(|e| FormDraft::from_routine(&e.routine)),
+                    _ => None,
+                }
+                .unwrap_or_else(|| FormDraft::new(filter.get().as_deref().unwrap_or(DEFAULT_PROJECT)));
+                form_init.set(init.clone());
+                form_draft.set(init);
+                panel.set(p);
+            };
+            match leave {
+                Leave::Cancel => panel.set(Panel::View),
+                Leave::OpenRoutine(id) => {
+                    panel.set(Panel::View);
+                    selected.set(Some(id));
+                    if let Some(d) = detail_state() {
+                        d.set(true);
+                    }
+                }
+                Leave::NewForm => open_form(Panel::New),
+                Leave::EditForm(id) => open_form(Panel::Edit(id)),
+            }
+        }
+    };
+    let request_leave = {
+        let (perform, pending) = (perform.clone(), pending_leave.clone());
+        let open = form_initial.is_some();
+        move |leave: Leave| match leave_decision(open, form_dirty, false) {
+            LeaveDecision::Go => perform(leave),
+            LeaveDecision::Ask => pending.set(Some(leave)),
+            LeaveDecision::Block => {}
+        }
     };
 
     let inline_form = form_initial.is_some() && form_layout(mode) == FormLayout::Inline;
@@ -752,7 +812,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 .modifier(Modifier::new().fill_max_width().padding(pad))
                 .content(|| {
                     if mode != PaneMode::DetailOnly {
-                        let panel_new = panel.clone();
+                        let rl_new = request_leave.clone();
                         RoutineHeader(compact, move || {
                             if compact {
                                 cu::Box()
@@ -767,7 +827,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     .alignment(Alignment::Center)
                                     .content(move || {
                                         NavIcon(super::shell::ICON_PLUS_SVG, p.ink_text.to_argb(), 18.0);
-                                        FocusOverlay("새 루틴", move || panel_new.set(Panel::New));
+                                        FocusOverlay("새 루틴", move || rl_new(Leave::NewForm));
                                     });
                             } else {
                                 let label = "새 루틴";
@@ -786,7 +846,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             .border(1.0, paint(p.ink))
                                             .shape_role(ShapeRole::Full),
                                     )
-                                    .on_click(move || panel_new.set(Panel::New));
+                                    .on_click(move || rl_new(Leave::NewForm));
                             }
                         });
                     }
@@ -813,22 +873,16 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         &computers,
                                         {
                                             let sel = selected.clone();
-                                            let pan_open = panel.clone();
-                                            move |id| {
-                                                // Opening another routine leaves the inline form.
-                                                pan_open.set(Panel::View);
-                                                sel.set(Some(id));
-                                                if let Some(d) = detail_state() {
-                                                    d.set(true);
-                                                }
-                                            }
+                                            // Opening another routine leaves the inline form, asking first.
+                                            let rl = request_leave.clone();
+                                            move |id| rl(Leave::OpenRoutine(id))
                                         },
                                         on_toggle.clone(),
                                     );
                                 });
                                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                                     if let (true, Some((initial, editing))) = (inline_form, form_initial.as_ref()) {
-                                        let panel_close = panel.clone();
+                                        let rl_close = request_leave.clone();
                                         let save_cb = on_save.clone();
                                         let editing_save = editing.clone();
                                         RoutineForm(
@@ -838,8 +892,9 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             &computers,
                                             &existing_projects,
                                             FormLayout::Inline,
+                                            &form_draft,
                                             move |d| save_cb((d, editing_save.clone())),
-                                            move || panel_close.set(Panel::View),
+                                            move || rl_close(Leave::Cancel),
                                         );
                                         return;
                                     }
@@ -860,8 +915,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             }
                                         },
                                         {
-                                            let pan = panel.clone();
-                                            move |id| pan.set(Panel::Edit(id))
+                                            let rl = request_leave.clone();
+                                            move |id| rl(Leave::EditForm(id))
                                         },
                                         on_run_now.clone(),
                                         on_toggle.clone(),
@@ -909,8 +964,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     }
                                 },
                                 {
-                                    let pan = panel.clone();
-                                    move |id| pan.set(Panel::Edit(id))
+                                    let rl = request_leave.clone();
+                                    move |id| rl(Leave::EditForm(id))
                                 },
                                 on_run_now.clone(),
                                 on_toggle.clone(),
@@ -924,7 +979,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         });
 
     if let (false, Some((initial, editing))) = (inline_form, form_initial) {
-        let panel_close = panel.clone();
+        let rl_close = request_leave.clone();
         let save_cb = on_save.clone();
         RoutineForm(
             initial,
@@ -933,9 +988,33 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             &computers,
             &existing_projects,
             FormLayout::Sheet,
+            &form_draft,
             move |d| save_cb((d, editing.clone())),
-            move || panel_close.set(Panel::View),
+            move || rl_close(Leave::Cancel),
         );
+    }
+    // The unsaved-changes question: 버리기 goes where the user was going, 계속 편집 stays.
+    {
+        let keep = {
+            let c = pending_leave.clone();
+            move || c.set(None)
+        };
+        let asked = pending_leave.get();
+        EmberSheet("변경 사항", asked.is_some(), keep.clone(), None, || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                Label(ROUTINE_DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
+            });
+            SheetFooter(|| {
+                AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
+                let (c, perform) = (pending_leave.clone(), perform.clone());
+                AppButton("버리기", None, ButtonKind::Primary, true, true, false, move || {
+                    if let Some(l) = c.get() {
+                        c.set(None);
+                        perform(l);
+                    }
+                });
+            });
+        });
     }
 }
 
@@ -1819,11 +1898,12 @@ fn RoutineForm(
     computers: &[(String, String)],
     projects: &[String],
     layout: FormLayout,
+    draft: &MutableState<FormDraft>,
     on_save: impl FnMut(FormDraft) + Clone + 'static,
     on_close: impl FnMut() + Clone + 'static,
 ) {
     let p = ember_theme().palette;
-    let draft = remember(|| mutable_state_of(initial.clone()));
+    let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
     let ctx = FormCtx {
         draft,
@@ -1859,10 +1939,23 @@ fn RoutineForm(
                         AppButton("저장", None, ButtonKind::Primary, true, true, false, save);
                     });
                 cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                // The first error also sits under the header buttons once a save was tried, so
+                // it is seen without scrolling to the end of the form.
+                if ctx.tried.get() {
+                    if let Some(e) = ctx.draft.get().errors().first() {
+                        cu::Column().modifier(Modifier::new().fill_max_width().padding(16.0)).content(|| {
+                            Label(e.message(), Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(2));
+                        });
+                    }
+                }
                 cu::Column()
                     .spacing(SP[3])
                     .modifier(Modifier::new().fill_max_width().padding(16.0))
-                    .content(move || FormFields(&ctx));
+                    .content(move || {
+                        FormFields(&ctx);
+                        // The last field clears the page bottom.
+                        cu::Spacer().modifier(Modifier::new().height(SP[4]));
+                    });
             });
         });
         return;
@@ -2617,6 +2710,53 @@ mod tests {
                 assert_eq!(form_layout(pane_mode(compact, open)), expect, "width {w}, open {open}");
             }
         }
+    }
+
+    #[test]
+    fn fr_l25_form_is_dirty_when_any_field_differs_from_where_it_opened() {
+        let init = FormDraft::new("ember");
+        assert!(!routine_form_dirty(&init, &init.clone()));
+        let mut d = init.clone();
+        d.name = "a".into();
+        assert!(routine_form_dirty(&init, &d));
+        d.name.clear();
+        assert!(!routine_form_dirty(&init, &d), "typing and deleting again is clean");
+        for edit in [
+            |d: &mut FormDraft| d.cron = "0 10 * * *".into(),
+            |d: &mut FormDraft| d.prompt = "x".into(),
+            |d: &mut FormDraft| d.sel.project = "core".into(),
+            |d: &mut FormDraft| d.sel.computer = Some("c1".into()),
+            |d: &mut FormDraft| d.sel = d.sel.with_harness(Harness::Codex),
+            |d: &mut FormDraft| *d = d.with_trigger(Trigger::Event),
+        ] {
+            let mut d = init.clone();
+            edit(&mut d);
+            assert!(routine_form_dirty(&init, &d));
+        }
+        let mut m = init.clone();
+        m.sel = m.sel.with_mode(PermMode::Plan);
+        assert!(routine_form_dirty(&init, &m));
+    }
+
+    #[test]
+    fn fr_l25_every_route_out_of_a_dirty_form_asks_and_a_clean_one_goes() {
+        assert_eq!(leave_decision(true, true, false), LeaveDecision::Ask);
+        assert_eq!(leave_decision(true, false, false), LeaveDecision::Go);
+        assert_eq!(leave_decision(false, true, false), LeaveDecision::Go, "no form, nothing to lose");
+        assert_eq!(leave_decision(true, true, true), LeaveDecision::Block);
+        assert_eq!(leave_decision(true, false, true), LeaveDecision::Block);
+    }
+
+    #[test]
+    fn fr_l25_form_routes_all_go_through_request_leave() {
+        let src = include_str!("routines.rs");
+        let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview").next().unwrap();
+        for route in ["Leave::NewForm", "Leave::OpenRoutine", "Leave::Cancel", "Leave::EditForm"] {
+            assert!(screen.contains(route), "{route}");
+        }
+        assert!(!screen.contains("pan.set(Panel::Edit"));
+        assert!(!screen.contains("panel_new.set"));
+        assert_eq!(ROUTINE_DISCARD_QUESTION, "변경 사항을 버릴까요?");
     }
 
     #[test]

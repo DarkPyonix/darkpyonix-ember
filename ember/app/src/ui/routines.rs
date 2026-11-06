@@ -469,6 +469,53 @@ pub fn form_layout(mode: PaneMode) -> FormLayout {
     }
 }
 
+/// A route out of the open routine form, or into another form (FR-L25, #511).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Leave {
+    /// 취소.
+    Cancel,
+    /// A list row was tapped.
+    OpenRoutine(String),
+    /// 새 루틴.
+    NewForm,
+    /// 편집 of a routine.
+    EditForm(String),
+}
+
+/// What a route out does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaveDecision {
+    /// Go at once: the form is closed or has no changes.
+    Go,
+    /// Ask "변경 사항을 버릴까요?" first.
+    Ask,
+    /// A save is in flight: do nothing.
+    Block,
+}
+
+/// Whether the form holds changes: any field differs from the draft it opened with (name,
+/// project, trigger, cron or event, model, permission, computer, prompt).
+pub fn routine_form_dirty(initial: &FormDraft, current: &FormDraft) -> bool {
+    initial != current
+}
+
+/// The one rule for every route out. A save closes the form at once (it hands the draft to the
+/// save path and sets the panel to view), so `saving` stays false today.
+pub fn leave_decision(form_open: bool, dirty: bool, saving: bool) -> LeaveDecision {
+    if !form_open {
+        LeaveDecision::Go
+    } else if saving {
+        LeaveDecision::Block
+    } else if dirty {
+        LeaveDecision::Ask
+    } else {
+        LeaveDecision::Go
+    }
+}
+
+/// The question of the confirm.
+pub const ROUTINE_DISCARD_QUESTION: &str = "변경 사항을 버릴까요?";
+
 /// The fields of the routine form, in mockup v8 order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormField {

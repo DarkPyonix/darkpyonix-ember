@@ -685,6 +685,7 @@ dependencies = [
  "futures",
  "http-body-util",
  "hyper",
+ "hyper-util",
  "libc",
  "nfsserve",
  "reqwest",

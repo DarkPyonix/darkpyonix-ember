@@ -1093,7 +1093,7 @@ fn save_settings(
                         ui.set_selected_project(follow_rename(ui.selected_project.get_untracked().as_deref(), &old, new));
                         let open = follow_rename(full.get_untracked().as_deref(), &old, new);
                         full.set(open);
-                        ui.update_prefs(|pr| pr.move_character_style(&old, new));
+                        ui.update_prefs(|pr| pr.rename_project_keys(&old, new));
                     }
                     if let (true, Some(st)) = (style_changed, style) {
                         ui.update_prefs(|pr| pr.set_character_style(&saved_as, st));
@@ -1131,7 +1131,7 @@ fn SettingsSheet(
     let patch = build_patch(&server, &d);
     let can_save = SETTINGS_SAVE_AVAILABLE && errors.is_empty() && !patch.is_empty() && !saving.get();
     let window = compose_rust::runtime::current_window_size();
-    let body_height = (window.height_dp - 32.0 - 60.0).clamp(240.0, 900.0);
+    let body_height = super::components::sheet_body_max_height(window.width_dp, window.height_dp, false, 60.0).min(900.0);
     // 취소, X and the backdrop: nothing while saving, a question when the draft has changes.
     let guard = SettingsGuard::new(saving.get(), patch.is_empty());
     let request_close = {

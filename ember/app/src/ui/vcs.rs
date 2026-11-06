@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitStashEntry, GitStatus,
+    ApiError, GitBranchInfo, GitCommitApplied, GitCommitDetail, GitCommitFileStatus, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrCheckState, GitPrCreated, GitPrDetail, GitPrMergeMethod, GitPrReview, GitPrReviewAction, GitPrReviewItem, GitPrReviewState, GitPrState, GitPrs, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -988,6 +988,8 @@ pub struct RepoSnapshot {
     pub staged: BTreeSet<String>,
     /// Paths with unresolved merge conflicts (`git/conflicts`).
     pub conflicts: Vec<String>,
+    /// Korean lines under the bar about what the snapshot left out (#268).
+    pub notes: Vec<String>,
 }
 
 /// The state of the repository view of one project.
@@ -1119,13 +1121,14 @@ pub fn build_snapshot(
         changes,
         staged: already,
         conflicts: Vec::new(),
+        notes: Vec::new(),
     }
 }
 
 /// A demo source answer as an API result: the status and message of its error become an
 /// [`ApiError::Status`], so the demo and the server share the same load states.
 pub fn git_result<T: DeserializeOwned>(r: Result<Value, GitError>) -> Result<T, ApiError> {
-    let v = r.map_err(|e| ApiError::Status { status: e.status, message: format!("{}: {}", e.code, e.message) })?;
+    let v = r.map_err(|e| ApiError::Status { status: e.status, message: format!("{}: {}", e.code, e.message), code: None })?;
     serde_json::from_value(v).map_err(|e| ApiError::Decode(e.to_string()))
 }
 
@@ -1148,8 +1151,73 @@ pub fn diff_body(staged: bool, include_untracked: bool) -> Value {
 }
 
 async fn git_diff_of(project: &str, staged: bool) -> Result<String, ApiError> {
-    let d: GitDiff = git_call(project, "diff", diff_body(staged, !staged)).await?;
+    git_diff_with(project, staged, !staged).await
+}
+
+async fn git_diff_with(project: &str, staged: bool, include_untracked: bool) -> Result<String, ApiError> {
+    let d: GitDiff = git_call(project, "diff", diff_body(staged, include_untracked)).await?;
     Ok(d.patch)
+}
+
+/// The line shown when the untracked files' diffs were skipped (#268).
+pub const UNTRACKED_SKIPPED_NOTE: &str = "추적하지 않는 파일이 너무 많아 내용을 건너뛰었습니다. 파일 목록만 표시합니다.";
+
+/// The work tree diff from its two reads: `tracked` (tracked files only) and `with_untracked`
+/// (the untracked files' diffs added). A 413 (output cap) on the second keeps the first and
+/// returns the note; the untracked files stay listed by the status, without hunks. Any other
+/// error of either read fails as before.
+pub fn merge_untracked_diff(
+    tracked: Result<String, ApiError>,
+    with_untracked: Result<String, ApiError>,
+) -> Result<(String, Option<&'static str>), ApiError> {
+    match with_untracked {
+        Ok(patch) => Ok((patch, None)),
+        Err(e) if e.status() == Some(413) => Ok((tracked?, Some(UNTRACKED_SKIPPED_NOTE))),
+        Err(e) => Err(e),
+    }
+}
+
+/// The warning under the amend checkbox when HEAD is already on the upstream (#269): there is an
+/// upstream and the branch is not ahead of it. Limits: a detached HEAD has no upstream, and a
+/// branch whose upstream is gone has none either, so neither warns although the commit may be
+/// pushed.
+pub fn amend_warning(snap: &RepoSnapshot) -> Option<&'static str> {
+    if snap.upstream.is_some() && snap.ahead == 0 {
+        Some("이 커밋은 이미 원격에 올라가 있습니다. 수정하면 다음 올리기에서 기록을 덮어써야 합니다.")
+    } else {
+        None
+    }
+}
+
+/// What a tap on the commit button does while amending a pushed commit (#269): the first tap arms
+/// it, and a second tap counts only after the "그래도 수정합니다" label has had time to show, so a
+/// fast double click cannot skip the confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmendTap {
+    Arm,
+    Wait,
+    Commit,
+}
+
+/// Milliseconds between arming and the second tap that is accepted.
+pub const AMEND_CONFIRM_DELAY_MS: i64 = 600;
+
+/// `armed_at` is the time of the first tap (0 when not armed).
+pub fn amend_tap(needs_confirm: bool, armed_at: i64, now: i64) -> AmendTap {
+    if !needs_confirm {
+        AmendTap::Commit
+    } else if armed_at == 0 {
+        AmendTap::Arm
+    } else if now - armed_at < AMEND_CONFIRM_DELAY_MS {
+        AmendTap::Wait
+    } else {
+        AmendTap::Commit
+    }
+}
+
+/// The commit button's label: the armed second tap of a pushed amend reads "그래도 수정합니다".
+pub fn amend_button_label(base: &str, warning: Option<&str>, armed: bool) -> String {
+    if warning.is_some() && armed { "그래도 수정합니다".to_string() } else { base.to_string() }
 }
 
 /// Read a project's repository: status, the work tree diff (untracked files included, in one
@@ -1164,10 +1232,18 @@ pub async fn fetch_snapshot(project: &str) -> Result<RepoSnapshot, ApiError> {
             Vec::new()
         }
     };
-    let unstaged = git_diff_of(project, false).await?;
+    let full = git_diff_with(project, false, true).await;
+    // The tracked-only read happens only after a 413, so the usual path stays one call.
+    let tracked = if matches!(&full, Err(e) if e.status() == Some(413)) {
+        git_diff_with(project, false, false).await
+    } else {
+        Ok(String::new())
+    };
+    let (unstaged, note) = merge_untracked_diff(tracked, full)?;
     let staged = git_diff_of(project, true).await?;
     let mut snap = build_snapshot(&status, &unstaged, &staged, &BTreeMap::new());
     snap.conflicts = conflicts;
+    snap.notes.extend(note.map(str::to_string));
     Ok(snap)
 }
 
@@ -1304,6 +1380,985 @@ pub fn history_append(state: HistoryLoad, result: Result<GitLog, ApiError>, now:
             (HistoryLoad::Ready { entries, more, loading_more: false }, None)
         }
         Err(e) => (HistoryLoad::Ready { entries, more: true, loading_more: false }, Some(failure_text("다음 히스토리를 확인", &e))),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Commit detail, revert, cherry-pick and a branch from a commit (FR-G14, FR-G15, #484)
+// ---------------------------------------------------------------------------------------------
+
+/// The most changed files the detail card lists; the rest is a count.
+pub const COMMIT_FILES_SHOWN: usize = 100;
+/// The most message-body lines the detail card shows.
+pub const COMMIT_BODY_LINES: usize = 12;
+
+/// One changed file of a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitFileView {
+    pub path: String,
+    pub old_path: Option<String>,
+    /// "A", "M", "D", "R", "C" or "T".
+    pub status_letter: &'static str,
+    pub additions: u64,
+    pub deletions: u64,
+    pub binary: bool,
+}
+
+/// One commit in full, as the detail card shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitDetailView {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    /// The message after the subject, without blank lines, cut at `COMMIT_BODY_LINES`.
+    pub body_lines: Vec<String>,
+    pub author: String,
+    /// "3시간 전", or the node's own text when it is not a time this code reads.
+    pub time_text: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<HistoryRef>,
+    pub is_merge: bool,
+    pub files: Vec<CommitFileView>,
+    /// The files the commit changed, also those past what the node listed.
+    pub files_total: usize,
+    pub truncated: bool,
+}
+
+/// The state of the detail of the selected commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitDetailLoad {
+    Idle,
+    Loading,
+    Ready(CommitDetailView),
+    Failed(String),
+}
+
+/// The letter before a file in the list.
+pub fn file_status_letter(status: GitCommitFileStatus) -> &'static str {
+    match status {
+        GitCommitFileStatus::Added => "A",
+        GitCommitFileStatus::Modified => "M",
+        GitCommitFileStatus::Deleted => "D",
+        GitCommitFileStatus::Renamed => "R",
+        GitCommitFileStatus::Copied => "C",
+        GitCommitFileStatus::TypeChanged => "T",
+    }
+}
+
+/// The count after a file: "+12 -3", or "바이너리" for a file with no line counts.
+pub fn file_stat_text(additions: u64, deletions: u64, binary: bool) -> String {
+    if binary { "바이너리".to_string() } else { format!("+{additions} -{deletions}") }
+}
+
+/// The detail card's data for a node answer. `now` is unix seconds.
+pub fn commit_detail_view(d: &GitCommitDetail, now: i64) -> CommitDetailView {
+    let author = clip_line(&d.author, COMMIT_TEXT_MAX);
+    let subject = clip_line(&d.subject, COMMIT_TEXT_MAX);
+    let files: Vec<CommitFileView> = d
+        .files
+        .iter()
+        .map(|f| CommitFileView {
+            path: f.path.clone(),
+            old_path: f.old_path.clone().filter(|o| !o.is_empty() && *o != f.path),
+            status_letter: file_status_letter(f.status),
+            additions: f.additions,
+            deletions: f.deletions,
+            binary: f.binary,
+        })
+        .collect();
+    let rank = |k: &GitLogRefKind| match k {
+        GitLogRefKind::Head => 0,
+        GitLogRefKind::Branch => 1,
+        GitLogRefKind::Remote => 2,
+        GitLogRefKind::Tag => 3,
+    };
+    let mut refs: Vec<HistoryRef> = d.refs.iter().map(|r| HistoryRef { label: ref_label(&r.name), kind: r.kind.clone() }).collect();
+    refs.sort_by_key(|r| rank(&r.kind));
+    // The node sends the whole message in `body` (subject first in some answers): drop a leading copy of the subject.
+    let mut lines = d.body.lines().map(str::trim_end).skip_while(|l| l.trim().is_empty());
+    let first = lines.clone().next();
+    if first.is_some_and(|l| l.trim() == d.subject.trim()) {
+        lines.next();
+    }
+    let body_lines: Vec<String> = lines.filter(|l| !l.trim().is_empty()).take(COMMIT_BODY_LINES).map(|l| clip_line(l, COMMIT_TEXT_MAX)).collect();
+    CommitDetailView {
+        sha: d.sha.clone(),
+        short: if d.short.is_empty() { d.sha.chars().take(7).collect() } else { d.short.clone() },
+        subject,
+        body_lines,
+        author,
+        time_text: iso_to_unix(&d.time).map(|t| history_time_text(now, t)).unwrap_or_else(|| d.time.clone()),
+        parents: d.parents.clone(),
+        refs,
+        is_merge: d.parents.len() > 1,
+        files_total: d.files_total.max(files.len()),
+        truncated: d.truncated,
+        files,
+    }
+}
+
+/// Read one commit. Runs on the runtime, not the UI thread.
+pub async fn fetch_commit_detail(project: &str, sha: &str) -> Result<GitCommitDetail, ApiError> {
+    git_call(project, "commit/show", json!({ "sha": sha })).await
+}
+
+/// The detail as a view state. A failure keeps the node's Korean line, else a Korean one.
+pub fn commit_detail_from(result: Result<GitCommitDetail, ApiError>, now: i64) -> CommitDetailLoad {
+    match result {
+        Ok(d) => CommitDetailLoad::Ready(commit_detail_view(&d, now)),
+        Err(e) => CommitDetailLoad::Failed(commit_failure("커밋 확인", &e)),
+    }
+}
+
+/// The most characters of one displayed line of commit text (subject, author, one body line).
+pub const COMMIT_TEXT_MAX: usize = 200;
+
+/// The node lists at most this many files of one commit.
+pub const COMMIT_NODE_FILES_MAX: usize = 500;
+
+/// Commit text is untrusted: control characters are dropped (a tab becomes a space) and a line
+/// past `max` characters ends in an ellipsis, so one commit cannot fill the screen.
+pub fn clip_line(text: &str, max: usize) -> String {
+    let clean: String = text.chars().filter_map(|c| if c == '\t' { Some(' ') } else if c.is_control() { None } else { Some(c) }).collect();
+    if clean.chars().count() <= max {
+        return clean;
+    }
+    let mut out: String = clean.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// The line under the file list. `shown` files are on screen of `total`; `truncated` says the
+/// node cut its own list. The cut files are part of the "more" count, so they are not counted twice.
+pub fn commit_files_notice(shown: usize, total: usize, truncated: bool) -> Option<String> {
+    let more = total.saturating_sub(shown);
+    let cut = format!("파일 목록이 {COMMIT_NODE_FILES_MAX}개에서 잘렸습니다 (전체 {total}개)");
+    match (more > 0, truncated) {
+        (false, false) => None,
+        (true, false) => Some(format!("{more}개 더 있습니다")),
+        (true, true) => Some(format!("{more}개 더 있습니다. {cut}")),
+        (false, true) => Some(cut),
+    }
+}
+
+/// The files shown and the line under them for the rest.
+pub fn commit_files_shown(v: &CommitDetailView) -> (&[CommitFileView], Option<String>) {
+    let shown = &v.files[..v.files.len().min(COMMIT_FILES_SHOWN)];
+    (shown, commit_files_notice(shown.len(), v.files_total, v.truncated))
+}
+
+/// A Korean line for a failed commit call: the node's Korean message as it is; anything else
+/// (git's own text, a demo's) becomes "{what}에 실패했습니다" with a Korean reason, never raw English.
+pub fn commit_failure(what: &str, e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { status: 409, .. } => "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.".to_string(),
+        ApiError::Status { .. } => format!("{what}에 실패했습니다. 잠시 후 다시 시도해 주세요"),
+        ApiError::Unauthorized(_) => format!("{what}에 실패했습니다. 서버 인증에 실패했습니다. 서버 토큰을 확인해 주세요"),
+        _ => format!("{what}에 실패했습니다. 서버에 닿지 않습니다"),
+    }
+}
+
+/// The two actions that change the current branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitAction {
+    Revert,
+    CherryPick,
+}
+
+impl CommitAction {
+    /// The button text.
+    pub fn label(self) -> &'static str {
+        match self {
+            CommitAction::Revert => "되돌리기",
+            CommitAction::CherryPick => "Cherry-pick",
+        }
+    }
+
+    /// The button text of the armed second tap.
+    pub fn armed_label(self) -> &'static str {
+        match self {
+            CommitAction::Revert => "정말 되돌립니다",
+            CommitAction::CherryPick => "정말 가져옵니다",
+        }
+    }
+
+    fn done_text(self) -> &'static str {
+        match self {
+            CommitAction::Revert => "되돌렸습니다",
+            CommitAction::CherryPick => "가져왔습니다",
+        }
+    }
+}
+
+/// Why an action cannot start, before any call. A merge commit cannot be cherry-picked (it has
+/// no single parent to diff against); both actions need a clean tracked tree. `dirty` is
+/// computed from the screen's snapshot; an unknown state is passed as clean and the node answers.
+pub fn commit_action_gate(action: CommitAction, dirty: bool, is_merge: bool) -> Result<(), &'static str> {
+    if action == CommitAction::CherryPick && is_merge {
+        return Err("병합 커밋은 가져올 수 없습니다");
+    }
+    if dirty {
+        return Err("작업 중인 변경이 있어 먼저 커밋하거나 스태시해야 합니다");
+    }
+    Ok(())
+}
+
+/// Whether the snapshot has changes to tracked files. An untracked file reads as an added file
+/// that is not staged (git leaves it alone on a revert), so it does not count.
+pub fn snapshot_dirty(snap: &RepoSnapshot) -> bool {
+    snap.changes.iter().any(|f| !(f.status == FileStatus::Added && !snap.staged.contains(&f.path)))
+}
+
+/// The key of one action on one commit in the armed state (`delete_tap`): two keys per commit,
+/// so arming 되돌리기 never confirms Cherry-pick and another commit starts unarmed.
+pub fn commit_action_key(sha: &str, action: CommitAction) -> usize {
+    let mut h: usize = 0xcbf2_9ce4;
+    for b in sha.bytes() {
+        h = (h ^ b as usize).wrapping_mul(0x0100_0193);
+    }
+    (h >> 1).wrapping_mul(2) + usize::from(action == CommitAction::CherryPick)
+}
+
+/// The line under the actions while one is armed: which branch gets the new commit.
+pub fn commit_action_branch_line(_action: CommitAction, branch: &str) -> String {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        "현재 브랜치에 새 커밋을 만듭니다".to_string()
+    } else {
+        format!("현재 브랜치 {branch}에 새 커밋을 만듭니다")
+    }
+}
+
+/// The notice after a revert or cherry-pick: the branch and the new commit's short sha.
+pub fn commit_applied_notice(_action: CommitAction, branch: &str, short: &str) -> String {
+    let branch = if branch.trim().is_empty() { "현재 브랜치" } else { branch.trim() };
+    let short: String = short.chars().take(7).collect();
+    if short.is_empty() {
+        format!("{branch}에 새 커밋을 만들었습니다")
+    } else {
+        format!("{branch}에 새 커밋 {short}을 만들었습니다")
+    }
+}
+
+/// Whether a failure line says the snapshot's dirty flag was wrong (the node found changes the
+/// client did not see): the detail then reloads the snapshot so the flag corrects itself.
+pub fn commit_failure_reloads_snapshot(line: &str) -> bool {
+    line.contains("작업 중인 변경") || line.contains("진행 중인 git 작업")
+}
+
+async fn run_commit_apply(project: &str, sha: &str, action: CommitAction, branch: &str) -> Result<String, String> {
+    let op = if action == CommitAction::Revert { "revert" } else { "cherry-pick" };
+    git_call::<GitCommitApplied>(project, op, json!({ "sha": sha, "confirm": true }))
+        .await
+        .map(|a| commit_applied_notice(action, branch, &a.new_sha))
+        .map_err(|e| commit_failure(action.label(), &e))
+}
+
+/// Revert a commit on the current branch. `Ok` is the notice, `Err` a Korean line (the node's
+/// conflict answer is Korean and shown as it is).
+pub async fn run_commit_revert(project: &str, sha: &str, branch: &str) -> Result<String, String> {
+    run_commit_apply(project, sha, CommitAction::Revert, branch).await
+}
+
+/// Cherry-pick a commit onto the current branch. Same answers as `run_commit_revert`.
+pub async fn run_commit_cherry_pick(project: &str, sha: &str, branch: &str) -> Result<String, String> {
+    run_commit_apply(project, sha, CommitAction::CherryPick, branch).await
+}
+
+/// Create `name` at `sha` and switch to it (the node's `branch` op with `from`).
+pub async fn run_branch_from(project: &str, name: &str, sha: &str) -> Result<String, String> {
+    let name = name.trim();
+    if !valid_branch_name(name) {
+        return Err("브랜치 이름을 확인해 주세요. 공백이나 쓸 수 없는 문자가 있습니다".to_string());
+    }
+    git_call::<Value>(project, "branch", branch_create_body(name, Some(sha)))
+        .await
+        .map(|_| format!("브랜치를 만들어 전환했습니다: {name}"))
+        .map_err(|e| commit_failure("브랜치 만들기", &e))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pull requests (FR-G8)
+// ---------------------------------------------------------------------------------------------
+
+/// Which pull requests the list asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrFilter {
+    #[default]
+    Open,
+    Closed,
+    Merged,
+    All,
+}
+
+impl PrFilter {
+    pub const ALL: [PrFilter; 4] = [PrFilter::Open, PrFilter::Closed, PrFilter::Merged, PrFilter::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PrFilter::Open => "열림",
+            PrFilter::Closed => "닫힘",
+            PrFilter::Merged => "병합됨",
+            PrFilter::All => "전체",
+        }
+    }
+
+    /// The `state` the node takes.
+    pub fn arg(self) -> &'static str {
+        match self {
+            PrFilter::Open => "open",
+            PrFilter::Closed => "closed",
+            PrFilter::Merged => "merged",
+            PrFilter::All => "all",
+        }
+    }
+
+    /// The line of an empty list.
+    pub fn empty_text(self) -> &'static str {
+        match self {
+            PrFilter::Open => "열린 풀 리퀘스트가 없습니다",
+            PrFilter::Closed => "닫힌 풀 리퀘스트가 없습니다",
+            PrFilter::Merged => "병합된 풀 리퀘스트가 없습니다",
+            PrFilter::All => "풀 리퀘스트가 없습니다",
+        }
+    }
+}
+
+/// How many pull requests one read asks for.
+pub const PR_LIMIT: u32 = 30;
+
+/// The row of one pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrEntry {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub head: String,
+    pub base: String,
+    pub time_text: String,
+    pub state: GitPrState,
+    /// "열림", "닫힘" or "병합됨".
+    pub state_text: &'static str,
+    pub draft: bool,
+    pub review: GitPrReview,
+    /// "승인됨", "변경 요청", "리뷰 필요" or "리뷰 없음".
+    pub review_text: &'static str,
+    /// "체크 3/4 통과", or "체크 없음".
+    pub checks_text: String,
+    pub checks_failed: u32,
+    pub checks_pending: u32,
+    pub can_merge: bool,
+    /// "병합할 수 있습니다", or the node's reason it cannot be merged.
+    pub gate_text: String,
+    pub url: String,
+}
+
+/// The state of the pull request list of one project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrLoad {
+    Loading,
+    Ready(Vec<PrEntry>),
+    /// The Korean line with the node's message (shown with a retry button). `gh` missing, not
+    /// logged in and a repository with no GitHub remote arrive here.
+    Failed(String),
+}
+
+pub fn pr_state_text(state: GitPrState) -> &'static str {
+    match state {
+        GitPrState::Open => "열림",
+        GitPrState::Closed => "닫힘",
+        GitPrState::Merged => "병합됨",
+    }
+}
+
+pub fn pr_review_text(review: GitPrReview) -> &'static str {
+    match review {
+        GitPrReview::Approved => "승인됨",
+        GitPrReview::ChangesRequested => "변경 요청",
+        GitPrReview::ReviewRequired => "리뷰 필요",
+        GitPrReview::None => "리뷰 없음",
+    }
+}
+
+/// "체크 3/4 통과": the checks that passed over all of them; "체크 없음" when there are none.
+pub fn pr_checks_text(passed: u32, failed: u32, pending: u32) -> String {
+    let total = passed + failed + pending;
+    if total == 0 {
+        "체크 없음".to_string()
+    } else {
+        format!("체크 {passed}/{total} 통과")
+    }
+}
+
+/// The row of one pull request. A time that cannot be read shows as the node sent it.
+pub fn pr_entry(pr: &GitPr, now: i64) -> PrEntry {
+    let c = pr.checks;
+    PrEntry {
+        number: pr.number,
+        title: pr.title.clone(),
+        author: pr.author.clone(),
+        head: pr.head.clone(),
+        base: pr.base.clone(),
+        time_text: iso_to_unix(&pr.updated_at).map(|t| history_time_text(now, t)).unwrap_or_else(|| pr.updated_at.clone()),
+        state: pr.state,
+        state_text: pr_state_text(pr.state),
+        draft: pr.draft,
+        review: pr.review,
+        review_text: pr_review_text(pr.review),
+        checks_text: pr_checks_text(c.passed, c.failed, c.pending),
+        checks_failed: c.failed,
+        checks_pending: c.pending,
+        can_merge: pr.merge.can_merge,
+        gate_text: if pr.merge.can_merge {
+            "병합할 수 있습니다".to_string()
+        } else if pr.merge.reason.trim().is_empty() {
+            "병합 조건을 채우지 못했습니다".to_string()
+        } else {
+            pr.merge.reason.clone()
+        },
+        url: pr.url.clone(),
+    }
+}
+
+/// The list as a view state. An empty list is a ready, empty state, not an error.
+pub fn prs_from(result: Result<GitPrs, ApiError>, now: i64) -> PrLoad {
+    match result {
+        Ok(list) => PrLoad::Ready(list.prs.iter().map(|p| pr_entry(p, now)).collect()),
+        Err(e) => PrLoad::Failed(failure_text("풀 리퀘스트 목록을 확인", &e)),
+    }
+}
+
+/// The `prs` body for a filter.
+pub fn prs_body(filter: PrFilter) -> Value {
+    json!({ "state": filter.arg(), "limit": PR_LIMIT })
+}
+
+/// Read a project's pull requests. Runs on the runtime, not the UI thread.
+pub async fn fetch_prs(project: &str, filter: PrFilter) -> Result<GitPrs, ApiError> {
+    git_call(project, "prs", prs_body(filter)).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Pull request detail, review, merge and new PR (FR-G10, FR-G11, FR-G12, #483)
+// ---------------------------------------------------------------------------------------------
+
+/// The class of one check run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckClass {
+    Passed,
+    Failed,
+    Pending,
+}
+
+impl CheckClass {
+    /// The word beside the check's dot.
+    pub fn label(self) -> &'static str {
+        match self {
+            CheckClass::Passed => "통과",
+            CheckClass::Failed => "실패",
+            CheckClass::Pending => "진행 중",
+        }
+    }
+}
+
+/// Where one reviewer stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewerState {
+    Approved,
+    ChangesRequested,
+    /// Asked to review, or a dismissed or pending review.
+    Waiting,
+    /// Left comments only.
+    Commented,
+}
+
+impl ReviewerState {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewerState::Approved => "승인",
+            ReviewerState::ChangesRequested => "변경 요청",
+            ReviewerState::Waiting => "대기",
+            ReviewerState::Commented => "코멘트",
+        }
+    }
+}
+
+/// The merge hint when the node gave no reason.
+pub const MERGE_GATE_DEFAULT: &str = "CI 통과와 승인이 있어야 병합할 수 있습니다";
+/// The longest comment shown in the detail, in characters.
+pub const PR_COMMENT_CUT: usize = 300;
+/// The most description lines shown in the detail.
+pub const PR_BODY_LINES: usize = 8;
+
+/// One pull request in full, as the detail card shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrDetailView {
+    pub number: u64,
+    pub title: String,
+    /// "열림", "닫힘" or "병합됨".
+    pub state_text: &'static str,
+    pub body_lines: Vec<String>,
+    pub author: String,
+    pub head: String,
+    pub base: String,
+    /// "파일 3 +40 -2".
+    pub files_text: String,
+    pub checks: Vec<(String, CheckClass, String)>,
+    /// The row's checks summary ("체크 3/4 통과", or "체크 없음").
+    pub ci_pill: String,
+    pub checks_failed: u32,
+    pub checks_pending: u32,
+    /// "승인됨", "변경 요청", "리뷰 필요" or "리뷰 없음".
+    pub review_pill: &'static str,
+    pub review: GitPrReview,
+    pub reviewers: Vec<(String, ReviewerState)>,
+    pub comments: Vec<(String, String)>,
+    pub can_merge: bool,
+    /// The node's Korean reason, or `MERGE_GATE_DEFAULT` when it sent none.
+    pub merge_reason: String,
+    pub open: bool,
+    pub draft: bool,
+    /// The head commit the user saw (40 hex characters); `pr/merge` carries it. Empty when the node sent none.
+    pub head_sha: String,
+}
+
+/// The state of the detail of the selected pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrDetailLoad {
+    Idle,
+    Loading,
+    Ready(PrDetailView),
+    Failed(String),
+}
+
+/// A text cut at `max` characters with an ellipsis.
+fn cut_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut s: String = text.chars().take(max).collect();
+        s.push('\u{2026}');
+        s
+    }
+}
+
+/// The reviewers: the newest decisive review of each author, then the requested ones that have
+/// not reviewed. A comment-only review never replaces an approval or a change request.
+pub fn pr_reviewers(reviews: &[GitPrReviewItem], requested: &[String]) -> Vec<(String, ReviewerState)> {
+    let mut out: Vec<(String, ReviewerState)> = Vec::new();
+    for r in reviews {
+        if r.author.is_empty() {
+            continue;
+        }
+        let state = match r.state {
+            GitPrReviewState::Approved => ReviewerState::Approved,
+            GitPrReviewState::ChangesRequested => ReviewerState::ChangesRequested,
+            GitPrReviewState::Commented => ReviewerState::Commented,
+            GitPrReviewState::Dismissed | GitPrReviewState::Pending => ReviewerState::Waiting,
+        };
+        match out.iter_mut().find(|(a, _)| *a == r.author) {
+            Some(slot) => {
+                if !(state == ReviewerState::Commented && slot.1 != ReviewerState::Waiting) {
+                    slot.1 = state;
+                }
+            }
+            None => out.push((r.author.clone(), state)),
+        }
+    }
+    for name in requested {
+        if !name.is_empty() && !out.iter().any(|(a, _)| a == name) {
+            out.push((name.clone(), ReviewerState::Waiting));
+        }
+    }
+    out
+}
+
+/// The detail of one pull request for the card.
+pub fn pr_detail_view(d: &GitPrDetail) -> PrDetailView {
+    let pr = &d.pr;
+    let checks = d
+        .check_runs
+        .iter()
+        .map(|c| match c.state {
+            GitPrCheckState::Passed => (c.name.clone(), CheckClass::Passed, CheckClass::Passed.label().to_string()),
+            GitPrCheckState::Failed => (c.name.clone(), CheckClass::Failed, CheckClass::Failed.label().to_string()),
+            GitPrCheckState::Pending => (c.name.clone(), CheckClass::Pending, CheckClass::Pending.label().to_string()),
+        })
+        .collect();
+    let mut comments: Vec<(String, String)> = d
+        .reviews
+        .iter()
+        .filter(|r| !r.body.trim().is_empty())
+        .map(|r| (r.author.clone(), cut_chars(r.body.trim(), PR_COMMENT_CUT)))
+        .collect();
+    comments.extend(d.comments.iter().filter(|c| !c.body.trim().is_empty()).map(|c| (c.author.clone(), cut_chars(c.body.trim(), PR_COMMENT_CUT))));
+    PrDetailView {
+        number: pr.number,
+        title: pr.title.clone(),
+        state_text: pr_state_text(pr.state),
+        body_lines: d.body.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).take(PR_BODY_LINES).map(String::from).collect(),
+        author: pr.author.clone(),
+        head: pr.head.clone(),
+        base: pr.base.clone(),
+        files_text: format!("파일 {} +{} -{}", d.changed_files, d.additions, d.deletions),
+        checks,
+        ci_pill: pr_checks_text(pr.checks.passed, pr.checks.failed, pr.checks.pending),
+        checks_failed: pr.checks.failed,
+        checks_pending: pr.checks.pending,
+        review_pill: pr_review_text(pr.review),
+        review: pr.review,
+        reviewers: pr_reviewers(&d.reviews, &d.requested_reviewers),
+        comments,
+        can_merge: pr.merge.can_merge,
+        merge_reason: if pr.merge.reason.trim().is_empty() { MERGE_GATE_DEFAULT.to_string() } else { pr.merge.reason.clone() },
+        open: pr.state == GitPrState::Open,
+        draft: pr.draft,
+        head_sha: d.head_sha.clone(),
+    }
+}
+
+/// The detail as a view state. A failure keeps the node's Korean line, else a Korean one.
+pub fn pr_detail_from(result: Result<GitPrDetail, ApiError>) -> PrDetailLoad {
+    match result {
+        Ok(d) => PrDetailLoad::Ready(pr_detail_view(&d)),
+        Err(e) => PrDetailLoad::Failed(korean_failure("풀 리퀘스트를 확인", &e)),
+    }
+}
+
+/// Like `failure_text`, but an English message (git's, gh's or a demo's) never reaches the
+/// screen: a Korean message of the node is shown as it is, anything else becomes
+/// "{what}하지 못했습니다" with a Korean reason.
+pub fn korean_failure(what: &str, e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { .. } => format!("{what}하지 못했습니다. 잠시 후 다시 시도해 주세요"),
+        ApiError::Unauthorized(_) => format!("{what}하지 못했습니다. 서버 인증에 실패했습니다. 서버 토큰을 확인해 주세요"),
+        _ => format!("{what}하지 못했습니다. 서버에 닿지 않습니다"),
+    }
+}
+
+/// The merge button: enabled only when the node's gate is open and the pull request is open.
+/// The hint is the reason shown under a disabled button.
+pub fn merge_button_state(v: &PrDetailView) -> (bool, Option<String>) {
+    if !v.open {
+        return (false, Some("열려 있는 풀 리퀘스트만 병합할 수 있습니다".to_string()));
+    }
+    if v.head_sha.trim().is_empty() {
+        return (false, Some(MERGE_NO_HEAD.to_string()));
+    }
+    if v.can_merge {
+        (true, None)
+    } else {
+        (false, Some(v.merge_reason.clone()))
+    }
+}
+
+/// The merge hint when the detail carries no head SHA to merge against.
+pub const MERGE_NO_HEAD: &str = "헤드를 확인할 수 없어 병합할 수 없습니다";
+
+/// The first line of the armed merge: the method is squash.
+pub const MERGE_METHOD_TEXT: &str = "스쿼시로 병합합니다";
+
+/// The label of the merge button; the armed second tap reads "정말 병합합니다".
+pub fn merge_button_text(armed: bool) -> &'static str {
+    if armed { "정말 병합합니다" } else { "병합" }
+}
+
+/// Whether a review of this kind can be sent: a comment and a change request need a body.
+pub fn review_request_gate(action: GitPrReviewAction, body: &str) -> Result<(), &'static str> {
+    match action {
+        GitPrReviewAction::Approve => Ok(()),
+        GitPrReviewAction::Comment | GitPrReviewAction::RequestChanges => {
+            if body.trim().is_empty() { Err("내용을 입력해 주세요") } else { Ok(()) }
+        }
+    }
+}
+
+/// The longest title of a new pull request, in characters (the node's limit).
+pub const PR_TITLE_MAX_CHARS: usize = 256;
+
+/// A new pull request needs a title of one line, at most `PR_TITLE_MAX_CHARS` characters.
+pub fn pr_create_gate(title: &str) -> Result<(), &'static str> {
+    let t = title.trim();
+    if t.is_empty() {
+        Err("제목을 입력해 주세요")
+    } else if t.chars().any(char::is_control) {
+        Err("제목은 한 줄로 입력해 주세요")
+    } else if t.chars().count() > PR_TITLE_MAX_CHARS {
+        Err("제목은 256자까지 입력할 수 있습니다")
+    } else {
+        Ok(())
+    }
+}
+
+/// A review or description body without control characters, except newline and tab. Pasted
+/// text can carry escapes; the node and the host should never see them.
+pub fn clean_body(body: &str) -> String {
+    body.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+}
+
+/// The key of the review draft: the project and the selected pull request, so a draft typed
+/// for one pull request never shows under another.
+pub fn review_draft_key(project: &str, number: Option<u64>) -> String {
+    match number {
+        Some(n) => format!("{project}#{n}"),
+        None => format!("{project}#"),
+    }
+}
+
+/// The key of one review action of one pull request in the armed state.
+pub fn pr_action_key(number: u64, action: GitPrReviewAction) -> usize {
+    let slot = match action {
+        GitPrReviewAction::Comment => 0,
+        GitPrReviewAction::Approve => 1,
+        GitPrReviewAction::RequestChanges => 2,
+    };
+    number as usize * 3 + slot
+}
+
+/// What a tap on a review button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTap {
+    /// First tap of 승인 or 변경 요청: the button asks again.
+    Arm,
+    /// A second tap before 600 ms: ignored.
+    Wait,
+    /// Send the review.
+    Send,
+    /// The armed state ran out: arm again.
+    Expired,
+}
+
+/// 승인 and 변경 요청 are public and cannot be taken back, so they ask twice like 병합.
+/// 코멘트 is one tap. `armed` is the key and arm time of the armed review button.
+pub fn review_tap(action: GitPrReviewAction, armed: Option<(usize, i64)>, number: u64, now: i64) -> ReviewTap {
+    if action == GitPrReviewAction::Comment {
+        return ReviewTap::Send;
+    }
+    match delete_tap(armed, pr_action_key(number, action), now) {
+        DeleteTap::Arm => ReviewTap::Arm,
+        DeleteTap::Wait => ReviewTap::Wait,
+        DeleteTap::Confirm => ReviewTap::Send,
+        DeleteTap::Expired => ReviewTap::Expired,
+    }
+}
+
+/// The label of a review button, with the question while it is armed.
+pub fn review_button_label(action: GitPrReviewAction, armed: bool) -> &'static str {
+    match (action, armed) {
+        (GitPrReviewAction::Approve, true) => "정말 승인합니다",
+        (GitPrReviewAction::RequestChanges, true) => "정말 변경을 요청합니다",
+        (GitPrReviewAction::Approve, false) => "승인",
+        (GitPrReviewAction::RequestChanges, false) => "변경 요청",
+        (GitPrReviewAction::Comment, _) => "코멘트",
+    }
+}
+
+/// The node's Korean line for a merge refused because the head moved (409). Copied from
+/// `ember/node/src/git_prs.rs` (the `GitError::Conflict` of the merge); a test pins the stem.
+pub const STALE_HEAD_TEXT: &str = "풀 리퀘스트가 바뀌었습니다";
+
+/// Whether an error line says the head moved since the detail was read.
+pub fn is_stale_head(error_line: &str) -> bool {
+    error_line.contains(STALE_HEAD_TEXT)
+}
+
+pub fn pr_review_notice(action: GitPrReviewAction) -> &'static str {
+    match action {
+        GitPrReviewAction::Approve => "승인했습니다",
+        GitPrReviewAction::RequestChanges => "변경을 요청했습니다",
+        GitPrReviewAction::Comment => "코멘트를 남겼습니다",
+    }
+}
+
+fn non_empty(text: &str) -> Option<&str> {
+    let t = text.trim();
+    if t.is_empty() { None } else { Some(t) }
+}
+
+/// The `pr/review` body. The caller confirmed by tapping, so `confirm` is true.
+pub fn pr_review_body(number: u64, action: GitPrReviewAction, body: &str) -> Value {
+    json!({ "number": number, "action": action, "body": non_empty(&clean_body(body)), "confirm": true })
+}
+
+/// The `pr/merge` body (squash by default; the branch stays). `head_sha` is the head the user saw.
+pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, head_sha: &str) -> Value {
+    json!({ "number": number, "method": method, "delete_branch": false, "head_sha": head_sha, "confirm": true })
+}
+
+/// The `pr/create` body; an empty base or head is left to the node.
+pub fn pr_create_body(title: &str, body: &str, base: &str, head: &str, draft: bool) -> Value {
+    json!({ "title": title.trim(), "body": non_empty(&clean_body(body)), "base": non_empty(base), "head": non_empty(head), "draft": draft, "confirm": true })
+}
+
+/// Read one pull request. Runs on the runtime, not the UI thread.
+pub async fn fetch_pr_detail(project: &str, number: u64) -> Result<GitPrDetail, ApiError> {
+    git_call(project, "pr", json!({ "number": number })).await
+}
+
+/// Leave a review. `Ok` is the notice to show, `Err` the Korean line.
+pub async fn run_pr_review(project: &str, number: u64, action: GitPrReviewAction, body: &str) -> Result<String, String> {
+    review_request_gate(action, body).map_err(String::from)?;
+    git_call::<Value>(project, "pr/review", pr_review_body(number, action, body))
+        .await
+        .map(|_| pr_review_notice(action).to_string())
+        .map_err(|e| korean_failure("리뷰 등록", &e))
+}
+
+/// Merge. `Ok` is the notice to show, `Err` the Korean line (a closed gate or a moved head answers 409).
+pub async fn run_pr_merge(project: &str, number: u64, method: GitPrMergeMethod, head_sha: &str) -> Result<String, String> {
+    if head_sha.trim().is_empty() {
+        return Err(MERGE_NO_HEAD.to_string());
+    }
+    git_call::<Value>(project, "pr/merge", pr_merge_body(number, method, head_sha))
+        .await
+        .map(|_| "병합했습니다".to_string())
+        .map_err(|e| korean_failure("병합", &e))
+}
+
+/// Create a pull request. `Ok` is the notice with the new number.
+pub async fn run_pr_create(project: &str, title: &str, body: &str, base: &str, head: &str, draft: bool) -> Result<String, String> {
+    pr_create_gate(title).map_err(String::from)?;
+    git_call::<GitPrCreated>(project, "pr/create", pr_create_body(title, body, base, head, draft))
+        .await
+        .map(|c| pr_created_notice(c.number))
+        .map_err(|e| korean_failure("풀 리퀘스트 생성", &e))
+}
+
+pub fn pr_created_notice(number: u64) -> String {
+    format!("풀 리퀘스트 #{number}을 만들었습니다")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Branches (FR-G9)
+// ---------------------------------------------------------------------------------------------
+
+/// Commits the ahead/behind bars show at full width; more is drawn as full.
+pub const BRANCH_BAR_CAP: u32 = 10;
+
+/// One row of the branch list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchEntry {
+    pub name: String,
+    pub current: bool,
+    pub default: bool,
+    /// The upstream's short name, or "업스트림 없음".
+    pub upstream_text: String,
+    pub has_upstream: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    /// "a1b2c3d \u{b7} subject \u{b7} 12분 전" (the parts that exist).
+    pub last_line: String,
+    /// The path of the worktree that has the branch checked out.
+    pub worktree: Option<String>,
+}
+
+impl BranchEntry {
+    /// "앞섬 2 · 뒤처짐 1", "원격과 같음" or "업스트림 없음".
+    pub fn sync_text(&self) -> String {
+        if self.has_upstream {
+            ahead_behind_label(self.ahead, self.behind)
+        } else {
+            "업스트림 없음".to_string()
+        }
+    }
+}
+
+/// The state of the branch list of one project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchLoad {
+    Loading,
+    Ready(Vec<BranchEntry>),
+    /// The Korean line with the node's message (shown with a retry button).
+    Failed(String),
+}
+
+/// "앞섬 2 · 뒤처짐 1", "앞섬 2", "뒤처짐 1" or "원격과 같음" (for a branch that has an upstream).
+pub fn ahead_behind_label(ahead: u32, behind: u32) -> String {
+    match (ahead, behind) {
+        (0, 0) => "원격과 같음".to_string(),
+        (a, 0) => format!("앞섬 {a}"),
+        (0, b) => format!("뒤처짐 {b}"),
+        (a, b) => format!("앞섬 {a} \u{00b7} 뒤처짐 {b}"),
+    }
+}
+
+/// The widths of the ahead and behind bars as fractions of the full bar (0.0 to 1.0).
+pub fn branch_bar_fractions(ahead: u32, behind: u32) -> (f32, f32) {
+    let f = |n: u32| n.min(BRANCH_BAR_CAP) as f32 / BRANCH_BAR_CAP as f32;
+    (f(ahead), f(behind))
+}
+
+/// The last folder of a worktree path ("/Users/a/worktrees/ui" gives "ui").
+pub fn worktree_tail(path: &str) -> String {
+    let t = path.trim_end_matches('/');
+    t.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(t).to_string()
+}
+
+/// The row of one branch. A time that cannot be read shows as the node sent it.
+pub fn branch_entry(b: &GitBranchInfo, now: i64) -> BranchEntry {
+    let time = b.last_time.as_deref().map(|t| iso_to_unix(t).map(|u| history_time_text(now, u)).unwrap_or_else(|| t.to_string()));
+    let parts: Vec<String> = [Some(b.last_sha.clone()), Some(b.last_subject.clone()), time].into_iter().flatten().filter(|s| !s.trim().is_empty()).collect();
+    BranchEntry {
+        name: b.name.clone(),
+        current: b.is_current,
+        default: b.is_default,
+        upstream_text: b.upstream.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| "업스트림 없음".to_string()),
+        has_upstream: b.upstream.as_deref().is_some_and(|u| !u.is_empty()),
+        ahead: b.ahead,
+        behind: b.behind,
+        last_line: parts.join(" \u{00b7} "),
+        worktree: b.worktree.clone().filter(|w| !w.is_empty()),
+    }
+}
+
+/// The list as a view state, in the node's order (current, default, then newest). An empty list
+/// is a ready, empty state, not an error.
+pub fn branches_from(result: Result<GitBranches, ApiError>, now: i64) -> BranchLoad {
+    match result {
+        Ok(list) => BranchLoad::Ready(list.branches.iter().map(|b| branch_entry(b, now)).collect()),
+        Err(e) => BranchLoad::Failed(failure_text("브랜치 목록을 확인", &e)),
+    }
+}
+
+/// The 기본 브랜치 row (the first default one) and the 작업 브랜치 rows (all others, in order).
+pub fn split_branches(list: &[BranchEntry]) -> (Option<&BranchEntry>, Vec<&BranchEntry>) {
+    let default = list.iter().find(|b| b.default);
+    let rest = list.iter().filter(|b| default.map_or(true, |d| !std::ptr::eq(*b, d))).collect();
+    (default, rest)
+}
+
+/// Read a project's branches. Runs on the runtime, not the UI thread.
+pub async fn fetch_branches(project: &str) -> Result<GitBranches, ApiError> {
+    git_call(project, "branches", json!({})).await
+}
+
+/// The `branch` body: create `name` and switch to it, from `base` when one is chosen.
+pub fn branch_create_body(name: &str, base: Option<&str>) -> Value {
+    match base {
+        Some(b) => json!({ "name": name, "from": b }),
+        None => json!({ "name": name }),
+    }
+}
+
+/// The 스태시 button of 변경 사항: a clean tree has nothing to stash, and the API is not called.
+/// The Korean line for a failed stash-now. An untracked-only tree passes the gate (the gate counts
+/// every change) but git has nothing to stash because untracked files are left out; its English
+/// text is replaced by a line that says so.
+pub fn stash_now_error(line: &str) -> String {
+    if line.contains("No local changes") {
+        "스태시할 추적 중인 변경이 없습니다. 추적하지 않는 파일은 포함되지 않습니다".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+pub fn stash_now_gate(changes_len: usize) -> Result<(), &'static str> {
+    if changes_len == 0 {
+        Err("스태시할 변경이 없습니다")
+    } else {
+        Ok(())
     }
 }
 
@@ -1450,6 +2505,96 @@ pub fn stash_action_notice(action: StashAction, result: &Result<(), String>) -> 
 /// A failed action leaves the shown list alone; a success replaces it with the fresh read.
 pub fn stash_after_action(shown: StashLoad, result: &Result<(), String>, fresh: StashLoad) -> StashLoad {
     if result.is_ok() { fresh } else { shown }
+}
+
+/// Milliseconds an armed stash button waits for its second tap before it disarms (#350).
+pub const STASH_ARM_TIMEOUT_MS: i64 = 4000;
+
+/// What a tap on a stash button that asks twice does (#350).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteTap {
+    /// Arm this button (a first tap, or a tap on another button than the armed one).
+    Arm,
+    /// The label has not had time to show yet (under 600 ms): ignore the tap, stay armed.
+    Wait,
+    /// The second tap, 600 ms to 4000 ms after arming: do it.
+    Confirm,
+    /// The armed state ran out (4000 ms or more): the caller arms again, as for `Arm`.
+    Expired,
+}
+
+/// `armed` is the key and arm time (ms) of the armed button. The key is the entry index for 삭제,
+/// or `stash_tap_key` for the buttons that act on a dirty tree. Like `amend_tap`, a second tap
+/// counts only after `AMEND_CONFIRM_DELAY_MS`, so a fast double click cannot skip the question.
+pub fn delete_tap(armed: Option<(usize, i64)>, index: usize, now: i64) -> DeleteTap {
+    match armed {
+        Some((i, at)) if i == index => {
+            let age = now - at;
+            if age >= STASH_ARM_TIMEOUT_MS {
+                DeleteTap::Expired
+            } else if age < AMEND_CONFIRM_DELAY_MS {
+                DeleteTap::Wait
+            } else {
+                DeleteTap::Confirm
+            }
+        }
+        _ => DeleteTap::Arm,
+    }
+}
+
+/// Whether the armed label ("정말 삭제합니다") shows. Nothing re-renders on a timer, so the label
+/// may stay on screen until the next recomposition after the timeout; `delete_tap` is the
+/// authority for what a tap does.
+pub fn armed_label_visible(armed: Option<(usize, i64)>, index: usize, now: i64) -> bool {
+    matches!(armed, Some((i, at)) if i == index && now - at < STASH_ARM_TIMEOUT_MS)
+}
+
+/// The key of one button of one entry in the armed state: three buttons per entry.
+pub fn stash_tap_key(action: StashAction, index: u32) -> usize {
+    let slot = match action {
+        StashAction::Apply => 0,
+        StashAction::Pop => 1,
+        StashAction::Drop => 2,
+    };
+    index as usize * 3 + slot
+}
+
+/// 삭제 always asks; 적용 and 꺼내기 ask once when the work tree has changes.
+pub fn stash_needs_confirm(action: StashAction, dirty: bool) -> bool {
+    action == StashAction::Drop || dirty
+}
+
+/// What a tap on a stash button does. A clean tree acts at once for 적용 and 꺼내기.
+pub fn stash_tap(action: StashAction, dirty: bool, armed: Option<(usize, i64)>, index: u32, now: i64) -> DeleteTap {
+    if stash_needs_confirm(action, dirty) {
+        delete_tap(armed, stash_tap_key(action, index), now)
+    } else {
+        DeleteTap::Confirm
+    }
+}
+
+/// The visible text of a stash button; the armed second tap reads differently.
+pub fn stash_button_text(action: StashAction, armed: bool) -> &'static str {
+    match (action, armed) {
+        (StashAction::Apply, false) => "적용",
+        (StashAction::Apply, true) => "그래도 적용합니다",
+        (StashAction::Pop, false) => "꺼내기",
+        (StashAction::Pop, true) => "그래도 꺼냅니다",
+        (StashAction::Drop, false) => "삭제",
+        (StashAction::Drop, true) => "정말 삭제합니다",
+    }
+}
+
+/// The line under an entry whose 적용 or 꺼내기 is armed on a dirty tree.
+pub const STASH_DIRTY_WARNING: &str = "작업 중인 변경이 있습니다. 충돌할 수 있습니다.";
+
+/// Added under the warning when 꺼내기 is armed: unlike 적용 it removes the stash on success.
+pub const STASH_POP_NOTE: &str = "꺼내기는 성공하면 이 스태시를 삭제합니다.";
+
+/// The accessible name of one entry's button: it names the entry, so a screen reader hears more
+/// than three identical "적용" buttons (#350).
+pub fn stash_button_label(index: u32, message: &str, verb: &str) -> String {
+    format!("스태시 {index} {verb}: {message}")
 }
 
 /// One call that brings the index to the staging the user chose.
@@ -1661,13 +2806,110 @@ pub fn section_count(section: Section, snap: Option<&RepoSnapshot>) -> Option<us
     }
 }
 
+/// A session of the project with its folder, as the 팀 작업 tab matches it to a worktree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberCwd {
+    pub name: String,
+    pub harness: String,
+    pub leader: bool,
+    pub cwd: String,
+    /// "실행 중", "승인 대기" and so on.
+    pub state_text: String,
+    pub status: ember_client::LauncherStatus,
+}
+
+/// The member of a worktree row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamMember {
+    pub name: String,
+    pub harness: String,
+    pub leader: bool,
+    pub state_text: String,
+    pub status: ember_client::LauncherStatus,
+}
+
+/// One row of 팀 작업: a worktree, its branch, its member and the branch's pull request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamRow {
+    pub branch: String,
+    pub worktree: String,
+    /// `None` shows "담당 없음".
+    pub member: Option<TeamMember>,
+    /// "앞섬 2 \u{b7} 뒤처짐 1", "원격과 같음" or "업스트림 없음".
+    pub sync_text: String,
+    /// "#398 열림" for the branch's pull request (an open one first), `None` when there is none.
+    pub pr_text: Option<String>,
+    /// The branch the project's main checkout has open.
+    pub current: bool,
+}
+
+/// `cwd` is `worktree` or inside it (a path boundary, so "/w/ui2" is not inside "/w/ui").
+fn cwd_in_worktree(cwd: &str, worktree: &str) -> bool {
+    let (c, w) = (cwd.trim_end_matches('/'), worktree.trim_end_matches('/'));
+    // A worktree of "/" would hold every folder: it holds none.
+    !w.is_empty() && (c == w || (c.starts_with(w) && c[w.len()..].starts_with('/')))
+}
+
+/// The rows of 팀 작업, one per branch that has a worktree: the current branch (the main
+/// checkout) first, then by branch name. A member belongs to the worktree with the longest path
+/// that holds its folder; when several members share one worktree the leader, else the first in
+/// `members`, is shown.
+pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: &[PrEntry]) -> Vec<TeamRow> {
+    let trees: Vec<(&BranchEntry, &str)> = branches.iter().filter_map(|b| b.worktree.as_deref().filter(|w| !w.is_empty()).map(|w| (b, w))).collect();
+    let owner = |m: &MemberCwd| -> Option<usize> {
+        trees.iter().enumerate().filter(|(_, (_, w))| cwd_in_worktree(&m.cwd, w)).max_by_key(|(_, (_, w))| w.trim_end_matches('/').len()).map(|(i, _)| i)
+    };
+    let mut rows: Vec<TeamRow> = trees
+        .iter()
+        .enumerate()
+        .map(|(i, (b, w))| {
+            let mine: Vec<&MemberCwd> = members.iter().filter(|m| owner(m) == Some(i)).collect();
+            let chosen = mine.iter().find(|m| m.leader).or_else(|| mine.first());
+            let pr = prs.iter().filter(|p| p.head == b.name).max_by_key(|p| (p.state == GitPrState::Open, p.number));
+            TeamRow {
+                branch: b.name.clone(),
+                worktree: w.to_string(),
+                member: chosen.map(|m| TeamMember { name: m.name.clone(), harness: m.harness.clone(), leader: m.leader, state_text: m.state_text.clone(), status: m.status }),
+                sync_text: b.sync_text(),
+                pr_text: pr.map(|p| format!("#{} {}", p.number, p.state_text)),
+                current: b.current,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.current.cmp(&a.current).then_with(|| a.branch.cmp(&b.branch)));
+    rows
+}
+
+/// Like `section_count_with_branches`, plus the count the 팀 작업 section read (`None` until read;
+/// the snapshot count stands in meanwhile).
+pub fn section_count_with_team(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>, branches: Option<usize>, team: Option<usize>) -> Option<usize> {
+    match section {
+        Section::Team => team.or_else(|| section_count(section, snap)),
+        _ => section_count_with_branches(section, snap, stash, prs, branches),
+    }
+}
+
 /// The count beside a section's name, with the stash count read by the stash section (`None`
 /// until it has been read). The stash count does not need the repository snapshot.
 pub fn section_count_with_stash(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>) -> Option<usize> {
-    if section == Section::Stash {
-        return stash;
+    section_count_with(section, snap, stash, None)
+}
+
+/// The count beside a section's name, with the counts the stash and pull request sections read
+/// themselves (`None` until read). Neither needs the repository snapshot.
+pub fn section_count_with(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>) -> Option<usize> {
+    section_count_with_branches(section, snap, stash, prs, None)
+}
+
+/// Like `section_count_with`, plus the count the branch section read (`None` until read; the
+/// snapshot's branch count stands in meanwhile).
+pub fn section_count_with_branches(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>, branches: Option<usize>) -> Option<usize> {
+    match section {
+        Section::Stash => stash,
+        Section::PullRequests => prs,
+        Section::Branches => branches.or_else(|| section_count(section, snap)),
+        _ => section_count(section, snap),
     }
-    section_count(section, snap)
 }
 
 /// Projects that can have a repository: every project except 기본 프로젝트.
@@ -1820,13 +3062,65 @@ pub const CONFLICT_PREVIEW_LINES: usize = 40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictStep {
     Editing,
+    /// The merged text cut to `CONFLICT_PREVIEW_LINES` lines.
     Preview,
+    /// The whole merged text (전체 보기).
+    PreviewFull,
+}
+
+/// What a tap on 해결하고 스테이징 does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveTap {
+    Ignore,
+    /// Send this merged text to `git/resolve`.
+    Send(String),
+}
+
+/// The decision of a 해결하고 스테이징 tap: nothing while a request is in flight (a double tap
+/// sends once) or while a block is unchosen, else the merged text to send.
+pub fn resolve_tap(busy: bool, file: &ConflictFile) -> ResolveTap {
+    if busy {
+        return ResolveTap::Ignore;
+    }
+    match file.resolved_content() {
+        Some(text) => ResolveTap::Send(text),
+        None => ResolveTap::Ignore,
+    }
+}
+
+/// 해결하고 스테이징 on `step`: only a preview step sends.
+pub fn confirm(step: ConflictStep, busy: bool, file: &ConflictFile) -> ResolveTap {
+    if step.is_preview() { resolve_tap(busy, file) } else { ResolveTap::Ignore }
+}
+
+/// 취소: back to editing. The choices live in the file, so they are kept.
+pub fn cancel_preview(_step: ConflictStep) -> ConflictStep {
+    ConflictStep::Editing
 }
 
 impl ConflictStep {
     /// The step after tapping 해결 완료: the preview when every block is settled, else unchanged.
     pub fn enter_preview(self, file: &ConflictFile) -> ConflictStep {
         if file.is_resolved() { ConflictStep::Preview } else { self }
+    }
+
+    /// Whether the merged text is showing, cut or whole.
+    pub fn is_preview(self) -> bool {
+        matches!(self, ConflictStep::Preview | ConflictStep::PreviewFull)
+    }
+
+    /// How many lines the preview shows on this step.
+    pub fn preview_max(self) -> usize {
+        if self == ConflictStep::PreviewFull { usize::MAX } else { CONFLICT_PREVIEW_LINES }
+    }
+
+    /// 전체 보기 and 접기: flips between the cut and the whole text; editing is unchanged.
+    pub fn toggle_full(self) -> ConflictStep {
+        match self {
+            ConflictStep::Preview => ConflictStep::PreviewFull,
+            ConflictStep::PreviewFull => ConflictStep::Preview,
+            ConflictStep::Editing => ConflictStep::Editing,
+        }
     }
 }
 
@@ -2416,16 +3710,16 @@ rename to new.txt
 
     #[test]
     fn a_missing_repository_or_server_is_not_data() {
-        let not_repo = ApiError::Status { status: 404, message: "not_a_repo".into() };
+        let not_repo = ApiError::Status { status: 404, message: "not_a_repo".into(), code: None };
         assert_eq!(load_from(Err(not_repo)), Load::NotRepo);
         let down = ApiError::Peer("refused".into());
         assert!(matches!(load_from(Err(down)), Load::Unavailable(_)));
         // Any other answer of the node is a failure with its message, not "준비 중입니다".
-        let boom = ApiError::Status { status: 500, message: "boom".into() };
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
         let failed = load_from(Err(boom));
         assert!(matches!(&failed, Load::Failed(t) if t.contains("boom")), "{failed:?}");
         assert_ne!(failed.note(), Some(soon_line("저장소 정보")));
-        let busy = ApiError::Status { status: 409, message: "병합 중이라 차이를 읽지 못했습니다: x".into() };
+        let busy = ApiError::Status { status: 409, message: "병합 중이라 차이를 읽지 못했습니다: x".into(), code: None };
         assert_eq!(load_from(Err(busy)), Load::Failed("병합 중이라 차이를 읽지 못했습니다: x".into()));
         assert!(matches!(load_from(Err(ApiError::Decode("bad".into()))), Load::Failed(_)));
         assert!(Load::Loading.snapshot().is_none());
@@ -2471,6 +3765,47 @@ rename to new.txt
         assert_eq!(snap.changes[2].status, FileStatus::Added);
         // Only the file whose index changed and work tree is clean starts staged.
         assert_eq!(snap.staged, ["docs/new.md".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn fr_g3_a_413_on_untracked_keeps_the_tracked_changes_and_notes_it() {
+        let too_big = ApiError::Status { status: 413, message: "출력이 너무 큽니다".into(), code: None };
+        let (patch, note) = merge_untracked_diff(Ok(SAMPLE.to_string()), Err(too_big)).unwrap();
+        assert_eq!(patch, SAMPLE);
+        assert_eq!(note, Some("추적하지 않는 파일이 너무 많아 내용을 건너뛰었습니다. 파일 목록만 표시합니다."));
+        let (patch, note) = merge_untracked_diff(Ok(String::new()), Ok("full".to_string())).unwrap();
+        assert_eq!((patch.as_str(), note), ("full", None));
+        // The untracked files stay listed by the status, with no hunks.
+        let st = status(vec![gf("src/a.rs", '.', 'M'), gf("notes.txt", '?', '?')]);
+        let snap = build_snapshot(&st, SAMPLE, "", &BTreeMap::new());
+        assert!(snap.changes.iter().any(|d| d.path == "notes.txt" && d.hunks.is_empty()));
+    }
+
+    #[test]
+    fn fr_g3_other_untracked_errors_still_fail() {
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert!(merge_untracked_diff(Ok(String::new()), Err(boom)).is_err());
+        let tracked_fail = ApiError::Status { status: 413, message: "x".into(), code: None };
+        let too_big = ApiError::Status { status: 413, message: "y".into(), code: None };
+        assert!(merge_untracked_diff(Err(tracked_fail), Err(too_big)).is_err(), "no tracked diff to keep");
+    }
+
+    #[test]
+    fn fr_g3_amend_warns_when_head_is_on_the_upstream() {
+        let snap = RepoSnapshot { upstream: Some("origin/x".into()), ahead: 0, ..Default::default() };
+        let text = amend_warning(&snap).unwrap();
+        assert_eq!(text, "이 커밋은 이미 원격에 올라가 있습니다. 수정하면 다음 올리기에서 기록을 덮어써야 합니다.");
+        assert_eq!(amend_button_label("main에 커밋", Some(text), false), "main에 커밋");
+        assert_eq!(amend_button_label("main에 커밋", Some(text), true), "그래도 수정합니다");
+    }
+
+    #[test]
+    fn fr_g3_amend_does_not_warn_when_ahead_or_no_upstream() {
+        let ahead = RepoSnapshot { upstream: Some("origin/x".into()), ahead: 1, ..Default::default() };
+        let none = RepoSnapshot { upstream: None, ahead: 0, ..Default::default() };
+        assert_eq!(amend_warning(&ahead), None);
+        assert_eq!(amend_warning(&none), None);
+        assert_eq!(amend_button_label("main에 커밋", None, true), "main에 커밋");
     }
 
     #[test]
@@ -2574,7 +3909,7 @@ rename to new.txt
             "Pull 완료: Already up to date."
         );
         assert_eq!(remote_done_text(RemoteAction::Fetch, ""), "Fetch을 마쳤습니다");
-        let e = ApiError::Status { status: 409, message: "not fast-forward".into() };
+        let e = ApiError::Status { status: 409, message: "not fast-forward".into(), code: None };
         assert_eq!(failure_text("Pull", &e), "Pull하지 못했습니다: not fast-forward");
         let down = ApiError::Peer("refused".into());
         assert!(failure_text("Push", &down).contains("서버에 닿지 않습니다"));
@@ -2585,6 +3920,7 @@ rename to new.txt
         let e = ApiError::Status {
             status: 409,
             message: "분기되어 있어 pull할 수 없습니다: fatal: Not possible to fast-forward".into(),
+            code: None,
         };
         assert_eq!(
             failure_text("Pull", &e),
@@ -2832,7 +4168,7 @@ rename to new.txt
         assert_eq!(entries.iter().map(|e| e.short.as_str()).collect::<Vec<_>>(), ["a0a0a0a", "b0b0b0b"]);
         assert!(!more);
 
-        let down = ApiError::Status { status: 500, message: "boom".into() };
+        let down = ApiError::Status { status: 500, message: "boom".into(), code: None };
         let (kept, err) = history_append(first, Err(down), 0);
         assert!(err.unwrap().contains("boom"));
         let HistoryLoad::Ready { entries, more, .. } = kept else { panic!() };
@@ -2842,7 +4178,7 @@ rename to new.txt
 
     #[test]
     fn fr_g5_a_failed_first_page_shows_the_nodes_message() {
-        let e = ApiError::Status { status: 500, message: "로그를 읽지 못했습니다".into() };
+        let e = ApiError::Status { status: 500, message: "로그를 읽지 못했습니다".into(), code: None };
         assert_eq!(history_from(Err(e), 0), HistoryLoad::Failed("로그를 읽지 못했습니다".into()));
     }
 
@@ -2891,7 +4227,7 @@ rename to new.txt
 
     #[test]
     fn fr_g6_a_failed_list_shows_the_nodes_message() {
-        let e = ApiError::Status { status: 500, message: "스태시를 읽지 못했습니다".into() };
+        let e = ApiError::Status { status: 500, message: "스태시를 읽지 못했습니다".into(), code: None };
         assert_eq!(stash_from(Err(e), 0), StashLoad::Failed("스태시를 읽지 못했습니다".into()));
     }
 
@@ -2904,7 +4240,7 @@ rename to new.txt
     #[test]
     fn fr_g6_a_failed_pop_keeps_the_list_and_says_why() {
         let shown = stash_from(Ok(vec![stash(0, "a", "2026-08-29T10:40:00Z")]), 0);
-        let down = ApiError::Status { status: 409, message: "충돌 때문에 꺼낼 수 없습니다. 스태시는 그대로 남아 있습니다.".into() };
+        let down = ApiError::Status { status: 409, message: "충돌 때문에 꺼낼 수 없습니다. 스태시는 그대로 남아 있습니다.".into(), code: None };
         let result: Result<(), String> = Err(failure_text(StashAction::Pop.what(), &down));
         let after = stash_after_action(shown.clone(), &result, StashLoad::Ready(Vec::new()));
         assert_eq!(after, shown);
@@ -2916,8 +4252,56 @@ rename to new.txt
 
     #[test]
     fn fr_g6_a_non_korean_failure_gets_a_korean_prefix() {
-        let e = ApiError::Status { status: 500, message: "boom".into() };
+        let e = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(failure_text(StashAction::Apply.what(), &e), "스태시를 적용하지 못했습니다: boom");
+    }
+
+    #[test]
+    fn fr_g6_delete_arms_then_confirms() {
+        assert_eq!(delete_tap(None, 1, 10_000), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 10_100), DeleteTap::Wait);
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 10_600), DeleteTap::Confirm);
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 13_999), DeleteTap::Confirm);
+        assert!(armed_label_visible(Some((1, 10_000)), 1, 10_000));
+    }
+
+    #[test]
+    fn fr_g6_delete_disarms_after_the_timeout() {
+        assert_eq!(delete_tap(Some((1, 10_000)), 1, 14_000), DeleteTap::Expired);
+        assert!(!armed_label_visible(Some((1, 10_000)), 1, 14_000));
+        assert!(armed_label_visible(Some((1, 10_000)), 1, 13_999));
+        assert!(!armed_label_visible(None, 1, 0));
+    }
+
+    #[test]
+    fn fr_g6_delete_on_another_row_rearms() {
+        assert_eq!(delete_tap(Some((1, 10_000)), 2, 10_900), DeleteTap::Arm);
+        assert!(!armed_label_visible(Some((1, 10_000)), 2, 10_900));
+    }
+
+    #[test]
+    fn fr_g6_apply_asks_once_when_the_tree_is_dirty() {
+        let key = stash_tap_key(StashAction::Apply, 0);
+        assert_eq!(stash_tap(StashAction::Apply, true, None, 0, 1_000), DeleteTap::Arm);
+        assert_eq!(stash_tap(StashAction::Apply, true, Some((key, 1_000)), 0, 1_700), DeleteTap::Confirm);
+        assert_eq!(stash_tap(StashAction::Pop, true, Some((key, 1_000)), 0, 1_700), DeleteTap::Arm, "pop is its own button");
+        assert_eq!(stash_button_text(StashAction::Apply, true), "그래도 적용합니다");
+        assert_eq!(stash_button_text(StashAction::Pop, true), "그래도 꺼냅니다");
+        assert_eq!(STASH_DIRTY_WARNING, "작업 중인 변경이 있습니다. 충돌할 수 있습니다.");
+        assert!(STASH_POP_NOTE.contains("삭제"), "the pop warning says the stash is removed");
+    }
+
+    #[test]
+    fn fr_g6_apply_is_immediate_when_the_tree_is_clean() {
+        assert_eq!(stash_tap(StashAction::Apply, false, None, 0, 1_000), DeleteTap::Confirm);
+        assert_eq!(stash_tap(StashAction::Pop, false, None, 3, 1_000), DeleteTap::Confirm);
+        assert_eq!(stash_tap(StashAction::Drop, false, None, 3, 1_000), DeleteTap::Arm, "delete always asks");
+    }
+
+    #[test]
+    fn fr_g6_stash_button_labels_name_the_entry() {
+        assert_eq!(stash_button_label(0, "작업 중", "적용"), "스태시 0 적용: 작업 중");
+        assert_ne!(stash_button_label(1, "a", "삭제"), stash_button_label(2, "a", "삭제"));
     }
 
     fn block(ours: &str, theirs: &str) -> GitConflictBlock {
@@ -3016,10 +4400,824 @@ rename to new.txt
 
     #[test]
     fn fr_g7_a_failed_read_shows_the_nodes_korean_message() {
-        let e = ApiError::Status { status: 409, message: "병합 충돌 중인 파일이 아닙니다.".into() };
+        let e = ApiError::Status { status: 409, message: "병합 충돌 중인 파일이 아닙니다.".into(), code: None };
         assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("병합 충돌 중인 파일이 아닙니다.".into()));
-        let e = ApiError::Status { status: 500, message: "boom".into() };
+        let e = ApiError::Status { status: 500, message: "boom".into(), code: None };
         assert_eq!(conflict_from("a", Err(e)), ConflictLoad::Failed("충돌 내용을 확인하지 못했습니다: boom".into()));
         assert!(matches!(conflict_from("a", Ok(GitConflict { blocks: vec![] })), ConflictLoad::Ready(_)));
+    }
+
+    // ---- FR-G8: pull requests ----
+
+    use ember_client::api::{GitPrChecks, GitPrMerge};
+
+    fn a_pr(number: u64, state: GitPrState, review: GitPrReview, checks: (u32, u32, u32), merge: (bool, &str)) -> GitPr {
+        GitPr {
+            number,
+            title: format!("change {number}"),
+            state,
+            draft: false,
+            author: "octo".into(),
+            head: "feat/x".into(),
+            base: "develop".into(),
+            updated_at: "2026-11-06T12:00:00Z".into(),
+            review,
+            checks: GitPrChecks { passed: checks.0, failed: checks.1, pending: checks.2 },
+            merge: GitPrMerge { can_merge: merge.0, reason: merge.1.into() },
+            url: format!("https://github.com/o/r/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn fr_g8_the_checks_text_counts_passed_over_all() {
+        assert_eq!(pr_checks_text(3, 1, 0), "체크 3/4 통과");
+        assert_eq!(pr_checks_text(2, 0, 2), "체크 2/4 통과");
+        assert_eq!(pr_checks_text(4, 0, 0), "체크 4/4 통과");
+        assert_eq!(pr_checks_text(0, 0, 0), "체크 없음");
+    }
+
+    #[test]
+    fn fr_g8_an_entry_has_badges_the_time_and_the_gate_text() {
+        let now = iso_to_unix("2026-11-06T14:00:00Z").unwrap();
+        let ok = pr_entry(&a_pr(7, GitPrState::Open, GitPrReview::Approved, (4, 0, 0), (true, "병합할 수 있습니다.")), now);
+        assert_eq!((ok.number, ok.state_text, ok.review_text), (7, "열림", "승인됨"));
+        assert_eq!(ok.time_text, "2시간 전");
+        assert_eq!(ok.checks_text, "체크 4/4 통과");
+        assert!(ok.can_merge);
+        assert_eq!(ok.gate_text, "병합할 수 있습니다");
+        let bad = pr_entry(&a_pr(8, GitPrState::Open, GitPrReview::ChangesRequested, (3, 1, 0), (false, "CI 체크가 실패했습니다 (실패 1개).")), now);
+        assert_eq!((bad.review_text, bad.checks_failed, bad.can_merge), ("변경 요청", 1, false));
+        assert_eq!(bad.gate_text, "CI 체크가 실패했습니다 (실패 1개).");
+        let merged = pr_entry(&a_pr(9, GitPrState::Merged, GitPrReview::None, (0, 0, 0), (false, "")), now);
+        assert_eq!((merged.state_text, merged.review_text), ("병합됨", "리뷰 없음"));
+        assert!(!merged.gate_text.is_empty(), "an empty reason still says something");
+        assert_eq!(pr_state_text(GitPrState::Closed), "닫힘");
+        assert_eq!(pr_review_text(GitPrReview::ReviewRequired), "리뷰 필요");
+    }
+
+    #[test]
+    fn fr_g8_an_unreadable_time_shows_as_sent() {
+        let mut pr = a_pr(1, GitPrState::Open, GitPrReview::None, (0, 0, 0), (false, "승인이 필요합니다."));
+        pr.updated_at = "yesterday".into();
+        assert_eq!(pr_entry(&pr, 0).time_text, "yesterday");
+    }
+
+    #[test]
+    fn fr_g8_the_list_is_a_view_state_and_an_error_carries_the_nodes_message() {
+        assert_eq!(prs_from(Ok(GitPrs::default()), 0), PrLoad::Ready(Vec::new()));
+        let one = GitPrs { prs: vec![a_pr(1, GitPrState::Open, GitPrReview::Approved, (1, 0, 0), (true, "x"))] };
+        assert!(matches!(prs_from(Ok(one), 0), PrLoad::Ready(v) if v.len() == 1));
+        let login = ApiError::Status { status: 409, message: "GitHub에 로그인되어 있지 않습니다.\ngh auth login".into(), code: None };
+        assert_eq!(prs_from(Err(login), 0), PrLoad::Failed("GitHub에 로그인되어 있지 않습니다.\ngh auth login".into()));
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(prs_from(Err(boom), 0), PrLoad::Failed("풀 리퀘스트 목록을 확인하지 못했습니다: boom".into()));
+        let down = ApiError::Peer("refused".into());
+        assert!(matches!(prs_from(Err(down), 0), PrLoad::Failed(t) if t.contains("서버에 닿지 않습니다")));
+    }
+
+    #[test]
+    fn fr_g8_the_filter_sends_its_state_and_has_korean_labels() {
+        assert_eq!(prs_body(PrFilter::Open), json!({ "state": "open", "limit": 30 }));
+        assert_eq!(prs_body(PrFilter::Merged), json!({ "state": "merged", "limit": 30 }));
+        assert_eq!(PrFilter::default(), PrFilter::Open);
+        assert_eq!(PrFilter::ALL.map(PrFilter::label), ["열림", "닫힘", "병합됨", "전체"]);
+        assert_eq!(PrFilter::Open.empty_text(), "열린 풀 리퀘스트가 없습니다");
+        for f in PrFilter::ALL {
+            assert!(f.empty_text().ends_with("니다"), "{}", f.empty_text());
+        }
+    }
+
+    #[test]
+    fn fr_g8_the_tab_count_is_read_by_the_pull_request_section() {
+        assert_eq!(section_count_with(Section::PullRequests, None, None, None), None, "not read yet");
+        assert_eq!(section_count_with(Section::PullRequests, None, Some(9), Some(3)), Some(3));
+        assert_eq!(section_count_with(Section::Stash, None, Some(9), Some(3)), Some(9));
+        let snap = RepoSnapshot { branches: s(&["main"]), ..Default::default() };
+        assert_eq!(section_count_with(Section::Branches, Some(&snap), None, Some(3)), Some(1));
+    }
+
+    // ---- FR-G9: branches ----
+
+    fn a_branch(name: &str, current: bool, default: bool, upstream: Option<&str>, ahead: u32, behind: u32, worktree: Option<&str>) -> GitBranchInfo {
+        GitBranchInfo {
+            name: name.into(),
+            is_current: current,
+            is_default: default,
+            upstream: upstream.map(String::from),
+            ahead,
+            behind,
+            last_sha: "a1b2c3d".into(),
+            last_subject: "Fix: x".into(),
+            last_time: Some("2026-11-06T12:00:00Z".into()),
+            worktree: worktree.map(String::from),
+        }
+    }
+
+    #[test]
+    fn fr_g9_branches_ahead_behind_label_reads_in_korean() {
+        assert_eq!(ahead_behind_label(2, 1), "앞섬 2 \u{00b7} 뒤처짐 1");
+        assert_eq!(ahead_behind_label(3, 0), "앞섬 3");
+        assert_eq!(ahead_behind_label(0, 4), "뒤처짐 4");
+        assert_eq!(ahead_behind_label(0, 0), "원격과 같음");
+    }
+
+    #[test]
+    fn fr_g9_branches_a_branch_without_an_upstream_says_so() {
+        let now = iso_to_unix("2026-11-06T14:00:00Z").unwrap();
+        let e = branch_entry(&a_branch("feat/x", false, false, None, 0, 0, None), now);
+        assert_eq!((e.sync_text().as_str(), e.upstream_text.as_str(), e.has_upstream), ("업스트림 없음", "업스트림 없음", false));
+        let t = branch_entry(&a_branch("feat/y", true, false, Some("origin/feat/y"), 2, 1, None), now);
+        assert_eq!((t.sync_text().as_str(), t.upstream_text.as_str()), ("앞섬 2 \u{00b7} 뒤처짐 1", "origin/feat/y"));
+        assert_eq!(t.last_line, "a1b2c3d \u{00b7} Fix: x \u{00b7} 2시간 전");
+    }
+
+    #[test]
+    fn fr_g9_branches_an_unreadable_time_shows_as_sent_and_blank_parts_drop() {
+        let mut b = a_branch("m", false, true, None, 0, 0, None);
+        b.last_time = Some("yesterday".into());
+        b.last_sha = String::new();
+        assert_eq!(branch_entry(&b, 0).last_line, "Fix: x \u{00b7} yesterday");
+        b.last_time = None;
+        assert_eq!(branch_entry(&b, 0).last_line, "Fix: x");
+    }
+
+    #[test]
+    fn fr_g9_branches_worktree_shows_its_last_folder() {
+        assert_eq!(worktree_tail("/Users/demo/worktrees/ui-phase-6"), "ui-phase-6");
+        assert_eq!(worktree_tail("/Users/demo/darkpyonix-ember/"), "darkpyonix-ember");
+        assert_eq!(worktree_tail("ember"), "ember");
+        let e = branch_entry(&a_branch("w", false, false, None, 0, 0, Some("/w/ui")), 0);
+        assert_eq!(e.worktree.as_deref(), Some("/w/ui"));
+        assert_eq!(branch_entry(&a_branch("w", false, false, None, 0, 0, Some("")), 0).worktree, None);
+    }
+
+    #[test]
+    fn fr_g9_branches_the_bars_are_proportional_and_capped() {
+        assert_eq!(branch_bar_fractions(0, 0), (0.0, 0.0));
+        assert_eq!(branch_bar_fractions(5, 1), (0.5, 0.1));
+        assert_eq!(branch_bar_fractions(50, 10), (1.0, 1.0));
+    }
+
+    #[test]
+    fn fr_g9_branches_the_default_is_split_from_the_work_branches_in_node_order() {
+        let list = GitBranches { branches: vec![
+            a_branch("feat/a", true, false, Some("origin/feat/a"), 1, 0, None),
+            a_branch("main", false, true, Some("origin/main"), 0, 0, None),
+            a_branch("develop", false, false, None, 0, 0, None),
+        ] };
+        let BranchLoad::Ready(entries) = branches_from(Ok(list), 0) else { panic!() };
+        let (default, rest) = split_branches(&entries);
+        assert_eq!(default.map(|d| d.name.as_str()), Some("main"));
+        assert_eq!(rest.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["feat/a", "develop"]);
+        assert!(rest[0].current);
+        let (none, all) = split_branches(&entries[..1]);
+        assert!(none.is_none() && all.len() == 1);
+    }
+
+    #[test]
+    fn fr_g9_branches_the_list_is_a_view_state_and_an_error_carries_the_message() {
+        assert_eq!(branches_from(Ok(GitBranches::default()), 0), BranchLoad::Ready(Vec::new()));
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(branches_from(Err(boom), 0), BranchLoad::Failed("브랜치 목록을 확인하지 못했습니다: boom".into()));
+        let down = ApiError::Peer("refused".into());
+        assert!(matches!(branches_from(Err(down), 0), BranchLoad::Failed(t) if t.contains("서버에 닿지 않습니다")));
+    }
+
+    #[test]
+    fn fr_g9_branches_create_sends_the_base_only_when_chosen() {
+        assert_eq!(branch_create_body("feat/n", None), json!({ "name": "feat/n" }));
+        assert_eq!(branch_create_body("feat/n", Some("main")), json!({ "name": "feat/n", "from": "main" }));
+    }
+
+    #[test]
+    fn fr_g9_branches_the_tab_count_is_the_loaded_count() {
+        assert_eq!(section_count_with_branches(Section::Branches, None, None, None, None), None);
+        assert_eq!(section_count_with_branches(Section::Branches, None, None, None, Some(4)), Some(4));
+        let snap = RepoSnapshot { branches: s(&["main", "x"]), ..Default::default() };
+        assert_eq!(section_count_with_branches(Section::Branches, Some(&snap), None, None, None), Some(2), "snapshot count until read");
+        assert_eq!(section_count_with_branches(Section::Branches, Some(&snap), None, None, Some(5)), Some(5));
+        assert_eq!(section_count_with_branches(Section::Stash, Some(&snap), Some(1), None, Some(5)), Some(1));
+    }
+
+    #[test]
+    fn fr_l19_stash_now_an_untracked_only_tree_says_so_in_korean() {
+        let raw = "스태시 만들기를 하지 못했습니다: No local changes to save";
+        assert!(stash_now_error(raw).contains("추적 중인 변경이 없습니다"));
+        assert_eq!(stash_now_error("다른 오류입니다"), "다른 오류입니다");
+    }
+
+    #[test]
+    fn fr_l19_stash_now_refuses_a_clean_tree_without_calling_the_api() {
+        assert_eq!(stash_now_gate(0), Err("스태시할 변경이 없습니다"));
+        assert_eq!(stash_now_gate(1), Ok(()));
+        assert_eq!(stash_now_gate(40), Ok(()));
+    }
+
+    // ---- conflict editor follow-ups (#382) ----
+
+    #[test]
+    fn fr_g7_a_second_tap_while_busy_is_ignored() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Ours);
+        assert!(matches!(resolve_tap(false, &f), ResolveTap::Send(_)));
+        assert_eq!(resolve_tap(true, &f), ResolveTap::Ignore);
+    }
+
+    #[test]
+    fn fr_g7_resolve_tap_is_ignored_until_every_block_is_chosen() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours);
+        assert_eq!(resolve_tap(false, &f), ResolveTap::Ignore);
+        assert_eq!(confirm(ConflictStep::Preview, false, &f), ResolveTap::Ignore);
+    }
+
+    #[test]
+    fn fr_g7_cancel_returns_to_editing_and_keeps_choices() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
+        let step = ConflictStep::Editing.enter_preview(&f);
+        assert_eq!(step, ConflictStep::Preview);
+        assert_eq!(cancel_preview(step), ConflictStep::Editing);
+        assert_eq!(cancel_preview(ConflictStep::PreviewFull), ConflictStep::Editing);
+        assert_eq!(f.resolved_count(), 2);
+    }
+
+    #[test]
+    fn fr_g7_confirm_sends_the_merged_text() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Ours).with_choice(1, ConflictChoice::Theirs);
+        let want = f.resolved_content().unwrap();
+        assert_eq!(confirm(ConflictStep::Preview, false, &f), ResolveTap::Send(want.clone()));
+        assert_eq!(confirm(ConflictStep::PreviewFull, false, &f), ResolveTap::Send(want));
+        assert_eq!(confirm(ConflictStep::Editing, false, &f), ResolveTap::Ignore);
+    }
+
+    #[test]
+    fn fr_g7_preview_expands_and_collapses() {
+        assert_eq!(ConflictStep::Preview.preview_max(), CONFLICT_PREVIEW_LINES);
+        let full = ConflictStep::Preview.toggle_full();
+        assert_eq!(full, ConflictStep::PreviewFull);
+        assert_eq!(full.preview_max(), usize::MAX);
+        assert_eq!(full.toggle_full(), ConflictStep::Preview);
+        assert_eq!(ConflictStep::Editing.toggle_full(), ConflictStep::Editing);
+        let long = "x\n".repeat(CONFLICT_PREVIEW_LINES + 5);
+        assert_eq!(preview_lines(&long, ConflictStep::Preview.preview_max()).1, 5);
+        assert_eq!(preview_lines(&long, full.preview_max()).1, 0);
+    }
+    #[test]
+    fn fr_g3_a_fast_second_tap_does_not_skip_the_amend_confirmation() {
+        assert_eq!(amend_tap(false, 0, 1_000), AmendTap::Commit);
+        assert_eq!(amend_tap(true, 0, 1_000), AmendTap::Arm);
+        assert_eq!(amend_tap(true, 1_000, 1_000 + AMEND_CONFIRM_DELAY_MS - 1), AmendTap::Wait);
+        assert_eq!(amend_tap(true, 1_000, 1_000 + AMEND_CONFIRM_DELAY_MS), AmendTap::Commit);
+    }
+
+    #[test]
+    fn fr_g3_a_snapshot_keeps_its_note_in_a_rebuilt_status() {
+        // Every snapshot comes from `fetch_snapshot`, which sets the note after `build_snapshot`;
+        // staging reloads through it, so the note is derived again each time and a bare
+        // `build_snapshot` carries none.
+        let st = status(vec![gf("src/a.rs", '.', 'M')]);
+        assert!(build_snapshot(&st, SAMPLE, "", &BTreeMap::new()).notes.is_empty());
+    }
+
+
+    // ---- 팀 작업 (#482) ----
+
+    fn a_member(name: &str, leader: bool, cwd: &str) -> MemberCwd {
+        MemberCwd { name: name.into(), harness: "claude-code".into(), leader, cwd: cwd.into(), state_text: "실행 중".into(), status: ember_client::LauncherStatus::Running }
+    }
+
+    fn branches_of(list: &[(&str, bool, Option<&str>)]) -> Vec<BranchEntry> {
+        list.iter().map(|(n, cur, wt)| branch_entry(&a_branch(n, *cur, false, Some("origin/x"), 2, 1, *wt), 0)).collect()
+    }
+
+    #[test]
+    fn fr_g9_team_a_root_worktree_holds_no_member_folder() {
+        assert!(!cwd_in_worktree("/Users/x", "/"));
+        assert!(!cwd_in_worktree("/", "/"));
+        assert!(cwd_in_worktree("/a/b", "/a/"));
+    }
+
+    #[test]
+    fn fr_g9_team_longest_prefix_wins_for_a_nested_worktree() {
+        let b = branches_of(&[("main", true, Some("/r")), ("feat/ui", false, Some("/r/.claude/worktrees/ui"))]);
+        let m = [a_member("ui-agent", false, "/r/.claude/worktrees/ui/ember/app"), a_member("lead", true, "/r/docs")];
+        let rows = team_rows(&b, &m, &[]);
+        assert_eq!(rows[0].branch, "main");
+        assert_eq!(rows[0].member.as_ref().unwrap().name, "lead");
+        assert_eq!(rows[1].member.as_ref().unwrap().name, "ui-agent");
+    }
+
+    #[test]
+    fn fr_g9_team_a_sibling_folder_with_the_same_prefix_is_not_inside() {
+        let b = branches_of(&[("feat/ui", false, Some("/w/ui"))]);
+        let rows = team_rows(&b, &[a_member("x", false, "/w/ui2")], &[]);
+        assert_eq!(rows[0].member, None);
+        assert_eq!(team_rows(&b, &[a_member("x", false, "/w/ui/")], &[])[0].member.as_ref().unwrap().name, "x");
+    }
+
+    #[test]
+    fn fr_g9_team_a_worktree_without_a_member_has_none() {
+        let b = branches_of(&[("main", true, Some("/r"))]);
+        let rows = team_rows(&b, &[a_member("far", false, "/elsewhere")], &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].member, None);
+        assert_eq!(rows[0].sync_text, "앞섬 2 \u{00b7} 뒤처짐 1");
+    }
+
+    #[test]
+    fn fr_g9_team_lists_only_branches_with_a_worktree_main_first_then_by_name() {
+        let b = branches_of(&[("zeta", false, Some("/w/z")), ("develop", false, None), ("alpha", false, Some("/w/a")), ("main", true, Some("/r"))]);
+        let names: Vec<String> = team_rows(&b, &[], &[]).into_iter().map(|r| r.branch).collect();
+        assert_eq!(names, ["main", "alpha", "zeta"]);
+        assert!(team_rows(&b, &[], &[])[0].current);
+    }
+
+    #[test]
+    fn fr_g9_team_a_shared_worktree_shows_the_leader() {
+        let b = branches_of(&[("main", true, Some("/r"))]);
+        let m = [a_member("first", false, "/r"), a_member("lead", true, "/r/x")];
+        assert_eq!(team_rows(&b, &m, &[])[0].member.as_ref().unwrap().name, "lead");
+    }
+
+    #[test]
+    fn fr_g9_team_the_pr_text_is_the_branch_pr_open_first() {
+        let b = branches_of(&[("feat/x", false, Some("/w/x")), ("main", true, Some("/r"))]);
+        let prs = [
+            pr_entry(&a_pr(7, GitPrState::Merged, GitPrReview::None, (0, 0, 0), (false, "")), 0),
+            pr_entry(&a_pr(9, GitPrState::Open, GitPrReview::None, (0, 0, 0), (false, "")), 0),
+        ];
+        let rows = team_rows(&b, &[], &prs);
+        let x = rows.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x.pr_text.as_deref(), Some("#9 열림"));
+        assert_eq!(rows.iter().find(|r| r.branch == "main").unwrap().pr_text, None);
+    }
+
+    #[test]
+    fn fr_g9_team_empty_input_gives_no_rows_and_the_count_is_the_loaded_count() {
+        assert!(team_rows(&[], &[], &[]).is_empty());
+        assert_eq!(section_count_with_team(Section::Team, None, None, None, None, None), None);
+        assert_eq!(section_count_with_team(Section::Team, None, None, None, None, Some(3)), Some(3));
+        assert_eq!(section_count_with_team(Section::Branches, None, None, None, Some(4), Some(3)), Some(4));
+    }
+
+    // ---- FR-G10 to FR-G12: pull request detail, review, merge, create (#483) ----
+
+    use ember_client::api::{GitPrCheck, GitPrComment};
+
+    fn a_detail(state: GitPrState, merge: (bool, &str)) -> GitPrDetail {
+        GitPrDetail {
+            pr: a_pr(7, state, GitPrReview::ReviewRequired, (2, 1, 0), merge),
+            body: "첫 줄\n\n  \n둘째 줄".into(),
+            check_runs: vec![
+                GitPrCheck { name: "build".into(), state: GitPrCheckState::Passed, detail_url: None },
+                GitPrCheck { name: "test".into(), state: GitPrCheckState::Failed, detail_url: None },
+            ],
+            reviews: Vec::new(),
+            comments: Vec::new(),
+            requested_reviewers: Vec::new(),
+            additions: 40,
+            deletions: 2,
+            changed_files: 3,
+            head_sha: A_HEAD.into(),
+        }
+    }
+
+    const A_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn fr_g11_merge_is_disabled_without_a_head_sha() {
+        let mut v = pr_detail_view(&a_detail(GitPrState::Open, (true, "병합할 수 있습니다")));
+        assert_eq!(v.head_sha, A_HEAD);
+        v.head_sha = String::new();
+        assert_eq!(merge_button_state(&v), (false, Some("헤드를 확인할 수 없어 병합할 수 없습니다".to_string())));
+    }
+
+    #[test]
+    fn fr_g11_merge_body_carries_the_head_sha() {
+        let body = pr_merge_body(7, GitPrMergeMethod::Squash, A_HEAD);
+        assert_eq!(body["head_sha"], json!(A_HEAD));
+        assert_eq!(body["confirm"], json!(true));
+    }
+
+    #[test]
+    fn fr_g10_the_detail_maps_a_failed_check_and_the_counts() {
+        let v = pr_detail_view(&a_detail(GitPrState::Open, (false, "CI 체크가 실패했습니다.")));
+        assert_eq!(v.files_text, "파일 3 +40 -2");
+        assert_eq!(v.ci_pill, "체크 2/3 통과");
+        assert_eq!(v.review_pill, "리뷰 필요");
+        assert_eq!(v.checks[1], ("test".to_string(), CheckClass::Failed, "실패".to_string()));
+        assert_eq!(v.checks[0].1, CheckClass::Passed);
+        assert_eq!(v.body_lines, vec!["첫 줄".to_string(), "둘째 줄".to_string()]);
+        assert!(v.open);
+        assert_eq!(v.merge_reason, "CI 체크가 실패했습니다.");
+    }
+
+    #[test]
+    fn fr_g10_no_reviewers_gives_an_empty_list_and_the_default_reason() {
+        let v = pr_detail_view(&a_detail(GitPrState::Open, (false, "  ")));
+        assert!(v.reviewers.is_empty());
+        assert!(v.comments.is_empty());
+        assert_eq!(v.merge_reason, MERGE_GATE_DEFAULT);
+    }
+
+    #[test]
+    fn fr_g10_reviewers_keep_the_newest_decision_and_requested_ones_wait() {
+        let r = |a: &str, st| GitPrReviewItem { author: a.into(), state: st, body: String::new(), submitted_at: String::new() };
+        let list = pr_reviewers(
+            &[r("a", GitPrReviewState::ChangesRequested), r("a", GitPrReviewState::Approved), r("b", GitPrReviewState::Approved), r("b", GitPrReviewState::Commented), r("c", GitPrReviewState::Commented)],
+            &["d".to_string(), "a".to_string()],
+        );
+        assert_eq!(list, vec![("a".into(), ReviewerState::Approved), ("b".into(), ReviewerState::Approved), ("c".into(), ReviewerState::Commented), ("d".into(), ReviewerState::Waiting)]);
+        assert_eq!(ReviewerState::ChangesRequested.label(), "변경 요청");
+        assert_eq!(ReviewerState::Waiting.label(), "대기");
+    }
+
+    #[test]
+    fn fr_g10_a_long_comment_is_cut_and_empty_ones_are_dropped() {
+        let mut d = a_detail(GitPrState::Open, (true, ""));
+        d.comments = vec![
+            GitPrComment { author: "kim".into(), body: "가".repeat(PR_COMMENT_CUT + 50), created_at: String::new() },
+            GitPrComment { author: "lee".into(), body: "   ".into(), created_at: String::new() },
+        ];
+        let v = pr_detail_view(&d);
+        assert_eq!(v.comments.len(), 1);
+        assert_eq!(v.comments[0].1.chars().count(), PR_COMMENT_CUT + 1);
+        assert!(v.comments[0].1.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn fr_g10_the_detail_state_carries_a_korean_failure() {
+        assert!(matches!(pr_detail_from(Ok(a_detail(GitPrState::Open, (true, "")))), PrDetailLoad::Ready(v) if v.number == 7));
+        let korean = ApiError::Status { status: 409, message: "GitHub에 로그인되어 있지 않습니다.".into(), code: None };
+        assert_eq!(pr_detail_from(Err(korean)), PrDetailLoad::Failed("GitHub에 로그인되어 있지 않습니다.".into()));
+        let english = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(pr_detail_from(Err(english)), PrDetailLoad::Failed("풀 리퀘스트를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요".into()));
+    }
+
+    #[test]
+    fn fr_g11_the_merge_button_follows_the_gate_and_the_state() {
+        let open_ok = pr_detail_view(&a_detail(GitPrState::Open, (true, "병합할 수 있습니다")));
+        assert_eq!(merge_button_state(&open_ok), (true, None));
+        let closed_gate = pr_detail_view(&a_detail(GitPrState::Open, (false, "")));
+        assert_eq!(merge_button_state(&closed_gate), (false, Some(MERGE_GATE_DEFAULT.to_string())));
+        let merged = pr_detail_view(&a_detail(GitPrState::Merged, (true, "")));
+        assert!(!merge_button_state(&merged).0, "a merged pull request cannot be merged again");
+        assert_eq!(merge_button_text(false), "병합");
+        assert_eq!(merge_button_text(true), "정말 병합합니다");
+    }
+
+    #[test]
+    fn fr_g11_comment_and_request_changes_need_a_body() {
+        assert_eq!(review_request_gate(GitPrReviewAction::Comment, "  "), Err("내용을 입력해 주세요"));
+        assert_eq!(review_request_gate(GitPrReviewAction::RequestChanges, ""), Err("내용을 입력해 주세요"));
+        assert_eq!(review_request_gate(GitPrReviewAction::Comment, " 좋아요 "), Ok(()));
+        assert_eq!(review_request_gate(GitPrReviewAction::Approve, ""), Ok(()));
+    }
+
+    #[test]
+    fn fr_g11_the_request_bodies_confirm_and_trim() {
+        assert_eq!(pr_review_body(7, GitPrReviewAction::RequestChanges, " 고쳐 주세요 "), json!({ "number": 7, "action": "request_changes", "body": "고쳐 주세요", "confirm": true }));
+        assert_eq!(pr_review_body(7, GitPrReviewAction::Approve, ""), json!({ "number": 7, "action": "approve", "body": null, "confirm": true }));
+        assert_eq!(pr_merge_body(7, GitPrMergeMethod::Squash, "abc"), json!({ "number": 7, "method": "squash", "delete_branch": false, "head_sha": "abc", "confirm": true }));
+        assert_eq!(pr_review_notice(GitPrReviewAction::Approve), "승인했습니다");
+    }
+
+    #[test]
+    fn fr_g12_a_new_pull_request_needs_a_title_and_leaves_blanks_to_the_node() {
+        assert_eq!(pr_create_gate(" "), Err("제목을 입력해 주세요"));
+        assert_eq!(pr_create_gate("Feat: x"), Ok(()));
+        assert_eq!(pr_create_body(" Feat: x ", "", "", "feat/x", true), json!({ "title": "Feat: x", "body": null, "base": null, "head": "feat/x", "draft": true, "confirm": true }));
+        assert_eq!(pr_created_notice(12), "풀 리퀘스트 #12을 만들었습니다");
+    }
+
+    const A: GitPrReviewAction = GitPrReviewAction::Approve;
+    const R: GitPrReviewAction = GitPrReviewAction::RequestChanges;
+    const C: GitPrReviewAction = GitPrReviewAction::Comment;
+
+    #[test]
+    fn fr_g11_approve_asks_twice() {
+        let k = pr_action_key(7, A);
+        assert_eq!(review_tap(A, None, 7, 10_000), ReviewTap::Arm);
+        assert_eq!(review_tap(A, Some((k, 10_000)), 7, 10_100), ReviewTap::Wait);
+        assert_eq!(review_tap(A, Some((k, 10_000)), 7, 10_600), ReviewTap::Send);
+        assert_eq!(review_tap(A, Some((k, 10_000)), 7, 14_000), ReviewTap::Expired);
+        assert_eq!(review_button_label(A, true), "정말 승인합니다");
+        assert_eq!(review_button_label(A, false), "승인");
+    }
+
+    #[test]
+    fn fr_g11_request_changes_asks_twice() {
+        let k = pr_action_key(7, R);
+        assert_eq!(review_tap(R, None, 7, 10_000), ReviewTap::Arm);
+        assert_eq!(review_tap(R, Some((k, 10_000)), 7, 10_100), ReviewTap::Wait);
+        assert_eq!(review_tap(R, Some((k, 10_000)), 7, 13_999), ReviewTap::Send);
+        assert_eq!(review_tap(R, Some((k, 10_000)), 7, 14_000), ReviewTap::Expired);
+        assert_eq!(review_button_label(R, true), "정말 변경을 요청합니다");
+    }
+
+    #[test]
+    fn fr_g11_comment_is_a_single_tap() {
+        assert_eq!(review_tap(C, None, 7, 10_000), ReviewTap::Send);
+        assert_eq!(review_tap(C, Some((pr_action_key(7, A), 10_000)), 7, 10_100), ReviewTap::Send);
+        assert_eq!(review_button_label(C, true), "코멘트");
+    }
+
+    #[test]
+    fn fr_g11_arming_one_review_action_disarms_the_other() {
+        // 승인 is armed; a tap on 변경 요청 (or on another pull request) arms afresh, never sends.
+        let armed = Some((pr_action_key(7, A), 10_000));
+        assert_eq!(review_tap(R, armed, 7, 10_900), ReviewTap::Arm);
+        assert_eq!(review_tap(A, armed, 8, 10_900), ReviewTap::Arm);
+        assert_ne!(pr_action_key(7, A), pr_action_key(7, R));
+        assert_ne!(pr_action_key(7, A), pr_action_key(8, A));
+        assert!(!armed_label_visible(armed, pr_action_key(7, R), 10_900));
+    }
+
+    #[test]
+    fn fr_g11_a_review_draft_belongs_to_one_pull_request() {
+        assert_ne!(review_draft_key("p", Some(1)), review_draft_key("p", Some(2)));
+        assert_ne!(review_draft_key("p", Some(1)), review_draft_key("q", Some(1)));
+        assert_eq!(review_draft_key("p", Some(1)), review_draft_key("p", Some(1)));
+    }
+
+    #[test]
+    fn fr_g12_new_pr_title_limits() {
+        assert_eq!(pr_create_gate("a\nb"), Err("제목은 한 줄로 입력해 주세요"));
+        assert_eq!(pr_create_gate("a\u{1b}b"), Err("제목은 한 줄로 입력해 주세요"));
+        assert_eq!(pr_create_gate(&"가".repeat(256)), Ok(()));
+        assert_eq!(pr_create_gate(&"가".repeat(257)), Err("제목은 256자까지 입력할 수 있습니다"));
+        assert_eq!(pr_create_gate("  Feat: x \n"), Ok(()));
+    }
+
+    #[test]
+    fn fr_g11_review_body_is_cleaned() {
+        assert_eq!(clean_body("a\u{1b}[31m b\r\n\tc\u{0}"), "a[31m b\n\tc");
+        assert_eq!(pr_review_body(7, C, "x\u{7}y")["body"], json!("xy"));
+        assert_eq!(pr_create_body("t", "d\u{0}e", "", "", false)["body"], json!("de"));
+    }
+
+    #[test]
+    fn fr_g11_a_stale_head_error_is_recognised() {
+        // The node's line, from ember/node/src/git_prs.rs (the merge's head check).
+        let node = "풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요.";
+        assert!(is_stale_head(node));
+        assert!(!is_stale_head("CI 체크가 실패했습니다."));
+        assert!(include_str!("../../../node/src/git_prs.rs").contains(STALE_HEAD_TEXT));
+    }
+
+    #[test]
+    fn fr_g11_failures_are_korean_text() {
+        let english = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(korean_failure("병합", &english), "병합하지 못했습니다. 잠시 후 다시 시도해 주세요");
+        let gate = ApiError::Status { status: 409, message: "CI 체크가 실패했습니다.".into(), code: None };
+        assert_eq!(korean_failure("병합", &gate), "CI 체크가 실패했습니다.");
+        assert!(!korean_failure("병합", &ApiError::Peer("refused".into())).contains("refused"));
+    }
+}
+
+#[cfg(test)]
+mod commit_detail_tests {
+    use super::*;
+    use ember_client::api::{GitCommitFile, GitLogRef};
+
+    fn file(path: &str, status: GitCommitFileStatus, add: u64, del: u64, binary: bool) -> GitCommitFile {
+        GitCommitFile { path: path.to_string(), old_path: None, status, additions: add, deletions: del, binary }
+    }
+
+    fn detail(parents: &[&str], files: Vec<GitCommitFile>) -> GitCommitDetail {
+        GitCommitDetail {
+            sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            short: "0123456".to_string(),
+            subject: "Feat: x".to_string(),
+            body: "Feat: x\n\nfirst line\n\nsecond line\n".to_string(),
+            author: "BREW".to_string(),
+            time: "2026-11-06T12:00:00+09:00".to_string(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            refs: vec![
+                GitLogRef { name: "refs/tags/v1".to_string(), kind: GitLogRefKind::Tag },
+                GitLogRef { name: "refs/heads/main".to_string(), kind: GitLogRefKind::Branch },
+            ],
+            files_total: files.len(),
+            files,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn fr_g14_status_letters_cover_every_status() {
+        assert_eq!(file_status_letter(GitCommitFileStatus::Added), "A");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Modified), "M");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Deleted), "D");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Renamed), "R");
+        assert_eq!(file_status_letter(GitCommitFileStatus::Copied), "C");
+        assert_eq!(file_status_letter(GitCommitFileStatus::TypeChanged), "T");
+    }
+
+    #[test]
+    fn fr_g14_stat_text_is_counts_or_binary() {
+        assert_eq!(file_stat_text(12, 3, false), "+12 -3");
+        assert_eq!(file_stat_text(0, 0, false), "+0 -0");
+        assert_eq!(file_stat_text(0, 0, true), "바이너리");
+    }
+
+    #[test]
+    fn fr_g14_the_view_drops_the_subject_copy_and_blank_lines_and_reads_the_time() {
+        let now = iso_to_unix("2026-11-06T15:00:00+09:00").unwrap();
+        let v = commit_detail_view(&detail(&["p1"], vec![file("a.rs", GitCommitFileStatus::Modified, 1, 2, false)]), now);
+        assert_eq!(v.body_lines, ["first line", "second line"]);
+        assert_eq!(v.time_text, "3시간 전");
+        assert_eq!(v.short, "0123456");
+        assert!(!v.is_merge);
+        assert_eq!(v.refs[0].label, "main");
+        assert_eq!(v.refs[1].label, "v1");
+        assert_eq!(v.files[0].status_letter, "M");
+    }
+
+    #[test]
+    fn fr_g14_a_time_that_does_not_parse_is_shown_as_the_node_sent_it() {
+        let mut d = detail(&[], vec![]);
+        d.time = "yesterday".to_string();
+        assert_eq!(commit_detail_view(&d, 0).time_text, "yesterday");
+    }
+
+    #[test]
+    fn fr_g14_two_parents_are_a_merge_and_a_rename_keeps_its_old_path() {
+        let mut f = file("new.rs", GitCommitFileStatus::Renamed, 0, 0, false);
+        f.old_path = Some("old.rs".to_string());
+        let v = commit_detail_view(&detail(&["a", "b"], vec![f]), 0);
+        assert!(v.is_merge);
+        assert_eq!(v.files[0].old_path.as_deref(), Some("old.rs"));
+    }
+
+    #[test]
+    fn fr_g14_the_list_is_cut_at_100_and_says_how_many_more() {
+        let files: Vec<_> = (0..130).map(|i| file(&format!("f{i}.rs"), GitCommitFileStatus::Added, 1, 0, false)).collect();
+        let v = commit_detail_view(&detail(&["p"], files), 0);
+        let (shown, more) = commit_files_shown(&v);
+        assert_eq!(shown.len(), 100);
+        assert_eq!(more.as_deref(), Some("30개 더 있습니다"));
+        // The node cut its list: the total is larger than what came.
+        let mut d = detail(&["p"], vec![file("a", GitCommitFileStatus::Added, 1, 0, false)]);
+        d.files_total = 500;
+        d.truncated = true;
+        let v = commit_detail_view(&d, 0);
+        assert_eq!(commit_files_shown(&v).1.as_deref(), Some("499개 더 있습니다. 파일 목록이 500개에서 잘렸습니다 (전체 500개)"));
+        let small = commit_detail_view(&detail(&["p"], vec![file("a", GitCommitFileStatus::Added, 1, 0, false)]), 0);
+        assert_eq!(commit_files_shown(&small).1, None);
+    }
+
+    #[test]
+    fn fr_g14_a_failed_read_is_a_korean_line() {
+        let en = ApiError::Status { status: 404, message: "no such commit".to_string(), code: None };
+        let ko = ApiError::Status { status: 404, message: "그런 커밋을 찾을 수 없습니다.".to_string(), code: None };
+        let CommitDetailLoad::Failed(a) = commit_detail_from(Err(en), 0) else { panic!() };
+        let CommitDetailLoad::Failed(b) = commit_detail_from(Err(ko), 0) else { panic!() };
+        assert!(!a.is_ascii() && !a.contains("no such"));
+        assert_eq!(b, "그런 커밋을 찾을 수 없습니다.");
+        assert!(matches!(commit_detail_from(Ok(detail(&[], vec![])), 0), CommitDetailLoad::Ready(_)));
+    }
+
+    #[test]
+    fn fr_g15_a_merge_commit_cannot_be_cherry_picked_but_can_be_reverted() {
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, false, true), Err("병합 커밋은 가져올 수 없습니다"));
+        assert_eq!(commit_action_gate(CommitAction::Revert, false, true), Ok(()));
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, false, false), Ok(()));
+    }
+
+    #[test]
+    fn fr_g15_a_dirty_tree_stops_both_actions() {
+        let line = "작업 중인 변경이 있어 먼저 커밋하거나 스태시해야 합니다";
+        assert_eq!(commit_action_gate(CommitAction::Revert, true, false), Err(line));
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, true, false), Err(line));
+        // A merge says why it cannot be picked before it talks about the tree.
+        assert_eq!(commit_action_gate(CommitAction::CherryPick, true, true), Err("병합 커밋은 가져올 수 없습니다"));
+    }
+
+    #[test]
+    fn fr_g15_untracked_files_do_not_make_the_tree_dirty() {
+        let f = |path: &str, status| FileDiff { path: path.to_string(), old_path: None, status, binary: false, mode: None, hunks: vec![] };
+        let mut snap = RepoSnapshot::default();
+        assert!(!snapshot_dirty(&snap));
+        snap.changes = vec![f("new.txt", FileStatus::Added)];
+        assert!(!snapshot_dirty(&snap));
+        snap.staged.insert("new.txt".to_string());
+        assert!(snapshot_dirty(&snap));
+        snap.staged.clear();
+        snap.changes = vec![f("a.rs", FileStatus::Modified)];
+        assert!(snapshot_dirty(&snap));
+    }
+
+    #[test]
+    fn fr_g15_the_armed_keys_differ_by_commit_and_action() {
+        let (a, b) = ("0123456789abcdef", "fedcba9876543210");
+        assert_ne!(commit_action_key(a, CommitAction::Revert), commit_action_key(a, CommitAction::CherryPick));
+        assert_ne!(commit_action_key(a, CommitAction::Revert), commit_action_key(b, CommitAction::Revert));
+        assert_eq!(commit_action_key(a, CommitAction::Revert), commit_action_key(a, CommitAction::Revert));
+    }
+
+    #[test]
+    fn fr_g15_the_branch_form_uses_the_branch_name_rule() {
+        assert!(valid_branch_name("fix/from-abc1234"));
+        assert!(!valid_branch_name("bad name"));
+        assert!(!valid_branch_name("  "));
+    }
+
+    #[test]
+    fn fr_g15_labels_and_notices_are_korean_without_a_plain_da_ending() {
+        assert_eq!(CommitAction::Revert.armed_label(), "정말 되돌립니다");
+        assert_eq!(CommitAction::CherryPick.armed_label(), "정말 가져옵니다");
+        assert_eq!(commit_applied_notice(CommitAction::Revert, "develop", "abcdef0123"), "develop에 새 커밋 abcdef0을 만들었습니다");
+        assert_eq!(commit_applied_notice(CommitAction::CherryPick, "", ""), "현재 브랜치에 새 커밋을 만들었습니다");
+    }
+
+    #[test]
+    fn fr_g15_failures_keep_the_nodes_korean_and_never_show_english() {
+        let conflict = ApiError::Status { status: 409, message: "충돌이 나서 중단했습니다. 되돌리기를 취소했습니다.".to_string(), code: None };
+        assert_eq!(commit_failure("되돌리기", &conflict), "충돌이 나서 중단했습니다. 되돌리기를 취소했습니다.");
+        let en = ApiError::Status { status: 500, message: "error: could not revert".to_string(), code: None };
+        let line = commit_failure("Cherry-pick", &en);
+        assert!(!line.contains("could not"));
+        assert!(line.ends_with("다시 시도해 주세요"));
+    }
+
+    #[test]
+    fn fr_g15_the_armed_action_names_the_branch_that_gets_the_commit() {
+        assert_eq!(commit_action_branch_line(CommitAction::Revert, "develop"), "현재 브랜치 develop에 새 커밋을 만듭니다");
+        assert_eq!(commit_action_branch_line(CommitAction::CherryPick, " "), "현재 브랜치에 새 커밋을 만듭니다");
+        assert_eq!(commit_applied_notice(CommitAction::CherryPick, "feat/x", "1234567890"), "feat/x에 새 커밋 1234567을 만들었습니다");
+    }
+
+    #[test]
+    fn fr_g14_the_files_notice_counts_the_cut_files_once() {
+        assert_eq!(commit_files_notice(10, 10, false), None);
+        assert_eq!(commit_files_notice(100, 130, false).as_deref(), Some("30개 더 있습니다"));
+        assert_eq!(commit_files_notice(500, 500, true).as_deref(), Some("파일 목록이 500개에서 잘렸습니다 (전체 500개)"));
+        assert_eq!(commit_files_notice(100, 800, true).as_deref(), Some("700개 더 있습니다. 파일 목록이 500개에서 잘렸습니다 (전체 800개)"));
+    }
+
+    #[test]
+    fn fr_g15_a_dirty_tree_answer_is_shown_as_is() {
+        let text = "작업 중인 변경이 있어 되돌릴 수 없습니다. 먼저 커밋하거나 스태시해 주세요.";
+        let e = ApiError::Status { status: 409, message: text.to_string(), code: None };
+        let line = commit_failure("되돌리기", &e);
+        assert_eq!(line, text);
+        assert!(!line.contains("잠시 후"));
+        // The client's dirty flag was wrong: the snapshot reloads.
+        assert!(commit_failure_reloads_snapshot(&line));
+        assert!(!commit_failure_reloads_snapshot("충돌이 발생해 취소했습니다."));
+    }
+
+    #[test]
+    fn fr_g15_an_in_progress_answer_is_shown_as_is() {
+        for text in ["진행 중인 git 작업이 있습니다. 먼저 마무리해 주세요.", "다른 git 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요."] {
+            let e = ApiError::Status { status: 409, message: text.to_string(), code: None };
+            assert_eq!(commit_failure("Cherry-pick", &e), text);
+        }
+    }
+
+    #[test]
+    fn fr_g15_an_unknown_error_gets_a_korean_line() {
+        let e = ApiError::Status { status: 409, message: "error: could not revert".to_string(), code: None };
+        assert_eq!(commit_failure("되돌리기", &e), "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.");
+    }
+
+    #[test]
+    fn fr_g14_displayed_commit_text_is_clipped_and_cleaned() {
+        assert_eq!(clip_line("짧은 줄", 200), "짧은 줄");
+        assert_eq!(clip_line("a\u{1b}[31mb\tc", 200), "a[31mb c");
+        let long = "x".repeat(300);
+        let out = clip_line(&long, COMMIT_TEXT_MAX);
+        assert_eq!(out.chars().count(), COMMIT_TEXT_MAX);
+        assert!(out.ends_with('\u{2026}'));
+        let mut d = detail(&["p"], vec![]);
+        d.subject = long.clone();
+        d.author = long;
+        let v = commit_detail_view(&d, 0);
+        assert_eq!(v.subject.chars().count(), COMMIT_TEXT_MAX);
+        assert_eq!(v.author.chars().count(), COMMIT_TEXT_MAX);
+    }
+
+    #[test]
+    fn fr_g15_revert_arms_then_confirms_after_600ms() {
+        let k = commit_action_key("abc1234", CommitAction::Revert);
+        assert_eq!(delete_tap(None, k, 10_000), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((k, 10_000)), k, 10_599), DeleteTap::Wait);
+        assert_eq!(delete_tap(Some((k, 10_000)), k, 10_600), DeleteTap::Confirm);
+    }
+
+    #[test]
+    fn fr_g15_an_armed_revert_expires_after_4s() {
+        let k = commit_action_key("abc1234", CommitAction::Revert);
+        assert!(armed_label_visible(Some((k, 10_000)), k, 13_999));
+        assert!(!armed_label_visible(Some((k, 10_000)), k, 14_000));
+        assert_eq!(delete_tap(Some((k, 10_000)), k, 14_000), DeleteTap::Expired);
+    }
+
+    #[test]
+    fn fr_g15_arming_cherry_pick_disarms_revert() {
+        let (rv, cp) = (commit_action_key("abc1234", CommitAction::Revert), commit_action_key("abc1234", CommitAction::CherryPick));
+        // Revert is armed; a tap on Cherry-pick arms Cherry-pick instead of confirming Revert.
+        assert_eq!(delete_tap(Some((rv, 10_000)), cp, 11_000), DeleteTap::Arm);
+        let armed = Some((cp, 11_000));
+        assert!(!armed_label_visible(armed, rv, 11_100));
+        assert!(armed_label_visible(armed, cp, 11_100));
     }
 }

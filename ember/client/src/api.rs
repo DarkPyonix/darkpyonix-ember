@@ -24,7 +24,7 @@ use crate::wire::{
     ApprovalDecision, DailyUsage, DetectedAgent, MentionCandidate, NewSession, Project, SearchHit, SessionDetail, SessionPatch,
     SessionRecord, StoredEvent, TeamMail, TeamMember, TeamView,
 };
-use crate::channels::{Channel, ChannelMessage, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
+use crate::channels::{Allowance, AllowanceBody, Channel, ChannelMessage, CreatedInvite, Guest, Invite, FeedAnswer, FeedDecision, FeedItem, MentionPreview, MentionPreviewRequest, MessagesQuery, NewChannel, NewChannelMessage, ReadBody};
 use crate::wire::{NewSchedule, Schedule, SchedulePatch, ScheduleRun};
 
 /// Transport service name of the server API (matches `ember_server::transport::SERVER_SERVICE`).
@@ -41,11 +41,15 @@ pub enum ApiError {
     #[error("peer connection failed: {0}")]
     Peer(String),
     #[error("server answered {status}: {message}")]
-    Status { status: u16, message: String },
+    Status { status: u16, message: String, code: Option<String> },
     /// The server answered 401: the token is missing or wrong (FR-S11). The client never retries
     /// on this, because the same token would be refused again.
     #[error("authentication failed: the server refused the token ({0})")]
     Unauthorized(String),
+    /// The server answered 400 `not_a_member` (FR-T13): the message mentions names that are not
+    /// members of the channel. Nothing was stored. `unknown` lists those names.
+    #[error("server answered 400: {message}")]
+    NotAMember { message: String, unknown: Vec<String> },
     #[error("invalid response: {0}")]
     Decode(String),
     #[error("push connection failed: {0}")]
@@ -63,10 +67,20 @@ pub(crate) fn fork_body(turn_seq: Option<i64>) -> serde_json::Value {
 }
 
 impl ApiError {
+    /// The server's JSON `code` (`invalid_hours`, `not_found`, ...), when the error body had one.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            ApiError::Status { code, .. } => code.as_deref(),
+            ApiError::NotAMember { .. } => Some("not_a_member"),
+            _ => None,
+        }
+    }
+
     pub fn status(&self) -> Option<u16> {
         match self {
             ApiError::Status { status, .. } => Some(*status),
             ApiError::Unauthorized(_) => Some(401),
+            ApiError::NotAMember { .. } => Some(400),
             _ => None,
         }
     }
@@ -167,6 +181,359 @@ pub enum GitLogRefKind {
     Head,
 }
 
+/// One commit with its changed files (FR-G14).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitDetail {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    #[serde(default)]
+    pub body: String,
+    pub author: String,
+    /// Author time, ISO 8601 strict.
+    pub time: String,
+    pub parents: Vec<String>,
+    #[serde(default)]
+    pub refs: Vec<GitLogRef>,
+    #[serde(default)]
+    pub files: Vec<GitCommitFile>,
+    #[serde(default)]
+    pub files_total: usize,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitFile {
+    pub path: String,
+    #[serde(default)]
+    pub old_path: Option<String>,
+    pub status: GitCommitFileStatus,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitCommitFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+}
+
+/// The new HEAD after a revert or cherry-pick (FR-G15).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitCommitApplied {
+    pub new_sha: String,
+}
+
+/// The merge in progress, for the conflict screen banner (`git/merge`, FR-G16).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitMergeState {
+    #[serde(default)]
+    pub in_progress: bool,
+    /// The branch or ref being merged in; null when unknown.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// The current branch; null on a detached HEAD.
+    #[serde(default)]
+    pub into: Option<String>,
+    #[serde(default)]
+    pub conflict_files: u32,
+    /// `in_progress` with no unmerged path left.
+    #[serde(default)]
+    pub can_commit: bool,
+}
+
+/// The answer of `git/merge/abort` (FR-G17).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitMergeAborted {
+    #[serde(default)]
+    pub ok: bool,
+}
+
+/// Local branches (`POST /projects/{id}/git/branches`, FR-G9).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitBranches {
+    #[serde(default)]
+    pub branches: Vec<GitBranchInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitBranchInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    #[serde(default)]
+    pub last_sha: String,
+    #[serde(default)]
+    pub last_subject: String,
+    #[serde(default)]
+    pub last_time: Option<String>,
+    #[serde(default)]
+    pub worktree: Option<String>,
+}
+
+/// The Home GitHub card (`GET /api/integrations/github`, FR-G13). A number is `None` when its
+/// call failed; the card shows that as 알 수 없음.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GithubSummary {
+    #[serde(default)]
+    pub state: GithubState,
+    /// Korean reason when `state` is not `On`.
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub repos: Vec<GithubRepo>,
+    #[serde(default)]
+    pub totals: GithubTotals,
+    /// Epoch seconds of the check.
+    #[serde(default)]
+    pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubState {
+    On,
+    Warn,
+    #[default]
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GithubRepo {
+    #[serde(default)]
+    pub name_with_owner: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub open_prs: Option<u64>,
+    #[serde(default)]
+    pub review_requested: Option<u64>,
+    /// `open_prs` stopped at the 100 limit.
+    #[serde(default)]
+    pub capped: bool,
+    /// Last workflow runs, newest first: `success`, `failure`, `cancelled`, `pending`.
+    #[serde(default)]
+    pub ci: Option<Vec<String>>,
+    /// Korean text of the repository's first failed call.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GithubTotals {
+    /// Repositories listed; null when the state is `off` or none is listed.
+    #[serde(default)]
+    pub repos: Option<u64>,
+    /// Sum of the known values; null when no repository gave one (never an invented 0).
+    #[serde(default)]
+    pub open_prs: Option<u64>,
+    /// Sum of the known values; null when no repository gave one.
+    #[serde(default)]
+    pub review_requested: Option<u64>,
+    /// Null when no run is known.
+    #[serde(default)]
+    pub ci_pass_percent: Option<u64>,
+}
+
+/// Pull requests of the repository's GitHub remote (`POST /projects/{id}/git/prs`, FR-G8).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitPrs {
+    #[serde(default)]
+    pub prs: Vec<GitPr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPr {
+    pub number: u64,
+    pub title: String,
+    pub state: GitPrState,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub head: String,
+    #[serde(default)]
+    pub base: String,
+    /// ISO 8601 (`2026-11-05T10:00:00Z`).
+    #[serde(default)]
+    pub updated_at: String,
+    pub review: GitPrReview,
+    pub checks: GitPrChecks,
+    pub merge: GitPrMerge,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrState {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReview {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GitPrChecks {
+    #[serde(default)]
+    pub passed: u32,
+    #[serde(default)]
+    pub failed: u32,
+    #[serde(default)]
+    pub pending: u32,
+}
+
+/// The merge gate: `reason` is the node's Korean text, also when `can_merge` is true.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrMerge {
+    pub can_merge: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// One pull request in full (`POST /projects/{id}/git/pr`, FR-G10). The list fields of
+/// [`GitPr`] are flattened in (`checks` is the summary count); `check_runs` lists every check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GitPrDetail {
+    #[serde(flatten)]
+    pub pr: GitPr,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub check_runs: Vec<GitPrCheck>,
+    #[serde(default)]
+    pub reviews: Vec<GitPrReviewItem>,
+    /// Oldest first, at most the newest 50.
+    #[serde(default)]
+    pub comments: Vec<GitPrComment>,
+    #[serde(default)]
+    pub requested_reviewers: Vec<String>,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub changed_files: u64,
+    /// The head commit (40 hex characters) the fields describe; pass it to `git_pr_merge`.
+    #[serde(default)]
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrCheck {
+    pub name: String,
+    pub state: GitPrCheckState,
+    #[serde(default)]
+    pub detail_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrCheckState {
+    Passed,
+    Failed,
+    Pending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+    Pending,
+}
+
+/// A review, its body cut at 2000 characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrReviewItem {
+    #[serde(default)]
+    pub author: String,
+    pub state: GitPrReviewState,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub submitted_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrComment {
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitPrReviewAction {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GitPrMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrReviewed {
+    pub number: u64,
+    pub action: GitPrReviewAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrMerged {
+    pub number: u64,
+    pub merged: bool,
+    pub method: GitPrMergeMethod,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitPrCreated {
+    pub number: u64,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitStashEntry {
     pub index: u32,
@@ -240,6 +607,7 @@ pub struct Api {
 }
 
 /// A status and a fully read body.
+#[derive(Debug)]
 struct Raw {
     status: StatusCode,
     body: Bytes,
@@ -364,11 +732,33 @@ impl Api {
         let message = serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-            .unwrap_or(body);
+            .unwrap_or_else(|| body.clone());
         if raw.status == StatusCode::UNAUTHORIZED {
             return Err(ApiError::Unauthorized(message));
         }
-        Err(ApiError::Status { status: raw.status.as_u16(), message })
+        if raw.status == StatusCode::BAD_REQUEST {
+            if let Some(unknown) = Self::not_a_member(&body) {
+                return Err(ApiError::NotAMember { message, unknown });
+            }
+        }
+        let code = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string));
+        Err(ApiError::Status { status: raw.status.as_u16(), message, code })
+    }
+
+    /// The `unknown` names of a `not_a_member` error body, or `None` for any other body.
+    fn not_a_member(body: &str) -> Option<Vec<String>> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        if v.get("code")?.as_str()? != "not_a_member" {
+            return None;
+        }
+        Some(
+            v.get("unknown")
+                .and_then(|u| u.as_array())
+                .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+        )
     }
 
     fn decode<T: DeserializeOwned>(raw: Raw) -> ApiResult<T> {
@@ -480,6 +870,12 @@ impl Api {
     }
 
     // ---- projects and computer assignment (FR-L4) ------------------------------------------
+
+    /// The GitHub card: connection state, account, repositories and totals (FR-G13). The server
+    /// caches its answer for 90 seconds.
+    pub async fn github_summary(&self) -> ApiResult<GithubSummary> {
+        self.get("/integrations/github").await
+    }
 
     /// Every project with its assigned computers.
     pub async fn projects(&self) -> ApiResult<Vec<Project>> {
@@ -602,6 +998,72 @@ impl Api {
         Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
     }
 
+    /// One commit with its message, refs and changed files (FR-G14).
+    pub async fn git_commit_show(&self, project: &str, sha: &str) -> ApiResult<GitCommitDetail> {
+        Self::decode(self.git_post(project, "commit/show", json!({ "sha": sha })).await?)
+    }
+
+    /// Revert a commit on the current branch (FR-G15; 409 for a dirty tree or a conflict).
+    pub async fn git_revert(&self, project: &str, sha: &str) -> ApiResult<GitCommitApplied> {
+        Self::decode(self.git_post(project, "revert", json!({ "sha": sha, "confirm": true })).await?)
+    }
+
+    /// Cherry-pick a commit onto the current branch (FR-G15; 409 for a dirty tree or a conflict).
+    pub async fn git_cherry_pick(&self, project: &str, sha: &str) -> ApiResult<GitCommitApplied> {
+        Self::decode(self.git_post(project, "cherry-pick", json!({ "sha": sha, "confirm": true })).await?)
+    }
+
+    /// Whether a merge is in progress, what is merged into what, and how many files conflict (FR-G16).
+    pub async fn git_merge_state(&self, project: &str) -> ApiResult<GitMergeState> {
+        Self::decode(self.git_post(project, "merge", json!({})).await?)
+    }
+
+    /// Cancel the merge in progress (FR-G17; 409 when none is).
+    pub async fn git_merge_abort(&self, project: &str) -> ApiResult<GitMergeAborted> {
+        Self::decode(self.git_post(project, "merge/abort", json!({ "confirm": true })).await?)
+    }
+
+    /// Finish the merge in progress with a merge commit (FR-G17; 409 when none is or conflicts remain).
+    pub async fn git_merge_commit(&self, project: &str) -> ApiResult<GitCommitApplied> {
+        Self::decode(self.git_post(project, "merge/commit", json!({ "confirm": true })).await?)
+    }
+
+    /// List local branches with upstream ahead/behind, last commit, default and worktree (FR-G9).
+    pub async fn git_branches(&self, project: &str) -> ApiResult<GitBranches> {
+        Self::decode(self.git_post(project, "branches", json!({})).await?)
+    }
+
+    /// List pull requests (`state` is `open`, `closed`, `merged` or `all`). The node runs the
+    /// computer's own `gh`; a missing or logged-out `gh` answers 409 with a Korean message.
+    pub async fn git_prs(&self, project: &str, state: &str, limit: u32) -> ApiResult<GitPrs> {
+        Self::decode(self.git_post(project, "prs", json!({ "state": state, "limit": limit })).await?)
+    }
+
+    /// One pull request in full (FR-G10).
+    pub async fn git_pr(&self, project: &str, number: u64) -> ApiResult<GitPrDetail> {
+        Self::decode(self.git_post(project, "pr", json!({ "number": number })).await?)
+    }
+
+    /// Approve, request changes or comment (FR-G11). `request_changes` and `comment` need a
+    /// body. The call sends `confirm: true`, so call it only after the person confirmed.
+    pub async fn git_pr_review(&self, project: &str, number: u64, action: GitPrReviewAction, body: Option<&str>) -> ApiResult<GitPrReviewed> {
+        Self::decode(self.git_post(project, "pr/review", json!({ "number": number, "action": action, "body": body, "confirm": true })).await?)
+    }
+
+    /// Merge (FR-G11). A closed merge gate answers 409 with the Korean reason. The call sends
+    /// `confirm: true`, so call it only after the person confirmed. `head_sha` is required: the
+    /// `GitPrDetail::head_sha` the person saw (empty answers 400). When the head moved since, the node answers 409
+    /// ("풀 리퀘스트가 바뀌었습니다...") and merges nothing.
+    pub async fn git_pr_merge(&self, project: &str, number: u64, method: GitPrMergeMethod, delete_branch: bool, head_sha: &str) -> ApiResult<GitPrMerged> {
+        let body = json!({ "number": number, "method": method, "delete_branch": delete_branch, "head_sha": head_sha, "confirm": true });
+        Self::decode(self.git_post(project, "pr/merge", body).await?)
+    }
+
+    /// Create a pull request from a branch that already exists on the remote (FR-G12).
+    pub async fn git_pr_create(&self, project: &str, title: &str, body: Option<&str>, base: Option<&str>, head: Option<&str>, draft: bool) -> ApiResult<GitPrCreated> {
+        Self::decode(self.git_post(project, "pr/create", json!({ "title": title, "body": body, "base": base, "head": head, "draft": draft, "confirm": true })).await?)
+    }
+
     pub async fn git_stash_list(&self, project: &str) -> ApiResult<Vec<GitStashEntry>> {
         Self::decode(self.git_post(project, "stash/list", json!({})).await?)
     }
@@ -663,10 +1125,79 @@ impl Api {
         Self::decode(self.post(&format!("/channels/{}/messages", seg(id)), body).await?)
     }
 
+    /// Which member agents `text` would reach and which `@names` are not members (FR-T12, FR-T13).
+    pub async fn preview_channel_mentions(&self, id: &str, text: &str) -> ApiResult<MentionPreview> {
+        let body = serde_json::to_value(MentionPreviewRequest { text: text.to_string() }).expect("MentionPreviewRequest serialises");
+        Self::decode(self.post(&crate::channels::mentions_preview_path(id), body).await?)
+    }
+
     /// Mark everything up to `upto` (default the latest) as read; the cursor only moves forward.
     pub async fn mark_channel_read(&self, id: &str, upto: Option<i64>) -> ApiResult<Channel> {
         let body = serde_json::to_value(ReadBody { seq: upto }).expect("ReadBody serialises");
         Self::decode(self.post(&format!("/channels/{}/read", seg(id)), body).await?)
+    }
+
+    /// The state of the guest door (FR-T14): on or off, its listen address and public URL, and
+    /// whether the link needs a reachability check. Known before the first invite is made.
+    pub async fn guest_door(&self) -> ApiResult<crate::channels::GuestDoorState> {
+        self.get(crate::channels::GUEST_DOOR_PATH).await
+    }
+
+    /// The feed of a channel (FR-T11): pending approvals and last-turn reports of its agents,
+    /// newest first.
+    pub async fn channel_feed(&self, id: &str) -> ApiResult<Vec<FeedItem>> {
+        self.get(&crate::channels::feed_path(id)).await
+    }
+
+    /// Answer a pending approval from the feed; the server answers 204.
+    pub async fn answer_channel_feed(&self, id: &str, approval_id: &str, decision: FeedDecision) -> ApiResult<()> {
+        let body = serde_json::to_value(FeedAnswer { decision }).expect("FeedAnswer serialises");
+        self.post(&crate::channels::feed_answer_path(id, approval_id), body).await?;
+        Ok(())
+    }
+
+    // ---- invites, guests, allowances (FR-T14, FR-T17) --------------------------------------
+
+    /// Create a single-use invite. The token and link are in this answer only. `None` lets the
+    /// server pick its default TTL; the body is `{}` then, never empty.
+    pub async fn create_invite(&self, channel: &str, ttl_hours: Option<u32>) -> ApiResult<CreatedInvite> {
+        let body = crate::channels::new_invite_body(ttl_hours);
+        Self::decode(self.post(&crate::channels::invites_path(channel), body).await?)
+    }
+
+    /// Invites of a channel, newest first (no token, no link).
+    pub async fn invites(&self, channel: &str) -> ApiResult<Vec<Invite>> {
+        self.get(&crate::channels::invites_path(channel)).await
+    }
+
+    /// Revoke an invite (204); also ends the guest made from it.
+    pub async fn revoke_invite(&self, channel: &str, invite_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &crate::channels::invite_path(channel, invite_id), None).await?)?;
+        Ok(())
+    }
+
+    /// Guests of a channel, newest first, revoked and expired ones included.
+    pub async fn guests(&self, channel: &str) -> ApiResult<Vec<Guest>> {
+        self.get(&crate::channels::guests_path(channel)).await
+    }
+
+    /// Remove a guest (204): the credential and allowance end at once.
+    pub async fn remove_guest(&self, channel: &str, guest_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &crate::channels::guest_path(channel, guest_id), None).await?)?;
+        Ok(())
+    }
+
+    /// Allow the guest's mentions to reach agents for `hours` (1..=168); replaces any end time.
+    pub async fn set_allowance(&self, channel: &str, guest_id: &str, hours: u32) -> ApiResult<Allowance> {
+        let body = serde_json::to_value(AllowanceBody { hours }).expect("AllowanceBody serialises");
+        let path = crate::channels::guest_allow_path(channel, guest_id);
+        Self::decode(self.send(Method::PUT, &path, Some(body)).await?)
+    }
+
+    /// Stop delivering the guest's mentions (204).
+    pub async fn clear_allowance(&self, channel: &str, guest_id: &str) -> ApiResult<()> {
+        Self::check(self.send(Method::DELETE, &crate::channels::guest_allow_path(channel, guest_id), None).await?)?;
+        Ok(())
     }
 
     // ---- schedules (FR-A8) -----------------------------------------------------------------
@@ -824,6 +1355,105 @@ fn usage_path(days: Option<u32>) -> String {
     match days {
         Some(n) => format!("/usage?days={n}"),
         None => "/usage".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Listening ports of a computer's sessions (FR-P7)
+// ---------------------------------------------------------------------------------------------
+
+/// How far a listening port is reachable. An unknown value from a newer node reads as `Lan`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortScope {
+    Loopback,
+    Any,
+    #[default]
+    #[serde(other)]
+    Lan,
+}
+
+/// The terminal or job a listening process belongs to (`kind` is `term` or `job`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PortOwner {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+}
+
+/// One TCP port in LISTEN state under a node-owned terminal or job.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ListeningPort {
+    pub port: u16,
+    #[serde(default)]
+    pub scope: PortScope,
+    /// Executable name only.
+    #[serde(default)]
+    pub process: String,
+    #[serde(default)]
+    pub owner: PortOwner,
+}
+
+/// `GET /api/computers/{id}/ports` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Ports {
+    #[serde(default)]
+    pub ports: Vec<ListeningPort>,
+    /// False where the node cannot look (not Linux or macOS). Older nodes omit it: true.
+    #[serde(default = "ports_supported_default")]
+    pub supported: bool,
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Ports { ports: Vec::new(), supported: true }
+    }
+}
+
+fn ports_supported_default() -> bool {
+    true
+}
+
+impl Api {
+    /// Listening TCP ports of the processes under a computer's terminals and jobs (FR-P7).
+    pub async fn computer_ports(&self, computer_id: &str) -> ApiResult<Ports> {
+        self.get(&ports_path(computer_id)).await
+    }
+}
+
+fn ports_path(computer_id: &str) -> String {
+    format!("/computers/{}/ports", seg(computer_id))
+}
+
+#[cfg(test)]
+mod ports_tests {
+    use super::*;
+
+    #[test]
+    fn fr_p7_the_ports_path_escapes_the_computer_id() {
+        assert_eq!(ports_path("a b"), "/computers/a%20b/ports");
+    }
+
+    #[test]
+    fn fr_p7_a_ports_answer_decodes() {
+        let p: Ports = serde_json::from_value(json!({
+            "ports": [
+                {"port": 3000, "scope": "loopback", "process": "node", "owner": {"kind": "job", "id": "j1"}},
+                {"port": 8080, "scope": "any", "process": "python3", "owner": {"kind": "term", "id": "t1"}},
+                {"port": 22, "scope": "future", "process": "x", "owner": {"kind": "term", "id": "t2"}}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(p.ports.len(), 3);
+        assert_eq!(p.ports[0].scope, PortScope::Loopback);
+        assert_eq!(p.ports[0].owner, PortOwner { kind: "job".into(), id: "j1".into() });
+        assert_eq!(p.ports[1].scope, PortScope::Any);
+        assert_eq!(p.ports[2].scope, PortScope::Lan);
+        assert!(p.supported, "an older node omits supported: true");
+        assert_eq!(serde_json::from_value::<Ports>(json!({})).unwrap(), Ports::default());
+        let off: Ports = serde_json::from_value(json!({"ports": [], "supported": false})).unwrap();
+        assert!(!off.supported);
     }
 }
 
@@ -1029,6 +1659,51 @@ mod tests {
     }
 
     #[test]
+    fn fr_t17_client_error_code_is_exposed() {
+        let raw = Raw {
+            status: StatusCode::BAD_REQUEST,
+            body: Bytes::from_static(br#"{"error":"hours must be a whole number from 1 to 168","code":"invalid_hours"}"#),
+        };
+        let e = Api::check(raw).err().expect("an error");
+        assert_eq!(e.code(), Some("invalid_hours"));
+        assert_eq!(e.status(), Some(400));
+        assert_eq!(e.to_string(), "server answered 400: hours must be a whole number from 1 to 168");
+        let raw = Raw { status: StatusCode::NOT_FOUND, body: Bytes::from_static(br#"{"error":"invite i1 not found","code":"not_found"}"#) };
+        assert_eq!(Api::check(raw).err().expect("an error").code(), Some("not_found"));
+        let raw = Raw { status: StatusCode::INTERNAL_SERVER_ERROR, body: Bytes::from_static(b"plain") };
+        assert_eq!(Api::check(raw).err().expect("an error").code(), None);
+    }
+
+    #[test]
+    fn fr_t14_client_not_a_member_code_and_invite_body() {
+        let e = ApiError::NotAMember { message: "m".into(), unknown: vec![] };
+        assert_eq!(e.code(), Some("not_a_member"));
+        assert_eq!(ApiError::Unauthorized("x".into()).code(), None);
+        assert_eq!(crate::channels::new_invite_body(None), json!({}));
+    }
+
+    #[test]
+    fn fr_t10_client_not_a_member_maps_to_its_error() {
+        let body = br#"{"error":"not a member: ghost","code":"not_a_member","reason":"not_a_member","unknown":["ghost","zed"]}"#;
+        let raw = Raw { status: StatusCode::BAD_REQUEST, body: Bytes::from_static(body) };
+        let err = Api::check(raw).err().expect("400 is an error");
+        assert_eq!(err.status(), Some(400));
+        assert!(err.to_string().contains("not a member: ghost"));
+        match err {
+            ApiError::NotAMember { message, unknown } => {
+                assert_eq!(message, "not a member: ghost");
+                assert_eq!(unknown, vec!["ghost".to_string(), "zed".to_string()]);
+            }
+            other => panic!("expected NotAMember, got {other:?}"),
+        }
+        // Another 400, with or without a code, stays a plain status error.
+        for b in [&br#"{"error":"bad","code":"invalid"}"#[..], b"nope"] {
+            let raw = Raw { status: StatusCode::BAD_REQUEST, body: Bytes::copy_from_slice(b) };
+            assert!(matches!(Api::check(raw), Err(ApiError::Status { status: 400, .. })));
+        }
+    }
+
+    #[test]
     fn fr_u7_usage_path_carries_days() {
         assert_eq!(usage_path(None), "/usage");
         assert_eq!(usage_path(Some(14)), "/usage?days=14");
@@ -1181,6 +1856,137 @@ impl Api {
     }
 }
 
+// ---- project settings (FR-L26) ----------------------------------------------------------------
+
+/// Why `PATCH /projects/{name}` failed. The server answers `{error, code}`; the status and the
+/// `code` are kept so a UI can pick its own sentence and never shows the raw text.
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectPatchError {
+    /// The server refused the patch: `code` is e.g. `name_taken`, `protected_project`,
+    /// `unknown_field`, `not_yet` (absent for an answer without a code).
+    #[error("server answered {status} ({code:?}): {message}")]
+    Rejected { status: u16, code: Option<String>, message: String },
+    /// Anything else: transport, authentication, undecodable answer.
+    #[error(transparent)]
+    Api(#[from] ApiError),
+}
+
+impl ProjectPatchError {
+    /// The error `code` of a refusal, if the server sent one.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            ProjectPatchError::Rejected { code, .. } => code.as_deref(),
+            ProjectPatchError::Api(_) => None,
+        }
+    }
+
+    /// The HTTP status of a refusal.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            ProjectPatchError::Rejected { status, .. } => Some(*status),
+            ProjectPatchError::Api(ApiError::Status { status, .. }) => Some(*status),
+            ProjectPatchError::Api(_) => None,
+        }
+    }
+
+    /// Reads a non-success answer: status, `code` and `error` of a JSON body.
+    pub(crate) fn from_answer(status: u16, body: &[u8]) -> ProjectPatchError {
+        let text = String::from_utf8_lossy(body).into_owned();
+        let v: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+        let code = v.as_ref().and_then(|v| v.get("code")).and_then(|c| c.as_str()).map(str::to_string);
+        let message = v.as_ref().and_then(|v| v.get("error")).and_then(|e| e.as_str()).map(str::to_string).unwrap_or(text);
+        if status == 401 {
+            return ProjectPatchError::Api(ApiError::Unauthorized(message));
+        }
+        ProjectPatchError::Rejected { status, code, message }
+    }
+}
+
+impl Api {
+    /// `PATCH /projects/{name}` (FR-L26): only the fields set in `patch` are sent. Answers the
+    /// updated project; a rename answers under the new name.
+    pub async fn patch_project(&self, name: &str, patch: &crate::wire::ProjectPatch) -> Result<Project, ProjectPatchError> {
+        let body = serde_json::to_value(patch).expect("ProjectPatch serialises");
+        let raw = self.send(Method::PATCH, &format!("/projects/{}", seg(name)), Some(body)).await?;
+        if !raw.status.is_success() {
+            return Err(ProjectPatchError::from_answer(raw.status.as_u16(), &raw.body));
+        }
+        serde_json::from_slice(&raw.body).map_err(|e| ProjectPatchError::Api(ApiError::Decode(e.to_string())))
+    }
+}
+
+#[cfg(test)]
+mod project_patch_tests {
+    use super::*;
+    use crate::wire::{MemberDefaults, ProjectPatch};
+
+    #[test]
+    fn fr_l26_a_patch_sends_only_its_set_fields() {
+        let p = ProjectPatch { repository: Some("github.com/a/b".into()), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"repository": "github.com/a/b"}));
+        assert!(ProjectPatch::default().is_empty());
+        assert_eq!(serde_json::to_value(ProjectPatch::default()).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn fr_l26_clearing_sends_an_empty_string_or_null() {
+        let p = ProjectPatch { default_branch: Some(String::new()), member_defaults: Some(None), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"default_branch": "", "member_defaults": null}));
+        let p = ProjectPatch {
+            member_defaults: Some(Some(MemberDefaults { agent: Some("codex".into()), ..Default::default() })),
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"member_defaults": {"agent": "codex"}}));
+    }
+
+    #[test]
+    fn fr_l26_profile_overrides_decode_with_tolerant_defaults() {
+        let p: Project = serde_json::from_value(json!({"name": "p", "profile_overrides": {"codex": "acc-1", "claude-code": null}})).unwrap();
+        assert_eq!(p.profile_overrides.get("codex"), Some(&Some("acc-1".to_string())));
+        assert_eq!(p.profile_overrides.get("claude-code"), Some(&None), "a deleted account reads as null");
+        let missing: Project = serde_json::from_value(json!({"name": "p"})).unwrap();
+        assert!(missing.profile_overrides.is_empty());
+        let null: Project = serde_json::from_value(json!({"name": "p", "profile_overrides": null})).unwrap();
+        assert!(null.profile_overrides.is_empty());
+    }
+
+    #[test]
+    fn fr_l26_profile_overrides_patch_sends_the_whole_object_or_nothing() {
+        assert_eq!(serde_json::to_value(ProjectPatch::default()).unwrap(), json!({}));
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("codex".to_string(), Some("acc-1".to_string()));
+        let p = ProjectPatch { profile_overrides: Some(m), ..Default::default() };
+        assert!(!p.is_empty());
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {"codex": "acc-1"}}));
+        let p = ProjectPatch { profile_overrides: Some(Default::default()), ..Default::default() };
+        assert_eq!(serde_json::to_value(&p).unwrap(), json!({"profile_overrides": {}}), "an empty map clears all");
+    }
+
+    #[test]
+    fn fr_l26_a_refusal_keeps_status_and_code() {
+        let e = ProjectPatchError::from_answer(409, br#"{"error":"name taken","code":"name_taken"}"#);
+        assert_eq!((e.status(), e.code()), (Some(409), Some("name_taken")));
+        let e = ProjectPatchError::from_answer(502, b"bad gateway");
+        assert_eq!((e.status(), e.code()), (Some(502), None));
+        assert!(matches!(ProjectPatchError::from_answer(401, b"{}"), ProjectPatchError::Api(ApiError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn fr_l26_a_project_decodes_with_and_without_the_new_fields() {
+        let old: Project = serde_json::from_value(json!({"name": "p", "created_at": 1, "computers": ["local"]})).unwrap();
+        assert_eq!((old.repository, old.member_defaults, old.archived), (None, None, false));
+        let new: Project = serde_json::from_value(json!({
+            "name": "p", "repository": "r", "default_branch": "develop",
+            "member_defaults": {"agent": "codex", "mode": "plan"}, "character_style": "crew", "archived": false
+        }))
+        .unwrap();
+        assert_eq!(new.default_branch.as_deref(), Some("develop"));
+        assert_eq!(new.member_defaults.unwrap().mode.as_deref(), Some("plan"));
+        let nulls: Project = serde_json::from_value(json!({"name": "p", "member_defaults": null, "character_style": null})).unwrap();
+        assert_eq!(nulls.member_defaults, None);
+    }
+}
+
 #[cfg(test)]
 mod usage_summary_tests {
     use super::*;
@@ -1219,5 +2025,499 @@ mod usage_summary_tests {
         assert!(!u.reported, "a missing flag is unknown, not reported");
         let u: SessionUsage = serde_json::from_value(json!({"session_id": "s", "total_tokens": 9, "reported": true})).unwrap();
         assert!(u.reported && u.total_tokens == 9);
+    }
+}
+
+// ---- harness detection (FR-A6.1) -------------------------------------------------------------
+
+/// One entry of `POST /api/computers/{id}/harnesses/detect`. Every field but `harness` is
+/// tolerant: a missing `version` or `path` is unknown, never invented.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct DetectedHarness {
+    pub harness: String,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Epoch ms of the probe.
+    #[serde(default)]
+    pub detected_at: Option<i64>,
+}
+
+/// `POST /computers/{id}/harnesses/detect`, below `/api`.
+pub(crate) fn detect_path(computer_id: &str) -> String {
+    format!("/computers/{}/harnesses/detect", seg(computer_id))
+}
+
+impl Api {
+    /// Probe a computer's harnesses now. `local` is this server. Another computer answers
+    /// 501 `not_implemented` (`code()` says so) and an unknown id 404.
+    pub async fn detect_harnesses(&self, computer_id: &str) -> ApiResult<Vec<DetectedHarness>> {
+        let raw = self.post(&detect_path(computer_id), json!({})).await?;
+        serde_json::from_slice(&raw.body).map_err(|e| ApiError::Decode(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod detect_tests {
+    use super::*;
+
+    #[test]
+    fn fr_a6_1_detect_decodes_server_shape_and_nulls() {
+        let v: Vec<DetectedHarness> = serde_json::from_value(json!([
+            {"harness": "claude-code", "installed": true, "version": "2.1.4", "path": "/opt/x/claude", "detected_at": 1761900000000i64},
+            {"harness": "codex", "installed": false, "version": null, "path": null, "detected_at": 1761900000000i64},
+            {"harness": "omp"}
+        ]))
+        .unwrap();
+        assert_eq!(v[0].path.as_deref(), Some("/opt/x/claude"));
+        assert_eq!(v[0].detected_at, Some(1761900000000));
+        assert!(!v[1].installed && v[1].version.is_none() && v[1].path.is_none());
+        assert_eq!(v[2], DetectedHarness { harness: "omp".into(), ..Default::default() });
+    }
+
+    #[test]
+    fn fr_a6_1_detect_path_escapes_the_id() {
+        assert_eq!(detect_path("local"), "/computers/local/harnesses/detect");
+        assert_eq!(detect_path("a/b c"), "/computers/a%2Fb%20c/harnesses/detect");
+    }
+
+    #[test]
+    fn fr_a6_1_not_implemented_maps_to_status_and_code() {
+        let raw = Raw {
+            status: StatusCode::NOT_IMPLEMENTED,
+            body: Bytes::from_static(br#"{"error":"not yet","code":"not_implemented"}"#),
+        };
+        let e = Api::check(raw).unwrap_err();
+        assert_eq!(e.status(), Some(501));
+        assert_eq!(e.code(), Some("not_implemented"));
+    }
+}
+
+// ---- hub devices, read only (FR-C1 / FR-C2, D39, #490) ------------------------
+
+/// What a device says it runs (`app` of the hub's device). Tolerant: a hint only.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct HubDeviceApp {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub version: String,
+}
+
+/// One entry of `GET /api/hub/devices`: the hub's `Device` fields the UI needs, flattened, plus
+/// the server's own flags. The hub reports no operating system, so none is shown.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct HubDevice {
+    pub endpoint_id: String,
+    #[serde(default)]
+    pub name: String,
+    /// `main_server`, `computer` or `client`; empty when the server did not say.
+    #[serde(default)]
+    pub role: String,
+    /// `None` when the hub did not report it.
+    #[serde(default)]
+    pub online: Option<bool>,
+    #[serde(default)]
+    pub last_seen: Option<i64>,
+    #[serde(default)]
+    pub app: Option<HubDeviceApp>,
+    /// This server itself.
+    #[serde(default)]
+    pub this_server: bool,
+    /// The computer registered for this device, if any.
+    #[serde(default)]
+    pub computer_id: Option<String>,
+    /// On this server's devices allow-list.
+    #[serde(default)]
+    pub allowed: bool,
+}
+
+/// A hub call failed. 503 means the server runs with the hub off, which is a state and not a
+/// failure; the message of the server is never carried to the screen.
+#[derive(Debug)]
+pub enum HubCallError {
+    Off,
+    Api(ApiError),
+}
+
+impl HubCallError {
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            HubCallError::Off => Some(503),
+            HubCallError::Api(e) => e.status(),
+        }
+    }
+}
+
+impl From<ApiError> for HubCallError {
+    fn from(e: ApiError) -> Self {
+        if e.status() == Some(503) {
+            HubCallError::Off
+        } else {
+            HubCallError::Api(e)
+        }
+    }
+}
+
+/// `/hub/devices`, below `/api`.
+pub(crate) fn hub_devices_path() -> &'static str {
+    "/hub/devices"
+}
+
+impl Api {
+    /// The account's devices as the hub integration lists them.
+    pub async fn hub_devices(&self) -> Result<Vec<HubDevice>, HubCallError> {
+        Ok(self.get(hub_devices_path()).await?)
+    }
+}
+
+#[cfg(test)]
+mod hub_device_tests {
+    use super::*;
+
+    #[test]
+    fn fr_c2_hub_devices_decode_the_server_shape_and_missing_fields() {
+        let v: Vec<HubDevice> = serde_json::from_value(json!([
+            {"endpoint_id": "abc", "name": "studio", "role": "computer", "created_at": 1, "last_seen": 5,
+             "online": true, "app": {"kind": "ember-node", "version": "0.9", "services": []},
+             "this_server": false, "computer_id": "studio", "allowed": true},
+            {"endpoint_id": "def"}
+        ]))
+        .unwrap();
+        assert_eq!(v[0].computer_id.as_deref(), Some("studio"));
+        assert_eq!(v[0].app.as_ref().map(|a| a.kind.as_str()), Some("ember-node"));
+        assert!(v[0].online == Some(true) && v[0].allowed && !v[0].this_server);
+        assert_eq!(v[1], HubDevice { endpoint_id: "def".into(), ..Default::default() });
+        assert_eq!(v[1].online, None);
+    }
+
+    #[test]
+    fn fr_c2_hub_devices_path_is_fixed() {
+        assert_eq!(hub_devices_path(), "/hub/devices");
+    }
+
+    #[test]
+    fn fr_c2_a_503_is_the_typed_hub_off_error() {
+        let raw = Raw {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: Bytes::from_static(br#"{"error":"the hub is off"}"#),
+        };
+        let e: HubCallError = Api::check(raw).unwrap_err().into();
+        assert!(matches!(e, HubCallError::Off));
+        let raw = Raw { status: StatusCode::BAD_REQUEST, body: Bytes::from_static(br#"{"error":"x"}"#) };
+        let e: HubCallError = Api::check(raw).unwrap_err().into();
+        assert_eq!(e.status(), Some(400));
+    }
+}
+
+// ---- Enrol code flow (FR-C1, FR-C2, FR-C2c, FR-C2g, D39) ----
+
+/// The answer to minting a one-time enrol code. The code and the command hold the secret, so
+/// `Debug` prints neither them nor the fingerprint (FR-C2g). The server sends `code` once.
+/// `door`, `server` and `server_fingerprint` are optional: older servers omit them.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct EnrolMinted {
+    pub id: String,
+    pub code: String,
+    pub expires_ms: i64,
+    /// The line to run on the other machine, exactly as the server gave it.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub warning: Option<String>,
+    /// `on` when present. A closed door mints nothing (409 `door_off`).
+    #[serde(default)]
+    pub door: Option<String>,
+    /// The server's full transport peer id; the server pins it in `command`. Omitted when the
+    /// transport is off. Never printed.
+    #[serde(default)]
+    pub server_peer_id: Option<String>,
+    /// The door URL the node should use.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// The server's short fingerprint, for comparison on screen only.
+    #[serde(default)]
+    pub server_fingerprint: Option<String>,
+}
+
+impl fmt::Debug for EnrolMinted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolMinted")
+            .field("id", &self.id)
+            .field("code", &"<redacted>")
+            .field("expires_ms", &self.expires_ms)
+            .field("command", &"<redacted>")
+            .field("door", &self.door)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The state of an enrolment, as the admin status route spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrolState {
+    Waiting,
+    AwaitingConfirmation,
+    Joined,
+    Denied,
+    Expired,
+    /// A state this client does not know; shown as a failure, never guessed.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a node says about itself. Untrusted display data: show it as plain text.
+#[derive(Clone, Default, Deserialize, PartialEq)]
+pub struct EnrolNodeInfo {
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub node_version: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub peer_id: Option<String>,
+}
+
+impl fmt::Debug for EnrolNodeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolNodeInfo").field("hostname", &self.hostname).finish_non_exhaustive()
+    }
+}
+
+/// `GET /computers/enrol-codes/{id}`. The optional fields appear only while the owner can decide.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct EnrolStatus {
+    pub status: EnrolState,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub node_info: Option<EnrolNodeInfo>,
+    #[serde(default)]
+    pub observed_addr: Option<String>,
+    #[serde(default)]
+    pub proposed_url: Option<String>,
+    /// Short form of the NODE's peer id, to compare with the node's screen.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub confirm_deadline_ms: Option<i64>,
+    /// How the server will register the computer: `url`, `peer` or `observed`. Appears while the
+    /// owner can decide; absent from an older server.
+    #[serde(default)]
+    pub registered_by: Option<String>,
+}
+
+impl fmt::Debug for EnrolStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolStatus").field("status", &self.status).finish_non_exhaustive()
+    }
+}
+
+/// What a confirm answered: `{computer_id, name}`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct EnrolConfirmed {
+    pub computer_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// An enrol call failed. The server's text never reaches the screen; the kind decides the line.
+#[derive(Debug)]
+pub enum EnrolCallError {
+    /// 503: the part of the server behind the call is off.
+    Off,
+    /// 404: the enrolment is not known (any more).
+    NotFound,
+    /// 409 `door_off`: the enrol door is not listening, so no code was made.
+    DoorOff,
+    /// 409 `door_url_unknown`: the door is on but no usable public URL is known; no code was made.
+    DoorUrlUnknown,
+    /// 409 `name_taken`: choose another name; the enrolment stays awaiting confirmation.
+    NameTaken,
+    /// 409 `wrong_state`: it is no longer awaiting confirmation.
+    WrongState,
+    /// 409 `fingerprint_mismatch`: the typed fingerprint differs from the node's (or the node has
+    /// no peer id). Nothing changed; the enrolment stays awaiting confirmation.
+    FingerprintMismatch,
+    /// 409 `fingerprint_required`: the node has only a peer id and no fingerprint was sent.
+    FingerprintRequired,
+    /// 410: the enrolment expired.
+    Expired,
+    Api(ApiError),
+}
+
+impl EnrolCallError {
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            EnrolCallError::Off => Some(503),
+            EnrolCallError::NotFound => Some(404),
+            EnrolCallError::NameTaken | EnrolCallError::WrongState | EnrolCallError::FingerprintMismatch | EnrolCallError::FingerprintRequired | EnrolCallError::DoorOff | EnrolCallError::DoorUrlUnknown => Some(409),
+            EnrolCallError::Expired => Some(410),
+            EnrolCallError::Api(e) => e.status(),
+        }
+    }
+}
+
+impl From<ApiError> for EnrolCallError {
+    fn from(e: ApiError) -> Self {
+        match &e {
+            ApiError::Status { status: 503, .. } => EnrolCallError::Off,
+            ApiError::Status { status: 404, .. } => EnrolCallError::NotFound,
+            ApiError::Status { status: 410, .. } => EnrolCallError::Expired,
+            ApiError::Status { status: 409, message, .. } if message == "door_off" => EnrolCallError::DoorOff,
+            ApiError::Status { status: 409, message, .. } if message == "door_url_unknown" => EnrolCallError::DoorUrlUnknown,
+            ApiError::Status { status: 409, message, .. } if message == "name_taken" => EnrolCallError::NameTaken,
+            ApiError::Status { status: 409, message, .. } if message == "wrong_state" => EnrolCallError::WrongState,
+            ApiError::Status { status: 409, message, .. } if message == "fingerprint_mismatch" => EnrolCallError::FingerprintMismatch,
+            ApiError::Status { status: 409, message, .. } if message == "fingerprint_required" => EnrolCallError::FingerprintRequired,
+            _ => EnrolCallError::Api(e),
+        }
+    }
+}
+
+/// Paths below `/api`. The id is one path segment.
+pub(crate) fn enrol_codes_path() -> &'static str {
+    "/computers/enrol-codes"
+}
+
+pub(crate) fn enrol_code_path(id: &str, tail: &str) -> String {
+    format!("{}/{}{tail}", enrol_codes_path(), seg(id))
+}
+
+/// `POST` body of a mint: `{name}`.
+pub(crate) fn enrol_mint_body(name: &str) -> serde_json::Value {
+    json!({ "name": name })
+}
+
+/// `POST .../confirm` body: `{name}` and, only when given, `expect_fingerprint` (the text the owner
+/// typed from the node's screen; mandatory for a node that reported a peer id and no url). The
+/// server refuses other unknown fields (422).
+pub(crate) fn enrol_confirm_body(name: &str, expect_fingerprint: Option<&str>) -> serde_json::Value {
+    match expect_fingerprint {
+        Some(fp) => json!({ "name": name, "expect_fingerprint": fp }),
+        None => json!({ "name": name }),
+    }
+}
+
+impl Api {
+    /// Mints a one-time code for a new computer called `name`.
+    pub async fn enrol_mint(&self, name: &str) -> Result<EnrolMinted, EnrolCallError> {
+        Ok(Self::decode(self.post(enrol_codes_path(), enrol_mint_body(name)).await?)?)
+    }
+
+    pub async fn enrol_status(&self, id: &str) -> Result<EnrolStatus, EnrolCallError> {
+        Ok(self.get(&enrol_code_path(id, "")).await?)
+    }
+
+    /// Confirms the enrolment under `name` (the owner may rename). `expect_fingerprint` is the text
+    /// the owner typed from the node's screen, sent only for a peer-only node.
+    pub async fn enrol_confirm(&self, id: &str, name: &str, expect_fingerprint: Option<&str>) -> Result<EnrolConfirmed, EnrolCallError> {
+        Ok(Self::decode(self.post(&enrol_code_path(id, "/confirm"), enrol_confirm_body(name, expect_fingerprint)).await?)?)
+    }
+
+    pub async fn enrol_deny(&self, id: &str) -> Result<(), EnrolCallError> {
+        self.post(&enrol_code_path(id, "/deny"), json!({})).await?;
+        Ok(())
+    }
+
+    /// Cancels a code that is not used yet.
+    pub async fn enrol_cancel(&self, id: &str) -> Result<(), EnrolCallError> {
+        Self::check(self.send(Method::DELETE, &enrol_code_path(id, ""), None).await?)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod enrol_tests {
+    use super::*;
+
+    const CODE: &str = "SECRETCODE-0123456789abcdef";
+
+    fn minted() -> EnrolMinted {
+        serde_json::from_value(json!({
+            "id": "e1", "code": CODE, "expires_ms": 5,
+            "command": format!("ember-node enrol {CODE} --server http://x:1"),
+            "warning": "w", "door": "on", "server": "http://x:1", "server_fingerprint": "ab12 cd34", "server_peer_id": "PEERID9999"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn fr_c2_enrol_minted_debug_hides_the_code_command_and_fingerprint() {
+        let m = minted();
+        let d = format!("{m:?}");
+        assert!(!d.contains(CODE) && !d.contains("ember-node enrol") && !d.contains("ab12") && !d.contains("PEERID9999"), "{d}");
+        assert!(d.contains("e1"));
+        assert_eq!(m.code, CODE);
+    }
+
+    #[test]
+    fn fr_c2_enrol_minted_decodes_the_old_shape_without_door_keys() {
+        let m: EnrolMinted = serde_json::from_value(json!({"id":"e","code":"c","expires_ms":1,"command":"x","warning":"w"})).unwrap();
+        assert_eq!((m.door, m.server, m.server_fingerprint), (None, None, None));
+    }
+
+    #[test]
+    fn fr_c2_enrol_status_decodes_every_state_and_missing_fields() {
+        for (s, want) in [
+            ("waiting", EnrolState::Waiting),
+            ("awaiting_confirmation", EnrolState::AwaitingConfirmation),
+            ("joined", EnrolState::Joined),
+            ("denied", EnrolState::Denied),
+            ("expired", EnrolState::Expired),
+            ("something_new", EnrolState::Unknown),
+        ] {
+            let st: EnrolStatus = serde_json::from_value(json!({"status": s, "name": "lab"})).unwrap();
+            assert_eq!(st.status, want);
+            assert!(st.node_info.is_none() && st.observed_addr.is_none() && st.fingerprint.is_none());
+        }
+        let st: EnrolStatus = serde_json::from_value(json!({
+            "status": "awaiting_confirmation", "name": "lab", "observed_addr": "10.0.0.5:5000",
+            "node_info": {"hostname": "box", "os": "linux", "arch": "x86_64", "node_version": "0.1"},
+            "fingerprint": "ab12 cd34", "confirm_deadline_ms": 9, "proposed_url": "http://10.0.0.5:8741"
+        }))
+        .unwrap();
+        assert_eq!(st.node_info.as_ref().map(|n| n.hostname.as_str()), Some("box"));
+        assert!(!format!("{st:?}").contains("ab12"));
+        assert_eq!(st.registered_by, None);
+        let st: EnrolStatus = serde_json::from_value(json!({"status": "awaiting_confirmation", "registered_by": "peer"})).unwrap();
+        assert_eq!(st.registered_by.as_deref(), Some("peer"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_paths_and_bodies_are_fixed_and_carry_no_code_or_fingerprint() {
+        assert_eq!(enrol_codes_path(), "/computers/enrol-codes");
+        assert_eq!(enrol_code_path("e1", "/confirm"), "/computers/enrol-codes/e1/confirm");
+        assert_eq!(enrol_mint_body("lab"), json!({"name": "lab"}));
+        let c = enrol_confirm_body("lab", None);
+        assert_eq!(c, json!({"name": "lab"}));
+        assert!(c.get("expect_fingerprint").is_none());
+        assert_eq!(enrol_confirm_body("lab", Some("ab12 cd34")), json!({"name": "lab", "expect_fingerprint": "ab12 cd34"}));
+        assert!(!enrol_code_path("a/b", "").contains("a/b"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_errors_are_typed_by_status_and_key() {
+        let st = |status: u16, message: &str| ApiError::Status { status, message: message.into(), code: None };
+        assert!(matches!(EnrolCallError::from(st(503, "x")), EnrolCallError::Off));
+        assert!(matches!(EnrolCallError::from(st(404, "x")), EnrolCallError::NotFound));
+        assert!(matches!(EnrolCallError::from(st(410, "expired")), EnrolCallError::Expired));
+        assert!(matches!(EnrolCallError::from(st(409, "name_taken")), EnrolCallError::NameTaken));
+        assert!(matches!(EnrolCallError::from(st(409, "wrong_state")), EnrolCallError::WrongState));
+        assert!(matches!(EnrolCallError::from(st(409, "fingerprint_mismatch")), EnrolCallError::FingerprintMismatch));
+        assert_eq!(EnrolCallError::FingerprintMismatch.status(), Some(409));
+        assert!(matches!(EnrolCallError::from(st(409, "fingerprint_required")), EnrolCallError::FingerprintRequired));
+        assert_eq!(EnrolCallError::FingerprintRequired.status(), Some(409));
+        assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
+        assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
+        assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));
     }
 }

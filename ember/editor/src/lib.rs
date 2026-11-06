@@ -34,6 +34,7 @@ pub mod coords;
 pub mod engine;
 pub mod fallback;
 pub mod diagnostics;
+pub mod paths;
 pub mod document;
 pub mod hover;
 pub mod ids;
@@ -49,7 +50,7 @@ pub use crate::bridge::{BridgeAction, DocumentWidgetState, WidgetBridge};
 pub use crate::fallback::{fallback_for, vscode_fallback_url, ConnectOutcome, Fallback, FallbackTarget};
 pub use crate::engine::{CoreOptions, Effect, ExternalChange, Input, SessionCore, SessionUpdate};
 pub use crate::coords::{WidgetPos, WidgetRange};
-pub use crate::session::{EditorSession, SessionConfig};
+pub use crate::session::{DirLister, EditorSession, SessionConfig};
 pub use crate::widget::{
     Decoration, DecorationId, DecorationKind, HoverPhase, Severity, WidgetCommand, WidgetEvent,
     DECORATION_RECORD_LEN,
@@ -70,4 +71,7 @@ pub enum Error {
     /// The session task has ended.
     #[error("session closed")]
     Closed,
+    /// An explorer edit named a path or a name that is not allowed.
+    #[error("{0}")]
+    Path(crate::paths::PathError),
 }

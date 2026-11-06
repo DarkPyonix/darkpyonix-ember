@@ -12,15 +12,15 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, DrawList, IconRole, ShapeRole, TextOverflow};
+use compose_rust::{Alignment, Color, DrawList, Paint, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
-    harness_block, kpis, mode_after_harness_change, model_catalog, modes_for, needs_approve_all,
+    harness_block, kpis, mode_after_harness_change, composer_chip_budget, composer_chip_rows, composer_chip_width, mode_header, mode_picker_rows_pending, mode_tap, popover_width, model_catalog, modes_for, needs_approve_all,
     project_options, project_tile_line, resolve_cwd, shortcut_label, split_chip_rows,
     success_percent, title_from_message, CrewMember, Dash, Harness, HarnessBar, Kpi, ModelOption,
-    PermMode, ProjectTile, Selection, StatusCounts, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
-    EMPTY_CREW, EMPTY_HARNESS_USAGE, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
+    ModeRow, PermMode, ProjectTile, Selection, StatusCounts, ATTACH_UNSUPPORTED, COMPOSER_PLACEHOLDER, DEFAULT_PROJECT,
+    EMPTY_CREW, EMPTY_HARNESS_USAGE, CiResult, GithubCard, GithubPill, INTEGRATIONS_TITLE, LATER_INTEGRATIONS, LATER_LINE, LATER_PILL, GITHUB_NAME, EMPTY_PROJECTS, GREETING, SUGGESTIONS, UNAVAILABLE,
 };
 use super::components::{
     AppButton, ButtonKind, Clickable, EmberField, EmberSheet, FieldOptions, FilterChip, Label,
@@ -41,6 +41,67 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
 /// The width of the option popups of the composer's chips.
 const POPUP_WIDTH: f32 = 280.0;
+/// The permission popover (mockup `.mp-pop.mp-mode`).
+const MODE_POPOVER_WIDTH: f32 = 340.0;
+/// The model popover: a rail of harnesses beside the search and the rows.
+const MODEL_POPOVER_WIDTH: f32 = 560.0;
+const MODEL_RAIL_WIDTH: f32 = 128.0;
+
+/// The permission-mode rows (FR-L16, mockup v8 `.md-row`): a header "권한 모드 · harness", then
+/// one row per mode with a shield (a warning triangle on the danger row), the title, a
+/// one-line description and a check on the chosen row. The bypass row is red. Tapping calls
+/// `on_tap(i)`; closing and the bypass confirmation belong to the caller.
+fn ModeBody(header: &str, rows: &[ModeRow], width: f32, on_tap: impl FnMut(usize) + Clone + 'static) {
+    let p = ember_theme().palette;
+    cu::Column().modifier(Modifier::new().width(width)).content(|| {
+        if !header.is_empty() {
+            cu::Row().modifier(Modifier::new().width(width).padding(SP[2])).content(|| {
+                Label(header, Fs::Xs, Weight::Semibold, Some(paint(p.muted)), Some(1));
+            });
+        }
+        for (i, r) in rows.iter().enumerate() {
+            let mut tap = on_tap.clone();
+            let bg = if r.chosen { paint(p.sel) } else { Paint::Literal(Color::argb(0)) };
+            let tone = if r.danger { p.red.strong } else { p.muted };
+            let title = if r.danger { p.red.strong } else { p.text };
+            let icon = if r.danger { ICON_WARN } else { ICON_SHIELD };
+            Clickable(
+                Modifier::new().width(width).background(bg).corner_radius(CORNER_SM).padding(SP[2]),
+                Alignment::CenterStart,
+                move || tap(i),
+                || {
+                    cu::Row().alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                        NavIcon(icon, tone.to_argb(), 16.0);
+                        cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            Label(r.title, Fs::Sm, Weight::Medium, Some(paint(title)), Some(1));
+                            Label(r.description, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                        });
+                        if r.chosen {
+                            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                            NavIcon(ICON_CHECK, p.text.to_argb(), 16.0);
+                        }
+                    });
+                },
+            );
+        }
+    });
+}
+
+/// The permission picker as a bottom sheet at 560 and below (the shared sheet, FR-L32), with
+/// the same header, rows and bypass confirmation as the popover.
+fn ModeSheet(
+    open: bool,
+    header: &str,
+    rows: &[ModeRow],
+    on_dismiss: impl FnMut() + Clone + 'static,
+    on_tap: impl FnMut(usize) + Clone + 'static,
+) {
+    let width = (compose_rust::runtime::current_window_size().width_dp - 2.0 * SP[3]).max(240.0);
+    EmberSheet(header, open, on_dismiss, None, || {
+        cu::Box().modifier(Modifier::new().fill_max_width().padding(SP[1])).content(|| ModeBody("", rows, width - 2.0 * SP[1], on_tap));
+    });
+}
 
 macro_rules! line_icon {
     ($d:literal) => {
@@ -53,6 +114,15 @@ macro_rules! line_icon {
 }
 
 const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
+const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
+const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
+const ICON_PC: &str = include_str!("../../../assets/nav/pc.svg");
+// TODO(item 6): the model chip's harness glyph; the terminal stands in.
+const ICON_TERMINAL: &str = include_str!("../../../assets/nav/terminal.svg");
+const ICON_CODE: &str = include_str!("../../../assets/nav/code.svg");
+const ICON_GIT: &str = include_str!("../../../assets/nav/git.svg");
+const ICON_CHART_NAV: &str = include_str!("../../../assets/nav/chart.svg");
+const ICON_WARN: &str = line_icon!("M12 9.5v4M12 16.75h.01M10.3 3.9L2.4 17.6a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
 const ICON_ZAP: &str = line_icon!("M13 3L5 13.5h6L10 21l8-10.5h-6z");
@@ -329,14 +399,34 @@ enum Pick {
     Computer,
 }
 
-/// `EMBER_CR_HOME_PICK=project|model|mode|computer` opens one list at the start, and
-/// `EMBER_CR_HOME_SUGGEST=0..2` takes a suggestion, for review captures.
+/// `EMBER_CR_HOME_PICK=project|model|mode|computer|mode_armed` opens one list at the start
+/// (`mode_armed` opens the permission picker with the bypass confirmation armed, so its row
+/// reads "다시 눌러 바이패스 적용"), `EMBER_CR_HOME_MODE=bypass` presets the permission mode so the
+/// composer shows the warning chip, and `EMBER_CR_HOME_SUGGEST=0..2` takes a suggestion, for
+/// review captures.
 fn initial_pick() -> Option<Pick> {
-    match std::env::var("EMBER_CR_HOME_PICK").ok().as_deref() {
-        Some("project") => Some(Pick::Project),
-        Some("model") => Some(Pick::Model),
-        Some("mode") => Some(Pick::Mode),
-        Some("computer") => Some(Pick::Computer),
+    pick_from(std::env::var("EMBER_CR_HOME_PICK").ok().as_deref()).0
+}
+
+/// The list a `EMBER_CR_HOME_PICK` value opens and whether it also arms the bypass confirm.
+fn pick_from(value: Option<&str>) -> (Option<Pick>, bool) {
+    match value {
+        Some("project") => (Some(Pick::Project), false),
+        Some("model") => (Some(Pick::Model), false),
+        Some("mode") => (Some(Pick::Mode), false),
+        Some("mode_armed") => (Some(Pick::Mode), true),
+        Some("computer") => (Some(Pick::Computer), false),
+        _ => (None, false),
+    }
+}
+
+/// The permission mode a `EMBER_CR_HOME_MODE` value presets.
+fn mode_from(value: Option<&str>) -> Option<PermMode> {
+    match value {
+        Some("bypass") => Some(PermMode::Bypass),
+        Some("edits") => Some(PermMode::Edits),
+        Some("plan") => Some(PermMode::Plan),
+        Some("ask") => Some(PermMode::Ask),
         _ => None,
     }
 }
@@ -355,7 +445,7 @@ impl Skip {
         let v = match std::env::var("EMBER_CR_SCROLL").ok().as_deref() {
             Some("bottom") => (total_est - window_h).max(0.0),
             // Named starts: the first block in view. `status` shows the 팀원 상태 card with its
-            // legend at the top, `usage` the 하네스별 세션 and 지금 일하는 팀원 row.
+            // legend at the top, `usage` the 하네스별 사용량 and 지금 일하는 팀원 row.
             Some("status") => EST_HERO + EST_HEAD,
             Some("usage") => EST_HERO + EST_HEAD + EST_TREND,
             Some("efficiency") => EST_HERO + EST_HEAD + EST_TREND + EST_USAGE,
@@ -423,6 +513,8 @@ struct Composer {
     suggestion: MutableState<Option<String>>,
     busy: MutableState<bool>,
     open: MutableState<Option<Pick>>,
+    /// The mode that waits for its confirming tap (bypass), if any.
+    mode_pending: MutableState<crate::ui::home::ModePending>,
     harness_filter: MutableState<Option<Harness>>,
     query: MutableState<String>,
 }
@@ -430,11 +522,17 @@ struct Composer {
 impl Composer {
     fn new() -> Self {
         Composer {
-            selection: mutable_state_of(Selection::initial()),
+            selection: mutable_state_of(match mode_from(std::env::var("EMBER_CR_HOME_MODE").ok().as_deref()) {
+                Some(m) => Selection::initial().with_mode(m),
+                None => Selection::initial(),
+            }),
             typed: mutable_state_of(String::new()),
             suggestion: mutable_state_of(initial_suggestion()),
             busy: mutable_state_of(false),
             open: mutable_state_of(initial_pick()),
+            mode_pending: mutable_state_of(
+                pick_from(std::env::var("EMBER_CR_HOME_PICK").ok().as_deref()).1.then(|| (PermMode::Bypass, now_ms())),
+            ),
             harness_filter: mutable_state_of(None),
             query: mutable_state_of(String::new()),
         }
@@ -567,21 +665,18 @@ impl Composer {
                 }
             });
         }
-        let modes = modes_for(sel.option.harness);
-        let mode_labels: Vec<String> = modes.iter().map(|m| m.label().to_string()).collect();
-        {
-            let selection = self.selection.clone();
-            OptionSheet(
+        // Compact widths keep the modal; wider ones use the popover under the chip, drawn in
+        // the composer card (`mode_popover`).
+        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        if compact {
+            let me = self.clone();
+            let dismiss = self.dismiss_mode();
+            ModeSheet(
                 open == Some(Pick::Mode),
-                &mode_labels,
-                modes.iter().position(|m| *m == sel.mode),
-                POPUP_WIDTH,
-                close.clone(),
-                move |i| {
-                    if let Some(m) = modes.get(i) {
-                        selection.set(selection.get_untracked().with_mode(*m));
-                    }
-                },
+                &mode_header(sel.option.harness),
+                &mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m)),
+                dismiss,
+                move |i| me.tap_mode(i),
             );
         }
         let mut labels = vec![self.local_name(ui)];
@@ -595,11 +690,89 @@ impl Composer {
                 selection.set(s);
             });
         }
-        self.model_sheet(ui, &sel, open == Some(Pick::Model), close);
+        // Compact widths keep the modal (a bottom sheet in the spec); wider ones use the popover
+        // under the chip, drawn in the composer card.
+        let compact = layout(compose_rust::runtime::current_window_size().width_dp).compact;
+        self.model_sheet(ui, &sel, compact && open == Some(Pick::Model), close);
     }
 
-    /// The model picker: harness filter, search and the rows with their reasons (FR-L15).
+    /// Closing the permission picker also withdraws a waiting bypass confirmation.
+    fn dismiss_mode(&self) -> impl FnMut() + Clone + 'static {
+        let (o, pending) = (self.open.clone(), self.mode_pending.clone());
+        move || {
+            pending.set(None);
+            if o.get_untracked() == Some(Pick::Mode) {
+                o.set(None);
+            }
+        }
+    }
+
+    /// A tap on row `i` of the permission picker: bypass needs a second tap (`mode_tap`).
+    fn tap_mode(&self, i: usize) {
+        let sel = self.selection.get_untracked();
+        let Some(m) = modes_for(sel.option.harness).get(i).copied() else { return };
+        let (pending, applied) = mode_tap(sel.mode, self.mode_pending.get_untracked(), m, now_ms());
+        self.mode_pending.set(pending);
+        if let Some(m) = applied {
+            self.selection.set(sel.with_mode(m));
+            self.open.set(None);
+        }
+    }
+
+    /// The permission picker as a popover under the mode chip (mockup `.mp-pop.mp-mode`, 340 dp).
+    fn mode_popover(&self, sel: &Selection, anchor: impl FnOnce()) {
+        let theme = ember_theme();
+        let p = theme.palette;
+        let open = self.open.get() == Some(Pick::Mode);
+        let width = MODE_POPOVER_WIDTH;
+        let rows = mode_picker_rows_pending(sel.option.harness, sel.mode, self.mode_pending.get().map(|(m, _)| m));
+        let header = mode_header(sel.option.harness);
+        cu::Menu(open).on_dismiss(self.dismiss_mode()).anchor(anchor).content(|| {
+            let me = self.clone();
+            cu::Box()
+                .modifier(
+                    with_shadows(Modifier::new(), theme.shadow_lg())
+                        .width(width)
+                        .background(paint(p.surface))
+                        .border(1.0, paint(p.line))
+                        .corner_radius(CORNER_MD)
+                        .padding(SP[1]),
+                )
+                .content(|| ModeBody(&header, &rows, width - 2.0 * SP[1], move |i| me.tap_mode(i)));
+        });
+    }
+
+    /// The model picker as a modal (compact widths, where the spec asks for a bottom sheet):
+    /// harness chips on top, search and the rows with their reasons (FR-L15).
     fn model_sheet(&self, ui: &SharedUi, sel: &Selection, open: bool, close: impl FnMut() + Clone + 'static) {
+        EmberSheet("모델 선택", open, close.clone(), None, || {
+            self.model_body(ui, sel, false, close);
+        });
+    }
+
+    /// The model picker as a popover hanging under the model chip (FR-L15, mockup v8 `.mpick`):
+    /// a left rail of harnesses, then search and the rows. The toolkit `Menu` places its popup
+    /// below its anchor since compose-rust v0.0.5 (#383), with any content as its entries.
+    /// Not built: the rail's favourites group, favourite stars and profile names, which need
+    /// stored favourites and FR-L17 profiles (SPEC FR-L15 note).
+    fn model_popover(&self, ui: &SharedUi, sel: &Selection, anchor: impl FnOnce(), close: impl FnMut() + Clone + 'static) {
+        let open = self.open.get() == Some(Pick::Model);
+        let dismiss = {
+            let o = self.open.clone();
+            move || {
+                if o.get_untracked() == Some(Pick::Model) {
+                    o.set(None);
+                }
+            }
+        };
+        cu::Menu(open).on_dismiss(dismiss).anchor(anchor).content(|| {
+            self.model_body(ui, sel, true, close);
+        });
+    }
+
+    /// The picker's contents. With `rail` the harness filter is a vertical rail at the left
+    /// and the list is a fixed-width column beside it; without, chips run along the top.
+    fn model_body(&self, ui: &SharedUi, sel: &Selection, rail: bool, close: impl FnMut() + Clone + 'static) {
         let p = ember_theme().palette;
         let agents: Vec<(String, bool)> = ui.live.agents.get().iter().map(|a| (a.kind.clone(), a.installed)).collect();
         let limited: Vec<String> = {
@@ -618,17 +791,17 @@ impl Composer {
         let filter = self.harness_filter.get();
         let query = self.query.get();
         let rows = filter_models(&all, filter, &query);
-        EmberSheet("모델 선택", open, close.clone(), None, || {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
-                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-                    let f = self.harness_filter.clone();
-                    FilterChip("전체", filter.is_none(), move || f.set(None));
-                    for h in Harness::ALL {
-                        cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                        let f = self.harness_filter.clone();
-                        FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
-                    }
-                });
+        let filters = || {
+            let f = self.harness_filter.clone();
+            FilterChip("전체", filter.is_none(), move || f.set(None));
+            for h in Harness::ALL {
+                cu::Spacer().modifier(Modifier::new().width(SP[0]).height(SP[0]));
+                let f = self.harness_filter.clone();
+                FilterChip(h.label(), filter == Some(h), move || f.set(Some(h)));
+            }
+        };
+        let list = || {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
                 let q = self.query.clone();
                 EmberField(FieldOptions {
                     fill_max_width: true,
@@ -681,7 +854,28 @@ impl Composer {
                     });
                 });
             });
-        });
+        };
+        if rail {
+            let surface = with_shadows(Modifier::new(), ember_theme().shadow_lg())
+                .width(popover_width(MODEL_POPOVER_WIDTH, compose_rust::runtime::current_window_size().width_dp))
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_MD)
+                .padding(SP[1]);
+            cu::Row().modifier(surface).content(|| {
+                cu::Column().spacing(SP[0]).modifier(Modifier::new().width(MODEL_RAIL_WIDTH).padding(SP[1])).content(|| {
+                    filters();
+                });
+                cu::Box().modifier(Modifier::new().weight(1.0).padding(SP[1])).content(list);
+            });
+        } else {
+            cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[3])).content(|| {
+                cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
+                    filters();
+                });
+                list();
+            });
+        }
     }
 }
 
@@ -751,24 +945,100 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
     cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, shell::leak_doc(doc))).modifier(Modifier::new().size(px, px));
 }
 
-/// A composer chip (`.pickchip`): the toolkit button on a `surface-2` pill with its glyph and the
-/// content-sized text; `icon_only` chips are 32 px circles.
-/// TODO(compose-rust#372, #373): the mockup's folder, star, shield and monitor line icons and the
-/// chevron of the model and mode chips need a button that takes an SVG icon; the toolkit glyph
-/// roles stand in.
-fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, weighted: bool, on_click: impl FnMut() + 'static) {
+/// A composer chip (`.pickchip`): a 32 px `surface-2` pill built like `WarnChip`: 16 px glyph,
+/// 13 px weight 500 label cut with an ellipsis, and the 14 px chevron of a picker. `icon_only`
+/// chips are 32 px circles with the glyph centred.
+/// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+fn ComposerChip(
+    text: &str,
+    icon: &'static str,
+    chevron: bool,
+    selected: bool,
+    icon_only: bool,
+    weighted: bool,
+    on_click: impl FnMut() + 'static,
+) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
     let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
     let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
-    cu::Button(if icon_only { "" } else { text })
-        .variant(ButtonVariant::Text)
-        .max_lines(1)
-        .overflow(TextOverflow::Ellipsis)
-        .color(paint(p.text_2))
-        .icon(icon)
-        .modifier(modifier)
-        .on_click(on_click);
+    Clickable(modifier, Alignment::Center, on_click, || {
+        if icon_only {
+            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            return;
+        }
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            if weighted {
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                });
+            } else {
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            }
+            if chevron {
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 14.0);
+            }
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+        });
+    });
+}
+
+/// A suggestion chip (`.chip.outline`): 32 px, `surface` with a 1 px line, an 18 px glyph and
+/// the label at 13 px weight 500.
+fn SuggestionChip(text: &str, icon: &'static str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .corner_radius(H_CTL / 2.0),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                NavIcon(icon, p.text_2.to_argb(), 18.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+        },
+    );
+}
+
+/// The side of the Home send button (`.sendround`).
+pub const SEND_BUTTON_DP: f32 = 36.0;
+
+/// Whether a composer chip draws the picker chevron: the project, model and mode pickers do, the
+/// computer chip does not (mockup `.mp-chev`, FR-L11).
+fn chip_has_chevron(pick: Pick) -> bool {
+    pick != Pick::Computer
+}
+
+/// The composer's mode chip while bypass is on: `red-soft` fill, red text, the warning triangle.
+fn WarnChip(text: &str, icon_only: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new().height(H_CTL).background(paint(p.red.soft)).shape_role(ShapeRole::Full),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
+                NavIcon(ICON_WARN, p.red.strong.to_argb(), 16.0);
+                if !icon_only {
+                    cu::Spacer().modifier(Modifier::new().width(SP[0]));
+                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(1));
+                }
+                cu::Spacer().modifier(Modifier::new().width(if icon_only { SP[1] } else { SP[2] }));
+            });
+        },
+    );
 }
 
 fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
@@ -785,26 +1055,26 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let gap = if l.compact { SP[0] } else { 6.0 };
     let model_text = sel.option.chip_label();
     let mode_text = sel.mode.label().to_string();
-    let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool| {
+    let chip = |text: &str, icon: &'static str, pick: Pick, selected: bool| {
         let open = c.open.clone();
-        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, !icon_only || pick == Pick::Project, move || open.set(Some(pick)));
+        // Wide chips are content-sized, their text cut to the budget; only the compact project
+        // chip takes the rest of the row.
+        ComposerChip(text, icon, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
-        // TODO(FR-L11): attachments need the file picker and an upload API.
-        super::components::IconButton(IconRole::Add, true, || notice::post(UNAVAILABLE));
+        // TODO(compose-rust#483, #500): attachments need the file picker (planned for v0.0.8)
+        // and an upload API. Until then the button is dimmed and says why when tapped.
+        // TODO(compose-rust#429): the dimmed wrapper has no disabled accessible name.
+        cu::Box().modifier(Modifier::new().alpha(0.5)).content(|| {
+            super::components::IconButton(IconRole::Add, true, || notice::post(ATTACH_UNSUPPORTED));
+        });
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
-        // `.sendround`: a 36 px `--ink` circle with the send glyph.
-        // TODO(compose-rust#372): the toolkit glyph is not the mockup's paper plane.
-        // TODO(compose-rust#387): a disabled button turns grey instead of keeping `--ink`.
-        cu::Button("")
-            .icon(IconRole::Send)
-            .enabled(sendable)
-            .variant(ButtonVariant::Text)
-            .color(paint(p.ink_text))
-            .modifier(Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full))
-            .on_click(move || c2.send(&ui2));
+        // `.sendround`: a 36 px `--ink` circle with the paper plane, always ink. Composer::send
+        // guards `can_send`, so an empty input does nothing.
+        // TODO(compose-rust#428, #429): the circle has no accessible name ("보내기").
+        super::session::SendCircleButton(SEND_BUTTON_DP, move || c2.send(&ui2));
     };
 
     // `.bigcomposer`: surface, 1 px line, the xl radius, 16 / 16 / 12 padding.
@@ -842,11 +1112,62 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                 }
                 cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                     cu::Box().modifier(Modifier::new().size(36.0, 36.0)).content(add);
-                    cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
-                        chip(&sel.project, IconRole::Library, Pick::Project, false);
-                        chip(&model_text, IconRole::Compose, Pick::Model, false);
-                        chip(&mode_text, IconRole::Settings, Pick::Mode, sel.mode.is_bypass());
-                        chip(&computer_text, IconRole::Sidebar, Pick::Computer, false);
+                    cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
+                        // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
+                        let chip_at = |i: usize, text: &str| match i {
+                            0 => chip(text, ICON_FOLDER, Pick::Project, false),
+                            1 => {
+                                let close = {
+                                    let o = c.open.clone();
+                                    move || o.set(None)
+                                };
+                                let one = || chip(text, ICON_TERMINAL, Pick::Model, false);
+                                if l.compact {
+                                    one();
+                                } else {
+                                    c.model_popover(ui, &sel, one, close);
+                                }
+                            }
+                            2 => {
+                                let one = || {
+                                    if sel.mode.is_bypass() {
+                                        let open = c.open.clone();
+                                        WarnChip(text, icon_only, move || open.set(Some(Pick::Mode)));
+                                    } else {
+                                        chip(text, ICON_SHIELD, Pick::Mode, false);
+                                    }
+                                };
+                                if l.compact {
+                                    one();
+                                } else {
+                                    c.mode_popover(&sel, one);
+                                }
+                            }
+                            _ => chip(text, ICON_PC, Pick::Computer, false),
+                        };
+                        let texts = [sel.project.clone(), model_text.clone(), mode_text.clone(), computer_text.clone()];
+                        if l.compact {
+                            cu::Row().spacing(gap).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                                for (i, t) in texts.iter().enumerate() {
+                                    chip_at(i, t);
+                                }
+                            });
+                        } else {
+                            let fitted: Vec<String> = texts
+                                .iter()
+                                .zip(composer_chip_budget(w))
+                                .map(|(t, b)| crate::ui::home::composer_fit_text(t, b))
+                                .collect();
+                            let widths: Vec<f32> = fitted.iter().map(|t| composer_chip_width(t)).collect();
+                            // A line per row of chips: a narrow card wraps rather than drops a chip.
+                            for row in composer_chip_rows(&widths, w) {
+                                cu::Row().spacing(gap).alignment(Alignment::CenterStart).content(|| {
+                                    for i in row {
+                                        chip_at(i, &fitted[i]);
+                                    }
+                                });
+                            }
+                        }
                     });
                     if c.busy.get() {
                         cu::IndeterminateProgressIndicator().circular(true).modifier(Modifier::new().size(18.0, 18.0));
@@ -857,17 +1178,22 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         });
 }
 
+/// The glyph of the `i`th suggestion in a line. TODO(item 6): the mockup's spark star needs the
+/// harness glyph asset; `code.svg` stands in until it lands.
+fn suggestion_icon(i: usize) -> &'static str {
+    [ICON_CODE, ICON_GIT, ICON_CHART_NAV][i % 3]
+}
+
 /// `.sugg`: outlined chips, three a line (two up to 900 px), centred.
 fn Suggestions(c: &Composer, width_dp: f32) {
     let n = suggestion_cols(width_dp);
     cu::Column().alignment(Alignment::Center).spacing(SP[1]).content(|| {
         for line in SUGGESTIONS.chunks(n) {
             cu::Row().spacing(SP[1]).content(|| {
-                for text in line {
+                for (i, text) in line.iter().enumerate() {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
-                    // TODO(compose-rust#372): the mockup's sparkle, branch and bars icons.
-                    AppButton(text, None, ButtonKind::Default, true, true, false, move || s.set(Some(t.clone())));
+                    SuggestionChip(text, suggestion_icon(i), move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -901,9 +1227,10 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
                 (4.0, Box::new(|| StatusTile(&d.counts, ui, if l.wide { (content_w - GAP_CARD) * 4.0 / 12.0 } else { content_w }, l.compact))),
             ]);
         }
+        let usage_w = if l.wide { (content_w - GAP_CARD) * 7.0 / 12.0 - 2.0 * PAD_CARD_H } else { content_w - 2.0 * PAD_CARD_H }.max(200.0);
         if skip.show(EST_USAGE) {
             Weighted(stacked, GAP_CARD, vec![
-                (7.0, Box::new(|| HarnessTile(&d.harness, &week, ui))),
+                (7.0, Box::new(|| HarnessTile(&d.harness, &week, ui, usage_w))),
                 (5.0, Box::new(|| CrewTile(&d.crew, d.online, d.computers, ui, content_w * 5.0 / 12.0))),
             ]);
         }
@@ -926,6 +1253,116 @@ fn Dashboard(d: &Dash, ui: &SharedUi, l: Layout, content_w: f32, skip: &Skip) {
             Unavailable(shell::ICON_CPU_SVG, "컴퓨터 부하");
         }
         ProjectsTile(&d.projects, ui, l);
+        IntegrationsArea();
+    });
+}
+
+/// `연동` (FR-L23, #498): the GitHub card, then one small 준비 중 card per later service. The
+/// card reads `GET /api/integrations/github` through the live slot (FR-L35). Before the first
+/// answer, or when it failed, it says 준비 중입니다; a null number reads 알 수 없음. In the demo
+/// the card shows a fixed sample and its header carries (예시). No number is drawn that the
+/// server did not send.
+fn IntegrationsArea() {
+    let p = ember_theme().palette;
+    let s = services();
+    let _requested = remember(|| {
+        crate::bridge::request_github_summary();
+        0u8
+    });
+    let demo = s.demo.is_some();
+    let fetched = s.ui.live.github.get();
+    let sample = demo.then(crate::demo::github_state);
+    let card = GithubCard::from_state(if demo { sample.as_ref() } else { fetched.state() });
+    let header_line = if demo { crate::ui::home::sample_header(&card.header_line) } else { card.header_line.clone() };
+    let guidance = remember(|| mutable_state_of(false));
+    cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+        Label(INTEGRATIONS_TITLE, Fs::Lg, Weight::Semibold, None, Some(1));
+        Label(&header_line, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+        Tile(|| {
+            cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                cu::Box()
+                    .alignment(Alignment::Center)
+                    .modifier(Modifier::new().size(30.0, 30.0).border(1.0, paint(p.line)).corner_radius(CORNER_SM))
+                    .content(|| Label("G", Fs::Md, Weight::Semibold, None, Some(1)));
+                Label(GITHUB_NAME, Fs::Lg, Weight::Semibold, None, Some(1));
+                cu::Spacer().modifier(Modifier::new().weight(1.0));
+                let tone = match card.tone {
+                    GithubPill::Soon => PillTone::Grey,
+                    GithubPill::Off => PillTone::Grey,
+                    GithubPill::Warn => PillTone::Orange,
+                    GithubPill::On => PillTone::Green,
+                };
+                Pill(card.pill, tone, true);
+            });
+            if let Some(account) = &card.account {
+                Label(account, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
+            if let Some(note) = &card.note {
+                Label(note, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
+            if let Some(action) = &card.action {
+                // Pressing only shows how to log in; Ember runs nothing and stores no token.
+                let g = guidance.clone();
+                AppButton(action.label, None, ButtonKind::Default, true, true, false, move || g.set(true));
+                if guidance.get() {
+                    Label(&action.guidance, Fs::Md, Weight::Regular, None, None);
+                }
+            }
+            for (label, value) in &card.kpis {
+                cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label(label, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Label(value, Fs::Md, Weight::Regular, None, Some(1));
+                });
+            }
+            for r in &card.repos {
+                cu::Column().spacing(4.0).modifier(Modifier::new().fill_max_width()).content(|| {
+                    cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+                        Label(&r.name, Fs::Md, Weight::Medium, None, Some(1));
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                        if r.error.is_none() {
+                            Label(&format!("PR {} · 리뷰 {}", r.open_prs, r.review_requested), Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
+                    });
+                    if let Some(e) = &r.error {
+                        Label(e, Fs::Md, Weight::Regular, Some(paint(p.red.strong)), None);
+                    } else if !r.ci.is_empty() {
+                        CiBar(&r.ci);
+                    }
+                });
+            }
+            if let Some(more) = &card.more_repos {
+                Label(more, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            }
+            // The server sends no list of what the integration did, so none is drawn.
+            Label(card.activity_empty, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+        });
+        for name in LATER_INTEGRATIONS {
+            Tile(|| {
+                cu::Row().spacing(10.0).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label(name, Fs::Md, Weight::Semibold, None, Some(1));
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Pill(LATER_PILL, PillTone::Grey, true);
+                });
+                Label(LATER_LINE, Fs::Md, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        }
+    });
+}
+
+/// Recent CI results of one repository: small cells, newest first (left).
+fn CiBar(results: &[CiResult]) {
+    let p = ember_theme().palette;
+    cu::Row().spacing(2.0).content(|| {
+        for r in results {
+            let c = match r {
+                CiResult::Success => p.green.strong,
+                CiResult::Failure => p.red.strong,
+                CiResult::Cancelled => p.grey.strong,
+                CiResult::Pending => p.track,
+            };
+            cu::Spacer().modifier(Modifier::new().size(8.0, 14.0).background(paint(c)).corner_radius(2.0));
+        }
     });
 }
 
@@ -993,7 +1430,7 @@ fn UnavailableH(icon: &'static str, title: &str, height: Option<f32>) {
 /// The hatched bars (Ember #190) are a `Canvas` at the card's width.
 fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
     let p = ember_theme().palette;
-    let days = remember(|| mutable_state_of(7usize));
+    let days = remember(|| mutable_state_of(usage::DEFAULT_WINDOW));
     let _requested = remember(|| {
         crate::bridge::request_usage_summary();
         0u8
@@ -1022,10 +1459,28 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
         CardHead(shell::ICON_GAUGE_SVG, "비용과 토큰 추이", || {
             for n in [7usize, 14] {
                 let d = days.clone();
-                AppButton(&format!("{n}일"), None, if days.get() == n { ButtonKind::Primary } else { ButtonKind::Default }, true, true, false, move || d.set(n));
+                // The mockup's toggle pill is 42 x 26.
+                let fill = if days.get() == n { p.sel } else { p.surface_2 };
+                let on = days.get() == n;
+                Clickable(
+                    Modifier::new().size(42.0, 26.0).background(paint(fill)).shape_role(ShapeRole::Full),
+                    Alignment::Center,
+                    move || d.set(n),
+                    || {
+                        Label(
+                            &format!("{n}일"),
+                            Fs::Xs,
+                            Weight::Medium,
+                            Some(paint(if on { p.text } else { p.text_2 })),
+                            Some(1),
+                        );
+                    },
+                );
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             }
         });
+        // Legend above the chart: says what the bars are.
+        Label(&usage::cost_legend(&load, days.get()), Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
         cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
             Label(&first, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -1033,7 +1488,18 @@ fn TokenTrendTile(ui: &SharedUi, chart_w: f32) {
             Label(&last, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
         });
         Label(&usage::trend_line(&load, days.get()), Fs::Sm, Weight::Regular, None, None);
-        Label(usage::COST_UNKNOWN, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(2));
+        // Four stats from the real data; a missing one reads "데이터 없음". Cache hits stay without
+        // data: the usage event has no cache tokens (FR-U7).
+        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
+            for (label, value) in usage::cost_stats(&load, days.get()) {
+                cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(label, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+                    Label(&value, Fs::Sm, Weight::Semibold, None, Some(1));
+                });
+            }
+        });
+        // TODO(compose-rust): a tooltip or per-bar tap needs hover or a click on the Canvas; the
+        // toolkit has neither, so no day is selectable.
     });
 }
 
@@ -1137,90 +1603,124 @@ pub fn weekday_usage(state: &ember_client::State, now_ms: i64) -> Vec<WeekDay> {
     days
 }
 
-/// 하네스별 세션 (`.hm-usage`): the day's and the week's sessions, a legend, weekday stacked
-/// bars per harness, one ring per harness with its share, and a "자세히" button to 에이전트.
-/// The width of one weekday bar.
-const BAR_W: f32 = 28.0;
+/// Greedy rows of legend entries: the indices of `widths` (dp, each entry with its dot) that fit
+/// `max_w` per row with `gap` between. An entry wider than the row gets a row of its own.
+pub fn legend_rows(widths: &[f32], max_w: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut used = 0.0f32;
+    for (i, w) in widths.iter().enumerate() {
+        match rows.last_mut() {
+            Some(row) if used + gap + w <= max_w => {
+                row.push(i);
+                used += gap + w;
+            }
+            _ => {
+                rows.push(vec![i]);
+                used = *w;
+            }
+        }
+    }
+    rows
+}
 
-fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi) {
+fn vendor_color(v: usage::Vendor, p: &Palette) -> compose_rust::Color {
+    match v {
+        usage::Vendor::Claude => p.orange.strong,
+        usage::Vendor::Codex => p.blue.strong,
+        usage::Vendor::Gemini => p.sky.strong,
+        usage::Vendor::Other => p.grey.strong,
+    }
+}
+
+/// 하네스별 사용량 (`.hm-usage`, FR-L23, #360): today's tokens, a 7-day stacked chart of the
+/// tokens each harness reported (`days[].by_agent`) with the average as a dashed line, a legend
+/// that wraps, and the session counts underneath. Unreported harnesses are not drawn.
+/// `chart_w` is the card's inner width.
+fn HarnessTile(bars: &[HarnessBar], week: &[WeekDay], ui: &SharedUi, chart_w: f32) {
     let p = ember_theme().palette;
-    let colors = [p.orange.strong, p.blue.strong, p.sky.strong];
-    let totals: Vec<u64> = week.iter().map(|d| d.counts.iter().sum::<usize>() as u64).collect();
-    let today = totals.last().copied().unwrap_or(0);
-    let all: u64 = totals.iter().sum();
+    let _requested = remember(|| {
+        crate::bridge::request_usage_summary();
+        0u8
+    });
+    let load = ui.live.usage_summary.get();
+    let model = usage::home_stack(&load, 7);
+    let sessions_today = week.last().map(|d| d.counts.iter().sum::<usize>()).unwrap_or(0);
+    let sessions_week: usize = week.iter().map(|d| d.counts.iter().sum::<usize>()).sum();
     const H: f32 = 100.0;
-    let heights = bar_heights(&totals, H);
+    const GAP: f32 = 6.0;
+    let totals: Vec<usize> = model.days.iter().map(|d| d.total as usize).collect();
+    let rects = crate::ui::home::bar_rects(&totals, chart_w, H, GAP);
+    let max = totals.iter().copied().max().unwrap_or(0);
+    let mut list = DrawList::builder().rect(paint(p.line), 0.0, H, chart_w, 1.0, 0.0);
+    for (day, (x, y, w, h)) in model.days.iter().zip(rects.iter().copied()) {
+        let mut top = y + h;
+        for seg in &day.segs {
+            let sh = h * seg.fraction;
+            top -= sh;
+            list = list.rect(paint(vendor_color(seg.vendor, &p)), x, top, w, sh, 0.0);
+        }
+    }
+    if max > 0 {
+        // The average as a dashed line across the chart.
+        let ay = H - H * (model.average_tokens as f32 / max as f32);
+        let mut x = 0.0;
+        while x < chart_w {
+            list = list.rect(paint(p.text), x, ay, 4.0f32.min(chart_w - x), 1.0, 0.0);
+            x += 8.0;
+        }
+    }
+    let commands = list.build();
+    let bar_w = rects.first().map(|r| r.2).unwrap_or(0.0);
+    let widths: Vec<f32> = model.legend.iter().map(|e| 8.0 + 4.0 + text_px(&e.label, 12.0)).collect();
+    let rows = legend_rows(&widths, chart_w, 16.0);
     Tile(|| {
-        CardHead(ICON_CHART, "하네스별 세션", || {
+        CardHead(ICON_CHART, "하네스별 사용량", || {
             let u = ui.clone();
             AppButton("자세히", None, ButtonKind::Default, true, true, false, move || shell::choose(&u, NavMenu::Agents));
         });
-        if bars.is_empty() {
-            Label(EMPTY_HARNESS_USAGE, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
-            return;
-        }
-        // The summary and legend at the left; the bars gather at the right, 28 px wide with
-        // rounded tops (`.hm-tbars`).
-        cu::Row().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(|| {
-            cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
-                cu::Row().spacing(SP[5]).content(|| {
-                    for (label, v) in [("오늘 세션", today), ("7일 합계", all)] {
-                        cu::Column().content(|| {
-                            Label(label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                            Label(&v.to_string(), Fs::Xl2, Weight::Regular, None, Some(1));
-                        });
-                    }
-                });
-                for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
-                    cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
-                        Dot(*color);
-                        Label(h.label(), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        Label(&model.today, Fs::Xl2, Weight::Regular, None, Some(1));
+        if let Some(notice) = &model.notice {
+            Label(notice, Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
+            if model.retry {
+                AppButton(usage::RETRY, None, ButtonKind::Default, true, true, false, crate::bridge::request_usage_summary);
+            }
+        } else {
+            Label(&model.average, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            cu::Canvas(commands).modifier(Modifier::new().size(chart_w, H + 1.0));
+            cu::Row().spacing(GAP).modifier(Modifier::new().fill_max_width()).content(|| {
+                for (i, day) in model.days.iter().enumerate() {
+                    let today = i + 1 == model.days.len();
+                    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().width(bar_w)).content(|| {
+                        Label(day.weekday, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
                     });
                 }
             });
-            cu::Column().spacing(SP[0]).content(|| {
-                cu::Row().spacing(SP[1]).modifier(Modifier::new().height(H)).content(|| {
-                    for (day, total_h) in week.iter().zip(heights.iter()) {
-                        cu::Column().modifier(Modifier::new().width(BAR_W).height(H)).content(|| {
-                            cu::Spacer().modifier(Modifier::new().weight(1.0));
-                            let n: usize = day.counts.iter().sum();
-                            let top = day.counts.iter().rposition(|c| *c > 0);
-                            for (i, (count, color)) in day.counts.iter().zip(colors.iter()).enumerate().rev() {
-                                if *count > 0 && n > 0 {
-                                    let h = total_h * *count as f32 / n as f32;
-                                    let r = if Some(i) == top { BAR_W / 2.0 } else { 0.0 };
-                                    cu::Spacer().modifier(Modifier::new().fill_max_width().height(h).background(paint(*color)).corner_radius(r.min(h / 2.0)));
-                                }
-                            }
+            Label(model.axis_caption, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+            for row in &rows {
+                cu::Row().spacing(16.0).content(|| {
+                    for &i in row {
+                        let e = &model.legend[i];
+                        cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                            Dot(vendor_color(e.vendor, &p));
+                            Label(&e.label, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                         });
                     }
-                });
-                cu::Row().spacing(SP[1]).content(|| {
-                    for (i, day) in week.iter().enumerate() {
-                        let today = i + 1 == week.len();
-                        cu::Box().alignment(Alignment::Center).modifier(Modifier::new().width(BAR_W)).content(|| {
-                            Label(day.label, Fs::Xs2, if today { Weight::Semibold } else { Weight::Regular }, Some(paint(if today { p.text } else { p.muted })), Some(1));
-                        });
-                    }
-                });
-            });
-        });
-        // `.hm-rings`: one 52 px ring per harness with its share of the sessions.
-        // TODO(server, FR-U7): rings per account with their usage share.
-        let total: usize = bars.iter().map(|b| b.sessions).sum::<usize>().max(1);
-        cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
-        cu::Row().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
-            for (h, color) in Harness::ALL.iter().zip(colors.iter()) {
-                let n = bars.iter().find(|b| b.label == h.label()).map(|b| b.sessions).unwrap_or(0);
-                cu::Row().spacing(SP[1]).alignment(Alignment::CenterStart).modifier(Modifier::new().weight(1.0)).content(|| {
-                    cu::Box().alignment(Alignment::Center).modifier(Modifier::new().size(52.0, 52.0)).content(|| {
-                        ring_image(52.0, 6.0, &[(color.to_argb(), n as f32 / total as f32)]);
-                        Label(&n.to_string(), Fs::Sm, Weight::Semibold, None, None);
-                    });
-                    Label(h.label(), Fs::Xs, Weight::Medium, None, Some(1));
                 });
             }
-        });
+            // The dashed average line has its own legend entry.
+            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).content(|| {
+                cu::Canvas(DrawList::builder().rect(paint(p.text), 0.0, 0.0, 3.0, 1.0, 0.0).rect(paint(p.text), 6.0, 0.0, 3.0, 1.0, 0.0).rect(paint(p.text), 12.0, 0.0, 3.0, 1.0, 0.0).build()).modifier(Modifier::new().size(15.0, 1.0));
+                Label(model.average_legend, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+            });
+        }
+        Label(usage::COST_UNKNOWN, Fs::Xs2, Weight::Regular, Some(paint(p.muted)), Some(1));
+        // The session counts stay, below the chart.
+        let total: usize = bars.iter().map(|b| b.sessions).sum();
+        if bars.is_empty() {
+            Label(EMPTY_HARNESS_USAGE, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        } else {
+            Label(&format!("오늘 세션 {sessions_today} · 7일 세션 {sessions_week} · 전체 {total}"), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+        }
     });
 }
 
@@ -1374,6 +1874,19 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l16_capture_hooks_map_env_values() {
+        assert_eq!(pick_from(Some("mode")), (Some(Pick::Mode), false));
+        assert_eq!(pick_from(Some("mode_armed")), (Some(Pick::Mode), true));
+        assert_eq!(pick_from(Some("model")), (Some(Pick::Model), false));
+        assert_eq!(pick_from(Some("zzz")), (None, false));
+        assert_eq!(pick_from(None), (None, false));
+        assert_eq!(mode_from(Some("bypass")), Some(PermMode::Bypass));
+        assert_eq!(mode_from(Some("plan")), Some(PermMode::Plan));
+        assert_eq!(mode_from(Some("nope")), None);
+        assert_eq!(mode_from(None), None);
+    }
+
     use super::*;
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};
@@ -1417,25 +1930,37 @@ mod tests {
             })));
             let bytes = host.rebuild().expect("rebuild");
             let batch = decode_batch(bytes).expect("decode");
-            let send = batch.iter().find_map(|m| match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Icon, value: PropertyValue::Integer(icon) }
-                    if *icon == IconRole::Send as i64 => Some(*node_id),
+            let w36: Vec<_> = batch.iter().filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier: compose_rust::Modifier::Width(w), .. } if *w == SEND_BUTTON_DP => Some(*node_id),
                 _ => None,
-            }).expect("send button");
-            assert!(batch.iter().any(|m| matches!(m, Mutation::SetModifier {
-                node_id, modifier: compose_rust::Modifier::Width(w), ..
-            } if *node_id == send && *w == 36.0)));
-            let parent = batch.iter().find_map(|m| match m {
-                Mutation::Insert { parent_id, node_id, .. } if *node_id == send => Some(*parent_id),
-                _ => None,
-            }).expect("send row");
-            assert!(batch.iter().any(|m| match m {
+            }).collect();
+            let weighted = |parent| batch.iter().any(|m| match m {
                 Mutation::Insert { parent_id, node_id, .. } if *parent_id == parent => batch.iter().any(|n| matches!(n,
                     Mutation::SetModifier { node_id: id, modifier: compose_rust::Modifier::Weight(w), .. }
                     if id == node_id && *w == 1.0)),
                 _ => false,
-            }), "chip row must take the remaining width at {width} dp");
+            });
+            // The add box and the send circle are both 36 wide beside the weighted chip column.
+            let beside = w36.iter().filter(|n| batch.iter().any(|m| matches!(m,
+                Mutation::Insert { parent_id, node_id, .. } if node_id == *n && weighted(*parent_id)))).count();
+            assert!(beside >= 2, "chip row must take the remaining width at {width} dp");
         }
+    }
+
+    #[test]
+    fn fr_l10_home_send_button_is_the_ink_paper_plane_circle() {
+        assert_eq!(SEND_BUTTON_DP, 36.0);
+        let production = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("super::session::SendCircleButton(SEND_BUTTON_DP"));
+        assert!(!production.contains("IconRole::Send"), "the toolkit arrow glyph is gone");
+    }
+
+    #[test]
+    fn fr_l10_home_send_button_chips_are_not_toolkit_buttons() {
+        let production = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(production.matches("cu::Button(").count(), 0);
+        assert!(chip_has_chevron(Pick::Project) && chip_has_chevron(Pick::Model) && chip_has_chevron(Pick::Mode));
+        assert!(!chip_has_chevron(Pick::Computer));
     }
 
     #[test]
@@ -1450,6 +1975,14 @@ mod tests {
         let svg = hero_bot_svg("codex", "run", 40.0, &LIGHT);
         assert!(svg.contains("#3f74d4") && svg.contains("width=\"40\""));
         assert!(hero_bot_svg("gemini", "wait", 32.0, &DARK).contains("#8fb1df"));
+    }
+
+    #[test]
+    fn fr_l23_legend_rows_wrap_at_the_card_width() {
+        assert_eq!(legend_rows(&[80.0, 80.0, 80.0], 390.0, 16.0), vec![vec![0, 1, 2]]);
+        assert_eq!(legend_rows(&[100.0, 100.0, 100.0], 230.0, 16.0), vec![vec![0, 1], vec![2]]);
+        assert_eq!(legend_rows(&[300.0, 50.0], 200.0, 16.0), vec![vec![0], vec![1]]);
+        assert!(legend_rows(&[], 200.0, 16.0).is_empty());
     }
 
     #[test]
@@ -1525,6 +2058,9 @@ mod tests {
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
                 height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");

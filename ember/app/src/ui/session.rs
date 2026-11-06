@@ -51,7 +51,11 @@ const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
-const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
+const WEB_LOADING: &str = "불러오는 중입니다";
+const WEB_EMPTY: &str = "열려 있는 웹 포트가 없습니다";
+const WEB_UNSUPPORTED: &str = "이 컴퓨터는 포트 목록을 지원하지 않습니다";
+const WEB_LOOPBACK_ONLY: &str = "이 컴퓨터 안에서만 열 수 있습니다";
+const WEB_NO_HOST: &str = "주소를 알 수 없어 열 수 없습니다";
 const COMPUTER_LOADING: &str = "확인하는 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const PR_TITLE: &str = "PR과 CI";
@@ -73,6 +77,50 @@ pub fn timeline_summary(demo: bool) -> &'static str {
 }
 
 pub const UI_STRINGS: &[&str] = &[
+    crate::ui::home::INTEGRATIONS_TITLE,
+    crate::ui::enrol_flow::NAME_HELP,
+    crate::ui::enrol_flow::STDIN_NOTE,
+    crate::ui::enrol_flow::WAITING_LINE,
+    crate::ui::enrol_flow::CODE_ONCE,
+    crate::ui::enrol_flow::DOOR_OFF,
+    crate::ui::enrol_flow::DOOR_URL_UNKNOWN,
+    crate::ui::enrol_flow::NO_COMMAND,
+    crate::ui::enrol_flow::HTTP_WARNING,
+    crate::ui::enrol_flow::CONFIRM_QUESTION,
+    crate::ui::enrol_flow::CONFIRM_CHECK,
+    crate::ui::enrol_flow::CONFIRMED_WAIT,
+    crate::ui::enrol_flow::JOINED_LINE,
+    crate::ui::enrol_flow::JOINED_NEXT,
+    crate::ui::enrol_flow::NODE_CMD_NOTE,
+    crate::ui::enrol_flow::ZSH_QUOTE_NOTE,
+    crate::ui::enrol_flow::DENIED_LINE,
+    crate::ui::enrol_flow::EXPIRED_LINE,
+    crate::ui::enrol_flow::GONE_LINE,
+    crate::ui::enrol_flow::DEMO_LINE,
+    crate::ui::enrol_flow::WARN_ADDR_DIFFERS,
+    crate::ui::enrol_flow::WARN_NAME_DIFFERS,
+    crate::ui::enrol_flow::WARN_PUBLIC_ADDR,
+    crate::ui::enrol_flow::NOTE_PROPOSED,
+    crate::ui::enrol_flow::WARN_INFORMS,
+    crate::ui::enrol_flow::PEER_ID_UNUSED,
+    crate::ui::enrol_flow::PEER_ONLY_NOTE,
+    crate::ui::enrol_flow::TYPED_FINGERPRINT_HELP,
+    crate::ui::enrol_flow::FINGERPRINT_MISMATCH,
+    crate::ui::enrol_flow::FINGERPRINT_REQUIRED,
+    crate::ui::enrol_flow::FINGERPRINT_PENDING_HINT,
+    crate::ui::enrol_flow::UNKNOWN_STATE,
+    crate::ui::add_computer::ENROL_NOTE,
+    crate::ui::home::GITHUB_NO_INFO,
+    crate::ui::home::GITHUB_UNKNOWN,
+    crate::ui::home::GITHUB_SAMPLE_MARK,
+    crate::ui::home::GITHUB_NO_ACTIVITY,
+    crate::ui::home::GITHUB_LOGIN_HINT,
+    crate::ui::home::GITHUB_UNAVAILABLE_HINT,
+    crate::ui::home::GITHUB_INSTALL_HINT,
+    crate::ui::home::GITHUB_HOW,
+    crate::ui::home::LATER_PILL,
+    crate::ui::home::LATER_LINE,
+    crate::ui::home::ATTACH_UNSUPPORTED,
     SOON,
     NO_PROJECT,
     NO_MEMBERS,
@@ -82,12 +130,156 @@ pub const UI_STRINGS: &[&str] = &[
     crate::ui::term_pane::NO_TERMINAL,
     crate::ui::term_pane::FAILED,
     MODEL_LOCKED,
-    WEB_SOON,
+    WEB_LOADING,
+    WEB_EMPTY,
+    WEB_UNSUPPORTED,
+    WEB_LOOPBACK_ONLY,
+    WEB_NO_HOST,
     COMPUTER_LOADING,
     NO_SESSION,
     NONE_YET,
     WAIT_SERVER,
 ];
+
+// ---------------------------------------------------------------------------------------------
+// Web pages (FR-L18, FR-P7, #326)
+// ---------------------------------------------------------------------------------------------
+
+/// Where a session's computer can be reached from this app: `local` when its loopback is this
+/// machine's loopback, otherwise the `host` its ports are served on (None when unknown).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ComputerHost {
+    pub local: bool,
+    pub host: Option<String>,
+}
+
+/// One row of the 웹 페이지 list. `url` is None when the page cannot be opened from here, and
+/// `note` then says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebPage {
+    pub label: String,
+    pub url: Option<String>,
+    pub note: Option<&'static str>,
+}
+
+/// The state of the 웹 페이지 list.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum WebPagesLoad {
+    #[default]
+    Loading,
+    Ready(Vec<WebPage>),
+    Empty,
+    Unsupported,
+    Failed(String),
+}
+
+/// The host part of an `http(s)://host[:port][/path]` address; None for any other form
+/// (a peer address, an empty string).
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let auth = auth.rsplit('@').next().unwrap_or("");
+    let host = if let Some(v6) = auth.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        auth.split(':').next().unwrap_or("")
+    };
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+/// How to reach the session's computer. A local computer of a server on another machine is
+/// not this machine: its loopback ports stay closed and its LAN ports use the server's host.
+/// A remote computer uses the host of its own `url` (empty or a peer address: unknown).
+pub fn computer_host(local: bool, computer_url: &str, server_url: &str) -> ComputerHost {
+    if local {
+        return match url_host(server_url) {
+            Some(h) if !is_loopback_host(&h) => ComputerHost { local: false, host: Some(h) },
+            _ => ComputerHost { local: true, host: None },
+        };
+    }
+    ComputerHost { local: false, host: url_host(computer_url) }
+}
+
+fn web_host_text(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// The 웹 페이지 list from the node's listening ports: sorted by port, one row per
+/// (port, address). A loopback port opens only on the local computer.
+pub fn web_pages_from(
+    result: Result<ember_client::api::Ports, String>,
+    computer: &ComputerHost,
+) -> WebPagesLoad {
+    use ember_client::api::PortScope;
+    let ports = match result {
+        Ok(p) => p,
+        Err(e) => return WebPagesLoad::Failed(format!("포트 목록을 불러오지 못했습니다: {e}")),
+    };
+    if !ports.supported {
+        return WebPagesLoad::Unsupported;
+    }
+    let mut rows: Vec<(u16, WebPage)> = Vec::new();
+    for lp in &ports.ports {
+        let port = lp.port;
+        let (url, note) = match lp.scope {
+            PortScope::Loopback if computer.local => (Some(format!("http://127.0.0.1:{port}")), None),
+            PortScope::Loopback => (None, Some(WEB_LOOPBACK_ONLY)),
+            _ => match (&computer.host, computer.local) {
+                (Some(h), _) => (Some(format!("http://{}:{port}", web_host_text(h))), None),
+                (None, true) => (Some(format!("http://127.0.0.1:{port}")), None),
+                (None, false) => (None, Some(WEB_NO_HOST)),
+            },
+        };
+        let shown = url.clone().unwrap_or_else(|| format!(":{port}"));
+        let label = if lp.process.is_empty() { shown } else { format!("{shown} ({})", lp.process) };
+        rows.push((port, WebPage { label, url, note }));
+    }
+    rows.sort_by(|a, b| (a.0, &a.1.url, &a.1.label).cmp(&(b.0, &b.1.url, &b.1.label)));
+    rows.dedup_by(|b, a| a.0 == b.0 && a.1.url == b.1.url);
+    if rows.is_empty() {
+        return WebPagesLoad::Empty;
+    }
+    WebPagesLoad::Ready(rows.into_iter().map(|(_, w)| w).collect())
+}
+
+/// The OptionSheet lines of a load state: one per page, or the single state line.
+pub fn web_menu_lines(load: &WebPagesLoad) -> Vec<String> {
+    match load {
+        WebPagesLoad::Loading => vec![WEB_LOADING.to_string()],
+        WebPagesLoad::Ready(pages) => pages.iter().map(|w| w.label.clone()).collect(),
+        WebPagesLoad::Empty => vec![WEB_EMPTY.to_string()],
+        WebPagesLoad::Unsupported => vec![WEB_UNSUPPORTED.to_string()],
+        WebPagesLoad::Failed(e) => vec![e.clone()],
+    }
+}
+
+/// What a tap on line `idx` does: open a url, or post a text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebTap {
+    Open(String),
+    Say(String),
+    Nothing,
+}
+
+pub fn web_tap(load: &WebPagesLoad, idx: usize) -> WebTap {
+    match load {
+        WebPagesLoad::Ready(pages) => match pages.get(idx) {
+            Some(WebPage { url: Some(u), .. }) => WebTap::Open(u.clone()),
+            Some(WebPage { note: Some(n), .. }) => WebTap::Say((*n).to_string()),
+            _ => WebTap::Nothing,
+        },
+        WebPagesLoad::Loading => WebTap::Nothing,
+        other => web_menu_lines(other).into_iter().next().map(WebTap::Say).unwrap_or(WebTap::Nothing),
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Views
@@ -225,10 +417,41 @@ pub fn toolbar_fold_level(toolbar_dp: f32) -> usize {
     }
 }
 
+/// Width of the left session drawer (mockup `.sside`, #582): `min(300, 86% of the window)` at
+/// phone width, 290 between 561 and 900 where the 64 px rail stays and the drawer opens beside it (the list column's place).
+pub fn drawer_width(window_dp: f32) -> f32 {
+    // The window size reads 0 until the renderer reports it: the widest phone drawer then.
+    if window_dp <= 0.0 {
+        300.0
+    } else if window_dp > 560.0 {
+        290.0
+    } else {
+        (window_dp * 0.86).min(300.0)
+    }
+}
+
+/// Whether the session list opens as an overlay drawer rather than sitting as a column (the
+/// column shows only above 900 dp, FR-L18).
+pub fn drawer_is_overlay(window_dp: f32) -> bool {
+    window_dp <= 900.0
+}
+
+/// Whether the drawer is open for the overlay decision: it counts only while the list is not a
+/// column, so widening past 900 dp and shrinking again does not reopen it (FR-L18).
+pub fn drawer_open_effective(show_column: bool, drawer_open: bool) -> bool {
+    !show_column && drawer_open
+}
+
 /// Whether the 멀티/싱글/상태 chips move to their own row: at the bottom-bar width (mockup
 /// `max-width:560px`) the toolbar has no room for them beside the project and IDE 열기 (#218).
 pub fn view_chips_below(window_dp: f32) -> bool {
     window_dp <= crate::ui::shell::BAR_MAX_DP
+}
+
+/// Whether the 멀티/싱글/상태 chips show only their icons (mockup `.viewseg`: icons below the
+/// desktop width, including the full-width row at phone width, FR-L18, #512).
+pub fn view_seg_icon_only(window_dp: f32) -> bool {
+    window_dp < 1280.0
 }
 
 /// 264 dp at 1440 in the design.
@@ -655,6 +878,22 @@ impl PaneToggle {
         match self {
             PaneToggle::Conversation => "대화",
             PaneToggle::Terminal => "터미널",
+        }
+    }
+
+    /// The view the pane header's single icon button switches to (`.ph-mode`, FR-L18).
+    pub fn other(self) -> PaneToggle {
+        match self {
+            PaneToggle::Conversation => PaneToggle::Terminal,
+            PaneToggle::Terminal => PaneToggle::Conversation,
+        }
+    }
+
+    /// Label of that icon button: it names the view it opens, not the current one.
+    pub fn switch_label(self) -> &'static str {
+        match self {
+            PaneToggle::Conversation => "터미널로 보기",
+            PaneToggle::Terminal => "대화로 보기",
         }
     }
 }
@@ -1237,6 +1476,33 @@ mod tests {
     }
 
     #[test]
+    fn fr_l18_drawer_width_is_86_percent_capped_at_300_then_290() {
+        assert_eq!(drawer_width(0.0), 300.0);
+        assert_eq!(drawer_width(300.0), 300.0 * 0.86);
+        assert_eq!(drawer_width(360.0), 300.0);
+        assert_eq!(drawer_width(390.0), 300.0);
+        assert_eq!(drawer_width(560.0), 300.0);
+        assert_eq!(drawer_width(561.0), 290.0);
+        assert_eq!(drawer_width(900.0), 290.0);
+    }
+
+    #[test]
+    fn fr_l18_drawer_is_an_overlay_unless_the_list_is_a_column() {
+        assert!(drawer_is_overlay(390.0));
+        assert!(drawer_is_overlay(561.0));
+        assert!(drawer_is_overlay(900.0));
+        assert!(!drawer_is_overlay(901.0));
+    }
+
+    #[test]
+    fn fr_l18_drawer_open_effective_resets_when_the_list_is_a_column() {
+        assert!(drawer_open_effective(false, true));
+        assert!(!drawer_open_effective(false, false));
+        assert!(!drawer_open_effective(true, true));
+        assert!(!drawer_open_effective(true, false));
+    }
+
+    #[test]
     fn fr_l18_side_list_is_a_column_on_expanded_and_a_drawer_elsewhere() {
         assert_eq!(
             side_list_mode(WindowSizeClass::Expanded),
@@ -1593,6 +1859,22 @@ mod tests {
     }
 
     #[test]
+    fn fr_l18_pane_header_has_one_icon_toggle_that_names_the_other_view() {
+        assert_eq!(PaneToggle::Conversation.other(), PaneToggle::Terminal);
+        assert_eq!(PaneToggle::Terminal.other(), PaneToggle::Conversation);
+        assert_eq!(PaneToggle::Conversation.switch_label(), "터미널로 보기");
+        assert_eq!(PaneToggle::Terminal.switch_label(), "대화로 보기");
+    }
+
+    #[test]
+    fn fr_l18_view_segment_is_icon_only_below_desktop_width() {
+        assert!(view_seg_icon_only(390.0));
+        assert!(view_seg_icon_only(1024.0));
+        assert!(!view_seg_icon_only(1280.0));
+        assert!(!view_seg_icon_only(1440.0));
+    }
+
+    #[test]
     fn fr_l5_right_panel_has_four_cards_and_only_environment_has_data() {
         let l: Vec<_> = InfoCard::ALL.iter().map(|c| c.label()).collect();
         assert_eq!(l, ["환경", "컨텍스트", "결과물", "변경 사항"]);
@@ -1623,6 +1905,127 @@ mod tests {
             none.iter().find(|(a, _)| *a == "컴퓨터").unwrap().1,
             "확인하는 중입니다"
         );
+    }
+
+    // ---- FR-L18 web pages (#326) -------------------------------------------------------------
+
+    fn lp(port: u16, scope: ember_client::api::PortScope, process: &str) -> ember_client::api::ListeningPort {
+        ember_client::api::ListeningPort { port, scope, process: process.into(), ..Default::default() }
+    }
+
+    fn ports_of(v: Vec<ember_client::api::ListeningPort>) -> ember_client::api::Ports {
+        ember_client::api::Ports { ports: v, supported: true }
+    }
+
+    fn remote(host: &str) -> ComputerHost {
+        ComputerHost { local: false, host: Some(host.into()) }
+    }
+
+    fn local_host() -> ComputerHost {
+        ComputerHost { local: true, host: None }
+    }
+
+    fn ready(l: WebPagesLoad) -> Vec<WebPage> {
+        match l {
+            WebPagesLoad::Ready(v) => v,
+            other => panic!("not ready: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fr_l18_web_lan_port_opens_on_the_computer_host() {
+        use ember_client::api::PortScope::*;
+        let pages = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(80, Any, "nginx")])), &remote("192.168.0.10")));
+        assert_eq!(pages[0].url.as_deref(), Some("http://192.168.0.10:80"));
+        assert_eq!(pages[0].label, "http://192.168.0.10:80 (nginx)");
+        assert_eq!(pages[1].url.as_deref(), Some("http://192.168.0.10:3000"));
+        assert_eq!(pages[1].note, None);
+    }
+
+    #[test]
+    fn fr_l18_web_loopback_opens_only_on_the_local_computer() {
+        use ember_client::api::PortScope::*;
+        let l = ready(web_pages_from(Ok(ports_of(vec![lp(5173, Loopback, "vite")])), &local_host()));
+        assert_eq!(l[0].url.as_deref(), Some("http://127.0.0.1:5173"));
+        assert_eq!(l[0].label, "http://127.0.0.1:5173 (vite)");
+        let r = ready(web_pages_from(Ok(ports_of(vec![lp(5173, Loopback, "vite")])), &remote("192.168.0.10")));
+        assert_eq!(r[0].url, None);
+        assert_eq!(r[0].note, Some("이 컴퓨터 안에서만 열 수 있습니다"));
+        assert_eq!(r[0].label, ":5173 (vite)");
+    }
+
+    #[test]
+    fn fr_l18_web_lan_port_on_the_local_computer_uses_loopback() {
+        use ember_client::api::PortScope::*;
+        let l = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node")])), &local_host()));
+        assert_eq!(l[0].url.as_deref(), Some("http://127.0.0.1:3000"));
+    }
+
+    #[test]
+    fn fr_l18_web_peer_addressed_computer_has_no_url() {
+        use ember_client::api::PortScope::*;
+        let none = ComputerHost { local: false, host: None };
+        let l = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Any, ""), lp(4000, Lan, "bun")])), &none));
+        assert_eq!(l[0].url, None);
+        assert_eq!(l[0].note, Some("주소를 알 수 없어 열 수 없습니다"));
+        assert_eq!(l[0].label, ":3000");
+        assert_eq!(l[1].label, ":4000 (bun)");
+    }
+
+    #[test]
+    fn fr_l18_web_ipv6_host_is_bracketed() {
+        use ember_client::api::PortScope::*;
+        let l = ready(web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node")])), &remote("fd00::1")));
+        assert_eq!(l[0].url.as_deref(), Some("http://[fd00::1]:3000"));
+    }
+
+    #[test]
+    fn fr_l18_web_sorts_by_port_and_drops_duplicates() {
+        use ember_client::api::PortScope::*;
+        let v = vec![lp(6006, Lan, "a"), lp(3000, Lan, "node"), lp(3000, Any, "node"), lp(80, Lan, "n")];
+        let l = ready(web_pages_from(Ok(ports_of(v)), &remote("h")));
+        let ports: Vec<_> = l.iter().map(|w| w.url.clone().unwrap()).collect();
+        assert_eq!(ports, ["http://h:80", "http://h:3000", "http://h:6006"]);
+    }
+
+    #[test]
+    fn fr_l18_web_unsupported_empty_and_failed() {
+        let h = remote("h");
+        let unsupported = ember_client::api::Ports { ports: Vec::new(), supported: false };
+        assert_eq!(web_pages_from(Ok(unsupported), &h), WebPagesLoad::Unsupported);
+        assert_eq!(web_pages_from(Ok(ports_of(Vec::new())), &h), WebPagesLoad::Empty);
+        assert_eq!(
+            web_pages_from(Err("timeout".into()), &h),
+            WebPagesLoad::Failed("포트 목록을 불러오지 못했습니다: timeout".into())
+        );
+    }
+
+    #[test]
+    fn fr_l18_web_menu_lines_and_taps() {
+        use ember_client::api::PortScope::*;
+        let load = web_pages_from(Ok(ports_of(vec![lp(3000, Lan, "node"), lp(5173, Loopback, "vite")])), &remote("h"));
+        assert_eq!(web_menu_lines(&load), ["http://h:3000 (node)", ":5173 (vite)"]);
+        assert_eq!(web_tap(&load, 0), WebTap::Open("http://h:3000".into()));
+        assert_eq!(web_tap(&load, 1), WebTap::Say("이 컴퓨터 안에서만 열 수 있습니다".into()));
+        assert_eq!(web_tap(&load, 9), WebTap::Nothing);
+        assert_eq!(web_menu_lines(&WebPagesLoad::Loading), ["불러오는 중입니다"]);
+        assert_eq!(web_tap(&WebPagesLoad::Loading, 0), WebTap::Nothing);
+        assert_eq!(web_menu_lines(&WebPagesLoad::Empty), ["열려 있는 웹 포트가 없습니다"]);
+        assert_eq!(web_tap(&WebPagesLoad::Empty, 0), WebTap::Say("열려 있는 웹 포트가 없습니다".into()));
+        assert_eq!(
+            web_menu_lines(&WebPagesLoad::Unsupported),
+            ["이 컴퓨터는 포트 목록을 지원하지 않습니다"]
+        );
+    }
+
+    #[test]
+    fn fr_l18_web_computer_host_from_the_address() {
+        assert_eq!(computer_host(true, "", "http://127.0.0.1:8740"), local_host());
+        assert_eq!(computer_host(true, "", "http://mini.local:8740"), remote("mini.local"));
+        assert_eq!(computer_host(false, "http://192.168.0.20:8740/x", ""), remote("192.168.0.20"));
+        assert_eq!(computer_host(false, "http://[fd00::2]:8740", ""), remote("fd00::2"));
+        assert_eq!(computer_host(false, "", "http://127.0.0.1:8740"), ComputerHost { local: false, host: None });
+        assert_eq!(computer_host(false, "peer:abc", ""), ComputerHost { local: false, host: None });
     }
 
     // ---- NFR-L4 ------------------------------------------------------------------------------

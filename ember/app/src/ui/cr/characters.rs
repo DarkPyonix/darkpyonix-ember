@@ -48,7 +48,10 @@ pub fn Character(
     role: Option<&str>,
 ) {
     let theme = ember_theme();
-    let style = shared_ui().prefs.get().character_style(project);
+    // The server's value first, this device's choice only as a fallback (FR-L26).
+    let server = crate::services::try_services()
+        .and_then(|s| s.client.read(|st| st.project(project).and_then(|p| p.character_style.clone())));
+    let style = crate::ui::project::effective_style(server.as_deref(), shared_ui().prefs.get().saved_character_style(project));
     let spec = CharSpec {
         style,
         name: name.to_string(),
@@ -57,11 +60,12 @@ pub fn Character(
         lead: crown_shown(project, leader),
         role: role.map(str::to_string),
         dark: theme.scheme == Scheme::Dark,
+        pin: None,
     };
     draw(&spec, size);
 }
 
-fn draw(spec: &CharSpec, size: f32) {
+pub fn draw(spec: &CharSpec, size: f32) {
     // The renderer draws an SVG at its own width and height, so the pixel size goes in.
     let px = format!("{}", size.round() as i32);
     let doc = svg(spec).replacen("width=\"100\" height=\"100\"", &format!("width=\"{px}\" height=\"{px}\""), 1);
@@ -70,13 +74,11 @@ fn draw(spec: &CharSpec, size: f32) {
 }
 
 /// The 팀 캐릭터 picker of the project settings sheet: six preview cards, three rows of two, so
-/// the Korean names are not clipped. The choice is saved to prefs at once.
-/// TODO(server): save it on the project instead.
-pub fn StylePicker(project_id: &str, seed_name: &str) {
+/// the Korean names are not clipped. A pick goes to `on_pick`; the settings sheet keeps it in
+/// its draft and saves it with 저장 (FR-L26).
+pub fn StylePicker(seed_name: &str, current: CharStyle, on_pick: impl FnMut(CharStyle) + Clone + 'static) {
     let theme = ember_theme();
-    let ui = shared_ui().clone();
     let p = theme.palette;
-    let current = ui.prefs.get().character_style(project_id);
     let dark = theme.scheme == Scheme::Dark;
     cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width()).content(|| {
         for row in CharStyle::ALL.chunks(2) {
@@ -96,14 +98,13 @@ pub fn StylePicker(project_id: &str, seed_name: &str) {
                                     lead: false,
                                     role: Some("리뷰어".into()),
                                     dark,
+                                    pin: None,
                                 },
                                 56.0,
                             );
-                            let (ui, pid) = (ui.clone(), project_id.to_string());
+                            let mut pick = on_pick.clone();
                             let kind = if style == current { ButtonKind::Primary } else { ButtonKind::Default };
-                            AppButton(style.label(), None, kind, true, true, false, move || {
-                                ui.update_prefs(|pr| pr.set_character_style(&pid, style));
-                            });
+                            AppButton(style.label(), None, kind, true, true, false, move || pick(style));
                             Label(style.blurb(), Fs::Xs2, Weight::Regular, Some(paint(p.text_2)), Some(3));
                         });
                 }
@@ -127,7 +128,7 @@ mod tests {
     #[test]
     fn fr_l24_the_style_picker_lists_every_style_label() {
         let _guard = crate::services::test_guard();
-        let mut host = Host::new(|| Box::new(Recomposer::new(|| StylePicker("p1", "ember"))));
+        let mut host = Host::new(|| Box::new(Recomposer::new(|| StylePicker("ember", CharStyle::Crew, |_| {}))));
         let batch = compose_rust::protocol::decode_batch(host.rebuild().expect("rebuild")).expect("decode");
         let text: String = batch.iter().map(|m| format!("{m:?}")).collect();
         for style in CharStyle::ALL {

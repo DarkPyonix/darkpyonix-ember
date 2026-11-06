@@ -49,10 +49,16 @@ pub struct SharedLive {
     /// ChatGPT plan accounts (FR-U4); empty when sign-in is off.
     pub chatgpt: MutableState<Vec<ChatGptAccount>>,
     pub agents: MutableState<Vec<DetectedAgent>>,
+    /// The 다시 찾기 state of the 에이전트 screen (FR-L21).
+    pub agents_rescan: MutableState<crate::ui::agents::Rescan>,
+    /// When the agent detection last answered (ms since epoch); `None` before the first answer.
+    pub agents_checked_ms: MutableState<Option<u64>>,
     /// Tokens per account per UTC day, last 14 days (FR-U7); empty until loaded.
     pub usage: MutableState<Vec<DailyUsage>>,
     /// Tokens per UTC day over the last 14 days, all harnesses (FR-U7, #332).
     pub usage_summary: MutableState<crate::ui::usage::Load<UsageSummary>>,
+    /// The Home GitHub card's last answer (FR-L35).
+    pub github: MutableState<crate::ui::home::GithubFetch>,
     /// Today's tokens per project, keyed by project name (the Session status tile, FR-L18).
     pub project_day: MutableState<std::collections::HashMap<String, crate::ui::usage::Load<UsageSummary>>>,
 }
@@ -73,8 +79,11 @@ impl SharedLive {
             accounts: mutable_state_of(Vec::new()),
             chatgpt: mutable_state_of(Vec::new()),
             agents: mutable_state_of(Vec::new()),
+            agents_rescan: mutable_state_of(Default::default()),
+            agents_checked_ms: mutable_state_of(None),
             usage: mutable_state_of(Vec::new()),
             usage_summary: mutable_state_of(Default::default()),
+            github: mutable_state_of(Default::default()),
             project_day: mutable_state_of(Default::default()),
         }
     }
@@ -129,6 +138,10 @@ pub struct SharedUi {
     /// A phone screen shows a detail view (an open room): the shell hides its top-right menu
     /// there (`body.view-detail .phonemenu { display: none }`).
     pub detail_open: MutableState<bool>,
+    /// `Some(project)` while the team character screen is open (FR-L22); empty means the
+    /// screen picks the project. Not a menu: it opens from the project settings sheet and
+    /// replaces the content with a back button (INTENT D26, #503).
+    pub characters: MutableState<Option<String>>,
     /// `true` when this process was launched directly with `--editor <project> <folder>`, so
     /// closing the editor exits the process instead of leaving a blank window.
     pub standalone_editor: MutableState<bool>,
@@ -151,6 +164,7 @@ impl SharedUi {
             theme_pref: mutable_state_of(theme),
             notice: mutable_state_of(None),
             detail_open: mutable_state_of(false),
+            characters: mutable_state_of(None),
             standalone_editor: mutable_state_of(false),
             mirrors: Arc::new(OnceLock::new()),
         }
@@ -294,7 +308,7 @@ impl SharedUi {
         project: String,
         folder: String,
         spawner: impl FnOnce(&str, &str) -> std::io::Result<()>,
-    ) {
+    ) -> Option<String> {
         let target = Some(EditorTarget {
             project: project.clone(),
             folder: folder.clone(),
@@ -306,8 +320,12 @@ impl SharedUi {
         }
         if crate::services::try_services().is_some() {
             let notice = crate::ide::spawn_editor_notice(&project, &folder, spawner);
-            crate::ui::cr::notice::post(notice);
+            crate::ui::cr::notice::post(notice.clone());
+            // The text that was posted: the shared notice signal is written by worker threads too, so a
+            // reader of the signal can see someone else's message instead.
+            return Some(notice);
         }
+        None
     }
 
     pub fn close_editor(&self) {
@@ -326,6 +344,14 @@ impl SharedUi {
         if standalone {
             on_exit_standalone();
         }
+    }
+
+    pub fn open_characters(&self, project: &str) {
+        self.characters.set(Some(project.to_string()));
+    }
+
+    pub fn close_characters(&self) {
+        self.characters.set(None);
     }
 
     pub fn open_new_session(&self, project: Option<String>) {
@@ -473,7 +499,7 @@ mod tests {
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
         let mut spawned: Option<(String, String)> = None;
-        ui.open_editor_with("demo-project".into(), "/work/demo".into(), |p, f| {
+        let posted = ui.open_editor_with("demo-project".into(), "/work/demo".into(), |p, f| {
             spawned = Some((p.to_string(), f.to_string()));
             Ok(())
         });
@@ -481,18 +507,16 @@ mod tests {
             spawned,
             Some(("demo-project".to_string(), "/work/demo".to_string()))
         );
-        assert_eq!(
-            ui.notice.get_untracked().map(|(_, s)| s),
-            Some("Ember 에디터: 새 창에서 여는 중입니다".to_string())
-        );
+        assert_eq!(posted, Some("Ember 에디터: 새 창에서 여는 중입니다".to_string()));
 
-        ui.open_editor_with("demo-project".into(), "/work/demo".into(), |_, _| {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no binary"))
-        });
-        let err_notice = ui.notice.get_untracked().map(|(_, s)| s).unwrap_or_default();
+        let posted = ui
+            .open_editor_with("demo-project".into(), "/work/demo".into(), |_, _| {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no binary"))
+            })
+            .unwrap_or_default();
         assert!(
-            err_notice.starts_with("Ember 에디터: 열지 못했습니다:"),
-            "unexpected error notice: {err_notice}"
+            posted.starts_with("Ember 에디터: 열지 못했습니다:"),
+            "unexpected error notice: {posted}"
         );
         ui.close_editor();
     }

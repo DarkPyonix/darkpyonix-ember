@@ -6,6 +6,30 @@ use ember_editor::widget::HoverPhase as EditorHoverPhase;
 use crate::editor_host::{EditorHost, HostCommand};
 use super::{editor::{EditorTarget, EditorTabs, Stripes, base_name, position_text}, keymap::Keymap, workbench};
 
+/// The find bar's state: whether it is open, what is typed, the options, which match the reader is on,
+/// and the command the editor pane carries out next (a selection to show, or replacements to make).
+#[derive(Clone, Copy)]
+struct FindState {
+    open: Signal<bool>,
+    query: Signal<String>,
+    replacement: Signal<String>,
+    case_sensitive: Signal<bool>,
+    whole_word: Signal<bool>,
+    current: Signal<Option<usize>>,
+    cmd: Signal<Option<FindCmd>>,
+    next_id: Signal<u64>,
+}
+
+/// One thing asked of the editor by the find bar. `id` is new for every request, so the pane does each once.
+#[derive(Clone, Debug, PartialEq)]
+struct FindCmd {
+    id: u64,
+    /// The match to select and bring into view.
+    goto: Option<crate::ui::find::Match>,
+    /// Replacements, last first, each written against the same document version.
+    replacements: Vec<(crate::ui::find::Match, String)>,
+}
+
 #[derive(Clone)]
 struct Shared {
     host: EditorHost,
@@ -13,6 +37,18 @@ struct Shared {
     revision: SyncSignal<u64>,
     tabs: Signal<EditorTabs>,
     directory: Signal<String>,
+    expanded: Signal<std::collections::HashSet<String>>,
+    bottom_max: Signal<bool>,
+    tree_sel: Signal<Option<(String, bool)>>,
+    prompt: Signal<Option<crate::ui::editor::TreePrompt>>,
+    prompt_text: Signal<String>,
+    prompt_at: Signal<u64>,
+    palette_open: Signal<bool>,
+    find: FindState,
+    palette_mode: Signal<crate::ui::palette::Mode>,
+    palette_query: Signal<String>,
+    palette_sel: Signal<usize>,
+    theme: Signal<crate::ui::theme::ThemePref>,
     position: Signal<(usize, usize)>,
     stripes: Signal<Stripes>,
     menu_open: Signal<bool>,
@@ -23,10 +59,22 @@ struct Shared {
     project: String,
     project_name: String,
     uris: Rc<RefCell<HashMap<String, ember_editor_conn::uri::UriComponents>>>,
+    /// Why a file could not be opened, by path: the pane says so instead of looking like nothing is open.
+    open_errors: Rc<RefCell<HashMap<String, String>>>,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
 // the trees until WidgetView supports props and flex stretch sizing (dioxus-compose #160).
+thread_local! { static DOUBLE_SHIFT: RefCell<super::editor::DoubleShift> = RefCell::new(super::editor::DoubleShift::default()); }
+
+/// Milliseconds on a clock that only moves forward, for telling two Shift presses apart.
+fn now_ms() -> u64 {
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+thread_local! { static ICON_DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 thread_local! { static SHARED: RefCell<Option<Shared>> = const { RefCell::new(None) }; }
 fn shared() -> Shared { SHARED.with(|s| s.borrow().as_ref().expect("workbench initialized").clone()) }
 
@@ -38,17 +86,60 @@ fn init(target: EditorTarget) {
     let host = use_hook(|| EditorHost::start(target.clone(), revision));
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
+    let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
+    let theme = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().theme, root));
+    let tree_sel = use_hook(|| Signal::new_in_scope(None::<(String, bool)>, root));
+    let prompt = use_hook(|| Signal::new_in_scope(None::<crate::ui::editor::TreePrompt>, root));
+    let palette_open = use_hook(|| Signal::new_in_scope(false, root));
+    let find = use_hook(|| FindState {
+        open: Signal::new_in_scope(false, root),
+        query: Signal::new_in_scope(String::new(), root),
+        replacement: Signal::new_in_scope(String::new(), root),
+        case_sensitive: Signal::new_in_scope(false, root),
+        whole_word: Signal::new_in_scope(false, root),
+        current: Signal::new_in_scope(None, root),
+        cmd: Signal::new_in_scope(None, root),
+        next_id: Signal::new_in_scope(1, root),
+    });
+    let palette_mode = use_hook(|| Signal::new_in_scope(crate::ui::palette::Mode::Commands, root));
+    let palette_query = use_hook(|| Signal::new_in_scope(String::new(), root));
+    let palette_sel = use_hook(|| Signal::new_in_scope(0usize, root));
+    let prompt_at = use_hook(|| Signal::new_in_scope(0u64, root));
+    let prompt_text = use_hook(|| Signal::new_in_scope(String::new(), root));
+    let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors }));
 }
 
-fn join_path(dir: &str, name: &str) -> String {
+pub(crate) fn join_path(dir: &str, name: &str) -> String {
     if dir == "/" { format!("/{name}") } else if dir.is_empty() { name.to_string() } else { format!("{}/{name}", dir.trim_end_matches('/')) }
+}
+
+/// The open files whose edits are not saved.
+fn unsaved_open_paths(s: &Shared) -> Vec<String> {
+    let bridge = s.bridge.borrow();
+    let uris = s.uris.borrow();
+    s.tabs
+        .read()
+        .paths()
+        .into_iter()
+        .filter(|p| uris.get(*p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty))
+        .map(str::to_owned)
+        .collect()
+}
+
+thread_local! {
+    /// The editor's document version as last heard: (generation, version). A selection, a reveal or an
+    /// edit the find bar asks for is written against it.
+    static EDITOR_VERSION: std::cell::Cell<(u64, u32)> = const { std::cell::Cell::new((0, 0)) };
+    /// The last find command the editor pane carried out.
+    static LAST_FIND_CMD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn pos(p: compose_rust::code::Position) -> WidgetPos { WidgetPos::new(p.line, p.column) }
@@ -69,15 +160,29 @@ fn editor_pane() -> Element {
     let Some(doc) = doc else { return rsx! {}; };
     let generation = doc.generation;
     let uri = doc.uri.clone();
+    let handle = dioxus_compose::use_code_editor();
+    let version = EDITOR_VERSION.with(|v| { let (g, n) = v.get(); if g == generation { n } else { v.set((generation, 0)); 0 } });
+    if let Some(cmd) = s.find.cmd.read().clone() {
+        if LAST_FIND_CMD.with(|last| last.replace(cmd.id)) != cmd.id {
+            use compose_rust::code::{CodeRange, Position};
+            if let Some(m) = cmd.goto {
+                handle.select(version, Position::new(m.line, m.start), Position::new(m.line, m.end));
+                handle.reveal(version, CodeRange::of(m.line, m.start, m.line, m.end), compose_rust::schema::RevealAlign::Center);
+            }
+            for (i, (m, text)) in cmd.replacements.iter().enumerate() {
+                handle.edit(i as u32 + 1, version, CodeRange::of(m.line, m.start, m.line, m.end), text.clone());
+            }
+        }
+    }
     let change_s = s.clone(); let change_uri = uri.clone();
     let save_s = s.clone(); let save_uri = uri.clone();
     let hover_s = s.clone(); let hover_uri = uri.clone();
     let click_s = s.clone(); let click_uri = uri.clone();
     let selection_s = s.clone(); let selection_uri = uri;
     rsx! { CodeEditor {
-        key: "{generation}", width: Some(box_w), height: Some(box_h),
+        key: "{generation}", width: Some(box_w), height: Some(box_h), handle,
         text: doc.text, decorations: compose_rust::code::Decorations::from_bytes(doc.decoration_bytes), tab_width: Some(doc.tab_width),
-        on_change: move |e: compose_rust::code::CodeChange| { let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
+        on_change: move |e: compose_rust::code::CodeChange| { EDITOR_VERSION.with(|v| v.set((generation, e.version))); let event = change_s.bridge.borrow_mut().on_code_changed(&change_uri, e.version, WidgetRange::new(pos(e.range.start), pos(e.range.end)), e.text); send(&change_s, event); },
         on_save: move |e: compose_rust::code::SaveRequest| { let event = save_s.bridge.borrow().on_save_requested(&save_uri, e.version); send(&save_s, event); },
         on_hover: move |e: compose_rust::code::CodeHover| { let phase = match e.phase { compose_rust::schema::HoverPhase::Rest => EditorHoverPhase::Rest, _ => EditorHoverPhase::Leave }; let event = hover_s.bridge.borrow().on_code_hovered(&hover_uri, e.decoration.unwrap_or(0), pos(e.position), phase); send(&hover_s, event); },
         on_decoration_click: move |id| { let event = click_s.bridge.borrow().on_decoration_activated(&click_uri, id); send(&click_s, event); },
@@ -92,12 +197,28 @@ pub mod page {
     use dioxus_compose::html::prelude::*;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
+    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
     use crate::ui::editor::{
-        action_for_key, agent_status_text, apply_action, breadcrumb_text, tooltip_text, Side, Stripes, ToolWindow,
+        action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
-    use crate::ui::keymap::{Action, Keymap, Os};
+    use crate::ui::keymap::{Action, Chord, Keymap, Os};
+    use crate::ui::editor::DoubleShift;
     use crate::ui::project::{project_boxes, status_pill, SOON};
+
+    /// The mockup's tokens and editor screen styles.
+    pub fn config() -> HtmlConfig {
+        HtmlConfig {
+            stylesheets: vec![
+                // The mockup's dark tokens hang on `:root[data-theme=dark]`; here the page's own container
+                // carries the attribute, so the selector is the attribute alone.
+                include_str!("../../assets/editor/style.css").replace(":root[data-theme=dark]", "[data-theme=dark]"),
+                include_str!("../../assets/editor/editor.css").to_string(),
+                include_str!("../../assets/editor/page.css").to_string(),
+            ],
+            images: Some(Box::new(crate::ui::editor_icons::IconResolver::default())),
+            ..HtmlConfig::default()
+        }
+    }
 
     pub fn app() -> Element {
         let target = crate::services::services().ui.editor.get_untracked().expect("editor target");
@@ -121,6 +242,25 @@ pub mod page {
     /// Do a keymap action. Closing a tab also tells the host; an action the editor cannot do
     /// says it is not ready.
     fn run_action(s: &Shared, action: Action) {
+        if action == Action::FindInFile {
+            // The bar is for the open file: with none open there is nothing to search, and the bar would
+            // appear later over whatever file is opened next.
+            if s.bridge.borrow().active_document().is_none() {
+                notice("찾을 파일이 열려 있지 않습니다");
+                return;
+            }
+            let mut open = s.find.open;
+            open.set(true);
+            return;
+        }
+        if action == Action::Save {
+            save_current(s);
+            return;
+        }
+        if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
+            open_palette(s, mode);
+            return;
+        }
         let mut tabs = s.tabs;
         let mut stripes = s.stripes;
         let closing = if action == Action::Close { tabs.read().current_path().map(str::to_owned) } else { None };
@@ -139,6 +279,239 @@ pub mod page {
         }
     }
 
+    /// Saves the document in the active tab: the same request the editor widget sends for its own Cmd+S, for
+    /// when the key reaches the page instead of the widget. The session saves the text it holds, so the
+    /// request carries no version.
+    fn save_current(s: &Shared) {
+        let current = s.tabs.read().current_path().map(str::to_owned);
+        let uri = current.and_then(|p| s.uris.borrow().get(&p).cloned());
+        match uri {
+            Some(uri) => send(s, s.bridge.borrow().on_save_requested(&uri, 0)),
+            None => notice("저장할 파일이 열려 있지 않습니다"),
+        }
+    }
+
+    fn open_palette(s: &Shared, mode: crate::ui::palette::Mode) {
+        let (mut open, mut query, mut sel, mut palette_mode) = (s.palette_open, s.palette_query, s.palette_sel, s.palette_mode);
+        palette_mode.set(mode);
+        if mode != crate::ui::palette::Mode::Commands {
+            s.host.send(HostCommand::IndexFiles);
+        }
+        query.set(String::new());
+        sel.set(0);
+        open.set(true);
+    }
+
+    /// Does what a chosen palette item says: runs the action, or opens the file in a tab.
+    fn choose_palette_item(s: &Shared, payload: crate::ui::palette::Payload) {
+        match payload {
+            crate::ui::palette::Payload::Action(action) => run_action(s, action),
+            crate::ui::palette::Payload::File(path) => {
+                let mut tabs = s.tabs;
+                tabs.write().open(&path);
+                s.host.send(HostCommand::Open(path));
+            }
+        }
+    }
+
+    /// The palette sheet: a search field over the editor's actions, ranked as the query is typed.
+    /// Enter does the highlighted one, Escape or a click outside closes it. The design follows the
+    /// app's sheet rules in the mockup's tokens (the mockup has no palette).
+    fn palette_sheet(s: &Shared, keymap: Keymap) -> Element {
+        use crate::ui::palette::{highlight_segments, items_for, move_selection, placeholder, rank, Payload};
+        let (mut open, mut query, mut sel) = (s.palette_open, s.palette_query, s.palette_sel);
+        let mode = *s.palette_mode.read();
+        let (files, index_running, index_capped) = {
+            let state = s.host.state.lock().unwrap();
+            (state.file_items.clone(), state.index_running, state.index_capped)
+        };
+        let items = items_for(mode, keymap, Os::current(), &files);
+        let hint_text = placeholder(mode, keymap);
+        let text = query.read().clone();
+        let ranked = rank(&text, &items);
+        let shown: Vec<_> = ranked.iter().take(50).cloned().collect();
+        let chosen = (*sel.read()).min(shown.len().saturating_sub(1));
+        // A command the editor cannot do yet is listed but does nothing: Enter on it leaves the sheet open.
+        let enter_payload = shown.get(chosen).filter(|r| items[r.index].enabled).map(|r| items[r.index].payload.clone());
+        let count = shown.len();
+        let run_s = s.clone();
+        rsx! {
+            div { style: "position:fixed; left:0; top:0; right:0; bottom:0; z-index:39;", onclick: move |_| open.set(false) }
+            div { class: "ed-menu", role: "dialog", "aria-label": "명령 팔레트",
+                style: "position:fixed; z-index:40; top:60px; left:calc(50vw - min(280px, calc(50vw - 12px))); width:min(560px, calc(100vw - 24px)); right:auto; padding:var(--sp1);",
+                div { class: "ed-find", style: "width:auto; margin:var(--sp1);",
+                    {icon("search")}
+                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                        "aria-label": "{crate::ui::palette::search_label(mode)}", placeholder: "{hint_text}", value: "{text}", autofocus: true,
+                        oninput: move |event| { query.set(event.value()); sel.set(0); },
+                        onkeydown: move |event| {
+                            match event.key() {
+                                Key::Escape => { event.stop_propagation(); open.set(false); }
+                                Key::ArrowDown => { event.stop_propagation(); sel.set(move_selection(chosen, count, true)); }
+                                Key::ArrowUp => { event.stop_propagation(); sel.set(move_selection(chosen, count, false)); }
+                                Key::Enter => {
+                                    event.stop_propagation();
+                                    if let Some(payload) = enter_payload.clone() {
+                                        open.set(false);
+                                        choose_palette_item(&run_s, payload);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        },
+                    }
+                }
+                if mode != crate::ui::palette::Mode::Commands && index_running && !shown.is_empty() {
+                    div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일을 더 찾는 중입니다…" }
+                }
+                if mode != crate::ui::palette::Mode::Commands && index_capped {
+                    div { style: "padding:var(--sp1) var(--sp3); color:var(--muted); font-size:var(--fs-xs);", "파일이 많아 일부만 표시합니다." }
+                }
+                div { style: "max-height:320px; overflow:auto;", role: "listbox",
+                    if shown.is_empty() { div { style: "padding:var(--sp3); color:var(--muted);", "{crate::ui::palette::empty_text(mode, index_running)}" } }
+                    for (row, r) in shown.iter().enumerate() {
+                        {
+                            let item = &items[r.index];
+                            let segments = highlight_segments(&item.title, &r.matched);
+                            let enabled = item.enabled;
+                            let hint = if enabled { item.hint.clone() } else { "준비 중".to_string() };
+                            let payload = item.payload.clone();
+                            let click_s = s.clone();
+                            let class = if row == chosen { "ed-tn sel" } else { "ed-tn" };
+                            let row_style = if enabled { "--d:0; height:34px;" } else { "--d:0; height:34px; color:var(--muted);" };
+                            rsx! { div { key: "{row}", class, role: "option", "aria-selected": "{row == chosen}", "aria-disabled": "{!enabled}", style: "{row_style}",
+                                onclick: move |_| {
+                                    if !enabled { return; }
+                                    open.set(false);
+                                    choose_palette_item(&click_s, payload.clone());
+                                },
+                                for (i, (part, hit)) in segments.into_iter().enumerate() {
+                                    span { key: "{i}", style: if hit { "font-weight:var(--fw-semibold); color:var(--text);" } else { "" }, "{part}" }
+                                }
+                                div { class: "spacer" }
+                                if !hint.is_empty() { kbd { class: "ed-sc", "{hint}" } }
+                            } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The text of the open file, or empty.
+    fn active_text(s: &Shared) -> String {
+        s.bridge.borrow().active_document().map(|d| d.text.clone()).unwrap_or_default()
+    }
+
+    fn find_options(s: &Shared) -> crate::ui::find::FindOptions {
+        crate::ui::find::FindOptions { case_sensitive: *s.find.case_sensitive.read(), whole_word: *s.find.whole_word.read() }
+    }
+
+    /// Asks the editor to do `goto` and `replacements`, once.
+    fn find_send(s: &Shared, goto: Option<crate::ui::find::Match>, replacements: Vec<(crate::ui::find::Match, String)>) {
+        let (mut cmd, mut next_id) = (s.find.cmd, s.find.next_id);
+        let id = *next_id.read();
+        next_id.set(id + 1);
+        cmd.set(Some(super::FindCmd { id, goto, replacements }));
+    }
+
+    /// Goes to the next or the previous match: from the match the reader is on, else from the caret.
+    fn find_go(s: &Shared, forward: bool) {
+        let matches = crate::ui::find::cached_matches(&active_text(s), &s.find.query.read(), find_options(s)).0;
+        if matches.is_empty() { return; }
+        let mut current = s.find.current;
+        let index = match *current.read() {
+            Some(i) if i < matches.len() => if forward { (i + 1) % matches.len() } else { (i + matches.len() - 1) % matches.len() },
+            _ => {
+                let (line, col) = *s.position.read();
+                crate::ui::find::next_match(&matches, (line.saturating_sub(1) as u32, col.saturating_sub(1) as u32), forward).unwrap_or(0)
+            }
+        };
+        current.set(Some(index));
+        find_send(s, Some(matches[index]), Vec::new());
+    }
+
+    /// Replaces the match the reader is on (the first one when none is chosen yet).
+    fn find_replace_one(s: &Shared) {
+        let matches = crate::ui::find::cached_matches(&active_text(s), &s.find.query.read(), find_options(s)).0;
+        let mut current = s.find.current;
+        let index = current.read().filter(|i| *i < matches.len()).or(if matches.is_empty() { None } else { Some(0) });
+        let Some(index) = index else { return };
+        let replacement = s.find.replacement.read().clone();
+        find_send(s, None, crate::ui::find::replace_edits(&matches, Some(index), &replacement));
+        current.set(None);
+    }
+
+    fn find_replace_all(s: &Shared) {
+        let (matches, truncated) = crate::ui::find::cached_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        if matches.is_empty() { return; }
+        if truncated {
+            notice(format!("결과가 {}개를 넘어 모두 바꾸기를 쓸 수 없습니다. 찾을 내용을 더 구체적으로 적으세요", crate::ui::find::MAX_MATCHES));
+            return;
+        }
+        let replacement = s.find.replacement.read().clone();
+        let mut current = s.find.current;
+        find_send(s, None, crate::ui::find::replace_edits(&matches, None, &replacement));
+        current.set(None);
+    }
+
+    /// The find bar over the editor: a field with the case and whole-word options, the counter and the
+    /// previous and next buttons, a replacement field with replace and replace all, and close. Enter goes
+    /// to the next match, Shift+Enter to the previous, Escape closes.
+    fn find_bar(s: &Shared) -> Element {
+        let (mut query, mut replacement, mut case_sensitive, mut whole_word, mut current, mut open) =
+            (s.find.query, s.find.replacement, s.find.case_sensitive, s.find.whole_word, s.find.current, s.find.open);
+        let text = active_text(s);
+        let q = query.read().clone();
+        let (matches, truncated) = crate::ui::find::cached_matches(&text, &q, find_options(s));
+        let counter = if truncated { format!("{}개 이상", crate::ui::find::MAX_MATCHES) } else { crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q) };
+        let (prev_s, next_s, one_s, all_s, key_s, enter_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        let has_doc = s.bridge.borrow().active_document().is_some();
+        let has_matches = has_doc && !matches.is_empty();
+        let (case_on, word_on) = (*case_sensitive.read(), *whole_word.read());
+        let on = |flag: bool| if flag { "ed-pj on" } else { "ed-pj" };
+        rsx! {
+            div { class: "ed-tsub", role: "search", "aria-label": "문서에서 찾기", style: "flex-wrap:wrap;",
+                div { class: "ed-find", style: "width:220px; height:28px;",
+                    {icon("search")}
+                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                        "aria-label": "찾을 내용", placeholder: "찾기", value: "{q}", autofocus: true,
+                        oninput: move |event| { query.set(event.value()); current.set(None); },
+                        onkeydown: move |event| {
+                            match event.key() {
+                                Key::Enter => { event.stop_propagation(); find_go(&key_s, !event.modifiers().contains(Modifiers::SHIFT)); }
+                                Key::Escape => { event.stop_propagation(); open.set(false); }
+                                _ => {}
+                            }
+                        },
+                    }
+                }
+                button { class: on(case_on), title: "대소문자 구분", "aria-pressed": "{case_on}", style: "border:1px solid var(--line);", onclick: move |_| { case_sensitive.set(!case_on); current.set(None); }, "Aa" }
+                button { class: on(word_on), title: "단어 단위", "aria-pressed": "{word_on}", style: "border:1px solid var(--line);", onclick: move |_| { whole_word.set(!word_on); current.set(None); }, "단어" }
+                span { class: "ed-sbi", role: "status", "{counter}" }
+                button { class: "ed-ib", title: "이전 결과", disabled: !has_matches, onclick: move |_| find_go(&prev_s, false), {icon("up")} }
+                button { class: "ed-ib", title: "다음 결과", disabled: !has_matches, onclick: move |_| find_go(&next_s, true), {icon("down")} }
+                div { class: "ed-find", style: "width:200px; height:28px;",
+                    input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
+                        "aria-label": "바꿀 내용", placeholder: "바꾸기", value: "{replacement}",
+                        oninput: move |event| replacement.set(event.value()),
+                        onkeydown: move |event| {
+                            match event.key() {
+                                Key::Enter => { event.stop_propagation(); find_replace_one(&enter_s); }
+                                Key::Escape => { event.stop_propagation(); open.set(false); }
+                                _ => {}
+                            }
+                        },
+                    }
+                }
+                button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
+                button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_all(&all_s), "모두 바꾸기" }
+                div { class: "spacer" }
+                button { class: "ed-ib", title: "닫기", onclick: move |_| open.set(false), {icon("close")} }
+            }
+        }
+    }
+
     /// The agent state and the branch of the project, from the client's rows.
     fn project_status(project: &str) -> (String, String) {
         crate::services::services().client.read(|st| {
@@ -153,31 +526,62 @@ pub mod page {
         })
     }
 
-    fn glyph(w: ToolWindow) -> &'static str {
-        match w {
-            ToolWindow::Project => "\u{25A4}",
-            ToolWindow::Commit => "\u{2713}",
-            ToolWindow::Git => "\u{2442}",
-            ToolWindow::Agent => "\u{2726}",
-            ToolWindow::Notifications => "\u{25CE}",
-            ToolWindow::Terminal => "\u{203A}_",
-            ToolWindow::Run => "\u{25B6}",
-            ToolWindow::Problems => "\u{26A0}",
-        }
-    }
-
     fn workbench_page() -> Element {
         let s = shared();
         let _ = *s.revision.read();
-        let (entries, error, updates) = {
+        let (error, updates, edit_errors, gone, renamed) = {
             let mut state = s.host.state.lock().unwrap();
-            (state.entries.clone(), state.error.clone(), std::mem::take(&mut state.updates))
+            (state.error.clone(), std::mem::take(&mut state.updates), std::mem::take(&mut state.edit_errors), std::mem::take(&mut state.gone), std::mem::take(&mut state.renamed))
         };
+        for (old, new) in renamed {
+            // The tabs below the renamed path follow it (clean ones only: a rename with unsaved
+            // changes is refused before it is sent); the session reopens them under the new name.
+            let current = s.tabs.read().current_path().map(str::to_owned);
+            let moved = { let mut tabs = s.tabs; tabs.write().rename_prefix(&old, &new) };
+            for (from, to) in moved {
+                s.host.send(HostCommand::Close(from.clone()));
+                s.host.send(HostCommand::Open(to.clone()));
+                if current.as_deref() == Some(from.as_str()) { s.host.send(HostCommand::Focus(to)); }
+            }
+            let mut expanded = s.expanded;
+            let remapped: Vec<String> = expanded.read().iter().filter(|p| crate::ui::editor::is_at_or_below(p, &old)).cloned().collect();
+            for p in remapped {
+                expanded.write().remove(&p);
+                expanded.write().insert(format!("{}{}", new.trim_end_matches('/'), &p[old.trim_end_matches('/').len()..]));
+            }
+            let mut tree_sel = s.tree_sel;
+            tree_sel.set(None);
+        }
+        for message in edit_errors { notice(message); }
+        for path in gone {
+            let doomed: Vec<String> = s.tabs.read().paths().into_iter().filter(|tab| crate::ui::editor::is_at_or_below(tab, &path)).map(str::to_owned).collect();
+            for tab in doomed {
+                let mut tabs = s.tabs;
+                tabs.write().close(&tab);
+                s.host.send(HostCommand::Close(tab));
+            }
+            let mut expanded = s.expanded;
+            expanded.write().retain(|p| !crate::ui::editor::is_at_or_below(p, &path));
+            let mut tree_sel = s.tree_sel;
+            tree_sel.set(None);
+        }
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
             let action = s.bridge.borrow_mut().apply(update);
-            if let BridgeAction::Resync(uri) = action { s.host.send(HostCommand::Resync(uri)); }
+            match action {
+                BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
+                BridgeAction::OpenFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "opening a file failed");
+                    s.open_errors.borrow_mut().insert(uri.path.clone(), crate::ui::editor::file_failure_reason(&error).to_string());
+                }
+                BridgeAction::SaveFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "saving a file failed");
+                    notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
+                }
+                _ => {}
+            }
         }
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
@@ -187,21 +591,60 @@ pub mod page {
         if let Some(uri) = current.as_ref().and_then(|p| uris.get(p)) { drop(bridge); s.bridge.borrow_mut().set_active(uri); } else { drop(bridge); }
         let bridge = s.bridge.borrow();
         let active = current.as_ref().and_then(|p| uris.get(p)).and_then(|u| bridge.document(u)).cloned();
+        let open_error = current.as_ref().and_then(|p| s.open_errors.borrow().get(p).cloned());
         let dirty: Vec<bool> = paths.iter().map(|p| uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty)).collect();
         drop(uris);
         drop(bridge);
         let (line, col) = *s.position.read();
-        let dir = s.directory.read().clone();
         let sel = *s.stripes.read();
         let keymap = *s.keymap.read();
         let (agent_state, branch) = project_status(&s.project);
         let key_s = s.clone();
+        let has_left = sel.selected(Side::Left).is_some();
+        let has_bottom = sel.selected(Side::Bottom).is_some();
+        let theme_pref = *s.theme.read();
+        let dark = theme_pref.resolve(crate::ui::theme::system_scheme()) == crate::ui::theme::Scheme::Dark;
+        if super::ICON_DARK.with(|d| d.replace(dark)) != dark {
+            // The code editor is a Compose widget: it takes its colours from the toolkit's theme.
+            let scheme = if dark { compose_rust::schema::ColorScheme::Dark } else { compose_rust::schema::ColorScheme::Light };
+            compose_rust::theme::set_theme(compose_rust::theme::current_theme().with_color_scheme(scheme));
+        }
+        let ed_class = format!(
+            "ed{}{}",
+            if has_left { "" } else { " no-left" },
+            if has_bottom { "" } else { " no-bottom" },
+        );
+        // The grid the mockup's `.ed.no-left` and `.ed.no-bottom` rules give, written inline so a
+        // closed column is 0 wide and the areas stay as the stylesheet has them.
+        let maximized = has_bottom && *s.bottom_max.read();
+        let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
+        // macOS opens the window FullSize (the page starts at the top and the top bar is the title
+        // strip), so the page is the window's height; elsewhere the native chrome stays and the
+        // page keeps its 76px allowance. TODO(#320): the height is fixed at launch (compose-rust#467).
+        let height = crate::ui::editor::editor_page_height(cfg!(target_os = "macos"));
+        let ed_style = format!("width:100vw; height:{height}; {grid}");
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
-            div { class: "monaco-workbench", tabindex: "0", style: "width:100vw; height:calc(100vh - 76px); display:flex; flex-direction:column; background:#1e1e1e; color:#cccccc; font-size:13px;",
+            div { class: "{ed_class}", "data-theme": if dark { "dark" } else { "light" }, tabindex: "0", style: "{ed_style}",
                 onkeydown: move |event| {
                     let m = event.modifiers();
                     let keymap = *key_s.keymap.read();
+                    let name = key_name(&event.key());
+                    let double = DOUBLE_SHIFT.with(|d| {
+                        d.borrow_mut().press(
+                            &name,
+                            event.is_auto_repeating(),
+                            m.contains(Modifiers::CONTROL),
+                            m.contains(Modifiers::ALT),
+                            m.contains(Modifiers::META),
+                            now_ms(),
+                        )
+                    });
+                    if double {
+                        if let Some(action) = keymap.action_for(&Chord::DoubleShift, Os::current()) {
+                            run_action(&key_s, action);
+                        }
+                    }
                     if let Some(action) = action_for_key(
                         keymap,
                         Os::current(),
@@ -215,59 +658,97 @@ pub mod page {
                     }
                 },
                 if let Some(error) = error {
-                    div { style: "padding:20px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
+                    div { style: "padding:20px; grid-column:1 / -1; padding-top:76px;", "{error}" button { onclick: move |_| crate::services::services().ui.close_editor(), "닫기" } }
                 } else {
                     {top_bar(&s, &branch, keymap)}
-                    div { style: "display:flex; flex:1; min-height:0;",
-                        {stripe_column(&s, sel, keymap, true)}
-                        if let Some(w) = sel.selected(Side::Left) {
-                            if w == ToolWindow::Project {
-                                {project_tree(&s, entries, &dir)}
-                            } else {
-                                {side_note(w)}
-                            }
-                        }
-                        div { style: "display:flex; flex:1; min-width:0; flex-direction:column;",
-                            {tab_strip(&s, &paths, &dirty, current.as_deref())}
-                            if let Some(path) = current.as_deref() {
-                                {breadcrumbs(path, &s.folder)}
-                            }
-                            div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
-                                if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
-                                else { div { style: "padding:20px;", "열린 파일이 없습니다" } }
-                            }
-                            if let Some(w) = sel.selected(Side::Bottom) {
-                                {bottom_window(&s, w)}
-                            }
-                        }
-                        if let Some(w) = sel.selected(Side::Right) {
-                            {side_note(w)}
-                        }
-                        {stripe_column(&s, sel, keymap, false)}
+                    div { class: "ed-rail",
+                        {stripe_column(&s, sel, keymap, Strip::Left)}
+                        {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
-                    {status_bar(&s, &agent_state, &branch, active.is_some(), line, col)}
+                    if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
+                        if w == ToolWindow::Project {
+                            {project_tree(&s, current.as_deref())}
+                        } else {
+                            {side_note(w, "ed-left")}
+                        }
+                    }
+                    section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
+                        {tab_strip(&s, &paths, &dirty, current.as_deref())}
+                        if let Some(path) = current.as_deref() {
+                            {breadcrumbs(path, &s.folder)}
+                        }
+                        if *s.find.open.read() && active.is_some() { {find_bar(&s)} }
+                        div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
+                            if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
+                            else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
+                                div { class: "ed-empty", role: "alert",
+                                    b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
+                                    p { "{error.1}" }
+                                }
+                            }
+                            else { div { class: "ed-empty", b { "열린 파일이 없습니다" } } }
+                        }
+                    }
+                    {stripe_column(&s, sel, keymap, Strip::Right)}
+                    if let Some(w) = sel.selected(Side::Bottom) {
+                        {bottom_window(&s, w)}
+                    }
+                    if *s.palette_open.read() { {palette_sheet(&s, keymap)} }
+                    {status_bar(&s, &agent_state, &branch, current.as_deref().filter(|_| active.is_some()), line, col)}
                 }
             }
         }
     }
 
+    /// A mockup icon as an image: the HTML path draws SVG through `img`, which cannot take
+    /// `currentColor`, so the stroke is the text colour of the light palette.
+    // TODO(editor-redesign step 4): tint per theme once the dark palette is switched on.
+    pub(super) fn icon(name: &str) -> Element {
+        icon_px(name, 16)
+    }
+
+    /// A mockup icon at `px` dp (the mockup sizes tree, tab and breadcrumb icons by context).
+    pub(super) fn icon_px(name: &str, px: u32) -> Element {
+        let dark = if super::ICON_DARK.with(|d| d.get()) { "@dark" } else { "" };
+        rsx! { img { class: "i", src: "icon:{name}{dark}", width: "{px}", height: "{px}" } }
+    }
+
     fn top_bar(s: &Shared, branch: &str, keymap: Keymap) -> Element {
         let mut menu_open = s.menu_open;
+        let mut theme = s.theme;
+        let theme_pref = *s.theme.read();
+        let theme_title = format!("테마: {}", theme_pref.label());
         let name = s.project_name.clone();
         let branch = branch.to_string();
         let find = tooltip_text(keymap.find_label(), &keymap.hint(Action::Find, Os::current()));
-        let find_note = format!("{}: {SOON}", keymap.find_label());
-        let btn = "height:32px; padding:0 12px; display:flex; align-items:center; border-radius:16px; border:1px solid #333333; background:#1e1e1e; color:#cccccc; cursor:pointer;";
+        let find_hint = keymap.hint(Action::Find, Os::current());
+        let find_s = s.clone();
         let open = *menu_open.read();
+        // The traffic lights float over the top bar's left end under FullSize.
+        let strip_pad = crate::ui::editor::editor_strip_padding(cfg!(target_os = "macos"), crate::ui::safe_area::safe_area().leading);
         rsx! {
-            div { style: "position:relative; height:48px; flex-shrink:0; display:flex; align-items:center; gap:8px; padding:0 8px; background:#252526; border-bottom:1px solid #333333;",
-                div { style: "{btn}", onclick: move |_| crate::services::services().ui.close_editor(), "닫기" }
-                span { style: "font-weight:600;", "{name}" }
-                span { style: "color:#9d9d9d;", "{branch}" }
-                div { style: "flex:1;" }
-                div { style: "{btn}", title: "{find}", onclick: move |_| notice(find_note.clone()), "\u{2315} {find}" }
-                div { style: "{btn}", onclick: move |_| notice(format!("실행: {SOON}")), "\u{25B6} 실행" }
-                div { style: "{btn}", onclick: move |_| menu_open.set(!open), "\u{22EF}" }
+            header { class: "ed-top", style: "{strip_pad}",
+                img { class: "logo logo-img", src: "icon:mark", width: "28", height: "28", alt: "Ember" }
+                button { class: "ed-pj", title: "닫기", onclick: move |_| crate::services::services().ui.close_editor(), "{name}" {icon_px("chev-dn", 12)} }
+                button { class: "ed-pj", title: "브랜치", onclick: move |_| notice(format!("브랜치: {SOON}")), {icon("git")} "{branch}" {icon_px("chev-dn", 12)} }
+                div { class: "spacer" }
+                button { class: "ed-find", title: "{find}", onclick: move |_| run_action(&find_s, Action::Find),
+                    {icon("search")}
+                    span { class: "hide-md", "{keymap.find_label()}" }
+                    kbd { class: "ed-sc", "{find_hint}" }
+                }
+                div { class: "ed-runcfg",
+                    button { class: "ed-pj", title: "실행 구성", onclick: move |_| notice(format!("실행 구성: {SOON}")), {icon("play")} "실행 구성" {icon_px("chev-dn", 12)} }
+                    button { class: "ed-ib run", title: "실행", onclick: move |_| notice(format!("실행: {SOON}")), {icon("play")} }
+                    button { class: "ed-ib", title: "중지", onclick: move |_| notice(format!("중지: {SOON}")), {icon("pause")} }
+                    button { class: "ed-ib", title: "{theme_title}", onclick: move |_| {
+                        let next = theme_pref.next();
+                        theme.set(next);
+                        crate::services::services().ui.update_prefs(|p| p.theme = next);
+                    }, {icon(if super::ICON_DARK.with(|d| d.get()) { "moon" } else { "sun" })} }
+                    button { class: "ed-ib", title: "에이전트에게 묻기", onclick: move |_| notice(format!("에이전트에게 묻기: {SOON}")), {icon("spark")} }
+                    button { class: "ed-ib", title: "메뉴", onclick: move |_| menu_open.set(!open), {icon("more")} }
+                }
                 if open { {menu(s, keymap)} }
             }
         }
@@ -275,26 +756,26 @@ pub mod page {
 
     fn menu(s: &Shared, keymap: Keymap) -> Element {
         let os = Os::current();
-        let item = "padding:8px 12px; cursor:pointer;";
         rsx! {
-            div { style: "position:absolute; right:8px; top:46px; width:280px; z-index:10; background:#252526; border:1px solid #333333; border-radius:8px; padding:4px 0;",
-                for a in [Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Palette] {
+            div { class: "ed-menu", role: "menu", "aria-label": "편집기 메뉴",
+                for a in [Action::FindInFile, Action::Save, Action::Recent, Action::Format, Action::GotoLine, Action::Palette] {
                     {
                         let s = s.clone();
                         let label = if a == Action::Palette { keymap.palette_label() } else { a.label() };
                         let text = tooltip_text(label, &keymap.hint(a, os));
                         let mut menu_open = s.menu_open;
-                        rsx! { div { key: "{a.label()}", style: "{item}", onclick: move |_| { menu_open.set(false); run_action(&s, a); }, "{text}" } }
+                        rsx! { button { key: "{a.label()}", role: "menuitem", onclick: move |_| { menu_open.set(false); run_action(&s, a); }, "{text}" } }
                     }
                 }
-                div { style: "padding:8px 12px; color:#858585; font-size:11px;", "단축키 체계" }
+                div { class: "ed-msep" }
+                div { class: "ed-mlab", "단축키 체계" }
                 for k in Keymap::ALL {
                     {
                         let mut menu_open = s.menu_open;
                         let mut keymap_sig = s.keymap;
                         let mark = if k == keymap { "\u{2713}" } else { "\u{2003}" };
                         let text = format!("{mark} {}  {}", k.label(), k.hint(Action::Find, os));
-                        rsx! { div { key: "{k.label()}", style: "{item}", onclick: move |_| {
+                        rsx! { button { key: "{k.label()}", role: "menuitemradio", "aria-checked": "{k == keymap}", onclick: move |_| {
                             menu_open.set(false);
                             keymap_sig.set(k);
                             crate::services::services().ui.update_prefs(|p| p.keymap = k);
@@ -309,53 +790,202 @@ pub mod page {
         let mut stripes = s.stripes;
         let hint = w.action().map(|a| keymap.hint(a, Os::current())).unwrap_or_default();
         let tip = tooltip_text(w.label(), &hint);
-        let look = if selected { "background:#37373d; color:#ffffff;" } else { "color:#9d9d9d;" };
+        let class = if selected { "ed-sb on" } else { "ed-sb" };
         rsx! {
-            div { key: "{w.label()}", title: "{tip}", style: "width:40px; height:40px; display:flex; align-items:center; justify-content:center; cursor:pointer; border-radius:4px; font-size:18px; {look}",
-                onclick: move |_| stripes.write().toggle(w), "{glyph(w)}" }
+            button { key: "{w.label()}", class, title: "{tip}", "aria-label": "{tip}", onclick: move |_| {
+                if w.side() == Side::Right { notice(format!("{}: {SOON}", w.label())); } else { stripes.write().toggle(w); }
+            }, {icon(icon_name(w))} }
         }
     }
 
-    fn stripe_column(s: &Shared, sel: Stripes, keymap: Keymap, left: bool) -> Element {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Strip { Left, Bottom, Right }
+
+    fn icon_name(w: ToolWindow) -> &'static str {
+        match w {
+            ToolWindow::Project => "folder",
+            ToolWindow::Commit => "commit",
+            ToolWindow::Git => "git",
+            ToolWindow::Agent => "spark",
+            ToolWindow::Notifications => "bell",
+            ToolWindow::Terminal => "code",
+            ToolWindow::Run => "play",
+            ToolWindow::Problems => "warn",
+        }
+    }
+
+    fn stripe_column(s: &Shared, sel: Stripes, keymap: Keymap, strip: Strip) -> Element {
+        let (class, windows): (&str, &[ToolWindow]) = match strip {
+            Strip::Left => ("ed-stripe ed-stripe-l", &ToolWindow::LEFT),
+            Strip::Bottom => ("ed-stripe ed-stripe-b", &ToolWindow::BOTTOM),
+            Strip::Right => ("ed-stripe ed-stripe-r", &ToolWindow::RIGHT),
+        };
         rsx! {
-            div { style: "width:40px; flex-shrink:0; display:flex; flex-direction:column; align-items:center; gap:2px; padding-top:4px; background:#252526;",
-                if left {
-                    for w in ToolWindow::LEFT { {stripe_button(s, w, sel.is_selected(w), keymap)} }
-                    div { style: "flex:1;" }
-                    for w in ToolWindow::BOTTOM { {stripe_button(s, w, sel.is_selected(w), keymap)} }
-                } else {
-                    for w in ToolWindow::RIGHT { {stripe_button(s, w, sel.is_selected(w), keymap)} }
+            nav { class, "aria-label": "도구 창",
+                for w in windows.iter().copied() { {stripe_button(s, w, sel.is_selected(w), keymap)} }
+            }
+        }
+    }
+
+    fn side_note(w: ToolWindow, area: &str) -> Element {
+        let class = format!("ed-tw {area}");
+        rsx! {
+            section { class, "aria-label": "{w.label()}",
+                div { class: "ed-twh", b { class: "ed-twt", "{w.label()}" } }
+                div { style: "padding:12px;",
+                    div { style: "color:var(--text-2);", "{SOON}" }
+                    div { style: "color:var(--muted); padding-top:6px; font-size:var(--fs-2xs);", "서버가 알려 주면 이곳에 표시됩니다." }
                 }
             }
         }
     }
 
-    fn side_note(w: ToolWindow) -> Element {
-        rsx! {
-            div { style: "width:260px; flex-shrink:0; padding:12px; background:#252526;",
-                div { style: "font-weight:600;", "{w.label()}" }
-                div { style: "color:#9d9d9d; padding-top:6px;", "{SOON}" }
-                div { style: "color:#858585; padding-top:6px; font-size:11px;", "서버가 알려 주면 이곳에 표시됩니다." }
-            }
-        }
-    }
-
-    fn project_tree(s: &Shared, entries: Vec<(String, u32)>, dir: &str) -> Element {
+    fn project_tree(s: &Shared, current: Option<&str>) -> Element {
+        use crate::ui::editor::TreePrompt;
         let mut tabs = s.tabs;
-        let mut directory = s.directory;
+        let mut expanded = s.expanded;
+        let mut stripes = s.stripes;
+        let mut tree_sel = s.tree_sel;
+        let mut prompt = s.prompt;
+        let mut prompt_text = s.prompt_text;
+        let mut prompt_at = s.prompt_at;
+        let unsaved = super::unsaved_open_paths(s);
+        let root = s.folder.clone();
+        let rows = {
+            let state = s.host.state.lock().unwrap();
+            crate::ui::editor::tree_rows(&root, &state.listings, &expanded.read())
+        };
+        let root_name = base_name(&root).to_string();
+        let selected: Option<(String, bool)> = tree_sel.read().clone();
+        let pending = prompt.read().clone();
+        let parent_for_new = crate::ui::editor::new_item_parent(selected.as_ref().map(|(p, d)| (p.as_str(), *d)), &root);
+        let (new_file_parent, new_dir_parent) = (parent_for_new.clone(), parent_for_new);
+        let submit_host = s.host.clone();
+        let submit_root = root.clone();
+        let mut submit = move |pending: TreePrompt| {
+            let name = prompt_text.read().trim().to_string();
+            match pending {
+                TreePrompt::NewFile { parent } => {
+                    expanded.write().insert(parent.clone());
+                    submit_host.send(HostCommand::CreateFile { parent, name });
+                }
+                TreePrompt::NewDir { parent } => {
+                    expanded.write().insert(parent.clone());
+                    submit_host.send(HostCommand::CreateDir { parent, name });
+                }
+                TreePrompt::Rename { path } => { submit_host.send(HostCommand::Rename { path, new_name: name }); }
+                TreePrompt::Delete { path, is_dir } => { submit_host.send(HostCommand::Delete { path, is_dir }); }
+            }
+            let _ = &submit_root;
+            prompt.set(None);
+            prompt_text.set(String::new());
+        };
+        let mut submit_enter = submit.clone();
+        let mut submit_ok = submit.clone();
+        let prompt_row = match pending.clone() {
+            None => rsx! {},
+            Some(TreePrompt::Delete { path, is_dir }) => {
+                let affected: Vec<String> = unsaved.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &path)).cloned().collect();
+                let message = crate::ui::editor::delete_confirmation(&path, &root, is_dir, &affected);
+                let confirm = TreePrompt::Delete { path, is_dir };
+                // A deletion cannot be undone: the answer that is safe is the one a stray key or an early
+                // double click gives. Cancel is the default (Enter and Escape cancel), and a click on
+                // the delete button is ignored for the first 600 ms after the question appears.
+                rsx! {
+                    div { class: "ed-tn", role: "alertdialog", "aria-label": "삭제 확인", tabindex: "0", style: "--d:0; height:auto; flex-wrap:wrap; padding:var(--sp2); white-space:normal; background:var(--c-red-soft); color:var(--c-red);",
+                        onkeydown: move |event| { if matches!(event.key(), Key::Enter | Key::Escape) { event.stop_propagation(); prompt.set(None); } },
+                        div { style: "flex:1 1 100%;", "{message}" }
+                        button { class: "ed-pj", style: "border:1px solid var(--line); background:var(--surface); color:var(--text);", autofocus: true, onclick: move |_| prompt.set(None), "취소" }
+                        button { class: "ed-pj", style: "background:var(--c-red); color:var(--ink-text);", onclick: move |_| {
+                            if crate::ui::editor::delete_click_allowed(*prompt_at.read(), now_ms()) { submit_ok(confirm.clone()); }
+                        }, "삭제" }
+                    }
+                }
+            }
+            Some(other) => {
+                let label = match &other { TreePrompt::NewFile { .. } => "새 파일 이름", TreePrompt::NewDir { .. } => "새 폴더 이름", _ => "새 이름" };
+                let enter = other.clone();
+                rsx! {
+                    div { class: "ed-tn", style: "--d:0;",
+                        {icon_px("file", 15)}
+                        input { style: "flex:1; min-width:0; height:22px; border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); color:var(--text); padding:0 6px;",
+                            "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}", autofocus: true,
+                            oninput: move |event| prompt_text.set(event.value()),
+                            onblur: move |_| { if prompt_text.read().trim().is_empty() { prompt.set(None); } },
+                            onkeydown: move |event| {
+                                match event.key() {
+                                    Key::Enter => { event.stop_propagation(); submit_enter(enter.clone()); }
+                                    Key::Escape => { event.stop_propagation(); prompt.set(None); }
+                                    _ => {}
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        };
         rsx! {
-            div { class: "customview-tree", style: "width:260px; flex-shrink:0; overflow:auto; background:#252526;",
-                div { style: "padding:10px;", "탐색기" }
-                div { style: "padding:8px;", "{dir}" }
-                for (name, kind) in entries {
-                    {
-                        let path = join_path(dir, &name);
-                        let host = s.host.clone();
-                        let is_dir = kind & ember_editor_conn::remote_fs::file_type::DIRECTORY != 0;
-                        rsx! { div { class: workbench::tree_row_classes(false, false), style: "height:28px; padding-left:12px; cursor:pointer;", onclick: move |_| {
-                            if is_dir { directory.set(path.clone()); host.send(HostCommand::List(path.clone())); }
-                            else { tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
-                        }, if is_dir { "▸ " } "{name}" } }
+            section { class: "ed-tw ed-left", "aria-label": "프로젝트",
+                div { class: "ed-twh",
+                    b { class: "ed-twt", "프로젝트" }
+                    div { class: "spacer" }
+                    button { class: "ed-ib", title: "새 파일", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewFile { parent: new_file_parent.clone() })); }, {icon("plus")} }
+                    button { class: "ed-ib", title: "새 폴더", onclick: move |_| { prompt_text.set(String::new()); prompt.set(Some(TreePrompt::NewDir { parent: new_dir_parent.clone() })); }, {icon("folder")} }
+                    button { class: "ed-ib", title: "모두 접기", onclick: move |_| expanded.write().clear(), {icon_px("chev", 16)} }
+                    button { class: "ed-ib", title: "파일 검색", onclick: move |_| notice(format!("파일 검색: {SOON}")), {icon("search")} }
+                    button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Left), {icon("close")} }
+                }
+                div { class: "ed-tree", role: "tree", "aria-label": "프로젝트 트리",
+                    div { class: "ed-tn", role: "treeitem", "aria-expanded": "true", "aria-label": "{root_name} 폴더", style: "--d:0;", {icon_px("chev-dn", 12)} {icon_px("folder", 15)} "{root_name}" }
+                    {prompt_row}
+                    for row in rows {
+                        {
+                            let path = row.path.clone();
+                            let host = s.host.clone();
+                            let open_errors = s.open_errors.clone();
+                            let is_dir = row.is_dir;
+                            let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
+                            let class = if chosen || (selected.is_none() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
+                            let depth = row.depth + 1;
+                            let rename_path = row.path.clone();
+                            let delete_path = row.path.clone();
+                            let rename_name = row.name.clone();
+                            let rename_label = row.name.clone();
+                            let unsaved_for_rename = unsaved.clone();
+                            let row_label = crate::ui::editor::tree_item_aria_label(&row.name, is_dir);
+                            rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
+                                "aria-expanded": if is_dir { "{row.open}" } else { "" },
+                                onclick: move |_| {
+                                    let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
+                                    if close { prompt.set(None); }
+                                    tree_sel.set(Some((path.clone(), is_dir)));
+                                    if is_dir {
+                                        let was_open = expanded.read().contains(&path);
+                                        if was_open { expanded.write().remove(&path); }
+                                        else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
+                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                },
+                                if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
+                                if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
+                                "{row.name}"
+                                if chosen {
+                                    div { class: "spacer" }
+                                    button { class: "ed-ib", title: "이름 변경: {rename_label}", style: "width:22px; height:22px;",
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            let blocked: Vec<String> = unsaved_for_rename.iter().filter(|p| crate::ui::editor::is_at_or_below(p, &rename_path)).cloned().collect();
+                                            if !blocked.is_empty() {
+                                                notice(format!("저장하지 않은 변경이 있어 이름을 바꿀 수 없습니다. 먼저 저장하세요: {}", blocked.iter().map(|p| base_name(p).to_string()).collect::<Vec<_>>().join(", ")));
+                                                return;
+                                            }
+                                            prompt_text.set(rename_name.clone());
+                                            prompt.set(Some(TreePrompt::Rename { path: rename_path.clone() }));
+                                        }, {icon_px("edit", 13)} }
+                                    button { class: "ed-ib", title: "삭제: {rename_label}", style: "width:22px; height:22px; color:var(--c-red);",
+                                        onclick: move |event| { event.stop_propagation(); prompt_at.set(now_ms()); prompt.set(Some(TreePrompt::Delete { path: delete_path.clone(), is_dir })); }, {icon_px("close", 13)} }
+                                }
+                            } }
+                        }
                     }
                 }
             }
@@ -364,29 +994,39 @@ pub mod page {
 
     fn tab_strip(s: &Shared, paths: &[String], dirty: &[bool], current: Option<&str>) -> Element {
         let mut tabs = s.tabs;
+        let mut menu_open = s.menu_open;
         rsx! {
-            div { style: "display:flex; height:36px; flex-shrink:0; background:#252526;",
+            div { class: "ed-tabs", role: "tablist", "aria-label": "열린 파일",
                 for (i, path) in paths.iter().enumerate() {
                     {
                         let path = path.clone(); let close_path = path.clone();
                         let host = s.host.clone(); let close_host = s.host.clone();
                         let selected = current == Some(path.as_str());
                         let label = base_name(&path).to_string();
-                        let mark = if dirty[i] { " ●" } else { "" };
-                        let style = if selected { "padding:8px; background:#1e1e1e; cursor:pointer;" } else { "padding:8px; cursor:pointer;" };
-                        rsx! { div { style, onclick: move |_| {
+                                                let class = if selected { "ed-tab on" } else { "ed-tab" };
+                        let tab_label = crate::ui::editor::tab_aria_label(&label, dirty[i]);
+                        let close_label = format!("닫기: {label}");
+                        rsx! { div { class, role: "tab", "aria-selected": "{selected}", "aria-label": "{tab_label}", onclick: move |_| {
                             tabs.write().activate(&path);
                             host.send(HostCommand::Focus(path.clone()));
-                        }, "{label}{mark}" span { style: "padding-left:10px;", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, "×" } } }
+                        }, {icon_px(if selected { "file-w" } else { "file" }, 14)} "{label}" if dirty[i] { span { class: "ed-dirty" } } button { class: "ed-tx", "aria-label": "{close_label}", onclick: move |event| { event.stop_propagation(); tabs.write().close(&close_path); close_host.send(HostCommand::Close(close_path.clone())); if let Some(next) = tabs.read().current_path() { close_host.send(HostCommand::Focus(next.to_string())); } }, {icon_px(if selected { "close-w" } else { "close" }, 12)} } } }
                     }
                 }
+                div { class: "spacer" }
+                button { class: "ed-ib", title: "탭 메뉴", onclick: move |_| { let open = *menu_open.read(); menu_open.set(!open); }, {icon("more")} }
             }
         }
     }
 
     fn breadcrumbs(path: &str, folder: &str) -> Element {
-        let text = breadcrumb_text(path, folder);
-        rsx! { div { style: "height:24px; flex-shrink:0; padding:0 12px; display:flex; align-items:center; color:#9d9d9d; font-size:12px; background:#1e1e1e;", "{text}" } }
+        let segments = crate::ui::editor::breadcrumb_segments(path, folder);
+        let last = segments.len().saturating_sub(1);
+        rsx! { div { class: "ed-crumbs", role: "navigation", "aria-label": "경로",
+            for (i, seg) in segments.iter().enumerate() {
+                if i > 0 { {icon_px("chev", 11)} }
+                span { key: "{i}", class: if i == last { "cur" } else { "" }, "{seg}" }
+            }
+        } }
     }
 
     thread_local! {
@@ -453,7 +1093,7 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         let Some(handle) = terminal_handle(s) else {
-            return rsx! { div { style: "padding:12px; color:#9d9d9d; overflow:auto;", "노드의 터미널에 연결되어 있지 않습니다. 서버 주소와 컴퓨터 정보가 없어 터미널을 열 수 없습니다." } };
+            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         };
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
@@ -461,8 +1101,13 @@ pub mod page {
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
+        let computer = if s.computer.is_empty() { "로컬".to_string() } else { s.computer.clone() };
         rsx! {
-            div { tabindex: "0", style: "flex:1; min-height:0; overflow:auto; outline:none; padding:8px 12px; background:#1e1e1e; color:#cccccc;",
+            div { class: "ed-tsub",
+                button { class: "on", {icon_px("code", 14)} "{computer}" }
+                button { class: "ed-ib", title: "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
+            }
+            div { class: "ed-term", tabindex: "0", style: "outline:none;",
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -476,29 +1121,62 @@ pub mod page {
                     }
                 },
                 if let Some(banner) = view.banner {
-                    div { style: "display:flex; align-items:center; gap:8px; padding:4px 8px; margin-bottom:6px; background:#4d3b00; color:#ffd479; border-radius:4px;",
+                    div { style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--c-orange-soft); color:var(--c-orange); border-radius:var(--r-sm);",
                         div { style: "flex:1;", "{banner}" }
                         if offer_control {
-                            div { style: "padding:2px 10px; border-radius:4px; background:#ffd479; color:#4d3b00; cursor:pointer; font-size:12px;",
+                            button { class: "ed-pj", style: "background:var(--c-orange); color:var(--ink-text); height:24px;",
                                 onclick: move |_| control_handle.take_control(), "제어권 가져오기" }
                         }
                     }
                 }
-                div { style: "white-space:pre; font-family:monospace; font-size:12px;",
+                div { style: "white-space:pre;",
                     for (i, line) in view.lines.iter().enumerate() {
-                        div { key: "{i}", "{line}" }
+                        div { key: "{i}", class: "tl", "{line}" }
                     }
                 }
                 if let Some(notice) = view.notice {
-                    div { style: "padding-top:6px; color:#9d9d9d;", "{notice}" }
+                    div { class: "tl", style: "padding-top:var(--sp2); color:var(--muted);", "{notice}" }
                 }
                 if offer_reconnect {
-                    div { style: "display:inline-block; margin-top:6px; padding:2px 10px; border-radius:4px; background:#333333; color:#cccccc; cursor:pointer; font-size:12px;",
-                        onclick: move |_| {
-                            TERMINAL.with(|t| *t.borrow_mut() = None);
-                            let mut revision = revision;
-                            *revision.write() += 1;
-                        }, "다시 연결" }
+                    // TODO(dioxus-compose#175): the button sits in a flex row of its own because directly under
+                    // the block-level panel the renderer leaves out the second glyph of each word
+                    // ("다시 연결" draws as "다 연"). Drop the wrapper once that is fixed.
+                    div { style: "display:flex; margin-top:var(--sp2);",
+                        button { class: "ed-pj", style: "border:1px solid var(--line);",
+                            onclick: move |_| {
+                                TERMINAL.with(|t| *t.borrow_mut() = None);
+                                let mut revision = revision;
+                                *revision.write() += 1;
+                            }, "다시 연결" }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The problems list: a row per marker, errors first; a click opens the file.
+    fn problems_body(s: &Shared, rows: Vec<(String, ember_editor::widget::Severity, String, String, String)>) -> Element {
+        use ember_editor::widget::Severity;
+        let mut tabs = s.tabs;
+        if rows.is_empty() {
+            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "문제가 없습니다." } };
+        }
+        rsx! {
+            div { class: "ed-plist", role: "list", "aria-label": "문제 목록",
+                for (i, (path, severity, message, location, source)) in rows.into_iter().enumerate() {
+                    {
+                        let host = s.host.clone();
+                        let dot = match severity { Severity::Error => "ed-pdot err", Severity::Warning => "ed-pdot warn", _ => "ed-pdot" };
+                        let row_label = crate::ui::editor::problem_aria_label(match severity { Severity::Error => "오류", Severity::Warning => "경고", _ => "정보" }, &message, &location);
+                        rsx! { div { key: "{i}", class: "ed-prow", role: "listitem", "aria-label": "{row_label}", onclick: move |_| {
+                            tabs.write().open(&path);
+                            host.send(HostCommand::Open(path.clone()));
+                        },
+                            span { class: "{dot}" }
+                            span { style: "flex:1; min-width:0; overflow:hidden; white-space:nowrap;", "{message}" }
+                            span { style: "color:var(--muted); font-size:var(--fs-xs); white-space:nowrap;", "{source} {location}" }
+                        } }
+                    }
                 }
             }
         }
@@ -506,49 +1184,67 @@ pub mod page {
 
     fn bottom_window(s: &Shared, w: ToolWindow) -> Element {
         let mut stripes = s.stripes;
+        let mut bottom_max = s.bottom_max;
+        let max = *bottom_max.read();
+        let has_left = s.stripes.read().selected(Side::Left).is_some();
+        let problem_rows: Vec<(String, ember_editor::widget::Severity, String, String, String)> = s
+            .bridge
+            .borrow()
+            .problems()
+            .iter()
+            .map(|p| (p.uri.path.clone(), p.severity, p.message.clone(), crate::ui::editor::problem_location(&p.uri.path, &s.folder, p.range.start.line), p.source.clone().unwrap_or_default()))
+            .collect();
+        let problem_count = problem_rows.len();
         let body = match w {
             ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
             _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
         };
         rsx! {
-            div { style: "height:200px; flex-shrink:0; display:flex; flex-direction:column; background:#252526; border-top:1px solid #333333;",
-                div { style: "display:flex; align-items:center; gap:4px; padding:4px 8px;",
-                    for b in ToolWindow::BOTTOM {
-                        {
-                            let look = if b == w { "background:#cccccc; color:#1e1e1e;" } else { "color:#9d9d9d;" };
-                            rsx! { div { key: "{b.label()}", style: "height:28px; padding:0 14px; display:flex; align-items:center; border-radius:14px; cursor:pointer; {look}",
-                                onclick: move |_| { if !stripes.read().is_selected(b) { stripes.write().toggle(b); } }, "{b.label()}" } }
+            section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "아래 도구 창",
+                div { class: "ed-twh",
+                    div { class: "ed-btabs", role: "tablist", "aria-label": "아래 도구 창 탭",
+                        for b in ToolWindow::BOTTOM {
+                            {
+                                let class = if b == w { "on" } else { "" };
+                                let label = if b == ToolWindow::Problems { crate::ui::editor::problems_tab_label(problem_count) } else { b.label().to_string() };
+                                rsx! { button { key: "{b.label()}", class, role: "tab", "aria-selected": "{b == w}", onclick: move |_| { if !stripes.read().is_selected(b) { stripes.write().toggle(b); } }, "{label}" } }
+                            }
                         }
                     }
-                    div { style: "flex:1;" }
-                    div { style: "width:28px; height:28px; display:flex; align-items:center; justify-content:center; cursor:pointer;",
-                        title: "숨기기", onclick: move |_| stripes.write().hide(Side::Bottom), "\u{2304}" }
+                    div { class: "spacer" }
+                    button { class: "ed-ib", title: if max { "원래 크기" } else { "최대화" }, onclick: move |_| bottom_max.set(!max), {icon(if max { "down" } else { "up" })} }
+                    button { class: "ed-ib", title: "숨기기", onclick: move |_| { bottom_max.set(false); stripes.write().hide(Side::Bottom); }, {icon("close")} }
                 }
                 if w == ToolWindow::Terminal {
                     {terminal_body(s)}
+                } else if w == ToolWindow::Problems {
+                    {problems_body(s, problem_rows)}
                 } else {
-                    div { style: "padding:12px; color:#9d9d9d; overflow:auto;", "{body}" }
+                    div { class: "ed-term", style: "color:var(--muted);", "{body}" }
                 }
             }
         }
     }
 
-    fn status_bar(s: &Shared, agent_state: &str, branch: &str, has_file: bool, line: usize, col: usize) -> Element {
-        let folder = s.folder.clone();
+    fn status_bar(s: &Shared, agent_state: &str, branch: &str, current: Option<&str>, line: usize, col: usize) -> Element {
+        let crumbs = crate::ui::editor::status_crumbs(&s.folder, current);
         let agent = agent_status_text(agent_state);
+        let dot = crate::ui::editor::agent_dot_class(agent_state);
         let position = position_text(line, col);
         let branch = branch.to_string();
+        let has_file = current.is_some();
         rsx! {
-            div { style: "height:24px; flex-shrink:0; display:flex; align-items:center; gap:16px; padding:0 8px; background:#007acc; color:white;",
-                span { "{folder}" }
-                div { style: "flex:1;" }
-                span { "{agent}" }
+            footer { class: "ed-status", role: "group", "aria-label": "상태 표시줄",
+                span { class: "ed-sbi crumbs-s", "{crumbs}" }
+                div { class: "spacer" }
+                span { class: "ed-sbi", span { class: "{dot}" } "{agent}" }
                 if has_file {
-                    span { "{position}" }
-                    span { "LF" }
-                    span { "UTF-8" }
+                    span { class: "ed-sbi", "{position}" }
+                    span { class: "ed-sbi hide-md", "LF" }
+                    span { class: "ed-sbi hide-md", "UTF-8" }
+                    span { class: "ed-sbi hide-md", "4칸" }
                 }
-                span { "{branch}" }
+                span { class: "ed-sbi", {icon("git")} "{branch}" }
             }
         }
     }

@@ -1,0 +1,10 @@
+/* Ember-owned additions to the mockup's editor styles. */
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font)}
+@media (max-width:900px){
+ /* The page is 76px shorter than the window (see TODO(#320) in the page), so the overlay's bottom edge follows it. */
+ .ed-left{bottom:calc(var(--sbh) + 76px)}
+}
+.ed{color:var(--text);font-family:var(--font)}
+/* The top bar is the window's title strip under FullSize: a drag region, with its controls cut out. */
+.ed-top{-webkit-app-region:drag}
+.ed-top button,.ed-top .ed-menu{-webkit-app-region:no-drag}

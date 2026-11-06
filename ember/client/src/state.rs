@@ -79,6 +79,9 @@ pub enum Input {
     ComputersLoaded(Vec<Computer>),
     /// `GET /projects` answered (FR-L4).
     ProjectsLoaded(Vec<Project>),
+    /// A rename was saved (FR-L26): sessions and the project record move to the new name at once,
+    /// so nothing shows the old name until the next refresh.
+    ProjectRenamed { old: String, new: String },
     /// `GET /sessions/{id}/team` answered (FR-T7): the team `session_id` leads or belongs to,
     /// or `None`.
     TeamLoaded { session_id: String, team: Option<TeamView> },
@@ -380,6 +383,21 @@ impl State {
                 self.projects_known = true;
                 if self.project_records.get(&project.name) != Some(&project) {
                     self.project_records.insert(project.name.clone(), project);
+                    ch.projects = true;
+                    ch.persist = true;
+                    ch.computers |= self.derive_computer_projects();
+                }
+            }
+            Input::ProjectRenamed { old, new } => {
+                if old != new {
+                    for rec in self.sessions.values_mut().filter(|r| r.project == old) {
+                        rec.project = new.clone();
+                        ch.sessions.insert(rec.id.clone());
+                    }
+                    if let Some(mut p) = self.project_records.remove(&old) {
+                        p.name = new.clone();
+                        self.project_records.insert(new, p);
+                    }
                     ch.projects = true;
                     ch.persist = true;
                     ch.computers |= self.derive_computer_projects();
@@ -824,6 +842,7 @@ mod tests {
             name: name.into(),
             created_at: 0,
             computers: computers.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
         };
         let ch = s.apply(Input::ProjectsLoaded(vec![proj("alpha", &["studio"]), proj("empty", &[])]));
         assert!(ch.projects && ch.computers);
@@ -849,6 +868,18 @@ mod tests {
         let c = State::from_cache(s.to_cache());
         assert_eq!(c.project_computers("alpha"), ["studio".to_string()]);
         assert_eq!(c.computers()[0].projects, vec!["empty".to_string()]);
+    }
+
+    #[test]
+    fn fr_l22_a_project_answer_replaces_the_character_style() {
+        let mut s = State::default();
+        let mut p = Project { name: "alpha".into(), created_at: 0, ..Default::default() };
+        p.character_style = Some("crew".into());
+        s.apply(Input::Push(Push::ProjectUpdated { project: p.clone() }));
+        p.character_style = Some("cream".into());
+        let ch = s.apply(Input::Push(Push::ProjectUpdated { project: p }));
+        assert!(ch.projects);
+        assert_eq!(s.project("alpha").and_then(|p| p.character_style.clone()).as_deref(), Some("cream"));
     }
 
     fn member(sid: &str, name: &str, role: crate::wire::TeamRole, ended: Option<i64>) -> crate::wire::TeamMember {
@@ -968,5 +999,18 @@ mod tests {
         assert!(ch.sessions.contains("a"));
         assert_eq!(s.fork_info("a"), info);
         assert!(s.apply(Input::ForkInfoLoaded { session_id: "a".into(), info }).is_empty());
+    }
+
+    #[test]
+    fn fr_l26_rename_updates_selection_state_sessions_show_the_new_name() {
+        let mut s = State::default();
+        s.apply(Input::SessionsLoaded(vec![rec("a", "old", SessionStatus::Running, 1), rec("b", "other", SessionStatus::Running, 1)]));
+        s.apply(Input::ProjectsLoaded(vec![Project { name: "old".into(), created_at: 0, ..Default::default() }]));
+        let ch = s.apply(Input::ProjectRenamed { old: "old".into(), new: "new".into() });
+        assert!(ch.projects && ch.persist && ch.sessions.contains("a") && !ch.sessions.contains("b"));
+        assert_eq!(s.session("a").unwrap().record.project, "new");
+        assert_eq!(s.session("b").unwrap().record.project, "other");
+        assert!(s.project("old").is_none() && s.project("new").is_some());
+        assert!(s.apply(Input::ProjectRenamed { old: "new".into(), new: "new".into() }).is_empty());
     }
 }

@@ -10,11 +10,17 @@
 //! - `GET /api/health`, so a launcher can tell whether a server is up *[provisional]*;
 //! - the agent routes, which carry the session's runtime token in the same header and check it
 //!   themselves: `/api/a2a/*` except `/api/a2a/settings`, and the Antigravity hook;
+//! - `POST /api/channels/<id>/post`, where an agent answers a mention with its runtime token
+//!   (exactly this path, nothing else under `/api/channels/`; the handler checks the token);
 //! - `GET /api/browsers/<project>/cdp/<nonce>` and `.../cdp/<nonce>/json/version` with the per-run
 //!   nonce from [`agent_cdp_nonce`], the agent browser relay and its discovery document (agent MCP
 //!   servers send no header);
 //! - `GET /auth/callback`, the browser redirect of Sign in with ChatGPT, which cannot carry a
 //!   header (the `state` value in it is checked by the handler).
+//!
+//! `/api/guest/*` is deliberately not exempt: the guest router (`channels::guest`) is never served
+//! under this layer; its door is the separate `EMBER_GUEST_LISTEN` listener. Merged here by
+//! mistake, its routes would answer 401 without the server token, which fails loudly.
 //!
 //! A WebSocket upgrade takes the token from the header, or from a `Sec-WebSocket-Protocol` entry
 //! `ember.token.<token>`. Never from the query string, which ends up in logs and history. When
@@ -179,6 +185,17 @@ fn refuse(status: StatusCode, msg: &str) -> Response {
     r
 }
 
+/// True for exactly `/api/channels/<id>/post` (four segments, a non-empty id): the route where an
+/// agent answers a mention with its runtime token (FR-T12). The rest of `/api/channels/*` carries
+/// the user routes and keeps the server token.
+fn agent_channel_post_path(path: &str) -> bool {
+    let mut it = path.split('/');
+    matches!(
+        (it.next(), it.next(), it.next(), it.next(), it.next(), it.next(), it.next()),
+        (Some(""), Some("api"), Some("channels"), Some(id), Some("post"), None, None) if !id.is_empty()
+    )
+}
+
 /// True for the routes that check a session's runtime token themselves, and `GET /auth/callback`.
 fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
     if method == axum::http::Method::GET
@@ -187,6 +204,9 @@ fn token_exempt(method: &axum::http::Method, path: &str) -> bool {
         return true;
     }
     if method == axum::http::Method::GET && agent_cdp_path_ok(path) {
+        return true;
+    }
+    if method == axum::http::Method::POST && agent_channel_post_path(path) {
         return true;
     }
     (path.starts_with("/api/a2a/") && path != "/api/a2a/settings")
@@ -264,6 +284,68 @@ async fn guard(State(auth): State<Arc<ServerAuth>>, req: Request<Body>, next: Ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_s9_only_the_channel_post_route_is_exempt_under_channels() {
+        use axum::http::Method;
+        assert!(token_exempt(&Method::POST, "/api/channels/c1/post"));
+        assert!(!token_exempt(&Method::GET, "/api/channels/c1/post"));
+        for p in ["/api/channels", "/api/channels/c1", "/api/channels/c1/messages", "/api/channels//post",
+            "/api/channels/c1/post/x", "/api/channels/c1/x/post", "/api/channels/post"] {
+            assert!(!token_exempt(&Method::POST, p), "{p}");
+        }
+    }
+
+    #[test]
+    fn fr_t14_the_guest_family_is_not_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST] {
+            for p in ["/api/guest/accept", "/api/guest/channels/c1/messages", "/api/guest/", "/api/guest"] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
+
+    /// FR-S8 (#311): the per-harness settings routes are owner routes, never exempt. The nearby
+    /// exempt `/api/agents/antigravity/hook` is matched by its whole path only.
+    #[test]
+    fn fr_s8_settings_paths_are_not_token_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::PUT, Method::POST, Method::DELETE] {
+            for p in [
+                "/api/agents/settings",
+                "/api/agents/codex/settings",
+                "/api/agents/claude-code/settings",
+                "/api/agents/antigravity/settings",
+                "/api/agents/scripted/settings",
+            ] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
+
+    /// FR-C2e: the enrol routes and the mint and owner routes are never exempt from the token.
+    /// The enrol door is not behind `protect` at all (its own listener), so an exemption here would
+    /// only ever open an owner route.
+    #[test]
+    fn fr_c2_redeem_is_not_token_exempt() {
+        use axum::http::Method;
+        for m in [Method::GET, Method::POST, Method::DELETE, Method::PUT] {
+            for p in [
+                "/enrol/redeem",
+                "/enrol/redeem/",
+                "/enrol/status/x",
+                "/enrol/status/",
+                "/enrol",
+                "/api/computers/enrol-codes",
+                "/api/computers/enrol-codes/x",
+                "/api/computers/enrol-codes/x/confirm",
+                "/api/computers/enrol-codes/x/deny",
+            ] {
+                assert!(!token_exempt(&m, p), "{m} {p}");
+            }
+        }
+    }
 
     #[test]
     fn fr_s9_token_eq_compares_whole_values() {

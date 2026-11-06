@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ember_server::agents::acp::{AcpAdapter, AcpConfig};
+use ember_server::agents::acp::{AcpAdapter, AcpConfig, EnvPolicy};
 use ember_server::agents::antigravity::{AntigravityAdapter, HookBroker};
 use ember_server::agents::claude_code::ClaudeCodeAdapter;
 use ember_server::agents::codex::CodexAdapter;
@@ -513,6 +513,7 @@ async fn fr_s8_acp_mid_turn_output_drained_and_persisted_after_server_crash() {
         instructions_args: Vec::new(),
         version_args: vec!["--version".into()],
         env: Vec::new(),
+        env_policy: EnvPolicy::Inherit,
     };
     let kind = AcpAdapter::new(config()).unwrap().kind();
     let id = store.create_session("p", kind, work.path().to_str().unwrap(), None, "t").unwrap().id;

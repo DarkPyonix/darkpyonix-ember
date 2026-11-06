@@ -19,6 +19,8 @@ pub const RENDER_LINES: usize = 500;
 pub const CONNECTING: &str = "터미널에 연결하는 중입니다";
 pub const NO_TERMINAL: &str = "이 팀원에게는 볼 수 있는 터미널이 없습니다";
 pub const FAILED: &str = "터미널에 연결하지 못했습니다. 잠시 뒤에 다시 시도해 주세요";
+pub const NO_AGENT_TERMINAL: &str = "이 프로젝트에서 실행 중인 에이전트 터미널이 없습니다";
+pub const AMBIGUOUS_TERMINAL: &str = "이 프로젝트에 에이전트 터미널이 여러 개라 이 팀원의 터미널을 알 수 없습니다";
 pub const DROPPED: &str = "터미널 연결이 끊어졌습니다";
 pub const EMPTY: &str = "터미널에 아직 출력이 없습니다";
 
@@ -165,6 +167,8 @@ pub enum TermView {
     NoTerminal,
     /// A Korean sentence, never the transport's text.
     Failed(&'static str),
+    /// Nothing to show, and the reason in a fixed Korean sentence.
+    Note(&'static str),
     Lines { rows: Vec<(TermRole, String)>, notice: Option<String> },
 }
 
@@ -216,6 +220,17 @@ pub fn view_for_member(
     match state {
         Some(s) => view_from_state(s),
         None => TermView::NoTerminal,
+    }
+}
+
+/// The view of a member's terminal attached through the relay: why there is none when the project has no
+/// running agent terminal or several, else the stream's state (connecting until it reports).
+pub fn view_for_attached(state: Option<&TerminalState>, pick: Option<&crate::terminal_stream::TermPick>) -> TermView {
+    use crate::terminal_stream::TermPick;
+    match pick {
+        Some(TermPick::None) => TermView::Note(NO_AGENT_TERMINAL),
+        Some(TermPick::Ambiguous) => TermView::Note(AMBIGUOUS_TERMINAL),
+        _ => state.map(view_from_state).unwrap_or(TermView::Connecting),
     }
 }
 
@@ -359,8 +374,23 @@ mod tests {
 
     #[test]
     fn fr_l18_terminal_strings_are_clean() {
-        for s in [CONNECTING, NO_TERMINAL, FAILED, DROPPED, EMPTY] {
+        for s in [CONNECTING, NO_TERMINAL, FAILED, DROPPED, EMPTY, NO_AGENT_TERMINAL, AMBIGUOUS_TERMINAL] {
             assert!(!s.contains('\u{2014}') && !s.contains("준비 중"));
+        }
+    }
+
+    #[test]
+    fn fr_l18_an_attached_view_says_why_there_is_no_terminal_and_never_guesses() {
+        use crate::terminal_stream::TermPick;
+        assert_eq!(view_for_attached(None, Some(&TermPick::None)), TermView::Note(NO_AGENT_TERMINAL));
+        assert_eq!(view_for_attached(None, Some(&TermPick::Ambiguous)), TermView::Note(AMBIGUOUS_TERMINAL));
+        assert_eq!(view_for_attached(None, None), TermView::Connecting);
+        let mut state = TerminalState::default();
+        state.status = TerminalStatus::Connected;
+        state.lines = vec!["$ ls".into()];
+        match view_for_attached(Some(&state), None) {
+            TermView::Lines { rows, .. } => assert_eq!(rows[0].1, "$ ls"),
+            other => panic!("expected lines, got {other:?}"),
         }
     }
 }

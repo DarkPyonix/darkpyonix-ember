@@ -42,6 +42,46 @@ pub fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// A Korean reason for a failed open or save. The server's own text is English, can carry paths and
+/// control characters, and is not for the person: the caller logs it and shows this.
+pub fn file_failure_reason(error: &str) -> &'static str {
+    let e = error.to_lowercase();
+    if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
+        "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
+    } else if e.contains("nopermissions") || e.contains("eacces") || e.contains("eperm") || e.contains("permission") {
+        "파일을 읽거나 쓸 권한이 없습니다"
+    } else if e.contains("utf-8") || e.contains("utf8") {
+        "UTF-8 텍스트 파일이 아니어서 열 수 없습니다"
+    } else if e.contains("connection closed") || e.contains("timed out") || e.contains("io:") || e.contains("handshake") || e.contains("refused") {
+        "서버와의 연결이 끊어졌습니다. 연결을 확인한 뒤 다시 시도하세요"
+    } else if e.contains("filetoolarge") || e.contains("too large") {
+        "파일이 너무 커서 열 수 없습니다"
+    } else {
+        "알 수 없는 오류입니다. 자세한 내용은 로그에 있습니다"
+    }
+}
+
+/// A file name as shown to the person: control characters (newlines, escapes) are dropped, so a name
+/// cannot break the layout or smuggle terminal sequences, and a very long one is shortened.
+pub fn display_name(name: &str) -> String {
+    let clean: String = name.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > 80 {
+        let head: String = clean.chars().take(79).collect();
+        format!("{head}…")
+    } else {
+        clean
+    }
+}
+
+/// Whether a click on a tree row ends the pending name prompt. An empty field has nothing to lose; a
+/// typed name is kept (the person may have clicked by mistake), and a delete question is not a field.
+pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
+    match prompt {
+        TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. } => typed.trim().is_empty(),
+        TreePrompt::Delete { .. } => false,
+    }
+}
+
 /// The open files. A tab holds its unsaved mark, so closing a tab drops it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorTabs {
@@ -85,6 +125,21 @@ impl EditorTabs {
         };
     }
 
+    /// A path was renamed: every tab at or below `old` takes the matching path below `new`, keeping its
+    /// place and its dirty mark. Returns the (old, new) pairs of the tabs that moved.
+    pub fn rename_prefix(&mut self, old: &str, new: &str) -> Vec<(String, String)> {
+        let old = old.trim_end_matches('/');
+        let new = new.trim_end_matches('/');
+        let mut moved = Vec::new();
+        for (path, _) in &mut self.tabs {
+            if is_at_or_below(path, old) {
+                let renamed = format!("{new}{}", &path[old.len()..]);
+                moved.push((std::mem::replace(path, renamed.clone()), renamed));
+            }
+        }
+        moved
+    }
+
     pub fn set_dirty(&mut self, path: &str, dirty: bool) {
         if let Some(i) = self.index(path) {
             self.tabs[i].1 = dirty;
@@ -122,9 +177,202 @@ pub fn breadcrumb_segments(path: &str, folder: &str) -> Vec<String> {
         .collect()
 }
 
+/// One row of the explorer tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub path: String,
+    pub name: String,
+    pub depth: u32,
+    pub is_dir: bool,
+    pub open: bool,
+}
+
+/// The rows of the explorer: the folder's entries with directories first, then files by name,
+/// and below an expanded directory its own entries once they have been listed.
+pub fn tree_rows(
+    root: &str,
+    listings: &std::collections::HashMap<String, Vec<(String, u32)>>,
+    expanded: &std::collections::HashSet<String>,
+) -> Vec<TreeRow> {
+    fn walk(
+        dir: &str,
+        depth: u32,
+        listings: &std::collections::HashMap<String, Vec<(String, u32)>>,
+        expanded: &std::collections::HashSet<String>,
+        rows: &mut Vec<TreeRow>,
+    ) {
+        let Some(entries) = listings.get(dir) else { return };
+        let is_dir = |kind: u32| kind & ember_editor_conn::remote_fs::file_type::DIRECTORY != 0;
+        let mut sorted: Vec<&(String, u32)> = entries.iter().collect();
+        sorted.sort_by_key(|(name, kind)| (!is_dir(*kind), name.to_lowercase()));
+        for (name, kind) in sorted {
+            let path = super::editor_workbench::join_path(dir, name);
+            let dir_row = is_dir(*kind);
+            let open = dir_row && expanded.contains(&path);
+            rows.push(TreeRow { path: path.clone(), name: name.clone(), depth, is_dir: dir_row, open });
+            if open {
+                walk(&path, depth + 1, listings, expanded, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    walk(root, 0, listings, expanded, &mut rows);
+    rows
+}
+
+/// The editor page's grid tracks as inline style. An open tool window adds nothing: the
+/// stylesheet's tracks apply, including its width breakpoints. A closed left column is 0 wide and
+/// a closed bottom row is 0 high (the mockup's `.no-left` and `.no-bottom`).
+pub fn editor_grid_style(has_left: bool, has_bottom: bool) -> String {
+    let mut style = String::new();
+    if !has_left {
+        style.push_str("grid-template-columns:var(--stw) 0 minmax(0,1fr) var(--stw); ");
+    }
+    if !has_bottom {
+        style.push_str("grid-template-rows:52px minmax(0,1fr) 0 var(--sbh); ");
+    }
+    style
+}
+
+/// The page's height rule: macOS opens the window FullSize, so the page is the window's height;
+/// elsewhere the native chrome stays and the page keeps its 76px allowance.
+pub fn editor_page_height(full_size: bool) -> &'static str {
+    if full_size { "100vh" } else { "calc(100vh - 76px)" }
+}
+
+/// The top bar's left padding past the window controls: under FullSize the traffic lights float
+/// over its left end, so it starts after their footprint; otherwise nothing is added.
+pub fn editor_strip_padding(full_size: bool, leading: f32) -> String {
+    if full_size { format!("padding-left:{leading}px;") } else { String::new() }
+}
+
+/// The page grid while the bottom tool window is maximized (the mockup's `.ed.max`): the editor row
+/// is 0 high and the bottom window takes its row and the one below.
+pub fn editor_grid_style_maximized() -> String {
+    "grid-template-rows:52px 0 minmax(0,1fr) var(--sbh);".to_string()
+}
+
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
+}
+
+/// A pending explorer edit the tree is asking a name or a confirmation for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreePrompt {
+    NewFile { parent: String },
+    NewDir { parent: String },
+    Rename { path: String },
+    Delete { path: String, is_dir: bool },
+}
+
+/// The directory a new file or folder goes in: the selected directory, the directory of the
+/// selected file, or the project folder when nothing is selected.
+pub fn new_item_parent(selected: Option<(&str, bool)>, root: &str) -> String {
+    match selected {
+        Some((path, true)) => path.to_string(),
+        Some((path, false)) => match path.trim_end_matches('/').rsplit_once('/') {
+            Some(("", _)) | None => "/".to_string(),
+            Some((parent, _)) => parent.to_string(),
+        },
+        None => root.to_string(),
+    }
+}
+
+/// What the delete confirmation says. There is no trash, so it says the deletion cannot be undone,
+/// a directory goes with everything in it, and which open files have unsaved changes that go too.
+pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool, unsaved: &[String]) -> String {
+    let name = breadcrumb_segments(path, folder).join("/");
+    let mut text = if is_dir {
+        format!("폴더 {name}와 그 안의 모든 파일을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    } else {
+        format!("파일 {name}을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    };
+    if !unsaved.is_empty() {
+        let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
+        text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));
+    }
+    text
+}
+
+/// Why an explorer edit failed, in Korean: the server's own English text is not shown, only what kind
+/// of failure it was.
+pub fn edit_failure_text(action: &str, detail: &str) -> String {
+    let d = detail.to_lowercase();
+    let reason = if d.contains("exists") || d.contains("eexist") {
+        "같은 이름이 이미 있습니다"
+    } else if d.contains("not found") || d.contains("enoent") || d.contains("does not exist") {
+        "대상을 찾을 수 없습니다"
+    } else if d.contains("permission") || d.contains("eacces") || d.contains("eperm") {
+        "권한이 없습니다"
+    } else if d.contains("not empty") || d.contains("enotempty") {
+        "폴더가 비어 있지 않습니다"
+    } else if d.contains("closed") || d.contains("timed out") || d.contains("connection") {
+        "서버와의 연결이 끊겼습니다"
+    } else {
+        "서버가 요청을 처리하지 못했습니다"
+    };
+    format!("{action} 실패: {reason}")
+}
+
+/// The delete button answers only once the question has been on screen for 600 ms, so a stray double
+/// click that opened it cannot also confirm it.
+pub const DELETE_GUARD_MS: u64 = 600;
+
+pub fn delete_click_allowed(opened_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(opened_ms) >= DELETE_GUARD_MS
+}
+
+/// Whether closing `tab` is needed after `gone` was deleted or renamed: it is that path or below it.
+pub fn is_at_or_below(tab: &str, gone: &str) -> bool {
+    let gone = gone.trim_end_matches('/');
+    tab == gone || tab.strip_prefix(gone).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The accessible name of a tab: the file name, and that its edits are not saved.
+pub fn tab_aria_label(name: &str, dirty: bool) -> String {
+    if dirty { format!("{name} (저장 안 됨)") } else { name.to_string() }
+}
+
+/// The accessible name of a tree row: the name, and that it is a folder.
+pub fn tree_item_aria_label(name: &str, is_dir: bool) -> String {
+    if is_dir { format!("{name} 폴더") } else { name.to_string() }
+}
+
+/// The accessible name of a problem row: what it is, what it says, and where.
+pub fn problem_aria_label(severity: &str, message: &str, location: &str) -> String {
+    format!("{severity}: {message} ({location})")
+}
+
+/// The problems tab's label: the tool window's name, with the count when there is one.
+pub fn problems_tab_label(count: usize) -> String {
+    if count == 0 { ToolWindow::Problems.label().to_string() } else { format!("{} {count}", ToolWindow::Problems.label()) }
+}
+
+/// Where a problem is, as a row shows it: the file below the project folder and the 1-based line.
+pub fn problem_location(path: &str, folder: &str, line: u32) -> String {
+    format!("{}:{}", breadcrumb_segments(path, folder).join("/"), line + 1)
+}
+
+/// The status bar's agent dot: orange while waiting for approval, blue while running, green otherwise.
+pub fn agent_dot_class(state: &str) -> &'static str {
+    match state {
+        "승인 대기" => "dot wait",
+        "실행 중" => "dot run",
+        _ => "dot ok",
+    }
+}
+
+/// The status bar's path: the folder's name, then the directories of the open file below it.
+pub fn status_crumbs(folder: &str, current: Option<&str>) -> String {
+    let name = folder.trim_end_matches('/').rsplit('/').next().unwrap_or(folder);
+    let mut parts = vec![name.to_string()];
+    if let Some(path) = current {
+        let mut dirs = breadcrumb_segments(path, folder);
+        dirs.pop();
+        parts.extend(dirs);
+    }
+    parts.join(" \u{203A} ")
 }
 
 /// The status bar's agent field.
@@ -151,6 +399,37 @@ pub fn action_for_key(
     meta: bool,
 ) -> Option<Action> {
     keymap.action_for(&chord_from_key(key, ctrl, shift, alt, meta), os)
+}
+
+/// How long after a Shift press a second one still counts as a double press.
+pub const DOUBLE_SHIFT_MS: u64 = 500;
+
+/// Finds Shift pressed twice in quick succession, the JetBrains chord for search everywhere.
+/// Feed it every key down event; it answers true on the second press of a pair.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DoubleShift {
+    last_press_ms: Option<u64>,
+}
+
+impl DoubleShift {
+    /// One key down event at `now_ms`. `repeat` is the operating system's auto repeat for a held
+    /// key, which is not a new press. Any key but a bare Shift breaks a pair that was started.
+    pub fn press(&mut self, key: &str, repeat: bool, ctrl: bool, alt: bool, meta: bool, now_ms: u64) -> bool {
+        if key != "Shift" || ctrl || alt || meta {
+            self.last_press_ms = None;
+            return false;
+        }
+        if repeat {
+            return false;
+        }
+        match self.last_press_ms.take() {
+            Some(first) if now_ms.saturating_sub(first) <= DOUBLE_SHIFT_MS => true,
+            _ => {
+                self.last_press_ms = Some(now_ms);
+                false
+            }
+        }
+    }
 }
 
 pub fn tooltip_text(label: &str, hint: &str) -> String {
@@ -305,10 +584,21 @@ impl Stripes {
 }
 
 
+/// Whether the editor does something for `action` today ([`apply_action`] returns true for it
+/// when it can act). The palette shows the others as not ready instead of as live commands.
+pub fn is_implemented(action: Action) -> bool {
+    // The right tool windows (agent, notifications) have no panel in the window yet: toggling one shows nothing.
+    ToolWindow::from_action(action).is_some_and(|w| w.side() != Side::Right)
+        || matches!(action, Action::Close | Action::HideTool | Action::FindInFile)
+}
+
 /// Do what a keymap action does. Returns false for an action the editor cannot do yet (the
 /// caller says "준비 중입니다"). The key handler calls this with `Keymap::action_for`.
 pub fn apply_action(action: Action, tabs: &mut EditorTabs, stripes: &mut Stripes) -> bool {
     if let Some(w) = ToolWindow::from_action(action) {
+        if w.side() == Side::Right {
+            return false;
+        }
         stripes.toggle(w);
         return true;
     }
@@ -340,7 +630,50 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_failure_reasons_are_korean_and_never_the_server_text() {
+        assert!(file_failure_reason("remote error: EntryNotFound (FileSystemError)").contains("없습니다"));
+        assert!(file_failure_reason("NoPermissions (FileSystemError): /root/x").contains("권한"));
+        assert!(file_failure_reason("file is not UTF-8").contains("UTF-8"));
+        assert!(file_failure_reason("connection closed").contains("연결"));
+        assert!(file_failure_reason("timed out: readFile").contains("연결"));
+        let other = file_failure_reason("weird \u{1b}[31m thing at /secret/path");
+        assert!(!other.contains("secret") && !other.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn fr_l31_display_name_drops_control_characters_and_shortens() {
+        assert_eq!(display_name("a\nb\u{1b}[2Jc.txt"), "ab[2Jc.txt");
+        assert_eq!(display_name(&"x".repeat(200)).chars().count(), 80);
+        assert_eq!(display_name("README.md"), "README.md");
+    }
+
+    #[test]
+    fn fr_l31_row_click_keeps_a_typed_name_and_closes_an_empty_field() {
+        let new_file = TreePrompt::NewFile { parent: "/w".into() };
+        assert!(row_click_closes_prompt(&new_file, ""));
+        assert!(row_click_closes_prompt(&new_file, "  "));
+        assert!(!row_click_closes_prompt(&new_file, "notes.md"));
+        assert!(!row_click_closes_prompt(&TreePrompt::Rename { path: "/w/a".into() }, "b"));
+        assert!(!row_click_closes_prompt(&TreePrompt::Delete { path: "/w/a".into(), is_dir: false }, ""));
+    }
     use crate::ui::keymap::{Keymap, Os};
+
+    #[test]
+    fn fr_l31_is_implemented_matches_what_apply_action_does() {
+        for action in Action::ALL {
+            // The palette, find and find-in-file open sheets and bars in the window: they are not
+            // tab or tool window changes, so `apply_action` does not do them.
+            if matches!(action, Action::Palette | Action::Find | Action::FindInFile) {
+                continue;
+            }
+            let mut tabs = EditorTabs::default();
+            tabs.open("/w/p/a.rs");
+            let mut stripes = Stripes::default();
+            assert_eq!(apply_action(action, &mut tabs, &mut stripes), is_implemented(action), "{action:?}");
+        }
+    }
 
     #[test]
     fn fr_l31_actions_toggle_tool_windows_and_close_tabs() {

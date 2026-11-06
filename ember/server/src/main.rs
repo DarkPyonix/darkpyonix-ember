@@ -37,7 +37,8 @@ use ember_server::store::Store;
 /// - `EMBER_ACP_AGENTS`: Agent Client Protocol agents to offer, as JSON: a list of preset names
 ///   (`["omp"]`) and/or objects `{"name", "command", "args", "model_args", "instructions_args",
 ///   "version_args", "env"}`; `EMBER_ACP_AGENTS_FILE` reads the same JSON from a file. Presets:
-///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary). See `agents::acp`.
+///   `omp` (`omp acp`; `EMBER_OMP_BIN` picks the binary) and `gemini` (`gemini --acp`, API key or
+///   Enterprise only; `EMBER_GEMINI_BIN` picks the binary). Both are opt-in. See `agents::acp`.
 /// - `EMBER_CHROME_BIN`: the browser for remote browsing (default: found on the machine)
 /// - `EMBER_BROWSER_MCP`: `chrome-devtools`, `playwright` or `off` (default): give agents the
 ///   project's browser as an MCP server, run with `npx`/`bunx` (`EMBER_BROWSER_MCP_RUNNER`)
@@ -70,6 +71,10 @@ use ember_server::store::Store;
 ///   through the hub's directory and uses its relay (FR-N2). `EMBER_HUB_RELAY_URL` overrides
 ///   the relay derived from the hub URL; `EMBER_HUB_SYNC_DEVICES=1` keeps the devices
 ///   allow-list in sync with the account's devices
+/// - `EMBER_GUEST_LISTEN`: the guest door (FR-T14), off when unset: a second listener that serves
+///   only the guest routes and `/join`, never the owner API. `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`
+///   is required for a non-loopback address; `EMBER_GUEST_ALLOWED_HOSTS` and
+///   `EMBER_GUEST_PUBLIC_URL` name the hosts guests use. See `guest_door`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -137,7 +142,8 @@ async fn main() -> anyhow::Result<()> {
         )),
         None => None,
     };
-    // The peer-to-peer transport (FR-N1), opt-in.
+    // The peer-to-peer transport (FR-N1), opt-in. `server_peer_id` stays None when it is off.
+    let mut server_peer_id: Option<String> = None;
     let net = if server_transport::enabled_from_env() {
         let key = server_transport::load_key(&data_dir)?;
         let registered = hub.as_ref().is_some_and(|h| h.is_registered());
@@ -174,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         t.wait_online(std::time::Duration::from_secs(5)).await;
         // Printed (not only logged): the peer id goes into each node's allowed peers.
         println!("ember server peer id: {}", t.peer_id());
+        server_peer_id = Some(t.peer_id().to_string());
         println!("ember server peer addr: {}", serde_json::to_string(&t.local_addr())?);
         Some(ServerTransport::new(t))
     } else {
@@ -185,7 +192,13 @@ async fn main() -> anyhow::Result<()> {
     let browser_egress_store: Arc<dyn ember_server::browser::EgressStore> = store.clone();
     let store_for_mcp = store.clone();
     let store_for_channels = store.clone();
+    let store_for_guest = store.clone();
+    // One `Enrol` for the whole process: the owner's routes (mint, confirm, deny) and the enrol door
+    // (redeem, poll, from step C3a) share its failure windows and its pending-token map, which live per instance.
+    let enrol = computers::enrol::Enrol::with_server_peer_id(store.clone(), server_peer_id);
     let sessions = Sessions::new(store, adapters);
+    // Per-harness memory limits stored by the settings API (FR-L20, FR-S8).
+    sessions.load_settings();
     accounts.install(&sessions);
     ember_server::members::install(&sessions);
     let shim = computers::find_shim();
@@ -232,6 +245,14 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = std::env::var("EMBER_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:8740".into())
         .parse()?;
+    // The guest door (FR-T14): off unless EMBER_GUEST_LISTEN is set. A bad value is a startup error.
+    let guest_door = ember_server::guest_door::GuestDoor::from_env(addr)?;
+    // The enrol door (FR-C2e): off unless EMBER_ENROL_LISTEN is set. A bad value, or an address
+    // that clashes with the owner's or the guest door's, is a startup error.
+    let enrol_door = ember_server::enrol_door::EnrolDoor::from_env(addr, guest_door.as_ref().map(|d| d.listen))?;
+    // The URL the enrol command prints is the DOOR's (EMBER_ENROL_PUBLIC_URL, else its specific
+    // listen address), never the owner API address: that port serves no /enrol/redeem (FR-C1).
+    let enrol_door_url = ember_server::enrol_door::EnrolDoor::door_url(enrol_door.as_ref());
     // This server as seen from this machine (an unspecified address replaced by loopback).
     let local_url = {
         let mut local = addr;
@@ -330,6 +351,42 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("ember server listening on http://{addr}");
+    // Bound before the owner server starts serving, so a bind failure aborts the start.
+    let guest_listener = match &guest_door {
+        Some(d) => {
+            let l = d.bind().await.map_err(|e| anyhow::anyhow!("guest door: cannot bind {}: {e}", d.listen))?;
+            if d.is_remote() {
+                tracing::warn!(
+                    "guest door on {} is reachable from that network (EMBER_GUEST_LISTEN_ALLOW_REMOTE=1); it \
+                     speaks plain HTTP and anyone with an invite link can join a channel; put TLS in \
+                     front of it",
+                    d.listen
+                );
+            } else {
+                tracing::info!("guest door on {} (loopback)", d.listen);
+            }
+            Some(l)
+        }
+        None => None,
+    };
+    // Bound before the owner server starts serving, so a bind failure aborts the start.
+    let enrol_listener = match &enrol_door {
+        Some(d) => {
+            let l = d.bind().await.map_err(|e| anyhow::anyhow!("enrol door: cannot bind {}: {e}", d.listen))?;
+            if d.is_remote() {
+                tracing::warn!(
+                    "enrol door on {} is reachable from that network (EMBER_ENROL_LISTEN_ALLOW_REMOTE=1); it \
+                     speaks plain HTTP, so an enrol code and the credential cross the network in clear; put \
+                     TLS in front of it",
+                    d.listen
+                );
+            } else {
+                tracing::info!("enrol door on {} (loopback)", d.listen);
+            }
+            Some(l)
+        }
+        None => None,
+    };
     // After binding, so agents woken by queued messages can reach the API.
     a2a.install();
     // Scheduled tasks (FR-A8): the first tick reports triggers missed while the server was down.
@@ -351,20 +408,41 @@ async fn main() -> anyhow::Result<()> {
         scheduler.set_computer_placer(Arc::new(place));
     }
     let _scheduler_task = scheduler.start();
-    // TODO(computers): "Open IDE" still takes its per-computer targets from
-    // EMBER_IDE_COMPUTERS; derive them from the computers registry (and the session's current
-    // computer) instead of a second, hand-maintained list.
+    // "Open IDE" takes its computers from the registry and the session's current computer
+    // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    let ose = Arc::new(ember_server::ose::OseManager::default());
+    // The guest router is built only when the door is on, wrapped only by the door's guards, and
+    // never merged into `app` (not under auth::protect either).
+    let guest_app = guest_door.as_ref().map(|d| {
+        d.wrap_limited(
+            ember_server::channels::guest::guest_router_with_a2a(
+                store_for_guest.clone(),
+                sessions.clone(),
+                &data_dir,
+                a2a.clone(),
+            ),
+            d.limits(),
+        )
+    });
+    // The enrol door's router is built only when the door is on, wrapped only by the door's
+    // guards, and never merged into `app` or `local_app` (not under auth::protect either).
+    let enrol_app = enrol_door.as_ref().map(|d| d.app(enrol.clone()));
     let app = ember_server::api::router(sessions.clone())
         .merge(computers::api::router(computers.clone(), sessions.clone()))
         .merge(computers::terms::router(computers.clone()))
         .merge(computers::metrics::router(computers.clone()))
+        .merge(computers::fs::router(computers.clone()))
+        .merge(computers::ports::router(computers.clone()))
+        .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
-        .merge(ember_server::api::ide::router(sessions.clone(), ide))
+        .merge(ember_server::api::integrations::router(sessions.clone(), computers.clone()))
+        .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
+        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))
-        .merge(ember_server::channels::api::router_with_dir(store_for_channels, sessions.clone(), &data_dir))
+        .merge(ember_server::channels::api::router_with_a2a_door(store_for_channels, sessions.clone(), &data_dir, a2a.clone(), guest_door.clone()))
         .merge(ember_server::a2a::api::router(a2a))
         .merge(ember_server::accounts::api::router(accounts))
         .merge(ember_server::chatgpt::api::router(chatgpt))
@@ -392,7 +470,19 @@ async fn main() -> anyhow::Result<()> {
     let local_app = app
         .merge(devices::api::router(devices.clone()))
         .merge(antigravity::router(agy_hooks))
-        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()));
+        .merge(ember_server::hub::api::admin_router(hub.clone(), computers.clone()))
+        // FR-C1: minting an enrol code is an admin act, local and token-protected only. There is
+        // no redeem route (docs/design/COMPUTERS.md, "Adding a computer with an enrol code").
+        // FR-C2c: the owner's confirm and deny are on this router too, and so is the registrar
+        // that adds the confirmed computer to the registry.
+        .merge(computers::enrol::router(
+            enrol.clone(),
+            enrol_door_url,
+            Arc::new(
+                computers::enrol::ComputersRegistrar::new(computers.clone())
+                    .with_server_peer_id(enrol.server_peer_id().map(String::from)),
+            ),
+        ));
     // FR-S9, FR-S10: the token and the Origin/Host check on the local listener, every route.
     // The transport above serves `app` unwrapped: its callers passed the device gate (FR-N7).
     let local_app = {
@@ -419,11 +509,54 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("rejoined {} running session(s) from the previous server", rejoined.len());
         }
     }
-    axum::serve(listener, local_app)
+    // The guest door stops with the owner server. Its failure never stops the owner server.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let guest_task = match (guest_listener, guest_app) {
+        (Some(listener), Some(app)) => {
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                if let Err(e) = ember_server::guest_door::GuestDoor::serve(listener, app, shutdown).await {
+                    tracing::error!("guest door failed and is closed: {e}");
+                }
+            }))
+        }
+        _ => None,
+    };
+    // The enrol door is its own task on the same stop watch. Its failure never stops the owner server.
+    let enrol_task = match (enrol_listener, enrol_app) {
+        (Some(listener), Some(app)) => {
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.wait_for(|v| *v).await;
+                };
+                if let Err(e) = ember_server::enrol_door::EnrolDoor::serve(listener, app, shutdown).await {
+                    tracing::error!("enrol door failed and is closed: {e}");
+                }
+            }))
+        }
+        _ => None,
+    };
+    let served = axum::serve(listener, local_app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
-        .await?;
+        .await;
+    let _ = stop_tx.send(true);
+    if let Some(mut task) = guest_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+    if let Some(mut task) = enrol_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await.is_err() {
+            task.abort();
+        }
+    }
+    served?;
     if let Some(task) = transport_task {
         task.abort();
     }

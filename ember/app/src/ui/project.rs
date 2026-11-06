@@ -20,10 +20,12 @@
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::state::Reachability;
-use ember_client::wire::TeamView;
+use std::collections::BTreeMap;
+use ember_client::wire::{MemberDefaults, Project, ProjectPatch, TeamView};
 use ember_client::{LauncherStatus, State};
 
 use crate::model::status_rank;
+use crate::ui::characters::CharStyle;
 use crate::ui::components::PillTone;
 
 
@@ -39,7 +41,7 @@ pub const DEFAULT_PROJECT_NAME: &str = "기본 프로젝트";
 pub const SOON: &str = "준비 중입니다";
 
 pub fn is_default_project(id: &str) -> bool {
-    id == DEFAULT_PROJECT_ID
+    id == DEFAULT_PROJECT_ID || id == DEFAULT_PROJECT_NAME
 }
 
 /// The name to draw for a project id.
@@ -247,7 +249,7 @@ pub struct ProjectBox {
     pub computers: Vec<String>,
     /// The most urgent status, for the status disc.
     pub top: Option<LauncherStatus>,
-    /// TODO(server): the server has no project repository or branch yet (FR-L26).
+    /// From the server's project record (FR-L26).
     pub repo: Option<String>,
     pub branch: Option<String>,
 }
@@ -348,8 +350,8 @@ pub fn project_boxes_with_archived(state: &State, show_archived: bool) -> Vec<Pr
                 waiting: count(LauncherStatus::WaitingForApproval),
                 computers: state.project_computers(&p.name).to_vec(),
                 top,
-                repo: None,
-                branch: None,
+                repo: state.project(&p.name).and_then(|r| r.repository.clone()).filter(|r| !r.is_empty()),
+                branch: state.project(&p.name).and_then(|r| r.default_branch.clone()).filter(|r| !r.is_empty()),
                 members,
             };
             (latest, b)
@@ -432,13 +434,24 @@ pub enum SettingsPart {
     Delete,
 }
 
-/// Whether the main server can save a part today. Only computer assignment has an API
-/// (`assign_computer`, `unassign_computer`, FR-L4). The rest is shown disabled with "준비 중입니다".
-/// TODO(server): project metadata (name, repository, branch, defaults, leader, profile override,
-/// character style) and archive and delete need a project settings API (FR-L26).
+/// Whether the main server can save a part today: computer assignment (FR-L4) and, through
+/// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults and character
+/// style (FR-L26). The rest is shown disabled with an explanation.
+/// TODO(#384): leader, archive and delete (server answers 400 `not_yet`).
 pub fn part_supported(part: SettingsPart) -> bool {
-    matches!(part, SettingsPart::Computers)
+    matches!(
+        part,
+        SettingsPart::Computers
+            | SettingsPart::Name
+            | SettingsPart::Repository
+            | SettingsPart::CharacterStyle
+            | SettingsPart::MemberDefaults
+            | SettingsPart::ProfileOverride
+    )
 }
+
+/// The short note under a part the server does not save yet.
+pub const NOT_YET: &str = "서버가 아직 지원하지 않습니다";
 
 /// Whether the leader choice is shown at all: never in 기본 프로젝트 (D28).
 pub fn leader_choice_visible(project_id: &str) -> bool {
@@ -450,14 +463,247 @@ pub fn danger_allowed(project_id: &str, part: SettingsPart) -> bool {
     part_supported(part) && !is_default_project(project_id)
 }
 
-/// Whether 저장 can do anything. False until the server saves project metadata.
-pub const SETTINGS_SAVE_AVAILABLE: bool = false;
+/// Whether 저장 can do anything: the server saves project metadata (FR-L26).
+pub const SETTINGS_SAVE_AVAILABLE: bool = true;
 
+/// The form of the settings sheet. Empty strings mean "not set"; `style` is the server's
+/// character style id, empty for none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsDraft {
     pub name: String,
     pub repo: String,
     pub branch: String,
+    pub agent: String,
+    pub model: String,
+    pub mode: String,
+    pub style: String,
+    /// Profile override per harness kind to account id (FR-L26); a harness without an entry is
+    /// unset. A deleted account (`null` on the server) counts as unset.
+    pub overrides: BTreeMap<String, String>,
+    /// Harnesses whose dangling (`null`) server entry the user chose to clear with 기본.
+    pub cleared: std::collections::BTreeSet<String>,
+}
+
+impl SettingsDraft {
+    /// The form as the server holds the project now.
+    pub fn from_project(p: &Project) -> SettingsDraft {
+        let d = p.member_defaults.clone().unwrap_or_default();
+        SettingsDraft {
+            name: p.name.clone(),
+            repo: p.repository.clone().unwrap_or_default(),
+            branch: p.default_branch.clone().unwrap_or_default(),
+            agent: d.agent.unwrap_or_default(),
+            model: d.model.unwrap_or_default(),
+            mode: d.mode.unwrap_or_default(),
+            style: p.character_style.clone().unwrap_or_default(),
+            overrides: loaded_overrides(p),
+            cleared: Default::default(),
+        }
+    }
+
+    fn defaults(&self) -> MemberDefaults {
+        let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+        MemberDefaults { agent: some(&self.agent), model: some(&self.model), mode: some(&self.mode) }
+    }
+}
+
+/// The overrides the server holds, without the entries whose account was deleted (FR-L26).
+pub fn loaded_overrides(p: &Project) -> BTreeMap<String, String> {
+    p.profile_overrides.iter().filter_map(|(h, a)| a.clone().map(|a| (h.clone(), a))).collect()
+}
+
+/// The `profile_overrides` object the patch sends: the whole map, every entry an account id.
+pub fn overrides_map(draft: &BTreeMap<String, String>) -> BTreeMap<String, Option<String>> {
+    draft.iter().filter(|(_, a)| !a.is_empty()).map(|(h, a)| (h.clone(), Some(a.clone()))).collect()
+}
+
+/// The harnesses the override section offers: server kind and label (Claude Code, Codex and
+/// Antigravity, the kinds that have accounts).
+pub fn override_harnesses() -> [(&'static str, &'static str); 3] {
+    [("claude-code", "Claude Code"), ("codex", "Codex"), ("antigravity", "Antigravity")]
+}
+
+/// The picker choices of one harness: "" for no fixed account, then that harness's accounts as
+/// (id, label). `accounts` are (id, kind, label).
+pub fn override_options(harness: &str, accounts: &[(String, String, String)]) -> Vec<(String, String)> {
+    let mut v = vec![(String::new(), "기본(고정 없음)".to_string())];
+    v.extend(accounts.iter().filter(|(_, k, _)| k == harness).map(|(id, _, l)| (id.clone(), l.clone())));
+    v
+}
+
+/// Whether the account list the pickers read has arrived (FR-L26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountsState {
+    Loading,
+    Ready,
+}
+
+impl AccountsState {
+    /// An empty list is read as still loading, because the client has no separate flag.
+    pub fn of(accounts: &[(String, String, String)]) -> AccountsState {
+        if accounts.is_empty() { AccountsState::Loading } else { AccountsState::Ready }
+    }
+}
+
+/// What the picker of `harness` shows as chosen: the account label, "기본(고정 없음)" when unset,
+/// and "삭제된 계정" when the server holds a `null` for it (the account is gone) and the draft has
+/// not picked another or cleared it. While the accounts load, a stored id reads "불러오는 중"
+/// instead of "삭제된 계정", because the account may simply not have arrived yet.
+pub fn override_label(
+    server: &Project,
+    draft: &SettingsDraft,
+    harness: &str,
+    accounts: &[(String, String, String)],
+    state: AccountsState,
+) -> String {
+    if let Some(id) = draft.overrides.get(harness) {
+        return match accounts.iter().find(|(a, _, _)| a == id) {
+            Some((_, _, l)) => l.clone(),
+            None if state == AccountsState::Loading => "불러오는 중".to_string(),
+            None => "삭제된 계정".to_string(),
+        };
+    }
+    if !draft.cleared.contains(harness) && matches!(server.profile_overrides.get(harness), Some(None)) {
+        return "삭제된 계정".to_string();
+    }
+    "기본(고정 없음)".to_string()
+}
+
+/// The user picks `account_id` ("" for 기본) for `harness`. Picking 기본 on a dangling entry marks
+/// it cleared, so the draft becomes dirty and 저장 sends the map without that harness.
+pub fn pick_override(server: &Project, draft: &mut SettingsDraft, harness: &str, account_id: &str) {
+    if account_id.is_empty() {
+        draft.overrides.remove(harness);
+        if matches!(server.profile_overrides.get(harness), Some(None)) {
+            draft.cleared.insert(harness.to_string());
+        }
+    } else {
+        draft.overrides.insert(harness.to_string(), account_id.to_string());
+        draft.cleared.remove(harness);
+    }
+}
+
+/// The patch that turns `server` into `d`: only changed fields are set (FR-L26). A field the
+/// user emptied is sent empty (or `null` for the defaults), which clears it. Leader, profile
+/// override and archive are never sent. The name of 기본 프로젝트 is never sent.
+pub fn build_patch(server: &Project, d: &SettingsDraft) -> ProjectPatch {
+    let was = SettingsDraft::from_project(server);
+    let mut patch = ProjectPatch::default();
+    let name = d.name.trim();
+    if !is_default_project(&server.name) && name != was.name {
+        patch.name = Some(name.to_string());
+    }
+    if d.repo.trim() != was.repo.trim() {
+        patch.repository = Some(d.repo.trim().to_string());
+    }
+    if d.branch.trim() != was.branch.trim() {
+        patch.default_branch = Some(d.branch.trim().to_string());
+    }
+    let (now, before) = (d.defaults(), was.defaults());
+    if now != before {
+        patch.member_defaults = Some((!now.is_empty()).then_some(now));
+    }
+    if d.style != was.style {
+        patch.character_style = Some(d.style.clone());
+    }
+    if d.overrides != was.overrides || !d.cleared.is_empty() {
+        patch.profile_overrides = Some(overrides_map(&d.overrides));
+    }
+    patch
+}
+
+/// The project the UI shows as selected after `old` was renamed to `new` (FR-L26): the new name
+/// when `old` was selected, otherwise what was selected.
+pub fn follow_rename(selected: Option<&str>, old: &str, new: &str) -> Option<String> {
+    selected.map(|s| if s == old { new.to_string() } else { s.to_string() })
+}
+
+/// The character style to show: the server's value when it is a known id, else the one this
+/// device remembers, else the default (FR-L26). One source of truth is the server.
+pub fn effective_style(server: Option<&str>, device: Option<CharStyle>) -> CharStyle {
+    server.and_then(CharStyle::from_id).or(device).unwrap_or_default()
+}
+
+/// Why the link to the character screen is disabled: the draft is dirty (FR-L22).
+pub fn characters_link_reason(dirty: bool) -> Option<&'static str> {
+    dirty.then_some("저장하지 않은 변경 사항이 있어 열 수 없습니다")
+}
+
+/// What closing the settings sheet does (FR-L26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseAction {
+    /// Ignored: a save is in flight.
+    Ignore,
+    /// Ask first: the draft differs from the loaded project.
+    Confirm,
+    Close,
+}
+
+/// The unsaved-changes guard of the settings sheet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SettingsGuard {
+    pub saving: bool,
+    pub dirty: bool,
+}
+
+impl SettingsGuard {
+    /// `dirty` when the patch the draft would send is not empty.
+    pub fn new(saving: bool, patch_is_empty: bool) -> SettingsGuard {
+        SettingsGuard { saving, dirty: !patch_is_empty }
+    }
+
+    /// What 취소, X and the backdrop do.
+    pub fn on_close(self) -> CloseAction {
+        if self.saving {
+            CloseAction::Ignore
+        } else if self.dirty {
+            CloseAction::Confirm
+        } else {
+            CloseAction::Close
+        }
+    }
+}
+
+/// The question of the unsaved-changes confirm.
+pub const DISCARD_QUESTION: &str = "저장하지 않은 변경이 있습니다. 닫을까요?";
+
+/// The harness choices of the new member defaults: server kind and label. The first is "none".
+/// Gemini is left out because the server has no Gemini kind (see `Harness::kind`).
+pub fn agent_options() -> Vec<(&'static str, &'static str)> {
+    vec![("", "기본값 없음"), ("claude-code", "Claude Code"), ("codex", "Codex")]
+}
+
+/// The permission mode choices of the new member defaults: server id and label.
+pub fn mode_options() -> Vec<(&'static str, &'static str)> {
+    use crate::ui::home::PermMode;
+    vec![
+        ("", "기본값 없음"),
+        ("ask", PermMode::Ask.label()),
+        ("edits", PermMode::Edits.label()),
+        ("plan", PermMode::Plan.label()),
+        ("bypass", PermMode::Bypass.label()),
+    ]
+}
+
+/// The sentence a failed save shows. Never the server's raw text.
+/// The server maps every bad value to `invalid_field`, so the account sentence is used only when
+/// the patch carried nothing but `profile_overrides`.
+pub fn patch_error_message(status: Option<u16>, code: Option<&str>, patch: &ProjectPatch) -> &'static str {
+    let account_only = patch.profile_overrides.is_some()
+        && patch.name.is_none()
+        && patch.repository.is_none()
+        && patch.default_branch.is_none()
+        && patch.member_defaults.is_none()
+        && patch.character_style.is_none();
+    match (status, code) {
+        (Some(409), Some("name_taken")) => "이미 있는 이름입니다",
+        (Some(403), Some("protected_project")) => "기본 프로젝트의 이름은 바꿀 수 없습니다",
+        (Some(400), Some("invalid_field")) if !account_only => "입력한 값을 서버가 받아들이지 않았습니다. 내용을 확인하십시오.",
+        (Some(400), Some("invalid_field")) => "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.",
+        (Some(400), _) => "입력한 값이 올바르지 않습니다",
+        (Some(404), _) => "프로젝트를 찾지 못했습니다",
+        _ => "설정을 저장하지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -517,8 +763,119 @@ pub fn validate_settings(d: &SettingsDraft, project_id: &str) -> Vec<SettingsErr
     errors
 }
 
+/// The form of the 새 프로젝트 sheet (FR-L26, FR-L1). Empty strings mean "not filled"; `style` is
+/// the server's character style id, empty until the user picks one (the picker shows 몽글 then).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewProjectDraft {
+    pub name: String,
+    pub repo: String,
+    pub branch: String,
+    pub style: String,
+}
+
+/// Why the 새 프로젝트 sheet cannot create yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewProjectError {
+    /// A rule the settings sheet has too (name, repository, branch).
+    Field(SettingsError),
+    NameTaken,
+}
+
+impl NewProjectError {
+    pub fn message(self) -> &'static str {
+        match self {
+            NewProjectError::Field(e) => e.message(),
+            NewProjectError::NameTaken => "같은 이름의 프로젝트가 이미 있습니다",
+        }
+    }
+}
+
+/// The sentence a failed `POST /api/projects` shows. Never the server's raw text.
+pub fn create_error_message(code: Option<&str>) -> &'static str {
+    match code {
+        Some("name_taken") => "이미 있는 이름입니다",
+        Some("protected_project") => "기본 프로젝트와 같은 이름은 쓸 수 없습니다",
+        _ => "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
+    }
+}
+
+/// What the sheet does once the follow-up `PATCH` has answered. The project exists in both cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProjectOutcome {
+    pub project_kept: bool,
+    pub notice: Option<&'static str>,
+}
+
+impl NewProjectOutcome {
+    pub fn after_followup(failed: bool) -> NewProjectOutcome {
+        NewProjectOutcome {
+            project_kept: true,
+            notice: failed.then_some(
+                "프로젝트는 만들었지만 저장소와 캐릭터 설정은 저장하지 못했습니다. 프로젝트 설정에서 다시 저장해 주세요",
+            ),
+        }
+    }
+}
+
+impl NewProjectDraft {
+    pub fn trimmed_name(&self) -> String {
+        self.name.trim().to_string()
+    }
+
+    /// Nothing typed or picked: closing needs no question.
+    pub fn is_blank(&self) -> bool {
+        *self == NewProjectDraft::default()
+    }
+
+    /// Name rules as the settings sheet and a name not taken (an empty branch means `develop`). `existing` are the project names that exist now (the server's create is idempotent,
+    /// so a taken name must be refused here).
+    pub fn validate(&self, existing: &[String]) -> Vec<NewProjectError> {
+        let as_settings = SettingsDraft {
+            name: self.name.clone(),
+            repo: self.repo.clone(),
+            branch: self.branch.clone(),
+            ..Default::default()
+        };
+        let mut errors: Vec<NewProjectError> =
+            validate_settings(&as_settings, "").into_iter().map(NewProjectError::Field).collect();
+        let name = self.name.trim();
+        if !name.is_empty() && existing.iter().any(|e| e == name) {
+            errors.push(NewProjectError::NameTaken);
+        }
+        errors
+    }
+
+    /// The branch used when the field is empty (the mockup shows `develop`).
+    pub const DEFAULT_BRANCH: &'static str = "develop";
+
+    /// The typed branch, or `develop` when the field is empty.
+    pub fn effective_branch(&self) -> String {
+        let b = self.branch.trim();
+        if b.is_empty() { Self::DEFAULT_BRANCH.to_string() } else { b.to_string() }
+    }
+
+    /// The second call after `POST /api/projects` (which takes only a name): the filled fields,
+    /// empty when only the name was given.
+    pub fn followup_patch(&self) -> ProjectPatch {
+        let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+        ProjectPatch {
+            repository: some(&self.repo),
+            default_branch: (!self.repo.trim().is_empty() || !self.branch.trim().is_empty())
+                .then(|| self.effective_branch()),
+            character_style: some(&self.style),
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l22_disabled_characters_link_says_why() {
+        assert_eq!(characters_link_reason(true), Some("저장하지 않은 변경 사항이 있어 열 수 없습니다"));
+        assert_eq!(characters_link_reason(false), None);
+    }
+
     use super::*;
 
     fn member(id: &str, status: LauncherStatus, at: i64) -> Member {
@@ -702,6 +1059,7 @@ mod tests {
             name: name.into(),
             repo: repo.into(),
             branch: branch.into(),
+            ..Default::default()
         }
     }
 
@@ -775,17 +1133,21 @@ mod tests {
         }
     }
 
-    // FR-L26: only what the server supports is enabled; the rest is "준비 중입니다".
+    // FR-L26: only what the server supports is enabled; the rest says the server cannot yet.
     #[test]
-    fn only_computer_assignment_is_saved_by_the_server() {
-        assert!(part_supported(SettingsPart::Computers));
+    fn fr_l26_the_server_saves_metadata_and_profile_override_but_not_leader_archive_or_delete() {
         for part in [
+            SettingsPart::Computers,
             SettingsPart::Name,
             SettingsPart::Repository,
             SettingsPart::CharacterStyle,
             SettingsPart::MemberDefaults,
-            SettingsPart::Leader,
             SettingsPart::ProfileOverride,
+        ] {
+            assert!(part_supported(part), "{part:?}");
+        }
+        for part in [
+            SettingsPart::Leader,
             SettingsPart::Links,
             SettingsPart::Archive,
             SettingsPart::Delete,
@@ -793,7 +1155,187 @@ mod tests {
             assert!(!part_supported(part), "{part:?}");
         }
         assert_eq!(SOON, "준비 중입니다");
-        assert!(!SETTINGS_SAVE_AVAILABLE);
+        assert!(SETTINGS_SAVE_AVAILABLE);
+    }
+
+    fn server_project() -> Project {
+        Project {
+            name: "ember".into(),
+            repository: Some("github.com/a/b".into()),
+            default_branch: Some("develop".into()),
+            member_defaults: Some(MemberDefaults { agent: Some("codex".into()), model: None, mode: Some("plan".into()) }),
+            character_style: Some("crew".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn fr_l26_an_unchanged_form_builds_an_empty_patch() {
+        let p = server_project();
+        assert!(build_patch(&p, &SettingsDraft::from_project(&p)).is_empty());
+        let mut d = SettingsDraft::from_project(&p);
+        d.name = "  ember  ".into();
+        assert!(build_patch(&p, &d).is_empty(), "whitespace around the same name is no change");
+    }
+
+    #[test]
+    fn fr_l26_the_patch_holds_only_the_changed_fields() {
+        let p = server_project();
+        let mut d = SettingsDraft::from_project(&p);
+        d.name = "ember2".into();
+        d.branch = "main".into();
+        let patch = build_patch(&p, &d);
+        assert_eq!(patch.name.as_deref(), Some("ember2"));
+        assert_eq!(patch.default_branch.as_deref(), Some("main"));
+        assert_eq!((patch.repository, patch.member_defaults, patch.character_style), (None, None, None));
+        let mut d = SettingsDraft::from_project(&p);
+        d.model = "opus".into();
+        d.style = "cream".into();
+        let patch = build_patch(&p, &d);
+        let md = patch.member_defaults.clone().flatten().expect("defaults sent");
+        assert_eq!((md.agent.as_deref(), md.model.as_deref(), md.mode.as_deref()), (Some("codex"), Some("opus"), Some("plan")));
+        assert_eq!(patch.character_style.as_deref(), Some("cream"));
+        assert!(patch.name.is_none());
+    }
+
+    fn acc() -> Vec<(String, String, String)> {
+        vec![
+            ("a1".into(), "claude-code".into(), "개인".into()),
+            ("a2".into(), "claude-code".into(), "회사".into()),
+            ("c1".into(), "codex".into(), "코덱스".into()),
+        ]
+    }
+
+    #[test]
+    fn fr_l26_profile_override_unchanged_sends_nothing_and_a_deleted_account_is_unset() {
+        let mut p = server_project();
+        p.profile_overrides.insert("codex".into(), Some("c1".into()));
+        p.profile_overrides.insert("claude-code".into(), None);
+        let d = SettingsDraft::from_project(&p);
+        assert_eq!(d.overrides.len(), 1, "a null entry counts as unset");
+        assert!(build_patch(&p, &d).profile_overrides.is_none());
+        assert_eq!(override_label(&p, &d, "claude-code", &acc(), AccountsState::Ready), "삭제된 계정");
+        assert_eq!(override_label(&p, &d, "codex", &acc(), AccountsState::Ready), "코덱스");
+        assert_eq!(override_label(&p, &d, "antigravity", &acc(), AccountsState::Ready), "기본(고정 없음)");
+    }
+
+    #[test]
+    fn fr_l26_profile_override_a_change_sends_the_whole_map() {
+        let mut p = server_project();
+        p.profile_overrides.insert("codex".into(), Some("c1".into()));
+        let mut d = SettingsDraft::from_project(&p);
+        d.overrides.insert("claude-code".into(), "a2".into());
+        let m = build_patch(&p, &d).profile_overrides.expect("sent");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("codex"), Some(&Some("c1".to_string())));
+        assert_eq!(m.get("claude-code"), Some(&Some("a2".to_string())));
+        d.overrides.clear();
+        assert_eq!(build_patch(&p, &d).profile_overrides, Some(BTreeMap::new()), "clearing all sends {{}}");
+    }
+
+    #[test]
+    fn fr_l26_profile_override_options_list_that_harness_only() {
+        let o = override_options("claude-code", &acc());
+        assert_eq!(o.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["", "a1", "a2"]);
+        assert_eq!(o[0].1, "기본(고정 없음)");
+        assert_eq!(override_options("antigravity", &acc()).len(), 1);
+        assert_eq!(override_harnesses().len(), 3);
+    }
+
+    #[test]
+    fn fr_l26_profile_override_invalid_field_reads_a_fixed_sentence() {
+        let m = patch_error_message(Some(400), Some("invalid_field"), &only_overrides());
+        assert_eq!(m, "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.");
+        assert!(!m.contains('\u{2014}'));
+    }
+
+    fn only_overrides() -> ProjectPatch {
+        ProjectPatch { profile_overrides: Some(BTreeMap::new()), ..Default::default() }
+    }
+
+    #[test]
+    fn fr_l26_invalid_field_message_depends_on_the_patch() {
+        let account = patch_error_message(Some(400), Some("invalid_field"), &only_overrides());
+        assert_eq!(account, "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.");
+        let mixed = ProjectPatch { repository: Some("x".into()), ..only_overrides() };
+        let repo = ProjectPatch { repository: Some("x".into()), ..Default::default() };
+        for p in [&mixed, &repo] {
+            assert_eq!(patch_error_message(Some(400), Some("invalid_field"), p), "입력한 값을 서버가 받아들이지 않았습니다. 내용을 확인하십시오.");
+        }
+    }
+
+    #[test]
+    fn fr_l26_override_label_while_accounts_load() {
+        let mut p = server_project();
+        p.profile_overrides.insert("codex".into(), Some("c1".into()));
+        let d = SettingsDraft::from_project(&p);
+        assert_eq!(AccountsState::of(&[]), AccountsState::Loading);
+        assert_eq!(AccountsState::of(&acc()), AccountsState::Ready);
+        assert_eq!(override_label(&p, &d, "codex", &[], AccountsState::Loading), "불러오는 중");
+        assert_eq!(override_label(&p, &d, "codex", &acc(), AccountsState::Ready), "코덱스");
+        let mut gone = d.clone();
+        gone.overrides.insert("codex".into(), "zz".into());
+        assert_eq!(override_label(&p, &gone, "codex", &acc(), AccountsState::Ready), "삭제된 계정");
+    }
+
+    #[test]
+    fn fr_l26_a_dangling_override_can_be_cleared() {
+        let mut p = server_project();
+        p.profile_overrides.insert("codex".into(), Some("c1".into()));
+        p.profile_overrides.insert("claude-code".into(), None);
+        let mut d = SettingsDraft::from_project(&p);
+        assert!(build_patch(&p, &d).is_empty(), "untouched is clean");
+        pick_override(&p, &mut d, "claude-code", "");
+        assert!(!build_patch(&p, &d).is_empty(), "clearing a dangling entry makes the draft dirty");
+        assert_eq!(override_label(&p, &d, "claude-code", &acc(), AccountsState::Ready), "기본(고정 없음)");
+        let m = build_patch(&p, &d).profile_overrides.expect("sent");
+        assert_eq!(m.len(), 1);
+        assert!(m.contains_key("codex") && !m.contains_key("claude-code"));
+    }
+
+    #[test]
+    fn fr_l26_emptying_a_field_sends_an_empty_value_or_null() {
+        let p = server_project();
+        let mut d = SettingsDraft::from_project(&p);
+        d.repo.clear();
+        d.agent.clear();
+        d.mode.clear();
+        let patch = build_patch(&p, &d);
+        assert_eq!(patch.repository.as_deref(), Some(""));
+        assert_eq!(patch.member_defaults, Some(None), "all defaults emptied sends null");
+        let json = serde_json::to_value(&patch).unwrap();
+        assert_eq!(json["repository"], "");
+        assert!(json["member_defaults"].is_null() && json.get("member_defaults").is_some());
+    }
+
+    #[test]
+    fn fr_l26_the_default_project_name_is_never_sent() {
+        let p = Project { name: DEFAULT_PROJECT_ID.into(), ..Default::default() };
+        let mut d = SettingsDraft::from_project(&p);
+        d.name = "other".into();
+        assert!(build_patch(&p, &d).name.is_none());
+    }
+
+    #[test]
+    fn fr_l26_pickers_offer_only_ids_the_server_accepts() {
+        assert_eq!(mode_options().iter().map(|m| m.0).collect::<Vec<_>>(), ["", "ask", "edits", "plan", "bypass"]);
+        assert_eq!(agent_options().iter().map(|m| m.0).collect::<Vec<_>>(), ["", "claude-code", "codex"]);
+        for st in crate::ui::characters::CharStyle::ALL {
+            assert_eq!(crate::ui::characters::CharStyle::from_id(st.id()), Some(st));
+        }
+        assert_eq!(crate::ui::characters::CharStyle::from_id("x"), None);
+    }
+
+    #[test]
+    fn fr_l26_failures_read_as_fixed_korean_sentences() {
+        assert_eq!(patch_error_message(Some(409), Some("name_taken"), &ProjectPatch::default()), "이미 있는 이름입니다");
+        assert_eq!(patch_error_message(Some(403), Some("protected_project"), &ProjectPatch::default()), "기본 프로젝트의 이름은 바꿀 수 없습니다");
+        assert_eq!(patch_error_message(Some(400), Some("unknown_field"), &ProjectPatch::default()), "입력한 값이 올바르지 않습니다");
+        assert_eq!(patch_error_message(Some(404), None, &ProjectPatch::default()), "프로젝트를 찾지 못했습니다");
+        for (st, code) in [(None, None), (Some(500), None), (Some(502), Some("x"))] {
+            let m = patch_error_message(st, code, &ProjectPatch::default());
+            assert!(m.starts_with("설정을 저장하지 못했습니다") && !m.contains("500"), "{m}");
+        }
     }
 
     #[test]
@@ -819,5 +1361,119 @@ mod tests {
         b.repo = Some("github.com/x/y".into());
         b.branch = Some("develop".into());
         assert_eq!(b.repo_line(), "github.com/x/y \u{00b7} develop");
+    }
+
+    #[test]
+    fn fr_l26_rename_updates_selection() {
+        assert_eq!(follow_rename(Some("old"), "old", "new").as_deref(), Some("new"));
+        assert_eq!(follow_rename(Some("other"), "old", "new").as_deref(), Some("other"));
+        assert_eq!(follow_rename(None, "old", "new"), None);
+    }
+
+    #[test]
+    fn fr_l26_style_prefers_server_value() {
+        assert_eq!(effective_style(Some("crew"), Some(CharStyle::Cream)), CharStyle::Crew);
+        assert_eq!(effective_style(None, Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some(""), Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some("neon"), Some(CharStyle::Cream)), CharStyle::Cream);
+        assert_eq!(effective_style(Some("neon"), None), CharStyle::default());
+    }
+
+    #[test]
+    fn fr_l26_guard_blocks_close_while_saving() {
+        assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
+        assert_eq!(SettingsGuard::new(true, true).on_close(), CloseAction::Ignore);
+    }
+
+    #[test]
+    fn fr_l26_guard_asks_when_dirty() {
+        assert_eq!(SettingsGuard::new(false, false).on_close(), CloseAction::Confirm);
+        assert_eq!(SettingsGuard::new(false, true).on_close(), CloseAction::Close);
+    }
+
+    // --- the new project sheet (FR-L26, FR-L1) ---
+
+    fn np_draft(name: &str, repo: &str, branch: &str, style: &str) -> NewProjectDraft {
+        NewProjectDraft { name: name.into(), repo: repo.into(), branch: branch.into(), style: style.into() }
+    }
+
+    #[test]
+    fn fr_l26_new_project_name_only_creates_without_a_patch() {
+        let d = np_draft("  ember  ", "", "", "");
+        assert!(d.validate(&[]).is_empty());
+        assert_eq!(d.trimmed_name(), "ember");
+        assert!(d.followup_patch().is_empty());
+        assert!(!d.is_blank());
+    }
+
+    #[test]
+    fn fr_l26_new_project_name_rules_as_settings() {
+        assert_eq!(np_draft("  ", "", "", "").validate(&[]), vec![NewProjectError::Field(SettingsError::NameEmpty)]);
+        assert_eq!(np_draft("a/b", "", "", "").validate(&[]), vec![NewProjectError::Field(SettingsError::NameInvalid)]);
+        assert_eq!(np_draft(&"x".repeat(65), "", "", "").validate(&[]), vec![NewProjectError::Field(SettingsError::NameTooLong)]);
+        assert_eq!(np_draft("a", "", "", "").validate(&["a".to_string()]), vec![NewProjectError::NameTaken]);
+        assert_eq!(NewProjectError::NameTaken.message(), "같은 이름의 프로젝트가 이미 있습니다");
+    }
+
+    #[test]
+    fn fr_l26_new_project_empty_branch_means_develop() {
+        let d = np_draft("ember", "github.com/a/b", "", "");
+        assert!(d.validate(&[]).is_empty());
+        assert_eq!(d.effective_branch(), "develop");
+        let patch = d.followup_patch();
+        assert_eq!(patch.repository.as_deref(), Some("github.com/a/b"));
+        assert_eq!(patch.default_branch.as_deref(), Some("develop"));
+        assert!(patch.name.is_none() && patch.member_defaults.is_none() && patch.character_style.is_none());
+        let d = np_draft("ember", "github.com/a/b", " main ", "");
+        assert_eq!(d.effective_branch(), "main");
+        assert_eq!(d.followup_patch().default_branch.as_deref(), Some("main"));
+        // No repository and no branch: no branch is sent.
+        assert!(np_draft("ember", "", "", "").followup_patch().default_branch.is_none());
+        assert_eq!(np_draft("ember", "", "dev", "").followup_patch().default_branch.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn fr_l26_new_project_create_error_maps_name_taken() {
+        assert_eq!(create_error_message(Some("name_taken")), "이미 있는 이름입니다");
+        assert_eq!(create_error_message(Some("protected_project")), "기본 프로젝트와 같은 이름은 쓸 수 없습니다");
+        assert_eq!(create_error_message(Some("boom")), "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요");
+        assert_eq!(create_error_message(None), "프로젝트를 만들지 못했습니다. 잠시 뒤에 다시 시도해 주세요");
+    }
+
+    #[test]
+    fn fr_l26_new_project_invalid_repository_message() {
+        let d = np_draft("ember", "github.com/a b", "develop", "");
+        assert_eq!(d.validate(&[]), vec![NewProjectError::Field(SettingsError::RepoHasSpace)]);
+        assert_eq!(NewProjectError::Field(SettingsError::RepoHasSpace).message(), "저장소 주소에는 공백이 들어갈 수 없습니다");
+        let d = np_draft("ember", "github.com/a/b", "-x", "");
+        assert_eq!(d.validate(&[]), vec![NewProjectError::Field(SettingsError::BranchInvalid)]);
+    }
+
+    #[test]
+    fn fr_l26_new_project_character_style_is_in_the_patch() {
+        let patch = np_draft("ember", "", "", "crew").followup_patch();
+        assert_eq!(patch.character_style.as_deref(), Some("crew"));
+        assert!(patch.repository.is_none() && patch.default_branch.is_none());
+        assert!(!patch.is_empty());
+    }
+
+    #[test]
+    fn fr_l26_new_project_a_failed_followup_keeps_the_project_and_says_so() {
+        let ok = NewProjectOutcome::after_followup(false);
+        assert!(ok.project_kept && ok.notice.is_none());
+        let bad = NewProjectOutcome::after_followup(true);
+        assert!(bad.project_kept);
+        assert_eq!(
+            bad.notice,
+            Some("프로젝트는 만들었지만 저장소와 캐릭터 설정은 저장하지 못했습니다. 프로젝트 설정에서 다시 저장해 주세요")
+        );
+    }
+
+    #[test]
+    fn fr_l26_new_project_guard_asks_only_after_typing() {
+        assert!(NewProjectDraft::default().is_blank());
+        assert_eq!(SettingsGuard::new(false, NewProjectDraft::default().is_blank()).on_close(), CloseAction::Close);
+        assert_eq!(SettingsGuard::new(false, np_draft("x", "", "", "").is_blank()).on_close(), CloseAction::Confirm);
+        assert_eq!(SettingsGuard::new(true, false).on_close(), CloseAction::Ignore);
     }
 }

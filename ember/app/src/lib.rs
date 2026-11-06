@@ -118,13 +118,21 @@ pub fn launch() {
         // Separate IDE window (FR-L31): `--editor <project> <folder>` opens the editor as its own
         // HTML-mode window in its own process until dioxus-compose#152 (the `window` element on a
         // shared host) lands.
+        // `EMBER_CR_SIZE=1100x400` opens a check window of that size beside the owner's.
+        let (w, h): (u16, u16) = std::env::var("EMBER_CR_SIZE")
+            .ok()
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+            })
+            .unwrap_or((1280, 820));
         let title: &'static str = Box::leak(format!("{} - Ember", target.project).into_boxed_str());
         services().ui.standalone_editor.set(true);
         services().ui.editor.set(Some(target));
         // TODO(dioxus-compose#161): HtmlView inside a Compose root aborts the real renderer, so the editor runs in HTML mode.
         launch_builder()
-            .with_html(ui::workbench::config)
-            .with_window(Window::new().with_title(title).with_size(1280, 820))
+            .with_html(ui::editor_workbench::page::config)
+            .with_window(ui::cr::shell::window_chrome(Window::new().with_title(title).with_size(w, h)))
             .launch(ui::editor_workbench::page::app);
     } else if let Some(pref) = ui::cr::gallery::requested() {
         // Phase 1 review window (#220): the compose-rust components, no app.

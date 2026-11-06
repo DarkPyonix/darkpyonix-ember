@@ -45,6 +45,23 @@ impl CharStyle {
         CharStyle::Keyring,
     ];
 
+    /// The id the server stores as `character_style` (FR-L26).
+    pub fn id(self) -> &'static str {
+        match self {
+            CharStyle::Mongle => "mongle",
+            CharStyle::Malang => "malang",
+            CharStyle::Crew => "crew",
+            CharStyle::Pocket => "pocket",
+            CharStyle::Cream => "cream",
+            CharStyle::Keyring => "keyring",
+        }
+    }
+
+    /// The style of a server id; `None` for an id this client does not know.
+    pub fn from_id(id: &str) -> Option<CharStyle> {
+        CharStyle::ALL.into_iter().find(|s| s.id() == id)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             CharStyle::Mongle => "몽글",
@@ -164,6 +181,8 @@ pub struct CharSpec {
     /// The member's role name (크루 props).
     pub role: Option<String>,
     pub dark: bool,
+    /// A fixed silhouette (index into [`SILHOUETTES`]); `None` lets the name choose (FR-L22).
+    pub pin: Option<usize>,
 }
 
 /// The leader badge rule (FR-L24): a leader outside 기본 프로젝트 only.
@@ -555,6 +574,9 @@ fn mouth(st: CharState) -> &'static str {
 pub fn svg(spec: &CharSpec) -> String {
     let fam = family_of(&spec.agent);
     let mut t = traits(&spec.name, fam);
+    if let Some(pin) = spec.pin {
+        t.shape = pin % SHAPES;
+    }
     let c = palette(&t, fam, spec.dark);
     let st = spec.state;
     let (cx, cy, rad) = (50.0_f32, 58.0_f32, 30.0_f32);
@@ -726,6 +748,122 @@ pub fn svg(spec: &CharSpec) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------------------------
+// Team character screen model (FR-L22, INTENT D29; mockup `characters.html`)
+// ---------------------------------------------------------------------------------------------
+
+/// The eight fixed silhouettes, in the order the drawing indexes them (mockup `SHAPES`/`SHN`).
+pub const SILHOUETTES: [&str; 8] = ["둥근", "유기", "네모", "캡슐", "구름", "물방울", "돌기", "조약돌"];
+
+/// Only 말랑 and 키링 draw the seeded blob, so only they can pin a silhouette (mockup text).
+pub fn supports_pin(style: CharStyle) -> bool {
+    matches!(style, CharStyle::Malang | CharStyle::Keyring)
+}
+
+/// The roles the editor offers (mockup `edRole`).
+pub const EDITOR_ROLES: [&str; 6] = ["리더", "구현", "리뷰어", "테스터", "디자인", "문서"];
+
+/// The harnesses the editor offers: the drawing agent id and its label.
+pub const EDITOR_HARNESSES: [(&str, &str); 3] = [("claude", "Claude Code"), ("codex", "Codex"), ("gemini", "Gemini CLI")];
+
+/// One sample member of the preview team. These are the mockup's demo members, not the
+/// project's real members: the screen labels them 미리보기.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewMember {
+    /// The project short name that prefixes the name; `None` is 기본 프로젝트.
+    pub project: &'static str,
+    pub role: &'static str,
+    pub agent: &'static str,
+    pub state: CharState,
+    pub leader: bool,
+}
+
+impl PreviewMember {
+    /// The seed and the caption: `<project>-<role>`, `기본-<role>` in 기본 프로젝트.
+    pub fn name(&self) -> String {
+        format!("{}-{}", self.project, self.role)
+    }
+
+    /// The crown only outside 기본 프로젝트 (FR-L24).
+    pub fn crown(&self) -> bool {
+        self.leader && self.project != "기본"
+    }
+}
+
+/// The 18 sample members of the team preview (mockup `D.sessions.slice(0, 18)`).
+pub fn preview_team() -> Vec<PreviewMember> {
+    use CharState::*;
+    let m = |project, role, agent, state, leader| PreviewMember { project, role, agent, state, leader };
+    vec![
+        m("ember", "리더", "claude", Wait, true),
+        m("ember", "디자인", "codex", Run, false),
+        m("core", "리더", "claude", Run, true),
+        m("ember", "구현", "claude", Done, false),
+        m("ember", "인프라", "claude", Done, false),
+        m("ember", "빌드", "codex", Fail, false),
+        m("core", "보안", "claude", Done, false),
+        m("pyx", "벤치", "gemini", Done, true),
+        m("기본", "비서", "claude", Done, false),
+        m("ember", "구현2", "codex", Run, false),
+        m("ember", "스케줄러", "claude", Wait, false),
+        m("ember", "조사", "gemini", Done, false),
+        m("ember", "검색", "claude", Done, false),
+        m("ember", "문서", "codex", Done, false),
+        m("core", "구현", "codex", Wait, false),
+        m("site", "카피", "claude", Done, true),
+        m("site", "배포", "gemini", Run, false),
+        m("pyx", "테스터", "claude", Fail, false),
+    ]
+}
+
+/// The label of a harness colour family.
+pub fn harness_label(agent: &str) -> &'static str {
+    match family_of(agent) {
+        Family::Claude => "Claude",
+        Family::Codex => "Codex",
+        Family::Gemini => "Gemini",
+    }
+}
+
+/// The label of a state (mockup `ST`).
+pub fn state_label(s: CharState) -> &'static str {
+    match s {
+        CharState::Run => "실행 중",
+        CharState::Wait => "승인 대기",
+        CharState::Fail => "실패",
+        CharState::Done => "완료",
+        CharState::Idle => "유휴",
+    }
+}
+
+/// Columns of the team preview: 9, 5 up to 1000 dp, 3 up to 560 dp (mockup media queries).
+pub fn team_cols(width_dp: f32) -> usize {
+    if width_dp <= 560.0 {
+        3
+    } else if width_dp <= 1000.0 {
+        5
+    } else {
+        9
+    }
+}
+
+/// The project the screen is about: the one asked for, else the selected one, else the first
+/// listed that is not 기본 프로젝트, else none (the screen then shows the default style).
+pub fn characters_project(asked: &str, selected: Option<&str>, names: &[String]) -> Option<String> {
+    if !asked.is_empty() {
+        return Some(asked.to_string());
+    }
+    if let Some(s) = selected.filter(|s| !s.is_empty()) {
+        return Some(s.to_string());
+    }
+    names.iter().find(|n| !is_default_project(n)).or_else(|| names.first()).cloned()
+}
+
+/// What the apply button does: nothing to save when the chosen style is already the project's.
+pub fn style_apply_needed(current: CharStyle, chosen: CharStyle) -> bool {
+    current != chosen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +878,7 @@ mod tests {
             lead: false,
             role: None,
             dark: false,
+            pin: None,
         }
     }
 
@@ -928,5 +1067,92 @@ mod tests {
             serde_json::from_str::<CharStyle>("\"crew\"").unwrap(),
             CharStyle::Crew
         );
+    }
+
+    // FR-L22: the team screen's sample team and editor vocabulary.
+    #[test]
+    fn fr_l22_the_preview_team_has_eighteen_members() {
+        let t = preview_team();
+        assert_eq!(t.len(), 18);
+        let names: std::collections::HashSet<String> = t.iter().map(|m| m.name()).collect();
+        assert!(names.len() >= 17, "names seed the shapes, so they should differ");
+        for h in ["claude", "codex", "gemini"] {
+            assert!(t.iter().any(|m| m.agent == h), "no {h} member");
+        }
+        for s in CharState::ALL {
+            assert!(t.iter().any(|m| m.state == s) || s == CharState::Idle);
+        }
+    }
+
+    #[test]
+    fn fr_l22_the_preview_has_no_crown_in_the_default_project() {
+        let t = preview_team();
+        let default_leader = PreviewMember { project: "기본", role: "리더", agent: "claude", state: CharState::Idle, leader: true };
+        assert!(!default_leader.crown());
+        assert!(t.iter().filter(|m| m.crown()).count() >= 3);
+        assert!(t.iter().filter(|m| m.project == "기본").all(|m| !m.crown()));
+        assert_eq!(t[8].name(), "기본-비서");
+    }
+
+    #[test]
+    fn fr_l22_only_the_blob_styles_pin_a_silhouette() {
+        for s in CharStyle::ALL {
+            assert_eq!(supports_pin(s), matches!(s, CharStyle::Malang | CharStyle::Keyring), "{s:?}");
+        }
+        assert_eq!(SILHOUETTES.len(), 8);
+    }
+
+    #[test]
+    fn fr_l22_a_pinned_silhouette_changes_the_drawing_and_is_stable() {
+        let mut a = spec(CharStyle::Malang, "ember-리더", "claude");
+        let auto = svg(&a);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..SILHOUETTES.len() {
+            a.pin = Some(i);
+            let one = svg(&a);
+            assert_eq!(one, svg(&a));
+            seen.insert(one);
+        }
+        assert!(seen.len() >= 4, "pins should give mostly different shapes, got {}", seen.len());
+        a.pin = None;
+        assert_eq!(auto, svg(&a));
+    }
+
+    #[test]
+    fn fr_l22_team_columns_follow_the_mockup_breakpoints() {
+        assert_eq!(team_cols(1440.0), 9);
+        assert_eq!(team_cols(1001.0), 9);
+        assert_eq!(team_cols(1000.0), 5);
+        assert_eq!(team_cols(768.0), 5);
+        assert_eq!(team_cols(561.0), 5);
+        assert_eq!(team_cols(390.0), 3);
+    }
+
+    #[test]
+    fn fr_l22_the_screen_project_prefers_the_asked_then_the_selected() {
+        let names = vec!["unsorted".to_string(), "ember".to_string(), "core".to_string()];
+        assert_eq!(characters_project("core", Some("ember"), &names).as_deref(), Some("core"));
+        assert_eq!(characters_project("", Some("ember"), &names).as_deref(), Some("ember"));
+        assert_eq!(characters_project("", None, &names).as_deref(), Some("ember"));
+        assert_eq!(characters_project("", None, &["unsorted".to_string()]).as_deref(), Some("unsorted"));
+        assert_eq!(characters_project("", None, &[]), None);
+    }
+
+    #[test]
+    fn fr_l22_applying_a_style_is_needed_only_when_it_differs() {
+        assert!(!style_apply_needed(CharStyle::Crew, CharStyle::Crew));
+        assert!(style_apply_needed(CharStyle::Crew, CharStyle::Cream));
+    }
+
+    #[test]
+    fn fr_l22_editor_vocabulary_is_complete() {
+        assert_eq!(EDITOR_ROLES[0], "리더");
+        assert_eq!(EDITOR_HARNESSES.len(), 3);
+        for (id, _) in EDITOR_HARNESSES {
+            assert!(!harness_label(id).is_empty());
+        }
+        for s in CharState::ALL {
+            assert!(!state_label(s).is_empty());
+        }
     }
 }

@@ -103,7 +103,7 @@ async fn fr_t16_two_channels_write_different_files() {
 }
 
 fn user_message(seq: i64, text: &str) -> Message {
-    Message { id: seq.to_string(), seq, from: "user".into(), text: text.into(), at: 1, unread: 0, mentions: Vec::new() }
+    Message { id: seq.to_string(), seq, from: "user".into(), text: text.into(), at: 1, unread: 0, mentions: Vec::new(), author_name: "나".into(), author_kind: "person".into() }
 }
 
 #[test]

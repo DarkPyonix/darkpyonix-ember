@@ -98,6 +98,21 @@ enum Command {
 }
 
 /// A connected editor session. Cheap to share by reference; every method is a non-blocking send.
+/// Lists directories on the remote server: [`EditorSession::lister`].
+#[derive(Clone)]
+pub struct DirLister {
+    fs: Arc<RemoteFs>,
+    authority: String,
+}
+
+impl DirLister {
+    /// `(name, FileType)` entries of the directory at `path`.
+    pub async fn read_dir(&self, path: &str) -> Result<Vec<(String, u32)>, Error> {
+        let uri = UriComponents::remote(&self.authority, path);
+        self.fs.readdir(&uri).await.map_err(Error::Conn)
+    }
+}
+
 pub struct EditorSession {
     tx: mpsc::UnboundedSender<Command>,
     authority: String,
@@ -269,6 +284,12 @@ impl EditorSession {
         self.uri(&self.workspace_path)
     }
 
+    /// A cheap handle that can list directories on its own, so a long walk runs in a task of its
+    /// own and does not hold the session's command loop.
+    pub fn lister(&self) -> DirLister {
+        DirLister { fs: Arc::clone(&self.fs), authority: self.authority.clone() }
+    }
+
     /// List entries `(name, FileType)` in a directory on the remote server.
     pub async fn read_dir(&self, uri: &UriComponents) -> Result<Vec<(String, u32)>, Error> {
         self.fs.readdir(uri).await.map_err(Error::Conn)
@@ -277,6 +298,52 @@ impl EditorSession {
     /// Stat a file or directory on the remote server.
     pub async fn stat(&self, uri: &UriComponents) -> Result<ember_editor_conn::remote_fs::Stat, Error> {
         self.fs.stat(uri).await.map_err(Error::Conn)
+    }
+
+    /// Refuses a directory that is a symbolic link: an item made in it would land wherever the link points.
+    async fn refuse_symlink_parent(&self, parent: &str) -> Result<(), Error> {
+        let stat = self.fs.stat(&self.uri(parent)).await.map_err(Error::Conn)?;
+        if stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0 {
+            return Err(Error::Path(crate::paths::PathError::Symlink));
+        }
+        Ok(())
+    }
+
+    /// Creates an empty file named `name` in the directory `parent`. Never overwrites: an existing
+    /// file is an error. Returns the new path.
+    pub async fn create_file(&self, parent: &str, name: &str) -> Result<String, Error> {
+        let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
+        self.refuse_symlink_parent(parent).await?;
+        let opts = WriteOptions { create: true, overwrite: false, unlock: false, atomic: false };
+        self.fs.write_file(&self.uri(&path), Vec::new(), &opts).await.map_err(Error::Conn)?;
+        Ok(path)
+    }
+
+    /// Creates a directory named `name` in the directory `parent`. Returns the new path.
+    pub async fn create_dir(&self, parent: &str, name: &str) -> Result<String, Error> {
+        let path = crate::paths::child_path(&self.workspace_path, parent, name).map_err(Error::Path)?;
+        self.refuse_symlink_parent(parent).await?;
+        self.fs.mkdir(&self.uri(&path)).await.map_err(Error::Conn)?;
+        Ok(path)
+    }
+
+    /// Renames `path` to `new_name` in the same directory. Never overwrites. A symbolic link is
+    /// renamed itself. Returns the new path.
+    pub async fn rename_path(&self, path: &str, new_name: &str) -> Result<String, Error> {
+        let to = crate::paths::renamed_path(&self.workspace_path, path, new_name).map_err(Error::Path)?;
+        let from = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        self.fs.rename(&self.uri(&from), &self.uri(&to), false).await.map_err(Error::Conn)?;
+        Ok(to)
+    }
+
+    /// Deletes one file or directory (a directory with everything in it). There is no trash: it
+    /// cannot be undone. A symbolic link is removed itself and never recursed into.
+    pub async fn delete_path(&self, path: &str, is_dir: bool) -> Result<(), Error> {
+        let path = crate::paths::target_path(&self.workspace_path, path).map_err(Error::Path)?;
+        let stat = self.fs.stat(&self.uri(&path)).await.map_err(Error::Conn)?;
+        let is_link = stat.file_type & ember_editor_conn::remote_fs::file_type::SYMBOLIC_LINK != 0;
+        let opts = ember_editor_conn::remote_fs::DeleteOptions { recursive: is_dir && !is_link, use_trash: false, atomic: false };
+        self.fs.delete(&self.uri(&path), &opts).await.map_err(Error::Conn)
     }
 
     fn send(&self, c: Command) -> Result<(), Error> {

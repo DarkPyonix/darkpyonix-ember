@@ -4,6 +4,7 @@
 
 pub mod theme;
 pub mod components;
+pub mod a11y;
 pub mod compat;
 pub mod gallery;
 pub mod shell;
@@ -13,7 +14,11 @@ pub mod search;
 pub mod new_session;
 pub mod ko;
 pub mod characters;
+pub mod characters_screen;
+pub mod add_computer;
 pub mod monitor;
+pub mod channel_owner;
+pub mod new_channel;
 pub mod channels;
 pub mod home;
 pub mod project;

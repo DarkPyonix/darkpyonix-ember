@@ -267,6 +267,20 @@ pub fn Label(text: &str, fs: Fs, weight: Weight, color: Option<Paint>, max_lines
     drop(t);
 }
 
+/// A short mono string at a scale size (the one-time code): selectable text, never broken.
+pub fn MonoLabel(text: &str, fs: Fs, weight: Weight, color: Option<Paint>) {
+    let theme = ember_theme();
+    let color = color.unwrap_or_else(|| paint(theme.palette.text));
+    drop(
+        cu::Text(text)
+            .type_role(TypeRole::Mono)
+            .font_size(fs.size())
+            .line_height(fs.line_height())
+            .font_weight(weight.value())
+            .color(color),
+    );
+}
+
 /// Text for screens that still name a toolkit type role: the role maps to a step of the scale,
 /// and a role colour maps to its token in the current scheme.
 pub fn Txt(
@@ -319,6 +333,8 @@ pub struct FieldOptions {
     pub weight: Option<f32>,
     pub fill_max_width: bool,
     pub placeholder: String,
+    /// Text the field starts with (selectable, copyable); `None` starts empty.
+    pub text: Option<String>,
     pub multiline: bool,
     /// `None` keeps the field enabled.
     pub enabled: Option<bool>,
@@ -343,21 +359,14 @@ pub fn EmberField(o: FieldOptions) {
     let theme = ember_theme();
     let p = theme.palette;
     let (fill, border_w) = if o.bare { (Color::argb(0), 0.0) } else { (p.surface, 1.0) };
-    // The renderer paints the design system's own field frame over these, so a frame drawn here
-    // only shows at the corners as a second box. The height is honored; the rest is left to the
-    // toolkit until #376, and only a caller that asks for a frame gets one.
-    let asked = o.background.is_some() || o.border_width.is_some() || o.border_color.is_some() || o.corner_radius.is_some();
-    let mut modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
-        .fill_max_width_if(o.fill_max_width);
-    if asked {
-        modifier = modifier
-            .background(o.background.unwrap_or_else(|| paint(fill)))
-            .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
-            .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
-    }
-    // TODO(compose-rust#376): the renderer paints the design system's field frame over these
-    // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
-    // appear once the node's own are honored. 14 px text needs #374.
+    // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
+    // of the design system's frame, which stays light in the dark scheme (#510). So every field
+    // names its frame: the token fill and line, or a transparent one when `bare`.
+    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
+        .fill_max_width_if(o.fill_max_width)
+        .background(o.background.unwrap_or_else(|| paint(fill)))
+        .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
+        .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
     // TODO(compose-rust#444): TextField has no word_break or overflow builder; its
     // multiline placeholder can break Korean words inside a line.
     let mut f = cu::TextField()
@@ -365,6 +374,9 @@ pub fn EmberField(o: FieldOptions) {
         .placeholder(o.placeholder)
         .multiline(o.multiline)
         .enabled(o.enabled.unwrap_or(true));
+    if let Some(t) = o.text {
+        f = f.text(t);
+    }
     if let Some(r) = o.type_role {
         f = f.type_role(r);
     }
@@ -523,6 +535,19 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
+/// `button_style` for a button that may be disabled. A disabled primary button keeps its
+/// filled shape, in `muted` with the `ink_text` on it: the toolkit's own disabled fade turned it
+/// into grey text on a grey fill, 1.5:1 in the dark scheme (NFR-L3, #510). The other kinds keep
+/// their style; the toolkit fades them.
+pub fn button_style_for(kind: ButtonKind, small: bool, enabled: bool, p: &Palette) -> ButtonStyle {
+    let s = button_style(kind, small, p);
+    if kind == ButtonKind::Primary && !enabled {
+        ButtonStyle { fill: p.muted, border: p.muted, text: p.ink_text, ..s }
+    } else {
+        s
+    }
+}
+
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 pub fn AppButton(
     text: &str,
@@ -534,7 +559,7 @@ pub fn AppButton(
     on_click: impl FnMut() + 'static,
 ) {
     let theme = ember_theme();
-    let s = button_style(kind, small, theme.palette);
+    let s = button_style_for(kind, small, enabled, theme.palette);
     let mut b = cu::Button(text)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
@@ -636,11 +661,30 @@ pub fn EmberCard(
     border: Option<Color>,
     content: impl FnOnce(),
 ) {
+    EmberCardSized(selected, fill_max_width, false, weight, padding, border, content);
+}
+
+/// `EmberCard` that can also fill the height its parent gives it. In a `Row` with
+/// `equal_height(true)` a child with `fill_max_height` takes the tallest sibling's height
+/// (FR-L18, compose-rust#389).
+pub fn EmberCardSized(
+    selected: bool,
+    fill_max_width: bool,
+    fill_max_height: bool,
+    weight: Option<f32>,
+    padding: Option<f32>,
+    border: Option<Color>,
+    content: impl FnOnce(),
+) {
     let theme = ember_theme();
     let (fill, line) = card_colors(selected, theme.palette);
     let border = border.unwrap_or(line);
-    let m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
-        .fill_max_width_if(fill_max_width)
+    let mut m = with_shadows(with_weight(Modifier::new(), weight), theme.shadow_sm())
+        .fill_max_width_if(fill_max_width);
+    if fill_max_height {
+        m = m.fill_max_height();
+    }
+    let m = m
         .background(paint(fill))
         .border(1.0, paint(border))
         .corner_radius(CORNER_LG);
@@ -673,9 +717,15 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
         )
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
-            cu::Row().content(|| {
+            // The Row and the Column take the panel's width (a Column with no weight shrinks to
+            // its widest word, which broke the routine prompt into one word per line, #492).
+            cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width)).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                cu::Column().content(content);
+                if fill_max_width {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                } else {
+                    cu::Column().content(content);
+                }
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             });
         });
@@ -717,12 +767,43 @@ fn sheet_presentation(window_width_dp: f32, monitor: bool) -> SheetPresentation 
     }
 }
 
-fn bottom_sheet_height(window_height_dp: f32) -> f32 {
-    window_height_dp.max(0.0) * 0.85
+/// The tallest a sheet may be (`.sheet` in the mockup): 85 percent of the window for a bottom
+/// sheet, the whole window for the full-screen monitor, and the window less 32 dp for a dialog.
+pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool) -> f32 {
+    let h = window_height_dp.max(0.0);
+    match sheet_presentation(window_width_dp, monitor) {
+        SheetPresentation::Bottom => h * 0.85,
+        SheetPresentation::FullScreen => h,
+        SheetPresentation::Dialog => (h - 32.0).max(0.0),
+    }
+}
+
+/// The body height used while the window height is unknown (not yet reported).
+///
+/// TODO(compose-rust#467, compose-rust#479): at 390x844 the implicit window never reports its dp
+/// size (`current_window_size()` reads 0x0 with class Compact, measured on v0.0.6 with the shell
+/// and with a sheet opened by a real press), so every sheet body is this constant. Remove it and
+/// check the 85 percent formula at 390 once the implicit window can opt in to `report_size`.
+const SHEET_BODY_UNKNOWN_H: f32 = 240.0;
+
+/// The one formula for a sheet body's height: what is left of the sheet's maximum height after
+/// the header (and any footer), never negative. Every sheet body sizes itself with this.
+pub(crate) fn sheet_body_max_height(window_width_dp: f32, window_height_dp: f32, monitor: bool, chrome_h: f32) -> f32 {
+    // A window that has not reported its height yet (0) is not a zero-high window: keep the body
+    // visible instead of collapsing it.
+    if window_height_dp <= 0.0 {
+        return SHEET_BODY_UNKNOWN_H;
+    }
+    (sheet_max_height(window_width_dp, window_height_dp, monitor) - chrome_h).max(0.0)
 }
 
 /// The 32 px round close button of a sheet header, with the mockup's line icon.
 /// TODO(compose-rust#372): a pointer-up subscription; the toolkit's modal calls on_dismiss for Escape and the scrim (not yet checked on a display).
+/// TODO(compose-rust#476, FR-L32, #502): Escape does not close a sheet on a display. The Rust API
+/// of v0.0.6 cannot receive the key: `Key` has only `Enter`, only `TextField` has `on_key_down`,
+/// and there is no request-focus call, so a sheet cannot take focus when it opens. Ember passes
+/// the same close callback (guarded where a guard exists) to the modal's `on_dismiss`, so Escape
+/// closes every sheet as soon as the renderer delivers it.
 pub fn CloseButton(on_click: impl FnMut() + 'static) {
     let p = ember_theme().palette;
     Clickable(
@@ -803,7 +884,7 @@ pub fn EmberSheetSized(
         // TODO(compose-rust#445): expose a maximum height constraint so short sheets can wrap
         // their content instead of occupying the full 85 percent height.
         cu::Sheet(open)
-            .modifier(modifier.fill_max_width().height(bottom_sheet_height(window.height_dp))
+            .modifier(modifier.fill_max_width().height(sheet_max_height(window.width_dp, window.height_dp, monitor))
                 .corner_radii([CORNER_XL, CORNER_XL, 0.0, 0.0]))
             .on_dismiss(on_dismiss)
             .content(body);
@@ -839,9 +920,125 @@ pub fn FilterChip(text: &str, selected: bool, on_click: impl FnMut() + 'static) 
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// SearchField (style.css `.searchbox`)
+// ---------------------------------------------------------------------------------------------
+
+/// The compact search height of the session sidebar (`.sside .st-q`).
+pub const SEARCH_FIELD_H_COMPACT: f32 = 36.0;
+/// The leading magnifier's size (`.searchbox svg`).
+pub const SEARCH_ICON_SIZE: f32 = 18.0;
+
+/// The pill radius of a search field of `height` (`.searchbox` is 999, capped at half the height).
+pub fn search_field_radius(height: f32) -> f32 {
+    (height / 2.0).min(PILL)
+}
+
+/// The leading padding before the magnifier: 16 at the 40 px height, 12 at the compact one.
+pub fn search_field_padding(height: f32) -> f32 {
+    if height < H_BTN { 12.0 } else { 16.0 }
+}
+
+/// The visible gap between the magnifier and the typed text (`.searchbox` gap 8).
+pub const SEARCH_FIELD_GAP: f32 = 8.0;
+/// The leading inset the bare toolkit text field adds before its text. Measured from captures
+/// (a 4 px spacer showed a ~24 px gap), so about 20 px; re-measure if the toolkit changes it.
+pub const SEARCH_FIELD_INSET: f32 = 20.0;
+
+/// The visible icon-to-text gap: no spacer, the field's own inset, and a negative offset that
+/// pulls the field left by `inset - gap`. Assumes [`SEARCH_FIELD_INSET`].
+pub fn search_field_gap() -> f32 {
+    search_field_offset() + SEARCH_FIELD_INSET
+}
+
+/// The negative x offset applied to the bare field so the visible gap is [`SEARCH_FIELD_GAP`].
+pub fn search_field_offset() -> f32 {
+    -(SEARCH_FIELD_INSET - SEARCH_FIELD_GAP)
+}
+
+/// A search box: white fill, 1 px border, pill radius, a leading magnifier and a bare field that
+/// takes the rest of the row. Width intent: it fills its column (`fill_max_width`); the mockup's
+/// 280/220 px is for the standalone box, which a caller gets by constraining the parent. The
+/// compact (36 px) field uses the `Label` role (Fs::Sm, 13 px) like the mockup's session field. The field is uncontrolled and keeps its hint `placeholder`.
+/// TODO(compose-rust#376, #374): the field frame and leading icon belong to the toolkit field.
+pub fn SearchField(placeholder: &str, height: f32, on_change: impl FnMut(String) + 'static) {
+    let p = ember_theme().palette;
+    let placeholder = placeholder.to_string();
+    let on_change = std::rc::Rc::new(std::cell::RefCell::new(Some(on_change)));
+    cu::Row()
+        .alignment(Alignment::CenterStart)
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .height(height)
+                .background(paint(p.surface))
+                .border(1.0, paint(p.line))
+                .shape_role(ShapeRole::Full),
+        )
+        .content(move || {
+            cu::Spacer().modifier(Modifier::new().width(search_field_padding(height)));
+            super::shell::NavIcon(super::shell::ICON_SEARCH_SVG, p.muted.to_argb(), SEARCH_ICON_SIZE);
+            // The field takes the row's remaining width by weight, so it never overruns it.
+            let cb = on_change.clone();
+            let placeholder = placeholder.clone();
+            cu::Box().modifier(Modifier::new().weight(1.0).height(height).offset(search_field_offset(), 0.0)).content(move || {
+                EmberField(FieldOptions {
+                    bare: true,
+                    type_role: Some(TypeRole::Label), // one 13 dp size for every search field (mockup fs-sm)
+                    background: Some(Paint::Literal(Color::argb(0))),
+                    border_width: Some(0.0),
+                    border_color: Some(Paint::Literal(Color::argb(0))),
+                    height: Some(height),
+                    fill_max_width: true,
+                    placeholder: placeholder.clone(),
+                    on_value_change: cb.borrow_mut().take().map(|f| Box::new(f) as Box<dyn FnMut(String)>),
+                    ..Default::default()
+                });
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l10_1_search_field_height_radius_and_icon_size() {
+        assert_eq!(H_BTN, 40.0);
+        assert_eq!(SEARCH_FIELD_H_COMPACT, 36.0);
+        assert_eq!(SEARCH_ICON_SIZE, 18.0);
+        assert_eq!(search_field_radius(40.0), 20.0);
+        assert_eq!(search_field_radius(36.0), 18.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_padding_is_16_and_12_when_compact() {
+        assert_eq!(search_field_padding(H_BTN), 16.0);
+        assert_eq!(search_field_padding(SEARCH_FIELD_H_COMPACT), 12.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_visible_gap_is_8() {
+        assert_eq!(search_field_gap(), 8.0);
+        assert_eq!(search_field_offset(), -12.0);
+    }
+
+    #[test]
+    fn fr_l10_1_search_field_call_sites() {
+        let sites = [
+            ("channels", include_str!("channels.rs"), "채널, 메시지 검색"),
+            ("session", include_str!("session.rs"), "세션 검색"),
+            ("project", include_str!("project.rs"), "팀원 검색"),
+            ("project", include_str!("project.rs"), "멤버 검색"),
+            ("routines", include_str!("routines.rs"), "루틴 검색"),
+        ];
+        for (name, src, ph) in sites {
+            assert!(src.contains("SearchField("), "{name} uses SearchField");
+            assert!(src.contains(&format!("SearchField(\"{ph}\"")), "{name} keeps the placeholder {ph}");
+        }
+        let project = include_str!("project.rs");
+        assert!(!project.contains("placeholder: \"멤버 검색\""), "the old EmberField member search is gone");
+    }
 
     #[test]
     fn type_roles_never_use_bold() {
@@ -998,7 +1195,10 @@ mod tests {
             EmberField(FieldOptions { ..Default::default() });
         });
         assert!(field.iter().any(|m| m == "Height(40.0)"), "{field:?}");
-        assert!(!field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
+        // NFR-L3 (#510): the field names its frame, so the toolkit's light one is not drawn.
+        assert!(field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
+        assert!(field.iter().any(|m| m.starts_with("Background")), "{field:?}");
+        assert!(field.iter().any(|m| m.starts_with("Border")), "{field:?}");
     }
 
     #[test]
@@ -1052,7 +1252,52 @@ mod tests {
         assert_eq!(sheet_presentation(600.0, false), SheetPresentation::Dialog);
         assert_eq!(sheet_presentation(559.0, false), SheetPresentation::Bottom);
         assert_eq!(sheet_presentation(560.0, false), SheetPresentation::Dialog);
-        assert_eq!(bottom_sheet_height(1000.0), 850.0);
+        assert_eq!(sheet_max_height(390.0, 1000.0, false), 850.0);
+    }
+
+    #[test]
+    fn fr_l32_sheet_body_height_is_one_formula() {
+        // 85 percent of the window for the sheet, minus the 60 dp header.
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 60.0), 844.0 * 0.85 - 60.0);
+        assert_eq!(sheet_body_max_height(390.0, 700.0, false, 60.0), 700.0 * 0.85 - 60.0);
+        assert_eq!(sheet_body_max_height(390.0, 390.0, false, 60.0), 390.0 * 0.85 - 60.0);
+        // With a 65 dp footer as well.
+        assert_eq!(sheet_body_max_height(390.0, 844.0, false, 125.0), 844.0 * 0.85 - 125.0);
+        // The real call sites at 390x844 and 390x640 keep a body well above 300 (header 60, footer 65).
+        for h in [844.0, 640.0] {
+            assert!(sheet_body_max_height(390.0, h, false, 60.0).min(900.0) > 300.0, "project {h}");
+            assert!(sheet_body_max_height(390.0, h, false, 125.0).min(600.0) > 300.0, "routines {h}");
+            assert!(sheet_body_max_height(390.0, h, false, 125.0).min(900.0) > 300.0, "new session {h}");
+            assert!(sheet_body_max_height(390.0, h, true, 60.0).min(1200.0) > 300.0, "monitor {h}");
+        }
+        // A window that has not reported its height does not collapse the body.
+        assert_eq!(sheet_body_max_height(390.0, 0.0, false, 60.0), 240.0);
+        // Never negative.
+        assert_eq!(sheet_body_max_height(390.0, 50.0, false, 125.0), 0.0);
+        // The monitor fills the screen at 390; a dialog keeps 32 dp of margin.
+        assert_eq!(sheet_body_max_height(390.0, 844.0, true, 60.0), 784.0);
+        assert_eq!(sheet_body_max_height(900.0, 900.0, false, 60.0), 808.0);
+    }
+
+    #[test]
+    fn fr_l32_every_modal_wires_dismiss_and_settings_keeps_its_guard() {
+        // Escape, the scrim and the close button share one callback, so a modal without
+        // on_dismiss could never close on Escape, and a guarded sheet must pass its guard.
+        for (name, src) in [
+            ("components.rs", include_str!("components.rs")),
+            ("session.rs", include_str!("session.rs")),
+            ("vcs.rs", include_str!("vcs.rs")),
+        ] {
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                let t = l.trim_start();
+                if (t.starts_with("cu::Dialog(") || t.starts_with("cu::Sheet(")) && !t.starts_with("//") {
+                    let near = lines[i..(i + 24).min(lines.len())].join("\n");
+                    assert!(near.contains(".on_dismiss("), "{name}:{} modal without on_dismiss", i + 1);
+                }
+            }
+        }
+        assert!(include_str!("project.rs").contains("EmberSheet(&format!(\"{} 설정\", b.name), true, request_close,"));
     }
 
     static DISMISSES: AtomicUsize = AtomicUsize::new(0);
@@ -1138,11 +1383,14 @@ mod tests {
                 "components.rs" => 3,
                 "agents.rs" => 2,
                 "files.rs" => 1,
-                "home.rs" => 2,
+                "home.rs" => 0,
                 "launcher.rs" => 1,
-                "project.rs" => 2,
+                "project.rs" => 1,
                 "routines.rs" => 2,
-                "vcs.rs" => 1,
+                // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
+                "vcs.rs" => 2,
+                // The accessible-name overlay of the channel + button (#499, compose-rust#429).
+                "new_channel.rs" => 1,
                 _ => 0,
             };
             assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");

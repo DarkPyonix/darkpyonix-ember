@@ -35,6 +35,7 @@ pub use crate::ui::shell::{
 };
 use super::components::{Clickable, EmberSheet, Label};
 use super::theme::*;
+pub const ICON_SEARCH_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" fill=\"none\" viewBox=\"0 0 24 24\" stroke-width=\"1.5\" stroke=\"currentColor\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" d=\"m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z\"/></svg>";
 pub const ICON_MENU_SVG: &str = include_str!("../../../assets/nav/menu.svg");
 pub const ICON_HASH_SVG: &str = include_str!("../../../assets/nav/hash.svg");
 pub const ICON_USERS_SVG: &str = include_str!("../../../assets/nav/users.svg");
@@ -336,6 +337,8 @@ pub fn Sidebar(rail: bool, active: NavMenu, counts: NavCounts, on_collapse: impl
     let side = if rail { 0.0 } else { SP[2] };
     // Spacers include the column's 2 px gap on either side.
     let top = if rail { 14.0 } else { SP[4] };
+    // macOS: the traffic lights float over the sidebar's top-left, so the first row starts below them.
+    let top = top + crate::ui::safe_area::sidebar_top_inset(crate::ui::safe_area::safe_area());
     let below_brand = if rail { 10.0 } else { 20.0 };
     let bottom = if rail { 26.0 } else { 30.0 };
     let demo_tools = show_demo_tools();
@@ -599,6 +602,7 @@ pub fn shell() {
     let active = active_menu(&route, ui.menu.get());
     let screen = screen_for(&route, active);
     let mode = current_mode(collapsed.get());
+    let strip = crate::ui::safe_area::top_reservation(crate::ui::safe_area::safe_area(), mode).content_strip;
     let counts = ui.with_rows_no_previews(|st, _| {
         let cards = model::project_cards(st);
         NavCounts {
@@ -609,7 +613,7 @@ pub fn shell() {
     });
 
     let content = || {
-        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
+        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
             if cfg!(target_os = "windows") {
                 // Caption strip: an empty drag region, then the width the caption buttons cover.
                 cu::Row()
@@ -619,9 +623,18 @@ pub fn shell() {
                         cu::Spacer().modifier(Modifier::new().width(caption_reserved_width(true)));
                     });
             }
+            // macOS without a sidebar or rail (bottom tabs): the content touches the left edge,
+            // where the traffic lights float, so every screen starts below them (FR-L33). The
+            // reservation is computed in `shell`, beside `mode`, so one read of the window size
+            // drives both.
+            if strip > 0.0 {
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(strip));
+            }
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width()).content(|| {
                 // TODO(#220 phases 4-7): each screen replaces its placeholder as it moves.
-                if matches!(screen, Screen::Search) {
+                if ui.characters.get().is_some() {
+                    super::characters_screen::CharactersScreen();
+                } else if matches!(screen, Screen::Search) {
                     super::search::SearchScreen();
                 } else if matches!(screen, Screen::Channels) {
                     super::channels::ChannelsScreen();
@@ -739,6 +752,16 @@ fn requested_size() -> (u16, u16) {
         .unwrap_or((1440, 900))
 }
 
+/// On macOS the window opens with content under the traffic lights (FR-L33, compose-rust
+/// v0.0.6 `Chrome::FullSize`); other systems keep their chrome.
+pub fn window_chrome(window: Window) -> Window {
+    if cfg!(target_os = "macos") {
+        window.with_chrome(compose_rust::schema::Chrome::FullSize)
+    } else {
+        window
+    }
+}
+
 /// Opens the compose-rust shell instead of the app and returns when it is closed.
 /// `services` must be installed.
 pub fn launch(pref: ThemePref) {
@@ -790,6 +813,11 @@ pub fn launch(pref: ThemePref) {
             ui.set_menu(NavMenu::Sessions);
             shell
         }
+        Some("characters") => {
+            ui.set_menu(NavMenu::Projects);
+            ui.open_characters("");
+            shell
+        }
         Some("conversation") => {
             ui.open_conversation("demo-s1");
             shell
@@ -798,7 +826,7 @@ pub fn launch(pref: ThemePref) {
     };
     compose_rust::LaunchBuilder::new()
         .with_theme(crate::ui::fonts::app_theme(scheme))
-        .with_window(Window::new().with_title("Ember").with_size(w, h))
+        .with_window(crate::ui::cr::shell::window_chrome(Window::new().with_title("Ember").with_size(w, h)))
         .launch(content);
 }
 
@@ -857,6 +885,9 @@ mod tests {
                     height_dp: 900.0,
                     class,
                     height_class: WindowHeightClass::Medium,
+                    safe_area_top: 0.0,
+                    safe_area_leading: 0.0,
+                    safe_area_trailing: 0.0,
                 },
             };
             let (bytes, _) = host.dispatch(event).expect("dispatch");
@@ -866,6 +897,25 @@ mod tests {
         assert!(report(1024.0, WindowSizeClass::Medium).contains("Rail"));
         assert!(report(390.0, WindowSizeClass::Compact).contains("BottomTabs"));
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l12_the_shell_content_column_has_fill_max_width_in_the_bottom_tabs_layout() {
+        // In the 390 bottom-tabs layout width is the cross axis of the content column, which a
+        // weight does not fill: without `fill_max_width` the page was sized to its content (about
+        // 230 dp, #496). The decoded modifier batch does not expose weight and fill together, so
+        // this checks the production source of the shell: the content column and the screen
+        // column inside it both carry `fill_max_width`.
+        let src = include_str!("shell.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height())"),
+            "the shell content column must fill the width"
+        );
+        assert!(
+            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width())"),
+            "the screen column inside it must fill the width"
+        );
     }
 
     #[composable]
@@ -905,11 +955,12 @@ mod tests {
         // Verify `services().reset_demo()` genuinely restores demo state after a mutation.
         let s = crate::services::services();
         let d = s.demo.as_ref().expect("test_services installs DemoSource");
+        let initial = d.events_for("demo-s1").len();
         d.send_message(&s.client, "demo-s1", "mutated message");
         let len_after_send = d.events_for("demo-s1").len();
-        assert!(len_after_send > 6);
+        assert!(len_after_send > initial);
         assert!(s.reset_demo());
-        assert_eq!(d.events_for("demo-s1").len(), 6);
+        assert_eq!(d.events_for("demo-s1").len(), initial);
     }
 
     #[test]

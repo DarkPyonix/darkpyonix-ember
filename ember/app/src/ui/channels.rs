@@ -31,6 +31,10 @@ pub struct Message {
     pub text: String,
     pub at: i64,
     pub unread: u32,
+    /// The server's display name of the author (FR-T15); empty on an older server.
+    pub author_name: String,
+    /// `person`, `agent`, `guest` or `system`; empty on an older server.
+    pub author_kind: String,
 }
 
 /// One channel.
@@ -154,7 +158,15 @@ pub fn member_from(m: &ember_client::channels::Member) -> Member {
 
 pub fn message_from(m: &ember_client::channels::ChannelMessage) -> Message {
     let id = if m.id.is_empty() { m.seq.to_string() } else { m.id.clone() };
-    Message { id, from: m.from.clone(), text: m.text.clone(), at: m.at, unread: m.unread }
+    Message {
+        id,
+        from: m.from.clone(),
+        text: m.text.clone(),
+        at: m.at,
+        unread: m.unread,
+        author_name: m.author_name.clone(),
+        author_kind: m.author_kind.clone(),
+    }
 }
 
 /// A server channel as a room. A list answer has no `messages`; its `last_message` stands in so
@@ -339,6 +351,8 @@ pub struct BubbleView {
     /// Draw the picture (the first bubble of a run from someone else).
     pub show_avatar: bool,
     pub is_agent: bool,
+    /// A guest's message (FR-T15): the name is the guest's display name and a 게스트 tag shows.
+    pub guest: bool,
     pub text: String,
     pub time: String,
     pub unread: Option<u32>,
@@ -396,14 +410,19 @@ pub fn feed(room: &Room, me: &str, tz: i64) -> Vec<FeedItem> {
         let continues = !new_day
             && prev.is_some_and(|p| p.from == m.from && p.at.div_euclid(60) == m.at.div_euclid(60));
         let member = room.member(&m.from);
+        let guest_name = crate::ui::channel_owner::guest_author_label(&m.from, &m.author_name, &m.author_kind);
         let first_of_other = side == Side::Left && !continues;
         out.push(FeedItem::Bubble(BubbleView {
             id: m.id.clone(),
             side,
             from: m.from.clone(),
-            name: first_of_other.then(|| member.map(|x| x.name.clone()).unwrap_or(m.from.clone())),
+            name: first_of_other.then(|| match &guest_name {
+                Some(g) => g.clone(),
+                None => member.map(|x| x.name.clone()).unwrap_or(m.from.clone()),
+            }),
             show_avatar: first_of_other,
             is_agent: member.is_some_and(|x| x.is_agent),
+            guest: guest_name.is_some(),
             text: m.text.clone(),
             time: time_label(m.at, tz),
             unread: (m.unread > 0).then_some(m.unread),
@@ -418,13 +437,268 @@ pub fn split_view(class: WindowSizeClass) -> bool {
     class != WindowSizeClass::Compact
 }
 
+/// Whether opening a room calls the read marker: only when the person clicked it (the
+/// auto-selected room of `initial_room` stays unread) and it has unread messages. FR-L12, #509.
+pub fn should_mark_read(user_clicked: bool, unread: u32) -> bool {
+    user_clicked && unread > 0
+}
+
+/// The room to show when none is open. Side by side (the split layout) the first room the list
+/// shows is opened for the person (`channels.js` opens the first room); a compact window keeps
+/// the list first, and no rooms leave the empty state. FR-L12, #509.
+pub fn initial_room(rooms: &[Room], project_order: &[String], filter: &ListFilter, split: bool) -> Option<String> {
+    if !split {
+        return None;
+    }
+    group_rooms(rooms, project_order, filter).into_iter().flat_map(|s| s.rooms).map(|r| r.id).next()
+}
+
+/// The mark of a channel: one of six motifs (`channels.js` `MOTIFS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomMotif {
+    Pulse,
+    Bars,
+    Radar,
+    Orbit,
+    Wave,
+    Spark,
+}
+
+/// The motif of a room. Ember's channel has no motif field, so it is derived from the room id
+/// the way the mockup does for rooms it has no fixed motif for: the sum of the id's characters
+/// modulo six. The same room always gets the same motif; nothing is stored on the server.
+pub fn room_motif(room_id: &str) -> RoomMotif {
+    const ALL: [RoomMotif; 6] = [RoomMotif::Pulse, RoomMotif::Bars, RoomMotif::Radar, RoomMotif::Orbit, RoomMotif::Wave, RoomMotif::Spark];
+    let sum: u32 = room_id.chars().fold(0u32, |a, c| a.wrapping_add(c as u32));
+    ALL[(sum % 6) as usize]
+}
+
+/// How a message sender's picture is drawn: the drawn character of an agent whose harness is
+/// known, the letter circle otherwise (a person, or an agent with no harness on record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvatarKind {
+    Character,
+    Letter,
+}
+
+pub fn avatar_kind(is_agent: bool, harness: &str) -> AvatarKind {
+    if is_agent && !harness.trim().is_empty() {
+        AvatarKind::Character
+    } else {
+        AvatarKind::Letter
+    }
+}
+
 /// What a compact window shows: the room when one is open, the list otherwise.
 pub fn compact_shows_room(open: &Option<String>) -> bool {
     open.is_some()
 }
 
+// ---------------------------------------------------------------------------------------------
+// New channel (FR-T10): the draft behind the 새 채널 sheet
+// ---------------------------------------------------------------------------------------------
+
+/// An agent session a channel can include: one of the project's sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentChoice {
+    pub id: String,
+    pub project: String,
+    /// The session title, or the agent kind when the title is empty.
+    pub label: String,
+    pub harness: String,
+}
+
+/// Why a draft cannot be created yet. The sheet tells it in a fixed sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftError {
+    EmptyName,
+    /// A control, format or line-separator character, which the server refuses (`invalid_name`).
+    BadChar,
+    /// A channel of that name exists in the project.
+    Taken,
+    NoProject,
+}
+
+impl DraftError {
+    pub fn text(self) -> &'static str {
+        match self {
+            DraftError::EmptyName => "채널 이름을 입력하십시오",
+            DraftError::BadChar => "채널 이름에 쓸 수 없는 문자가 있습니다",
+            DraftError::Taken => TAKEN_TEXT,
+            DraftError::NoProject => "프로젝트를 선택하십시오",
+        }
+    }
+}
+
+/// The sentence for a name that is already used.
+pub const TAKEN_TEXT: &str = "이미 있는 채널 이름입니다";
+
+/// The hint under the members when none is chosen (FR-T10: a created channel keeps its chosen
+/// agents and none other).
+pub const NO_MEMBERS_HINT: &str = "고른 에이전트가 없으면 에이전트 없이 만들어집니다. 나중에 멤버를 추가할 수 있습니다";
+
+/// The reason the 만들기 button is off in demo mode, which has no channel list to write to.
+pub const DEMO_NO_CREATE: &str = "데모에서는 채널을 만들 수 없습니다";
+
+/// Whether the 새 채널 sheet opens at start for a review capture: `EMBER_CR_NEWCHANNEL=1` with
+/// `EMBER_CR_ROUTE=channels`, in debug builds only.
+pub fn new_channel_review_hook(env: Option<&str>, route: Option<&str>, debug: bool) -> bool {
+    debug && env == Some("1") && route == Some("channels")
+}
+
+/// The server's `is_forbidden_name_char` (`ember/server/src/channels/invites.rs`): a channel name
+/// is placed in headers an agent reads, so no control, format or line-separator character.
+pub fn is_forbidden_name_char(c: char) -> bool {
+    let u = c as u32;
+    c.is_control()
+        || matches!(u, 0x2028 | 0x2029)
+        || matches!(u,
+            0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x180E
+            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+            | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// What the 새 채널 sheet holds.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NewChannelDraft {
+    pub name: String,
+    pub project: String,
+    /// Chosen session ids, in the order they were chosen. Only the current project's.
+    pub members: Vec<String>,
+    initial_project: String,
+}
+
+impl NewChannelDraft {
+    /// An empty draft on `project` (the list filter, else the first project).
+    pub fn new(project: &str) -> NewChannelDraft {
+        NewChannelDraft { name: String::new(), project: project.to_string(), members: Vec::new(), initial_project: project.to_string() }
+    }
+
+    /// Switches the project. The chosen agents belong to the old project, so they are dropped.
+    pub fn set_project(&mut self, project: &str) {
+        if self.project != project {
+            self.project = project.to_string();
+            self.members.clear();
+        }
+    }
+
+    pub fn toggle_member(&mut self, id: &str) {
+        match self.members.iter().position(|m| m == id) {
+            Some(i) => {
+                self.members.remove(i);
+            }
+            None => self.members.push(id.to_string()),
+        }
+    }
+
+    pub fn has_member(&self, id: &str) -> bool {
+        self.members.iter().any(|m| m == id)
+    }
+
+    /// Something was typed or chosen, so closing asks first.
+    pub fn is_dirty(&self) -> bool {
+        !self.name.trim().is_empty() || !self.members.is_empty() || self.project != self.initial_project
+    }
+
+    /// The first reason the draft cannot be created. `rooms` are the existing channels, to catch a
+    /// name that is taken in the project (compared trimmed and ignoring case).
+    pub fn problem(&self, rooms: &[Room]) -> Option<DraftError> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Some(DraftError::EmptyName);
+        }
+        if name.chars().any(is_forbidden_name_char) {
+            return Some(DraftError::BadChar);
+        }
+        if self.project.is_empty() {
+            return Some(DraftError::NoProject);
+        }
+        let lower = name.to_lowercase();
+        if rooms.iter().any(|r| r.project == self.project && r.name.trim().to_lowercase() == lower) {
+            return Some(DraftError::Taken);
+        }
+        None
+    }
+
+    /// 만들기 is enabled.
+    pub fn is_valid(&self, rooms: &[Room]) -> bool {
+        self.problem(rooms).is_none()
+    }
+
+    /// The members to send: the chosen sessions that are still one of the project's `agents`.
+    pub fn members_in(&self, agents: &[AgentChoice]) -> Vec<String> {
+        self.members
+            .iter()
+            .filter(|id| agents.iter().any(|a| &a.id == *id && a.project == self.project))
+            .cloned()
+            .collect()
+    }
+
+    /// The `POST /api/channels` body; the name is trimmed. `None` when the draft has a problem.
+    pub fn to_new_channel(&self, rooms: &[Room], agents: &[AgentChoice]) -> Option<ember_client::channels::NewChannel> {
+        if !self.is_valid(rooms) {
+            return None;
+        }
+        Some(ember_client::channels::NewChannel {
+            project: self.project.clone(),
+            name: self.name.trim().to_string(),
+            agents: self.members_in(agents),
+        })
+    }
+
+    /// The hint under the members: set when none is chosen.
+    pub fn members_hint(&self) -> Option<&'static str> {
+        self.members.is_empty().then_some(NO_MEMBERS_HINT)
+    }
+}
+
+/// The sessions of `project` as choices, most recent first as given; archived ones are left out.
+pub fn agent_choices(sessions: &[ember_client::wire::SessionRecord], project: &str) -> Vec<AgentChoice> {
+    sessions
+        .iter()
+        .filter(|s| s.project == project && !s.archived)
+        .map(|s| AgentChoice {
+            id: s.id.clone(),
+            project: s.project.clone(),
+            label: if s.title.trim().is_empty() { s.agent.clone() } else { s.title.clone() },
+            harness: s.agent.clone(),
+        })
+        .collect()
+}
+
+/// The project a new channel starts on: the list filter if it names a project, else the first.
+pub fn default_new_project(filter: Option<&str>, projects: &[String]) -> String {
+    filter
+        .filter(|f| projects.iter().any(|p| p == f))
+        .map(str::to_string)
+        .or_else(|| projects.first().cloned())
+        .unwrap_or_default()
+}
+
+/// The fixed sentence for a failed create, from the HTTP status and the server's `code`. Never the
+/// server's own text.
+pub fn create_error_text(status: Option<u16>, code: Option<&str>) -> &'static str {
+    match (status, code) {
+        (_, Some("invalid_name")) => DraftError::BadChar.text(),
+        (Some(409), _) | (_, Some("name_taken")) | (_, Some("conflict")) => TAKEN_TEXT,
+        (Some(404), _) => "프로젝트나 에이전트를 찾을 수 없습니다. 목록을 새로 고친 뒤 다시 시도하십시오",
+        (Some(400), _) => "입력한 내용을 서버가 받아들이지 않았습니다. 이름과 에이전트를 확인하십시오",
+        (Some(429), _) => "요청이 너무 많습니다. 잠시 뒤 다시 시도하십시오",
+        _ => "채널을 만들지 못했습니다. 연결을 확인한 뒤 다시 시도하십시오",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l12_only_a_click_on_an_unread_room_marks_it_read() {
+        assert!(super::should_mark_read(true, 3));
+        assert!(!super::should_mark_read(false, 3), "auto-selection never marks");
+        assert!(!super::should_mark_read(true, 0), "a read room needs no call");
+        assert!(!super::should_mark_read(false, 0));
+    }
+
     #[test]
     fn fr_t10_send_blocks_while_in_flight() {
         assert!(SendState::Idle.can_send("hi"));
@@ -465,6 +739,8 @@ mod tests {
             text: text.into(),
             at,
             unread,
+            author_name: String::new(),
+            author_kind: String::new(),
         }
     }
 
@@ -658,6 +934,21 @@ mod tests {
     fn fr_l12_no_rooms_are_invented() {
         assert!(rooms_snapshot().is_empty());
     }
+
+    #[test]
+    fn fr_t15_a_guest_bubble_shows_the_name_and_tag_never_the_id() {
+        let mut m = msg("m1", "guest:g7", "안녕하세요", 100, 0);
+        m.author_name = "민수".into();
+        m.author_kind = "guest".into();
+        let mut nameless = msg("m2", "guest:g8", "저도요", 4000, 0);
+        nameless.author_kind = "guest".into();
+        let r = room("c", "ember", 0, vec![m, nameless]);
+        let items = feed(&r, USER_ID, 0);
+        let bubbles: Vec<&BubbleView> = items.iter().filter_map(|i| if let FeedItem::Bubble(b) = i { Some(b) } else { None }).collect();
+        assert_eq!(bubbles[0].name.as_deref(), Some("민수"));
+        assert_eq!(bubbles[1].name.as_deref(), Some("게스트"));
+        assert!(bubbles.iter().all(|b| b.guest && !b.name.clone().unwrap_or_default().contains("guest:")));
+    }
 }
 
 #[cfg(test)]
@@ -673,6 +964,50 @@ mod layout_tests {
         assert!(compact_shows_room(&Some("a".into())));
     }
 
+    fn room_of(id: &str, project: &str, at: i64) -> Room {
+        Room {
+            id: id.into(),
+            name: id.into(),
+            project: project.into(),
+            members: vec![],
+            messages: vec![Message { id: "m".into(), from: "x".into(), text: "t".into(), at, unread: 0, author_name: String::new(), author_kind: String::new() }],
+            unread: 0,
+        }
+    }
+
+    #[test]
+    fn fr_l12_initial_room_is_the_first_listed_room_when_split() {
+        let rooms = vec![room_of("old", "ember", 10), room_of("new", "ember", 20), room_of("other", "core", 30)];
+        let all = ListFilter::default();
+        assert_eq!(initial_room(&rooms, &[], &all, true), Some("new".to_string()));
+        let core = ListFilter { project: Some("core".into()), query: String::new() };
+        assert_eq!(initial_room(&rooms, &[], &core, true), Some("other".to_string()));
+    }
+
+    #[test]
+    fn fr_l12_initial_room_is_none_when_compact_or_no_rooms() {
+        let rooms = vec![room_of("a", "ember", 1)];
+        assert_eq!(initial_room(&rooms, &[], &ListFilter::default(), false), None);
+        assert_eq!(initial_room(&[], &[], &ListFilter::default(), true), None);
+        let none = ListFilter { project: Some("nope".into()), query: String::new() };
+        assert_eq!(initial_room(&rooms, &[], &none, true), None);
+    }
+
+    #[test]
+    fn fr_l12_room_motif_is_stable_and_spreads_over_the_six() {
+        assert_eq!(room_motif("r1"), room_motif("r1"));
+        let motifs: std::collections::HashSet<_> = ["r1", "r2", "r3", "r4", "r5", "r6"].iter().map(|i| format!("{:?}", room_motif(i))).collect();
+        assert_eq!(motifs.len(), 6);
+        assert_eq!(room_motif(""), RoomMotif::Pulse);
+    }
+
+    #[test]
+    fn fr_l12_agent_with_a_harness_gets_its_character_others_a_letter() {
+        assert_eq!(avatar_kind(true, "claude"), AvatarKind::Character);
+        assert_eq!(avatar_kind(true, " "), AvatarKind::Letter);
+        assert_eq!(avatar_kind(false, "claude"), AvatarKind::Letter);
+    }
+
     fn blank() -> ember_client::channels::Channel {
         ember_client::channels::Channel {
             id: String::new(),
@@ -683,11 +1018,12 @@ mod layout_tests {
             last_message: None,
             messages: Vec::new(),
             unread: 0,
+            guests: Vec::new(),
         }
     }
 
     fn wire_msg(seq: i64, from: &str, at: i64) -> ember_client::channels::ChannelMessage {
-        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0 }
+        ember_client::channels::ChannelMessage { id: seq.to_string(), seq, from: from.into(), text: format!("t{seq}"), at, unread: 0, mentions: Vec::new(), author_name: String::new(), author_kind: String::new() }
     }
 
     #[test]
@@ -767,5 +1103,158 @@ mod layout_tests {
     #[test]
     fn fr_l12_unread_zero_has_no_badge() {
         assert_eq!(badge_text(0), None);
+    }
+    // ----- FR-T10: the new-channel draft -----
+
+    fn choice(id: &str, project: &str) -> AgentChoice {
+        AgentChoice { id: id.into(), project: project.into(), label: id.into(), harness: "claude-code".into() }
+    }
+
+    fn named(project: &str, name: &str) -> Room {
+        Room {
+            id: "x".into(),
+            name: name.into(),
+            project: project.into(),
+            members: Vec::new(),
+            messages: Vec::new(),
+            unread: 0,
+        }
+    }
+
+    #[test]
+    fn fr_t10_new_channel_name_is_required_and_trimmed() {
+        let mut d = NewChannelDraft::new("core");
+        assert_eq!(d.problem(&[]), Some(DraftError::EmptyName));
+        d.name = "   ".into();
+        assert!(!d.is_valid(&[]));
+        d.name = "  review  ".into();
+        assert!(d.is_valid(&[]));
+        assert_eq!(d.to_new_channel(&[], &[]).unwrap().name, "review");
+    }
+
+    #[test]
+    fn fr_t10_new_channel_name_refuses_what_the_server_refuses() {
+        let mut d = NewChannelDraft::new("core");
+        for bad in ["a\nb", "a\u{200B}b", "a\u{2028}b", "a\u{202E}b", "a\u{0}b"] {
+            d.name = bad.into();
+            assert_eq!(d.problem(&[]), Some(DraftError::BadChar), "{bad:?}");
+        }
+        d.name = "리뷰 방 2".into();
+        assert!(d.is_valid(&[]));
+    }
+
+    #[test]
+    fn fr_t10_new_channel_taken_name_is_per_project_and_ignores_case() {
+        let rooms = vec![named("core", "Review"), named("other", "ideas")];
+        let mut d = NewChannelDraft::new("core");
+        d.name = " review ".into();
+        assert_eq!(d.problem(&rooms), Some(DraftError::Taken));
+        assert_eq!(DraftError::Taken.text(), "이미 있는 채널 이름입니다");
+        d.name = "ideas".into();
+        assert!(d.is_valid(&rooms), "the same name in another project is fine");
+    }
+
+    #[test]
+    fn fr_t10_new_channel_needs_a_project_and_allows_the_default_project() {
+        let mut d = NewChannelDraft::new("");
+        d.name = "x".into();
+        assert_eq!(d.problem(&[]), Some(DraftError::NoProject));
+        let d2 = NewChannelDraft { name: "x".into(), ..NewChannelDraft::new("unsorted") };
+        assert!(d2.is_valid(&[]));
+        let projects = vec!["unsorted".to_string(), "core".to_string()];
+        assert_eq!(default_new_project(Some("core"), &projects), "core");
+        assert_eq!(default_new_project(Some("gone"), &projects), "unsorted");
+        assert_eq!(default_new_project(None, &projects), "unsorted");
+        assert_eq!(default_new_project(None, &[]), "");
+    }
+
+    #[test]
+    fn fr_t10_new_channel_members_are_a_subset_of_the_projects_agents() {
+        let agents = vec![choice("a", "core"), choice("b", "core"), choice("z", "other")];
+        let mut d = NewChannelDraft::new("core");
+        d.name = "x".into();
+        d.toggle_member("b");
+        d.toggle_member("a");
+        d.toggle_member("zz");
+        let body = d.to_new_channel(&[], &agents).unwrap();
+        assert_eq!(body.agents, ["b", "a"], "chosen order, and a session the project lacks is dropped");
+        d.toggle_member("b");
+        assert!(!d.has_member("b"));
+        assert_eq!(d.to_new_channel(&[], &agents).unwrap().agents, ["a"]);
+        assert_eq!(body.project, "core");
+    }
+
+    #[test]
+    fn fr_t10_new_channel_no_members_says_no_agent() {
+        let mut d = NewChannelDraft::new("core");
+        d.name = "x".into();
+        assert!(d.members_hint().unwrap().contains("에이전트 없이"));
+        assert!(d.to_new_channel(&[], &[]).unwrap().agents.is_empty());
+        d.toggle_member("a");
+        assert_eq!(d.members_hint(), None);
+    }
+
+    #[test]
+    fn fr_t10_new_channel_switching_project_clears_the_other_projects_members() {
+        let mut d = NewChannelDraft::new("core");
+        d.toggle_member("a");
+        d.set_project("core");
+        assert_eq!(d.members, ["a"], "the same project keeps them");
+        d.set_project("other");
+        assert!(d.members.is_empty());
+        assert_eq!(d.project, "other");
+    }
+
+    #[test]
+    fn fr_t10_new_channel_review_hook_is_debug_only() {
+        assert!(new_channel_review_hook(Some("1"), Some("channels"), true));
+        assert!(!new_channel_review_hook(Some("1"), Some("channels"), false));
+        assert!(!new_channel_review_hook(None, Some("channels"), true));
+        assert!(!new_channel_review_hook(Some("1"), Some("agents"), true));
+        assert!(!new_channel_review_hook(Some("0"), Some("channels"), true));
+    }
+
+    #[test]
+    fn fr_t10_new_channel_dirty_when_anything_was_typed_or_chosen() {
+        let mut d = NewChannelDraft::new("core");
+        assert!(!d.is_dirty());
+        d.name = " ".into();
+        assert!(!d.is_dirty());
+        d.name = "x".into();
+        assert!(d.is_dirty());
+        let mut d = NewChannelDraft::new("core");
+        d.set_project("other");
+        assert!(d.is_dirty());
+        let mut d = NewChannelDraft::new("core");
+        d.toggle_member("a");
+        assert!(d.is_dirty());
+    }
+
+    #[test]
+    fn fr_t10_new_channel_errors_map_to_fixed_sentences() {
+        assert_eq!(create_error_text(Some(409), None), "이미 있는 채널 이름입니다");
+        assert_eq!(create_error_text(Some(400), Some("name_taken")), "이미 있는 채널 이름입니다");
+        assert_eq!(create_error_text(Some(400), Some("invalid_name")), DraftError::BadChar.text());
+        assert!(create_error_text(Some(404), Some("not_found")).contains("찾을 수 없습니다"));
+        assert!(create_error_text(Some(400), Some("bad_request")).contains("확인하십시오"));
+        assert!(create_error_text(Some(429), Some("rate_limited")).contains("잠시"));
+        for (s, c) in [(Some(500), Some("internal")), (None, None)] {
+            let t = create_error_text(s, c);
+            assert!(t.contains("만들지 못했습니다"));
+            assert!(!t.contains("internal") && !t.contains("500"));
+        }
+    }
+
+    #[test]
+    fn fr_t10_new_channel_choices_are_the_projects_live_sessions() {
+        let mk = |id: &str, project: &str, title: &str, archived: bool| -> ember_client::wire::SessionRecord {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "project": project, "agent": "codex", "cwd": "/", "status": "idle",
+                "title": title, "created_at": 0, "updated_at": 0, "last_seq": 0, "archived": archived
+            })).unwrap()
+        };
+        let list = vec![mk("a", "core", "작업", false), mk("b", "core", "", false), mk("c", "core", "x", true), mk("d", "other", "y", false)];
+        let c = agent_choices(&list, "core");
+        assert_eq!(c.iter().map(|x| (x.id.as_str(), x.label.as_str())).collect::<Vec<_>>(), [("a", "작업"), ("b", "codex")]);
     }
 }

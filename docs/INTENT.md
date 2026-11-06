@@ -527,11 +527,35 @@ Rejected: messages as the only channel between sessions.
 - Storage: SQLite stays the read index and the message store. Human messages are also appended to the per-channel JSONL file (`FR-T16`) in parallel. Rejected: JSONL as the only store (no index for `after=` and unread counts) and SQLite as the only store (`FR-T16` asks for the file).
 - Allowance: whole hours, capped at 168 h (`FR-T17`). Rejected: free-form minutes and open-ended allowances, because an allowance spends the owner's tokens.
 - Guest: an invited person sees the message log only and has no right to answer approvals (`FR-T14`). Rejected: guests answering an agent's approval request, because that steers the owner's session.
-- Invite authentication (`FR-T14`, `FR-T15`, `FR-T17`) is still an owner decision (Q10, remaining part). The supervisor recommends (a) a channel-scoped invite token. Nothing is built on it until the owner chooses.
+- Invite authentication: decided below ("Invite authentication, 2026-11-06 [user]"). It replaces the earlier note that the supervisor only recommended (a).
+- Confirmation: the supervisor and the leader approved the five remaining decisions of this block (mention syntax, `channel_post`, storage, the 168 h cap, guest sees the log only). The supervisor message did not name them as owner-confirmed, so they stay [provisional] until the owner confirms them in their own words.
+
+**Invite authentication, 2026-11-06 [user, relayed by the supervisor].** The owner chose option (a): "(a) 채널 한정 초대 링크" (a channel-scoped invite link). The supervisor relayed only this choice, not the owner's own sentence, so the quote is the option's label. This closes the remainder of Q10. The model (`FR-T14`, `FR-T15`, `FR-T17`):
+
+1. The channel owner creates an invite. It is a single-use, channel-scoped link carrying a random token. The server stores only a hash of the token, never the token.
+2. Accepting the link yields a per-person Bearer credential scoped to that one channel. The server stores only its hash.
+3. Revoking the invite, or removing the person, makes the credential invalid at once (the next request gets 401).
+4. A guest credential is refused on every route except that channel's message log: reading it and the guest's own posts there (a guest's mention is what `FR-T15` and `FR-T17` gate, so a guest can post). It can never answer approvals, see the feed or other channels, or reach projects, sessions, files or computers.
+5. An allowance (`FR-T17`) is in whole hours, capped at 168. By default an invited person's mention reaches no agent unless the owner allows it (`FR-T15`).
+
+**Rejected** (the supervisor's relayed choice gave no reasons; recorded as the alternatives the choice excluded, reasons not stated): other mechanisms than a channel-scoped invite link. The single-use, hash-only storage and the immediate revocation are the supervisor's description of (a); where this text adds a detail (posting by guests), it is [provisional].
+
+**Interaction with D37.** The server token middleware (`auth.rs`) must treat a guest credential as a different credential class: valid only on the channel guest routes, never accepted where the device key or the local token is. A guest credential must not pass as the server token on any route.
+
+
+**Open items on invites (questions, not decided).**
+
+- Q-a: How long does an unused invite live before it expires (a default and a maximum)?
+- Q-b: Does a guest have a display name the owner sets at invite time, or one the guest types on acceptance? `FR-T15` attributes each message to the account that wrote it.
+- Q-c: May a guest post at all? The text above assumes yes, because `FR-T15` speaks of an invited person's mention; the supervisor said only "log only". Confirm.
+- Q-d: Does a guest credential expire by itself, or live until revoked?
+- Q-e: Can a guest receive pushes (the `channel_message` WebSocket event) or only poll the log? Push needs the WebSocket route to know the credential class (D37 part 3, Origin and Host checks apply to guests too).
+- Q-f: Reachability: a guest outside the owner's network cannot reach a loopback or LAN server. Does the invite link need a relay or the device layer (`FR-N`), and does a guest become a device?
+- Q-g: Does the owner see a list of invites and guests (pending, used, revoked) in the channel?
 
 **Later (2026-10-25).** D26 fills the open tab set with eight entries; D28 renames Unsorted to 기본 프로젝트.
 
-**Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: how an invited person authenticates (Q10, remaining part) and the exact JSONL layout of `FR-T16`.
+**Status.** Specified only (`FR-L10`–`FR-L13`, `FR-T10`–`FR-T17`, `FR-U7`). Not built. Still open: the exact JSONL layout of `FR-T16` and the invite details listed under Open questions (invite lifetime, guest identity, reach beyond the v1 server).
 
 ## Open questions
 
@@ -546,14 +570,14 @@ Rejected: messages as the only channel between sessions.
 | **Q7** | Which transport: iroh, rustunnel, a tunnel written in Rust from scratch, or tailcat? | **Decided, conditionally** [user, 2026-10-03]: **iroh 1.0**, behind a replaceable interface (SPEC `FR-N5`); if it misses `NFR-N1`, our own implementation is evaluated. Implemented in `ember/transport` (#23); `NFR-N1` not yet measured on real networks (#10). tailcat was withdrawn after the user's objection (two apps on mobile). An own implementation is weeks rather than months for the basic path, since a failed hole punch falls back to the relay; it stays the replacement option. `rustunnel` is not a transport: it is a server-relayed tunnel with no hole punching, and AGPL-3.0, so it must not be linked into clients; it is only a reference for the hub's public HTTPS edge. Source: darkpyonix leader, core PROJECT Q1 (3ea7fb7). **Update [user, 2026-10-30]:** the move to letify-link with the main server as relay is D36 (`FR-N5`); iroh stays until it ships. |
 | **Q8** | Is the Tauri scaffold kept long-term, and for what? | **Closed: deleted** [user, 2026-10-03] |
 | **Q9** | `ember/proxy/`'s open items carry over: HTTPS for phones (likely resolved by D8), login being a thin shell, and the pre-distribution security holes in `ember/proxy/docs/BACKGROUND.md` §7-3. | Open; HTTPS over P2P is #10 |
-| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Open remainder:** the authentication mechanism of the invite |
+| **Q10** | How does an external account (another person) authenticate to a channel, and what may it see: only that channel, or also the project's sessions, files and computers? | **Decided** [user, 2026-10-25]: "그 채널만 볼 수 있어. 디스코드나 슬랙 생각하는게 편할거야." An invited person sees only the channels they are invited to (`FR-T14`). **Remainder closed** [user, 2026-11-06, relayed by the supervisor: "(a) 채널 한정 초대 링크"]: a single-use, channel-scoped invite link, token hashed on the server, accepting it yields a per-person channel-scoped Bearer credential (D22). Open details: invite lifetime, guest identity, guest posting (listed after D22's block) |
 | **Q11** | Is Home's general chat a session without a project (so it needs a computer, an account and a place for its transcript), or something else? | **Closed** [user, 2026-10-25]: "분류되지 않은 프로젝트로 할당하도록 해. 나중에 프로젝트로 옮길 수도 있겠지." Home chat sessions live in a built-in Unsorted project (`FR-L13`), renamed 기본 프로젝트 by D28 |
 | **Q12** | Do channels persist across machines: stored on the main server and shared by every client and computer, or per client? Where do invited people's messages live when the main server is self-hosted? | **Closed** [user, 2026-10-25]: "음 메인 서버에 사람 전용 대화 jsonl 파일이 필요하려나" Per-channel append-only JSONL on the main server (`FR-T16`); the exact layout is [provisional] |
 | **Q13** | Which tabs follow Home, Project and Channels ("등으로")? And is a channel per project only, or can one span projects? | **Closed** [user, 2026-10-25]: "탭은 기능으로 올라올 필요가 있으면 더 올라오면 되는거야. 채널 하나가 여러 프로젝트에 걸칠 수 없어. ..." Full quote in D22. A channel belongs to one project; every project has a default channel (`FR-L12`, `FR-T10`) |
 
 ### D23: Ember vendors Code-OSS CSS by script and builds the workbench chrome rsx
 
-**Decision.** [provisional, leader decision 2026-10-25, user confirmation pending] Ember carries the Code-OSS CSS the workbench chrome needs, in `ember/app/assets/code-oss/`. `ember/ose/vendor-workbench-css.sh` fetches it from the Code-OSS commit the OSE build pins (`PINNED_COMMIT` in `ember/editor-conn/src/lib.rs`, tag in `ember/ose/VERSION`) and records the commit hash and the MIT notice in every file. Ember's only edit is `workbench-has.patch`, which turns `:has()` rules into state classes (#142). Ember builds the workbench chrome rsx (tree rows, view filter, title bar command center, action widget) and sets those classes (#143). Hover and chat markdown are drawn with `dioxus-compose-markdown` Compose widgets; there is no HTML `.rendered-markdown` path, so `renderedMarkdown.css` is not vendored.
+**Decision.** [provisional, leader decision 2026-10-25, user confirmation pending] *(Scope, corrected 2026-11-06: this decides how the chrome is drawn, not how it looks; the design is D25 and the mockup, see D38.)* Ember carries the Code-OSS CSS the workbench chrome needs, in `ember/app/assets/code-oss/`. `ember/ose/vendor-workbench-css.sh` fetches it from the Code-OSS commit the OSE build pins (`PINNED_COMMIT` in `ember/editor-conn/src/lib.rs`, tag in `ember/ose/VERSION`) and records the commit hash and the MIT notice in every file. Ember's only edit is `workbench-has.patch`, which turns `:has()` rules into state classes (#142). Ember builds the workbench chrome rsx (tree rows, view filter, title bar command center, action widget) and sets those classes (#143). Hover and chat markdown are drawn with `dioxus-compose-markdown` Compose widgets; there is no HTML `.rendered-markdown` path, so `renderedMarkdown.css` is not vendored.
 
 **Rejected.** Copying the CSS by hand (it drifts from the pinned Code-OSS and loses the commit record). A stylo patch for `:has()` (the replacement cost is small). Rendering markdown as HTML with `.rendered-markdown`.
 
@@ -573,7 +597,17 @@ Rejected: messages as the only channel between sessions.
 
 **Why.** The tunnel already connects every device of the user end to end. File transfer is the missing use of it, and it removes the habit of mailing files to oneself.
 
-**Status.** Specified only (`FR-F1`–`FR-F9`, Draft; issue #152). Not built. The Files menu mock is separate UI work.
+**Decisions of 2026-11-06** *[provisional, 2026-11-06 supervisor]*, issue #487:
+
+- **Who may offer**: only between the user's own devices registered under the same GitHub account (`FR-N2`). Rejected: offering to other accounts, to guests, or to unregistered devices, because each needs a trust model this version does not have.
+- **Size limit**: 4 GiB per transfer by default, configurable per device, applied to the sum of an offer and checked at the offer before any byte moves (`FR-F10`). Rejected: unlimited transfers, which let one device fill another's disk.
+- **File names**: only the basename is accepted. Control characters, path separators (`/` and `\`) and a leading dot are removed or replaced; an empty result gets a generated name. A folder offer keeps relative paths, every component goes through the same cleaning, and `..` never escapes (`FR-F9`). Rejected: trusting the sender's path, which is the classic path traversal.
+- **Storage**: `FR-F8` keeps the downloads folder as the target; the first version writes to a received-files folder under the device's data folder, and a user-chosen location is a follow-up. A clash never overwrites. Rejected: writing to downloads in the first version, since it needs per-OS pickers and permissions.
+- **Execute bit**: removed on receive. Files are written 0644, with no setuid, setgid or sticky bit. Rejected: preserving the sender's mode, which turns a received file into something runnable.
+
+**Architecture** *[provisional, session pZ proposal, needs supervisor confirmation]*. `FR-F6` allows file network code only inside the transport crate, and the transfer endpoints are devices (the app on a desktop or phone), not servers or computers. So the transfer service is a device-side library crate `ember/transfer` (a directory under `ember/`, no new repository root entry). It owns the offer, accept, decline and expire state machine, name cleaning, size limits, receive modes and the resume ledger, and talks to peers only through `ember-transport` streams. It is tested over the in-memory fake transport. The app's `TransferService` trait (`ember/app/src/ui/files.rs`) is implemented by it. The Ember server is not in the path and gets no `/api/transfers` route. Rejected: server-hosted transfer tables, because they put offer metadata, names and sizes on the server and contradict `FR-F6`.
+
+**Status.** Specified only (`FR-F1`–`FR-F10`, Draft; issues #152, #487). Not built. First unit: the `ember/transfer` state machine over the fake transport. The Files menu mock is separate UI work.
 
 ### D25: One client design on every OS, after the owner's reference images; Liquid Glass on iOS only
 
@@ -818,3 +852,76 @@ A request that fails is answered with 401, and tests fix this (`FR-S9` to `FR-S1
 **Consequence and owner decision [user, 2026-11-06, relayed by the supervisor: "지금은 전체 권한, 범위는 나중에" (full authority for now, scope later)].** A device admitted by the gate is trusted with the server user's full authority in v1. It can create a session and run an agent shell as the server user; that shell can read `<data dir>/server-token` and use the local door, including `/api/devices`; it can also reach `POST /api/computers`, the MCP registry and `/api/accounts`. The trust model is that of an SSH key: every admitted device is assumed to be the owner's own. So the split between the local door and the remote door guards against browsers, other local processes without the token and unadmitted peers, not against an admitted device. A per-device scope (for example read-only or chat only) is a later step, tracked in #366. Revoking a device closes its connections and refuses new ones, but sessions it created keep running (v1 allowed: there is no `created_by` column and the sessions belong to the server user; follow-up #369). Found by the P3 review of #338.
 
 **Rejected.** Loopback trust alone, which is today's model and is documented in `docs/guide/en/install.html` as "anyone who can reach `EMBER_LISTEN` can use every route"; a per-process secret; session tokens only. The issue lists the last two as options and gives no reason against them, so none is recorded here.
+
+### D38: Ember 에디터 = the functions of Code-OSS (OSE), the design of the mockup
+
+**Decision.** [user, 2026-11-06: "내가 요구하는건 기능은 oss랑 동일하고 디자인은 목업인거란다 제발 좀 똑바로 일하자."] The Ember 에디터 window does everything Code-OSS (the OSE runtime the server starts) does, and looks like the mockup `.scratch/mockup-v8/editor.html` with `editor.css`: the island style of D25 (rounded island panels for the code area, tabs and tool windows, 40 px icon-only tool-window stripes, breadcrumbs under the tabs), with the light and dark tokens of the mockup's `style.css`. Function parity is tracked row by row in `docs/design/EDITOR-PARITY.md`.
+
+**What went wrong, and the correction.** The leader's brief of 2026-11-05 read D23 as the design source for the window and had it drawn as a Code-OSS look-alike workbench (dark `#1e1e1e` chrome, the vendored Code-OSS CSS) in place of the island layout. D23 decides only *how the chrome is drawn* (rsx with the vendored Code-OSS CSS, built by script): it says nothing about the *design*, which is D25 and the mockup. `FR-L31` had been edited to say the island layout was replaced; that edit was wrong and is reverted by this decision. The Code-OSS CSS stays as the source of behaviour classes and tokens where the mockup uses the same widget; it does not set the look.
+
+**Rejected.** A dark Code-OSS look for the window (the owner asked for the mockup). Leaving the island layout "as a later polish" (the owner's words are a requirement, not a polish item).
+
+**Why.** The owner wants one product: the editor's behaviour is what developers know from VS Code, and its look is the same Ember design as every other screen. The keymap menu stays where `FR-L30` puts it (the ⋯ menu of the top bar).
+
+### D39: A new computer joins with a one-time enrol code, not a pasted token
+
+**Decision.** [provisional, session pZ proposal, needs supervisor confirmation] Adding a computer is a short flow: the server mints a one-time code, the user runs `ember-node enrol <code>` on the other machine, and the machine registers itself and appears online. The requirements are `FR-C1` (minting and storing the code) and `FR-C2` (redeeming and status), issue #491. These are the add-computer rows; the TODO in `project.rs` that cites `FR-X7` cites the metrics requirement by mistake.
+
+- The code is minted only from the local admin router (token-protected, never the guest door), is single use, lives at most 10 minutes, carries 244+ bits of randomness and is stored only as a SHA-256 hash. Redeem attempts are rate-limited per source address, and a used or expired code gets the same generic refusal.
+- The existing hub device-link route (`GET /api/hub/devices`, `POST /api/hub/devices/{id}/computer`) stays the first step for devices already signed in to the account and needs no new server code. The code flow is for machines that are not signed in.
+
+**Rejected** *[provisional]*. Pasting a long-lived node token by hand (today's `POST /api/computers {name, url|peer, token}`): the token is long-lived, travels through chat or a clipboard, and is easy to leak. A reusable or non-expiring code, which is the same leak with a shorter string. Requiring every computer to sign in to the GitHub account first, which fails for headless machines.
+
+**Why.** A code that dies after one use and ten minutes leaves nothing worth stealing, and the server never keeps it in a form that can be replayed.
+
+**Confirm at join (leader approval 2026-11-06).** [provisional, 2026-11-06, leader approval relayed by the supervisor; owner confirmation pending] The independent review of #523 (issue #526) found that a hostile or confused node that redeems a code would get what D37 grants (file read, agents, so remote execution) with no owner act. The door design memo (`.scratch/pz/enrol-door-design.md`) answers it, and the leader approved these decisions. The labels D1 to D13 are the memo's.
+
+- **D4, D5: the owner confirms every enrolment.** A redeemed code makes the enrolment `awaiting_confirmation`. The app shows the machine's reported host name and the observed address next to the owner-chosen name. The server mints the node token only when the owner presses confirm, and delivers it once. The owner can deny. An unconfirmed enrolment expires 10 minutes after the redeem (equal to the code lifetime).
+- **D3: the credential is server-minted and released after confirm.** The redeem answer carries only `{enrol_id, poll_secret}`; the node polls with the per-enrol secret and receives the token once.
+- **D1, D2: the enrol door is its own listener**, `EMBER_ENROL_LISTEN`, default OFF, with `EMBER_ENROL_PUBLIC_URL` in the printed command. When the door is off the mint answer says `door: off` and prints no command.
+- **D6: limits.** A global failure cap of 60 per 10 minutes across all sources, door limits of 5 per second with burst 10, 8 in flight, 32 connections and a 4 KiB body, all in a configurable struct.
+- **D9: `ember-node enrol` asks before it redeems** (prompt unless `--yes`). A server address outside the private ranges needs `--allow-http` to use plain http; plain http on a private LAN is allowed. Both the node and the app warn that plain http exposes the code on the network.
+- **D10: no enrol over the transport.** A machine that already has a device key uses the hub device-link route.
+- **D13: the node keeps its credentials in `enrol.json`** (0600, in its state dir); `EMBER_NODE_TOKEN` wins when set.
+- **D11 [provisional, pT/pX].** When the node reports no address, the server proposes the observed address with port 8741 and shows it to the owner for editing; the guess is never trusted automatically.
+- **Later, not v1.** D12 door auto-close after the last pending code expires (a runtime toggle), D7 sealed credential delivery (X25519 with an AEAD) and D8 server fingerprint pinning (`--server-fingerprint`). The v1 residual risks are documented in `COMPUTERS.md` and `FR-C2j`.
+
+**Rejected at this step.** Releasing the credential at redeem time (a hostile node would have it before any owner act, and a sniffer who wins the redeem would hold it). Holding the redeem request open until the owner clicks (it runs into the request timeout and the in-flight cap, and one valid-looking redeem could pin permits). A node-chosen token (the node would send a secret that controls itself to a server the owner has not confirmed, and a rogue server at the URL would collect a working key to the node). Option (b), enrol over the `FR-N5` transport (it weakens the rule that every transport caller is authenticated, and the machines it would serve already have a device key and use the device-link route). A shared listener, a `/enrol/*` prefix on the guest door (it would stay open as long as the guest door, mixes two audiences and two proxy setups, and a guest-door bug would reach enrol).
+
+**Server peer id in the delivery (C3b).** [provisional, 2026-11-06, leader approval relayed by the supervisor; owner confirmation pending] The `joined` answer carries the server's public transport peer id when the transport is on, and omits the key otherwise. It is public, so it is not a `Secret`. The node cannot verify the server, so the value is trust on first use and must not widen the node's reach unchecked. Node rules, required and tested in the node step (`ember-node enrol` is not built): R1 pin first (`--server-fingerprint` from the app's command is compared before anything is written; a mismatch aborts and writes nothing; the pin the app puts in the command is the FULL 64-hex server peer id, because the 16-hex short form is only 64 bits and a determined attacker can grind a key with a chosen prefix: the short form is accepted when a person types it, with the notice "short pin: 64 bits", and is for screens, not for commands) [supervisor, 2026-11-06, security-strengthening correction of the first R1 text]; R2 no pin means no automatic trust (the node asks, and non-interactive use needs `--server-fingerprint` or `--trust-unverified-server`); R3 verify, then write `enrol.json` and `allowed-peers` together, shape-check the id, add that one id only; R4 the node prints what it will allow.
+
+**Rejected for the peer id.** A signed delivery: the node has nothing to verify the signature against, so it is the same trust on first use. Adding the delivered id to `allowed-peers` automatically: it widens the node's reach (the transport crosses NAT through relays) on an unauthenticated value. The id in the redeem answer: it widens an unauthenticated answer for little gain; it can be added later with its own test.
+
+**Status.** `FR-C1` (admin side and redeem core) is built and merged (#523); `FR-C2` and its parts `FR-C2a` to `FR-C2k` are specified and approved, not built (issues #491, #526).
+
+### D40: The Gemini CLI is a harness through the ACP adapter
+
+**Decision.** [user, 2026-11-06, option "(a) Gemini CLI 어댑터 추가" chosen by the owner] Ember adds the Gemini CLI as a harness on top of the generic ACP adapter (`ember/server/src/agents/acp.rs`, issue #53). The mockup's Gemini card and the Home chip stay. Until the adapter is verified against the real CLI, the app shows the card as "preparing" (준비 중입니다). The requirements are `FR-A10` to `FR-A10g` (issue #53).
+
+- [provisional] The harness is an ACP agent named `gemini` with a built-in preset (command `gemini`, ACP flag per `SPEC.md` "Gemini CLI facts"), not a new protocol adapter. This keeps `FR-A3`: adding the agent needs a preset only.
+- [provisional] Authentication stays the user's own: Ember never stores or reads Gemini credentials.
+- [provisional] Usage limits come from the CLI and its documentation, never from an Ember estimate.
+
+**Rejected** (the owner chose adding the adapter over each of these). Removing the Gemini card from the mockup and the Home chip. Keeping the card as a permanent "preparing" placeholder with no adapter behind it.
+
+**Why.** The owner wants Gemini in the harness list as a working harness, and the ACP adapter already exists, so the cost is a preset plus verification.
+
+**Owner and leader decision, 2026-11-06 (option "(c) 카드 유지 + API 키·엔터프라이즈 전용" tag [user, relayed by the supervisor]).** Research found that Google's Gemini CLI announcement says that since 2026-06-18 the Gemini CLI no longer serves Google AI Pro, Google AI Ultra and free-tier individual accounts (replaced by the Antigravity CLI, `agy`); Enterprise Code Assist licences and API-key authentication are stated as unaffected, and Vertex AI is not addressed. Sources, read on 2026-11-06: <https://github.com/google-gemini/gemini-cli/discussions/28017> (announcement of 2026-06-18) and <https://9to5google.com/2026/06/17/gemini-cli-code-assist-shutting-down/> (consumer accounts only, shutdown on 2026-06-18). The decision: the Gemini card stays, it is marked as for API-key and Enterprise (Code Assist) accounts only, and a user with an individual account is pointed to the Antigravity harness (D14). The adapter authenticates with an API key (and Code Assist) over the ACP adapter; "Login with Google" for individuals is not supported. This narrows the earlier choice "(a) Gemini CLI 어댑터 추가": the adapter is still built, for the accounts the CLI still serves. Rejected: building the adapter around "Login with Google" for individuals (the CLI does not serve them); removing the card; merging it into the Antigravity card.
+
+**Status.** Specified only (`FR-A10`, Draft; issue #53). Not built.
+
+### D41: GitHub is the first integration, read through the session computer's own gh
+
+**Decision.** [user, 2026-11-06, option "(GitHub부터)" chosen by the owner for #498] The home screen's 연동 area starts with one integration, GitHub, in the November scope. Calendar, chat and mail integrations stay specified only (`FR-L23`).
+
+- [user] The GitHub card shows what can be read now: the number of repositories, open pull requests, reviews waiting for the signed-in account, the CI pass rate of the last runs on the default branch, and the work a CI failure can start (a routine linked to a failing CI, `FR-L25`).
+- [provisional] Authentication is the `gh` login on the computer that runs the project's sessions, the same path the 버전 관리 screen uses (`FR-G8`). Ember never stores a GitHub token and has no OAuth flow of its own; when `gh` is missing or signed out the card says so and offers no connect button that would pretend otherwise.
+- [provisional] The server answers from `gh` output on demand with a 90 second cache and one request in flight, never from a background poll. A value `gh` cannot give is null and the card shows "알 수 없음", never an invented number.
+- [provisional] Text that comes from GitHub (repository names, account names) is untrusted: it is cleaned of control characters and cut before it is shown; titles and bodies are not part of this card.
+
+**Rejected.** Building the calendar, chat and mail integrations first (the owner chose GitHub). An Ember-owned GitHub OAuth app that stores tokens on the server (a second credential store, and the user's `gh` login already covers it). A demo-only card with invented connection state (`NFR` "no value is invented").
+
+**Why.** GitHub data is already reachable through the same `gh` path as the pull request screen, so the card costs an API and a view, not an identity system.
+
+**Status.** Specified (`FR-L35`, `FR-G13`, #498). The server API is in progress; the card is built by the Home owner against it.
+

@@ -20,6 +20,12 @@
 //! | POST | `/fs/glob` | [`GlobRequest`] → [`GlobResponse`] |
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
 //! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
+//! | POST | `/git/commit/show` | [`git_commit::GitCommitShowRequest`] → [`git_commit::GitCommitShowResponse`] (FR-G14: one commit with its changed files; 400 for a bad sha, 404 `not_found` for an unknown one) |
+//! | POST | `/git/revert`, `/git/cherry-pick` | [`git_commit::GitCommitActionRequest`] → [`git_commit::GitCommitActionResponse`] (FR-G15; need `confirm: true`; 409 for a dirty tree or a conflict, which is aborted) |
+//! | POST | `/git/branches` | [`GitRepoRequest`] → [`git_branches::GitBranchesResponse`] (FR-G9: local branches with upstream ahead/behind, last commit, default and worktree) |
+//! | POST | `/git/github` | [`git_github::GitGithubRequest`] → [`git_github::GitGithubResponse`] (FR-G13, through `gh`; each failed call nulls its own fields; 409 when gh is missing) |
+//! | POST | `/git/prs` | [`git_prs::GitPrsRequest`] → [`git_prs::GitPrsResponse`] (FR-G8, through `gh pr list`; 409 when gh is missing, not logged in or the repository has no GitHub remote) |
+//! | POST | `/git/pr`, `/git/pr/review`, `/git/pr/merge`, `/git/pr/create` | [`git_prs::GitPrRef`], [`git_prs::GitPrReviewRequest`], [`git_prs::GitPrMergeRequest`], [`git_prs::GitPrCreateRequest`] (FR-G10 to FR-G12, through `gh`; changing calls need `confirm: true`, merge answers 409 with the gate reason when closed) |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
 //! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
 //! | POST | `/git/stage`, `/git/unstage` | [`GitPathsRequest`] → 204 |
@@ -28,6 +34,8 @@
 //! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
 //! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
 //! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
+//! | POST | `/git/merge` | [`GitRepoRequest`] → [`git_merge::GitMergeState`] (FR-G16: is a merge in progress, from, into, conflict count, `can_commit`) |
+//! | POST | `/git/merge/abort`, `/git/merge/commit` | [`git_merge::GitMergeActionRequest`] → [`git_merge::GitMergeAborted`] or [`git_commit::GitCommitActionResponse`] (FR-G17; need `confirm: true`; 409 without a merge, and for commit with conflicts left) |
 //! | POST | `/git/stash/{list,push,apply,pop,drop}` | FR-G6 stash list and operations (409 on conflicts) |
 //! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
@@ -40,6 +48,7 @@
 //! | POST | `/jobs/{id}/kill` | [`KillRequest`] → 204 |
 //! | DELETE | `/jobs/{id}` | → 204 (409 while running) |
 //! | GET (WS) | `/events?after=<seq>` | receive [`NodeEvent`]s |
+//! | GET  | `/ports` | → [`PortsResponse`] (FR-P7: listening TCP ports of processes under node-owned terms and jobs) |
 //! | POST | `/terms` | [`TermCreateRequest`] → [`TermCreateResponse`] (201 created, 200 key matched) |
 //! | GET  | `/terms?project=&origin=&running=` | → `[TermInfo]` |
 //! | GET  | `/terms/{id}` | → [`TermInfo`] |
@@ -78,6 +87,8 @@ use crate::config::NodeConfig;
 use crate::exec::{self, kill_group};
 use crate::fs::{self, FsError};
 use crate::git::{self, *};
+use crate::git::git_commit;
+use crate::git::git_merge;
 use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
 use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
@@ -107,7 +118,7 @@ impl Node {
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
         Ok(Self(Arc::new(Inner {
             token: config.token,
-            policy: PathPolicy::new(config.roots)?,
+            policy: PathPolicy::with_denied(config.roots, config.denied)?,
             jobs,
             terms,
             egress: Arc::new(config.egress),
@@ -161,7 +172,21 @@ pub fn router(node: Node) -> Router {
         .route("/fs/grep", post(grep))
         // FR-G5: history route.
         .route("/git/log", post(git_log_handler))
+        .route("/git/commit/show", post(git_commit_show_handler))
+        .route("/git/revert", post(git_revert_handler))
+        .route("/git/cherry-pick", post(git_cherry_pick_handler))
+        .route("/git/merge", post(git_merge_state_handler))
+        .route("/git/merge/abort", post(git_merge_abort_handler))
+        .route("/git/merge/commit", post(git_merge_commit_handler))
+        .route("/git/branches", post(git_branches_handler))
+        .route("/git/prs", post(git_prs_handler))
+        .route("/git/github", post(git_github_handler))
+        .route("/git/pr", post(git_pr_handler))
+        .route("/git/pr/review", post(git_pr_review_handler))
+        .route("/git/pr/merge", post(git_pr_merge_handler))
+        .route("/git/pr/create", post(git_pr_create_handler))
         // End FR-G5.
+
         .route("/git/status", post(git_status))
         .route("/git/diff", post(git_diff))
         .route("/git/stage", post(git_stage))
@@ -192,6 +217,7 @@ pub fn router(node: Node) -> Router {
         .route("/jobs/{id}", get(get_job).delete(remove_job))
         .route("/jobs/{id}/kill", post(kill_job))
         .route("/events", get(events_ws))
+        .route("/ports", get(list_ports))
         .route("/terms", get(list_terms).post(create_term))
         .route("/terms/{id}", get(get_term).delete(remove_term))
         .route("/terms/{id}/snapshot", get(term_snapshot))
@@ -296,6 +322,7 @@ impl From<GitError> for ApiError {
             GitError::NotARepo(m) => ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotARepo, m),
             GitError::Bad(m) => ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, m),
             GitError::Conflict(m) => ApiError::new(StatusCode::CONFLICT, ErrorCode::Conflict, m),
+            GitError::NotFound(m) => ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, m),
             GitError::Internal(m) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, m),
             GitError::Timeout(m) => ApiError::new(StatusCode::GATEWAY_TIMEOUT, ErrorCode::Timeout, m),
             GitError::TooLarge(m) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::TooLarge, m),
@@ -396,6 +423,38 @@ async fn git_log_handler(State(n): State<Node>, Json(r): Json<git_log::GitLogReq
     Ok(Json(git_log::log(&n.0.policy, &r).await?))
 }
 // End FR-G5.
+
+// FR-G9: branch list handler.
+async fn git_branches_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_branches::GitBranchesResponse> {
+    Ok(Json(git_branches::list(&n.0.policy, &r).await?))
+}
+// End FR-G9.
+
+// FR-G8: pull request list handler (runs `gh`, holds no lock).
+async fn git_prs_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrsRequest>) -> ApiResult<git_prs::GitPrsResponse> {
+    Ok(Json(git_prs::list(&n.0.policy, &r).await?))
+}
+// End FR-G8.
+
+// FR-G13: GitHub card summary handler (runs `gh`, holds no lock).
+async fn git_github_handler(State(n): State<Node>, Json(r): Json<git_github::GitGithubRequest>) -> ApiResult<git_github::GitGithubResponse> {
+    Ok(Json(git_github::summarize(&n.0.policy, &r).await?))
+}
+// End FR-G13.
+// FR-G10 to FR-G12: pull request detail, review, merge and create (run `gh`, hold no lock).
+async fn git_pr_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrRef>) -> ApiResult<git_prs::GitPrDetail> {
+    Ok(Json(git_prs::detail(&n.0.policy, &r).await?))
+}
+async fn git_pr_review_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrReviewRequest>) -> ApiResult<git_prs::GitPrReviewResponse> {
+    Ok(Json(git_prs::review(&n.0.policy, &r).await?))
+}
+async fn git_pr_merge_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrMergeRequest>) -> ApiResult<git_prs::GitPrMergeResponse> {
+    Ok(Json(git_prs::merge(&n.0.policy, &r).await?))
+}
+async fn git_pr_create_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrCreateRequest>) -> ApiResult<git_prs::GitPrCreateResponse> {
+    Ok(Json(git_prs::create(&n.0.policy, &r).await?))
+}
+// End FR-G10 to FR-G12.
 
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))
@@ -733,6 +792,23 @@ async fn create_term(
     Ok((status, Json(res)))
 }
 
+/// FR-P7: best effort, never an error. The owned roots are the running terms and jobs.
+async fn list_ports(State(n): State<Node>) -> Json<PortsResponse> {
+    let mut roots = Vec::new();
+    for t in n.0.terms.list(&TermListQuery::default()) {
+        if let (Some(pid), TermState::Running) = (t.pid, t.state) {
+            roots.push(crate::ports::Root { pid, owner: PortOwner { kind: PortOwnerKind::Term, id: t.id } });
+        }
+    }
+    for j in n.0.jobs.list() {
+        if let (Some(pid), JobState::Running) = (j.pid, j.state) {
+            roots.push(crate::ports::Root { pid, owner: PortOwner { kind: PortOwnerKind::Job, id: j.id } });
+        }
+    }
+    let ports = crate::ports::listening(roots).await;
+    Json(PortsResponse { ports, supported: crate::ports::ports_supported() })
+}
+
 async fn list_terms(State(n): State<Node>, Query(q): Query<TermListQuery>) -> Json<Vec<TermInfo>> {
     Json(n.0.terms.list(&q))
 }
@@ -860,3 +936,36 @@ async fn term_attach_session(node: Node, id: String, mut ws: WebSocket) {
     let _ = sink.close().await;
     tracing::debug!(term = %id, client, "terminal client detached");
 }
+
+
+// FR-G14, FR-G15: commit detail, revert and cherry-pick.
+async fn git_commit_show_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitShowRequest>) -> ApiResult<git_commit::GitCommitShowResponse> {
+    Ok(Json(git_commit::show(&n.0.policy, &r).await?))
+}
+
+async fn git_revert_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_commit::revert(&n.0.policy, &r).await?))
+}
+
+async fn git_cherry_pick_handler(State(n): State<Node>, Json(r): Json<git_commit::GitCommitActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_commit::cherry_pick(&n.0.policy, &r).await?))
+}
+// End FR-G14, FR-G15.
+
+// FR-G16, FR-G17: merge state, abort and commit.
+async fn git_merge_state_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_merge::GitMergeState> {
+    Ok(Json(git_merge::state(&n.0.policy, &r).await?))
+}
+
+async fn git_merge_abort_handler(State(n): State<Node>, Json(r): Json<git_merge::GitMergeActionRequest>) -> ApiResult<git_merge::GitMergeAborted> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_merge::abort(&n.0.policy, &r).await?))
+}
+
+async fn git_merge_commit_handler(State(n): State<Node>, Json(r): Json<git_merge::GitMergeActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_merge::commit(&n.0.policy, &r).await?))
+}
+// End FR-G16, FR-G17.

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, StartRequest};
+use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, Probe, StartRequest};
 use crate::events::{AgentEvent, ApprovalDecision, SessionStatus};
 use crate::projects::Project;
 use crate::schedules::{Schedule, ScheduleRun};
@@ -132,6 +132,17 @@ pub type MessageHook = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub type UserMessageHook =
     Arc<dyn Fn(String, String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
+/// The `harness_settings` key of the per-harness memory limit (FR-L20).
+pub const MEM_LIMIT_KEY: &str = "mem_limit_mb";
+/// Smallest accepted memory limit in MiB. An UNMEASURED assumption (FR-L20): nobody measured the
+/// least memory a real agent needs.
+pub const MEM_LIMIT_MIN_MB: u64 = 256;
+/// Largest accepted memory limit in MiB (256 GiB): stops typos and keeps the shim's byte
+/// arithmetic far from overflow.
+pub const MEM_LIMIT_MAX_MB: u64 = 262_144;
+/// The fixed refusal text for an out-of-range limit.
+pub const MEM_LIMIT_RANGE_MESSAGE: &str = "mem_limit_mb must be 0 (clear) or between 256 and 262144 MiB";
+
 pub struct Sessions {
     store: Arc<Store>,
     start_hooks: std::sync::Mutex<Vec<StartHook>>,
@@ -194,6 +205,54 @@ impl Sessions {
                 m.remove(&agent);
             }
         }
+    }
+
+    /// Load every stored `mem_limit_mb` into memory (FR-L20, FR-S8). Call once at startup, after
+    /// the store is open. A value that is not a `u64`, is outside
+    /// [`MEM_LIMIT_MIN_MB`]..=[`MEM_LIMIT_MAX_MB`], or belongs to a harness that is no longer a
+    /// known agent is ignored with a warning that names the harness only.
+    pub fn load_settings(&self) {
+        let rows = match self.store.harness_settings_with_key(MEM_LIMIT_KEY) {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("agent settings could not be read: {e:#}");
+                return;
+            }
+        };
+        for (harness, value) in rows {
+            let Some(agent) = AgentKind::parse(&harness) else {
+                tracing::warn!(harness = %harness, "stored agent memory limit ignored: unknown harness");
+                continue;
+            };
+            match value.parse::<u64>() {
+                Ok(mb) if (MEM_LIMIT_MIN_MB..=MEM_LIMIT_MAX_MB).contains(&mb) => {
+                    self.set_mem_limit_mb(agent, Some(mb));
+                }
+                _ => tracing::warn!(harness = %harness, "stored agent memory limit ignored: invalid value"),
+            }
+        }
+    }
+
+    /// Set (`Some(mb)`) or clear (`None`, `Some(0)`) the limit for `agent`, store it and apply it
+    /// to agents started from now on (FR-L20, FR-S8). The range is checked here; an out-of-range
+    /// value is an error and nothing changes. Store first, memory second, so a failed write never
+    /// leaves a limit that a restart would lose.
+    pub fn set_mem_limit_persisted(&self, agent: AgentKind, limit: Option<u64>) -> anyhow::Result<()> {
+        match limit.filter(|mb| *mb > 0) {
+            None => {
+                self.store.clear_harness_setting(agent.as_str(), MEM_LIMIT_KEY)?;
+                self.set_mem_limit_mb(agent, None);
+            }
+            Some(mb) => {
+                anyhow::ensure!(
+                    (MEM_LIMIT_MIN_MB..=MEM_LIMIT_MAX_MB).contains(&mb),
+                    "{MEM_LIMIT_RANGE_MESSAGE}"
+                );
+                self.store.set_harness_setting(agent.as_str(), MEM_LIMIT_KEY, &mb.to_string())?;
+                self.set_mem_limit_mb(agent, Some(mb));
+            }
+        }
+        Ok(())
     }
 
     /// The memory limit in MiB for the next agent of `agent`, if one was set.
@@ -280,6 +339,29 @@ impl Sessions {
             if adapter.kind() != AgentKind::Scripted {
                 out.push(adapter.detect().await);
             }
+        }
+        out.sort_by_key(|d| d.kind.as_str());
+        out
+    }
+
+    /// [`Sessions::detect_agents`] with where each CLI was found and when (FR-A6.1). Runs every
+    /// probe now; nothing is cached.
+    pub async fn probe_agents(&self) -> Vec<Probe> {
+        let mut out = Vec::new();
+        for adapter in self.adapters.values() {
+            if adapter.kind() == AgentKind::Scripted {
+                continue;
+            }
+            let d = adapter.detect().await;
+            let path = adapter
+                .binary()
+                .and_then(|b| crate::agents::resolve_executable(&b))
+                .map(|p| p.to_string_lossy().into_owned());
+            let detected_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|t| t.as_millis() as i64)
+                .unwrap_or(0);
+            out.push(Probe { kind: d.kind, installed: d.installed, version: d.version, path, detected_at });
         }
         out.sort_by_key(|d| d.kind.as_str());
         out

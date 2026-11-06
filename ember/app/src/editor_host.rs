@@ -14,6 +14,13 @@ pub enum HostCommand {
     Focus(String),
     Widget(UriComponents, u64, WidgetEvent),
     Resync(UriComponents),
+    /// Explorer edits through the OSE file channel; each lists the parent directory again after.
+    CreateFile { parent: String, name: String },
+    CreateDir { parent: String, name: String },
+    Rename { path: String, new_name: String },
+    /// List every file below the project folder for quick open.
+    IndexFiles,
+    Delete { path: String, is_dir: bool },
 }
 
 #[derive(Default)]
@@ -21,6 +28,20 @@ pub struct HostState {
     pub connected: bool,
     pub error: Option<String>,
     pub entries: Vec<(String, u32)>,
+    /// Every directory listed so far, by path, for the explorer tree.
+    pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
+    /// The files below the project folder as palette items (sorted), as far as the index has got.
+    pub file_items: Arc<Vec<crate::ui::palette::Item>>,
+    /// The index is still being built.
+    pub index_running: bool,
+    /// The index stopped at its cap: the list is not complete.
+    pub index_capped: bool,
+    /// Failures of explorer edits, for the window to show once.
+    pub edit_errors: Vec<String>,
+    /// Paths an explorer edit deleted, for the window to close their tabs.
+    pub gone: Vec<String>,
+    /// (old, new) paths an explorer edit renamed, for the window to move their tabs.
+    pub renamed: Vec<(String, String)>,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -51,6 +72,19 @@ impl HostState {
         }
     }
 
+    /// Store the listing of one directory for the tree, and keep it as the current entries.
+    pub fn set_dir_listing<E: std::fmt::Display>(&mut self, dir: &str, result: Result<Vec<(String, u32)>, E>) {
+        if let Ok(entries) = &result {
+            self.listings.insert(dir.to_string(), entries.clone());
+        }
+        self.set_listing(result);
+    }
+
+    /// Forget the listings of a path that was deleted or renamed and of everything below it.
+    pub fn forget_below(&mut self, path: &str) {
+        self.listings.retain(|dir, _| !crate::ui::editor::is_at_or_below(dir, path));
+    }
+
     /// Handle one session update: connection loss is recorded, every update is queued in order.
     pub fn apply_update(&mut self, update: SessionUpdate) {
         if let SessionUpdate::ConnectionLost { reason } = &update {
@@ -63,6 +97,77 @@ impl HostState {
     pub fn take_updates(&mut self) -> Vec<SessionUpdate> {
         std::mem::take(&mut self.updates)
     }
+}
+
+/// How many files and directories the quick open index takes before it stops.
+const INDEX_MAX_FILES: usize = 20_000;
+const INDEX_MAX_DIRS: usize = 5_000;
+/// The list is published to the window every this many directories while the walk goes on.
+const INDEX_PUBLISH_EVERY: usize = 200;
+
+/// Walks the project below `root`, breadth first, through the OSE file channel and keeps `shared`
+/// up to date: the files so far every few hundred directories and the finished list at the end.
+/// Directories the index does not enter are named by [`crate::ui::palette::skipped_directory`]; a
+/// symbolic link to a directory is not followed.
+async fn index_files(lister: ember_editor::DirLister, root: String, shared: Arc<Mutex<HostState>>, mut revision: SyncSignal<u64>) {
+    use ember_editor_conn::remote_fs::file_type::{DIRECTORY, SYMBOLIC_LINK};
+    let mut files: Vec<String> = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root.clone()]);
+    let mut visited = 0usize;
+    let mut capped = false;
+    while let Some(dir) = queue.pop_front() {
+        if files.len() >= INDEX_MAX_FILES || visited >= INDEX_MAX_DIRS {
+            capped = true;
+            break;
+        }
+        visited += 1;
+        let Ok(entries) = lister.read_dir(&dir).await else { continue };
+        let siblings: Vec<(String, u32)> = entries.clone();
+        for (name, kind) in entries {
+            let path = crate::ui::editor_workbench::join_path(&dir, &name);
+            if kind & DIRECTORY != 0 {
+                if !crate::ui::palette::skipped_directory(&name, &siblings) && kind & SYMBOLIC_LINK == 0 {
+                    queue.push_back(path);
+                }
+            } else if name != ".DS_Store" {
+                files.push(path);
+            }
+        }
+        if visited % INDEX_PUBLISH_EVERY == 0 {
+            shared.lock().unwrap().file_items = Arc::new(crate::ui::palette::file_items(&root, &files));
+            *revision.write() += 1;
+        }
+    }
+    {
+        let mut state = shared.lock().unwrap();
+        state.file_items = Arc::new(crate::ui::palette::file_items(&root, &files));
+        state.index_running = false;
+        state.index_capped = capped;
+    }
+    *revision.write() += 1;
+}
+
+fn parent_of(path: &str) -> String {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+    }
+}
+
+/// After an explorer edit: record a failure for the window, then list the parent again so the tree
+/// shows what is on disk.
+async fn finish_edit(session: &ember_editor::EditorSession, shared: &Arc<Mutex<HostState>>, action: &str, parent: &str, result: Result<(), ember_editor::Error>) {
+    if let Err(error) = result {
+        // The window shows a Korean reason; the server's own text goes to the log.
+        tracing::warn!("explorer edit failed ({action}): {error}");
+        let text = match &error {
+            ember_editor::Error::Path(path) => format!("{action} 실패: {path}"),
+            other => crate::ui::editor::edit_failure_text(action, &other.to_string()),
+        };
+        shared.lock().unwrap().edit_errors.push(text);
+    }
+    let listed = session.read_dir(&session.uri(parent)).await;
+    shared.lock().unwrap().set_dir_listing(parent, listed);
 }
 
 #[derive(Clone)]
@@ -82,6 +187,7 @@ impl EditorHost {
                 *revision.write() += 1;
                 return;
             }
+            let root = target.folder.clone();
             let mut config = SessionConfig::new(target.endpoint, target.folder);
             config.connection_token = (!target.token.is_empty()).then_some(target.token);
             config.app_language = "ko".into();
@@ -97,15 +203,57 @@ impl EditorHost {
                 let entries = session.read_dir(&session.workspace_uri()).await;
                 let mut state = shared.lock().unwrap();
                 state.connected = true;
-                state.set_listing(entries);
+                state.set_dir_listing(&root, entries);
             }
             *revision.write() += 1;
+            let mut index_task: Option<tokio::task::JoinHandle<()>> = None;
             loop {
                 tokio::select! {
                     command = rx.recv() => match command {
                         Some(HostCommand::List(path)) => {
                             let result = session.read_dir(&session.uri(&path)).await;
-                            shared.lock().unwrap().set_listing(result);
+                            shared.lock().unwrap().set_dir_listing(&path, result);
+                        }
+                        Some(HostCommand::CreateFile { parent, name }) => {
+                            let result = session.create_file(&parent, &name).await;
+                            finish_edit(&session, &shared, "새 파일", &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::CreateDir { parent, name }) => {
+                            let result = session.create_dir(&parent, &name).await;
+                            finish_edit(&session, &shared, "새 폴더", &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::Rename { path, new_name }) => {
+                            let parent = parent_of(&path);
+                            let result = session.rename_path(&path, &new_name).await;
+                            if let Ok(new_path) = &result {
+                                let mut state = shared.lock().unwrap();
+                                state.forget_below(&path);
+                                state.renamed.push((path.clone(), new_path.clone()));
+                            }
+                            finish_edit(&session, &shared, "이름 변경", &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::Delete { path, is_dir }) => {
+                            let parent = parent_of(&path);
+                            let result = session.delete_path(&path, is_dir).await;
+                            if result.is_ok() {
+                                let mut state = shared.lock().unwrap();
+                                state.forget_below(&path);
+                                state.gone.push(path.clone());
+                            }
+                            finish_edit(&session, &shared, "삭제", &parent, result).await;
+                        }
+                        Some(HostCommand::IndexFiles) => {
+                            // A fresh index replaces the last one and a running one is cancelled; the walk runs
+                            // in a task of its own so the session keeps answering while it goes.
+                            if let Some(task) = index_task.take() { task.abort(); }
+                            {
+                                let mut state = shared.lock().unwrap();
+                                state.file_items = Arc::new(Vec::new());
+                                state.index_running = true;
+                                state.index_capped = false;
+                            }
+                            *revision.write() += 1;
+                            index_task = Some(tokio::spawn(index_files(session.lister(), root.clone(), shared.clone(), revision)));
                         }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }
@@ -123,6 +271,7 @@ impl EditorHost {
                 }
                 *revision.write() += 1;
             }
+            if let Some(task) = index_task.take() { task.abort(); }
         });
         Self { state, tx }
     }

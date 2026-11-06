@@ -509,6 +509,47 @@ Sections on the left (pills at 900 and below):
 - **사용량**: today's tokens, 7/14-day bars, token kinds (`FR-U7`, "unknown" never estimated), cost
   by harness (donut) and by model (bars), account rings per provider.
 
+#### Harness detect API (hand-off to the app session, `FR-A6.1`)
+
+Server side is written (not compiled yet). The app still has to change two things in
+`ember/app/src/ui/cr/agents.rs`:
+
+- Route: `POST /api/computers/{id}/harnesses/detect` (no body; `local` for this server) answers
+  `[{"harness": "claude-code", "installed": true, "version": "2.1.288", "path": "/usr/local/bin/claude",
+  "detected_at": 1761900000000}]`. `harness` is the kind string `GET /api/agents` calls `kind`.
+  `version` and `path` are `null` when unknown; `detected_at` is epoch ms. Another registered
+  computer answers 501 `{error, code: "not_implemented"}` (node probe open), an unknown id 404.
+  `GET /api/agents` keeps `kind`, `installed`, `version` and gains `path` and `detected_at`.
+- Change 1: drop the `unwrap_or("1.0.0")` fallbacks (lines 920, 939, 942). With no version, show
+  "버전 알 수 없음" in the subtitle and the pill, and never `v1.0.0`.
+- Change 2: the 다시 찾기 button calls the route for the selected computer, replaces that
+  harness's `installed`, `version` and `path` from the answer, and posts the notice from the
+  answer ("Codex v0.46.0을 찾았습니다", or "찾지 못했습니다" when `installed` is false, or "버전을
+  알 수 없습니다" when installed without a version). On 501 post "이 컴퓨터에서는 아직 다시 찾을 수
+  없습니다". The client needs `Api::detect_harnesses(computer_id)` and the extra `path` and
+  `detected_at` fields on `DetectedAgent` (tolerant defaults).
+
+#### Gemini harness card (hand-off to the app session, `FR-A10`)
+
+Server side is written (CI compiled and ran its fake-agent tests green at 68ad53c; the real CLI never ran: `FR-A10g` UNVERIFIED), so the card stays
+"preparing" in the app until the owner or a runner has run `ember/server/tests/acp_gemini.rs`.
+`gemini` is opt-in (`EMBER_ACP_AGENTS=["gemini"]`) and then appears in `GET /api/agents` and in the
+detect route like the other harnesses. The app has to render:
+
+- The card label **"API key / Enterprise only"** (`INTENT.md` D40), with the line "Individual Google
+  accounts are no longer served by the Gemini CLI, use Antigravity" and a link to the Antigravity card.
+- A new event kind `{"kind": "turn_error", "code": "auth_required" | "quota_exceeded", "message": ...}`,
+  always followed by `turn_ended` with `outcome: "failed"`. Until the client knows it, an older client
+  decodes it as `Unknown` and shows only the failed turn.
+  **The app reducer must render `auth_required` and `quota_exceeded`:** today it ignores `Unknown`, so
+  without this work the user sees only a failed turn. Messages are redacted and at most 300 characters.
+  - `auth_required`: show the message verbatim, `sign in needed: set GEMINI_API_KEY (individual Google
+    accounts are no longer served by the Gemini CLI, use Antigravity)`, with a "use Antigravity" action.
+  - `quota_exceeded`: show the agent's message as a quota or rate-limit notice. The session stays usable
+    and the next message runs.
+- The usage chip for a gemini session says "not measured" while `GET /api/sessions/{id}/usage` has
+  `reported: false` (`FR-U7`); never a zero.
+
 ### 6.8 파일 (Files)
 
 The screen for file transfer between the user's devices (D24 and `FR-F1`..`FR-F9`, in PR #153).

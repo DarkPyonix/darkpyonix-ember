@@ -278,6 +278,92 @@ pub fn request_usage_summary() {
     s.spawn(async move { fetch_usage_summary(services()).await });
 }
 
+/// Minimum gap between two timer reads of the GitHub card (the server caches for 90 s).
+const GITHUB_MIN_GAP: Duration = Duration::from_secs(90);
+static GITHUB_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Whether the timer may read the GitHub card now (FR-G13): only while Home is shown, never in
+/// the demo, and not before the server cache time has passed since the last read.
+pub fn should_poll_github(route_is_home: bool, last_fetch_age: Option<Duration>, min_gap: Duration, demo: bool) -> bool {
+    route_is_home && !demo && last_fetch_age.is_none_or(|a| a >= min_gap)
+}
+
+/// Ask for the GitHub card now (Home opened, FR-L35). Not in the demo, which shows a sample.
+pub fn request_github_summary() {
+    let s = services();
+    if s.demo.is_some() {
+        return;
+    }
+    s.spawn(async move { fetch_github(services(), true).await });
+}
+
+/// Read `GET /api/integrations/github`. The timer passes `force = false` and is held to the
+/// server cache time. A failed call keeps the last answer.
+async fn fetch_github(s: &'static Services, force: bool) {
+    if s.demo.is_some() {
+        return;
+    }
+    {
+        let mut last = GITHUB_LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let home = s.ui.menu.get_untracked() == crate::ui::shell::NavMenu::Home;
+        if !force && !should_poll_github(home, last.map(|t| t.elapsed()), GITHUB_MIN_GAP, false) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let got = s.client.api().github_summary().await.map_err(|e| e.to_string());
+    let old = s.ui.live.github.get_untracked();
+    let new = crate::ui::home::GithubFetch::settle(&old, got.map(|g| crate::ui::home::github_state_from(&g)));
+    if new != old {
+        s.ui.live.github.set(new);
+    }
+}
+
+/// Run the harness detection again (`POST /api/computers/local/harnesses/detect`, FR-A6.1) and
+/// say how it ended in `agents_rescan` (FR-L21). Nothing is reported before the answer arrived.
+/// The demo re-reads its canned list and marks the sentence 예시. The sentence returns to
+/// the idle button label after a few seconds.
+pub fn rescan_agents() {
+    use crate::ui::agents::{self as ag, Rescan};
+    let s = services();
+    if matches!(s.ui.live.agents_rescan.get_untracked(), Rescan::Running) {
+        return;
+    }
+    s.ui.live.agents_rescan.set(Rescan::Running);
+    s.spawn(async move {
+        let s = services();
+        let before = s.ui.live.agents.get_untracked();
+        let demo = s.demo.is_some();
+        let got: Result<Vec<_>, ag::RescanFailure> = if demo {
+            Ok(crate::demo::agents())
+        } else {
+            match s.client.api().detect_harnesses("local").await {
+                Ok(v) => Ok(ag::detect_to_agents(&v)),
+                Err(e) => {
+                    tracing::debug!("harness detect failed: {e}");
+                    Err(ag::rescan_failure(e.status(), e.code()))
+                }
+            }
+        };
+        let mut sentence = ag::rescan_sentence(&before, got.as_deref().map_err(|e| *e));
+        if demo {
+            sentence.push_str(" (예시)");
+        }
+        if let Ok(fresh) = got {
+            let at = if demo { Some(crate::demo::now_ms().max(0) as u64) } else { ag::latest_detected_at(&fresh) };
+            if at.is_some() {
+                s.ui.live.agents_checked_ms.set(at);
+            }
+            s.ui.live.agents.set(ag::merge_detected(&before, &fresh));
+        }
+        s.ui.live.agents_rescan.set(Rescan::Done(sentence.clone()));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        if s.ui.live.agents_rescan.get_untracked() == Rescan::Done(sentence) {
+            s.ui.live.agents_rescan.set(Rescan::Idle);
+        }
+    });
+}
+
 /// Ask for today's tokens of `project` (the Session status tile). Only the first call per
 /// project starts a request; the slow timer refreshes it.
 pub fn request_project_day(project: &str) {
@@ -409,9 +495,14 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
         Err(e) => tracing::debug!("usage refresh failed: {e}"),
     }
     fetch_usage_summary(s).await;
+    if !first {
+        fetch_github(s, false).await;
+    }
     fetch_project_days(s).await;
     match s.client.agents().await {
         Ok(a) => {
+            s.ui.live.agents_checked_ms
+                .set(Some(crate::ui::agents::latest_detected_at(&a).unwrap_or_else(|| crate::demo::now_ms().max(0) as u64)));
             s.ui.live.agents.set(a.clone());
             if let Some(mut live) = live {
                 if *live.agents.peek() != a {
@@ -428,5 +519,20 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
             s.client.apply(Input::ComputersLoaded(merged));
         }
         Err(e) => tracing::debug!("computers refresh failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod github_poll_tests {
+    use super::*;
+
+    #[test]
+    fn fr_g13_github_poll_only_on_home() {
+        let gap = Duration::from_secs(90);
+        assert!(should_poll_github(true, None, gap, false));
+        assert!(should_poll_github(true, Some(Duration::from_secs(100)), gap, false));
+        assert!(!should_poll_github(false, Some(Duration::from_secs(100)), gap, false));
+        assert!(!should_poll_github(true, Some(Duration::from_secs(100)), gap, true));
+        assert!(!should_poll_github(true, Some(Duration::from_secs(10)), gap, false));
     }
 }

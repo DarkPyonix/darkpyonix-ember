@@ -11,8 +11,18 @@
 //! [`GitError::TooLarge`].
 
 
+#[path = "git_branches.rs"]
+pub mod git_branches;
+#[path = "git_commit.rs"]
+pub mod git_commit;
+#[path = "git_github.rs"]
+pub mod git_github;
 #[path = "git_log.rs"]
 pub mod git_log;
+#[path = "git_merge.rs"]
+pub mod git_merge;
+#[path = "git_prs.rs"]
+pub mod git_prs;
 #[path = "git_stash.rs"]
 pub mod git_stash;
 
@@ -152,6 +162,9 @@ pub enum GitError {
     Bad(String),
     #[error("{0}")]
     Conflict(String),
+    /// The named object (a commit) does not exist (404 `not_found`).
+    #[error("{0}")]
+    NotFound(String),
     #[error("{0}")]
     Internal(String),
     /// A network operation did not finish in time (504).
@@ -221,19 +234,41 @@ async fn run_net(repo: &Path, args: &[&str]) -> Result<Out, GitError> {
     run_with(repo, args, None, Some(network_timeout())).await
 }
 
+/// The `core.sshCommand` git would use here (repository, then global config), if any.
+async fn configured_ssh_command(repo: &Path) -> Option<String> {
+    let out = tokio::process::Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(repo)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// The ssh command for a network operation: the configured one (or plain `ssh`) in batch mode.
+fn batch_ssh_command(configured: Option<&str>) -> String {
+    format!("{} -o BatchMode=yes", configured.unwrap_or("ssh"))
+}
+
 async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
     let mut cmd = tokio::process::Command::new("git");
     // Non-ASCII paths stay raw (not octal-quoted), pathspecs are literal (`a[1].txt`, `*.rs`),
-    // and nothing may wait for a person: no terminal, credential or ssh prompt.
+    // and nothing may wait for a person: no terminal, credential or ssh prompt. The user's own
+    // askpass (`GIT_ASKPASS`, `core.askPass`, `SSH_ASKPASS`) and credential helper are kept; with
+    // none configured, `GIT_TERMINAL_PROMPT=0` makes an unanswered prompt fail.
     cmd.args(["-c", "core.quotepath=false"])
         .args(args)
         .current_dir(repo)
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
-        .env("GIT_ASKPASS", "true")
+        // A revert or cherry-pick never opens an editor for its message.
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
         .env("SSH_ASKPASS_REQUIRE", "never")
-        .env_remove("SSH_ASKPASS")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -246,10 +281,47 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
     if !args.starts_with(&["stash", "push"]) {
         cmd.env("GIT_LITERAL_PATHSPECS", "1");
     }
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    // Network operations never ask for an ssh password. GIT_SSH_COMMAND outranks the user's
+    // `core.sshCommand` (keys, proxy jump), so when the variable is unset the configured command
+    // is read and kept, with BatchMode appended.
+    if deadline.is_some() && std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", batch_ssh_command(configured_ssh_command(repo).await.as_deref()));
     }
-    let mut child = cmd.spawn().map_err(|e| GitError::Internal(format!("cannot run git: {e}")))?;
+    exec_cmd(cmd, "git", stdin, deadline).await
+}
+
+/// SIGKILL every process of the group led by `pid` (see `process_group(0)` in [`exec_cmd`]).
+#[cfg(unix)]
+fn kill_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // SAFETY: plain signal delivery to a process group id this function's caller created.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_pid: Option<u32>) {}
+
+/// Spawn a prepared command with piped output, the stdout cap and an optional deadline. Shared
+/// by git and the `gh` runner of FR-G8.
+async fn exec_cmd(mut cmd: tokio::process::Command, what: &str, stdin: Option<&str>, deadline: Option<Duration>) -> Result<Out, GitError> {
+    // A deadline marks a network command: it runs in its own process group, so a timeout or the
+    // output cap can end the whole tree (git, ssh, credential helpers), not only git.
+    #[cfg(unix)]
+    if deadline.is_some() {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound && what != "git" {
+            // A companion program (`gh`) that is not installed is a state the person can fix.
+            GitError::Conflict(format!("{what} 명령을 찾을 수 없습니다. 설치되어 있는지 확인하세요.\n{e}"))
+        } else {
+            GitError::Internal(format!("cannot run {what}: {e}"))
+        }
+    })?;
+    let group = if deadline.is_some() { child.id() } else { None };
     let pipe = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -264,6 +336,7 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         let ((out, over), (err, _), ()) =
             tokio::join!(read_capped(stdout, cap), read_capped(stderr, MAX_STDERR_BYTES), write);
         if over {
+            kill_group(group);
             let _ = child.kill().await;
         }
         let status = child.wait().await.map_err(|e| GitError::Internal(e.to_string()))?;
@@ -279,6 +352,7 @@ async fn run_with(repo: &Path, args: &[&str], stdin: Option<&str>, deadline: Opt
         Some(d) => match tokio::time::timeout(d, work).await {
             Ok(r) => r,
             Err(_) => {
+                kill_group(group);
                 let _ = child.kill().await;
                 Err(GitError::Timeout(format!(
                     "원격 저장소가 {}초 안에 응답하지 않아 중단했습니다 (네트워크 연결이나 인증 대기를 확인하세요).",
@@ -708,6 +782,18 @@ pub async fn pull_fetch(policy: &PathPolicy, r: &GitRemoteRequest) -> Result<Git
     require_branch(&dir).await?;
     if !has_upstream(&dir).await? {
         return Err(GitError::Conflict(korean_message("no tracking information").unwrap_or("no upstream").to_string()));
+    }
+    // The merge takes the upstream, so pulling from another remote would merge what was not
+    // fetched. Refuse before the network is touched.
+    if let Some(name) = remote.as_deref() {
+        let branch = run_ok(&dir, &["symbolic-ref", "--short", "HEAD"], None).await?.stdout.trim().to_string();
+        let key = format!("branch.{branch}.remote");
+        let up = run(&dir, &["config", "--get", &key], None).await?.stdout.trim().to_string();
+        if !up.is_empty() && up != name {
+            return Err(GitError::Conflict(format!(
+                "현재 브랜치의 업스트림은 {up}입니다. 그 원격으로 풀 하세요."
+            )));
+        }
     }
     let mut args = vec!["fetch"];
     args.extend(remote.as_deref());

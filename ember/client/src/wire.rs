@@ -157,7 +157,7 @@ impl SessionRecord {
 }
 
 /// A project and the computers assigned to it (server `projects::Project`, FR-L4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     #[serde(default)]
@@ -165,6 +165,76 @@ pub struct Project {
     /// Assigned computer ids (`local` = the main server itself), sorted.
     #[serde(default)]
     pub computers: Vec<String>,
+    /// Repository address (FR-L26); `None` when none is set or the server is older.
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    /// Defaults for new members; `None` or `null` reads as no defaults.
+    #[serde(default)]
+    pub member_defaults: Option<MemberDefaults>,
+    /// `mongle`, `malang`, `crew`, `pocket`, `cream` or `keyring`.
+    #[serde(default)]
+    pub character_style: Option<String>,
+    #[serde(default)]
+    pub archived: bool,
+    /// Harness to account id (FR-L26); `null` for a harness whose account was deleted. `{}`, a
+    /// missing field or `null` reads as no overrides.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub profile_overrides: std::collections::BTreeMap<String, Option<String>>,
+}
+
+fn null_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// New member defaults of a project (FR-L26): harness kind, model id and permission mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl MemberDefaults {
+    pub fn is_empty(&self) -> bool {
+        self.agent.is_none() && self.model.is_none() && self.mode.is_none()
+    }
+}
+
+/// `PATCH /projects/{name}` body (FR-L26). `None` fields are omitted. For the text fields an
+/// empty string clears; `member_defaults: Some(None)` sends `null` and clears. The client never
+/// sends `leader_session` or `archived` (the server answers 400 `not_yet`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProjectPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_defaults: Option<Option<MemberDefaults>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character_style: Option<String>,
+    /// The whole map, harness to account id (`Some(map)` replaces the stored one, an empty map
+    /// clears all). The field is never sent as `null` (the server answers 400).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_overrides: Option<std::collections::BTreeMap<String, Option<String>>>,
+}
+
+impl ProjectPatch {
+    /// True when nothing changed, so there is nothing to send.
+    pub fn is_empty(&self) -> bool {
+        *self == ProjectPatch::default()
+    }
 }
 
 /// `PATCH /sessions/{id}` body (FR-L9); `None` fields are left alone.
@@ -284,12 +354,18 @@ impl From<&SessionDetail> for ForkInfo {
 }
 
 /// `GET /agents` entry.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct DetectedAgent {
     pub kind: String,
     pub installed: bool,
     #[serde(default)]
     pub version: Option<String>,
+    /// Where the binary was found; `None` when the server did not report one (FR-A6.1).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// When the server last probed (epoch ms); `None` when not reported.
+    #[serde(default)]
+    pub detected_at: Option<i64>,
 }
 
 /// `POST /sessions` body.

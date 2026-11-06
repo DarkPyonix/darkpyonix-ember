@@ -11,6 +11,7 @@
 #   node-units           .github/scripts/checks/check-node-units.sh + its test (SPEC FR-P6)
 #   no-em-dash           .github/scripts/checks/check-no-em-dash.sh (AGENTS.md writing rules)
 #   rust                 cargo test for each ember/<crate> dir that exists
+#   oniguruma            the editor core links Oniguruma (a C library) on Windows and macOS too
 name: Test
 
 on:
@@ -24,7 +25,9 @@ permissions:
 
 concurrency:
   group: checks-${{ github.ref }}
-  cancel-in-progress: true
+  # Feature branches and PRs cancel a superseded run; develop, main and release finish every run
+  # so each merge keeps its own result.
+  cancel-in-progress: ${{ !contains(fromJSON('["refs/heads/develop","refs/heads/main","refs/heads/release"]'), github.ref) }}
 
 jobs:
   transport-isolation:
@@ -159,6 +162,30 @@ jobs:
           fi
           exit "$fail"
 
+  oniguruma:
+    name: Oniguruma builds (${{ matrix.os }})
+    # onig_sys compiles the C library with `cc`. Linux is covered by "Cargo test (editor)"; these two
+    # prove a C compiler and the library build on the other desktop platforms.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ember/editor
+      - name: cargo test (Oniguruma link test)
+        working-directory: ember/editor
+        run: cargo test --locked --test onig_link
+
   rust:
     name: Cargo test (${{ matrix.crate }})
     runs-on: ubuntu-latest
@@ -166,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [server, node, transport, hub, client, bridge, editor-conn, editor, app]
+        crate: [server, node, transport, transfer, hub, client, bridge, editor-conn, editor, app]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always

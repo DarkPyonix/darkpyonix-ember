@@ -118,9 +118,21 @@ async fn fr_n5_letify_transport_close_ends_connections() {
     let (a, b, _dir) = letify_pair().await;
     let mut listener = b.listen("svc").unwrap();
     let conn = a.connect(b.peer_id(), "svc").await.unwrap();
-    let _accepted = listener.accept().await.unwrap();
+    let accepted = listener.accept().await.unwrap();
+    let closed_at = std::time::Instant::now();
     b.close().await;
-    tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.unwrap();
+    // A lost Close frame would take the client 45 s (dead path) or 300 s (resume window) to
+    // notice, so a 5 s miss is either that or a runner stall. Say which one in the failure (#411):
+    // how long it took, what path the client thought it had, and what the accepted side saw.
+    if tokio::time::timeout(Duration::from_secs(5), conn.closed()).await.is_err() {
+        panic!(
+            "the client connection was still open {:?} after the listening side closed; \
+             client path_state {:?}; accepted side closed within 100 ms: {}",
+            closed_at.elapsed(),
+            conn.path_state(),
+            tokio::time::timeout(Duration::from_millis(100), accepted.closed()).await.is_ok()
+        );
+    }
     // Nothing listens at the peer's address any more: the dial fails at once, not after a timeout.
     let started = std::time::Instant::now();
     assert!(a.connect(b.peer_id(), "svc").await.is_err());

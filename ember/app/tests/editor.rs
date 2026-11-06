@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use ember_app::prefs::{self, Prefs};
-use ember_app::ui::editor::{position_text, EditorTabs, Side, Stripes, ToolWindow};
+use ember_app::ui::editor::{position_text, DoubleShift, EditorTabs, Side, Stripes, ToolWindow};
 use ember_app::ui::keymap::{Action, Chord, Keymap, Os};
 
 const OSES: [Os; 2] = [Os::Mac, Os::Other];
@@ -233,4 +233,302 @@ fn fr_l31_editor_target_is_empty_until_the_launch_arrives() {
     assert_eq!(IdeLaunch::editor_target(None), none);
     let err = Err("down".to_string());
     assert_eq!(IdeLaunch::editor_target(Some(&err)), none);
+}
+
+// FR-L30: JetBrains' search everywhere is Shift pressed twice, so two Shift presses close together make
+// that chord and nothing else does.
+#[test]
+fn fr_l30_two_shift_presses_close_together_are_double_shift() {
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, false, false, false, 1_000));
+    assert!(d.press("Shift", false, false, false, false, 1_300));
+    // The pair is used up: a third press starts a new one.
+    assert!(!d.press("Shift", false, false, false, false, 1_400));
+    assert_eq!(
+        Keymap::JetBrains.action_for(&Chord::DoubleShift, Os::Mac),
+        Some(Action::Find)
+    );
+    assert_eq!(Keymap::VsCode.action_for(&Chord::DoubleShift, Os::Mac), None);
+}
+
+#[test]
+fn fr_l30_double_shift_needs_two_bare_shift_presses_within_the_window() {
+    let mut d = DoubleShift::default();
+    // Too slow.
+    assert!(!d.press("Shift", false, false, false, false, 0));
+    assert!(!d.press("Shift", false, false, false, false, 900));
+    // Another key in between breaks the pair, as typing a capital letter would.
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, false, false, false, 0));
+    assert!(!d.press("P", false, false, false, false, 100));
+    assert!(!d.press("Shift", false, false, false, false, 200));
+    // Holding Shift repeats the key down event; that is one press.
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, false, false, false, 0));
+    assert!(!d.press("Shift", true, false, false, false, 100));
+    // Shift with another modifier is not a bare Shift.
+    let mut d = DoubleShift::default();
+    assert!(!d.press("Shift", false, true, false, false, 0));
+    assert!(!d.press("Shift", false, true, false, false, 100));
+}
+
+// FR-L31 (D38): the explorer is a tree of the folder, directories first, children indented,
+// a directory's children shown only while it is expanded and once they have been listed.
+mod tree {
+    use super::*;
+    use ember_app::ui::editor::{tree_rows, TreeRow};
+    use std::collections::HashSet;
+
+    const DIR: u32 = ember_editor_conn::remote_fs::file_type::DIRECTORY;
+    const FILE: u32 = ember_editor_conn::remote_fs::file_type::FILE;
+
+    fn listings() -> HashMap<String, Vec<(String, u32)>> {
+        HashMap::from([
+            ("/p".to_string(), vec![("b.rs".to_string(), FILE), ("src".to_string(), DIR), ("A.md".to_string(), FILE)]),
+            ("/p/src".to_string(), vec![("lib.rs".to_string(), FILE), ("deep".to_string(), DIR)]),
+        ])
+    }
+
+    fn names(rows: &[TreeRow]) -> Vec<(&str, u32)> {
+        rows.iter().map(|r| (r.name.as_str(), r.depth)).collect()
+    }
+
+    #[test]
+    fn fr_l31_collapsed_tree_lists_directories_first_then_files_by_name() {
+        let rows = tree_rows("/p", &listings(), &HashSet::new());
+        assert_eq!(names(&rows), vec![("src", 0), ("A.md", 0), ("b.rs", 0)]);
+        assert!(rows[0].is_dir && !rows[0].open);
+        assert_eq!(rows[0].path, "/p/src");
+    }
+
+    #[test]
+    fn fr_l31_expanded_directory_shows_its_children_indented() {
+        let open = HashSet::from(["/p/src".to_string()]);
+        let rows = tree_rows("/p", &listings(), &open);
+        assert_eq!(names(&rows), vec![("src", 0), ("deep", 1), ("lib.rs", 1), ("A.md", 0), ("b.rs", 0)]);
+        assert!(rows[0].open);
+    }
+
+    #[test]
+    fn fr_l31_expanded_directory_not_listed_yet_shows_no_children() {
+        let open = HashSet::from(["/p/src".to_string(), "/p/src/deep".to_string()]);
+        let rows = tree_rows("/p", &listings(), &open);
+        let deep = rows.iter().find(|r| r.name == "deep").unwrap();
+        assert!(deep.open);
+        assert_eq!(rows.len(), 5);
+    }
+}
+
+// FR-L31 (D38): the page grid is the mockup's; a closed tool window leaves a 0 wide column or a
+// 0 high row, and the stripes decide which.
+mod grid {
+    use super::*;
+    use ember_app::ui::editor::editor_grid_style;
+
+    #[test]
+    fn fr_l31_open_left_and_bottom_leave_the_tracks_to_the_stylesheet() {
+        // The stylesheet's tracks carry the width breakpoints; an inline track would override them.
+        assert_eq!(editor_grid_style(true, true), "");
+    }
+
+    #[test]
+    fn fr_l31_closed_left_column_is_zero_wide() {
+        let g = editor_grid_style(false, true);
+        assert!(g.contains("grid-template-columns:var(--stw) 0 minmax(0,1fr) var(--stw)"), "{g}");
+    }
+
+    #[test]
+    fn fr_l31_closed_bottom_row_is_zero_high() {
+        let g = editor_grid_style(true, false);
+        assert!(g.contains("grid-template-rows:52px minmax(0,1fr) 0 var(--sbh)"), "{g}");
+    }
+
+    #[test]
+    fn fr_l31_stripe_toggles_decide_the_closed_tracks() {
+        let mut s = Stripes::default();
+        let grid = |s: &Stripes| editor_grid_style(s.selected(Side::Left).is_some(), s.selected(Side::Bottom).is_some());
+        assert_eq!(grid(&s), editor_grid_style(true, true));
+        s.toggle(ToolWindow::Project);
+        assert_eq!(grid(&s), editor_grid_style(false, true));
+        s.toggle(ToolWindow::Terminal);
+        assert_eq!(grid(&s), editor_grid_style(false, false));
+        s.toggle(ToolWindow::Git);
+        assert_eq!(grid(&s), editor_grid_style(true, false));
+    }
+}
+
+// FR-L31 (D38): the maximized bottom window takes the editor's row, like the mockup's `.ed.max`.
+#[test]
+fn fr_l31_maximized_bottom_window_collapses_the_editor_row() {
+    let g = ember_app::ui::editor::editor_grid_style_maximized();
+    assert!(g.contains("grid-template-rows:52px 0 minmax(0,1fr) var(--sbh)"), "{g}");
+    assert!(!g.contains("grid-template-columns"), "{g}");
+}
+
+// FR-L31 (D38): the status bar's agent dot and path follow the mockup.
+mod status {
+    use ember_app::ui::editor::{agent_dot_class, status_crumbs};
+
+    #[test]
+    fn fr_l31_agent_dot_colours_follow_the_state() {
+        assert_eq!(agent_dot_class("승인 대기"), "dot wait");
+        assert_eq!(agent_dot_class("실행 중"), "dot run");
+        assert_eq!(agent_dot_class("완료"), "dot ok");
+        assert_eq!(agent_dot_class("팀원 없음"), "dot ok");
+    }
+
+    #[test]
+    fn fr_l31_status_path_is_the_folder_name_then_the_file_directories() {
+        assert_eq!(status_crumbs("/w/p/", None), "p");
+        assert_eq!(status_crumbs("/w/p", Some("/w/p/ember/proxy/src/shim.rs")), "p \u{203A} ember \u{203A} proxy \u{203A} src");
+        assert_eq!(status_crumbs("/w/p", Some("/w/p/README.md")), "p");
+    }
+}
+
+// FR-L31 (D38): the window opens FullSize on macOS, the top bar is the title strip.
+mod title_strip {
+    use ember_app::ui::editor::{editor_page_height, editor_strip_padding};
+
+    #[test]
+    fn fr_l31_full_size_page_is_the_window_height_and_other_chrome_keeps_its_allowance() {
+        assert_eq!(editor_page_height(true), "100vh");
+        assert_eq!(editor_page_height(false), "calc(100vh - 76px)");
+    }
+
+    #[test]
+    fn fr_l31_top_bar_clears_the_traffic_lights_only_under_full_size() {
+        assert_eq!(editor_strip_padding(true, 98.0), "padding-left:98px;");
+        assert_eq!(editor_strip_padding(false, 98.0), "");
+    }
+
+    #[test]
+    fn fr_l31_top_bar_is_a_drag_region_and_its_controls_are_cut_out_in_the_stylesheets() {
+        let css = ember_app::ui::editor_workbench::page::config().stylesheets.join("\n");
+        let compact: String = css.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(".ed-top{-webkit-app-region:drag}"), "no drag rule for the top bar");
+        assert!(
+            compact.contains(".ed-topbutton,.ed-top.ed-menu{-webkit-app-region:no-drag}"),
+            "the top bar's buttons and menu are not cut out of the drag region"
+        );
+    }
+
+    #[test]
+    fn fr_l31_editor_window_opens_full_size_on_macos() {
+        use compose_rust::schema::{Chrome, Window};
+        // The chrome the editor window is given is the shell's: FullSize on macOS, untouched elsewhere.
+        let given = ember_app::ui::cr::shell::window_chrome(Window::new()).chrome;
+        let plain = Window::new().chrome;
+        assert_eq!(given, if cfg!(target_os = "macos") { Chrome::FullSize } else { plain });
+    }
+}
+
+// FR-E2 (D38 problems list): the tab carries the count, a row says where the problem is.
+mod problems {
+    use ember_app::ui::editor::{problem_location, problems_tab_label};
+
+    #[test]
+    fn fr_e2_problems_tab_shows_the_count_only_when_there_are_problems() {
+        assert_eq!(problems_tab_label(0), "문제");
+        assert_eq!(problems_tab_label(3), "문제 3");
+    }
+
+    #[test]
+    fn fr_e2_problem_row_location_is_the_project_relative_path_and_one_based_line() {
+        assert_eq!(problem_location("/w/p/src/lib.rs", "/w/p/", 0), "src/lib.rs:1");
+        assert_eq!(problem_location("/w/p/package.json", "/w/p", 11), "package.json:12");
+    }
+}
+
+// FR-L31 (D38, #438): explorer edits: where a new item goes, the delete wording, which tabs go.
+mod explorer_edit {
+    use ember_app::ui::editor::{delete_click_allowed, delete_confirmation, edit_failure_text, is_at_or_below, new_item_parent, EditorTabs};
+
+    #[test]
+    fn fr_l31_delete_confirmation_warns_about_unsaved_changes_of_open_files() {
+        let text = delete_confirmation("/w/p/src", "/w/p", true, &["/w/p/src/a.rs".to_string(), "/w/p/src/deep/b.rs".to_string()]);
+        assert!(text.contains("저장하지 않은 변경이 있는 파일: src/a.rs, src/deep/b.rs"), "{text}");
+        assert!(text.contains("편집도 사라집니다"), "{text}");
+        assert!(!delete_confirmation("/w/p/a.rs", "/w/p", false, &[]).contains("저장하지 않은"));
+    }
+
+    #[test]
+    fn fr_l31_the_delete_button_ignores_clicks_in_the_first_600_ms() {
+        assert!(!delete_click_allowed(1_000, 1_000));
+        assert!(!delete_click_allowed(1_000, 1_599));
+        assert!(delete_click_allowed(1_000, 1_600));
+        assert!(!delete_click_allowed(5_000, 4_000), "a clock that went backwards does not allow it");
+    }
+
+    #[test]
+    fn fr_l31_failures_are_shown_in_korean_without_the_servers_english_text() {
+        let text = edit_failure_text("새 파일", "remote error: EntryExists (FileSystemError): File already exists");
+        assert_eq!(text, "새 파일 실패: 같은 이름이 이미 있습니다");
+        assert!(!edit_failure_text("삭제", "remote error: something odd happened").contains("odd"));
+        assert_eq!(edit_failure_text("이름 변경", "EACCES: permission denied"), "이름 변경 실패: 권한이 없습니다");
+    }
+
+    #[test]
+    fn fr_l31_renaming_a_directory_moves_the_tabs_below_it_in_place_with_their_dirty_marks() {
+        let mut tabs = EditorTabs::default();
+        tabs.open("/w/p/src/a.rs");
+        tabs.open("/w/p/other.rs");
+        tabs.open("/w/p/src/deep/b.rs");
+        tabs.set_dirty("/w/p/src/deep/b.rs", true);
+        tabs.activate("/w/p/src/a.rs");
+        let moved = tabs.rename_prefix("/w/p/src", "/w/p/lib");
+        assert_eq!(moved, vec![
+            ("/w/p/src/a.rs".to_string(), "/w/p/lib/a.rs".to_string()),
+            ("/w/p/src/deep/b.rs".to_string(), "/w/p/lib/deep/b.rs".to_string()),
+        ]);
+        assert_eq!(tabs.paths(), vec!["/w/p/lib/a.rs", "/w/p/other.rs", "/w/p/lib/deep/b.rs"]);
+        assert!(tabs.is_dirty("/w/p/lib/deep/b.rs"));
+        assert_eq!(tabs.current_path(), Some("/w/p/lib/a.rs"));
+        assert!(tabs.rename_prefix("/w/p/src2", "/w/p/x").is_empty(), "a sibling that shares a prefix is not touched");
+    }
+
+    #[test]
+    fn fr_l31_new_item_goes_in_the_selected_directory_or_beside_the_selected_file() {
+        assert_eq!(new_item_parent(Some(("/w/p/src", true)), "/w/p"), "/w/p/src");
+        assert_eq!(new_item_parent(Some(("/w/p/src/a.rs", false)), "/w/p"), "/w/p/src");
+        assert_eq!(new_item_parent(Some(("/a.rs", false)), "/w/p"), "/");
+        assert_eq!(new_item_parent(None, "/w/p"), "/w/p");
+    }
+
+    #[test]
+    fn fr_l31_delete_confirmation_says_it_cannot_be_undone_and_names_the_contents_of_a_folder() {
+        let file = delete_confirmation("/w/p/src/a.rs", "/w/p", false, &[]);
+        assert!(file.contains("src/a.rs") && file.contains("되돌릴 수 없습니다"), "{file}");
+        let dir = delete_confirmation("/w/p/src", "/w/p", true, &[]);
+        assert!(dir.contains("그 안의 모든 파일") && dir.contains("되돌릴 수 없습니다"), "{dir}");
+    }
+
+    #[test]
+    fn fr_l31_a_deleted_path_closes_its_own_tab_and_the_tabs_below_it_only() {
+        assert!(is_at_or_below("/w/p/src/a.rs", "/w/p/src/a.rs"));
+        assert!(is_at_or_below("/w/p/src/a.rs", "/w/p/src"));
+        assert!(!is_at_or_below("/w/p/src2/a.rs", "/w/p/src"));
+        assert!(!is_at_or_below("/w/p/a.rs", "/w/p/src"));
+    }
+}
+
+// #302 (D38): the names the accessibility tree shows for tabs, tree rows and problems.
+mod aria {
+    use ember_app::ui::editor::{problem_aria_label, tab_aria_label, tree_item_aria_label};
+
+    #[test]
+    fn fr_l31_a_tab_is_named_by_its_file_and_says_when_it_is_not_saved() {
+        assert_eq!(tab_aria_label("lib.rs", false), "lib.rs");
+        assert_eq!(tab_aria_label("lib.rs", true), "lib.rs (저장 안 됨)");
+    }
+
+    #[test]
+    fn fr_l31_a_tree_row_is_named_by_its_name_and_says_when_it_is_a_folder() {
+        assert_eq!(tree_item_aria_label("src", true), "src 폴더");
+        assert_eq!(tree_item_aria_label("main.rs", false), "main.rs");
+    }
+
+    #[test]
+    fn fr_l31_a_problem_row_says_what_where_and_how_bad() {
+        assert_eq!(problem_aria_label("오류", "Value expected", "package.json:2"), "오류: Value expected (package.json:2)");
+    }
 }

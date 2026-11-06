@@ -18,8 +18,8 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use compose_rust::runtime::{
-    MutableState, current_window_size, launched_effect, mutable_state_of, remember,
-    remember_with_key,
+    MutableState, current_window_size, delay, disposable_effect, launched_effect, mutable_state_of,
+    on_dispose, remember, remember_with_key,
 };
 use compose_rust::ui::{self as cu, Modifier};
 use compose_rust::{Alignment, AssetKind, Color, IconRole, ShapeRole, SpaceRole, TypeRole};
@@ -45,16 +45,16 @@ use crate::server::{CurrentComputer, IdeLaunch};
 use crate::services::{run_shared, services};
 use crate::ui::coexist::{SharedUi, shared_ui};
 use crate::ui::project::{Member, display_name, project_boxes, project_boxes_with_archived, status_pill};
-use crate::ui::shell::NavMenu;
 
 use super::characters::{CharState, Character};
 use super::compat::Spinner;
 use super::home::{CardHead, Dot as HomeDot};
 use super::components::{
-    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, TrackBar, EmberField, EmberSheet,
-    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, Select, SheetFooter, Txt,
+    AppButton, ButtonKind, Clickable, CloseButton, EmberCard, EmberCardSized, TrackBar, EmberField, EmberSheet,
+    FieldOptions, IconButton, Label, OptionSheet, PickChip, Pill, PillTone, SearchField, Select, SheetFooter, Txt,
+    SEARCH_FIELD_H_COMPACT,
 };
-use super::conversation::{ConversationView, ICON_SEND_SVG, TranscriptRow, tail_start_index};
+use super::conversation::{ConversationView, ICON_SEND_SVG, ICON_TERMINAL_SVG, TranscriptRow, tail_start_index};
 use super::notice;
 use super::shell::{
     ICON_CHEVRON_DOWN_SVG, ICON_CLOSE_SVG, ICON_CPU_SVG, ICON_PLUS_SVG, ICON_USERS_SVG, NavIcon,
@@ -87,11 +87,13 @@ const NO_PROJECT: &str = "프로젝트가 없습니다";
 const NO_MEMBERS: &str = "표시할 팀원이 없습니다";
 const PICK_FROM_LIST: &str = "목록에서 팀원을 고르면 이 탭에 추가됩니다";
 const NO_CONVERSATION: &str = "아직 대화가 없습니다";
+const ICON_CHAT_SVG: &str = include_str!("../../../assets/nav/chat.svg");
 const MODEL_LOCKED: &str = "실행 중인 세션의 모델은 바꿀 수 없습니다";
-const WEB_SOON: &str = "웹 페이지 목록은 준비 중입니다";
 const NO_SESSION: &str = "세션이 없습니다";
 const TIMELINE_TITLE: &str = "에이전트 간 통신";
-use crate::ui::session::timeline_summary;
+use crate::ui::session::{
+    ComputerHost, WebPagesLoad, WebTap, computer_host, timeline_summary, web_menu_lines, web_pages_from, web_tap,
+};
 
 const POPUP_W: f32 = 280.0;
 
@@ -476,6 +478,22 @@ pub fn ide_main_click(
     }
 }
 
+/// The colours of the "IDE 열기" split button (`.btn.sm` in the mockup): `surface` fill and a
+/// `line` border with `text` ink, the same default button as every other header action. It was
+/// drawn with the `ink` fill, which is a light inverted button in the dark scheme (NFR-L3, #510).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdeSplitStyle {
+    pub fill: Color,
+    pub ink: Color,
+    pub border: Color,
+    pub divider: Color,
+}
+
+/// The `IdeSplitStyle` of the current palette.
+pub fn ide_split_style(p: &Palette) -> IdeSplitStyle {
+    IdeSplitStyle { fill: p.surface, ink: p.text, border: p.line, divider: p.line }
+}
+
 /// The chevron beside a header's "IDE 열기" that opens the chooser even when a default is set
 /// (FR-L7). `on_ink` draws it inside the dark split button; otherwise as a bordered square.
 /// TODO(compose-rust#460): the accessible name "다른 IDE 선택" cannot be set; `Clickable` gives a
@@ -483,7 +501,7 @@ pub fn ide_main_click(
 pub fn IdeChevron(open: MutableState<bool>, on_ink: bool) {
     let p = ember_theme().palette;
     let (tint, m) = if on_ink {
-        (p.ink_text.to_argb(), Modifier::new().size(26.0, 32.0))
+        (ide_split_style(p).ink.to_argb(), Modifier::new().size(26.0, 32.0))
     } else {
         (
             p.text_2.to_argb(),
@@ -507,6 +525,7 @@ pub fn IdeMenu(session: &str) {
     let ui = shared_ui().clone();
     let window = current_window_size();
     let p = ember_theme().palette;
+    let split = ide_split_style(p);
     let sid = session.to_string();
     let ide = remember_with_key(sid.clone(), || {
         mutable_state_of(None::<Result<IdeLaunch, String>>)
@@ -569,7 +588,8 @@ pub fn IdeMenu(session: &str) {
                     Clickable(
                         Modifier::new()
                             .size(32.0, 32.0)
-                            .background(paint(p.ink))
+                            .background(paint(split.fill))
+                            .border(1.0, paint(split.border))
                             .shape_role(ShapeRole::Full),
                         Alignment::Center,
                         move || {
@@ -577,7 +597,7 @@ pub fn IdeMenu(session: &str) {
                                 launch_ide_shared(&ui_main, kind, launch_main.clone())
                             })
                         },
-                        || NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0),
+                        || NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0),
                     );
                 });
         } else {
@@ -586,7 +606,8 @@ pub fn IdeMenu(session: &str) {
                 .modifier(
                     Modifier::new()
                         .height(32.0)
-                        .background(paint(p.ink))
+                        .background(paint(split.fill))
+                        .border(1.0, paint(split.border))
                         .shape_role(ShapeRole::Full),
                 )
                 .content(move || {
@@ -604,12 +625,12 @@ pub fn IdeMenu(session: &str) {
                                 .spacing(6.0)
                                 .content(|| {
                                     cu::Spacer().modifier(Modifier::new().width(6.0));
-                                    NavIcon(ICON_CODE_SVG, p.ink_text.to_argb(), 15.0);
+                                    NavIcon(ICON_CODE_SVG, split.ink.to_argb(), 15.0);
                                     Label(
                                         "IDE 열기",
                                         Fs::Sm,
                                         Weight::Medium,
-                                        Some(paint(p.ink_text)),
+                                        Some(paint(split.ink)),
                                         Some(1),
                                     );
                                     if show_cur {
@@ -618,7 +639,7 @@ pub fn IdeMenu(session: &str) {
                                                 cur_label,
                                                 Fs::Xs,
                                                 Weight::Regular,
-                                                Some(paint(p.ink_text)),
+                                                Some(paint(split.ink)),
                                                 Some(1),
                                             );
                                         }
@@ -630,7 +651,7 @@ pub fn IdeMenu(session: &str) {
                     cu::Box().modifier(
                         Modifier::new()
                             .size(1.0, 18.0)
-                            .background(paint(p.muted)),
+                            .background(paint(split.divider)),
                     );
                     IdeChevron(o, true);
                 });
@@ -737,12 +758,7 @@ pub fn SideList(
                         .padding(SP[2]),
                 )
                 .content(move || {
-                    EmberField(FieldOptions {
-                        fill_max_width: true,
-                        placeholder: "세션 검색".to_string(),
-                        on_value_change: Some(Box::new(on_query)),
-                        ..Default::default()
-                    });
+                    SearchField("세션 검색", SEARCH_FIELD_H_COMPACT, on_query);
 
                     if is_multi {
                         Label(
@@ -1084,19 +1100,69 @@ pub fn PaneTranscript(session: &str, agent: &str) {
 ///
 /// TODO(compose-rust#5): wrap in `SelectionContainer` so the output can be selected and copied.
 /// TODO(compose-rust): scroll to the bottom on new output; the pane opens at the top.
-/// TODO(#325): attach to the member's terminal stream (needs a read-only attach by term id in
-/// `terminal_stream`); stop it when the pane closes. No stream is started today, so none leaks.
+/// Outside the demo it attaches as a read-only viewer to the project's one running agent terminal on
+/// the session's computer, and detaches when the pane leaves the screen (the terminal keeps running).
 pub fn PaneTerminal(member: &Member, project: &str) {
+    use crate::terminal_stream::{start_view, TerminalHandle};
     use crate::ui::term_pane::{self as tp, TermRole, TermView};
     let p = ember_theme().palette;
-    let view = tp::view_for_member(
-        services().demo.is_some(),
-        None,
-        &member.agent,
-        &member.agent,
-        project,
-        &member.task,
-    );
+    let demo = services().demo.is_some();
+    let sid = member.session_id.clone();
+    let computer = remember_with_key(sid.clone(), || mutable_state_of(None::<String>));
+    let revision = remember_with_key(sid.clone(), || mutable_state_of(0u64));
+    let handle = remember_with_key(sid.clone(), || Rc::new(RefCell::new(None::<TerminalHandle>)));
+    if !demo {
+        {
+            let (sid, computer) = (sid.clone(), computer.clone());
+            launched_effect(sid.clone(), move || async move {
+                let (s_id, c_st) = (sid.clone(), computer.clone());
+                run_shared(
+                    async move { services().server.session_computer(&s_id).await.map_err(|e| e.to_string()) },
+                    move |r: Result<CurrentComputer, String>| {
+                        if let Ok(c) = r {
+                            c_st.set(Some(c.computer.id));
+                        }
+                    },
+                );
+            });
+        }
+        let computer_id = computer.get();
+        let (handle_start, project_start) = (handle.clone(), project.to_string());
+        disposable_effect((sid.clone(), computer_id.clone()), move || {
+            if let Some(id) = &computer_id {
+                let server = services().config.server_url.clone();
+                *handle_start.borrow_mut() = Some(start_view(&server, id, &project_start, None));
+            }
+            let handle_stop = handle_start.clone();
+            on_dispose(move || {
+                if let Some(h) = handle_stop.borrow_mut().take() {
+                    h.detach();
+                }
+            })
+        });
+        // The stream runs on a worker; read its revision here, on the UI thread, and recompose on change.
+        let (handle_poll, revision_poll) = (handle.clone(), revision.clone());
+        launched_effect(sid.clone(), move || async move {
+            loop {
+                delay(std::time::Duration::from_millis(250)).await;
+                let current = handle_poll.borrow().as_ref().map(TerminalHandle::revision).unwrap_or(0);
+                if current != revision_poll.get() {
+                    revision_poll.set(current);
+                }
+            }
+        });
+    }
+    let _ = revision.get();
+    let attached = handle.borrow().clone();
+    let state = attached.as_ref().map(TerminalHandle::snapshot);
+    let pick = attached.as_ref().and_then(TerminalHandle::pick);
+    let view = if demo {
+        tp::view_for_member(true, None, &member.agent, &member.agent, project, &member.task)
+    } else if computer.get().is_none() {
+        TermView::Connecting
+    } else {
+        tp::view_for_attached(state.as_ref(), pick.as_ref())
+    };
     let note = |text: &str| {
         let text = text.to_string();
         cu::Box()
@@ -1109,6 +1175,7 @@ pub fn PaneTerminal(member: &Member, project: &str) {
     match view {
         TermView::Connecting => note(tp::CONNECTING),
         TermView::NoTerminal => note(tp::NO_TERMINAL),
+        TermView::Note(text) => note(text),
         TermView::Failed(text) => note(text),
         TermView::Lines { rows, notice } => {
             cu::Box()
@@ -1258,7 +1325,26 @@ pub fn PaneComposer(session: &str, busy: bool) {
         });
 }
 
-/// Compact segmented switcher inside a pane header (`.mini-seg`).
+/// Width of one pane in the multi view: the window less the nav, the page padding on both sides
+/// and the gaps between `columns` panes. An unknown window (0 dp on this toolkit version at 390)
+/// gives 0, which counts as narrow (FR-L18, #585).
+pub fn pane_width(window_dp: f32, columns: usize, nav_dp: f32) -> f32 {
+    if window_dp <= 0.0 {
+        return 0.0;
+    }
+    let n = columns.max(1) as f32;
+    let body = window_dp - nav_dp - 2.0 * status_page_pad(window_dp);
+    ((body - SP[2] * (n - 1.0)) / n).max(0.0)
+}
+
+/// Whether the pane header shows the single icon toggle (`.ph-mode`) instead of the 대화/터미널
+/// segment (`.ph-seg`): at 420 dp and below, or when the width is unknown (mockup
+/// `@container pane (max-width:420px)`, FR-L18, #585).
+pub fn pane_header_uses_icon_toggle(pane_w: f32) -> bool {
+    pane_w <= 0.0 || pane_w <= 420.0
+}
+
+/// Compact segmented switcher inside a pane header (`.ph-seg`).
 fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
     let p = ember_theme().palette;
     cu::Row()
@@ -1281,10 +1367,7 @@ fn MiniSeg(cur: PaneToggle, on_pick: impl Fn(PaneToggle) + Clone + 'static) {
                 };
                 let cb = on_pick.clone();
                 Clickable(
-                    Modifier::new()
-                        .height(22.0)
-                        .background(bg)
-                        .corner_radius(11.0),
+                    Modifier::new().height(22.0).background(bg).corner_radius(11.0),
                     Alignment::Center,
                     move || cb(t),
                     move || {
@@ -1322,6 +1405,14 @@ pub fn Pane(
     let all_owned = all.to_vec();
     let order_owned = order.to_vec();
     let narrow_pane = window.width_dp < 1150.0;
+    let pane_cols = if window.width_dp >= 700.0 { 2 } else { 1 };
+    let nav_dp = match crate::ui::shell::nav_mode(window.width_dp, false) {
+        crate::ui::shell::ShellMode::BottomTabs => 0.0,
+        crate::ui::shell::ShellMode::Rail => RAIL_W,
+        crate::ui::shell::ShellMode::Sidebar => SIDE_W,
+    };
+    let icon_toggle =
+        pane_header_uses_icon_toggle(pane_width(window.width_dp, pane_cols, nav_dp));
 
     let toggle = remember_with_key(id.clone(), || mutable_state_of(PaneToggle::Conversation));
     let menu = remember_with_key(id.clone(), || mutable_state_of(false));
@@ -1414,7 +1505,26 @@ pub fn Pane(
                                 Pill(label, tone.into(), true);
                             }
                             let tg_seg = toggle.clone();
-                            MiniSeg(cur_toggle, move |t| tg_seg.set(t));
+                            if icon_toggle {
+                                // One icon button (`.ph-mode`): shows the view it opens, so the
+                                // title keeps the remaining width. TODO(compose-rust#460): the
+                                // accessible name `switch_label()` cannot be set on a Clickable.
+                                let to = cur_toggle.other();
+                                Clickable(
+                                    Modifier::new().size(28.0, 28.0).corner_radius(CORNER_SM),
+                                    Alignment::Center,
+                                    move || tg_seg.set(to),
+                                    move || {
+                                        let icon = match to {
+                                            PaneToggle::Terminal => ICON_TERMINAL_SVG,
+                                            PaneToggle::Conversation => ICON_CHAT_SVG,
+                                        };
+                                        NavIcon(icon, p.muted.to_argb(), 14.0)
+                                    },
+                                );
+                            } else {
+                                MiniSeg(cur_toggle, move |t| tg_seg.set(t));
+                            }
 
                             let enl = on_enlarge.clone();
                             let id_enl = id.clone();
@@ -3246,7 +3356,8 @@ fn StatusCardShell(
     let p = ember_theme().palette;
     let title = title.to_string();
     let (fill, weight) = if weighted { (false, Some(1.0)) } else { (true, None) };
-    EmberCard(false, fill, weight, Some(0.0), None, move || {
+    // A weighted card sits in a multi-column row, which is `equal_height`; it fills that height.
+    EmberCardSized(false, fill, weighted, weight, Some(0.0), None, move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
             cu::Spacer().modifier(Modifier::new().height(13.0));
             cu::Row().modifier(Modifier::new().fill_max_width()).content(move || {
@@ -3457,18 +3568,23 @@ fn LoadCard(weighted: bool, d: StatusCardsData) {
     });
 }
 
+/// Whether a layout of `columns` columns stretches its cards to the tallest (FR-L18): only the
+/// multi-column rows do; the single column keeps each card's own height.
+fn status_cards_equal_height(columns: usize) -> bool {
+    columns >= 2
+}
+
 /// The bottom grid (`.grid.g3.sgrid`), gap 20: three columns from 1280 dp, two from 900 dp
 /// (the third card below), one under that. Every card fills its share of the page width
 /// (`status_card_width`); under 900 dp the width is set outright, because a column sized to its
 /// content shrank the cards to about 308 dp at 390 dp.
-/// TODO(compose-rust#464): the cards of a row keep their own heights; the mockup stretches them to the
-/// tallest. The pinned toolkit has no intrinsic-size measurement (`IntrinsicSize.Max`), and
-/// `fill_max_height` in a row of unbounded height collapses, so no fixed heights are faked.
+/// The rows of the multi-column layouts use `equal_height(true)` and the cards `fill_max_height`, so
+/// the cards stretch to the tallest, as in the mockup (FR-L18, compose-rust#389).
 fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
     let (d1, d2, d3) = (d.clone(), d.clone(), d);
     match status_grid_columns(width_dp) {
         3 => {
-            cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+            cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).equal_height(status_cards_equal_height(3)).modifier(Modifier::new().fill_max_width()).content(move || {
                 PrCard(true, d1);
                 SubagentCard(true, d2);
                 LoadCard(true, d3);
@@ -3476,7 +3592,7 @@ fn StatusCardsGrid(width_dp: f32, d: StatusCardsData) {
         }
         2 => {
             cu::Column().spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
-                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Row().alignment(Alignment::TopStart).spacing(SP[4]).equal_height(status_cards_equal_height(2)).modifier(Modifier::new().fill_max_width()).content(move || {
                     PrCard(true, d1);
                     SubagentCard(true, d2);
                 });
@@ -4281,6 +4397,10 @@ pub fn SessionScreen(focus: Option<String>) {
     let project_menu = remember(|| mutable_state_of(false));
     let more_menu = remember(|| mutable_state_of(false));
     let web_menu = remember(|| mutable_state_of(false));
+    // 버전 관리 opens as a sheet over the conversation (FR-L18, #495); `EMBER_CR_SESSION_VCS=1`
+    // opens it at start for captures.
+    let vcs_open = remember(|| mutable_state_of(std::env::var("EMBER_CR_SESSION_VCS").as_deref() == Ok("1")));
+    let web_pages = remember(|| mutable_state_of(WebPagesLoad::Loading));
 
     let show_archived = ui.show_archived.get();
     let boxes = {
@@ -4324,10 +4444,57 @@ pub fn SessionScreen(focus: Option<String>) {
     let is_tablet_rail = window.width_dp > 560.0 && window.width_dp <= 900.0;
     let show_rail = is_tablet_rail || (!is_phone && rail_collapsed.get());
     let show_column = !is_phone && !show_rail;
+    // The drawer state resets once the list is a column again, so shrinking later does not
+    // reopen it (FR-L18). Written only while it is true, so there is no write loop.
+    if show_column && drawer.get() {
+        drawer.set(false);
+    }
     let chips_below = view_chips_below(window.width_dp);
-    let hide_view_lbl = window.width_dp < 1280.0 && !chips_below;
+    let hide_view_lbl = crate::ui::session::view_seg_icon_only(window.width_dp);
     let show_btn_lbl = window.width_dp >= 1400.0;
     let show_web_lbl = window.width_dp >= 1400.0;
+
+    // Opening the 웹 페이지 list reads the listening ports of the session's computer (FR-P7).
+    let open_web_menu = {
+        let web_menu = web_menu.clone();
+        let web_pages = web_pages.clone();
+        let sid = target.clone().or_else(|| members.first().map(|m| m.session_id.clone()));
+        move || {
+            web_menu.set(true);
+            web_pages.set(WebPagesLoad::Loading);
+            let done = web_pages.clone();
+            if services().demo.is_some() {
+                let host = ComputerHost { local: false, host: Some(crate::demo::DEMO_HOST.to_string()) };
+                done.set(web_pages_from(Ok(crate::demo::ports()), &host));
+                return;
+            }
+            let Some(sid) = sid.clone() else {
+                done.set(WebPagesLoad::Failed(NO_SESSION.to_string()));
+                return;
+            };
+            run_shared(
+                async move {
+                    let c = services().server.session_computer(&sid).await.map_err(|e| e.to_string())?;
+                    let host = computer_host(c.computer.local, "", &services().config.server_url);
+                    let ports = services().client.api().computer_ports(&c.computer.id).await.map_err(|e| e.to_string())?;
+                    Ok::<_, String>((ports, host))
+                },
+                move |r: Result<(ember_client::api::Ports, ComputerHost), String>| match r {
+                    Ok((ports, host)) => done.set(web_pages_from(Ok(ports), &host)),
+                    Err(e) => done.set(web_pages_from(Err(e), &ComputerHost::default())),
+                },
+            );
+        }
+    };
+
+    // `EMBER_CR_SESSION_WEB=1` opens the 웹 페이지 list at start, for captures without clicks.
+    if std::env::var("EMBER_CR_SESSION_WEB").as_deref() == Ok("1") {
+        let open = open_web_menu.clone();
+        launched_effect((), move || {
+            let open = open.clone();
+            async move { open() }
+        });
+    }
 
     let set_view = {
         let view = view.clone();
@@ -4408,6 +4575,7 @@ pub fn SessionScreen(focus: Option<String>) {
     let sub_line = sub_parts.join(" · ");
 
     cu::Box()
+        .alignment(Alignment::TopStart)
         .modifier(Modifier::new().fill_max_width().fill_max_height())
         .content(move || {
             let sections_col = sections.clone();
@@ -4564,25 +4732,21 @@ pub fn SessionScreen(focus: Option<String>) {
                                             false,
                                             move || nm.set(true),
                                         );
-                                        let u = ui.clone();
-                                        let c = current.clone();
+                                        let vo = vcs_open.clone();
                                         ToolbarBtn(
                                             ICON_GIT_SVG,
                                             "버전 관리",
                                             show_btn_lbl,
                                             false,
-                                            move || {
-                                                u.set_selected_project(Some(c.clone()));
-                                                u.set_menu(NavMenu::VersionControl);
-                                            },
+                                            move || vo.set(true),
                                         );
-                                        let wm = web_menu.clone();
+                                        let wm = open_web_menu.clone();
                                         ToolbarBtn(
                                             ICON_GLOBE_SVG,
                                             "웹 페이지",
                                             show_web_lbl,
                                             true,
-                                            move || wm.set(true),
+                                            move || wm(),
                                         );
                                     } else {
                                         let mm = more_menu.clone();
@@ -4603,7 +4767,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                         AppButton(
                                             "IDE 열기",
                                             Some(IconRole::Forward),
-                                            ButtonKind::Primary,
+                                            ButtonKind::Default,
                                             true,
                                             false,
                                             false,
@@ -4629,7 +4793,7 @@ pub fn SessionScreen(focus: Option<String>) {
                                     )
                                     .content(|| {
                                         let sv = set_view.clone();
-                                        ViewSeg(view_now, false, true, move |v| sv(v));
+                                        ViewSeg(view_now, hide_view_lbl, true, move |v| sv(v));
                                     });
                             }
 
@@ -4675,37 +4839,55 @@ pub fn SessionScreen(focus: Option<String>) {
                         });
                 });
 
-            // Drawer sheet on compact/tablet
-            if !show_column {
-                let dr_d = drawer.clone();
+            // Left drawer with a scrim on compact/tablet (#582). The toolkit's Sheet picks its
+            // own edge and Dialog centres, so this is an in-tree overlay stacked in the screen's
+            // Box. It covers the session content area, not the phone tab bar or title strip
+            // (the shell is outside this screen).
+            // TODO(compose-rust#476): no Escape to the drawer (no key delivery or focus request
+            // in the Rust API); the scrim and the close button close it.
+            // TODO(compose-rust#429): no accessible name for the toggle, the scrim and the
+            // drawer yet.
+            if crate::ui::session::drawer_open_effective(show_column, drawer.get()) {
+                let dr_s = drawer.clone();
+                let dr_x = drawer.clone();
                 let sec_d = sections.clone();
                 let cur_d = current.clone();
                 let tgt_d = target.clone();
                 let q_d = query.clone();
                 let op_d = open_member.clone();
                 let is_m = view_now == SessionView::Multi;
-                EmberSheet(
-                    "세션 목록",
-                    drawer.get(),
-                    move || dr_d.set(false),
-                    None,
-                    move || {
-                        let q_st = q_d.clone();
+                let theme = ember_theme();
+                let pal = theme.palette;
+                let w = crate::ui::session::drawer_width(window.width_dp);
+                Clickable(
+                    Modifier::new()
+                        .fill_max_width()
+                        .fill_max_height()
+                        .background(paint(Color::argb(0x40000000))),
+                    Alignment::TopStart,
+                    move || dr_s.set(false),
+                    || {},
+                );
+                cu::Row()
+                    .modifier(with_shadows(Modifier::new(), theme.shadow_sm()).width(w).fill_max_height())
+                    .content(move || {
                         cu::Box()
-                            .modifier(Modifier::new().fill_max_width().height(PANE_H))
+                            .modifier(Modifier::new().weight(1.0).fill_max_height())
                             .content(move || {
                                 SideList(
                                     &sec_d,
                                     &cur_d,
                                     tgt_d.as_deref(),
                                     is_m,
-                                    None,
-                                    move |q| q_st.set(q),
+                                    Some(Box::new(move || dr_x.set(false))),
+                                    move |q| q_d.set(q),
                                     op_d.clone(),
                                 );
                             });
-                    },
-                );
+                        cu::Spacer().modifier(
+                            Modifier::new().width(1.0).fill_max_height().background(paint(pal.line)),
+                        );
+                    });
             }
 
             // New member sheet (#snew)
@@ -4714,12 +4896,16 @@ pub fn SessionScreen(focus: Option<String>) {
                 NewMemberSheet(&current, new_member_open.get(), move || nm_d.set(false));
             }
 
+            // 버전 관리 sheet over the conversation (#495)
+            {
+                let vo_d = vcs_open.clone();
+                super::vcs::VcsSheet(&current, vcs_open.get(), move || vo_d.set(false));
+            }
+
             // Web pages OptionSheet
             {
-                let web_opts = vec![
-                    "http://192.168.0.10:3000 (Ember 웹 미리보기)".to_string(),
-                    "http://192.168.0.10:6006 (컴포넌트 카탈로그)".to_string(),
-                ];
+                let load_now = web_pages.get();
+                let web_opts = web_menu_lines(&load_now);
                 let wm_d = web_menu.clone();
                 OptionSheet(
                     web_menu.get(),
@@ -4727,7 +4913,15 @@ pub fn SessionScreen(focus: Option<String>) {
                     None,
                     320.0,
                     move || wm_d.set(false),
-                    move |_| notice::post(WEB_SOON),
+                    move |idx| match web_tap(&load_now, idx) {
+                        WebTap::Open(url) => {
+                            if crate::ide::open_external(&url).is_err() {
+                                notice::post("브라우저를 열지 못했습니다");
+                            }
+                        }
+                        WebTap::Say(text) => notice::post(text),
+                        WebTap::Nothing => {}
+                    },
                 );
             }
 
@@ -4762,8 +4956,8 @@ pub fn SessionScreen(focus: Option<String>) {
                 ];
                 let mm_d = more_menu.clone();
                 let nm_m = new_member_open.clone();
-                let ui_m = ui.clone();
-                let cur_m = current.clone();
+                let vcs_m = vcs_open.clone();
+                let open_web = open_web_menu.clone();
                 OptionSheet(
                     more_menu.get(),
                     &more_opts,
@@ -4772,11 +4966,8 @@ pub fn SessionScreen(focus: Option<String>) {
                     move || mm_d.set(false),
                     move |idx| match idx {
                         0 => nm_m.set(true),
-                        1 => {
-                            ui_m.set_selected_project(Some(cur_m.clone()));
-                            ui_m.set_menu(NavMenu::VersionControl);
-                        }
-                        2 => notice::post(WEB_SOON),
+                        1 => vcs_m.set(true),
+                        2 => open_web(),
                         _ => {}
                     },
                 );
@@ -4786,6 +4977,46 @@ pub fn SessionScreen(focus: Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l18_drawer_state_resets_and_scrim_and_navigation_close_it() {
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        assert!(src.contains("if show_column && drawer.get() {\n        drawer.set(false);"));
+        assert!(src.contains("drawer_open_effective(show_column, drawer.get())"));
+        // The scrim's Clickable closes the drawer.
+        assert!(src.contains("move || dr_s.set(false),"));
+        // open_member closes it.
+        let om = src.split("let open_member = {").nth(1).unwrap();
+        assert!(om.split("let same = proj == current;").next().unwrap().contains("drawer.set(false);"));
+        assert!(src.contains("TODO(compose-rust#429)"));
+    }
+
+    #[test]
+    fn fr_l18_pane_header_icon_toggle_at_420_and_below_segment_above() {
+        assert!(super::pane_header_uses_icon_toggle(360.0));
+        assert!(super::pane_header_uses_icon_toggle(420.0));
+        assert!(!super::pane_header_uses_icon_toggle(421.0));
+        assert!(!super::pane_header_uses_icon_toggle(600.0));
+        assert!(super::pane_header_uses_icon_toggle(0.0));
+    }
+
+    #[test]
+    fn fr_l18_pane_width_unknown_window_is_narrow_and_columns_split_the_body() {
+        assert_eq!(super::pane_width(0.0, 2, 72.0), 0.0);
+        assert!(super::pane_header_uses_icon_toggle(super::pane_width(0.0, 1, 0.0)));
+        assert_eq!(super::pane_width(390.0, 1, 0.0), 366.0);
+        assert!(!super::pane_header_uses_icon_toggle(super::pane_width(1440.0, 2, 234.0)));
+    }
+
+    #[test]
+    fn fr_l18_status_cards_equal_height_only_when_multi_column() {
+        assert!(!super::status_cards_equal_height(super::status_grid_columns(390.0)));
+        assert!(super::status_cards_equal_height(super::status_grid_columns(900.0)));
+        assert!(super::status_cards_equal_height(super::status_grid_columns(1280.0)));
+        let src = include_str!("session.rs").split("mod tests {").next().unwrap();
+        assert!(src.contains(".equal_height(status_cards_equal_height(3))"));
+        assert!(src.contains(".equal_height(status_cards_equal_height(2))"));
+    }
+
     #[test]
     fn fr_l18_status_capture_scroll_cards_hides_the_blocks_above() {
         assert!(super::status_blocks_above_cards(None));
@@ -4903,6 +5134,9 @@ mod tests {
                 height_dp: 900.0,
                 class: WindowSizeClass::Expanded,
                 height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(resize.clone()).expect("dispatch");

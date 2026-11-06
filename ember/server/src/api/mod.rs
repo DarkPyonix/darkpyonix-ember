@@ -11,9 +11,10 @@
 //!
 //! | Method | Path | Body → Response |
 //! | ------ | ---- | --------------- |
-//! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers}`) |
+//! | GET    | `/api/projects` | → `[Project]` (`{name, created_at, computers, repository, default_branch, member_defaults, character_style, archived}`) |
 //! | POST   | `/api/projects` | `{name}` → 201 `Project` (200 when it existed) |
 //! | GET    | `/api/projects/{name}` | → `Project` |
+//! | PATCH  | `/api/projects/{name}` | `{name?, repository?, default_branch?, member_defaults?, character_style?}` → `Project` (FR-L26); errors `{error, code}` |
 //! | PUT    | `/api/projects/{name}/computers/{computer_id}` | → `Project` (assign; idempotent) |
 //! | DELETE | `/api/projects/{name}/computers/{computer_id}` | → `Project` (unassign; idempotent) |
 //! | PATCH  | `/api/sessions/{id}` | `{title?, pinned?, archived?}` → `SessionRecord` |
@@ -21,6 +22,8 @@
 //! | GET    | `/api/sessions/{id}/export` | → transcript file (JSON, `Content-Disposition: attachment`) |
 //! | PUT    | `/api/sessions/{id}/approve-all` | `{enabled}` → `{approve_all}` (FR-A5; `GET /sessions/{id}` carries `approve_all`; push `approve_all`) |
 //! | POST   | `/api/sessions/{id}/fork` | `{turn_seq?, title?}` → 201 new session; 409 without a completed turn |
+//! | GET    | `/api/agents/settings` | → `{settings: {<agent>: {mem_limit_mb}}}`, only harnesses with a stored value (FR-L20, FR-S8) |
+//! | PUT    | `/api/agents/{agent}/settings` | `{mem_limit_mb: 256..=262144 \| 0 \| null}` → `{agent, mem_limit_mb, applies: "next_session"}`; unknown field or missing key 422, bad value 400, unknown agent or `scripted` 404 |
 //!
 //! Tokens (FR-U7; cost is always `null`, the response says why in `cost_note`):
 //!
@@ -33,11 +36,16 @@
 //!
 //! Git per project (FR-G4) is in [`git`]: `POST /api/projects/{name}/git/<op>`.
 //!
+//! GitHub card data (FR-G13) is in [`integrations`]: `GET /api/integrations/github`.
+//!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
 //! changes are pushed (`project_updated`, `session_updated`).
 
 pub mod git;
+pub mod harnesses;
 pub mod ide;
+pub mod ide_extensions;
+pub mod integrations;
 pub mod origin;
 
 use std::path::PathBuf;
@@ -57,13 +65,19 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::agents::AgentKind;
 use crate::events::ApprovalDecision;
 use crate::projects::ProjectError;
-use crate::session::{NewSession, Push, SessionError, Sessions};
+use crate::session::{
+    NewSession, Push, SessionError, Sessions, MEM_LIMIT_KEY, MEM_LIMIT_MAX_MB, MEM_LIMIT_MIN_MB,
+    MEM_LIMIT_RANGE_MESSAGE,
+};
 use crate::store::{now_ms, SessionPatch};
 
 pub fn router(sessions: Arc<Sessions>) -> Router {
     Router::new()
         .route("/api/health", get(|| async { Json(json!({ "ok": true })) }))
         .route("/api/agents", get(agents))
+        // `/api/agents/settings` has three segments, `/api/agents/{agent}/settings` four: no overlap.
+        .route("/api/agents/settings", get(get_agent_settings))
+        .route("/api/agents/{agent}/settings", put(put_agent_settings))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(get_session).patch(patch_session))
         .route("/api/sessions/{id}/export", get(export_session))
@@ -72,7 +86,7 @@ pub fn router(sessions: Arc<Sessions>) -> Router {
         .route("/api/usage/summary", get(usage_summary))
         .route("/api/sessions/{id}/usage", get(session_usage))
         .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/{name}", get(get_project))
+        .route("/api/projects/{name}", get(get_project).patch(patch_project))
         .route("/api/projects/{name}/computers/{computer_id}", put(assign).delete(unassign))
         .route("/api/sessions/{id}/events", get(events))
         .route("/api/sessions/{id}/messages", post(send_message))
@@ -115,6 +129,8 @@ impl From<ProjectError> for ApiError {
         let code = match &e {
             ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => StatusCode::NOT_FOUND,
             ProjectError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ProjectError::Protected(_) => StatusCode::FORBIDDEN,
+            ProjectError::NameTaken(_) => StatusCode::CONFLICT,
             ProjectError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, format!("{e:#}"))
@@ -124,7 +140,53 @@ impl From<ProjectError> for ApiError {
 type ApiResult<T> = Result<T, ApiError>;
 
 async fn agents(State(s): State<Arc<Sessions>>) -> impl IntoResponse {
-    Json(s.detect_agents().await)
+    Json(s.probe_agents().await)
+}
+
+/// `GET /api/agents/settings`: the stored per-harness settings (FR-L20, FR-S8), only for
+/// harnesses with a value.
+async fn get_agent_settings(State(s): State<Arc<Sessions>>) -> ApiResult<impl IntoResponse> {
+    let mut settings = serde_json::Map::new();
+    for (harness, value) in s.store().harness_settings_with_key(MEM_LIMIT_KEY)? {
+        // Rows of a harness that is gone, or values the loader would ignore, are not reported.
+        let (Some(_), Ok(mb)) = (AgentKind::parse(&harness), value.parse::<u64>()) else { continue };
+        if (MEM_LIMIT_MIN_MB..=MEM_LIMIT_MAX_MB).contains(&mb) {
+            settings.insert(harness, json!({ "mem_limit_mb": mb }));
+        }
+    }
+    Ok(Json(json!({ "settings": settings })))
+}
+
+/// `PUT /api/agents/{agent}/settings` with exactly `{"mem_limit_mb": <u64> | null}`. The value
+/// applies to agents started after the change (`applies: "next_session"`).
+async fn put_agent_settings(
+    State(s): State<Arc<Sessions>>,
+    Path(agent): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<impl IntoResponse> {
+    let kind = match AgentKind::parse(&agent) {
+        Some(k) if k != AgentKind::Scripted => k,
+        _ => return Err(ApiError(StatusCode::NOT_FOUND, format!("unknown agent {agent}"))),
+    };
+    let unprocessable =
+        |m: &str| ApiError(StatusCode::UNPROCESSABLE_ENTITY, m.to_string());
+    let obj = body.as_object().ok_or_else(|| unprocessable("body must be an object"))?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != MEM_LIMIT_KEY) {
+        return Err(unprocessable(&format!("unknown field {k}")));
+    }
+    let value = obj.get(MEM_LIMIT_KEY).ok_or_else(|| unprocessable("missing field mem_limit_mb"))?;
+    let range = || ApiError(StatusCode::BAD_REQUEST, MEM_LIMIT_RANGE_MESSAGE.to_string());
+    let limit = match value {
+        serde_json::Value::Null => None,
+        v => Some(v.as_u64().ok_or_else(range)?),
+    };
+    if limit.is_some_and(|mb| mb != 0 && !(MEM_LIMIT_MIN_MB..=MEM_LIMIT_MAX_MB).contains(&mb)) {
+        return Err(range());
+    }
+    s.set_mem_limit_persisted(kind, limit)?;
+    let stored = limit.filter(|mb| *mb > 0);
+    tracing::info!(harness = kind.as_str(), mem_limit_mb = ?stored, "agent memory limit set");
+    Ok(Json(json!({ "agent": kind.as_str(), "mem_limit_mb": stored, "applies": "next_session" })))
 }
 
 #[derive(Deserialize)]
@@ -327,6 +389,58 @@ async fn create_project(
 
 async fn get_project(State(s): State<Arc<Sessions>>, Path(name): Path<String>) -> ApiResult<impl IntoResponse> {
     Ok(Json(s.store().project(&name)?.ok_or(ProjectError::NotFound(name))?))
+}
+
+/// A failed project change as `{error, code}` (FR-L26).
+fn coded(status: StatusCode, code: &str, error: impl std::fmt::Display) -> Response {
+    (status, Json(json!({ "error": error.to_string(), "code": code }))).into_response()
+}
+
+fn project_error(e: ProjectError) -> Response {
+    let code = match &e {
+        ProjectError::NotFound(_) | ProjectError::ComputerNotFound(_) => "not_found",
+        ProjectError::BadRequest(_) => "invalid_field",
+        ProjectError::Protected(_) => "protected_project",
+        ProjectError::NameTaken(_) => "name_taken",
+        ProjectError::Other(_) => "internal",
+    };
+    let message = format!("{e:#}");
+    coded(ApiError::from(e).0, code, message)
+}
+
+/// Fields of the settings sheet whose server side is not built yet. They are refused by name so
+/// the client sees a clean error and not a silent no-op (leader: blocked on an owner decision,
+/// archive: #384 PR 4).
+const NOT_YET_PROJECT_FIELDS: [&str; 2] = ["leader_session", "archived"];
+
+/// FR-L26: change project settings. Body fields are optional; unknown fields are 400
+/// `unknown_field`, unbuilt ones 400 `not_yet`. Pushes `project_updated` with the new state.
+async fn patch_project(
+    State(s): State<Arc<Sessions>>,
+    Path(name): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return coded(StatusCode::BAD_REQUEST, "invalid_body", "the body must be a JSON object");
+    };
+    if let Some(field) = NOT_YET_PROJECT_FIELDS.iter().find(|f| map.contains_key(**f)) {
+        return coded(StatusCode::BAD_REQUEST, "not_yet", format!("{field} cannot be changed yet"));
+    }
+    let patch: crate::projects::ProjectPatch = match serde_json::from_value(serde_json::Value::Object(map)) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("unknown field") { "unknown_field" } else { "invalid_field" };
+            return coded(StatusCode::BAD_REQUEST, code, msg);
+        }
+    };
+    match s.store().patch_project(&name, &patch) {
+        Ok(project) => {
+            s.publish(Push::ProjectUpdated { project: project.clone() });
+            Json(project).into_response()
+        }
+        Err(e) => project_error(e),
+    }
 }
 
 /// FR-L4: assign a computer to a project.

@@ -25,10 +25,10 @@ pub use crate::ui::channels::{
     bubble_side, compact_shows_room, draft_after_send, empty_text, SendState, feed, filter_chips, group_rooms, last_seq,
     me_id, merge_messages, message_from, room_from, rooms_from, rooms_snapshot, split_view,
     time_label, BubbleView, FeedItem, ListFilter, Load, Member, Message, Room, RoomRow, Section,
-    Side,
+    should_mark_read, Side,
 };
 use super::components::{
-    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone,
+    pill_colors, AppButton, ButtonKind, EmberField, FieldOptions, FilterChip, Label, Pill, PillTone, SearchField,
 };
 use super::theme::*;
 use super::notice;
@@ -76,8 +76,8 @@ pub const POLL_EVERY: Duration = Duration::from_secs(2);
 
 /// What the live screen holds: the rooms read from the server and the state of that read.
 #[derive(Clone)]
-struct Feed {
-    rooms: MutableState<Vec<Room>>,
+pub(super) struct Feed {
+    pub(super) rooms: MutableState<Vec<Room>>,
     load: MutableState<Load>,
 }
 
@@ -157,6 +157,26 @@ impl Feed {
         }
     }
 
+    /// The person opened room `id`: zero its badge at once, then tell the server. A failure is
+    /// only logged; the next refresh shows the server's count. Out of scope: marking read when a
+    /// message arrives in the already open room.
+    fn mark_read(&self, id: &str) {
+        self.rooms.update(|rooms| {
+            if let Some(r) = rooms.iter_mut().find(|r| r.id == id) {
+                r.unread = 0;
+            }
+        });
+        let id = id.to_string();
+        crate::services::run_shared(
+            async move { crate::services::services().client.api().mark_channel_read(&id, None).await },
+            |r| {
+                if let Err(e) = r {
+                    tracing::warn!("channel mark read failed: {e}");
+                }
+            },
+        );
+    }
+
     /// Posts `text` as the person; the answer joins the room at once, a failure is told.
     fn send(&self, id: &str, text: &str, done: impl FnOnce(bool) + Send + 'static) {
         let text = text.trim().to_string();
@@ -211,6 +231,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
 fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let filter = remember(|| mutable_state_of(ListFilter::default()));
+    let new_ch = super::new_channel::NewChannelState::new();
     // `EMBER_CR_ROOM=<index>` opens a room at the start, for review captures.
     let open = remember(|| {
         let index = std::env::var("EMBER_CR_ROOM").ok().and_then(|v| v.parse::<usize>().ok());
@@ -222,7 +243,10 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     });
     let window = compose_rust::runtime::current_window_size();
     let split = split_view(window.class);
-    let cur = open.get();
+    // Side by side with nothing open, the first listed room is shown (FR-L12, #509); the
+    // compact layout keeps the list first.
+    let order: Vec<String> = Vec::new();
+    let cur = open.get().or_else(|| crate::ui::channels::initial_room(&rooms, &order, &filter.get(), split));
     let show_room = compact_shows_room(&cur);
 
     // Nothing to draw yet (loading) or nothing could be read (failed): say so, plainly. An empty
@@ -246,9 +270,8 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
             }
         });
     }
-    let order: Vec<String> = Vec::new();
     let room = cur.as_ref().and_then(|id| rooms.iter().find(|r| &r.id == id)).cloned();
-    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0, &load);
+    let list = || RoomList(&rooms, &order, &filter, &open, cur.clone(), window.width_dp <= 900.0, &load, &new_ch, feed.is_some(), feed.clone());
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
@@ -264,7 +287,12 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
             cu::Box()
                 .alignment(Alignment::Center)
                 .modifier(Modifier::new().fill_max_width().fill_max_height())
-                .content(|| Label("채널을 선택하십시오", Fs::Md, Weight::Regular, Some(paint(p.muted)), None));
+                .content(|| {
+                    // The mockup opens the first room, so its only empty wording is the list's
+                    // "채널이 없습니다". A filter that hides every room keeps the old prompt.
+                    let text = if rooms.is_empty() { "채널이 없습니다" } else { "선택한 채널이 없습니다" };
+                    Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None)
+                });
         }
     };
     if split {
@@ -278,14 +306,24 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     } else {
         cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
     }
+    super::new_channel::NewChannelSheet(&new_ch, &rooms, feed.clone(), &open);
 }
 
-fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool, load: &Load) {
+/// The list title is 18 (Fs::Xl) Semibold at every width (FR-L12).
+pub fn list_title_size() -> Fs {
+    Fs::Xl
+}
+/// A room row is a 44 icon with 10 above and below, so 64 high (FR-L12); the list insets the sides.
+pub const ROOM_ICON: f32 = 44.0;
+pub const ROOM_ROW_PAD_V: f32 = 10.0;
+pub const ROOM_ROW_HEIGHT: f32 = ROOM_ICON + 2.0 * ROOM_ROW_PAD_V;
+
+fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, current_room: Option<String>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let current = filter.get();
     let sections = group_rooms(rooms, order, &current);
     let chips = filter_chips(rooms, order);
-    let selected = open.get();
+    let selected = current_room;
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(|| {
         // Header: the title at 15 px and a round "+" (new channel).
         cu::Row()
@@ -293,41 +331,22 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             .modifier(Modifier::new().fill_max_width().height(56.0))
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, Some(1));
+                Label("채널", list_title_size(), Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                // TODO(FR-T10): `POST /api/channels` and `Api::create_channel` work, but the screen
-                // has no sheet to ask for the name, the project and the agents yet, so the button
-                // stays disabled rather than creating a channel with guessed values.
-                // TODO(compose-rust#429): accessible name (new channel).
-                cu::Box()
-                    .alignment(Alignment::Center)
-                    .modifier(
-                        Modifier::new()
-                            .size(H_CTL, H_CTL)
-                            .background(paint(p.surface))
-                            .border(1.0, paint(p.line))
-                            .shape_role(compose_rust::ShapeRole::Full)
-                            .alpha(0.4),
-                    )
-                    .content(|| super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0));
+                // FR-T10, #499: the button opens the 새 채널 sheet; in demo it says why not.
+                super::new_channel::NewChannelButton(new_ch, live, current.project.clone());
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
         cu::Column().space_role(SpaceRole::Sm).modifier(Modifier::new().fill_max_width().fill_max_height().padding(SP[2])).content(|| {
-            // TODO(compose-rust#376, #374): the field frame and the leading magnifier; the
-            // field is uncontrolled and has no initial value.
+            // TODO(compose-rust#376, #374): the field is uncontrolled and has no initial value.
             // `.searchbox{display:none}` up to 900 dp: no search field on a phone.
             if !narrow {
                 let query = filter.clone();
-                EmberField(FieldOptions {
-                    fill_max_width: true,
-                    placeholder: "채널, 메시지 검색".to_string(),
-                    on_value_change: Some(Box::new(move |v| {
-                        let mut f = query.get_untracked();
-                        f.query = v;
-                        query.set(f);
-                    })),
-                    ..Default::default()
+                SearchField("채널, 메시지 검색", H_BTN, move |v| {
+                    let mut f = query.get_untracked();
+                    f.query = v;
+                    query.set(f);
                 });
             }
             cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
@@ -356,7 +375,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                     for s in sections.iter() {
                         for r in s.rooms.iter() {
                             let members = rooms.iter().find(|x| x.id == r.id).map(|x| x.members.clone()).unwrap_or_default();
-                            RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open);
+                            RoomItem(r, &s.project, &members, selected.as_deref() == Some(r.id.as_str()), open, feed.clone());
                         }
                     }
                 });
@@ -365,37 +384,63 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
     });
 }
 
-/// The room's mark: a 40 px rounded tile in the project's colour family with a hash glyph.
-/// TODO(channel icons): each channel gets its own animated mark (`channels.js` roomIcon).
-fn RoomIcon(project: &str, size: f32) {
+const ROOM_PULSE_SVG: &str = include_str!("../../../assets/nav/room-pulse.svg");
+const ROOM_BARS_SVG: &str = include_str!("../../../assets/nav/room-bars.svg");
+const ROOM_RADAR_SVG: &str = include_str!("../../../assets/nav/room-radar.svg");
+const ROOM_ORBIT_SVG: &str = include_str!("../../../assets/nav/room-orbit.svg");
+const ROOM_WAVE_SVG: &str = include_str!("../../../assets/nav/room-wave.svg");
+const ROOM_SPARK_SVG: &str = include_str!("../../../assets/nav/room-spark.svg");
+
+/// The room's mark (`channels.js` roomIcon): a rounded tile in the project's colour with the
+/// room's own motif, chosen from the room id (`room_motif`). The motifs are drawn still; the
+/// mockup's animation is not built (TODO(channel icons)).
+fn RoomIcon(room_id: &str, project: &str, size: f32) {
+    use crate::ui::channels::{room_motif, RoomMotif};
     let p = ember_theme().palette;
     let tones = [p.blue, p.orange, p.green, p.sky, p.red];
     let a = tones[(crate::ui::characters::seed_hash(project) as usize) % tones.len()];
+    let svg = match room_motif(room_id) {
+        RoomMotif::Pulse => ROOM_PULSE_SVG,
+        RoomMotif::Bars => ROOM_BARS_SVG,
+        RoomMotif::Radar => ROOM_RADAR_SVG,
+        RoomMotif::Orbit => ROOM_ORBIT_SVG,
+        RoomMotif::Wave => ROOM_WAVE_SVG,
+        RoomMotif::Spark => ROOM_SPARK_SVG,
+    };
     cu::Box()
         .alignment(Alignment::Center)
         .modifier(Modifier::new().size(size, size).background(paint(a.soft)).corner_radius(CORNER_MD))
-        .content(|| super::shell::NavIcon(super::shell::ICON_HASH_SVG, a.strong.to_argb(), size * 0.5));
+        .content(|| super::shell::NavIcon(svg, a.strong.to_argb(), size * 0.6));
 }
 
 /// One room in the list. TODO(compose-rust#372): the row is a pointer-up `Clickable`.
-fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, open: &MutableState<Option<String>>) {
+fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, open: &MutableState<Option<String>>, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let time = row.last_at.map(|t| time_label(t, local_tz())).unwrap_or_default();
     let (open, id) = (open.clone(), row.id.clone());
     let detail = detail_state();
+    let unread = row.unread;
     let fill = if selected { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
     super::components::Clickable(
-        Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(SP[1]),
+        Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(ROOM_ROW_PAD_V),
         Alignment::CenterStart,
         move || {
             if let Some(d) = &detail {
                 d.set(true);
             }
+            // A click is the person opening the room; `initial_room` never reaches here.
+            if let Some(f) = &feed {
+                if should_mark_read(true, unread) {
+                    f.mark_read(&id);
+                }
+            }
             open.set(Some(id.clone()));
         },
         || {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                RoomIcon(project, 40.0);
+                // Row = 44 icon + 2 x 10 padding = 64 high. The list already insets the row, so the
+                // side gap is the 10 of the padding (the capture showed a 6 spacer pushed the icon to 22+).
+                RoomIcon(&row.id, project, ROOM_ICON);
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
@@ -419,6 +464,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
     let p = ember_theme().palette;
     // The person is the member `user` (shown as 나) on the server, `me` in the samples.
     let items = feed(room, me_id(room), local_tz());
+    let owner = super::channel_owner::OwnerState::new(&room.id);
     // `.room{background:var(--room)}`: the room is on `--surface`, not the page.
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface))).content(|| {
         // `.topbar`: the room mark, the name with the member count and the project, round
@@ -433,7 +479,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                     // TODO(compose-rust#429): accessible name (back).
                     AppButton("목록", Some(IconRole::Back), ButtonKind::Default, true, true, false, on_back);
                 }
-                RoomIcon(&room.project, 36.0);
+                RoomIcon(&room.id, &room.project, 36.0);
                 cu::Column().content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&room.name, Fs::Md, Weight::Semibold, None, Some(1));
@@ -446,7 +492,21 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                 });
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 // TODO(compose-rust#429): accessible name (members, menu).
-                for svg in [super::shell::ICON_USERS_SVG, super::shell::ICON_MORE_SVG] {
+                // The members button opens the owner sheet (FR-T14, FR-T15, FR-T17).
+                {
+                    let st = owner.clone();
+                    super::components::Clickable(
+                        Modifier::new()
+                            .size(H_CTL, H_CTL)
+                            .background(paint(p.surface))
+                            .border(1.0, paint(p.line))
+                            .shape_role(compose_rust::ShapeRole::Full),
+                        Alignment::Center,
+                        move || st.open.set(true),
+                        || super::shell::NavIcon(super::shell::ICON_USERS_SVG, p.text_2.to_argb(), 16.0),
+                    );
+                }
+                for svg in [super::shell::ICON_MORE_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
                         .modifier(
@@ -475,13 +535,14 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                         }
                         FeedItem::Bubble(b) => {
                             let harness = room.member(&b.from).map(|m| m.harness.clone()).unwrap_or_default();
-                            BubbleRow(b, &harness);
+                            BubbleRow(b, &harness, &room.project);
                         }
                     }
                 }
             });
         });
-        InputBar(&room.id, live);
+        InputBar(&room.id, live.clone());
+        super::channel_owner::MembersSheet(&room.id, &room.name, &owner, live.is_some());
     });
 }
 
@@ -578,7 +639,7 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
     });
 }
 
-fn BubbleRow(bubble: &BubbleView, harness: &str) {
+fn BubbleRow(bubble: &BubbleView, harness: &str, project: &str) {
     let p = ember_theme().palette;
     let mine = bubble.side == Side::Right;
     let (fill, ink) = if mine { (p.ink, p.ink_text) } else { (p.surface_2, p.text) };
@@ -614,7 +675,14 @@ fn BubbleRow(bubble: &BubbleView, harness: &str) {
             .modifier(Modifier::new().fill_max_width())
             .content(|| {
                 if bubble.show_avatar {
-                    Avatar(&bubble.name.clone().unwrap_or_default(), harness, 36.0);
+                    let name = bubble.name.clone().unwrap_or_default();
+                    match crate::ui::channels::avatar_kind(bubble.is_agent, harness) {
+                        // The agent's team character, like the session list (FR-L22).
+                        crate::ui::channels::AvatarKind::Character => {
+                            super::characters::Character(harness, false, 36.0, &name, project, super::characters::CharState::Idle, None)
+                        }
+                        crate::ui::channels::AvatarKind::Letter => Avatar(&name, harness, 36.0),
+                    }
                 } else {
                     cu::Spacer().modifier(Modifier::new().width(36.0));
                 }
@@ -624,6 +692,9 @@ fn BubbleRow(bubble: &BubbleView, harness: &str) {
                             Label(&n, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                             if bubble.is_agent {
                                 Pill("에이전트", PillTone::Orange, true);
+                            }
+                            if bubble.guest {
+                                Pill("게스트", PillTone::Grey, true);
                             }
                         });
                     }
@@ -653,9 +724,24 @@ pub fn sample_rooms() -> Vec<Room> {
         text: text.into(),
         at: now - ago,
         unread,
+        author_name: String::new(),
+        author_kind: String::new(),
+    };
+    // A guest's message (FR-T15): shows the name and a 게스트 tag, never the id. Sample data
+    // only, compiled in debug builds only (release has no sample guests).
+    #[cfg(debug_assertions)]
+    let guest_msg = Message {
+        id: "m3g".into(),
+        from: "guest:g1".into(),
+        text: "저도 같이 확인해 볼게요".into(),
+        at: now - 450,
+        unread: 0,
+        author_name: "민수".into(),
+        author_kind: "guest".into(),
     };
     let team = vec![member("me", "나", false, ""), member("kim", "김하나", false, ""), member("a1", "ember-리더", true, "claude-code")];
-    vec![
+    #[allow(unused_mut)]
+    let mut rooms = vec![
         Room {
             id: "r1".into(),
             name: "배포 논의".into(),
@@ -685,7 +771,10 @@ pub fn sample_rooms() -> Vec<Room> {
             messages: vec![],
             unread: 0,
         },
-    ]
+    ];
+    #[cfg(debug_assertions)]
+    rooms[0].messages.insert(3, guest_msg);
+    rooms
 }
 
 /// A review window (`EMBER_CR_ROUTE=channels`): the channels screen with sample rooms; the
@@ -702,6 +791,17 @@ pub fn preview() {
 mod tests {
     use super::*;
     use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_l12_channels_title_is_18_at_every_width() {
+        assert_eq!(list_title_size(), Fs::Xl);
+    }
+
+    #[test]
+    fn fr_l12_channels_row_is_64_high() {
+        assert_eq!(ROOM_ICON, 44.0);
+        assert_eq!(ROOM_ROW_HEIGHT, 64.0);
+    }
 
     fn text_of(content: fn()) -> String {
         let mut host = Host::new(move || Box::new(Recomposer::new(content)));
@@ -761,6 +861,9 @@ mod tests {
                 height_dp: 900.0,
                 class,
                 height_class: WindowHeightClass::Medium,
+                safe_area_top: 0.0,
+                safe_area_leading: 0.0,
+                safe_area_trailing: 0.0,
             },
         };
         let (bytes, _) = host.dispatch(event).expect("dispatch");

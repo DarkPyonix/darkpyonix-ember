@@ -41,7 +41,6 @@ pub type Part<'a> = Box<dyn FnOnce() + 'a>;
 
 /// The width of the option popups of the composer's chips.
 const POPUP_WIDTH: f32 = 280.0;
-/// The permission popup is wider: each row carries a description line.
 /// The permission popover (mockup `.mp-pop.mp-mode`).
 const MODE_POPOVER_WIDTH: f32 = 340.0;
 /// The model popover: a rail of harnesses beside the search and the rows.

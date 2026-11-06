@@ -21,6 +21,7 @@
 //! | POST | `/fs/grep` | [`GrepRequest`] → [`GrepResponse`] |
 //! | POST | `/git/log` | [`git_log::GitLogRequest`] → [`git_log::GitLogResponse`] |
 //! | POST | `/git/branches` | [`GitRepoRequest`] → [`git_branches::GitBranchesResponse`] (FR-G9: local branches with upstream ahead/behind, last commit, default and worktree) |
+//! | POST | `/git/github` | [`git_github::GitGithubRequest`] → [`git_github::GitGithubResponse`] (FR-G13, through `gh`; each failed call nulls its own fields; 409 when gh is missing) |
 //! | POST | `/git/prs` | [`git_prs::GitPrsRequest`] → [`git_prs::GitPrsResponse`] (FR-G8, through `gh pr list`; 409 when gh is missing, not logged in or the repository has no GitHub remote) |
 //! | POST | `/git/status` | [`GitRepoRequest`] → [`GitStatus`] (404 `not_a_repo`; 409 for a bare repository or dubious ownership) |
 //! | POST | `/git/diff` | [`GitDiffRequest`] → [`GitDiff`] (`include_untracked` adds all untracked files; 413 `too_large` past 8 MiB of git output) |
@@ -166,6 +167,7 @@ pub fn router(node: Node) -> Router {
         .route("/git/log", post(git_log_handler))
         .route("/git/branches", post(git_branches_handler))
         .route("/git/prs", post(git_prs_handler))
+        .route("/git/github", post(git_github_handler))
         // End FR-G5.
         .route("/git/status", post(git_status))
         .route("/git/diff", post(git_diff))
@@ -414,6 +416,12 @@ async fn git_prs_handler(State(n): State<Node>, Json(r): Json<git_prs::GitPrsReq
     Ok(Json(git_prs::list(&n.0.policy, &r).await?))
 }
 // End FR-G8.
+
+// FR-G13: GitHub card summary handler (runs `gh`, holds no lock).
+async fn git_github_handler(State(n): State<Node>, Json(r): Json<git_github::GitGithubRequest>) -> ApiResult<git_github::GitGithubResponse> {
+    Ok(Json(git_github::summarize(&n.0.policy, &r).await?))
+}
+// End FR-G13.
 
 async fn git_status(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<GitStatus> {
     Ok(Json(git::status(&n.0.policy, &r).await?))

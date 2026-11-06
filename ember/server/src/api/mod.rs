@@ -39,6 +39,7 @@
 
 pub mod git;
 pub mod ide;
+pub mod ide_extensions;
 pub mod origin;
 
 use std::path::PathBuf;

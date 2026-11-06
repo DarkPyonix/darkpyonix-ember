@@ -50,14 +50,6 @@ pub fn list_width(width_dp: f32) -> f32 {
     }
 }
 
-/// The one-page width of the compact list and room: the window width, set outright. Under 600 dp
-/// the shell has no side navigation, so the page is as wide as the window. A column that only
-/// asks to fill (`fill_max_width`) sized itself to its content at 390 dp, about 230 dp, and left
-/// the right side blank (FR-L12, #496), as the status cards did (#365).
-pub fn compact_page_width(width_dp: f32) -> f32 {
-    width_dp.max(0.0)
-}
-
 /// The local zone's offset in seconds. TODO: read the device zone; UTC until the app can.
 fn local_tz() -> i64 {
     0
@@ -282,9 +274,9 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(detail);
         });
     } else if show_room {
-        cu::Column().modifier(Modifier::new().width(compact_page_width(window.width_dp)).fill_max_height()).content(detail);
+        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(detail);
     } else {
-        cu::Column().modifier(Modifier::new().width(compact_page_width(window.width_dp)).fill_max_height()).content(list);
+        cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
     }
 }
 
@@ -755,9 +747,11 @@ mod tests {
     }
 
     #[test]
-    fn fr_l12_the_compact_page_is_as_wide_as_the_window() {
-        assert_eq!(super::compact_page_width(390.0), 390.0);
-        assert_eq!(super::compact_page_width(-1.0), 0.0);
+    fn fr_l12_the_compact_list_root_fills_the_width() {
+        let src = include_str!("channels.rs");
+        let at = src.find("} else if show_room {").expect("compact branch");
+        let branch = &src[at..at + 400];
+        assert_eq!(branch.matches("fill_max_width()").count(), 2, "room and list roots fill the width");
     }
 
     #[test]

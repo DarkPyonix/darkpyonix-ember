@@ -612,7 +612,7 @@ pub fn shell() {
     });
 
     let content = || {
-        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
+        cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height()).content(|| {
             if cfg!(target_os = "windows") {
                 // Caption strip: an empty drag region, then the width the caption buttons cover.
                 cu::Row()

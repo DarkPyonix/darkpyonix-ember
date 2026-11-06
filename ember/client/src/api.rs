@@ -181,6 +181,37 @@ pub enum GitLogRefKind {
     Head,
 }
 
+/// Local branches (`POST /projects/{id}/git/branches`, FR-G9).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitBranches {
+    #[serde(default)]
+    pub branches: Vec<GitBranchInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GitBranchInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    #[serde(default)]
+    pub last_sha: String,
+    #[serde(default)]
+    pub last_subject: String,
+    #[serde(default)]
+    pub last_time: Option<String>,
+    #[serde(default)]
+    pub worktree: Option<String>,
+}
+
 /// Pull requests of the repository's GitHub remote (`POST /projects/{id}/git/prs`, FR-G8).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GitPrs {
@@ -701,6 +732,11 @@ impl Api {
     /// Read a page of repository history.
     pub async fn git_log(&self, project: &str, limit: u32, skip: u64, branch: Option<&str>) -> ApiResult<GitLog> {
         Self::decode(self.git_post(project, "log", json!({ "limit": limit, "skip": skip, "branch": branch })).await?)
+    }
+
+    /// List local branches with upstream ahead/behind, last commit, default and worktree (FR-G9).
+    pub async fn git_branches(&self, project: &str) -> ApiResult<GitBranches> {
+        Self::decode(self.git_post(project, "branches", json!({})).await?)
     }
 
     /// List pull requests (`state` is `open`, `closed`, `merged` or `all`). The node runs the

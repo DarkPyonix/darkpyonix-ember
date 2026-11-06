@@ -125,6 +125,8 @@ pub const CODE_PREFIX: &str = "dpe_";
 pub const POLL_PREFIX: &str = "dps_";
 /// Node token prefix.
 pub const TOKEN_PREFIX: &str = "dpn_";
+/// Characters after [`CODE_PREFIX`] in a code: two v4 UUIDs without dashes, 32 lower-case hex each.
+pub const CODE_BODY_CHARS: usize = 64;
 /// Default lifetime of a code.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 /// Longest lifetime of a code; a larger request is clamped to it.
@@ -627,6 +629,13 @@ impl Registrar for ComputersRegistrar {
     }
 }
 
+/// Whether `code` has the shape [`Enrol::mint`] makes: [`CODE_PREFIX`] and then exactly
+/// [`CODE_BODY_CHARS`] lower-case hex digits.
+fn code_has_shape(code: &str) -> bool {
+    code.strip_prefix(CODE_PREFIX)
+        .is_some_and(|b| b.len() == CODE_BODY_CHARS && b.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')))
+}
+
 fn digest(code: &str) -> Vec<u8> {
     Sha256::digest(code.as_bytes()).to_vec()
 }
@@ -799,6 +808,13 @@ impl Enrol {
             return Err(Refused::RateLimited);
         }
         let info = info.validated().ok_or(Refused::BadNodeInfo)?;
+        // A code with a shape no mint makes is never looked up in SQLite. It is a failure like
+        // any other: the same refusal, and it spends the same failure budgets, so it can neither
+        // probe for free nor reveal the format.
+        if !code_has_shape(code) {
+            self.record_failure(source_key, now_ms);
+            return Err(Refused::Generic);
+        }
         let info_json = serde_json::to_string(&info).map_err(|_| Refused::BadNodeInfo)?;
         let observed = clean_addr(source_key);
         let secret = long_secret(POLL_PREFIX);
@@ -1503,6 +1519,27 @@ mod tests {
         assert_eq!(r.enrol_id, m.id);
         assert_eq!(r.expires_ms, T0 + 1 + CONFIRM_WINDOW_MS);
         assert_eq!(rd(&e, m.code.expose(), T0 + 2, "a"), Err(Refused::Generic));
+    }
+
+    #[test]
+    fn fr_c2_a_code_with_the_wrong_shape_is_refused_and_recorded_as_a_failure() {
+        let (_, e) = svc();
+        let good = format!("{CODE_PREFIX}{}", "a".repeat(CODE_BODY_CHARS));
+        assert!(code_has_shape(&good));
+        let upper = format!("{CODE_PREFIX}{}", "A".repeat(CODE_BODY_CHARS));
+        let short = format!("{CODE_PREFIX}{}", "a".repeat(CODE_BODY_CHARS - 1));
+        let long = format!("{CODE_PREFIX}{}", "a".repeat(CODE_BODY_CHARS + 1));
+        let nonhex = format!("{CODE_PREFIX}{}", "g".repeat(CODE_BODY_CHARS));
+        for bad in ["", "dpe_", "dpe_wrong", upper.as_str(), short.as_str(), long.as_str(), nonhex.as_str()] {
+            assert!(!code_has_shape(bad), "{bad:?}");
+        }
+        // Ten malformed codes spend the per-source budget like ten unknown ones, the eleventh is limited.
+        for i in 0..MAX_FAILURES {
+            assert_eq!(rd(&e, "dpe_wrong", T0 + i as i64, "m"), Err(Refused::Generic));
+        }
+        assert_eq!(rd(&e, "dpe_wrong", T0 + 20, "m"), Err(Refused::RateLimited));
+        // A minted code has the shape.
+        assert!(code_has_shape(mint(&e, T0).code.expose()));
     }
 
     #[test]

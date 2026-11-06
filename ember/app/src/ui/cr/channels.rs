@@ -76,8 +76,8 @@ pub const POLL_EVERY: Duration = Duration::from_secs(2);
 
 /// What the live screen holds: the rooms read from the server and the state of that read.
 #[derive(Clone)]
-struct Feed {
-    rooms: MutableState<Vec<Room>>,
+pub(super) struct Feed {
+    pub(super) rooms: MutableState<Vec<Room>>,
     load: MutableState<Load>,
 }
 
@@ -211,6 +211,7 @@ pub fn ChannelsScreenWith(rooms: Vec<Room>) {
 fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let filter = remember(|| mutable_state_of(ListFilter::default()));
+    let new_ch = super::new_channel::NewChannelState::new();
     // `EMBER_CR_ROOM=<index>` opens a room at the start, for review captures.
     let open = remember(|| {
         let index = std::env::var("EMBER_CR_ROOM").ok().and_then(|v| v.parse::<usize>().ok());
@@ -248,7 +249,7 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     }
     let order: Vec<String> = Vec::new();
     let room = cur.as_ref().and_then(|id| rooms.iter().find(|r| &r.id == id)).cloned();
-    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0, &load);
+    let list = || RoomList(&rooms, &order, &filter, &open, window.width_dp <= 900.0, &load, &new_ch, feed.is_some());
     let detail = || match room.clone() {
         Some(r) => {
             let back = open.clone();
@@ -278,9 +279,10 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     } else {
         cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height()).content(list);
     }
+    super::new_channel::NewChannelSheet(&new_ch, &rooms, feed.clone(), &open);
 }
 
-fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool, load: &Load) {
+fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool) {
     let p = ember_theme().palette;
     let current = filter.get();
     let sections = group_rooms(rooms, order, &current);
@@ -295,21 +297,8 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
                 Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
-                // TODO(FR-T10): `POST /api/channels` and `Api::create_channel` work, but the screen
-                // has no sheet to ask for the name, the project and the agents yet, so the button
-                // stays disabled rather than creating a channel with guessed values.
-                // TODO(compose-rust#429): accessible name (new channel).
-                cu::Box()
-                    .alignment(Alignment::Center)
-                    .modifier(
-                        Modifier::new()
-                            .size(H_CTL, H_CTL)
-                            .background(paint(p.surface))
-                            .border(1.0, paint(p.line))
-                            .shape_role(compose_rust::ShapeRole::Full)
-                            .alpha(0.4),
-                    )
-                    .content(|| super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0));
+                // FR-T10, #499: the button opens the 새 채널 sheet; in demo it says why not.
+                super::new_channel::NewChannelButton(new_ch, live, current.project.clone());
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });
         cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));

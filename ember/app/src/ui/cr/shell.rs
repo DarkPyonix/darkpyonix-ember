@@ -928,11 +928,12 @@ mod tests {
         // Verify `services().reset_demo()` genuinely restores demo state after a mutation.
         let s = crate::services::services();
         let d = s.demo.as_ref().expect("test_services installs DemoSource");
+        let initial = d.events_for("demo-s1").len();
         d.send_message(&s.client, "demo-s1", "mutated message");
         let len_after_send = d.events_for("demo-s1").len();
-        assert!(len_after_send > 6);
+        assert!(len_after_send > initial);
         assert!(s.reset_demo());
-        assert_eq!(d.events_for("demo-s1").len(), 6);
+        assert_eq!(d.events_for("demo-s1").len(), initial);
     }
 
     #[test]

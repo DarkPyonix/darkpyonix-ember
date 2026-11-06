@@ -78,6 +78,37 @@ pub fn device_cols(width_dp: f32) -> usize {
     }
 }
 
+/// Narrowest an agent tile can be and still show its two buttons, "대화 열기" and "보내기"
+/// (24 dp padding, 2 dp border, about 98 + 4 + 90 dp of buttons, with some air).
+pub const AGENT_TILE_MIN_W: f32 = 232.0;
+
+/// Columns of the agent tiles (FR-L27): as many as keep every tile at least
+/// [`AGENT_TILE_MIN_W`] wide, at most four. `avail` is the card's inner width. At 768 dp four
+/// tiles were 142 dp and the "보내기" button was cut to a line.
+pub fn agent_cols(avail: f32, gap: f32) -> usize {
+    (((avail + gap) / (AGENT_TILE_MIN_W + gap)).floor() as usize).clamp(1, 4)
+}
+
+/// Width of one tile of a grid of `cols` columns in `avail` with `gap` between.
+pub fn tile_width(avail: f32, cols: usize, gap: f32) -> f32 {
+    let cols = cols.max(1) as f32;
+    ((avail - (cols - 1.0) * gap) / cols).max(1.0)
+}
+
+/// Rows of an equal-width grid: how many tiles each row has and how many empty columns follow,
+/// so a short last row keeps the width of the rows above (device cards are all the same width).
+pub fn equal_rows(n: usize, cols: usize) -> Vec<(usize, usize)> {
+    let cols = cols.max(1);
+    let mut rows = Vec::new();
+    let mut left = n;
+    while left > 0 {
+        let k = left.min(cols);
+        rows.push((k, cols - k));
+        left -= k;
+    }
+    rows
+}
+
 /// Transfers beside the received files above 1100 px (`.fl-cols`).
 pub fn side_by_side(width_dp: f32) -> bool {
     width_dp > 1100.0
@@ -550,20 +581,36 @@ pub fn grid_weights(n: usize, cols: usize) -> Vec<Vec<f32>> {
     rows
 }
 
-/// A grid of tiles by [`grid_widths`], so spanning tiles line up with the columns above.
-fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, tiles: Vec<Part<'a>>) {
-    let widths = grid_widths(tiles.len(), cols, avail, gap);
+/// A grid of tiles. With `span_last` a short last row stretches by [`grid_widths`] so spanning
+/// tiles line up with the columns above; without it the tiles keep the column width and empty
+/// columns fill the row ([`equal_rows`]).
+fn TileGrid<'a>(cols: usize, gap: f32, avail: f32, span_last: bool, tiles: Vec<Part<'a>>) {
     // The rows measured 15 apart for a 12 gap: the toolkit's rows run about 3 dp taller.
     cu::Column().spacing((gap - 3.0).max(0.0)).modifier(Modifier::new().fill_max_width()).content(|| {
         let mut it = tiles.into_iter();
-        for row in widths {
-            cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
-                for wt in row {
-                    if let Some(tile) = it.next() {
-                        cu::Column().modifier(Modifier::new().weight(wt)).content(tile);
+        if span_last {
+            for row in grid_widths(it.len(), cols, avail, gap) {
+                cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                    for wt in row {
+                        if let Some(tile) = it.next() {
+                            cu::Column().modifier(Modifier::new().weight(wt)).content(tile);
+                        }
                     }
-                }
-            });
+                });
+            }
+        } else {
+            for (k, empty) in equal_rows(it.len(), cols) {
+                cu::Row().spacing(gap).modifier(Modifier::new().fill_max_width()).content(|| {
+                    for _ in 0..k {
+                        if let Some(tile) = it.next() {
+                            cu::Column().modifier(Modifier::new().weight(1.0)).content(tile);
+                        }
+                    }
+                    for _ in 0..empty {
+                        cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    }
+                });
+            }
         }
     });
 }
@@ -623,6 +670,7 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                     cols,
                     SP[2],
                     avail,
+                    false,
                     model
                         .devices
                         .iter()
@@ -651,16 +699,19 @@ fn Stage(model: &FilesModel, members: &[CrewMember], extras: &Extras, st: &State
                 if members.is_empty() {
                     Label(empty_text(crate::ui::files::Section::Agents, ready), Fs::Md, Weight::Regular, Some(paint(p.muted)), None);
                 }
+                let a_cols = agent_cols(avail, SP[2]);
+                let text_w = tile_width(avail, a_cols, SP[2]) - 2.0 * SP[2] - 2.0;
                 TileGrid(
-                    cols,
+                    a_cols,
                     SP[2],
                     avail,
+                    true,
                     members
                         .iter()
                         .map(|m| -> Part {
                             let s = st.sheet.clone();
                             Box::new(move || {
-                                AgentTile(m, ui, move |id| {
+                                AgentTile(m, ui, text_w, move |id| {
                                     s.set(Some(SendDraft { target: Some(SendTarget::Agent(id)), files: Vec::new() }))
                                 })
                             })
@@ -757,7 +808,7 @@ pub fn agent_host(project: &str) -> String {
 /// task, its status, and actions to open its conversation (`ui.open_conversation`) or send files
 /// to the computer it works on.
 /// TODO(compose-rust#372): a pointer-up `Clickable`.
-fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'static) {
+fn AgentTile(m: &CrewMember, ui: &SharedUi, text_w: f32, on_send: impl FnMut(String) + 'static) {
     let p = ember_theme().palette;
     let send_id = m.id.clone();
     let open_id = m.id.clone();
@@ -776,9 +827,9 @@ fn AgentTile(m: &CrewMember, ui: &SharedUi, on_send: impl FnMut(String) + 'stati
             cu::Column().spacing(2.0).modifier(Modifier::new().fill_max_width()).content(|| {
                 Character(&m.agent, false, 48.0, &name, &m.project, state, None);
                 cu::Spacer().modifier(Modifier::new().height(SP[1]));
-                Label(&fit_label(&name, 150.0, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
-                Label(&fit_label(&host, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
-                Label(&fit_label(&m.title, 150.0, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&fit_label(&name, text_w, Fs::Md.size()), Fs::Md, Weight::Semibold, None, Some(1));
+                Label(&fit_label(&host, text_w, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                Label(&fit_label(&m.title, text_w, Fs::Xs.size()), Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 cu::Spacer().modifier(Modifier::new().height(SP[1]));
                 if m.waiting {
                     Pill("승인 대기", PillTone::Orange, false);
@@ -1289,6 +1340,49 @@ mod tests {
         assert!(side_by_side(1440.0) && !side_by_side(1024.0));
     }
 
+    /// The inner width of the stage card at `w`, as the screen computes it.
+    fn stage_avail(w: f32) -> f32 {
+        use crate::ui::shell::{nav_mode, ShellMode};
+        let nav = match nav_mode(w, false) {
+            ShellMode::BottomTabs => 0.0,
+            ShellMode::Rail => RAIL_W,
+            ShellMode::Sidebar => SIDE_W,
+        };
+        (w - nav - 2.0 * page_pad(w)).max(280.0) - 2.0 * PAD_CARD_H
+    }
+
+    #[test]
+    fn fr_l27_agent_tiles_keep_room_for_both_buttons_at_every_width() {
+        let gap = SP[2];
+        // 1440: 4 across; 1024: 3; 768: 2; 390: one full-width row.
+        assert_eq!(stage_avail(1440.0), 1102.0);
+        assert_eq!(stage_avail(1024.0), 864.0);
+        assert_eq!(stage_avail(768.0), 608.0);
+        assert_eq!(stage_avail(390.0), 318.0);
+        let cols: Vec<usize> = [1440.0, 1024.0, 768.0, 390.0].iter().map(|w| agent_cols(stage_avail(*w), gap)).collect();
+        assert_eq!(cols, vec![4, 3, 2, 1]);
+        for w in [390.0, 560.0, 640.0, 768.0, 900.0, 1024.0, 1100.0, 1280.0, 1440.0, 1920.0] {
+            let avail = stage_avail(w);
+            let c = agent_cols(avail, gap);
+            assert!((1..=4).contains(&c), "{w}");
+            assert!(tile_width(avail, c, gap) >= AGENT_TILE_MIN_W || c == 1, "{w}: tile {}", tile_width(avail, c, gap));
+        }
+        // Where the old four columns left 142 dp, the tile is now wide enough for both buttons.
+        assert!(tile_width(stage_avail(768.0), 4, gap) < AGENT_TILE_MIN_W);
+        assert!(tile_width(stage_avail(768.0), 2, gap) >= 292.0);
+    }
+
+    #[test]
+    fn fr_l27_device_tiles_have_equal_widths_and_a_short_row_keeps_the_column() {
+        assert_eq!(equal_rows(2, 4), vec![(2, 2)]);
+        assert_eq!(equal_rows(5, 4), vec![(4, 0), (1, 3)]);
+        assert_eq!(equal_rows(4, 2), vec![(2, 0), (2, 0)]);
+        assert!(equal_rows(0, 4).is_empty());
+        // Four device columns at 768 as in the mockup: 4 tiles of the same width.
+        let w = tile_width(stage_avail(768.0), device_cols(768.0), SP[2]);
+        assert!(w > 130.0 && (w * 4.0 + 3.0 * SP[2] - stage_avail(768.0)).abs() < 0.01);
+    }
+
     #[test]
     fn fr_l27_the_history_filter_separates_sent_received_and_problems() {
         let (m, _) = sample_model();
@@ -1415,7 +1509,7 @@ mod tests {
                     waiting: false,
                 };
                 let sent_cb = sent_cb.clone();
-                AgentTile(&member, shared_ui(), move |id| {
+                AgentTile(&member, shared_ui(), 200.0, move |id| {
                     *sent_cb.lock().expect("lock") = Some(id);
                 });
             }))

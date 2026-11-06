@@ -30,7 +30,7 @@ pub use crate::ui::files::{
     Transfer, TransferAction, TransferService, TransferState, FILE_PICKER_AVAILABLE, FILE_PICK_REASON,
     FILE_PICK_UNAVAILABLE, LOCK_LINE, UNAVAILABLE,
 };
-use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max, files_line, send_state};
+use crate::ui::files::{choose_target, chip_avail, chip_label, chip_rows, chip_text_max_for, chip_width_est, files_line, fit_chip_text, send_state};
 use super::characters::{CharState, Character};
 use super::components::{AppButton, ButtonKind, Clickable, EmberCard, EmberSheet, FilterChip, IconButton, Label, Pill, PillTone};
 use super::home::{fit_label, text_px, Cols, Part};
@@ -1228,8 +1228,8 @@ fn TargetChip(label: &str, icon: TargetIcon, selected: bool, on_click: impl FnMu
 }
 
 /// The chip text: the name cut to fit, with the offline tag for an offline device.
-fn shown_label(name: &str, offline: bool, glyph: f32) -> String {
-    chip_label(name, offline, chip_text_max(glyph), |t, px| fit_label(t, px, Fs::Sm.size()))
+fn shown_label(name: &str, offline: bool, glyph: f32, avail: f32) -> String {
+    chip_label(name, offline, chip_text_max_for(avail, glyph), fit_chip_text)
 }
 
 enum TargetIcon {
@@ -1283,7 +1283,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         .iter()
         .map(|(l, icon, _, dim, _)| {
             let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
-            target_chip_width(&shown_label(l, *dim, glyph), glyph)
+            chip_width_est(&shown_label(l, *dim, glyph, inner), glyph)
         })
         .collect();
     let lines = chip_rows(&widths, SP[1], inner);
@@ -1291,7 +1291,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
         cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
             Label("받는 곳", Fs::Sm, Weight::Regular, Some(paint(p.muted)), Some(1));
             // The full name below the chips, only when the chosen chip had to cut it.
-            if let Some(name) = chosen_name.as_ref().filter(|n| fit_label(n, chip_text_max(22.0), Fs::Sm.size()) != **n) {
+            if let Some(name) = chosen_name.as_ref().filter(|n| fit_chip_text(n, chip_text_max_for(inner, 22.0)) != **n) {
                 Label(&format!("선택한 이름: {name}"), Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
             }
             if chips.is_empty() {
@@ -1304,7 +1304,7 @@ fn SendSheet(st: &State, devices: &[Device], members: &[CrewMember], ready: bool
                         let (s, base) = (st.sheet.clone(), d.clone());
                         let target = target.clone();
                         let glyph = if matches!(icon, TargetIcon::Agent(_)) { 22.0 } else { 16.0 };
-                        let shown = shown_label(label, *dim, glyph);
+                        let shown = shown_label(label, *dim, glyph, inner);
                         let devs: Vec<Device> = devices.to_vec();
                         let icon = match icon {
                             TargetIcon::Kind(k) => TargetIcon::Kind(*k),

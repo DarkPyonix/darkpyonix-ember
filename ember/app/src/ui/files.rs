@@ -816,6 +816,40 @@ pub fn chip_rows(widths: &[f32], gap: f32, avail: f32) -> Vec<Vec<usize>> {
     rows
 }
 
+/// A pessimistic text width for the chips: 16 dp per Korean (non-ASCII) glyph and 9 dp per ASCII
+/// char, so a chip is never wider on screen than modelled and the rows wrap early, not late.
+pub fn chip_text_px(text: &str) -> f32 {
+    text.chars().map(|c| if c.is_ascii() { 9.0 } else { 16.0 }).sum()
+}
+
+/// `text` cut with an ellipsis so [`chip_text_px`] stays within `max_px`.
+pub fn fit_chip_text(text: &str, max_px: f32) -> String {
+    if chip_text_px(text) <= max_px {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        let next = format!("{out}{c}\u{2026}");
+        if chip_text_px(&next) > max_px {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// A chip's modelled width: 12 padding, the glyph, 8, the text, 12 padding.
+pub fn chip_width_est(label: &str, glyph: f32) -> f32 {
+    12.0 + glyph + 8.0 + chip_text_px(label) + 12.0
+}
+
+/// The widest a chip's text may be in a row `avail` wide: the mockup's 200 px cap, and also so that
+/// two chips always fit one row (each at most `(avail - 8) / 2` wide, the gap being 8).
+pub fn chip_text_max_for(avail: f32, glyph: f32) -> f32 {
+    chip_text_max(glyph).min((avail - 8.0) / 2.0 - 12.0 - glyph - 8.0 - 12.0)
+}
+
 /// The text of a receiver chip: the name, cut to fit, plus the offline tag for an offline device
 /// so the state is read as text and not only as a dimmed look. `fit` cuts a name to a pixel width.
 pub fn chip_label(
@@ -826,7 +860,7 @@ pub fn chip_label(
 ) -> String {
     if offline {
         let tag = format!(" {OFFLINE_TAG}");
-        let room = (max_px - tag.chars().count() as f32 * 13.0).max(24.0);
+        let room = (max_px - chip_text_px(&tag)).max(24.0);
         format!("{}{tag}", fit(name, room))
     } else {
         fit(name, max_px)
@@ -1387,6 +1421,38 @@ mod tests {
         assert_eq!(chip_avail(390.0), 302.0);
         assert_eq!(chip_rows(&widths, gap, chip_avail(390.0)), vec![vec![0, 1], vec![2], vec![3], vec![4]]);
         assert_eq!(chip_rows(&widths, gap, chip_avail(700.0)), vec![vec![0, 1, 2, 3], vec![4]]);
+    }
+
+    // FR-L27.5
+    #[test]
+    fn fr_l27_5_pessimistic_chip_rows_never_overflow_and_two_always_fit() {
+        let avail = chip_avail(390.0);
+        assert_eq!(chip_text_max_for(avail, 16.0), 99.0);
+        assert_eq!(chip_text_max_for(avail, 22.0), 93.0);
+        assert_eq!(chip_text_max_for(chip_avail(1440.0), 16.0), chip_text_max(16.0));
+        let names = ["이 컴퓨터", "스튜디오 PC", "second-project-codex", "second-project-claude", "a"];
+        for (width, expect_more) in [(390.0, false), (700.0, true)] {
+            let avail = chip_avail(width);
+            let mut widths = Vec::new();
+            for (i, n) in names.iter().enumerate() {
+                let glyph = if i >= 2 { 22.0 } else { 16.0 };
+                let label = chip_label(n, i == 1, chip_text_max_for(avail, glyph), fit_chip_text);
+                let w = chip_width_est(&label, glyph);
+                assert!(w <= (avail - 8.0) / 2.0 + 0.01, "{width} {n}: {w}");
+                widths.push(w);
+            }
+            let rows = chip_rows(&widths, 8.0, avail);
+            for r in &rows {
+                let sum: f32 = r.iter().map(|&i| widths[i]).sum::<f32>() + 8.0 * (r.len() as f32 - 1.0);
+                assert!(sum <= avail, "{width}: {sum}");
+                assert!(r.len() >= 2 || rows.len() == 1 || r != &rows[0], "{width}");
+            }
+            assert_eq!(rows.iter().any(|r| r.len() >= 3), expect_more, "{width}: {rows:?}");
+        }
+        // Three chips whose pessimistic widths exceed the row never share the first row.
+        let widths = [chip_width_est("이 컴퓨터", 16.0), chip_width_est("스튜디오 PC 오프라인", 16.0), 147.0];
+        assert!(widths.iter().sum::<f32>() > 302.0);
+        assert!(chip_rows(&widths, 8.0, 302.0)[0].len() < 3);
     }
 
     #[test]

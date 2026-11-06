@@ -145,7 +145,14 @@ const MIGRATIONS: &[&str] = &[
     crate::channels::invites::MIGRATION,
     crate::projects::schema::PROFILE_OVERRIDES_MIGRATION,
     crate::computers::enrol::MIGRATION,
+    crate::computers::enrol::CONFIRM_MIGRATION,
 ];
+
+/// The position of a registered migration (tests locate migrations by position, never by length).
+#[cfg(test)]
+pub(crate) fn migration_position(sql: &str) -> Option<usize> {
+    MIGRATIONS.iter().position(|m| *m == sql)
+}
 
 /// Bring `conn` up to the latest schema version.
 fn migrate(conn: &mut Connection) -> anyhow::Result<()> {

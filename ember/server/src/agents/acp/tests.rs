@@ -986,7 +986,14 @@ fn probe_adapter(script_body: &str) -> (tempfile::TempDir, AcpAdapter) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("probe.sh");
-    std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+    // Write, flush to disk and close the handle before chmod and use: a script still open for
+    // writing is "text file busy" (ETXTBSY) when executed (#546).
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(format!("#!/bin/sh\n{script_body}\n").as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut config = AcpConfig::preset("gemini", Some(path)).unwrap();
     config.env_policy = EnvPolicy::Inherit;
@@ -996,17 +1003,25 @@ fn probe_adapter(script_body: &str) -> (tempfile::TempDir, AcpAdapter) {
 #[tokio::test]
 async fn fr_a10_probe_a_script_that_exits_at_once_is_reaped_and_reported() {
     let (_dir, a) = probe_adapter("echo 'Unknown argument: acp' >&2; exit 1");
-    let (ok, text) = a.probe_start_args().await.expect("it exited within the window");
-    assert!(!ok && rejects_acp_flag(&text), "{text:?}");
+    let outcome = a.probe_start_args().await;
+    match &outcome {
+        ProbeOutcome::Exited { ok, text } => assert!(!ok && rejects_acp_flag(text), "{outcome:?}"),
+        _ => panic!("expected Exited, got {outcome:?}"),
+    }
     let (_dir, a) = probe_adapter("exit 0");
-    assert_eq!(a.probe_start_args().await.map(|(ok, _)| ok), Some(true));
+    let outcome = a.probe_start_args().await;
+    assert!(matches!(outcome, ProbeOutcome::Exited { ok: true, .. }), "{outcome:?}");
 }
 
 #[tokio::test]
 async fn fr_a10_probe_a_script_that_keeps_running_is_killed_after_the_window() {
     let (dir, a) = probe_adapter(&format!("echo $$ > {}/pid; exec sleep 30", "$(dirname \"$0\")"));
     let began = std::time::Instant::now();
-    assert!(a.probe_start_args().await.is_none(), "still running after the window: the flag is accepted");
+    let outcome = a.probe_start_args().await;
+    assert!(
+        matches!(outcome, ProbeOutcome::StillRunning),
+        "still running after the window: the flag is accepted; got {outcome:?}"
+    );
     assert!(began.elapsed() < Duration::from_secs(10));
     let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap().trim().to_string();
     let alive = std::process::Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
@@ -1040,4 +1055,28 @@ async fn fr_a10b_a_normal_omp_turn_is_unchanged() {
     assert_eq!(events.last(), Some(&AgentEvent::TurnEnded { outcome: TurnOutcome::Completed }));
     assert!(typed(&events).is_none());
     run.shutdown().await.unwrap();
+}
+
+#[test]
+fn fr_a10_probe_is_busy_only_for_etxtbsy() {
+    assert!(is_busy(&std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy)));
+    #[cfg(unix)]
+    assert!(is_busy(&std::io::Error::from_raw_os_error(26)), "errno 26 is ETXTBSY");
+    assert!(!is_busy(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+    assert!(!is_busy(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+}
+
+#[tokio::test]
+async fn fr_a10_probe_a_missing_command_is_spawn_failed_quickly_and_never_still_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = AcpConfig::preset("gemini", Some(dir.path().join("no-such-command"))).unwrap();
+    config.env_policy = EnvPolicy::Inherit;
+    let a = AcpAdapter::new(config).unwrap();
+    let began = std::time::Instant::now();
+    let outcome = a.probe_start_args().await;
+    assert!(
+        matches!(outcome, ProbeOutcome::SpawnFailed(std::io::ErrorKind::NotFound, _)),
+        "expected SpawnFailed(NotFound), got {outcome:?}"
+    );
+    assert!(began.elapsed() < Duration::from_secs(1), "no window wait and no busy retry: {:?}", began.elapsed());
 }

@@ -10,6 +10,7 @@
 //! | `checkout` | `{branch}` |
 //! | `branch` | `{name, from?}` |
 //! | `fetch`, `pull`, `push` | `{remote?}` |
+//! | `branches` | `{}` (FR-G9) |
 //! | `prs` | `{state?, limit?}` (FR-G8, through `gh` on the project's computer) |
 //!
 //! The server does not interpret the body. It adds `repo`, the working directory of the
@@ -39,7 +40,7 @@ use crate::session::Sessions;
 
 /// Every operation the node serves under `/git/`.
 pub const OPS: &[&str] =
-    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "prs", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
+    &["status", "diff", "stage", "unstage", "apply", "commit", "checkout", "branch", "fetch", "pull", "push", "conflicts", "log", "branches", "prs", "stash/list", "stash/push", "stash/apply", "stash/pop", "stash/drop", "conflict", "resolve"];
 
 #[derive(Clone)]
 struct GitState {

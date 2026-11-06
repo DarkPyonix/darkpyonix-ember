@@ -33,10 +33,21 @@ struct Fx {
     computers: Arc<Computers>,
 }
 
+/// Write an executable script: flush to disk and close the handle before chmod and use, because a
+/// script still open for writing is "text file busy" (ETXTBSY) when executed (#546).
+fn write_exec(path: &Path, content: &str) {
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 fn fake(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("fake-ose");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_exec(&path, &format!("#!/bin/sh\n{body}\n"));
     path
 }
 
@@ -272,7 +283,7 @@ fn fr_w4_ose_data_dir_a_timeout_kills_the_whole_process_group() {
 async fn fr_w4_ose_data_dir_start_passes_server_data_dir() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("fake-ose");
-    std::fs::write(
+    write_exec(
         &bin,
         r##"#!/bin/sh
 printf '%s\n' "$@" > "$(dirname "$0")/start-argv.txt"
@@ -280,9 +291,7 @@ env > "$(dirname "$0")/start-env.txt"
 exec python3 -c 'import socket,sys; p=int(sys.argv[sys.argv.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen();
 while True: s.accept()[0].close()' "$@"
 "##,
-    )
-    .unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let root = dir.path().join("ose-data");
     let folder = dir.path().join("proj");
     std::fs::create_dir(&folder).unwrap();
@@ -400,7 +409,7 @@ async fn fr_w4_ose_data_dir_a_second_concurrent_install_is_409() {
 async fn fr_w4_ose_token_file_keeps_the_token_out_of_argv() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("fake-ose");
-    std::fs::write(
+    write_exec(
         &bin,
         r##"#!/bin/sh
 D="$(dirname "$0")"
@@ -413,9 +422,7 @@ open(d+"/start-mode.txt","w").write("%o %o" % (os.stat(f).st_mode & 0o777, os.st
 p=int(a[a.index("--port")+1]); s=socket.socket(); s.bind(("127.0.0.1",p)); s.listen()
 while True: s.accept()[0].close()' "$D" "$@"
 "##,
-    )
-    .unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let root = dir.path().join("ose-data");
     let folder = dir.path().join("proj");
     std::fs::create_dir(&folder).unwrap();
@@ -454,8 +461,7 @@ async fn fr_w4_ose_token_file_replaces_a_stale_file_and_is_removed_when_the_star
     use sha2::{Digest, Sha256};
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("fake-ose");
-    std::fs::write(&bin, "#!/bin/sh\nexit 3\n").unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_exec(&bin, "#!/bin/sh\nexit 3\n");
     let root = dir.path().join("ose-data");
     let folder = dir.path().join("proj");
     std::fs::create_dir(&folder).unwrap();

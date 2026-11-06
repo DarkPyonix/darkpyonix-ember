@@ -29,28 +29,24 @@
 //! read timeout of 10 s on the connection and at most 256 open connections ([`GuestDoor::serve_with`]). A door served without
 //! `wrap_limited` has no limits and must not be exposed to a network.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::connect_info::ConnectInfo;
-use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::http::{header, HeaderValue};
+use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
 
-use crate::api::origin::host_of;
-use crate::door::err;
-use crate::door::harden::{forbid, not_found, origin_ok, request_host, response_headers, Guard};
-use crate::door::limits::{busy, normalize_ip, too_many};
+use crate::door::config::{DoorEnv, Spec};
+use crate::door::harden::{not_found, stack, Guard};
 
 pub use crate::door::harden::with_timeout;
 pub use crate::door::limits::{addr_key, client_ip, TokenBucket};
+pub use crate::door::limits::{AddrLimiter, DoorLimits, LimitConfig, LimitKind};
 pub use crate::door::DoorError;
 
 pub const LISTEN_VAR: &str = "EMBER_GUEST_LISTEN";
@@ -168,62 +164,21 @@ impl GuestDoor {
 
     /// As [`GuestDoor::from_env`] with the variables read through `get` (tests).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>, owner_listen: SocketAddr) -> Result<Option<Self>, DoorError> {
-        let raw = get(LISTEN_VAR).unwrap_or_default();
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Ok(None);
-        }
-        let listen: SocketAddr = match raw.parse() {
-            Ok(a) => a,
-            Err(_) => return err(format!("{LISTEN_VAR}={raw:?} is not an ip:port address")),
+        let spec = Spec {
+            listen_var: LISTEN_VAR,
+            allow_remote_var: ALLOW_REMOTE_VAR,
+            trusted_var: TRUSTED_PROXIES_VAR,
+            hosts_var: ALLOWED_HOSTS_VAR,
+            public_url_var: PUBLIC_URL_VAR,
+            noun: "guest door",
         };
-        // An unspecified address (0.0.0.0, ::) on either side takes the port on every interface.
-        let same_port = listen.port() == owner_listen.port();
-        if listen == owner_listen
-            || (same_port && (listen.ip().is_unspecified() || owner_listen.ip().is_unspecified()))
-        {
-            return err(format!("{LISTEN_VAR} must differ from EMBER_LISTEN ({owner_listen})"));
-        }
-        // A non-loopback bind needs the owner's explicit word; main.rs logs a warning when it happens.
-        if !listen.ip().is_loopback() && get(ALLOW_REMOTE_VAR).map(|v| v.trim() == "1") != Some(true) {
-            return err(format!(
-                "{LISTEN_VAR}={listen} is not a loopback address: set {ALLOW_REMOTE_VAR}=1 to expose the \
-                 guest door to a network (it speaks plain HTTP: put TLS in front of it)"
-            ));
-        }
-        let mut trusted: Vec<IpAddr> = Vec::new();
-        for e in get(TRUSTED_PROXIES_VAR).unwrap_or_default().split(',') {
-            let e = e.trim();
-            if e.is_empty() {
-                continue;
-            }
-            match e.parse::<IpAddr>() {
-                Ok(ip) => trusted.push(normalize_ip(ip)),
-                Err(_) => return err(format!("{TRUSTED_PROXIES_VAR}: {e:?} is not an IP address")),
-            }
-        }
-        let public_url = match get(PUBLIC_URL_VAR).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
-            Some(u) => Some(parse_public_url(&u)?),
-            None => None,
-        };
-        let mut hosts: HashSet<String> = HashSet::new();
-        if !listen.ip().is_unspecified() {
-            hosts.insert(listen.ip().to_string().to_ascii_lowercase());
-        }
-        if listen.ip().is_loopback() {
-            hosts.insert("localhost".into());
-        }
-        for h in get(ALLOWED_HOSTS_VAR).unwrap_or_default().split(',') {
-            let h = host_of(h.trim());
-            if !h.is_empty() {
-                hosts.insert(h);
-            }
-        }
-        if let Some(u) = &public_url {
-            let authority = u.split_once("://").map(|x| x.1).unwrap_or("");
-            hosts.insert(host_of(authority));
-        }
-        Ok(Some(Self { listen, public_url, hosts: Arc::new(hosts), trusted_proxies: Arc::new(trusted) }))
+        let Some(env) = DoorEnv::parse(get, &[("EMBER_LISTEN", owner_listen)], &spec)? else { return Ok(None) };
+        Ok(Some(Self {
+            listen: env.listen,
+            public_url: env.public_url,
+            hosts: Arc::new(env.hosts),
+            trusted_proxies: Arc::new(env.trusted),
+        }))
     }
 
     /// Wraps a guest router (`channels::guest::guest_router*`) with the door's routes and guards,
@@ -247,17 +202,9 @@ impl GuestDoor {
 
     fn build(&self, guest: Router, limits: Option<Arc<DoorLimits>>) -> Router {
         let _ = join_page(); // hashes computed once, at startup
-        let guard = Guard { hosts: self.hosts.clone() };
-        let app = guest
-            .route(JOIN_ROUTE.1, get(join))
-            .fallback(not_found)
-            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(middleware::from_fn_with_state(guard, guard_layer));
-        let mut app = with_timeout(app, REQUEST_TIMEOUT);
-        if let Some(l) = limits {
-            app = app.layer(middleware::from_fn_with_state(l, limit_layer));
-        }
-        app.layer(middleware::from_fn(response_headers))
+        let guard = Guard { hosts: self.hosts.clone(), max_body: MAX_BODY_BYTES };
+        let app = guest.route(JOIN_ROUTE.1, get(join)).fallback(not_found);
+        stack(app, guard, MAX_BODY_BYTES, REQUEST_TIMEOUT, limits)
     }
 
     /// Binds the door's socket.
@@ -296,52 +243,7 @@ impl GuestDoor {
         header_read_timeout: Duration,
         max_connections: usize,
     ) -> std::io::Result<()> {
-        use hyper_util::rt::{TokioIo, TokioTimer};
-        use hyper_util::server::graceful::GracefulShutdown;
-        use tower::ServiceExt;
-
-        let graceful = GracefulShutdown::new();
-        let conns = Arc::new(tokio::sync::Semaphore::new(max_connections));
-        let mut dropped: u64 = 0;
-        let mut shutdown = Box::pin(shutdown);
-        loop {
-            let (stream, peer) = tokio::select! {
-                r = listener.accept() => match r {
-                    Ok(x) => x,
-                    Err(e) => {
-                        // Out of descriptors and the like: back off, never spin, never stop the door.
-                        tracing::warn!("guest door accept failed: {e}");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                },
-                _ = &mut shutdown => break,
-            };
-            let Ok(permit) = conns.clone().try_acquire_owned() else {
-                dropped += 1;
-                tracing::debug!("guest door at its connection cap, dropped {peer} ({dropped} dropped so far)");
-                drop(stream);
-                continue;
-            };
-            let app = app.clone();
-            let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
-                req.extensions_mut().insert(ConnectInfo(peer));
-                app.clone().oneshot(req)
-            });
-            let mut builder = hyper::server::conn::http1::Builder::new();
-            builder.timer(TokioTimer::new());
-            builder.header_read_timeout(header_read_timeout);
-            let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), svc));
-            tokio::spawn(async move {
-                let _permit = permit; // held for the life of the connection
-                if let Err(e) = conn.await {
-                    tracing::debug!("guest door connection closed: {e}");
-                }
-            });
-        }
-        drop(listener);
-        graceful.shutdown().await;
-        Ok(())
+        crate::door::serve::serve_capped("guest door", listener, app, shutdown, header_read_timeout, max_connections).await
     }
 
     /// The `guest_door` object of an invite response.
@@ -388,52 +290,6 @@ pub fn status_body(door: Option<&GuestDoor>) -> Value {
     v
 }
 
-fn parse_public_url(u: &str) -> Result<String, DoorError> {
-    let bad = || DoorError(format!("{PUBLIC_URL_VAR}={u:?} must be http(s)://host[:port] (scheme and authority only)"));
-    let u = u.strip_suffix('/').unwrap_or(u);
-    let (scheme, rest) = u.split_once("://").ok_or_else(bad)?;
-    if scheme != "http" && scheme != "https" {
-        return Err(bad());
-    }
-    if rest.is_empty() || rest.contains(['/', '?', '#', '@', ' ', '\\']) {
-        return Err(bad());
-    }
-    if host_of(rest).is_empty() {
-        return Err(bad());
-    }
-    Ok(format!("{scheme}://{rest}"))
-}
-
-/// Host, Origin and Upgrade checks, before any route or body.
-async fn guard_layer(State(g): State<Guard>, req: Request, next: Next) -> Response {
-    let Some(host) = request_host(&req) else { return forbid("host not allowed") };
-    if host.is_empty() || host.contains(['@', '/', '\\', ' ']) || !g.hosts.contains(&host_of(&host)) {
-        return forbid("host not allowed");
-    }
-    if !origin_ok(req.headers(), &host, &g.hosts) {
-        return forbid("origin not allowed");
-    }
-    // HEAD would be answered by axum from every GET route; nothing needs it, so nothing leaks.
-    if matches!(req.method().as_str(), "HEAD" | "TRACE" | "CONNECT") {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
-    }
-    let too_big = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .is_some_and(|n| n > MAX_BODY_BYTES as u64);
-    if too_big {
-        return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(json!({ "error": "body too large", "code": "too_large" })))
-            .into_response();
-    }
-    if req.headers().contains_key(header::UPGRADE) {
-        return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "no upgrade here", "code": "bad_request" })))
-            .into_response();
-    }
-    next.run(req).await
-}
-
 async fn join() -> Response {
     let page = join_page();
     let mut r = Response::new(Body::from(page.html.clone()));
@@ -444,189 +300,4 @@ async fn join() -> Response {
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     r
-}
-
-// ---- limits (PR 5b) -------------------------------------------------------------------------
-
-/// The numbers of the limits. `Default` is the leader's decision (2026-11-06, adjustable).
-#[derive(Clone, Debug)]
-pub struct LimitConfig {
-    pub accept_per_minute: usize,
-    pub accept_per_hour: usize,
-    pub other_per_minute: usize,
-    pub global_per_second: f64,
-    pub global_burst: f64,
-    pub max_in_flight: usize,
-    pub max_addrs: usize,
-}
-
-impl Default for LimitConfig {
-    fn default() -> Self {
-        Self {
-            accept_per_minute: ACCEPT_PER_MINUTE,
-            accept_per_hour: ACCEPT_PER_HOUR,
-            other_per_minute: OTHER_PER_MINUTE,
-            global_per_second: GLOBAL_PER_SECOND,
-            global_burst: GLOBAL_BURST,
-            max_in_flight: MAX_IN_FLIGHT,
-            max_addrs: MAX_TRACKED_ADDRS,
-        }
-    }
-}
-
-/// Which budget a request spends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LimitKind {
-    /// `POST /api/guest/accept`, counted whatever the answer.
-    Accept,
-    /// Everything else.
-    Other,
-}
-
-const MINUTE: Duration = Duration::from_secs(60);
-const HOUR: Duration = Duration::from_secs(3600);
-
-struct Entry {
-    accept: VecDeque<Instant>,
-    other: VecDeque<Instant>,
-    touched: Instant,
-}
-
-impl Entry {
-    fn new(now: Instant) -> Self {
-        Self { accept: VecDeque::new(), other: VecDeque::new(), touched: now }
-    }
-
-    fn prune(&mut self, now: Instant) {
-        while self.accept.front().is_some_and(|t| now.saturating_duration_since(*t) >= HOUR) {
-            self.accept.pop_front();
-        }
-        while self.other.front().is_some_and(|t| now.saturating_duration_since(*t) >= MINUTE) {
-            self.other.pop_front();
-        }
-    }
-}
-
-struct LimiterState {
-    map: HashMap<IpAddr, Entry>,
-    calls: u64,
-}
-
-/// Sliding-window limits per remote address. Timestamps older than the window are dropped when
-/// an address is touched and by a sweep every [`SWEEP_EVERY`] calls; at most `max_addrs`
-/// addresses are tracked, the oldest-touched is evicted for a new one, so memory is bounded.
-pub struct AddrLimiter {
-    cfg: LimitConfig,
-    state: Mutex<LimiterState>,
-}
-
-impl AddrLimiter {
-    pub fn new(mut cfg: LimitConfig) -> Self {
-        // A zero would make the index arithmetic below meaningless; the least allowed is one.
-        cfg.accept_per_minute = cfg.accept_per_minute.max(1);
-        cfg.accept_per_hour = cfg.accept_per_hour.max(1);
-        cfg.other_per_minute = cfg.other_per_minute.max(1);
-        Self { cfg, state: Mutex::new(LimiterState { map: HashMap::new(), calls: 0 }) }
-    }
-
-    /// Spends one request of `kind` for `ip` at `now`. `Err(wait)` is how long until the request
-    /// would pass; a refused request is not recorded.
-    pub fn check_at(&self, ip: IpAddr, kind: LimitKind, now: Instant) -> Result<(), Duration> {
-        let key = addr_key(ip);
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        st.calls += 1;
-        if st.calls % SWEEP_EVERY == 0 {
-            st.map.retain(|_, e| {
-                e.prune(now);
-                !(e.accept.is_empty() && e.other.is_empty())
-            });
-        }
-        if !st.map.contains_key(&key) && st.map.len() >= self.cfg.max_addrs.max(1) {
-            if let Some(oldest) = st.map.iter().min_by_key(|(_, e)| e.touched).map(|(k, _)| *k) {
-                st.map.remove(&oldest);
-            }
-        }
-        let e = st.map.entry(key).or_insert_with(|| Entry::new(now));
-        e.touched = now;
-        e.prune(now);
-        match kind {
-            LimitKind::Accept => {
-                let mut wait = Duration::ZERO;
-                if e.accept.len() >= self.cfg.accept_per_hour {
-                    let i = e.accept.len() - self.cfg.accept_per_hour;
-                    wait = wait.max(HOUR.saturating_sub(now.saturating_duration_since(e.accept[i])));
-                }
-                let in_minute = e.accept.iter().rev().take_while(|t| now.saturating_duration_since(**t) < MINUTE).count();
-                if in_minute >= self.cfg.accept_per_minute {
-                    let i = e.accept.len() - self.cfg.accept_per_minute;
-                    wait = wait.max(MINUTE.saturating_sub(now.saturating_duration_since(e.accept[i])));
-                }
-                if wait > Duration::ZERO {
-                    return Err(wait.max(Duration::from_secs(1)));
-                }
-                e.accept.push_back(now);
-            }
-            LimitKind::Other => {
-                if e.other.len() >= self.cfg.other_per_minute {
-                    let i = e.other.len() - self.cfg.other_per_minute;
-                    let wait = MINUTE.saturating_sub(now.saturating_duration_since(e.other[i]));
-                    return Err(wait.max(Duration::from_secs(1)));
-                }
-                e.other.push_back(now);
-            }
-        }
-        Ok(())
-    }
-
-    /// Addresses currently tracked.
-    pub fn tracked(&self) -> usize {
-        self.state.lock().unwrap_or_else(|p| p.into_inner()).map.len()
-    }
-}
-
-/// Everything the limit layer needs: per-address limiter, global bucket, in-flight cap, and the
-/// trusted proxies that decide whether `X-Forwarded-For` is read.
-pub struct DoorLimits {
-    pub addr: AddrLimiter,
-    pub bucket: TokenBucket,
-    in_flight: Arc<tokio::sync::Semaphore>,
-    trusted: Vec<IpAddr>,
-}
-
-impl DoorLimits {
-    pub fn new(cfg: LimitConfig, trusted: Vec<IpAddr>) -> Self {
-        Self {
-            bucket: TokenBucket::new_at(cfg.global_per_second, cfg.global_burst, Instant::now()),
-            in_flight: Arc::new(tokio::sync::Semaphore::new(cfg.max_in_flight)),
-            addr: AddrLimiter::new(cfg),
-            trusted: trusted.into_iter().map(normalize_ip).collect(),
-        }
-    }
-}
-
-/// The per-address limits, then the global bucket and the in-flight cap. Runs before the Host check and
-/// before any body is read, so every request is bounded.
-async fn limit_layer(State(l): State<Arc<DoorLimits>>, req: Request, next: Next) -> Response {
-    let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
-        // Not served through `serve_with`: never run without knowing who is asking.
-        return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "error": "no peer address", "code": "internal" })))
-            .into_response();
-    };
-    let now = Instant::now();
-    let ip = client_ip(peer.ip(), req.headers(), &l.trusted);
-    let kind = if req.method() == axum::http::Method::POST && req.uri().path() == ACCEPT_PATH {
-        LimitKind::Accept
-    } else {
-        LimitKind::Other
-    };
-    // The per-address limit first: a request it refuses must not spend the shared budget, or one
-    // flooding address would drain the bucket and every guest would get 503.
-    if let Err(wait) = l.addr.check_at(ip, kind, now) {
-        return too_many(wait);
-    }
-    if !l.bucket.try_take_at(now) {
-        return busy();
-    }
-    let Ok(_permit) = l.in_flight.clone().try_acquire_owned() else { return busy() };
-    next.run(req).await
 }

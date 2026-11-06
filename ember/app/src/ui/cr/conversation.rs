@@ -376,6 +376,7 @@ pub fn ConversationView(id: &str, embedded: bool) {
     };
 
     let title = record.title.clone();
+    let last_seq = record.last_seq;
     let account = model::account_label(
         record.account_id.as_deref(),
         &model::account_labels(&ui.live.accounts.get()),
@@ -674,11 +675,8 @@ pub fn ConversationView(id: &str, embedded: bool) {
                                         Modifier::new().fill_max_width().fill_max_height(),
                                     )
                                     .content(|| {
-                                        let empty_msg = if status == LauncherStatus::Idle {
-                                            "무엇을 작업할지 입력해 주세요."
-                                        } else {
-                                            "대화를 불러오는 중입니다\u{2026}"
-                                        };
+                                        let empty_msg =
+                                            empty_transcript_text(status, last_seq);
                                         Label(
                                             empty_msg,
                                             Fs::Md,
@@ -1797,6 +1795,19 @@ pub fn TeamPanel(session: &str) {
     });
 }
 
+/// What the transcript area says while it has no items (FR-L5, FR-L18, #505). The loading line
+/// is honest only when the server reports events (`last_seq > 0`) that have not arrived yet; a
+/// session with none has nothing to load, so it says so instead of waiting forever.
+pub(crate) fn empty_transcript_text(status: LauncherStatus, last_seq: i64) -> &'static str {
+    if status == LauncherStatus::Idle {
+        "무엇을 작업할지 입력해 주세요."
+    } else if last_seq > 0 {
+        "대화를 불러오는 중입니다\u{2026}"
+    } else {
+        "아직 대화가 없습니다"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1816,6 +1827,26 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn fr_l18_single_view_does_not_wait_when_the_session_has_no_events() {
+        assert_eq!(
+            empty_transcript_text(LauncherStatus::Running, 0),
+            "아직 대화가 없습니다"
+        );
+        assert_eq!(
+            empty_transcript_text(LauncherStatus::Finished, 0),
+            "아직 대화가 없습니다"
+        );
+        assert_eq!(
+            empty_transcript_text(LauncherStatus::Running, 3),
+            "대화를 불러오는 중입니다\u{2026}"
+        );
+        assert_eq!(
+            empty_transcript_text(LauncherStatus::Idle, 0),
+            "무엇을 작업할지 입력해 주세요."
+        );
     }
 
     #[composable]

@@ -58,6 +58,10 @@ pub struct AddUi {
     confirmed: MutableState<bool>,
     /// The confirm call has not answered yet: closing must not cancel the request.
     confirm_in_flight: MutableState<bool>,
+    /// A confirm failed without an answer: it may have been accepted, so closing does not cancel.
+    confirm_unknown: MutableState<bool>,
+    /// The run whose confirm was in flight at close; its answer is still reported once.
+    detached_confirm: MutableState<Option<String>>,
     armed_at: MutableState<i64>,
     /// Ticks once a second while a view counts down.
     tick: MutableState<i64>,
@@ -80,6 +84,8 @@ impl AddUi {
             failure: mutable_state_of(None),
             confirmed: mutable_state_of(false),
             confirm_in_flight: mutable_state_of(false),
+            confirm_unknown: mutable_state_of(false),
+            detached_confirm: mutable_state_of(None),
             armed_at: mutable_state_of(0),
             tick: mutable_state_of(0),
             review: false,
@@ -149,6 +155,7 @@ impl AddUi {
         self.failure.set(None);
         self.confirmed.set(false);
         self.confirm_in_flight.set(false);
+        self.confirm_unknown.set(false);
     }
 
     fn with_guard<R>(&self, f: impl FnOnce(&mut RunGuard) -> R) -> R {
@@ -172,20 +179,23 @@ impl AddUi {
             view: self.view.get_untracked(),
             confirmed: self.confirmed.get_untracked(),
             confirm_in_flight: self.confirm_in_flight.get_untracked(),
+            confirm_unknown: self.confirm_unknown.get_untracked(),
+            detached_confirm: self.detached_confirm.get_untracked(),
             sample: self.sample(),
         };
         let effects = flow::reduce(&mut st, ev);
         self.guard.set(st.guard);
         self.confirmed.set(st.confirmed);
         self.confirm_in_flight.set(st.confirm_in_flight);
+        self.confirm_unknown.set(st.confirm_unknown);
+        self.detached_confirm.set(st.detached_confirm);
         for e in effects {
             match e {
                 flow::Effect::Cancel(id) => cancel_on_server(id),
                 flow::Effect::ArmConfirm => self.armed_at.set(now_ms()),
-                flow::Effect::RefreshComputers => {
-                    refresh_computers();
-                    notice::post("컴퓨터를 추가했습니다".to_string());
-                }
+                flow::Effect::RefreshComputers => refresh_computers(),
+                flow::Effect::Notice(t) => notice::post(t),
+                flow::Effect::ClearTypedFingerprint => self.typed_fp.set(String::new()),
                 flow::Effect::ClearSecrets => {
                     self.run.set(None);
                     self.typed_fp.set(String::new());
@@ -311,18 +321,32 @@ fn confirm(ui: AddUi, run: Run, rows: ConfirmRows) {
     ui.busy.set(true);
     ui.failure.set(None);
     ui.confirm_in_flight.set(true);
+    ui.confirm_unknown.set(false);
     let id = run.id.clone();
     let expect = flow::expect_fingerprint(&rows, &ui.typed_fp.get_untracked());
     run_shared(async move { services().client.api().enrol_confirm(&run.id, &name, expect.as_deref()).await }, move |r| {
-        if !ui.is_current(&id) {
-            return;
+        // The answer is always routed through the reducer: after the sheet closed it still
+        // reports the outcome (notice, list refresh) and changes no view.
+        let current = ui.is_current(&id);
+        if current {
+            ui.busy.set(false);
         }
-        ui.busy.set(false);
-        ui.step(flow::Event::ConfirmAnswered { id: id.clone(), ok: r.is_ok() });
-        if let Err(e) = r {
-            match flow::view_after_confirm_error(&e) {
-                Some(end) => ui.step(flow::Event::PollAnswered { id: id.clone(), view: end }),
-                None => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
+        match r {
+            Ok(_) => ui.step(flow::Event::ConfirmAnswered { id: id.clone(), ok: true }),
+            Err(e) if flow::confirm_is_unknown(&e) => {
+                ui.step(flow::Event::ConfirmUnknown { id: id.clone() });
+                if current {
+                    ui.failure.set(Some(flow::CONFIRM_UNKNOWN.to_string()));
+                }
+            }
+            Err(e) => {
+                ui.step(flow::Event::ConfirmAnswered { id: id.clone(), ok: false });
+                if current {
+                    match flow::view_after_confirm_error(&e) {
+                        Some(end) => ui.step(flow::Event::PollAnswered { id: id.clone(), view: end }),
+                        None => ui.failure.set(Some(flow::confirm_error_text(&e).to_string())),
+                    }
+                }
             }
         }
     });
@@ -512,6 +536,7 @@ fn WaitingBody(ui: &AddUi, code: &str, expires_ms: i64, sample: bool) {
                         Label(flow::STDIN_FORM_NOTE, Fs::Xs, Weight::Regular, muted, Some(3));
                         Label(flow::ARG_LABEL, Fs::Xs, Weight::Medium, muted, Some(1));
                         super::components::MonoLabel(text, Fs::Xs, Weight::Regular, muted);
+                        Label(flow::ARG_WARNING, Fs::Xs, Weight::Regular, muted, Some(3));
                     }
                     None => {
                         super::components::MonoLabel(text, Fs::Xs, Weight::Regular, Some(paint(p.text)));

@@ -77,6 +77,7 @@ accounts or computer switching.
 | `ember/server/` | ember server (Rust) |
 | `ember/node/` | ember node, the execution daemon (Rust) |
 | `ember/transport/` | the transport interface with letify-link as default and a legacy iroh backend (FR-N5, D36); see §1.5 |
+| `ember/transfer/` | device-side file transfer over `ember-transport` streams (FR-F1..FR-F10); a library, the server is not in the path |
 | `ember/client/` | the client core below the dioxus-compose UI |
 | `ember/proxy/` | the IDE window wrapping layer (Python) |
 | `ember/bridge/` | the IDE window bridge: message types and the `WebviewBridge` trait (`ember-bridge`, FR-B1–B4) |

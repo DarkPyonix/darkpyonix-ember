@@ -5,7 +5,7 @@
 //! This module is storage only (N1 of the node enrol design): reading and validating the file,
 //! and writing it together with `allowed-peers` so that both change or neither does, under a lock
 //! on the state dir ([`lock_state_dir`]). The `ember-node enrol` command that fetches the
-//! credential is not built yet (N2). Unix only: the credential file is protected by mode 0600 and
+//! credential is [`crate::enrol_cli`] (N2). Unix only: the credential file is protected by mode 0600 and
 //! the owner check, with no Windows ACL handling.
 
 use std::fmt;
@@ -148,12 +148,12 @@ impl fmt::Debug for Enrolment {
     }
 }
 
-fn is_peer_hex(id: &str) -> bool {
+pub(crate) fn is_peer_hex(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Shape checks that never echo the value (the token is a secret).
-fn validate(e: &Enrolment) -> anyhow::Result<()> {
+pub(crate) fn validate(e: &Enrolment) -> anyhow::Result<()> {
     anyhow::ensure!(!e.node_token.is_empty(), "the node token is empty");
     anyhow::ensure!(e.node_token.chars().count() <= MAX_TOKEN_CHARS, "the node token is longer than {MAX_TOKEN_CHARS} characters");
     anyhow::ensure!(

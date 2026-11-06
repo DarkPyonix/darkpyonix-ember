@@ -210,7 +210,11 @@ pub fn AgentsScreen() {
     let initial_section = std::env::var("EMBER_CR_AGENTS_SECTION")
         .ok()
         .map(|sec| resolve_section(&sec))
-        .unwrap_or(Section::Harness);
+        .unwrap_or_else(|| match crate::ui::agents::sheet_hook() {
+            Some(crate::ui::agents::SheetHook::Harness | crate::ui::agents::SheetHook::Account) => Section::Models,
+            Some(crate::ui::agents::SheetHook::AddAccount | crate::ui::agents::SheetHook::AddAccountLogin) => Section::Profiles,
+            None => Section::Harness,
+        });
 
     let _requested = remember(|| {
         if !is_sample {
@@ -1272,8 +1276,10 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
     let chips = crate::ui::agents::default_chips(&live.accounts, &live.default_ids, &store.get());
     let harness_pill = crate::ui::agents::harness_chip_text(&chips, model_name, example);
     let account_pill = crate::ui::agents::account_chip_text(&chips, live.accounts.len(), example);
-    let pick_open = remember(|| mutable_state_of(false));
-    let acct_open = remember(|| mutable_state_of(false));
+    let hook = crate::ui::agents::sheet_hook();
+    let pick_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Harness)));
+    let acct_open = remember(move || mutable_state_of(hook == Some(crate::ui::agents::SheetHook::Account)));
+    let stacked = crate::ui::agents::chips_stacked(compose_rust::runtime::current_window_size().width_dp);
     let rows = crate::ui::agents::pick_rows(&crate::ui::agents::harness_options(&live.detected), model_pairs);
     let row_labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
     let row_chosen = rows
@@ -1287,6 +1293,10 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
             cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(|| {
                 CardHeaderIcon(super::shell::ICON_PLUS_SVG);
                 Label("새 팀원 기본값", Fs::Lg, Weight::Semibold, None, Some(1));
+                if example {
+                    cu::Spacer().modifier(Modifier::new().weight(1.0));
+                    Pill(crate::ui::agents::EXAMPLE_MARK, PillTone::Grey, true);
+                }
             });
             Label(
                 "홈과 새 팀원 만들기, 루틴에서 처음 보이는 하네스와 모델입니다. 고른 계정의 플랜에서 쓸 수 없는 모델은 흐리게 표시됩니다.",
@@ -1295,7 +1305,7 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                 None,
                 None,
             );
-            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
+            let chips_body = || {
                 let po = pick_open.clone();
                 ModelPickerPill(&harness_pill, Some(ICON_SPARK_SVG), move || po.set(true));
                 let ao = acct_open.clone();
@@ -1329,7 +1339,13 @@ fn ModelsSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: b
                         }
                     });
                 });
-            });
+            };
+            // Below 560 dp the chips stack so each keeps its full text.
+            if stacked {
+                cu::Column().spacing(SP[2]).content(chips_body);
+            } else {
+                cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(chips_body);
+            }
             Label(crate::ui::agents::DEFAULTS_STORAGE_NOTE, Fs::Xs, Weight::Regular, Some(paint(ember_theme().palette.muted)), None);
         });
     });
@@ -1724,7 +1740,7 @@ fn ProfilesSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact:
         })
         .collect();
     let first = live.accounts.first().cloned();
-    let add = remember(|| mutable_state_of(crate::ui::agents::AddAccount::closed()));
+    let add = remember(|| mutable_state_of(crate::ui::agents::hook_add_account(crate::ui::agents::sheet_hook())));
     let seed = profiles.clone();
     let for_new = profiles.clone();
 

@@ -978,7 +978,7 @@ pub const ADD_ACCOUNT_FIRST: &str = "계정 추가에서 먼저 추가하세요"
 pub const DEFAULTS_STORAGE_NOTE: &str =
     "고른 하네스와 모델은 이 기기에만 저장됩니다. 기본 계정만 서버에 저장됩니다.";
 /// Why a harness cannot be picked: the server found no binary.
-pub const NOT_INSTALLED_REASON: &str = "설치되지 않았습니다";
+pub const NOT_INSTALLED_REASON: &str = "감지되지 않았습니다";
 /// Why Gemini cannot be picked: the server has no adapter yet (D40).
 pub const HARNESS_SOON_REASON: &str = "준비 중입니다";
 /// The mark on a sample or demo value.
@@ -1250,6 +1250,64 @@ pub fn sample_created() -> AddPhase {
         status: None,
         checking: false,
     })
+}
+
+/// A sheet a capture can open at start (`EMBER_CR_AGENTS_SHEET`, debug builds only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetHook {
+    Harness,
+    Account,
+    AddAccount,
+    AddAccountLogin,
+}
+
+/// Pure parse of the hook value. A release build (`debug == false`) never opens a sheet.
+pub fn parse_sheet_hook(value: Option<&str>, debug: bool) -> Option<SheetHook> {
+    if !debug {
+        return None;
+    }
+    match value? {
+        "harness" => Some(SheetHook::Harness),
+        "account" => Some(SheetHook::Account),
+        "add-account" => Some(SheetHook::AddAccount),
+        "add-account-login" => Some(SheetHook::AddAccountLogin),
+        _ => None,
+    }
+}
+
+/// The hook read from `EMBER_CR_AGENTS_SHEET`.
+pub fn sheet_hook() -> Option<SheetHook> {
+    parse_sheet_hook(std::env::var("EMBER_CR_AGENTS_SHEET").ok().as_deref(), cfg!(debug_assertions))
+}
+
+/// The sample login command of the capture hook: it carries no secret.
+pub const SAMPLE_LOGIN_COMMAND: &str = "claude login (예시)";
+
+/// The 계정 추가 state a capture opens: the form, or the sample login block.
+pub fn hook_add_account(hook: Option<SheetHook>) -> AddAccount {
+    match hook {
+        Some(SheetHook::AddAccount) => AddAccount { open: true, ..AddAccount::closed() },
+        Some(SheetHook::AddAccountLogin) => AddAccount {
+            open: true,
+            kind: Some("claude-code"),
+            label: EXAMPLE_MARK.to_string(),
+            phase: AddPhase::Created(CreatedLogin {
+                id: String::new(),
+                command: SAMPLE_LOGIN_COMMAND.to_string(),
+                note: DEMO_ADD_NOTE.to_string(),
+                status: None,
+                checking: false,
+            }),
+        },
+        _ => AddAccount::closed(),
+    }
+}
+
+/// Below this width the two default chips stack so each shows its full text.
+pub const CHIPS_STACK_BELOW_DP: f32 = 560.0;
+
+pub fn chips_stacked(window_dp: f32) -> bool {
+    window_dp < CHIPS_STACK_BELOW_DP
 }
 
 #[cfg(test)]
@@ -1936,6 +1994,45 @@ mod tests {
         assert_eq!(account_chip_text(&chips, 0, false), NO_ACCOUNTS);
         assert_eq!(account_chip_text(&chips, 2, false), NOT_CHOSEN);
         assert!(!NO_ACCOUNTS.contains("ncmnd"));
+    }
+
+    #[test]
+    fn fr_l17_agents_sheet_hook_is_debug_only() {
+        assert_eq!(parse_sheet_hook(Some("harness"), true), Some(SheetHook::Harness));
+        assert_eq!(parse_sheet_hook(Some("account"), true), Some(SheetHook::Account));
+        assert_eq!(parse_sheet_hook(Some("add-account"), true), Some(SheetHook::AddAccount));
+        assert_eq!(parse_sheet_hook(Some("add-account-login"), true), Some(SheetHook::AddAccountLogin));
+        assert_eq!(parse_sheet_hook(Some("nope"), true), None);
+        assert_eq!(parse_sheet_hook(None, true), None);
+        for v in ["harness", "account", "add-account", "add-account-login"] {
+            assert_eq!(parse_sheet_hook(Some(v), false), None);
+        }
+        let login = hook_add_account(Some(SheetHook::AddAccountLogin));
+        match login.phase {
+            AddPhase::Created(c) => assert!(c.command.contains(EXAMPLE_MARK) && !c.command.contains("CONFIG_DIR")),
+            other => panic!("{other:?}"),
+        }
+        assert!(!hook_add_account(None).open);
+    }
+
+    #[test]
+    fn fr_l17_default_chips_stack_below_560_dp() {
+        assert!(chips_stacked(390.0) && chips_stacked(559.0));
+        assert!(!chips_stacked(560.0) && !chips_stacked(1440.0));
+    }
+
+    #[test]
+    fn fr_l17_disabled_rows_always_carry_a_reason() {
+        let models = |_h: AgentHarness| vec![("m".to_string(), "M".to_string())];
+        for detected in [vec![], vec![det("claude-code", true, None)], vec![det("claude-code", true, None), det("codex", true, None)]] {
+            let rows = pick_rows(&harness_options(&detected), models);
+            assert!(!rows.is_empty());
+            for r in rows.iter().filter(|r| !r.enabled) {
+                let reason = [NOT_INSTALLED_REASON, HARNESS_SOON_REASON].into_iter().find(|x| r.label.contains(x));
+                assert!(reason.is_some(), "disabled row without reason: {}", r.label);
+                assert!(r.label.ends_with(reason.unwrap()));
+            }
+        }
     }
 
     #[test]

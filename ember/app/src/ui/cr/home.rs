@@ -12,7 +12,7 @@
 use compose_rust::runtime::{mutable_state_of, remember, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
-use compose_rust::{Alignment, ButtonVariant, Color, DrawList, Paint, IconRole, ShapeRole, TextOverflow};
+use compose_rust::{Alignment, Color, DrawList, Paint, IconRole, ShapeRole};
 
 pub use crate::ui::home::{
     apply_suggestion, can_send, computers_line, default_mode, effective_message, filter_models,
@@ -115,6 +115,13 @@ macro_rules! line_icon {
 
 const ICON_ARROW: &str = line_icon!("M5 12h14M13 6l6 6-6 6");
 const ICON_SHIELD: &str = include_str!("../../../assets/nav/shield.svg");
+const ICON_FOLDER: &str = include_str!("../../../assets/nav/folder.svg");
+const ICON_PC: &str = include_str!("../../../assets/nav/pc.svg");
+// TODO(item 6): the model chip's harness glyph; the terminal stands in.
+const ICON_TERMINAL: &str = include_str!("../../../assets/nav/terminal.svg");
+const ICON_CODE: &str = include_str!("../../../assets/nav/code.svg");
+const ICON_GIT: &str = include_str!("../../../assets/nav/git.svg");
+const ICON_CHART_NAV: &str = include_str!("../../../assets/nav/chart.svg");
 const ICON_WARN: &str = line_icon!("M12 9.5v4M12 16.75h.01M10.3 3.9L2.4 17.6a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z");
 const ICON_CHECK: &str = line_icon!("M5 12.5l4.5 4.5L19 7.5");
 const ICON_CLOCK: &str = line_icon!("M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z");
@@ -938,24 +945,79 @@ fn HeroBot(vendor: &str, status: &str, px: f32) {
     cu::Image(compose_rust::asset(compose_rust::AssetKind::Svg, shell::leak_doc(doc))).modifier(Modifier::new().size(px, px));
 }
 
-/// A composer chip (`.pickchip`): the toolkit button on a `surface-2` pill with its glyph and the
-/// content-sized text; `icon_only` chips are 32 px circles.
-/// TODO(compose-rust#372, #373): the mockup's folder, star, shield and monitor line icons and the
-/// chevron of the model and mode chips need a button that takes an SVG icon; the toolkit glyph
-/// roles stand in.
-fn ComposerChip(text: &str, icon: IconRole, selected: bool, icon_only: bool, weighted: bool, on_click: impl FnMut() + 'static) {
+/// A composer chip (`.pickchip`): a 32 px `surface-2` pill built like `WarnChip`: 16 px glyph,
+/// 13 px weight 500 label cut with an ellipsis, and the 14 px chevron of a picker. `icon_only`
+/// chips are 32 px circles with the glyph centred.
+/// TODO(compose-rust#372): a pointer-up `Clickable` with no keyboard focus or role.
+fn ComposerChip(
+    text: &str,
+    icon: &'static str,
+    chevron: bool,
+    selected: bool,
+    icon_only: bool,
+    weighted: bool,
+    on_click: impl FnMut() + 'static,
+) {
     let p = ember_theme().palette;
     let fill = if selected { p.sel } else { p.surface_2 };
     let modifier = Modifier::new().height(H_CTL).background(paint(fill)).shape_role(ShapeRole::Full);
     let modifier = if icon_only { modifier.width(H_CTL) } else if weighted { modifier.weight(1.0) } else { modifier };
-    cu::Button(if icon_only { "" } else { text })
-        .variant(ButtonVariant::Text)
-        .max_lines(1)
-        .overflow(TextOverflow::Ellipsis)
-        .color(paint(p.text_2))
-        .icon(icon)
-        .modifier(modifier)
-        .on_click(on_click);
+    Clickable(modifier, Alignment::Center, on_click, || {
+        if icon_only {
+            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            return;
+        }
+        cu::Row().alignment(Alignment::CenterStart).content(|| {
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            NavIcon(icon, p.text_2.to_argb(), 16.0);
+            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+            if weighted {
+                cu::Box().modifier(Modifier::new().weight(1.0)).content(|| {
+                    Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                });
+            } else {
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+            }
+            if chevron {
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                NavIcon(super::shell::ICON_CHEVRON_DOWN_SVG, p.muted.to_argb(), 14.0);
+            }
+            cu::Spacer().modifier(Modifier::new().width(SP[2]));
+        });
+    });
+}
+
+/// A suggestion chip (`.chip.outline`): 32 px, `surface` with a 1 px line, an 18 px glyph and
+/// the label at 13 px weight 500.
+fn SuggestionChip(text: &str, icon: &'static str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    Clickable(
+        Modifier::new()
+            .height(H_CTL)
+            .background(paint(p.surface))
+            .border(1.0, paint(p.line))
+            .corner_radius(H_CTL / 2.0),
+        Alignment::Center,
+        on_click,
+        || {
+            cu::Row().alignment(Alignment::CenterStart).content(|| {
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+                NavIcon(icon, p.text_2.to_argb(), 18.0);
+                cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                Label(text, Fs::Sm, Weight::Medium, Some(paint(p.text_2)), Some(1));
+                cu::Spacer().modifier(Modifier::new().width(SP[2]));
+            });
+        },
+    );
+}
+
+/// The side of the Home send button (`.sendround`).
+pub const SEND_BUTTON_DP: f32 = 36.0;
+
+/// Whether a composer chip draws the picker chevron: the project, model and mode pickers do, the
+/// computer chip does not (mockup `.mp-chev`, FR-L11).
+fn chip_has_chevron(pick: Pick) -> bool {
+    pick != Pick::Computer
 }
 
 /// The composer's mode chip while bypass is on: `red-soft` fill, red text, the warning triangle.
@@ -993,11 +1055,11 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     let gap = if l.compact { SP[0] } else { 6.0 };
     let model_text = sel.option.chip_label();
     let mode_text = sel.mode.label().to_string();
-    let chip = |text: &str, icon: IconRole, pick: Pick, selected: bool| {
+    let chip = |text: &str, icon: &'static str, pick: Pick, selected: bool| {
         let open = c.open.clone();
         // Wide chips are content-sized, their text cut to the budget; only the compact project
         // chip takes the rest of the row.
-        ComposerChip(text, icon, selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
+        ComposerChip(text, icon, chip_has_chevron(pick), selected, icon_only && pick != Pick::Project, icon_only && pick == Pick::Project, move || open.set(Some(pick)));
     };
     let add = || {
         // TODO(compose-rust#483, #500): attachments need the file picker (planned for v0.0.8)
@@ -1009,16 +1071,10 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
     };
     let send = || {
         let (c2, ui2) = (c.clone(), ui.clone());
-        // `.sendround`: a 36 px `--ink` circle with the send glyph.
-        // TODO(compose-rust#372): the toolkit glyph is not the mockup's paper plane.
-        // TODO(compose-rust#387): a disabled button turns grey instead of keeping `--ink`.
-        cu::Button("")
-            .icon(IconRole::Send)
-            .enabled(sendable)
-            .variant(ButtonVariant::Text)
-            .color(paint(p.ink_text))
-            .modifier(Modifier::new().size(36.0, 36.0).background(paint(p.ink)).shape_role(ShapeRole::Full))
-            .on_click(move || c2.send(&ui2));
+        // `.sendround`: a 36 px `--ink` circle with the paper plane, always ink. Composer::send
+        // guards `can_send`, so an empty input does nothing.
+        // TODO(compose-rust#428, #429): the circle has no accessible name ("보내기").
+        super::session::SendCircleButton(SEND_BUTTON_DP, move || c2.send(&ui2));
     };
 
     // `.bigcomposer`: surface, 1 px line, the xl radius, 16 / 16 / 12 padding.
@@ -1059,13 +1115,13 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                     cu::Column().spacing(SP[0]).modifier(Modifier::new().weight(1.0).clip(true)).content(|| {
                         // Bypass draws the chip in the warning state (mockup `.mdpick.warn`).
                         let chip_at = |i: usize, text: &str| match i {
-                            0 => chip(text, IconRole::Library, Pick::Project, false),
+                            0 => chip(text, ICON_FOLDER, Pick::Project, false),
                             1 => {
                                 let close = {
                                     let o = c.open.clone();
                                     move || o.set(None)
                                 };
-                                let one = || chip(text, IconRole::Compose, Pick::Model, false);
+                                let one = || chip(text, ICON_TERMINAL, Pick::Model, false);
                                 if l.compact {
                                     one();
                                 } else {
@@ -1078,7 +1134,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                                         let open = c.open.clone();
                                         WarnChip(text, icon_only, move || open.set(Some(Pick::Mode)));
                                     } else {
-                                        chip(text, IconRole::Settings, Pick::Mode, false);
+                                        chip(text, ICON_SHIELD, Pick::Mode, false);
                                     }
                                 };
                                 if l.compact {
@@ -1087,7 +1143,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                                     c.mode_popover(&sel, one);
                                 }
                             }
-                            _ => chip(text, IconRole::Sidebar, Pick::Computer, false),
+                            _ => chip(text, ICON_PC, Pick::Computer, false),
                         };
                         let texts = [sel.project.clone(), model_text.clone(), mode_text.clone(), computer_text.clone()];
                         if l.compact {
@@ -1122,17 +1178,22 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
         });
 }
 
+/// The glyph of the `i`th suggestion in a line. TODO(item 6): the mockup's spark star needs the
+/// harness glyph asset; `code.svg` stands in until it lands.
+fn suggestion_icon(i: usize) -> &'static str {
+    [ICON_CODE, ICON_GIT, ICON_CHART_NAV][i % 3]
+}
+
 /// `.sugg`: outlined chips, three a line (two up to 900 px), centred.
 fn Suggestions(c: &Composer, width_dp: f32) {
     let n = suggestion_cols(width_dp);
     cu::Column().alignment(Alignment::Center).spacing(SP[1]).content(|| {
         for line in SUGGESTIONS.chunks(n) {
             cu::Row().spacing(SP[1]).content(|| {
-                for text in line {
+                for (i, text) in line.iter().enumerate() {
                     let s = c.suggestion.clone();
                     let t = apply_suggestion(&c.typed.get_untracked(), text);
-                    // TODO(compose-rust#372): the mockup's sparkle, branch and bars icons.
-                    AppButton(text, None, ButtonKind::Default, true, true, false, move || s.set(Some(t.clone())));
+                    SuggestionChip(text, suggestion_icon(i), move || s.set(Some(t.clone())));
                 }
             });
         }
@@ -1869,25 +1930,37 @@ mod tests {
             })));
             let bytes = host.rebuild().expect("rebuild");
             let batch = decode_batch(bytes).expect("decode");
-            let send = batch.iter().find_map(|m| match m {
-                Mutation::SetProp { node_id, property: PropertyKind::Icon, value: PropertyValue::Integer(icon) }
-                    if *icon == IconRole::Send as i64 => Some(*node_id),
+            let w36: Vec<_> = batch.iter().filter_map(|m| match m {
+                Mutation::SetModifier { node_id, modifier: compose_rust::Modifier::Width(w), .. } if *w == SEND_BUTTON_DP => Some(*node_id),
                 _ => None,
-            }).expect("send button");
-            assert!(batch.iter().any(|m| matches!(m, Mutation::SetModifier {
-                node_id, modifier: compose_rust::Modifier::Width(w), ..
-            } if *node_id == send && *w == 36.0)));
-            let parent = batch.iter().find_map(|m| match m {
-                Mutation::Insert { parent_id, node_id, .. } if *node_id == send => Some(*parent_id),
-                _ => None,
-            }).expect("send row");
-            assert!(batch.iter().any(|m| match m {
+            }).collect();
+            let weighted = |parent| batch.iter().any(|m| match m {
                 Mutation::Insert { parent_id, node_id, .. } if *parent_id == parent => batch.iter().any(|n| matches!(n,
                     Mutation::SetModifier { node_id: id, modifier: compose_rust::Modifier::Weight(w), .. }
                     if id == node_id && *w == 1.0)),
                 _ => false,
-            }), "chip row must take the remaining width at {width} dp");
+            });
+            // The add box and the send circle are both 36 wide beside the weighted chip column.
+            let beside = w36.iter().filter(|n| batch.iter().any(|m| matches!(m,
+                Mutation::Insert { parent_id, node_id, .. } if node_id == *n && weighted(*parent_id)))).count();
+            assert!(beside >= 2, "chip row must take the remaining width at {width} dp");
         }
+    }
+
+    #[test]
+    fn fr_l10_home_send_button_is_the_ink_paper_plane_circle() {
+        assert_eq!(SEND_BUTTON_DP, 36.0);
+        let production = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("super::session::SendCircleButton(SEND_BUTTON_DP"));
+        assert!(!production.contains("IconRole::Send"), "the toolkit arrow glyph is gone");
+    }
+
+    #[test]
+    fn fr_l10_home_send_button_chips_are_not_toolkit_buttons() {
+        let production = include_str!("home.rs").split("#[cfg(test)]").next().unwrap();
+        assert_eq!(production.matches("cu::Button(").count(), 0);
+        assert!(chip_has_chevron(Pick::Project) && chip_has_chevron(Pick::Model) && chip_has_chevron(Pick::Mode));
+        assert!(!chip_has_chevron(Pick::Computer));
     }
 
     #[test]

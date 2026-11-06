@@ -294,6 +294,7 @@ impl Sessions {
 
     /// Run the end hooks for `id`. Call once the session has ended.
     pub fn session_ended(&self, id: &str) {
+        self.release_questions(id, None);
         let hooks: Vec<EndHook> = self.end_hooks.lock().unwrap().clone();
         for hook in hooks {
             hook(id);
@@ -435,6 +436,13 @@ impl Sessions {
     /// Record and push one event.
     fn record(&self, session_id: &str, event: &AgentEvent) -> anyhow::Result<()> {
         let (stored, status) = self.store.append(session_id, event)?;
+        // The question is answered or withdrawn: the double-answer guard has no use for its key.
+        match event {
+            AgentEvent::QuestionAnswered { question_id, .. } => self.release_questions(session_id, Some(question_id.as_str())),
+            AgentEvent::PromptWithdrawn { prompt_id } => self.release_questions(session_id, Some(prompt_id.as_str())),
+            AgentEvent::TurnEnded { .. } => self.release_questions(session_id, None),
+            _ => {}
+        }
         self.touch(session_id);
         let hooks = self.event_hooks.lock().unwrap().clone();
         for hook in hooks {
@@ -615,7 +623,9 @@ impl Sessions {
         for e in self.store.events_after(id, 0)? {
             match e.event {
                 AgentEvent::QuestionAsked { question_id, questions } => pending.push((question_id, questions)),
-                AgentEvent::QuestionAnswered { question_id, .. } => pending.retain(|(p, _)| *p != question_id),
+                AgentEvent::QuestionAnswered { question_id, .. } | AgentEvent::PromptWithdrawn { prompt_id: question_id } => {
+                    pending.retain(|(p, _)| *p != question_id)
+                }
                 AgentEvent::TurnEnded { .. } => pending.clear(),
                 _ => {}
             }
@@ -794,11 +804,26 @@ impl Sessions {
             .get(id)
             .cloned()
             .ok_or_else(|| QuestionError::NoAgent(id.into()))?;
+        // (a) Take the key: a second answer to the same question is refused while this one is in
+        // flight. (b) The agent is asked first. (c) Only an answer it accepted is recorded.
+        // (d) Any failure releases the key, so a retry or a decline can follow; the key is also
+        // released when the question is recorded as answered or withdrawn (see `release_questions`).
         let key = (id.to_string(), question_id.to_string());
         if !self.questions_taken.lock().unwrap().insert(key.clone()) {
             return Err(QuestionError::NotPending(question_id.into()));
         }
         let stored = answers.as_deref().map(|a| redact_secret_answers(&questions, a)).unwrap_or_default();
+        let sent = {
+            let mut run = live.run.lock().await;
+            match &answers {
+                Some(answers) => run.answer_question(question_id, answers).await,
+                None => run.decline_question(question_id).await,
+            }
+        };
+        if let Err(e) = sent {
+            self.questions_taken.lock().unwrap().remove(&key);
+            return Err(e.into());
+        }
         if live
             .events
             .send(AgentEvent::QuestionAnswered { question_id: question_id.to_string(), answers: stored })
@@ -808,12 +833,22 @@ impl Sessions {
             self.questions_taken.lock().unwrap().remove(&key);
             return Err(QuestionError::Other(anyhow::anyhow!("agent for session {id} has exited")));
         }
-        let mut run = live.run.lock().await;
-        match answers {
-            Some(answers) => run.answer_question(question_id, &answers).await?,
-            None => run.decline_question(question_id).await?,
-        }
         Ok(())
+    }
+
+    /// Release the double-answer keys of `session_id`: all of them when `question_id` is `None`,
+    /// else that question's.
+    fn release_questions(&self, session_id: &str, question_id: Option<&str>) {
+        self.questions_taken
+            .lock()
+            .unwrap()
+            .retain(|(s, q)| s != session_id || question_id.is_some_and(|only| only != q));
+    }
+
+    /// Number of questions held by the double-answer guard (tests: the set must not grow).
+    #[doc(hidden)]
+    pub fn questions_taken_len(&self) -> usize {
+        self.questions_taken.lock().unwrap().len()
     }
 
     /// Whether `id` is in approve-everything mode (FR-A5).
@@ -851,7 +886,10 @@ impl Sessions {
                             pending.push((approval_id, policy.auto_notice));
                         }
                     }
-                    AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|(p, _)| *p != approval_id),
+                    AgentEvent::ApprovalResolved { approval_id, .. }
+                    | AgentEvent::PromptWithdrawn { prompt_id: approval_id } => {
+                        pending.retain(|(p, _)| *p != approval_id)
+                    }
                     AgentEvent::TurnEnded { .. } => pending.clear(),
                     _ => {}
                 }
@@ -966,7 +1004,9 @@ fn pending_approvals_of(events: Vec<AgentEvent>) -> Vec<(String, String, serde_j
             AgentEvent::ApprovalRequested { approval_id, tool, input, needs_person } => {
                 pending.push((approval_id, tool, input, needs_person))
             }
-            AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|(p, _, _, _)| *p != approval_id),
+            AgentEvent::ApprovalResolved { approval_id, .. } | AgentEvent::PromptWithdrawn { prompt_id: approval_id } => {
+                pending.retain(|(p, _, _, _)| *p != approval_id)
+            }
             AgentEvent::TurnEnded { .. } => pending.clear(),
             _ => {}
         }

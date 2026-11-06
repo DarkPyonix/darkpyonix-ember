@@ -71,15 +71,19 @@ pub async fn log(policy: &PathPolicy, r: &GitLogRequest) -> Result<GitLogRespons
         let email = next()?.to_owned();
         let time = next()?.parse().map_err(|_| GitError::Internal("git 로그 시간 형식이 잘못되었습니다.".into()))?;
         let subject = next()?.to_owned();
-        let refs = fields.flat_map(|field| field.split('\x1f')).filter_map(|name| {
-            let kind = if name == "HEAD" { GitLogRefKind::Head }
-                else if name.starts_with("refs/heads/") { GitLogRefKind::Branch }
-                else if name.starts_with("refs/remotes/") { GitLogRefKind::Remote }
-                else if name.starts_with("refs/tags/") { GitLogRefKind::Tag }
-                else { return None };
-            Some(GitLogRef { name: name.to_owned(), kind })
-        }).collect();
+        let refs = fields.flat_map(|field| field.split('\x1f')).filter_map(ref_of).collect();
         commits.push(GitLogCommit { sha, parents, author, email, time, subject, refs });
     }
     Ok(GitLogResponse { commits })
+}
+
+/// One decorated name of `%(decorate)` with `--decorate=full` as a ref, or `None` for anything else.
+/// Shared with the commit detail (FR-G14).
+pub(super) fn ref_of(name: &str) -> Option<GitLogRef> {
+    let kind = if name == "HEAD" { GitLogRefKind::Head }
+        else if name.starts_with("refs/heads/") { GitLogRefKind::Branch }
+        else if name.starts_with("refs/remotes/") { GitLogRefKind::Remote }
+        else if name.starts_with("refs/tags/") { GitLogRefKind::Tag }
+        else { return None };
+    Some(GitLogRef { name: name.to_owned(), kind })
 }

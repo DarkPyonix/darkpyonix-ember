@@ -2172,3 +2172,287 @@ mod hub_device_tests {
         assert_eq!(e.status(), Some(400));
     }
 }
+
+// ---- Enrol code flow (FR-C1, FR-C2, FR-C2c, FR-C2g, D39) ----
+
+/// The answer to minting a one-time enrol code. The code and the command hold the secret, so
+/// `Debug` prints neither them nor the fingerprint (FR-C2g). The server sends `code` once.
+/// `door`, `server` and `server_fingerprint` are optional: older servers omit them.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct EnrolMinted {
+    pub id: String,
+    pub code: String,
+    pub expires_ms: i64,
+    /// The line to run on the other machine, exactly as the server gave it.
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub warning: Option<String>,
+    /// `on` when present. A closed door mints nothing (409 `door_off`).
+    #[serde(default)]
+    pub door: Option<String>,
+    /// The server's full transport peer id; the server pins it in `command`. Omitted when the
+    /// transport is off. Never printed.
+    #[serde(default)]
+    pub server_peer_id: Option<String>,
+    /// The door URL the node should use.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// The server's short fingerprint, for comparison on screen only.
+    #[serde(default)]
+    pub server_fingerprint: Option<String>,
+}
+
+impl fmt::Debug for EnrolMinted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolMinted")
+            .field("id", &self.id)
+            .field("code", &"<redacted>")
+            .field("expires_ms", &self.expires_ms)
+            .field("command", &"<redacted>")
+            .field("door", &self.door)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The state of an enrolment, as the admin status route spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrolState {
+    Waiting,
+    AwaitingConfirmation,
+    Joined,
+    Denied,
+    Expired,
+    /// A state this client does not know; shown as a failure, never guessed.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What a node says about itself. Untrusted display data: show it as plain text.
+#[derive(Clone, Default, Deserialize, PartialEq)]
+pub struct EnrolNodeInfo {
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub node_version: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub peer_id: Option<String>,
+}
+
+impl fmt::Debug for EnrolNodeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolNodeInfo").field("hostname", &self.hostname).finish_non_exhaustive()
+    }
+}
+
+/// `GET /computers/enrol-codes/{id}`. The optional fields appear only while the owner can decide.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct EnrolStatus {
+    pub status: EnrolState,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub node_info: Option<EnrolNodeInfo>,
+    #[serde(default)]
+    pub observed_addr: Option<String>,
+    #[serde(default)]
+    pub proposed_url: Option<String>,
+    /// Short form of the NODE's peer id, to compare with the node's screen.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub confirm_deadline_ms: Option<i64>,
+}
+
+impl fmt::Debug for EnrolStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnrolStatus").field("status", &self.status).finish_non_exhaustive()
+    }
+}
+
+/// What a confirm answered: `{computer_id, name}`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct EnrolConfirmed {
+    pub computer_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// An enrol call failed. The server's text never reaches the screen; the kind decides the line.
+#[derive(Debug)]
+pub enum EnrolCallError {
+    /// 503: the part of the server behind the call is off.
+    Off,
+    /// 404: the enrolment is not known (any more).
+    NotFound,
+    /// 409 `door_off`: the enrol door is not listening, so no code was made.
+    DoorOff,
+    /// 409 `door_url_unknown`: the door is on but no usable public URL is known; no code was made.
+    DoorUrlUnknown,
+    /// 409 `name_taken`: choose another name; the enrolment stays awaiting confirmation.
+    NameTaken,
+    /// 409 `wrong_state`: it is no longer awaiting confirmation.
+    WrongState,
+    /// 410: the enrolment expired.
+    Expired,
+    Api(ApiError),
+}
+
+impl EnrolCallError {
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            EnrolCallError::Off => Some(503),
+            EnrolCallError::NotFound => Some(404),
+            EnrolCallError::NameTaken | EnrolCallError::WrongState | EnrolCallError::DoorOff | EnrolCallError::DoorUrlUnknown => Some(409),
+            EnrolCallError::Expired => Some(410),
+            EnrolCallError::Api(e) => e.status(),
+        }
+    }
+}
+
+impl From<ApiError> for EnrolCallError {
+    fn from(e: ApiError) -> Self {
+        match &e {
+            ApiError::Status { status: 503, .. } => EnrolCallError::Off,
+            ApiError::Status { status: 404, .. } => EnrolCallError::NotFound,
+            ApiError::Status { status: 410, .. } => EnrolCallError::Expired,
+            ApiError::Status { status: 409, message, .. } if message == "door_off" => EnrolCallError::DoorOff,
+            ApiError::Status { status: 409, message, .. } if message == "door_url_unknown" => EnrolCallError::DoorUrlUnknown,
+            ApiError::Status { status: 409, message, .. } if message == "name_taken" => EnrolCallError::NameTaken,
+            ApiError::Status { status: 409, message, .. } if message == "wrong_state" => EnrolCallError::WrongState,
+            _ => EnrolCallError::Api(e),
+        }
+    }
+}
+
+/// Paths below `/api`. The id is one path segment.
+pub(crate) fn enrol_codes_path() -> &'static str {
+    "/computers/enrol-codes"
+}
+
+pub(crate) fn enrol_code_path(id: &str, tail: &str) -> String {
+    format!("{}/{}{tail}", enrol_codes_path(), seg(id))
+}
+
+/// `POST` body of a mint: `{name}`.
+pub(crate) fn enrol_mint_body(name: &str) -> serde_json::Value {
+    json!({ "name": name })
+}
+
+/// `POST .../confirm` body: `{name}` only. The server refuses unknown fields (422).
+pub(crate) fn enrol_confirm_body(name: &str) -> serde_json::Value {
+    json!({ "name": name })
+}
+
+impl Api {
+    /// Mints a one-time code for a new computer called `name`.
+    pub async fn enrol_mint(&self, name: &str) -> Result<EnrolMinted, EnrolCallError> {
+        Ok(Self::decode(self.post(enrol_codes_path(), enrol_mint_body(name)).await?)?)
+    }
+
+    pub async fn enrol_status(&self, id: &str) -> Result<EnrolStatus, EnrolCallError> {
+        Ok(self.get(&enrol_code_path(id, "")).await?)
+    }
+
+    /// Confirms the enrolment under `name` (the owner may rename).
+    pub async fn enrol_confirm(&self, id: &str, name: &str) -> Result<EnrolConfirmed, EnrolCallError> {
+        Ok(Self::decode(self.post(&enrol_code_path(id, "/confirm"), enrol_confirm_body(name)).await?)?)
+    }
+
+    pub async fn enrol_deny(&self, id: &str) -> Result<(), EnrolCallError> {
+        self.post(&enrol_code_path(id, "/deny"), json!({})).await?;
+        Ok(())
+    }
+
+    /// Cancels a code that is not used yet.
+    pub async fn enrol_cancel(&self, id: &str) -> Result<(), EnrolCallError> {
+        Self::check(self.send(Method::DELETE, &enrol_code_path(id, ""), None).await?)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod enrol_tests {
+    use super::*;
+
+    const CODE: &str = "SECRETCODE-0123456789abcdef";
+
+    fn minted() -> EnrolMinted {
+        serde_json::from_value(json!({
+            "id": "e1", "code": CODE, "expires_ms": 5,
+            "command": format!("ember-node enrol {CODE} --server http://x:1"),
+            "warning": "w", "door": "on", "server": "http://x:1", "server_fingerprint": "ab12 cd34", "server_peer_id": "PEERID9999"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn fr_c2_enrol_minted_debug_hides_the_code_command_and_fingerprint() {
+        let m = minted();
+        let d = format!("{m:?}");
+        assert!(!d.contains(CODE) && !d.contains("ember-node enrol") && !d.contains("ab12") && !d.contains("PEERID9999"), "{d}");
+        assert!(d.contains("e1"));
+        assert_eq!(m.code, CODE);
+    }
+
+    #[test]
+    fn fr_c2_enrol_minted_decodes_the_old_shape_without_door_keys() {
+        let m: EnrolMinted = serde_json::from_value(json!({"id":"e","code":"c","expires_ms":1,"command":"x","warning":"w"})).unwrap();
+        assert_eq!((m.door, m.server, m.server_fingerprint), (None, None, None));
+    }
+
+    #[test]
+    fn fr_c2_enrol_status_decodes_every_state_and_missing_fields() {
+        for (s, want) in [
+            ("waiting", EnrolState::Waiting),
+            ("awaiting_confirmation", EnrolState::AwaitingConfirmation),
+            ("joined", EnrolState::Joined),
+            ("denied", EnrolState::Denied),
+            ("expired", EnrolState::Expired),
+            ("something_new", EnrolState::Unknown),
+        ] {
+            let st: EnrolStatus = serde_json::from_value(json!({"status": s, "name": "lab"})).unwrap();
+            assert_eq!(st.status, want);
+            assert!(st.node_info.is_none() && st.observed_addr.is_none() && st.fingerprint.is_none());
+        }
+        let st: EnrolStatus = serde_json::from_value(json!({
+            "status": "awaiting_confirmation", "name": "lab", "observed_addr": "10.0.0.5:5000",
+            "node_info": {"hostname": "box", "os": "linux", "arch": "x86_64", "node_version": "0.1"},
+            "fingerprint": "ab12 cd34", "confirm_deadline_ms": 9, "proposed_url": "http://10.0.0.5:8741"
+        }))
+        .unwrap();
+        assert_eq!(st.node_info.as_ref().map(|n| n.hostname.as_str()), Some("box"));
+        assert!(!format!("{st:?}").contains("ab12"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_paths_and_bodies_are_fixed_and_carry_no_code_or_fingerprint() {
+        assert_eq!(enrol_codes_path(), "/computers/enrol-codes");
+        assert_eq!(enrol_code_path("e1", "/confirm"), "/computers/enrol-codes/e1/confirm");
+        assert_eq!(enrol_mint_body("lab"), json!({"name": "lab"}));
+        let c = enrol_confirm_body("lab");
+        assert_eq!(c, json!({"name": "lab"}));
+        assert!(c.get("expect_fingerprint").is_none());
+        assert!(!enrol_code_path("a/b", "").contains("a/b"));
+    }
+
+    #[test]
+    fn fr_c2_enrol_errors_are_typed_by_status_and_key() {
+        let st = |status: u16, message: &str| ApiError::Status { status, message: message.into(), code: None };
+        assert!(matches!(EnrolCallError::from(st(503, "x")), EnrolCallError::Off));
+        assert!(matches!(EnrolCallError::from(st(404, "x")), EnrolCallError::NotFound));
+        assert!(matches!(EnrolCallError::from(st(410, "expired")), EnrolCallError::Expired));
+        assert!(matches!(EnrolCallError::from(st(409, "name_taken")), EnrolCallError::NameTaken));
+        assert!(matches!(EnrolCallError::from(st(409, "wrong_state")), EnrolCallError::WrongState));
+        assert!(matches!(EnrolCallError::from(st(409, "door_off")), EnrolCallError::DoorOff));
+        assert!(matches!(EnrolCallError::from(st(409, "door_url_unknown")), EnrolCallError::DoorUrlUnknown));
+        assert_eq!(EnrolCallError::from(st(400, "bad")).status(), Some(400));
+    }
+}

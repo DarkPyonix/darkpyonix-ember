@@ -491,7 +491,7 @@ fn InviteList(channel: &str, st: &OwnerState) {
             Label("불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
             return;
         }
-        OwnerLoad::Failed => Label("초대와 게스트를 불러오지 못했습니다. 잠시 뒤 다시 시도하십시오", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None),
+        OwnerLoad::Failed => Label("초대와 게스트를 불러오지 못했습니다", Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None),
         OwnerLoad::Ready => {}
     }
     let rows = invite_rows(&st.invites.get(), crate::model::now_ms());

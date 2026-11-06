@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -1165,9 +1165,9 @@ fn CommitBox(
     let branch_name = branch.to_string();
     let can_commit = commit_enabled(&summary.get(), staged_files, is_amend);
     // Amending a commit already on the upstream asks twice (#269): the armed flag is the first tap.
-    let armed = remember(|| mutable_state_of(false));
+    let armed = remember(|| mutable_state_of(0_i64));
     let warning = if is_amend { commit.as_ref().and_then(|(_, snap, _)| amend_warning(snap)) } else { None };
-    let is_armed = warning.is_some() && armed.get();
+    let is_armed = warning.is_some() && armed.get() != 0;
 
     cu::Column()
         .modifier(
@@ -1184,7 +1184,7 @@ fn CommitBox(
                 cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
                     .text(sum_state.get()).placeholder("요약 (필수) 예: Feat: Wire shim")
                     .on_value_change(move |v| {
-                        s_armed.set(false);
+                        s_armed.set(0);
                         s_state.set(v);
                     });
             });
@@ -1195,7 +1195,7 @@ fn CommitBox(
                 cu::TextField().modifier(Modifier::new().fill_max_width().height(64.0))
                     .text(body_state.get()).placeholder("설명 (선택)").multiline(true)
                     .on_value_change(move |v| {
-                        b_armed.set(false);
+                        b_armed.set(0);
                         b_state.set(v);
                     });
             });
@@ -1208,7 +1208,7 @@ fn CommitBox(
                 cu::Checkbox(is_amend)
                     .modifier(Modifier::new().size(18.0, 18.0))
                     .on_change(move |v| {
-                        am_armed.set(false);
+                        am_armed.set(0);
                         am.set(v);
                     });
                 Label("마지막 커밋 수정 (amend)", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(1));
@@ -1227,11 +1227,16 @@ fn CommitBox(
                 true,
                 move || {
                     if let Some((actions, snap, staging)) = &commit {
-                        if amend_state.get() && amend_warning(snap).is_some() && !click_armed.get() {
-                            click_armed.set(true);
-                            return;
+                        let needs_confirm = amend_state.get() && amend_warning(snap).is_some();
+                        match amend_tap(needs_confirm, click_armed.get(), crate::demo::now_ms()) {
+                            AmendTap::Arm => {
+                                click_armed.set(crate::demo::now_ms().max(1));
+                                return;
+                            }
+                            AmendTap::Wait => return,
+                            AmendTap::Commit => {}
                         }
-                        click_armed.set(false);
+                        click_armed.set(0);
                         let req = commit_request(snap, &staging.get(), &sum_state.get(), &body_state.get(), amend_state.get());
                         let project = actions.project.clone();
                         let submitted_summary = req.summary.clone();

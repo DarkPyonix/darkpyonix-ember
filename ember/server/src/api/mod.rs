@@ -38,6 +38,7 @@
 //! changes are pushed (`project_updated`, `session_updated`).
 
 pub mod git;
+pub mod harnesses;
 pub mod ide;
 pub mod ide_extensions;
 pub mod origin;
@@ -128,7 +129,7 @@ impl From<ProjectError> for ApiError {
 type ApiResult<T> = Result<T, ApiError>;
 
 async fn agents(State(s): State<Arc<Sessions>>) -> impl IntoResponse {
-    Json(s.detect_agents().await)
+    Json(s.probe_agents().await)
 }
 
 #[derive(Deserialize)]

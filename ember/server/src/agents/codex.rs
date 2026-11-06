@@ -169,6 +169,10 @@ impl AgentAdapter for CodexAdapter {
         out
     }
 
+    fn binary(&self) -> Option<PathBuf> {
+        Some(self.bin.clone())
+    }
+
     async fn detect(&self) -> Detected {
         let out = tokio::time::timeout(
             Duration::from_secs(10),
@@ -373,7 +377,7 @@ fn toml_str(s: &str) -> String {
 
 /// `codex-cli 0.155.1` → `0.155.1`.
 fn parse_version(stdout: &str) -> Option<String> {
-    stdout.lines().next()?.split_whitespace().last().map(str::to_string)
+    stdout.lines().next()?.split_whitespace().last().and_then(super::version_token)
 }
 
 fn initialize_params(experimental: bool) -> Value {

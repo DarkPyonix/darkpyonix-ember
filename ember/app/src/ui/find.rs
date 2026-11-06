@@ -3,7 +3,7 @@
 //! the widget's own. The find bar in `editor_workbench` shows the result and moves the reader with
 //! the editor handle.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FindOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
@@ -25,26 +25,44 @@ fn fold(c: char, case_sensitive: bool) -> char {
     if case_sensitive { c } else { c.to_lowercase().next().unwrap_or(c) }
 }
 
-/// Every non-overlapping occurrence of `query` in `text`, in document order. An empty query, or one
-/// with a line break, matches nothing.
+/// The most matches kept. The find bar searches on every render, so a query that matches a huge file
+/// everywhere stops here instead of building an unbounded list; replace all refuses past it.
+pub const MAX_MATCHES: usize = 10_000;
+
+/// Every non-overlapping occurrence of `query` in `text`, in document order, at most [`MAX_MATCHES`].
+/// An empty query, or one with a line break, matches nothing.
 pub fn find_matches(text: &str, query: &str, options: FindOptions) -> Vec<Match> {
+    find_matches_capped(text, query, options).0
+}
+
+/// [`find_matches`] and whether more matches exist than were kept.
+pub fn find_matches_capped(text: &str, query: &str, options: FindOptions) -> (Vec<Match>, bool) {
     if query.is_empty() || query.contains('\n') || query.contains('\r') {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let needle: Vec<char> = query.chars().map(|c| fold(c, options.case_sensitive)).collect();
     let mut out = Vec::new();
+    // One set of buffers for every line: a line is scanned without allocating.
+    let mut chars: Vec<char> = Vec::new();
+    let mut cols: Vec<u32> = Vec::new();
+    let mut folded: Vec<char> = Vec::new();
     for (line_no, line) in text.split('\n').enumerate() {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        let chars: Vec<char> = line.chars().collect();
+        chars.clear();
+        chars.extend(line.chars());
+        if chars.len() < needle.len() {
+            continue;
+        }
         // UTF-16 column of each char, and one past the end.
-        let mut cols: Vec<u32> = Vec::with_capacity(chars.len() + 1);
+        cols.clear();
         let mut col = 0u32;
         for c in &chars {
             cols.push(col);
             col += c.len_utf16() as u32;
         }
         cols.push(col);
-        let folded: Vec<char> = chars.iter().map(|c| fold(*c, options.case_sensitive)).collect();
+        folded.clear();
+        folded.extend(chars.iter().map(|c| fold(*c, options.case_sensitive)));
         let mut i = 0;
         while i + needle.len() <= folded.len() {
             if folded[i..i + needle.len()] == needle[..] {
@@ -52,6 +70,9 @@ pub fn find_matches(text: &str, query: &str, options: FindOptions) -> Vec<Match>
                 let before_ok = i == 0 || !is_word(chars[i - 1]) || !is_word(chars[i]);
                 let after_ok = end == chars.len() || !is_word(chars[end]) || !is_word(chars[end - 1]);
                 if !options.whole_word || (before_ok && after_ok) {
+                    if out.len() == MAX_MATCHES {
+                        return (out, true);
+                    }
                     out.push(Match { line: line_no as u32, start: cols[i], end: cols[end] });
                     i = end;
                     continue;
@@ -60,7 +81,40 @@ pub fn find_matches(text: &str, query: &str, options: FindOptions) -> Vec<Match>
             i += 1;
         }
     }
-    out
+    (out, false)
+}
+
+/// [`find_matches_capped`] computed once per text, query and options: the find bar asks on every render
+/// and on every button, and the answer only changes when one of the three does. The text is compared by
+/// its hash and length, which costs one pass over it and no allocation.
+pub fn cached_matches(text: &str, query: &str, options: FindOptions) -> (Vec<Match>, bool) {
+    use std::cell::RefCell;
+    use std::hash::{Hash, Hasher};
+    type Key = (u64, usize, String, FindOptions);
+    type Entry = (Key, (Vec<Match>, bool));
+    thread_local! { static LAST: RefCell<Option<Entry>> = const { RefCell::new(None) }; }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let key: Key = (hasher.finish(), text.len(), query.to_string(), options);
+    LAST.with(|last| {
+        if let Some((k, v)) = last.borrow().as_ref() {
+            if *k == key {
+                return v.clone();
+            }
+        }
+        let found = find_matches_capped(text, query, options);
+        *last.borrow_mut() = Some((key, found.clone()));
+        found
+    })
+}
+
+/// The edits for a replacement: the one match at `only`, or every match. They are last first, so each
+/// edit is written against the same document version and none moves another.
+pub fn replace_edits(matches: &[Match], only: Option<usize>, replacement: &str) -> Vec<(Match, String)> {
+    match only {
+        Some(i) => matches.get(i).map(|m| vec![(*m, replacement.to_string())]).unwrap_or_default(),
+        None => matches.iter().rev().map(|m| (*m, replacement.to_string())).collect(),
+    }
 }
 
 /// The match to go to from the caret at `from` (line, column): the first one that starts at or after

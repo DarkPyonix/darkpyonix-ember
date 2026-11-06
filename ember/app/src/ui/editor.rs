@@ -42,6 +42,46 @@ pub fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// A Korean reason for a failed open or save. The server's own text is English, can carry paths and
+/// control characters, and is not for the person: the caller logs it and shows this.
+pub fn file_failure_reason(error: &str) -> &'static str {
+    let e = error.to_lowercase();
+    if e.contains("entrynotfound") || e.contains("enoent") || e.contains("not found") || e.contains("no such file") {
+        "파일이 없습니다. 지워졌거나 이름이 바뀌었을 수 있습니다"
+    } else if e.contains("nopermissions") || e.contains("eacces") || e.contains("eperm") || e.contains("permission") {
+        "파일을 읽거나 쓸 권한이 없습니다"
+    } else if e.contains("utf-8") || e.contains("utf8") {
+        "UTF-8 텍스트 파일이 아니어서 열 수 없습니다"
+    } else if e.contains("connection closed") || e.contains("timed out") || e.contains("io:") || e.contains("handshake") || e.contains("refused") {
+        "서버와의 연결이 끊어졌습니다. 연결을 확인한 뒤 다시 시도하세요"
+    } else if e.contains("filetoolarge") || e.contains("too large") {
+        "파일이 너무 커서 열 수 없습니다"
+    } else {
+        "알 수 없는 오류입니다. 자세한 내용은 로그에 있습니다"
+    }
+}
+
+/// A file name as shown to the person: control characters (newlines, escapes) are dropped, so a name
+/// cannot break the layout or smuggle terminal sequences, and a very long one is shortened.
+pub fn display_name(name: &str) -> String {
+    let clean: String = name.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() > 80 {
+        let head: String = clean.chars().take(79).collect();
+        format!("{head}…")
+    } else {
+        clean
+    }
+}
+
+/// Whether a click on a tree row ends the pending name prompt. An empty field has nothing to lose; a
+/// typed name is kept (the person may have clicked by mistake), and a delete question is not a field.
+pub fn row_click_closes_prompt(prompt: &TreePrompt, typed: &str) -> bool {
+    match prompt {
+        TreePrompt::NewFile { .. } | TreePrompt::NewDir { .. } | TreePrompt::Rename { .. } => typed.trim().is_empty(),
+        TreePrompt::Delete { .. } => false,
+    }
+}
+
 /// The open files. A tab holds its unsaved mark, so closing a tab drops it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EditorTabs {
@@ -590,6 +630,34 @@ pub fn EditorScreen(target: EditorTarget) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fr_l31_failure_reasons_are_korean_and_never_the_server_text() {
+        assert!(file_failure_reason("remote error: EntryNotFound (FileSystemError)").contains("없습니다"));
+        assert!(file_failure_reason("NoPermissions (FileSystemError): /root/x").contains("권한"));
+        assert!(file_failure_reason("file is not UTF-8").contains("UTF-8"));
+        assert!(file_failure_reason("connection closed").contains("연결"));
+        assert!(file_failure_reason("timed out: readFile").contains("연결"));
+        let other = file_failure_reason("weird \u{1b}[31m thing at /secret/path");
+        assert!(!other.contains("secret") && !other.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn fr_l31_display_name_drops_control_characters_and_shortens() {
+        assert_eq!(display_name("a\nb\u{1b}[2Jc.txt"), "ab[2Jc.txt");
+        assert_eq!(display_name(&"x".repeat(200)).chars().count(), 80);
+        assert_eq!(display_name("README.md"), "README.md");
+    }
+
+    #[test]
+    fn fr_l31_row_click_keeps_a_typed_name_and_closes_an_empty_field() {
+        let new_file = TreePrompt::NewFile { parent: "/w".into() };
+        assert!(row_click_closes_prompt(&new_file, ""));
+        assert!(row_click_closes_prompt(&new_file, "  "));
+        assert!(!row_click_closes_prompt(&new_file, "notes.md"));
+        assert!(!row_click_closes_prompt(&TreePrompt::Rename { path: "/w/a".into() }, "b"));
+        assert!(!row_click_closes_prompt(&TreePrompt::Delete { path: "/w/a".into(), is_dir: false }, ""));
+    }
     use crate::ui::keymap::{Keymap, Os};
 
     #[test]

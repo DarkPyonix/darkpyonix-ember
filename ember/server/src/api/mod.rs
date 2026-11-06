@@ -34,6 +34,8 @@
 //!
 //! Git per project (FR-G4) is in [`git`]: `POST /api/projects/{name}/git/<op>`.
 //!
+//! GitHub card data (FR-G13) is in [`integrations`]: `GET /api/integrations/github`.
+//!
 //! Project names are path segments: clients percent-encode them. Assignment and metadata
 //! changes are pushed (`project_updated`, `session_updated`).
 
@@ -41,6 +43,7 @@ pub mod git;
 pub mod harnesses;
 pub mod ide;
 pub mod ide_extensions;
+pub mod integrations;
 pub mod origin;
 
 use std::path::PathBuf;

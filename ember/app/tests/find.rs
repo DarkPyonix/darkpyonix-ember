@@ -1,7 +1,7 @@
 //! Find and replace in the open file (D38, #440): the pure model. Columns are UTF-16 code units, as
 //! the widget counts them. No renderer.
 
-use ember_app::ui::find::{count_text, find_matches, next_match, FindOptions, Match};
+use ember_app::ui::find::{count_text, find_matches, cached_matches, find_matches_capped, next_match, replace_edits, FindOptions, Match, MAX_MATCHES};
 
 fn opts() -> FindOptions {
     FindOptions { case_sensitive: false, whole_word: false }
@@ -76,4 +76,53 @@ fn fr_l31_the_counter_says_where_the_current_match_is() {
     assert_eq!(count_text(None, 12, "x"), "12개");
     assert_eq!(count_text(None, 0, "x"), "결과 없음");
     assert_eq!(count_text(None, 0, ""), "", "nothing typed yet");
+}
+
+#[test]
+fn fr_l31_find_stops_at_the_match_cap_and_says_so() {
+    let text = "a".repeat(MAX_MATCHES + 10);
+    let (matches, truncated) = find_matches_capped(&text, "a", opts());
+    assert_eq!(matches.len(), MAX_MATCHES);
+    assert!(truncated);
+    let (matches, truncated) = find_matches_capped(&"a".repeat(MAX_MATCHES), "a", opts());
+    assert_eq!(matches.len(), MAX_MATCHES);
+    assert!(!truncated, "exactly the cap is not past it");
+}
+
+#[test]
+fn fr_l31_replace_one_edits_only_the_chosen_match_and_none_when_out_of_range() {
+    let matches = vec![m(0, 0, 3), m(1, 4, 7)];
+    assert_eq!(replace_edits(&matches, Some(1), "x"), vec![(m(1, 4, 7), "x".to_string())]);
+    assert!(replace_edits(&matches, Some(2), "x").is_empty());
+    assert!(replace_edits(&[], Some(0), "x").is_empty());
+}
+
+#[test]
+fn fr_l31_replace_all_is_last_first_so_no_edit_moves_another() {
+    let matches = vec![m(0, 0, 1), m(0, 4, 5), m(2, 0, 1)];
+    let edits = replace_edits(&matches, None, "한글😀");
+    assert_eq!(edits.iter().map(|(x, _)| *x).collect::<Vec<_>>(), vec![m(2, 0, 1), m(0, 4, 5), m(0, 0, 1)]);
+    assert!(edits.iter().all(|(_, t)| t == "한글😀"), "a multi-byte replacement is passed through whole");
+}
+
+#[test]
+fn fr_l31_replace_edits_applied_last_first_give_the_replaced_text() {
+    // Apply the edits to a line the way the widget would (UTF-16 columns, each against the same text).
+    let text = "a-😀-a-a";
+    let matches = find_matches(text, "a", opts());
+    let mut units: Vec<u16> = text.encode_utf16().collect();
+    for (mt, t) in replace_edits(&matches, None, "XY") {
+        units.splice(mt.start as usize..mt.end as usize, t.encode_utf16());
+    }
+    assert_eq!(String::from_utf16(&units).unwrap(), "XY-😀-XY-XY");
+}
+
+#[test]
+fn fr_l31_cached_matches_follow_the_text_query_and_options() {
+    let o = opts();
+    assert_eq!(cached_matches("a b a", "a", o).0.len(), 2);
+    assert_eq!(cached_matches("a b a", "a", o).0.len(), 2, "same inputs, same answer");
+    assert_eq!(cached_matches("a b a a", "a", o).0.len(), 3, "a changed text is searched again");
+    assert_eq!(cached_matches("a b a a", "b", o).0.len(), 1, "a changed query is searched again");
+    assert_eq!(cached_matches("A a", "a", FindOptions { case_sensitive: true, whole_word: false }).0.len(), 1, "changed options too");
 }

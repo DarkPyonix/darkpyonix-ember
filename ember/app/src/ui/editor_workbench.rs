@@ -59,6 +59,8 @@ struct Shared {
     project: String,
     project_name: String,
     uris: Rc<RefCell<HashMap<String, ember_editor_conn::uri::UriComponents>>>,
+    /// Why a file could not be opened, by path: the pane says so instead of looking like nothing is open.
+    open_errors: Rc<RefCell<HashMap<String, String>>>,
 }
 
 // WidgetView accepts a function without props and owns a separate tree. Share signals between
@@ -111,7 +113,8 @@ fn init(target: EditorTarget) {
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    let open_errors = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, tree_sel, prompt, prompt_text, prompt_at, palette_open, find, palette_mode, palette_query, palette_sel, theme, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris, open_errors }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -194,7 +197,7 @@ pub mod page {
     use dioxus_compose::html::prelude::*;
     use std::sync::Arc;
     use crate::terminal_stream::{self, ChangeCallback, TerminalHandle, TerminalState};
-    use super::{DOUBLE_SHIFT, now_ms, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
+    use super::{DOUBLE_SHIFT, now_ms, send, editor_pane, join_path, shared, workbench, base_name, position_text, BridgeAction, HostCommand, Shared};
     use crate::ui::editor::{
         action_for_key, agent_status_text, apply_action, tooltip_text, Side, Stripes, ToolWindow,
     };
@@ -240,8 +243,18 @@ pub mod page {
     /// says it is not ready.
     fn run_action(s: &Shared, action: Action) {
         if action == Action::FindInFile {
+            // The bar is for the open file: with none open there is nothing to search, and the bar would
+            // appear later over whatever file is opened next.
+            if s.bridge.borrow().active_document().is_none() {
+                notice("찾을 파일이 열려 있지 않습니다");
+                return;
+            }
             let mut open = s.find.open;
             open.set(true);
+            return;
+        }
+        if action == Action::Save {
+            save_current(s);
             return;
         }
         if let Some(mode) = crate::ui::palette::mode_for(action, *s.keymap.read()) {
@@ -263,6 +276,18 @@ pub mod page {
         }
         if !handled {
             notice(format!("{}: {SOON}", action.label()));
+        }
+    }
+
+    /// Saves the document in the active tab: the same request the editor widget sends for its own Cmd+S, for
+    /// when the key reaches the page instead of the widget. The session saves the text it holds, so the
+    /// request carries no version.
+    fn save_current(s: &Shared) {
+        let current = s.tabs.read().current_path().map(str::to_owned);
+        let uri = current.and_then(|p| s.uris.borrow().get(&p).cloned());
+        match uri {
+            Some(uri) => send(s, s.bridge.borrow().on_save_requested(&uri, 0)),
+            None => notice("저장할 파일이 열려 있지 않습니다"),
         }
     }
 
@@ -392,7 +417,7 @@ pub mod page {
 
     /// Goes to the next or the previous match: from the match the reader is on, else from the caret.
     fn find_go(s: &Shared, forward: bool) {
-        let matches = crate::ui::find::find_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        let matches = crate::ui::find::cached_matches(&active_text(s), &s.find.query.read(), find_options(s)).0;
         if matches.is_empty() { return; }
         let mut current = s.find.current;
         let index = match *current.read() {
@@ -408,23 +433,25 @@ pub mod page {
 
     /// Replaces the match the reader is on (the first one when none is chosen yet).
     fn find_replace_one(s: &Shared) {
-        let matches = crate::ui::find::find_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        let matches = crate::ui::find::cached_matches(&active_text(s), &s.find.query.read(), find_options(s)).0;
         let mut current = s.find.current;
         let index = current.read().filter(|i| *i < matches.len()).or(if matches.is_empty() { None } else { Some(0) });
         let Some(index) = index else { return };
         let replacement = s.find.replacement.read().clone();
-        find_send(s, None, vec![(matches[index], replacement)]);
+        find_send(s, None, crate::ui::find::replace_edits(&matches, Some(index), &replacement));
         current.set(None);
     }
 
     fn find_replace_all(s: &Shared) {
-        let matches = crate::ui::find::find_matches(&active_text(s), &s.find.query.read(), find_options(s));
+        let (matches, truncated) = crate::ui::find::cached_matches(&active_text(s), &s.find.query.read(), find_options(s));
         if matches.is_empty() { return; }
+        if truncated {
+            notice(format!("결과가 {}개를 넘어 모두 바꾸기를 쓸 수 없습니다. 찾을 내용을 더 구체적으로 적으세요", crate::ui::find::MAX_MATCHES));
+            return;
+        }
         let replacement = s.find.replacement.read().clone();
-        // Last first: each edit is written against the same version and none moves another.
-        let edits: Vec<(crate::ui::find::Match, String)> = matches.into_iter().rev().map(|m| (m, replacement.clone())).collect();
         let mut current = s.find.current;
-        find_send(s, None, edits);
+        find_send(s, None, crate::ui::find::replace_edits(&matches, None, &replacement));
         current.set(None);
     }
 
@@ -436,10 +463,11 @@ pub mod page {
             (s.find.query, s.find.replacement, s.find.case_sensitive, s.find.whole_word, s.find.current, s.find.open);
         let text = active_text(s);
         let q = query.read().clone();
-        let matches = crate::ui::find::find_matches(&text, &q, find_options(s));
-        let counter = crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q);
-        let (prev_s, next_s, one_s, all_s, key_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
-        let has_matches = !matches.is_empty();
+        let (matches, truncated) = crate::ui::find::cached_matches(&text, &q, find_options(s));
+        let counter = if truncated { format!("{}개 이상", crate::ui::find::MAX_MATCHES) } else { crate::ui::find::count_text(current.read().filter(|i| *i < matches.len()), matches.len(), &q) };
+        let (prev_s, next_s, one_s, all_s, key_s, enter_s) = (s.clone(), s.clone(), s.clone(), s.clone(), s.clone(), s.clone());
+        let has_doc = s.bridge.borrow().active_document().is_some();
+        let has_matches = has_doc && !matches.is_empty();
         let (case_on, word_on) = (*case_sensitive.read(), *whole_word.read());
         let on = |flag: bool| if flag { "ed-pj on" } else { "ed-pj" };
         rsx! {
@@ -467,6 +495,13 @@ pub mod page {
                     input { style: "flex:1; min-width:0; border:0; background:none; outline:none; color:var(--text); font:inherit;",
                         "aria-label": "바꿀 내용", placeholder: "바꾸기", value: "{replacement}",
                         oninput: move |event| replacement.set(event.value()),
+                        onkeydown: move |event| {
+                            match event.key() {
+                                Key::Enter => { event.stop_propagation(); find_replace_one(&enter_s); }
+                                Key::Escape => { event.stop_propagation(); open.set(false); }
+                                _ => {}
+                            }
+                        },
                     }
                 }
                 button { class: "ed-pj", style: "border:1px solid var(--line);", disabled: !has_matches, onclick: move |_| find_replace_one(&one_s), "바꾸기" }
@@ -533,8 +568,20 @@ pub mod page {
         for update in updates {
             if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.uris.borrow_mut().insert(uri.path.clone(), uri.clone()); }
             if let ember_editor::SessionUpdate::Closed { uri } = &update { s.uris.borrow_mut().remove(&uri.path); }
+            if let ember_editor::SessionUpdate::Opened { uri, .. } = &update { s.open_errors.borrow_mut().remove(&uri.path); }
             let action = s.bridge.borrow_mut().apply(update);
-            if let BridgeAction::Resync(uri) = action { s.host.send(HostCommand::Resync(uri)); }
+            match action {
+                BridgeAction::Resync(uri) => { s.host.send(HostCommand::Resync(uri)); }
+                BridgeAction::OpenFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "opening a file failed");
+                    s.open_errors.borrow_mut().insert(uri.path.clone(), crate::ui::editor::file_failure_reason(&error).to_string());
+                }
+                BridgeAction::SaveFailed { uri, error } => {
+                    tracing::warn!(path = %uri.path, %error, "saving a file failed");
+                    notice(format!("{}을(를) 저장하지 못했습니다: {}", crate::ui::editor::display_name(base_name(&uri.path)), crate::ui::editor::file_failure_reason(&error)));
+                }
+                _ => {}
+            }
         }
         let tabs = s.tabs;
         let current = tabs.read().current_path().map(str::to_owned);
@@ -544,6 +591,7 @@ pub mod page {
         if let Some(uri) = current.as_ref().and_then(|p| uris.get(p)) { drop(bridge); s.bridge.borrow_mut().set_active(uri); } else { drop(bridge); }
         let bridge = s.bridge.borrow();
         let active = current.as_ref().and_then(|p| uris.get(p)).and_then(|u| bridge.document(u)).cloned();
+        let open_error = current.as_ref().and_then(|p| s.open_errors.borrow().get(p).cloned());
         let dirty: Vec<bool> = paths.iter().map(|p| uris.get(p).and_then(|u| bridge.document(u)).is_some_and(|d| d.dirty)).collect();
         drop(uris);
         drop(bridge);
@@ -632,6 +680,12 @@ pub mod page {
                         if *s.find.open.read() && active.is_some() { {find_bar(&s)} }
                         div { style: "flex:1; min-height:0; min-width:0; display:flex; overflow:hidden;",
                             if active.is_some() { WidgetView { app: editor_pane, style: "flex:1; min-width:0; height:100%;" } }
+                            else if let Some(error) = current.as_ref().and_then(|p| open_error.clone().map(|e| (p.clone(), e))) {
+                                div { class: "ed-empty", role: "alert",
+                                    b { "{crate::ui::editor::display_name(base_name(&error.0))} 파일을 열 수 없습니다" }
+                                    p { "{error.1}" }
+                                }
+                            }
                             else { div { class: "ed-empty", b { "열린 파일이 없습니다" } } }
                         }
                     }
@@ -855,8 +909,9 @@ pub mod page {
                     div { class: "ed-tn", style: "--d:0;",
                         {icon_px("file", 15)}
                         input { style: "flex:1; min-width:0; height:22px; border:1px solid var(--line); border-radius:var(--r-xs); background:var(--surface); color:var(--text); padding:0 6px;",
-                            "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}",
+                            "aria-label": "{label}", placeholder: "{label}", value: "{prompt_text}", autofocus: true,
                             oninput: move |event| prompt_text.set(event.value()),
+                            onblur: move |_| { if prompt_text.read().trim().is_empty() { prompt.set(None); } },
                             onkeydown: move |event| {
                                 match event.key() {
                                     Key::Enter => { event.stop_propagation(); submit_enter(enter.clone()); }
@@ -887,6 +942,7 @@ pub mod page {
                         {
                             let path = row.path.clone();
                             let host = s.host.clone();
+                            let open_errors = s.open_errors.clone();
                             let is_dir = row.is_dir;
                             let chosen = selected.as_ref().map(|(p, _)| p.as_str()) == Some(row.path.as_str());
                             let class = if chosen || (selected.is_none() && current == Some(row.path.as_str())) { "ed-tn sel" } else { "ed-tn" };
@@ -900,12 +956,14 @@ pub mod page {
                             rsx! { div { key: "{row.path}", class, role: "treeitem", "aria-label": "{row_label}", style: "--d:{depth};",
                                 "aria-expanded": if is_dir { "{row.open}" } else { "" },
                                 onclick: move |_| {
+                                    let close = prompt.read().as_ref().is_some_and(|p| crate::ui::editor::row_click_closes_prompt(p, &prompt_text.read()));
+                                    if close { prompt.set(None); }
                                     tree_sel.set(Some((path.clone(), is_dir)));
                                     if is_dir {
                                         let was_open = expanded.read().contains(&path);
                                         if was_open { expanded.write().remove(&path); }
                                         else { expanded.write().insert(path.clone()); host.send(HostCommand::List(path.clone())); }
-                                    } else { tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
+                                    } else { open_errors.borrow_mut().remove(&path); tabs.write().open(&path); host.send(HostCommand::Open(path.clone())); }
                                 },
                                 if is_dir { if row.open { {icon_px("chev-dn", 12)} } else { {icon_px("chev", 12)} } } else { span { class: "chev-sp" } }
                                 if is_dir { {icon_px("folder", 15)} } else { {icon_px("file", 15)} }
@@ -1035,7 +1093,7 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         let Some(handle) = terminal_handle(s) else {
-            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "노드의 터미널에 연결되어 있지 않습니다. 서버 주소와 컴퓨터 정보가 없어 터미널을 열 수 없습니다." } };
+            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "터미널은 서버에 연결했을 때만 사용할 수 있습니다. 이 창에는 서버 주소나 컴퓨터가 없습니다." } };
         };
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
@@ -1080,12 +1138,17 @@ pub mod page {
                     div { class: "tl", style: "padding-top:var(--sp2); color:var(--muted);", "{notice}" }
                 }
                 if offer_reconnect {
-                    button { class: "ed-pj", style: "margin-top:var(--sp2); border:1px solid var(--line);",
-                        onclick: move |_| {
-                            TERMINAL.with(|t| *t.borrow_mut() = None);
-                            let mut revision = revision;
-                            *revision.write() += 1;
-                        }, "다시 연결" }
+                    // TODO(dioxus-compose#175): the button sits in a flex row of its own because directly under
+                    // the block-level panel the renderer leaves out the second glyph of each word
+                    // ("다시 연결" draws as "다 연"). Drop the wrapper once that is fixed.
+                    div { style: "display:flex; margin-top:var(--sp2);",
+                        button { class: "ed-pj", style: "border:1px solid var(--line);",
+                            onclick: move |_| {
+                                TERMINAL.with(|t| *t.borrow_mut() = None);
+                                let mut revision = revision;
+                                *revision.write() += 1;
+                            }, "다시 연결" }
+                    }
                 }
             }
         }

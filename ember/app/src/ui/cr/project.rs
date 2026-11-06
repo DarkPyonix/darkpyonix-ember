@@ -1295,6 +1295,16 @@ fn SettingsSheet(
                     let device = shared_ui().prefs.get().saved_character_style(&b.id);
                     let shown = if d.style.is_empty() { effective_style(None, device) } else { effective_style(Some(&d.style), device) };
                     StylePicker(&b.name, shown, move |st| dr.update(|s| s.style = st.id().to_string()));
+                    // The team character screen is no sidebar entry (D26, #503): this link is the way in.
+                    // It leaves the sheet, so it waits for a clean draft instead of dropping edits.
+                    let (u, closed, id) = (shared_ui().clone(), closed.clone(), b.id.clone());
+                    AppButton("캐릭터 전체 보기", None, ButtonKind::Default, true, patch.is_empty() && !saving.get(), false, move || {
+                        closed.set(None);
+                        u.open_characters(&id);
+                    });
+                    if let Some(reason) = crate::ui::project::characters_link_reason(!patch.is_empty()) {
+                        Label(reason, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                    }
                 });
                 if leader_choice_visible(&b.id) {
                     SkipSection(&sheet_skip, EST_SEC_LEADER, "리더 (오케스트레이터)", "리더 지정은 서버가 아직 지원하지 않습니다", false, || match b.leader() {

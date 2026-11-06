@@ -135,6 +135,10 @@ pub struct SharedUi {
     /// A phone screen shows a detail view (an open room): the shell hides its top-right menu
     /// there (`body.view-detail .phonemenu { display: none }`).
     pub detail_open: MutableState<bool>,
+    /// `Some(project)` while the team character screen is open (FR-L22); empty means the
+    /// screen picks the project. Not a menu: it opens from the project settings sheet and
+    /// replaces the content with a back button (INTENT D26, #503).
+    pub characters: MutableState<Option<String>>,
     /// `true` when this process was launched directly with `--editor <project> <folder>`, so
     /// closing the editor exits the process instead of leaving a blank window.
     pub standalone_editor: MutableState<bool>,
@@ -157,6 +161,7 @@ impl SharedUi {
             theme_pref: mutable_state_of(theme),
             notice: mutable_state_of(None),
             detail_open: mutable_state_of(false),
+            characters: mutable_state_of(None),
             standalone_editor: mutable_state_of(false),
             mirrors: Arc::new(OnceLock::new()),
         }
@@ -332,6 +337,14 @@ impl SharedUi {
         if standalone {
             on_exit_standalone();
         }
+    }
+
+    pub fn open_characters(&self, project: &str) {
+        self.characters.set(Some(project.to_string()));
+    }
+
+    pub fn close_characters(&self) {
+        self.characters.set(None);
     }
 
     pub fn open_new_session(&self, project: Option<String>) {

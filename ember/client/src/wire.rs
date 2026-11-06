@@ -354,12 +354,18 @@ impl From<&SessionDetail> for ForkInfo {
 }
 
 /// `GET /agents` entry.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct DetectedAgent {
     pub kind: String,
     pub installed: bool,
     #[serde(default)]
     pub version: Option<String>,
+    /// Where the binary was found; `None` when the server did not report one (FR-A6.1).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// When the server last probed (epoch ms); `None` when not reported.
+    #[serde(default)]
+    pub detected_at: Option<i64>,
 }
 
 /// `POST /sessions` body.

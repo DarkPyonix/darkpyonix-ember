@@ -1164,7 +1164,8 @@ mod tests {
 
     #[test]
     fn fr_l15_chip_budget_caps_the_model_and_mode_chips_when_there_is_room() {
-        let b = composer_chip_budget(720.0);
+        // A composer wide enough for every cap (the 718 dp composer at 1440 is not: its chips share).
+        let b = composer_chip_budget(1200.0);
         assert_eq!(b[1], 200.0);
         assert_eq!(b[2], 150.0);
     }

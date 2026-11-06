@@ -113,6 +113,10 @@ async fn main() -> anyhow::Result<()> {
     if reset > 0 {
         tracing::info!("{reset} session(s) were mid-turn at shutdown; marked idle for resume");
     }
+    // Repair the per-channel JSONL files against the store before any router serves (FR-T16).
+    // It only logs: a problem here never stops the start. It uses its own JsonlLog and shares no lock
+    // with the routers' instances, so it must stay synchronous and ahead of every router.
+    ember_server::channels::jsonl::JsonlLog::new(&data_dir).recover(&store);
 
     // Always offered; detection reports a missing binary as not installed (FR-A6).
     // Antigravity's tool approvals arrive over HTTP from its PreToolUse hook (FR-A5).

@@ -15,6 +15,7 @@ pub mod new_session;
 pub mod ko;
 pub mod characters;
 pub mod characters_screen;
+pub mod add_computer;
 pub mod monitor;
 pub mod channel_owner;
 pub mod new_channel;

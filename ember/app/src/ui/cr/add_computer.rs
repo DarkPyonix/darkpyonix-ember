@@ -300,7 +300,10 @@ fn ConfirmAdd(r: &DeviceRow, ui: &AddUi, saving: bool) {
             Label(v, Fs::Sm, Weight::Regular, None, Some(2));
         });
     }
-    Label(&rows.address, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+    // The full address under the shortened row, only when it was actually shortened.
+    if rows.address != rows.address_short {
+        Label(&rows.address, Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
+    }
     if let Some(m) = ui.failure.get() {
         Label(&m, Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
     }

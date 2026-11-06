@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use compose_rust::runtime::{launched_effect, mutable_state_of, remember_with_key, MutableState};
+use compose_rust::runtime::{disposable_effect, launched_effect, on_dispose, mutable_state_of, remember_with_key, MutableState};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
 use compose_rust::{Alignment, SpaceRole};
@@ -24,7 +24,7 @@ use super::project::wrap_lines;
 use super::theme::*;
 use crate::ui::channel_owner::{
     capped_note, clears_sheet_state, create_label, create_runs, door_status, error_message, guest_rows, invite_rows,
-    known_door, parse_hours, Confirm, DoorStatus,
+    known_door, clamp_hours, Confirm, DoorStatus, CLAMPED_NOTE,
     InviteState, ALLOW_PRESETS, DEFAULT_TTL_HOURS, MAX_HOURS, MIN_HOURS, TTL_CHOICES,
 };
 
@@ -56,6 +56,8 @@ pub struct OwnerState {
     note: MutableState<Option<String>>,
     /// The row waiting for a second tap (remove or revoke).
     confirm: MutableState<Confirm>,
+    /// When the waiting row was armed (Unix ms): a second tap counts 600 ms later.
+    armed_at: MutableState<i64>,
     /// The door as the server last said, kept after close (it holds no secret).
     door: MutableState<Option<GuestDoorState>>,
     /// Create was tapped once while the door is known off.
@@ -73,8 +75,9 @@ pub struct ReviewSample {
     pub note: Option<String>,
 }
 
-/// SAMPLE DATA FOR REVIEW WINDOWS ONLY. Built relative to `now_ms` so the remaining times read
+/// SAMPLE DATA FOR REVIEW WINDOWS ONLY, compiled in debug builds only (release has no sample guests). Built relative to `now_ms` so the remaining times read
 /// plausibly. `door` is `off`, `warn`, `on` or anything else for "unknown".
+#[cfg(debug_assertions)]
 pub fn review_sample_data(now_ms: i64, door: &str) -> ReviewSample {
     const H: i64 = 3_600_000;
     let invite = |id: &str, expires: i64, used: Option<i64>, revoked: Option<i64>, name: Option<&str>| Invite {
@@ -129,10 +132,17 @@ pub fn review_sample_data(now_ms: i64, door: &str) -> ReviewSample {
 
 /// The sample, only when the review window asked for it: `EMBER_CR_ROUTE=channels` and
 /// `EMBER_CR_OWNER_SHEET=1`. The inputs are passed in so the gate is testable.
+#[cfg(debug_assertions)]
 pub fn review_sample_from(route: Option<&str>, sheet: Option<&str>, door: Option<&str>, now_ms: i64) -> Option<ReviewSample> {
     (route == Some("channels") && sheet == Some("1")).then(|| review_sample_data(now_ms, door.unwrap_or("unknown")))
 }
 
+#[cfg(not(debug_assertions))]
+fn review_sample() -> Option<ReviewSample> {
+    None
+}
+
+#[cfg(debug_assertions)]
 fn review_sample() -> Option<ReviewSample> {
     let get = |k: &str| std::env::var(k).ok();
     review_sample_from(
@@ -160,6 +170,7 @@ impl OwnerState {
             custom_gen: mutable_state_of(0),
             busy: mutable_state_of(false),
             confirm: mutable_state_of(Confirm::None),
+            armed_at: mutable_state_of(0),
             door: mutable_state_of(sample.as_ref().and_then(|s| s.created.as_ref().and_then(|c| c.guest_door.clone()))),
             create_armed: mutable_state_of(false),
             note: mutable_state_of(sample.and_then(|s| s.note)),
@@ -181,6 +192,7 @@ impl OwnerState {
         self.created.set(None);
         self.note.set(None);
         self.confirm.set(Confirm::None);
+        self.armed_at.set(0);
         self.create_armed.set(false);
         self.custom.set(String::new());
         self.custom_gen.set(self.custom_gen.get_untracked() + 1);
@@ -306,6 +318,19 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
             }
         });
     }
+    // Leaving the room (back, or another room) drops the link and the confirm too: the cleanup
+    // runs when this call site leaves the composition or the room changes.
+    {
+        let st2 = st.clone();
+        disposable_effect(channel.to_string(), move || {
+            on_dispose(move || {
+                if !st2.sample {
+                    st2.open.set(false);
+                    st2.reset();
+                }
+            })
+        });
+    }
     // Fetch when the sheet opens (the key changes with the open flag).
     {
         let (st2, c, open) = (st.clone(), channel.to_string(), st.open.get());
@@ -414,7 +439,11 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     if let Some(c) = created.filter(|_| status.can_copy()) {
         // TODO(compose-rust#471): no clipboard facility in the app or the toolkit, so the link is
         // shown as text to select and the 복사 button waits.
-        Label(&c.link, Fs::Sm, Weight::Regular, None, None);
+        // A read-only look: the field starts with the link, enabled so it can be selected and
+        // copied with Cmd+C / Ctrl+C. The toolkit has no read_only flag, so typing into it changes
+        // only what is drawn, never the link.
+        // TODO(compose-rust#471): replace with a 복사 button once the clipboard can be written.
+        EmberField(FieldOptions { fill_max_width: true, text: Some(c.link.clone()), ..Default::default() });
         Label("이 링크는 지금만 보입니다. 닫으면 다시 볼 수 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(n) = st.note.get() {
@@ -461,7 +490,12 @@ fn InviteList(channel: &str, st: &OwnerState) {
                 }
                 let label = if sure { "정말 취소합니다" } else { "취소" };
                 AppButton(label, None, ButtonKind::Destructive, true, !st.busy.get(), false, move || {
-                    let (next, fire) = s.confirm.get_untracked().tap_revoke(&id);
+                    let now = crate::model::now_ms();
+                    let cur = s.confirm.get_untracked();
+                    let (next, fire) = cur.tap_revoke(&id, s.armed_at.get_untracked(), now);
+                    if next != cur {
+                        s.armed_at.set(now);
+                    }
                     s.confirm.set(next);
                     if fire {
                         s.revoke(&c, &id);
@@ -500,7 +534,7 @@ fn GuestList(channel: &str, st: &OwnerState) {
             weight: Some(1.0),
             placeholder: format!("직접 입력 ({MIN_HOURS}~{MAX_HOURS}시간)"),
             on_value_change: Some(Box::new(move |v| {
-                if let Some(h) = parse_hours(&v) {
+                if let Some((h, _)) = clamp_hours(&v) {
                     hours.set(h);
                 }
                 text.set(v);
@@ -508,8 +542,12 @@ fn GuestList(channel: &str, st: &OwnerState) {
             ..Default::default()
         });
     });
-    if !custom.trim().is_empty() && parse_hours(&custom).is_none() {
-        Label(error_message(Some("invalid_hours")), Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
+    match clamp_hours(&custom) {
+        None if !custom.trim().is_empty() => {
+            Label(error_message(Some("invalid_hours")), Fs::Sm, Weight::Regular, Some(paint(p.red.strong)), None);
+        }
+        Some((_, true)) => Label(CLAMPED_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.orange.strong)), None),
+        _ => {}
     }
     // A custom value that is not valid leaves the chosen hours as they were; say which they are.
     let hours = st.hours.get();
@@ -519,7 +557,7 @@ fn GuestList(channel: &str, st: &OwnerState) {
     if rows.is_empty() {
         Label("게스트가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
     }
-    let custom_ok = custom.trim().is_empty() || parse_hours(&custom).is_some();
+    let custom_ok = custom.trim().is_empty() || clamp_hours(&custom).is_some();
     for g in rows {
         cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -556,7 +594,12 @@ fn GuestList(channel: &str, st: &OwnerState) {
                 let (s, c, id) = (st.clone(), channel.to_string(), g.id.clone());
                 let label = if sure { "정말 제거합니다" } else { "제거" };
                 AppButton(label, None, ButtonKind::Destructive, true, !st.busy.get(), false, move || {
-                    let (next, fire) = s.confirm.get_untracked().tap_remove(&id);
+                    let now = crate::model::now_ms();
+                    let cur = s.confirm.get_untracked();
+                    let (next, fire) = cur.tap_remove(&id, s.armed_at.get_untracked(), now);
+                    if next != cur {
+                        s.armed_at.set(now);
+                    }
                     s.confirm.set(next);
                     if fire {
                         s.remove(&c, &id);
@@ -605,7 +648,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 mod review_tests {
     use super::*;
     use crate::ui::channel_owner::{allowance_badge, guest_rows, invite_rows};

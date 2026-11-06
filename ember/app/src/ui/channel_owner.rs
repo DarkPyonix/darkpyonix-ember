@@ -32,6 +32,22 @@ pub fn parse_hours(text: &str) -> Option<u32> {
     t.parse::<u32>().ok().filter(|h| hours_valid(*h))
 }
 
+/// The custom-hours text as hours, pulled into 1..=168 when it is out of range; the flag says it was
+/// moved. Whole digits only: anything else (fraction, sign, text, empty) is `None` and stays
+/// rejected. A run of digits too long for a number clamps to the top.
+pub fn clamp_hours(text: &str) -> Option<(u32, bool)> {
+    let t = text.trim();
+    if t.is_empty() || !t.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let n = t.parse::<u64>().unwrap_or(u64::MAX);
+    let h = n.clamp(MIN_HOURS as u64, MAX_HOURS as u64) as u32;
+    Some((h, h as u64 != n))
+}
+
+/// The note shown when a typed value was pulled into the range.
+pub const CLAMPED_NOTE: &str = "1에서 168 사이로 맞췄습니다";
+
 /// The state of an invite, derived from the server's times (Unix ms) and the clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InviteState {
@@ -157,6 +173,15 @@ pub fn capped_note(capped: bool) -> Option<&'static str> {
     capped.then_some("게스트 자격의 만료 시각까지로 줄었습니다")
 }
 
+/// A second tap counts only this long after the first armed the row, so a double tap cannot skip
+/// the confirmation.
+pub const CONFIRM_DELAY_MS: i64 = 600;
+
+/// Whether a second tap at `now_ms` counts, for a row armed at `armed_at_ms`.
+pub fn confirm_tap(armed_at_ms: i64, now_ms: i64) -> bool {
+    now_ms.saturating_sub(armed_at_ms) >= CONFIRM_DELAY_MS
+}
+
 /// The one irreversible action waiting for a second tap, for one row only (FR-T14, FR-T15).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Confirm {
@@ -169,8 +194,11 @@ pub enum Confirm {
 impl Confirm {
     /// A tap on a guest's 제거: the first arms that row, the second on the same row fires.
     /// Returns the new state and whether to run the action now.
-    pub fn tap_remove(&self, guest_id: &str) -> (Confirm, bool) {
+    pub fn tap_remove(&self, guest_id: &str, armed_at_ms: i64, now_ms: i64) -> (Confirm, bool) {
         if *self == Confirm::Remove(guest_id.to_string()) {
+            if !confirm_tap(armed_at_ms, now_ms) {
+                return (self.clone(), false);
+            }
             (Confirm::None, true)
         } else {
             (Confirm::Remove(guest_id.to_string()), false)
@@ -178,8 +206,11 @@ impl Confirm {
     }
 
     /// A tap on an invite's 취소, the same way.
-    pub fn tap_revoke(&self, invite_id: &str) -> (Confirm, bool) {
+    pub fn tap_revoke(&self, invite_id: &str, armed_at_ms: i64, now_ms: i64) -> (Confirm, bool) {
         if *self == Confirm::Revoke(invite_id.to_string()) {
+            if !confirm_tap(armed_at_ms, now_ms) {
+                return (self.clone(), false);
+            }
             (Confirm::None, true)
         } else {
             (Confirm::Revoke(invite_id.to_string()), false)
@@ -435,21 +466,54 @@ mod tests {
     #[test]
     fn fr_t14_remove_needs_a_second_tap() {
         let c = Confirm::None;
-        let (c, fire) = c.tap_remove("g1");
+        let (c, fire) = c.tap_remove("g1", 0, 0);
         assert!(!fire && c.is_remove("g1"));
-        let (c, fire) = c.tap_remove("g1");
+        let (c, fire) = c.tap_remove("g1", 0, 600);
         assert!(fire && c == Confirm::None);
-        let (c, fire) = Confirm::None.tap_revoke("i1");
+        let (c, fire) = Confirm::None.tap_revoke("i1", 0, 0);
         assert!(!fire && c.is_revoke("i1"));
-        assert!(c.tap_revoke("i1").1);
+        assert!(c.tap_revoke("i1", 0, 700).1);
+    }
+
+    #[test]
+    fn fr_t14_a_fast_second_tap_does_not_skip_the_confirmation() {
+        assert!(!confirm_tap(1_000, 1_000));
+        assert!(!confirm_tap(1_000, 1_599));
+        let (c, _) = Confirm::None.tap_remove("g1", 0, 1_000);
+        let (c, fire) = c.tap_remove("g1", 1_000, 1_300);
+        assert!(!fire && c.is_remove("g1"), "still armed, nothing fired");
+        let (c, fire) = Confirm::None.tap_revoke("i1", 0, 1_000).0.tap_revoke("i1", 1_000, 1_100);
+        assert!(!fire && c.is_revoke("i1"));
+    }
+
+    #[test]
+    fn fr_t14_a_tap_after_600_ms_confirms() {
+        assert!(confirm_tap(1_000, 1_600));
+        assert!(confirm_tap(1_000, 5_000));
+        let (c, _) = Confirm::None.tap_remove("g1", 0, 1_000);
+        let (c, fire) = c.tap_remove("g1", 1_000, 1_600);
+        assert!(fire && c == Confirm::None);
+    }
+
+    #[test]
+    fn fr_t17_hours_are_clamped_with_a_note() {
+        assert_eq!(clamp_hours("24"), Some((24, false)));
+        assert_eq!(clamp_hours(" 168 "), Some((168, false)));
+        assert_eq!(clamp_hours("0"), Some((1, true)));
+        assert_eq!(clamp_hours("169"), Some((168, true)));
+        assert_eq!(clamp_hours("99999999999999999999999"), Some((168, true)));
+        for bad in ["", " ", "1.5", "-3", "+3", "abc", "2h"] {
+            assert_eq!(clamp_hours(bad), None, "{bad}");
+        }
+        assert_eq!(CLAMPED_NOTE, "1에서 168 사이로 맞췄습니다");
     }
 
     #[test]
     fn fr_t14_confirm_resets_when_another_row_is_tapped() {
-        let (c, _) = Confirm::None.tap_remove("g1");
-        let (c, fire) = c.tap_remove("g2");
+        let (c, _) = Confirm::None.tap_remove("g1", 0, 0);
+        let (c, fire) = c.tap_remove("g2", 0, 10);
         assert!(!fire && c.is_remove("g2") && !c.is_remove("g1"));
-        let (c, fire) = c.tap_revoke("i1");
+        let (c, fire) = c.tap_revoke("i1", 0, 20);
         assert!(!fire && c.is_revoke("i1") && !c.is_remove("g2"));
     }
 

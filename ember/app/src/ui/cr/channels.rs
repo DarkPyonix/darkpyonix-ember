@@ -675,7 +675,9 @@ pub fn sample_rooms() -> Vec<Room> {
         author_name: String::new(),
         author_kind: String::new(),
     };
-    // A guest's message (FR-T15): shows the name and a 게스트 tag, never the id. Sample data only.
+    // A guest's message (FR-T15): shows the name and a 게스트 tag, never the id. Sample data
+    // only, compiled in debug builds only (release has no sample guests).
+    #[cfg(debug_assertions)]
     let guest_msg = Message {
         id: "m3g".into(),
         from: "guest:g1".into(),
@@ -686,7 +688,8 @@ pub fn sample_rooms() -> Vec<Room> {
         author_kind: "guest".into(),
     };
     let team = vec![member("me", "나", false, ""), member("kim", "김하나", false, ""), member("a1", "ember-리더", true, "claude-code")];
-    vec![
+    #[allow(unused_mut)]
+    let mut rooms = vec![
         Room {
             id: "r1".into(),
             name: "배포 논의".into(),
@@ -696,7 +699,6 @@ pub fn sample_rooms() -> Vec<Room> {
                 msg("m1", "kim", "어제 빌드 확인해 주세요", 100_000, 0),
                 msg("m2", "me", "확인했습니다. 한 군데 실패해요", 99_000, 1),
                 msg("m3", "a1", "원인을 찾아서 고치겠습니다.", 600, 2),
-                guest_msg,
                 msg("m4", "me", "고마워요", 300, 0),
             ],
             unread: 3,
@@ -717,7 +719,10 @@ pub fn sample_rooms() -> Vec<Room> {
             messages: vec![],
             unread: 0,
         },
-    ]
+    ];
+    #[cfg(debug_assertions)]
+    rooms[0].messages.insert(3, guest_msg);
+    rooms
 }
 
 /// A review window (`EMBER_CR_ROUTE=channels`): the channels screen with sample rooms; the

@@ -330,11 +330,10 @@ async fn fr_c2_enrol_door_does_not_read_the_guest_variables_and_the_guest_door_d
 /// else (415 for a redeem with no content type, 404 with a JSON body for a poll), which
 /// `fr_c2_enrol_redeem.rs` pins in detail.
 ///
-/// THE MATRIX BELOW IS MEASURED, NOT READ: every (method, path) pair prints its header names as a
-/// `ROUTE_MATRIX|` line straight to the real stdout (cargo hides the output of a passing test and
-/// the harness captures print!, so the line reaches the CI log only this way). The assertion for a
-/// wrong method on a registered path is deliberately loose (the two door headers, with or without
-/// `allow`) until the matrix has been read from CI and pinned.
+/// THE MATRIX BELOW IS MEASURED, NOT READ: CI of #584 printed every (method, path) pair and the
+/// assertions below are pinned to what it showed. The `ROUTE_MATRIX|` line is kept (straight to the
+/// real stdout, which is the only way a line of a passing test reaches the CI log) so that a
+/// later change in axum shows up in the log as well as in a failing assertion.
 #[tokio::test]
 async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
     let a = unlimited(&door(&[]), EnrolDoor::routes(test_enrol()));
@@ -375,13 +374,26 @@ async fn fr_c2_enrol_door_serves_exactly_the_route_table() {
                 let allow = h.get("allow").and_then(|v| v.to_str().ok()).unwrap_or("-");
                 let _ = writeln!(std::io::stdout(), "ROUTE_MATRIX|{m}|{p}|{names:?}|allow={allow}");
             }
-            let registered = p == "/enrol/redeem" || p == "/enrol/status/x";
-            if registered {
-                // A wrong method on a registered path: the two door headers, with or without `allow`.
-                let without_allow: BTreeSet<&str> = names.iter().copied().filter(|n| *n != "allow").collect();
-                assert_eq!(without_allow, want, "{m} {p}: {names:?}");
-            } else {
-                assert_eq!(names, want, "{m} {p}");
+            // MEASURED in CI on #584 (64 pairs): a wrong method on one of the two registered paths
+            // carries `allow` with the methods of the route (`POST` for the redeem; `GET,HEAD` for
+            // the poll, axum adds HEAD to a GET route); every other path, trailing slash and
+            // encoded-slash form included, carries exactly the two door headers whatever the method.
+            let allow_value = match p {
+                "/enrol/redeem" => Some("POST"),
+                "/enrol/status/x" => Some("GET,HEAD"),
+                _ => None,
+            };
+            match allow_value {
+                Some(v) => {
+                    let mut with_allow = want.clone();
+                    with_allow.insert("allow");
+                    assert_eq!(names, with_allow, "{m} {p}");
+                    assert_eq!(h["allow"], v, "{m} {p}");
+                }
+                None => {
+                    assert_eq!(names, want, "{m} {p}");
+                    assert!(h.get("allow").is_none(), "{m} {p}");
+                }
             }
             assert_eq!(h["x-content-type-options"], "nosniff");
             assert_eq!(h["cache-control"], "no-store");

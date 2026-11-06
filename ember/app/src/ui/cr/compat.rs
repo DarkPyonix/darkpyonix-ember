@@ -179,7 +179,7 @@ pub fn SplitPane(start_weight: f32, start: impl FnOnce(), end: impl FnOnce()) {
             cu::Column()
                 .modifier(Modifier::new().weight(start_weight).fill_max_height())
                 .content(start);
-            cu::Divider().vertical(true);
+            cu::Spacer().modifier(Modifier::new().width(1.0).fill_max_height().background(paint(ember_theme().palette.line)));
             cu::Column()
                 .modifier(Modifier::new().weight(1.0 - start_weight).fill_max_height())
                 .content(end);

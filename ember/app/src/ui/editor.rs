@@ -289,6 +289,21 @@ pub fn is_at_or_below(tab: &str, gone: &str) -> bool {
     tab == gone || tab.strip_prefix(gone).is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// The accessible name of a tab: the file name, and that its edits are not saved.
+pub fn tab_aria_label(name: &str, dirty: bool) -> String {
+    if dirty { format!("{name} (저장 안 됨)") } else { name.to_string() }
+}
+
+/// The accessible name of a tree row: the name, and that it is a folder.
+pub fn tree_item_aria_label(name: &str, is_dir: bool) -> String {
+    if is_dir { format!("{name} 폴더") } else { name.to_string() }
+}
+
+/// The accessible name of a problem row: what it is, what it says, and where.
+pub fn problem_aria_label(severity: &str, message: &str, location: &str) -> String {
+    format!("{severity}: {message} ({location})")
+}
+
 /// The problems tab's label: the tool window's name, with the count when there is one.
 pub fn problems_tab_label(count: usize) -> String {
     if count == 0 { ToolWindow::Problems.label().to_string() } else { format!("{} {count}", ToolWindow::Problems.label()) }

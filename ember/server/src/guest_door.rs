@@ -6,8 +6,8 @@
 //!
 //! | Variable | Meaning |
 //! | -------- | ------- |
-//! | `EMBER_GUEST_LISTEN` | `ip:port` of the door. A bad value, the owner's own address, or a non-loopback address without `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1` is a startup error. |
-//! | `EMBER_GUEST_LISTEN_ALLOW_REMOTE` | `1` allows a non-loopback bind (plain HTTP; put TLS in front). |
+//! | `EMBER_GUEST_LISTEN` | `ip:port` of the door, loopback only for now. A bad value, the owner's own address, or any non-loopback address (with or without `EMBER_GUEST_LISTEN_ALLOW_REMOTE`) is a startup error. |
+//! | `EMBER_GUEST_LISTEN_ALLOW_REMOTE` | Inert until PR 5b (per-address limiters, header-read timeout, trusted proxies), which makes it effective again: `1` will then allow a non-loopback bind (plain HTTP; put TLS in front). |
 //! | `EMBER_GUEST_ALLOWED_HOSTS` | comma list of host names accepted in `Host`. |
 //! | `EMBER_GUEST_PUBLIC_URL` | `http(s)://host[:port]` guests use; builds the invite link and its host is accepted in `Host`. Scheme and authority only. |
 //!
@@ -106,11 +106,13 @@ impl GuestDoor {
         {
             return err(format!("{LISTEN_VAR} must differ from EMBER_LISTEN ({owner_listen})"));
         }
-        if !listen.ip().is_loopback() && get(ALLOW_REMOTE_VAR).as_deref().map(str::trim) != Some("1") {
+        // Inert until PR 5b: the variable is read so the message can name it, but it unlocks nothing.
+        if !listen.ip().is_loopback() {
+            let _ = get(ALLOW_REMOTE_VAR);
             return err(format!(
-                "{LISTEN_VAR}={listen} is not a loopback address; the guest door speaks plain HTTP \
-                 and anyone with an invite link can join a channel. Set {ALLOW_REMOTE_VAR}=1 to bind \
-                 it anyway, and put TLS in front"
+                "{LISTEN_VAR}={listen}: the guest door is loopback only until the per-address rate \
+                 limiters and the header-read timeout land (invite PR 5b); {ALLOW_REMOTE_VAR} has no \
+                 effect yet"
             ));
         }
         let public_url = match get(PUBLIC_URL_VAR).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {

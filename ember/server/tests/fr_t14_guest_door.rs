@@ -75,16 +75,47 @@ fn fr_t14_guest_listen_equal_to_owner_listen_is_a_startup_error() {
     assert!(e.contains("EMBER_LISTEN"), "{e}");
 }
 
+const REFUSAL: &str = "the guest door is loopback only until the per-address rate limiters and the header-read timeout land (invite PR 5b); EMBER_GUEST_LISTEN_ALLOW_REMOTE has no effect yet";
+
+fn refused(addr: &str) {
+    for allow in [None, Some("0"), Some("1")] {
+        let mut v = vec![("EMBER_GUEST_LISTEN", addr)];
+        if let Some(a) = allow {
+            v.push(("EMBER_GUEST_LISTEN_ALLOW_REMOTE", a));
+        }
+        let e = door_with(&v).unwrap_err();
+        assert!(e.contains(REFUSAL), "{addr} allow={allow:?}: {e}");
+    }
+}
+
 #[test]
-fn fr_t14_non_loopback_bind_needs_allow_remote() {
-    for a in ["0.0.0.0:9000", "192.168.1.5:9000", "[::]:9000"] {
-        let e = door_with(&[("EMBER_GUEST_LISTEN", a)]).unwrap_err();
-        assert!(e.contains("EMBER_GUEST_LISTEN_ALLOW_REMOTE"), "{e}");
-        assert!(door_with(&[("EMBER_GUEST_LISTEN", a), ("EMBER_GUEST_LISTEN_ALLOW_REMOTE", "0")]).is_err());
+fn fr_t14_door_refuses_0_0_0_0_even_with_allow_remote() {
+    refused("0.0.0.0:9000");
+}
+
+#[test]
+fn fr_t14_door_refuses_the_unspecified_ipv6_even_with_allow_remote() {
+    refused("[::]:9000");
+}
+
+#[test]
+fn fr_t14_door_refuses_an_ipv4_mapped_loopback_even_with_allow_remote() {
+    refused("[::ffff:127.0.0.1]:9000");
+}
+
+#[test]
+fn fr_t14_door_refuses_a_lan_address_even_with_allow_remote() {
+    refused("192.168.1.5:9000");
+    refused("10.0.0.7:9000");
+}
+
+#[test]
+fn fr_t14_door_accepts_loopback_addresses() {
+    for a in ["127.0.0.1:9000", "127.0.0.2:9000", "[::1]:9000"] {
+        assert!(door_with(&[("EMBER_GUEST_LISTEN", a)]).unwrap().is_some(), "{a}");
+        // The inert variable changes nothing for loopback.
         assert!(door_with(&[("EMBER_GUEST_LISTEN", a), ("EMBER_GUEST_LISTEN_ALLOW_REMOTE", "1")]).unwrap().is_some());
     }
-    assert!(door_with(&[("EMBER_GUEST_LISTEN", "127.0.0.1:9000")]).unwrap().is_some());
-    assert!(door_with(&[("EMBER_GUEST_LISTEN", "[::1]:9000")]).unwrap().is_some());
 }
 
 #[test]
@@ -116,19 +147,18 @@ async fn fr_t14_guest_door_refuses_a_foreign_host() {
 }
 
 #[tokio::test]
-async fn fr_t14_guest_door_unspecified_bind_does_not_accept_any_ip_literal_host() {
+async fn fr_t14_guest_door_does_not_accept_any_ip_literal_host() {
     let d = door(&[
-        ("EMBER_GUEST_LISTEN", "0.0.0.0:9000"),
-        ("EMBER_GUEST_LISTEN_ALLOW_REMOTE", "1"),
+        ("EMBER_GUEST_LISTEN", "127.0.0.1:9000"),
         ("EMBER_GUEST_ALLOWED_HOSTS", "Guests.Example.com, 192.168.1.5"),
         ("EMBER_GUEST_PUBLIC_URL", "https://public.example.org"),
     ]);
     let a = app(&d);
-    for host in ["10.9.9.9:9000", "127.0.0.1:9000", "localhost"] {
+    for host in ["10.9.9.9:9000", "127.0.0.2:9000"] {
         let (s, _, _) = send(&a, "GET", "/join", &[("host", host)]).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{host}");
     }
-    for host in ["guests.example.com", "192.168.1.5:9000", "public.example.org"] {
+    for host in ["127.0.0.1:9000", "guests.example.com", "192.168.1.5:9000", "public.example.org"] {
         let (s, _, _) = send(&a, "GET", "/join", &[("host", host)]).await;
         assert_eq!(s, StatusCode::OK, "{host}");
     }

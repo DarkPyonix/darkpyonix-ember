@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -81,11 +81,40 @@ impl Actions {
 
     fn branch(&self, name: String, create: bool, on_success: impl FnMut() + Send + 'static) {
         let project = self.project.clone();
-        self.finish_with("브랜치를 ", async move {
+        self.finish_with(if create { "브랜치 만들기를 " } else { "브랜치 전환을 " }, async move {
             let (op, body) = if create { ("branch", json!({"name": name})) } else { ("checkout", json!({"branch": name})) };
             git_call::<Value>(&project, op, body).await?;
             Ok(if create { "새 브랜치를 만들었습니다" } else { "브랜치를 전환했습니다" }.to_string())
         }, on_success);
+    }
+
+    /// Create `name` from `base` (the current branch when `None`) and switch to it: the node's
+    /// `branch` op runs `git switch -c`.
+    fn create_from(&self, name: String, base: Option<String>, on_success: impl FnMut() + Send + 'static) {
+        let project = self.project.clone();
+        self.finish_with("브랜치 만들기를 ", async move {
+            git_call::<Value>(&project, "branch", branch_create_body(&name, base.as_deref())).await?;
+            Ok("새 브랜치를 만들어 전환했습니다".to_string())
+        }, on_success);
+    }
+
+    /// The 스태시 button of 변경 사항 (#485): stash the work tree now, with no message and the
+    /// untracked files left alone. A clean tree says so and does not call the API.
+    fn stash_now(&self, changes_len: usize) {
+        if let Err(line) = stash_now_gate(changes_len) {
+            notice::post(line.to_string());
+            return;
+        }
+        let (project, reload) = (self.project.clone(), self.reload.clone());
+        crate::services::run_shared(async move { run_stash_push(&project, "", false).await }, move |result| {
+            match result {
+                Ok(()) => {
+                    notice::post("스태시를 만들었습니다".to_string());
+                    reload.set(reload.get() + 1);
+                }
+                Err(line) => notice::post(stash_now_error(&line)),
+            }
+        });
     }
 }
 
@@ -689,11 +718,11 @@ pub fn SectionList(
     snap: Option<&RepoSnapshot>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
-    SectionListWithSample(active, snap, false, None, None, on_pick);
+    SectionListWithSample(active, snap, false, None, None, None, on_pick);
 }
 
 fn SectionListWithSample(
-    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>,
+    active: Section, snap: Option<&RepoSnapshot>, is_sample: bool, stash_count: Option<usize>, pr_count: Option<usize>, branch_count: Option<usize>,
     mut on_pick: impl FnMut(Section) + Clone + 'static,
 ) {
     let p = ember_theme().palette;
@@ -702,7 +731,7 @@ fn SectionListWithSample(
             let is_active = sec == active;
             let bg = if is_active { paint(p.surface) } else { Paint::Literal(Color::argb(0)) };
             let fg = if is_active { p.text } else { p.muted };
-            let count = section_count_with(sec, snap, stash_count, pr_count).or_else(|| {
+            let count = section_count_with_branches(sec, snap, stash_count, pr_count, branch_count).or_else(|| {
                 if is_sample {
                     match sec {
                         Section::PullRequests => Some(sample_pr_count()),
@@ -933,6 +962,7 @@ pub fn DiffView(file: &FileDiff, staging: &MutableState<Staging>) {
 }
 
 fn FilesHeader(
+    stash: Option<Actions>,
     diffs_len: usize,
     all_checks: &[Check],
     staging: &MutableState<Staging>,
@@ -954,7 +984,10 @@ fn FilesHeader(
         Label(&format!("변경 파일 {}", diffs_len), Fs::Sm, Weight::Semibold, Some(paint(p.text)), Some(1));
         cu::Spacer().modifier(Modifier::new().weight(1.0));
         CircleIconButton(ICON_STASH_SVG, remote_button_labels()[3], move || {
-            notice::post(soon_line("스태시"));
+            match &stash {
+                Some(a) => a.stash_now(diffs_len),
+                None => notice::post(soon_line("스태시")),
+            }
         });
     });
 }
@@ -1126,7 +1159,7 @@ fn FilesPane(
 
     VcsCard(move || {
         cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-            FilesHeader(diffs_len, &all_checks, &st_clone, &d_clone);
+            FilesHeader(None, diffs_len, &all_checks, &st_clone, &d_clone);
             cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
             FilesTree(&d_clone, &st_clone, &fold_clone, &sel_clone, on_tab);
         });
@@ -1296,6 +1329,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
         for diff in &diffs { if snap.staged.contains(&diff.path) { state.toggle_file(diff); } }
         mutable_state_of(state)
     });
+    let stash_actions = actions.clone();
     let commit = actions.map(|a| (a, snap.clone(), staging.clone()));
     let folded = remember(|| mutable_state_of(BTreeSet::<String>::new()));
     let selected = remember(|| mutable_state_of(0usize));
@@ -1333,7 +1367,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                         cu::ScrollColumn().modifier(Modifier::new().fill_max_width().weight(1.0)).content(move || {
                             VcsCard(move || {
                                 cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                                    FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                                    FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
                                     cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                                     FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                                 });
@@ -1364,7 +1398,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
             cu::Column().modifier(Modifier::new().fill_max_width()).spacing(GAP_CARD).content(move || {
                 VcsCard(move || {
                     cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                        FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                        FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                         FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                         cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
@@ -1393,7 +1427,7 @@ fn ChangesPaneWithActions(snap: &RepoSnapshot, layout: PaneLayout, tab: Option<P
                     _ => {
                         VcsCard(move || {
                             cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
-                                FilesHeader(diffs_len, &all_checks, &st_files, &d_files);
+                                FilesHeader(stash_actions.clone(), diffs_len, &all_checks, &st_files, &d_files);
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                                 FilesTree(&d_files, &st_files, &fold_files, &sel_files, on_tab_files);
                             });
@@ -1414,6 +1448,7 @@ fn SectionContent(
     actions: Option<Actions>,
     stash_count: MutableState<Option<usize>>,
     pr_count: MutableState<Option<usize>>,
+    branch_count: MutableState<Option<usize>>,
 ) {
     match (snap, sec) {
         (Some(s), Section::Changes) => {
@@ -1430,6 +1465,7 @@ fn SectionContent(
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
         (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
         (Some(_), Section::PullRequests) => PullRequestsPane(actions, pr_count, layout),
+        (Some(_), Section::Branches) => BranchesPane(actions, branch_count, layout),
         _ => Unavailable(sec),
     }
 }
@@ -2037,6 +2073,212 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     }
 }
 
+/// Branches for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
+fn sample_branches() -> BranchLoad {
+    let e = |name: &str, current: bool, default: bool, upstream: Option<&str>, ahead: u32, behind: u32, last: &str, worktree: Option<&str>| BranchEntry {
+        name: name.to_string(),
+        current,
+        default,
+        upstream_text: upstream.unwrap_or("업스트림 없음").to_string(),
+        has_upstream: upstream.is_some(),
+        ahead,
+        behind,
+        last_line: last.to_string(),
+        worktree: worktree.map(String::from),
+    };
+    BranchLoad::Ready(vec![
+        e("feat/git-api", true, false, Some("origin/feat/git-api"), 2, 1, "a1b2c3d \u{00b7} Feat: Git log API and history list \u{00b7} 12분 전", Some("/Users/demo/darkpyonix-ember")),
+        e("main", false, true, Some("origin/main"), 0, 0, "7f6e5d4 \u{00b7} Merge pull request #398 \u{00b7} 1일 전", None),
+        e("develop", false, false, Some("origin/develop"), 0, 3, "3c2b1a0 \u{00b7} Docs: describe the commit message rules \u{00b7} 5시간 전", None),
+        e("feat/ui-phase-6", false, false, None, 0, 0, "9e8d7c6 \u{00b7} Feat: screen 6 layout \u{00b7} 1일 전", Some("/Users/demo/worktrees/ui-phase-6")),
+    ])
+}
+
+/// Width of a full ahead or behind bar in dp.
+const BRANCH_BAR_W: f32 = 56.0;
+
+/// One thin bar: `fraction` of `BRANCH_BAR_W` painted over a track. A zero fraction paints only the track.
+fn BranchBar(fraction: f32, fill: Paint) {
+    let p = ember_theme().palette;
+    cu::Box().modifier(Modifier::new().width(BRANCH_BAR_W).height(4.0).background(paint(p.line)).corner_radius(2.0)).content(move || {
+        if fraction > 0.0 {
+            cu::Box().modifier(Modifier::new().width(BRANCH_BAR_W * fraction).height(4.0).background(fill).corner_radius(2.0));
+        }
+    });
+}
+
+/// One branch: name with the 현재 pill, ahead/behind text and bars, the last commit line, the
+/// worktree pill and the 전환 button (off for the current branch).
+fn BranchRow(e: &BranchEntry, busy: bool, on_switch: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let (a, b) = branch_bar_fractions(e.ahead, e.behind);
+    let show_bars = e.has_upstream && (e.ahead > 0 || e.behind > 0);
+    cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(move || {
+        cu::Column().spacing(SP[1]).modifier(Modifier::new().weight(1.0)).content(|| {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Txt(&e.name, TypeRole::BodyStrong, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                if e.current {
+                    Pill("현재", PillTone::Green, true);
+                }
+                if let Some(w) = &e.worktree {
+                    Pill(&format!("워크트리 {}", worktree_tail(w)), PillTone::Sky, true);
+                }
+            });
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
+                Txt(&e.sync_text(), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+                if show_bars {
+                    BranchBar(a, paint(p.green.strong));
+                    BranchBar(b, paint(p.orange.strong));
+                }
+            });
+            if e.has_upstream {
+                Txt(&e.upstream_text, TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+            }
+            if !e.last_line.is_empty() {
+                Txt(&e.last_line, TypeRole::Caption, Some(paint(p.text_2)), Some(2), Some(TextOverflow::Ellipsis), None, None);
+            }
+        });
+        AppButton("전환", None, ButtonKind::Default, true, !e.current && !busy, false, on_switch);
+    });
+}
+
+/// 브랜치: create a branch from a base and switch to it, then the 기본 브랜치 row and the 작업
+/// 브랜치 rows (the node's order: current, default, newest). `actions` is the project and the
+/// screen's reload counter; `None` shows sample branches. `count` is written for the section list.
+fn BranchesPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
+    let p = ember_theme().palette;
+    let key_project = actions.as_ref().map(|a| a.project.clone());
+    let state = remember_with_key(key_project, || mutable_state_of(BranchLoad::Loading));
+    let retry = remember(|| mutable_state_of(0_u64));
+    let name = remember(|| mutable_state_of(String::new()));
+    let generation = remember(|| mutable_state_of(0_u64));
+    let base = remember(|| mutable_state_of(None::<String>));
+    let base_menu = remember(|| mutable_state_of(false));
+    if let Some(a) = actions.clone() {
+        let (st, cnt) = (state.clone(), count.clone());
+        launched_effect((a.project.clone(), a.reload.get(), retry.get()), move || async move {
+            if crate::services::try_services().is_some() {
+                if !matches!(st.get(), BranchLoad::Ready(_)) {
+                    st.set(BranchLoad::Loading);
+                }
+                let (project, now) = (a.project.clone(), crate::demo::now_ms() / 1000);
+                crate::services::run_shared(async move { branches_from(fetch_branches(&project).await, now) }, move |result| {
+                    cnt.set(if let BranchLoad::Ready(list) = &result { Some(list.len()) } else { None });
+                    st.set(result);
+                });
+            } else {
+                st.set(BranchLoad::Failed("서버에 연결되어 있지 않아 브랜치를 불러올 수 없습니다.".to_string()));
+            }
+        });
+    }
+    let current = if actions.is_some() { state.get() } else { sample_branches() };
+    let names: Vec<String> = if let BranchLoad::Ready(list) = &current { list.iter().map(|b| b.name.clone()).collect() } else { Vec::new() };
+    let base_text = match base.get() {
+        Some(b) => format!("기준: {b}"),
+        None => "기준: 현재 브랜치".to_string(),
+    };
+    let chosen_base = base.get().and_then(|b| names.iter().position(|n| *n == b));
+
+    let creator = {
+        let (actions, name, generation, base, base_menu) = (actions.clone(), name.clone(), generation.clone(), base.clone(), base_menu.clone());
+        let (names, base_text) = (names.clone(), base_text.clone());
+        move || {
+            VcsCard(|| {
+                cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                    Label("새 브랜치", Fs::Md, Weight::Semibold, None, Some(1));
+                    let value = name.clone();
+                    key(generation.get(), || {
+                        cu::TextField().modifier(Modifier::new().fill_max_width().height(H_BTN))
+                            .text(name.get()).placeholder("새 브랜치 이름")
+                            .on_value_change(move |v| value.set(v));
+                    });
+                    let open = base_menu.clone();
+                    AppButton(&base_text, None, ButtonKind::Default, false, !names.is_empty(), true, move || open.set(true));
+                    SmallNote(if base.get().is_some() { "고른 브랜치에서 만듭니다" } else { "현재 브랜치에서 만듭니다" });
+                    let (act, nm, gn, bs) = (actions.clone(), name.clone(), generation.clone(), base.clone());
+                    AppButton("만들고 전환", None, ButtonKind::Primary, false, actions.is_some() && valid_branch_name(nm.get().trim()), true, move || {
+                        if let (Some(a), Some(new_name)) = (act.as_ref(), branch_input(&nm.get())) {
+                            let submitted = nm.get();
+                            let (value, gn, bs) = (nm.clone(), gn.clone(), bs.clone());
+                            a.create_from(new_name, bs.get(), move || {
+                                value.set(text_after_success(&value.get(), &submitted));
+                                gn.set(gn.get() + 1);
+                                bs.set(None);
+                            });
+                        }
+                    });
+                });
+            });
+        }
+    };
+
+    let switch_actions = actions.clone();
+    let retry_state = retry.clone();
+    let status = current.clone();
+    let list = move || {
+        cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+            creator();
+            match status {
+                BranchLoad::Loading => {
+                    Label("브랜치를 불러오는 중입니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                }
+                BranchLoad::Failed(text) => {
+                    Label(&text, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                    AppButton("다시 시도", None, ButtonKind::Primary, false, true, true, move || retry_state.set(retry_state.get() + 1));
+                }
+                BranchLoad::Ready(entries) => {
+                    if entries.is_empty() {
+                        EmberCard(false, true, None, Some(SP[3]), None, || {
+                            Label("브랜치가 없습니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+                        });
+                        return;
+                    }
+                    let (default, rest) = split_branches(&entries);
+                    let row = |e: &BranchEntry| {
+                        let (a, target) = (switch_actions.clone(), e.name.clone());
+                        BranchRow(e, false, move || {
+                            if let Some(a) = &a {
+                                a.branch(target.clone(), false, || {});
+                            }
+                        });
+                    };
+                    if let Some(d) = default {
+                        Label("기본 브랜치", Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
+                        VcsCard(|| row(d));
+                    }
+                    if !rest.is_empty() {
+                        Label("작업 브랜치", Fs::Sm, Weight::Semibold, Some(paint(p.text_2)), Some(1));
+                        VcsCard(|| {
+                            for (i, e) in rest.iter().enumerate() {
+                                if i > 0 {
+                                    cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                                }
+                                row(e);
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    };
+    let (dismiss, pick_base) = (base_menu.clone(), base.clone());
+    let sheet_menu = base_menu.clone();
+    let content = move || {
+        list();
+        let (d, b, m) = (dismiss.clone(), pick_base.clone(), sheet_menu.clone());
+        let picked = names.clone();
+        OptionSheet(sheet_menu.get(), &names, chosen_base, 240.0, move || d.set(false), move |idx| {
+            b.set(picked.get(idx).cloned());
+            m.set(false);
+        });
+    };
+    if layout == PaneLayout::Two {
+        cu::ScrollColumn().modifier(Modifier::new().fill_max_width().fill_max_height()).content(content);
+    } else {
+        content();
+    }
+}
+
 /// Stashes for the review captures (`EMBER_CR_ROUTE=vcs`) and for a screen without a server.
 fn sample_stashes() -> StashLoad {
     let e = |index: u32, message: &str, branch: &str, time: &str| StashEntry {
@@ -2358,6 +2600,7 @@ fn VcsScreenWithLoad(
     let selected_proj = remember(|| mutable_state_of(current_id));
     let stash_count = remember(|| mutable_state_of(None::<usize>));
     let pr_count = remember(|| mutable_state_of(None::<usize>));
+    let branch_count = remember(|| mutable_state_of(None::<usize>));
 
     let current = selected_proj.get();
     let project = current.as_ref().and_then(|id| boxes.iter().find(|b| &b.id == id).cloned());
@@ -2412,10 +2655,10 @@ fn VcsScreenWithLoad(
                         cu::Row().modifier(Modifier::new().fill_max_width().weight(1.0)).spacing(SP[3]).content(|| {
                             let sec_state = section.clone();
                             cu::ScrollColumn().modifier(Modifier::new().width(200.0).fill_max_height()).content(|| {
-                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), move |s| sec_state.set(s));
+                                SectionListWithSample(sec, snap.as_ref(), sample, stash_count.get(), pr_count.get(), branch_count.get(), move |s| sec_state.set(s));
                             });
                             cu::Column().modifier(Modifier::new().weight(1.0).fill_max_height()).content(|| {
-                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone());
+                                SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone());
                             });
                         });
                     } else {
@@ -2426,7 +2669,7 @@ fn VcsScreenWithLoad(
                                 let tab_state = tab.clone();
                                 PaneTabs(sec, active_tab, move |t| tab_state.set(t));
                             }
-                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone());
+                            SectionContent(snap.as_ref(), sec, layout, active_tab, &tab, actions.clone(), stash_count.clone(), pr_count.clone(), branch_count.clone());
                         });
                     }
                 } else {
@@ -3039,6 +3282,38 @@ mod tests {
             let text = text_of(content);
             assert!(text.contains("a.rs"));
             assert!(!text.contains("충돌이 없습니다"));
+            assert!(!text.contains(SOON));
+        }
+    }
+
+    #[compose_rust::runtime::composable]
+    fn branches_sample_wide() {
+        BranchesPane(None, mutable_state_of(None), PaneLayout::Two);
+    }
+
+    #[compose_rust::runtime::composable]
+    fn branches_sample_compact() {
+        BranchesPane(None, mutable_state_of(None), PaneLayout::Tabs);
+    }
+
+    #[test]
+    fn fr_g9_branches_pane_shows_the_creator_the_default_and_the_work_branches_at_both_widths() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        for content in [branches_sample_wide as fn(), branches_sample_compact as fn()] {
+            let text = text_of(content);
+            assert!(text.contains("새 브랜치"));
+            assert!(text.contains("만들고 전환"));
+            assert!(text.contains("현재 브랜치에서 만듭니다"));
+            assert!(text.contains("기본 브랜치"));
+            assert!(text.contains("작업 브랜치"));
+            assert!(text.contains("feat/git-api"));
+            assert!(text.contains("현재"));
+            assert!(text.contains("앞섬 2 \u{00b7} 뒤처짐 1"));
+            assert!(text.contains("원격과 같음"));
+            assert!(text.contains("업스트림 없음"));
+            assert!(text.contains("워크트리 ui-phase-6"));
+            assert!(text.contains("전환"));
             assert!(!text.contains(SOON));
         }
     }

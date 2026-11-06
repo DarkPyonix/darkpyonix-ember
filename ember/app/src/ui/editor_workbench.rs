@@ -14,6 +14,7 @@ struct Shared {
     tabs: Signal<EditorTabs>,
     directory: Signal<String>,
     expanded: Signal<std::collections::HashSet<String>>,
+    bottom_max: Signal<bool>,
     position: Signal<(usize, usize)>,
     stripes: Signal<Stripes>,
     menu_open: Signal<bool>,
@@ -49,13 +50,14 @@ fn init(target: EditorTarget) {
     let tabs = use_hook(|| Signal::new_in_scope(EditorTabs::default(), root));
     let directory = use_hook(|| Signal::new_in_scope(target.folder.clone(), root));
     let expanded = use_hook(|| Signal::new_in_scope(std::collections::HashSet::<String>::new(), root));
+    let bottom_max = use_hook(|| Signal::new_in_scope(false, root));
     let position = use_hook(|| Signal::new_in_scope((1, 1), root));
     let stripes = use_hook(|| Signal::new_in_scope(Stripes::default(), root));
     let menu_open = use_hook(|| Signal::new_in_scope(false, root));
     let keymap = use_hook(|| Signal::new_in_scope(crate::services::services().ui.prefs.get_untracked().keymap, root));
     let bridge = use_hook(|| Rc::new(RefCell::new(WidgetBridge::new())));
     let uris = use_hook(|| Rc::new(RefCell::new(HashMap::new())));
-    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
+    SHARED.with(|s| *s.borrow_mut() = Some(Shared { host, bridge, revision, tabs, directory, expanded, bottom_max, position, stripes, menu_open, keymap, project_name: crate::ui::project::display_name(&target.project), project: target.project, folder: target.folder, server_url: target.server_url, computer: target.computer, uris }));
 }
 
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
@@ -215,7 +217,9 @@ pub mod page {
         );
         // The grid the mockup's `.ed.no-left` and `.ed.no-bottom` rules give, written inline so a
         // closed column is 0 wide and the areas stay as the stylesheet has them.
-        let ed_style = format!("width:100vw; height:calc(100vh - 76px); {}", crate::ui::editor::editor_grid_style(has_left, has_bottom));
+        let maximized = has_bottom && *s.bottom_max.read();
+        let grid = if maximized { crate::ui::editor::editor_grid_style_maximized() } else { crate::ui::editor::editor_grid_style(has_left, has_bottom) };
+        let ed_style = format!("width:100vw; height:calc(100vh - 76px); {grid}");
         rsx! {
             // TODO(#320): shrinking the window does not reflow this page; growing does.
             div { class: "{ed_class}", tabindex: "0", style: "{ed_style}",
@@ -258,14 +262,14 @@ pub mod page {
                         {stripe_column(&s, sel, keymap, Strip::Left)}
                         {stripe_column(&s, sel, keymap, Strip::Bottom)}
                     }
-                    if let Some(w) = sel.selected(Side::Left) {
+                    if let (Some(w), false) = (sel.selected(Side::Left), maximized) {
                         if w == ToolWindow::Project {
                             {project_tree(&s, current.as_deref())}
                         } else {
                             {side_note(w, "ed-left")}
                         }
                     }
-                    section { class: "ed-main", style: if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
+                    section { class: "ed-main", style: if maximized { "display:none;" } else if has_left { "" } else { "margin-left:calc(var(--gap) * -1);" }, "aria-label": "편집기",
                         {tab_strip(&s, &paths, &dirty, current.as_deref())}
                         if let Some(path) = current.as_deref() {
                             {breadcrumbs(path, &s.folder)}
@@ -563,7 +567,7 @@ pub mod page {
 
     fn terminal_body(s: &Shared) -> Element {
         let Some(handle) = terminal_handle(s) else {
-            return rsx! { div { style: "padding:12px; color:#9d9d9d; overflow:auto;", "노드의 터미널에 연결되어 있지 않습니다. 서버 주소와 컴퓨터 정보가 없어 터미널을 열 수 없습니다." } };
+            return rsx! { div { class: "ed-term", style: "color:var(--muted);", "노드의 터미널에 연결되어 있지 않습니다. 서버 주소와 컴퓨터 정보가 없어 터미널을 열 수 없습니다." } };
         };
         let view = panel_view(&handle.snapshot());
         let key_handle = handle.clone();
@@ -571,8 +575,13 @@ pub mod page {
         let offer_control = offers_take_control(&handle.snapshot());
         let offer_reconnect = handle.snapshot().needs_reconnect();
         let revision = s.revision;
+        let computer = if s.computer.is_empty() { "로컬".to_string() } else { s.computer.clone() };
         rsx! {
-            div { tabindex: "0", style: "flex:1; min-height:0; overflow:auto; outline:none; padding:8px 12px; background:#1e1e1e; color:#cccccc;",
+            div { class: "ed-tsub",
+                button { class: "on", {icon_px("code", 14)} "{computer}" }
+                button { class: "ed-ib", title: "새 터미널", onclick: move |_| notice(format!("새 터미널: {SOON}")), {icon("plus")} }
+            }
+            div { class: "ed-term", tabindex: "0", style: "outline:none;",
                 // TODO(#335): paste and IME. Only key presses are forwarded; pasted and composed text is not.
                 onkeydown: move |event| {
                     let m = event.modifiers();
@@ -586,24 +595,24 @@ pub mod page {
                     }
                 },
                 if let Some(banner) = view.banner {
-                    div { style: "display:flex; align-items:center; gap:8px; padding:4px 8px; margin-bottom:6px; background:#4d3b00; color:#ffd479; border-radius:4px;",
+                    div { style: "display:flex; align-items:center; gap:var(--sp2); padding:var(--sp1) var(--sp3); margin-bottom:var(--sp2); background:var(--c-orange-soft); color:var(--c-orange); border-radius:var(--r-sm);",
                         div { style: "flex:1;", "{banner}" }
                         if offer_control {
-                            div { style: "padding:2px 10px; border-radius:4px; background:#ffd479; color:#4d3b00; cursor:pointer; font-size:12px;",
+                            button { class: "ed-pj", style: "background:var(--c-orange); color:var(--ink-text); height:24px;",
                                 onclick: move |_| control_handle.take_control(), "제어권 가져오기" }
                         }
                     }
                 }
-                div { style: "white-space:pre; font-family:monospace; font-size:12px;",
+                div { style: "white-space:pre;",
                     for (i, line) in view.lines.iter().enumerate() {
-                        div { key: "{i}", "{line}" }
+                        div { key: "{i}", class: "tl", "{line}" }
                     }
                 }
                 if let Some(notice) = view.notice {
-                    div { style: "padding-top:6px; color:#9d9d9d;", "{notice}" }
+                    div { class: "tl", style: "padding-top:var(--sp2); color:var(--muted);", "{notice}" }
                 }
                 if offer_reconnect {
-                    div { style: "display:inline-block; margin-top:6px; padding:2px 10px; border-radius:4px; background:#333333; color:#cccccc; cursor:pointer; font-size:12px;",
+                    button { class: "ed-pj", style: "margin-top:var(--sp2); border:1px solid var(--line);",
                         onclick: move |_| {
                             TERMINAL.with(|t| *t.borrow_mut() = None);
                             let mut revision = revision;
@@ -616,12 +625,14 @@ pub mod page {
 
     fn bottom_window(s: &Shared, w: ToolWindow) -> Element {
         let mut stripes = s.stripes;
+        let mut bottom_max = s.bottom_max;
+        let max = *bottom_max.read();
         let body = match w {
             ToolWindow::Run => "실행 구성이 없습니다. 구성이 연결되면 이곳에 출력이 표시됩니다.",
             _ => "진단 정보가 아직 연결되지 않았습니다. 연결되면 이곳에 문제가 표시됩니다.",
         };
         rsx! {
-            section { class: "ed-tw ed-bottom", "aria-label": "아래 도구 창",
+            section { class: "ed-tw ed-bottom", style: if max { "grid-row:2 / 4;" } else { "" }, "aria-label": "아래 도구 창",
                 div { class: "ed-twh",
                     div { class: "ed-btabs", role: "tablist",
                         for b in ToolWindow::BOTTOM {
@@ -632,7 +643,8 @@ pub mod page {
                         }
                     }
                     div { class: "spacer" }
-                    button { class: "ed-ib", title: "숨기기", onclick: move |_| stripes.write().hide(Side::Bottom), {icon("close")} }
+                    button { class: "ed-ib", title: if max { "원래 크기" } else { "최대화" }, onclick: move |_| bottom_max.set(!max), {icon(if max { "down" } else { "up" })} }
+                    button { class: "ed-ib", title: "숨기기", onclick: move |_| { bottom_max.set(false); stripes.write().hide(Side::Bottom); }, {icon("close")} }
                 }
                 if w == ToolWindow::Terminal {
                     {terminal_body(s)}

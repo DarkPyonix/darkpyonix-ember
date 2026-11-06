@@ -357,3 +357,11 @@ mod grid {
         assert_eq!(grid(&s), editor_grid_style(true, false));
     }
 }
+
+// FR-L31 (D38): the maximized bottom window takes the editor's row, like the mockup's `.ed.max`.
+#[test]
+fn fr_l31_maximized_bottom_window_collapses_the_editor_row() {
+    let g = ember_app::ui::editor::editor_grid_style_maximized();
+    assert!(g.contains("grid-template-rows:52px 0 minmax(0,1fr) var(--sbh)"), "{g}");
+    assert!(g.contains("grid-template-columns:var(--stw) 280px minmax(0,1fr) var(--stw)"), "{g}");
+}

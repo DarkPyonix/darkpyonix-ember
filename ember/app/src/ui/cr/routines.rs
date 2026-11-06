@@ -494,6 +494,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let launch_tick = try_services().map(|s| s.ui.live.launcher.get()).unwrap_or(0);
     let tick = remember(|| mutable_state_of(0_u32));
     let entries_for_preset = entries.clone();
+    let entries_for_selected = entries.clone();
     let selected = remember_with_key(launch_tick, move || {
         let preset = std::env::var("EMBER_CR_ROUTINE")
             .ok()
@@ -501,7 +502,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             .and_then(|v| {
                 v.parse::<usize>()
                     .ok()
-                    .and_then(|i| entries_for_preset.get(i))
+                    .and_then(|i| entries_for_selected.get(i))
                     .map(|e| e.routine.id.clone())
                     .or(Some(v))
             });

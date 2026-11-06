@@ -1211,7 +1211,8 @@ mod tests {
                 "launcher.rs" => 1,
                 "project.rs" => 2,
                 "routines.rs" => 2,
-                "vcs.rs" => 1,
+                // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
+                "vcs.rs" => 2,
                 _ => 0,
             };
             assert_eq!(production.matches("cu::Button(").count(), allowed_buttons, "{name} has an unreviewed direct button");

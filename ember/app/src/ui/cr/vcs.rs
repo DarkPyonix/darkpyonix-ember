@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
 use compose_rust::ui::Modifier;
@@ -1428,7 +1428,7 @@ fn SectionContent(
         }
         (Some(s), Section::Conflicts) => ConflictsPane(&s.conflicts, actions, layout),
         (Some(_), Section::History) => HistoryPane(actions.as_ref().map(|a| (a.project.clone(), a.reload.get())), layout),
-        (Some(_), Section::Stash) => StashPane(actions, stash_count, layout),
+        (Some(s), Section::Stash) => StashPane(actions, stash_count, layout, !s.changes.is_empty()),
         (Some(_), Section::PullRequests) => PullRequestsPane(actions, pr_count, layout),
         _ => Unavailable(sec),
     }
@@ -2065,20 +2065,25 @@ fn drop_label(confirming: bool) -> &'static str {
 /// 스태시: make a stash, and apply, pop or drop the saved ones. `actions` is the project and the
 /// screen's reload counter (an action bumps it so 변경 사항 reads the work tree again); `None`
 /// shows sample stashes. `count` is written for the section list.
-fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout) {
+///
+/// `dirty` is whether the work tree has changes (the snapshot's `changes` is not empty; no snapshot
+/// counts as clean): 적용 and 꺼내기 then ask once before acting (#350).
+fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layout: PaneLayout, dirty: bool) {
     let p = ember_theme().palette;
     let key_project = actions.as_ref().map(|a| a.project.clone());
     let state = remember_with_key(key_project, || mutable_state_of(StashLoad::Loading));
     let local = remember(|| mutable_state_of(0_u64));
     let busy = remember(|| mutable_state_of(false));
-    let confirm = remember(|| mutable_state_of(None::<u32>));
+    // The armed button as (key from `stash_tap_key`, arm time in ms); cleared by a timeout, another tap or a reload.
+    let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
     let message = remember(|| mutable_state_of(String::new()));
     let untracked = remember(|| mutable_state_of(false));
     let generation = remember(|| mutable_state_of(0_u64));
 
     if let Some(a) = actions.clone() {
-        let (st, cnt) = (state.clone(), count.clone());
+        let (st, cnt, disarm) = (state.clone(), count.clone(), armed.clone());
         launched_effect((a.project.clone(), a.reload.get(), local.get()), move || async move {
+            disarm.set(None);
             if crate::services::try_services().is_some() {
                 if !matches!(st.get(), StashLoad::Ready(_)) {
                     st.set(StashLoad::Loading);
@@ -2098,18 +2103,18 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
 
     // One finished action: say what happened, read the list again after a success.
     let run = {
-        let (actions, busy, confirm, local) = (actions.clone(), busy.clone(), confirm.clone(), local.clone());
+        let (actions, busy, armed, local) = (actions.clone(), busy.clone(), armed.clone(), local.clone());
         move |action: StashAction, index: u32| {
             let Some(a) = actions.clone() else { return };
             busy.set(true);
-            let (name, busy, confirm, local, reload) = (a.project.clone(), busy.clone(), confirm.clone(), local.clone(), a.reload.clone());
+            let (name, busy, armed, local, reload) = (a.project.clone(), busy.clone(), armed.clone(), local.clone(), a.reload.clone());
             crate::services::run_shared(async move { run_stash_action(&name, action, index).await }, move |result| {
                 notice::post(stash_action_notice(action, &result));
                 if result.is_ok() {
                     local.set(local.get() + 1);
                     reload.set(reload.get() + 1);
                 }
-                confirm.set(None);
+                armed.set(None);
                 busy.set(false);
             });
         }
@@ -2188,8 +2193,8 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
                             if i > 0 {
                                 cu::Box().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
                             }
-                            let (run, confirm) = (run.clone(), confirm.clone());
-                            StashRow(e, layout, is_busy, confirm, run);
+                            let (run, armed) = (run.clone(), armed.clone());
+                            StashRow(e, layout, is_busy, dirty, armed, run);
                         }
                     });
                 }
@@ -2204,29 +2209,81 @@ fn StashPane(actions: Option<Actions>, count: MutableState<Option<usize>>, layou
 }
 
 /// One stash: message, meta line and the 적용, 꺼내기, 삭제 buttons. 삭제 needs a second tap on
-/// the same button, which then reads "정말 삭제합니다".
-fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, confirm: MutableState<Option<u32>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
+/// the same button, which then reads "정말 삭제합니다"; 적용 and 꺼내기 ask the same way when
+/// `dirty`, under a line that says why. The armed label shows only while `armed_label_visible`
+/// holds at composition: nothing re-renders on a timer, so it may stay on screen until the next
+/// recomposition after 4 seconds, and `stash_tap` decides what a tap does. Each button has an
+/// accessible name with the index and message (visible text stays 적용, 꺼내기, 삭제).
+fn StashRow(e: &StashEntry, _layout: PaneLayout, busy: bool, dirty: bool, armed: MutableState<Option<(usize, i64)>>, run: impl Fn(StashAction, u32) + Clone + 'static) {
     let p = ember_theme().palette;
     let index = e.index;
-    let confirming = confirm.get() == Some(index);
+    let now = crate::demo::now_ms();
+    let shows = |action: StashAction| armed_label_visible(armed.get(), stash_tap_key(action, index), now);
+    let asking = dirty && (shows(StashAction::Apply) || shows(StashAction::Pop));
+    let tap = {
+        let (armed, run) = (armed.clone(), run.clone());
+        move |action: StashAction| {
+            let now = crate::demo::now_ms();
+            match stash_tap(action, dirty, armed.get(), index, now) {
+                DeleteTap::Arm | DeleteTap::Expired => armed.set(Some((stash_tap_key(action, index), now))),
+                DeleteTap::Wait => {}
+                DeleteTap::Confirm => {
+                    armed.set(None);
+                    run(action, index);
+                }
+            }
+        }
+    };
     cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
         Txt(&e.message, TypeRole::BodyStrong, Some(paint(p.text)), Some(2), Some(TextOverflow::Ellipsis), None, None);
         Txt(&stash_meta(e), TypeRole::Caption, Some(paint(p.text_2)), Some(1), Some(TextOverflow::Ellipsis), None, None);
+        if asking {
+            Label(STASH_DIRTY_WARNING, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            if shows(StashAction::Pop) {
+                Label(STASH_POP_NOTE, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
+            }
+        }
         cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-            let apply = run.clone();
-            AppButton("적용", None, ButtonKind::Default, true, !busy, false, move || apply(StashAction::Apply, index));
-            let pop = run.clone();
-            AppButton("꺼내기", None, ButtonKind::Default, true, !busy, false, move || pop(StashAction::Pop, index));
-            let (ask, del) = (confirm.clone(), run.clone());
-            AppButton(drop_label(confirming), None, ButtonKind::Destructive, true, !busy, false, move || {
-                if ask.get() == Some(index) {
-                    del(StashAction::Drop, index);
-                } else {
-                    ask.set(Some(index));
-                }
-            });
+            for (action, verb, kind, ask) in [
+                (StashAction::Apply, "적용", ButtonKind::Default, dirty),
+                (StashAction::Pop, "꺼내기", ButtonKind::Default, dirty),
+                (StashAction::Drop, "삭제", ButtonKind::Destructive, true),
+            ] {
+                let armed_now = ask && shows(action);
+                let on_tap = tap.clone();
+                StashPill(stash_button_text(action, armed_now), &stash_button_label(index, &e.message, verb), kind, !busy, move || on_tap(action));
+            }
         });
     });
+}
+
+// TODO(compose-rust#425, #429): the pill is painted and an invisible `Button` over it carries the
+// accessible name, because `Button` takes only its visible text as the name.
+// TODO(compose-rust#427): a Box in a Row takes the remaining width, so the width is estimated and fixed.
+/// A small pill whose visible text is `text` and whose accessible name is `access`.
+fn StashPill(text: &str, access: &str, kind: ButtonKind, enabled: bool, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let s = super::components::button_style(kind, true, p);
+    let width = (super::home::text_px(text, s.fs.size()) + 28.0).max(64.0);
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .width(width)
+                .height(s.height)
+                .background(paint(s.fill))
+                .border(1.0, paint(s.border))
+                .shape_role(ShapeRole::Full),
+        )
+        .alignment(Alignment::Center)
+        .content(move || {
+            Label(text, s.fs, Weight::Medium, Some(paint(s.text)), Some(1));
+            cu::Button(access)
+                .enabled(enabled)
+                .variant(ButtonVariant::Text)
+                .color(Paint::Literal(Color::argb(0)))
+                .modifier(Modifier::new().fill_max_size())
+                .on_click(on_click);
+        });
 }
 
 /// The screen wired as 버전 관리.
@@ -2920,12 +2977,12 @@ mod tests {
 
     #[compose_rust::runtime::composable]
     fn stash_sample_wide() {
-        StashPane(None, mutable_state_of(None), PaneLayout::Two);
+        StashPane(None, mutable_state_of(None), PaneLayout::Two, false);
     }
 
     #[compose_rust::runtime::composable]
     fn stash_sample_compact() {
-        StashPane(None, mutable_state_of(None), PaneLayout::Tabs);
+        StashPane(None, mutable_state_of(None), PaneLayout::Tabs, false);
     }
 
     #[compose_rust::runtime::composable]

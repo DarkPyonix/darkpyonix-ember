@@ -10,15 +10,17 @@
 //! | `vscode`  | VS Code Web wrapped by `ember/proxy/` on that computer | the proxy URL with `?folder=`   |
 //! | `gateway` | JetBrains Gateway                             | a `jetbrains-gateway://` link and the command that opens it on that computer |
 //!
-//! **Computers are not wired yet**: a session has no current-computer
-//! attribute in the store. Until it does, the computer is `?computer=` or the configured
-//! default, and each computer's IDE details come from [`IdeConfig`] (`EMBER_IDE_COMPUTERS`).
+//! **Computers come from the registry** (`FR-L7`, `FR-W4`) when the router is built with
+//! [`router_with_computers`]: the IDE computers are the implicit local computer plus every
+//! registered node, and the launch's `computer` is the REGISTRY id (what
+//! `/api/computers/{id}/terms` expects), with the display name beside it as `computer_name`.
+//! The computer is `?computer=` (a registry id, a registry name or an `EMBER_IDE_COMPUTERS`
+//! name), else the session's current computer, else [`IdeConfig::default_computer`], else the
+//! local computer. `EMBER_IDE_COMPUTERS` stays as an override: an entry whose name is a registry
+//! id or name replaces that computer's IDE details (the id stays the registry id); an entry that
+//! matches none is still a computer, with id = name. Without a registry ([`router`]) only the
+//! `EMBER_IDE_COMPUTERS` list exists, exactly as before.
 //! The folder is the session's `cwd`, taken as a path on that computer.
-//!
-//! TODO(computers): sessions now have a current computer (`crate::computers`,
-//! `GET /api/sessions/{id}/computer`) and computers are registered there. Default
-//! `?computer=` to the session's current computer and map registered computers to IDE targets
-//! instead of the separate `EMBER_IDE_COMPUTERS` list.
 //!
 //! Link formats:
 //! - Gateway: `jetbrains-gateway://connect#type=ssh&host=…&port=…&user=…&projectPath=…`
@@ -27,8 +29,8 @@
 //!   Gateway into the Toolbox App with a `jetbrains://` scheme and only "limited backward
 //!   compatibility" for these links (<https://www.jetbrains.com/help/toolbox-app/jetbrains-gateway-migrations-guide.html>).
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -38,6 +40,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::computers::{Computer, Computers, LOCAL, LOCAL_NAME};
 use crate::ose::OseManager;
 use crate::session::Sessions;
 use crate::store::SessionRecord;
@@ -134,7 +137,11 @@ impl IdeConfig {
 pub struct EmberLaunch {
     pub session: String,
     pub project: String,
+    /// The computer's registry id (or, without a registry, its `EMBER_IDE_COMPUTERS` name).
     pub computer: String,
+    /// The computer's display name; present when the computers registry is in use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_name: Option<String>,
     pub folder: String,
     /// The main server the editor connects to.
     pub server_url: Option<String>,
@@ -181,8 +188,83 @@ impl Target {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ComputerRef {
+    /// The computer's id (the same value as `launch.computer`).
     pub name: String,
     pub local: bool,
+    /// The computer's display name; present when the computers registry is in use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_name: Option<String>,
+}
+
+/// One computer the IDE can target, after merging the registry with `EMBER_IDE_COMPUTERS`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdeComputer {
+    /// Registry id, or the `EMBER_IDE_COMPUTERS` name when no registry computer matches.
+    pub id: String,
+    pub name: String,
+    pub ide: ComputerIde,
+    /// Other names `?computer=` accepts for it (the matching `EMBER_IDE_COMPUTERS` name).
+    pub aliases: Vec<String>,
+    /// Whether `computer_name` is reported (registry in use).
+    pub named: bool,
+}
+
+impl IdeComputer {
+    fn matches(&self, q: &str) -> bool {
+        self.id == q || self.name == q || self.aliases.iter().any(|a| a == q)
+    }
+}
+
+/// The IDE computers: the registry (the local computer first, then the nodes) with the
+/// `EMBER_IDE_COMPUTERS` entries merged on by id or name, and the names of entries that matched
+/// no registry computer. `registry: None` gives the env list alone (id = name), as before.
+pub fn resolve_computers(
+    config: &IdeConfig,
+    registry: Option<&[Computer]>,
+) -> (Vec<IdeComputer>, Vec<String>) {
+    let Some(registered) = registry else {
+        let all = config
+            .computers
+            .iter()
+            .map(|(n, ide)| IdeComputer {
+                id: n.clone(), name: n.clone(), ide: ide.clone(), aliases: vec![], named: false,
+            })
+            .collect();
+        return (all, vec![]);
+    };
+    let mut all = vec![IdeComputer {
+        id: LOCAL.into(),
+        name: LOCAL_NAME.into(),
+        ide: ComputerIde { local: true, ..Default::default() },
+        aliases: vec![],
+        named: true,
+    }];
+    all.extend(registered.iter().map(|c| IdeComputer {
+        id: c.id.clone(), name: c.name.clone(), ide: ComputerIde::default(), aliases: vec![], named: true,
+    }));
+    let mut unmatched = Vec::new();
+    for (n, ide) in &config.computers {
+        match all.iter_mut().find(|c| c.id == *n || c.name == *n) {
+            Some(c) => {
+                c.ide = ide.clone();
+                if c.id != *n && c.name != *n {
+                    c.aliases.push(n.clone());
+                }
+            }
+            None => {
+                unmatched.push(n.clone());
+                all.push(IdeComputer {
+                    id: n.clone(), name: n.clone(), ide: ide.clone(), aliases: vec![], named: true,
+                });
+            }
+        }
+    }
+    (all, unmatched)
+}
+
+/// The computer `q` names: an id first, then a name or alias.
+pub fn find_computer<'a>(all: &'a [IdeComputer], q: &str) -> Option<&'a IdeComputer> {
+    all.iter().find(|c| c.id == q).or_else(|| all.iter().find(|c| c.matches(q)))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -250,7 +332,7 @@ pub fn open_command(os: Option<&str>, url: &str) -> Option<Vec<String>> {
     Some(argv.into_iter().map(String::from).collect())
 }
 
-/// The launch targets for one session on one computer.
+/// The launch targets for one session on one computer known only by its `EMBER_IDE_COMPUTERS` name.
 pub fn launch_targets(
     rec: &SessionRecord,
     computer_name: &str,
@@ -258,6 +340,23 @@ pub fn launch_targets(
     server_url: Option<&str>,
     ose: &OseManager,
 ) -> IdeLaunch {
+    let c = IdeComputer {
+        id: computer_name.into(), name: computer_name.into(), ide: computer.clone(),
+        aliases: vec![], named: false,
+    };
+    launch_targets_for(rec, &c, server_url, ose)
+}
+
+/// The launch targets for one session on one resolved computer.
+pub fn launch_targets_for(
+    rec: &SessionRecord,
+    target: &IdeComputer,
+    server_url: Option<&str>,
+    ose: &OseManager,
+) -> IdeLaunch {
+    let computer_name = target.id.as_str();
+    let computer = &target.ide;
+    let display = target.named.then(|| target.name.clone());
     let folder = rec.cwd.clone();
 
     let connection = if computer.local {
@@ -274,6 +373,7 @@ pub fn launch_targets(
             session: rec.id.clone(),
             project: rec.project.clone(),
             computer: computer_name.to_string(),
+            computer_name: display.clone(),
             folder: folder.clone(),
             server_url: server_url.map(String::from),
             ose: connection.as_ref().ok().cloned(),
@@ -312,7 +412,7 @@ pub fn launch_targets(
         session: rec.id.clone(),
         project: rec.project.clone(),
         folder,
-        computer: ComputerRef { name: computer_name.to_string(), local: computer.local },
+        computer: ComputerRef { name: computer_name.to_string(), local: computer.local, computer_name: display },
         targets: vec![ember, vscode, gateway],
     }
 }
@@ -322,12 +422,33 @@ struct IdeState {
     sessions: Arc<Sessions>,
     config: Arc<IdeConfig>,
     ose: Arc<OseManager>,
+    computers: Option<Arc<Computers>>,
+    /// Env names already warned about (one warning per name).
+    warned: Arc<Mutex<HashSet<String>>>,
 }
 
+/// The routes without a registry: the computers are the `EMBER_IDE_COMPUTERS` list alone.
 pub fn router(sessions: Arc<Sessions>, config: Arc<IdeConfig>) -> Router {
-    Router::new()
-        .route("/api/sessions/{id}/ide", get(ide_targets))
-        .with_state(IdeState { sessions, config, ose: Arc::new(OseManager::default()) })
+    build(sessions, config, None)
+}
+
+/// The routes with the computers registry (`FR-L7`, `FR-W4`).
+pub fn router_with_computers(
+    sessions: Arc<Sessions>,
+    config: Arc<IdeConfig>,
+    computers: Arc<Computers>,
+) -> Router {
+    build(sessions, config, Some(computers))
+}
+
+fn build(sessions: Arc<Sessions>, config: Arc<IdeConfig>, computers: Option<Arc<Computers>>) -> Router {
+    Router::new().route("/api/sessions/{id}/ide", get(ide_targets)).with_state(IdeState {
+        sessions,
+        config,
+        ose: Arc::new(OseManager::default()),
+        computers,
+        warned: Arc::new(Mutex::new(HashSet::new())),
+    })
 }
 
 #[derive(Deserialize)]
@@ -350,9 +471,45 @@ async fn ide_targets(
         Ok(None) => return error(StatusCode::NOT_FOUND, format!("session not found: {id}")),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     };
-    let name = q.computer.unwrap_or_else(|| st.config.default_computer.clone());
-    let Some(computer) = st.config.computers.get(&name) else {
-        return error(StatusCode::NOT_FOUND, format!("unknown computer: {name}"));
+    let registered = match &st.computers {
+        Some(c) => match c.registry().list() {
+            Ok(l) => Some(l),
+            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        },
+        None => None,
+    };
+    let (all, unmatched) = resolve_computers(&st.config, registered.as_deref());
+    for n in unmatched {
+        if st.warned.lock().unwrap().insert(n.clone()) {
+            tracing::warn!(
+                name = %n,
+                "EMBER_IDE_COMPUTERS entry matches no registered computer; using its name as the id"
+            );
+        }
+    }
+    let computer = match q.computer {
+        Some(name) => match find_computer(&all, &name) {
+            Some(c) => c,
+            None => return error(StatusCode::NOT_FOUND, format!("unknown computer: {name}")),
+        },
+        None => {
+            let current = st.computers.as_ref().and_then(|c| c.current(&st.sessions, &id).ok());
+            let from_session = current
+                .filter(|cur| !cur.implicit)
+                .and_then(|cur| all.iter().find(|c| c.id == cur.computer.id));
+            match from_session
+                .or_else(|| find_computer(&all, &st.config.default_computer))
+                .or_else(|| all.iter().find(|c| c.id == LOCAL))
+            {
+                Some(c) => c,
+                None => {
+                    return error(
+                        StatusCode::NOT_FOUND,
+                        format!("unknown computer: {}", st.config.default_computer),
+                    )
+                }
+            }
+        }
     };
     let server_url = st.config.server_url.clone().or_else(|| {
         headers
@@ -360,7 +517,7 @@ async fn ide_targets(
             .and_then(|h| h.to_str().ok())
             .map(|h| format!("http://{h}"))
     });
-    Json(launch_targets(&rec, &name, computer, server_url.as_deref(), &st.ose)).into_response()
+    Json(launch_targets_for(&rec, computer, server_url.as_deref(), &st.ose)).into_response()
 }
 
 #[cfg(test)]
@@ -370,7 +527,7 @@ mod tests {
     #[test]
     fn fr_l7_fr_l31_fr_w4_serializes_editor_connection() {
         let launch = EmberLaunch {
-            session: "s".into(), project: "p".into(), computer: "local".into(),
+            session: "s".into(), project: "p".into(), computer: "local".into(), computer_name: None,
             folder: "/w".into(), server_url: None,
             ose: Some(EmberOseConnection { endpoint: "http://localhost:9000".into(), connection_token: "secret".into() }),
         };

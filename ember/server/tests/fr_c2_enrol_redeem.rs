@@ -618,9 +618,13 @@ async fn fr_c2_guard_matrix_is_measured() {
             // Pinned to the CI measurement (see the doc comment).
             let is_route = (*method == "POST" && *uri == "/enrol/redeem") || (*method == "GET" && *uri == "/enrol/status/x");
             let want_status = if variant != "good_host" {
-                StatusCode::FORBIDDEN // the guard ran: a foreign Host or Origin, on every path and method
+                StatusCode::FORBIDDEN // the GUARD refused: a foreign Host or Origin, on every path and method
             } else if *method == "POST" && *uri == "/enrol/redeem" {
-                StatusCode::FORBIDDEN // the real route, an unknown code: the generic 403
+                // ALSO a 403, but NOT the guard's: the Host and Origin are good here, the request reaches the
+                // `redeem` handler, which refuses the unknown code in the body (`unknown_code`) with the
+                // generic "this enrol code cannot be used". Same status, different layer: do not read the
+                // good_host column of this row as a guard result.
+                StatusCode::FORBIDDEN
             } else if *method == "HEAD" {
                 StatusCode::METHOD_NOT_ALLOWED // the guard's bare 405
             } else {

@@ -55,6 +55,7 @@ use crate::store::{now_ms, SessionRecord, Store};
 pub mod api;
 pub mod bridge;
 pub mod egress;
+pub mod enrol;
 pub mod fs;
 pub mod local_node;
 pub mod metrics;

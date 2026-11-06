@@ -419,6 +419,7 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
     let p = ember_theme().palette;
     // The person is the member `user` (shown as 나) on the server, `me` in the samples.
     let items = feed(room, me_id(room), local_tz());
+    let owner = super::channel_owner::OwnerState::new(&room.id);
     // `.room{background:var(--room)}`: the room is on `--surface`, not the page.
     cu::Column().modifier(Modifier::new().fill_max_width().fill_max_height().background(paint(p.surface))).content(|| {
         // `.topbar`: the room mark, the name with the member count and the project, round
@@ -446,7 +447,21 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                 });
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 // TODO(compose-rust#429): accessible name (members, menu).
-                for svg in [super::shell::ICON_USERS_SVG, super::shell::ICON_MORE_SVG] {
+                // The members button opens the owner sheet (FR-T14, FR-T15, FR-T17).
+                {
+                    let st = owner.clone();
+                    super::components::Clickable(
+                        Modifier::new()
+                            .size(H_CTL, H_CTL)
+                            .background(paint(p.surface))
+                            .border(1.0, paint(p.line))
+                            .shape_role(compose_rust::ShapeRole::Full),
+                        Alignment::Center,
+                        move || st.open.set(true),
+                        || super::shell::NavIcon(super::shell::ICON_USERS_SVG, p.text_2.to_argb(), 16.0),
+                    );
+                }
+                for svg in [super::shell::ICON_MORE_SVG] {
                     cu::Box()
                         .alignment(Alignment::Center)
                         .modifier(
@@ -481,7 +496,8 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                 }
             });
         });
-        InputBar(&room.id, live);
+        InputBar(&room.id, live.clone());
+        super::channel_owner::MembersSheet(&room.id, &room.name, &owner, live.is_some());
     });
 }
 
@@ -625,6 +641,9 @@ fn BubbleRow(bubble: &BubbleView, harness: &str) {
                             if bubble.is_agent {
                                 Pill("에이전트", PillTone::Orange, true);
                             }
+                            if bubble.guest {
+                                Pill("게스트", PillTone::Grey, true);
+                            }
                         });
                     }
                     cu::Row().space_role(SpaceRole::Xs).alignment(Alignment::BottomStart).content(|| {
@@ -653,6 +672,8 @@ pub fn sample_rooms() -> Vec<Room> {
         text: text.into(),
         at: now - ago,
         unread,
+        author_name: String::new(),
+        author_kind: String::new(),
     };
     let team = vec![member("me", "나", false, ""), member("kim", "김하나", false, ""), member("a1", "ember-리더", true, "claude-code")];
     vec![

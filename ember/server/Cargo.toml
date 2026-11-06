@@ -39,7 +39,7 @@ tokio-tungstenite = "0.29"
 # already in the tree through axum, no new crate. Features checked in the registry sources
 # (hyper 1.11.1, hyper-util 0.1.21): `server-graceful` is hyper-util's graceful shutdown helper.
 hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["server", "server-graceful", "tokio", "http1", "service"] }
+hyper-util = { version = "0.1", features = ["server", "server-graceful", "tokio", "http1"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"

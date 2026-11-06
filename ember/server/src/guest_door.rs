@@ -8,7 +8,7 @@
 //! | -------- | ------- |
 //! | `EMBER_GUEST_LISTEN` | `ip:port` of the door. A bad value or the owner's own address is a startup error, and so is a non-loopback address without `EMBER_GUEST_LISTEN_ALLOW_REMOTE=1`. |
 //! | `EMBER_GUEST_LISTEN_ALLOW_REMOTE` | `1` allows a non-loopback bind (a warning is logged at startup). The door speaks plain HTTP: the owner puts TLS in front of it. |
-//! | `EMBER_GUEST_TRUSTED_PROXIES` | comma list of IPs. `X-Forwarded-For` is read only when the TCP peer is in this list (right-most untrusted entry); otherwise the header is ignored. An invalid entry is a startup error. |
+//! | `EMBER_GUEST_TRUSTED_PROXIES` | comma list of IPs. `X-Forwarded-For` is read only when the TCP peer is in this list (right-most untrusted entry); otherwise the header is ignored. An invalid entry is a startup error. Behind a reverse proxy WITHOUT this variable every guest is keyed to the proxy's address and shares one budget. |
 //! | `EMBER_GUEST_ALLOWED_HOSTS` | comma list of host names accepted in `Host`. |
 //! | `EMBER_GUEST_PUBLIC_URL` | `http(s)://host[:port]` guests use; builds the invite link and its host is accepted in `Host`. Scheme and authority only. |
 //!
@@ -24,7 +24,7 @@
 //! per remote address (IPv4 exact, IPv6 reduced to its /64) accept attempts 5 a minute and 20 an
 //! hour, failures counted, other requests 120 a minute (429 with `Retry-After`); a global token
 //! bucket of 50 requests a second (burst 100) and at most 64 requests in flight (503); a header
-//! read timeout of 10 s on the connection ([`GuestDoor::serve_with`]). A door served without
+//! read timeout of 10 s on the connection and at most 256 open connections ([`GuestDoor::serve_with`]). A door served without
 //! `wrap_limited` has no limits and must not be exposed to a network.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -69,6 +69,8 @@ pub const MAX_TRACKED_ADDRS: usize = 10_000;
 pub const SWEEP_EVERY: u64 = 256;
 /// A client that does not send a whole request header within this long is disconnected.
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Open TCP connections the door holds at once; the next one is closed at accept.
+pub const MAX_CONNECTIONS: usize = 256;
 
 /// The one non-API route the door serves.
 pub const JOIN_ROUTE: (&str, &str) = ("GET", "/join");
@@ -235,11 +237,25 @@ impl GuestDoor {
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
         header_read_timeout: Duration,
     ) -> std::io::Result<()> {
+        Self::serve_capped(listener, app, shutdown, header_read_timeout, MAX_CONNECTIONS).await
+    }
+
+    /// As [`GuestDoor::serve_with`] with a chosen cap on open connections (tests use a small
+    /// one). A connection over the cap is closed at once, before any task is spawned for it.
+    pub async fn serve_capped(
+        listener: tokio::net::TcpListener,
+        app: Router,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+        header_read_timeout: Duration,
+        max_connections: usize,
+    ) -> std::io::Result<()> {
         use hyper_util::rt::{TokioIo, TokioTimer};
         use hyper_util::server::graceful::GracefulShutdown;
         use tower::ServiceExt;
 
         let graceful = GracefulShutdown::new();
+        let conns = Arc::new(tokio::sync::Semaphore::new(max_connections));
+        let mut dropped: u64 = 0;
         let mut shutdown = Box::pin(shutdown);
         loop {
             let (stream, peer) = tokio::select! {
@@ -254,6 +270,12 @@ impl GuestDoor {
                 },
                 _ = &mut shutdown => break,
             };
+            let Ok(permit) = conns.clone().try_acquire_owned() else {
+                dropped += 1;
+                tracing::debug!("guest door at its connection cap, dropped {peer} ({dropped} dropped so far)");
+                drop(stream);
+                continue;
+            };
             let app = app.clone();
             let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                 req.extensions_mut().insert(ConnectInfo(peer));
@@ -264,6 +286,7 @@ impl GuestDoor {
             builder.header_read_timeout(header_read_timeout);
             let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), svc));
             tokio::spawn(async move {
+                let _permit = permit; // held for the life of the connection
                 if let Err(e) = conn.await {
                     tracing::debug!("guest door connection closed: {e}");
                 }
@@ -642,25 +665,46 @@ impl DoorLimits {
     }
 }
 
+/// One `X-Forwarded-For` entry as an address: whitespace trimmed, an IPv4 `:port`, `[v6]:port`
+/// and `[v6]` accepted, the port dropped, so one address is one key.
+fn parse_forwarded(entry: &str) -> Option<IpAddr> {
+    let e = entry.trim();
+    if let Ok(ip) = e.parse::<IpAddr>() {
+        return Some(normalize_ip(ip));
+    }
+    if let Ok(sa) = e.parse::<SocketAddr>() {
+        return Some(normalize_ip(sa.ip()));
+    }
+    let inner = e.strip_prefix('[')?.strip_suffix(']')?;
+    inner.parse::<IpAddr>().ok().map(normalize_ip)
+}
+
 /// The address a request counts against. The TCP `peer` unless it is a trusted proxy; then the
-/// right-most `X-Forwarded-For` entry that is not itself a trusted proxy (a client cannot forge
-/// the entries the proxy appended). An unparsable entry makes the header worthless: `peer`.
+/// chain of `X-Forwarded-For` is walked from the right: trusted hops are skipped and the first
+/// entry that is not a trusted proxy is the client. Everything left of it is ignored (a client
+/// can forge only what it sends, which the proxy puts on the left). If that entry does not
+/// parse, or every entry is a trusted hop, the key is `peer`.
 pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpAddr]) -> IpAddr {
     let peer = normalize_ip(peer);
     if !trusted.contains(&peer) {
         return peer;
     }
-    let mut chain: Vec<IpAddr> = Vec::new();
+    // Entries in arrival order across all header lines; a line that is not text is one bad entry.
+    let mut chain: Vec<Option<&str>> = Vec::new();
     for v in headers.get_all("x-forwarded-for").iter() {
-        let Ok(v) = v.to_str() else { return peer };
-        for part in v.split(',') {
-            match part.trim().parse::<IpAddr>() {
-                Ok(ip) => chain.push(normalize_ip(ip)),
-                Err(_) => return peer,
-            }
+        match v.to_str() {
+            Ok(v) => chain.extend(v.split(',').map(Some)),
+            Err(_) => chain.push(None),
         }
     }
-    chain.into_iter().rev().find(|ip| !trusted.contains(ip)).unwrap_or(peer)
+    for entry in chain.into_iter().rev() {
+        match entry.and_then(parse_forwarded) {
+            Some(ip) if trusted.contains(&ip) => continue,
+            Some(ip) => return ip,
+            None => return peer,
+        }
+    }
+    peer
 }
 
 fn too_many(wait: Duration) -> Response {
@@ -677,7 +721,7 @@ fn busy() -> Response {
     r
 }
 
-/// Global bucket, in-flight cap, then the per-address limits. Runs before the Host check and
+/// The per-address limits, then the global bucket and the in-flight cap. Runs before the Host check and
 /// before any body is read, so every request is bounded.
 async fn limit_layer(State(l): State<Arc<DoorLimits>>, req: Request, next: Next) -> Response {
     let Some(ConnectInfo(peer)) = req.extensions().get::<ConnectInfo<SocketAddr>>().copied() else {
@@ -686,18 +730,20 @@ async fn limit_layer(State(l): State<Arc<DoorLimits>>, req: Request, next: Next)
             .into_response();
     };
     let now = Instant::now();
-    if !l.bucket.try_take_at(now) {
-        return busy();
-    }
-    let Ok(_permit) = l.in_flight.clone().try_acquire_owned() else { return busy() };
     let ip = client_ip(peer.ip(), req.headers(), &l.trusted);
     let kind = if req.method() == axum::http::Method::POST && req.uri().path() == ACCEPT_PATH {
         LimitKind::Accept
     } else {
         LimitKind::Other
     };
+    // The per-address limit first: a request it refuses must not spend the shared budget, or one
+    // flooding address would drain the bucket and every guest would get 503.
     if let Err(wait) = l.addr.check_at(ip, kind, now) {
         return too_many(wait);
     }
+    if !l.bucket.try_take_at(now) {
+        return busy();
+    }
+    let Ok(_permit) = l.in_flight.clone().try_acquire_owned() else { return busy() };
     next.run(req).await
 }

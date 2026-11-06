@@ -17,7 +17,7 @@ use ember_server::agents::AgentAdapter;
 use ember_server::channels::guest::guest_router;
 use ember_server::guest_door::{
     addr_key, client_ip, AddrLimiter, DoorLimits, GuestDoor, LimitConfig, LimitKind, TokenBucket, ACCEPT_PATH,
-    ACCEPT_PER_HOUR, ACCEPT_PER_MINUTE, GLOBAL_BURST, GLOBAL_PER_SECOND, HEADER_READ_TIMEOUT, MAX_IN_FLIGHT,
+    ACCEPT_PER_HOUR, ACCEPT_PER_MINUTE, GLOBAL_BURST, GLOBAL_PER_SECOND, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, MAX_IN_FLIGHT,
     MAX_TRACKED_ADDRS, OTHER_PER_MINUTE,
 };
 use ember_server::session::Sessions;
@@ -78,7 +78,7 @@ async fn from(app: &Router, peer: &str, method: &str, uri: &str, headers: &[(&st
 fn fr_t14_limit_numbers_are_the_leaders_decision() {
     assert_eq!((ACCEPT_PER_MINUTE, ACCEPT_PER_HOUR, OTHER_PER_MINUTE), (5, 20, 120));
     assert_eq!((GLOBAL_PER_SECOND, GLOBAL_BURST), (50.0, 100.0));
-    assert_eq!((MAX_IN_FLIGHT, MAX_TRACKED_ADDRS), (64, 10_000));
+    assert_eq!((MAX_IN_FLIGHT, MAX_TRACKED_ADDRS, MAX_CONNECTIONS), (64, 10_000, 256));
     assert_eq!(HEADER_READ_TIMEOUT, Duration::from_secs(10));
 }
 
@@ -449,5 +449,122 @@ async fn fr_t14_a_partial_header_is_disconnected_by_the_header_read_timeout() {
     let ok = raw(addr, "GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\nConnection: close\r\n\r\n").await;
     assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
     let _ = stop.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+// ---- review of #425: order of checks, XFF from the right, connection cap ----
+
+fn xff(peer: &str, value: &[&str], trusted: &[&str]) -> IpAddr {
+    let mut h = axum::http::HeaderMap::new();
+    for v in value {
+        h.append("x-forwarded-for", v.parse().unwrap());
+    }
+    let t: Vec<IpAddr> = trusted.iter().map(|x| ip(x)).collect();
+    client_ip(ip(peer), &h, &t)
+}
+
+#[test]
+fn fr_t14_forwarded_for_is_walked_from_the_right_and_stops_at_the_first_untrusted_entry() {
+    let t = ["10.0.0.2"];
+    // A forged or unparsable entry to the left changes nothing.
+    assert_eq!(xff("10.0.0.2", &["x, 203.0.113.9"], &t), ip("203.0.113.9"));
+    assert_eq!(xff("10.0.0.2", &["1.2.3.4, 203.0.113.9"], &t), ip("203.0.113.9"));
+    assert_eq!(xff("10.0.0.2", &["garbage, 1.2.3.4, 203.0.113.9"], &t), ip("203.0.113.9"));
+    // An unparsable first untrusted entry: the peer.
+    assert_eq!(xff("10.0.0.2", &["x"], &t), ip("10.0.0.2"));
+    assert_eq!(xff("10.0.0.2", &["203.0.113.9, x"], &t), ip("10.0.0.2"));
+    assert_eq!(xff("10.0.0.2", &["203.0.113.9,"], &t), ip("10.0.0.2"));
+    // Two trusted hops: the trusted one on the right is skipped.
+    assert_eq!(xff("10.0.0.3", &["203.0.113.9, 10.0.0.2"], &["10.0.0.2", "10.0.0.3"]), ip("203.0.113.9"));
+    // A second header line is to the right of the first.
+    assert_eq!(xff("10.0.0.2", &["1.2.3.4", "203.0.113.9"], &t), ip("203.0.113.9"));
+    assert_eq!(xff("10.0.0.2", &["203.0.113.9", "x"], &t), ip("10.0.0.2"));
+    // Only trusted entries, or none: the peer. An untrusted peer: its own address, header ignored.
+    assert_eq!(xff("10.0.0.2", &["10.0.0.2"], &t), ip("10.0.0.2"));
+    assert_eq!(xff("10.0.0.2", &[], &t), ip("10.0.0.2"));
+    assert_eq!(xff("198.51.100.5", &["203.0.113.9"], &t), ip("198.51.100.5"));
+}
+
+#[test]
+fn fr_t14_forwarded_for_ports_and_brackets_normalise_to_the_ip() {
+    let t = ["10.0.0.2"];
+    for v in ["203.0.113.9", " 203.0.113.9 ", "203.0.113.9:51234", "::ffff:203.0.113.9"] {
+        assert_eq!(xff("10.0.0.2", &[v], &t), ip("203.0.113.9"), "{v}");
+    }
+    for v in ["2001:db8::7", "[2001:db8::7]", "[2001:db8::7]:443", "  [2001:db8::7]:8080"] {
+        assert_eq!(xff("10.0.0.2", &[v], &t), ip("2001:db8::7"), "{v}");
+    }
+    // A trusted proxy written with a port is still that proxy.
+    assert_eq!(xff("10.0.0.2", &["203.0.113.9, 10.0.0.2:4000"], &t), ip("203.0.113.9"));
+}
+
+#[tokio::test]
+async fn fr_t14_garbage_from_one_client_behind_a_proxy_cannot_move_another_guests_key() {
+    let d = door(&[]);
+    let app = limited_with_trusted(&d, LimitConfig::default(), vec![ip("10.0.0.2")], guest());
+    // The attacker sends garbage on the left of what the proxy appends; his own address is keyed.
+    for i in 0..5 {
+        let v = format!("garbage{i}, 6.6.6.6");
+        assert_eq!(from(&app, "10.0.0.2", "POST", ACCEPT_PATH, &[("x-forwarded-for", &v)]).await.0, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(from(&app, "10.0.0.2", "POST", ACCEPT_PATH, &[("x-forwarded-for", "zzz, 6.6.6.6")]).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // Another guest behind the same proxy is untouched, also when the attacker puts that address on the left.
+    assert_eq!(from(&app, "10.0.0.2", "POST", ACCEPT_PATH, &[("x-forwarded-for", "7.7.7.7")]).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn fr_t14_a_request_refused_per_address_does_not_spend_the_global_budget() {
+    let d = door(&[]);
+    // 130 tokens, no refill: one address may use 120 (its limit), then floods 100 more.
+    let cfg = LimitConfig { global_per_second: 0.0001, global_burst: 130.0, ..LimitConfig::default() };
+    let app = limited(&d, cfg, guest());
+    for i in 0..120 {
+        assert_eq!(from(&app, "203.0.113.9", "GET", "/join", &[]).await.0, StatusCode::OK, "{i}");
+    }
+    for _ in 0..100 {
+        assert_eq!(from(&app, "203.0.113.9", "GET", "/join", &[]).await.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+    // The flood cost no global token: 10 are left for everybody else, and nobody sees 503.
+    for i in 0..10 {
+        assert_eq!(from(&app, &format!("203.0.113.{}", 100 + i), "GET", "/join", &[]).await.0, StatusCode::OK, "{i}");
+    }
+    assert_eq!(from(&app, "203.0.113.9", "GET", "/join", &[]).await.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn fr_t14_connections_over_the_cap_are_closed_and_a_slot_frees_when_one_closes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let d = door(&[]);
+    let app = limited(&d, LimitConfig::default(), guest());
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(GuestDoor::serve_capped(
+        listener,
+        app,
+        async move {
+            let _ = rx.await;
+        },
+        Duration::from_secs(30),
+        2,
+    ));
+    // Two idle connections fill the cap.
+    let c1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The third is closed by the door: it reads EOF (or a reset) at once, with no response.
+    let mut c3 = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let _ = c3.write_all(b"GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\n\r\n").await;
+    let mut buf = Vec::new();
+    let r = tokio::time::timeout(Duration::from_secs(5), c3.read_to_end(&mut buf)).await;
+    assert!(r.is_ok(), "the extra connection was left open");
+    assert!(buf.is_empty(), "the extra connection got an answer: {:?}", String::from_utf8_lossy(&buf));
+    // One of the first two closes; a new connection is then served.
+    drop(c1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ok = raw(addr, "GET /join HTTP/1.1\r\nHost: 127.0.0.1:9000\r\nConnection: close\r\n\r\n").await;
+    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    drop(c2);
+    let _ = tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
 }

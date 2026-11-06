@@ -322,9 +322,14 @@ async fn fr_c2_enrol_door_does_not_read_the_guest_variables_and_the_guest_door_d
 /// C3a: the table is exactly `POST /enrol/redeem` and `GET /enrol/status/{enrol_id}`. Everything
 /// else is 404 with an empty body. Every path OUTSIDE the two registered paths carries exactly the
 /// two door headers whatever the method, so those cannot be told apart. A wrong METHOD on a
-/// registered path is also a 404 with an empty body, but it also carries `allow`: the router's 405
-/// body is replaced by `method_not_allowed_fallback`, which keeps the 405's headers (measured in
-/// CI on #584; the author had written 'unverified' for this very behaviour). The two registered
+/// registered path is also a 404 with an empty body, but it also carries `allow`. Why (axum 0.8.9
+/// source, read on #591): such a request finds no route for its method, so it falls to the
+/// MethodRouter's fallback (`method_not_allowed_fallback(not_found)`, wrapped by the same layers as
+/// the routes); the MethodRouter then attaches the allowed methods to that future
+/// (`method_routing.rs` 1167-1173) and `RouteFuture::poll` inserts `Allow` into WHATEVER response
+/// comes back, whatever its status, if none is set (`route.rs` 163-164). So `Allow` is added AFTER
+/// the fallback answered; it is not a header the router's own 405 left behind (the earlier wording
+/// of this comment, #584, was wrong about the cause, right about the fact: measured in CI). The two registered
 /// paths are public (SPEC FR-C2e, the node calls them), so `allow` leaks nothing new; the
 /// supervisor accepted this exception on 2026-11-06. The two routes themselves answer something
 /// else (415 for a redeem with no content type, 404 with a JSON body for a poll), which

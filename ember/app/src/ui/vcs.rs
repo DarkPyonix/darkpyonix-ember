@@ -1780,9 +1780,93 @@ pub fn review_request_gate(action: GitPrReviewAction, body: &str) -> Result<(), 
     }
 }
 
-/// A new pull request needs a title.
+/// The longest title of a new pull request, in characters (the node's limit).
+pub const PR_TITLE_MAX_CHARS: usize = 256;
+
+/// A new pull request needs a title of one line, at most `PR_TITLE_MAX_CHARS` characters.
 pub fn pr_create_gate(title: &str) -> Result<(), &'static str> {
-    if title.trim().is_empty() { Err("제목을 입력해 주세요") } else { Ok(()) }
+    let t = title.trim();
+    if t.is_empty() {
+        Err("제목을 입력해 주세요")
+    } else if t.chars().any(char::is_control) {
+        Err("제목은 한 줄로 입력해 주세요")
+    } else if t.chars().count() > PR_TITLE_MAX_CHARS {
+        Err("제목은 256자까지 입력할 수 있습니다")
+    } else {
+        Ok(())
+    }
+}
+
+/// A review or description body without control characters, except newline and tab. Pasted
+/// text can carry escapes; the node and the host should never see them.
+pub fn clean_body(body: &str) -> String {
+    body.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect()
+}
+
+/// The key of the review draft: the project and the selected pull request, so a draft typed
+/// for one pull request never shows under another.
+pub fn review_draft_key(project: &str, number: Option<u64>) -> String {
+    match number {
+        Some(n) => format!("{project}#{n}"),
+        None => format!("{project}#"),
+    }
+}
+
+/// The key of one review action of one pull request in the armed state.
+pub fn pr_action_key(number: u64, action: GitPrReviewAction) -> usize {
+    let slot = match action {
+        GitPrReviewAction::Comment => 0,
+        GitPrReviewAction::Approve => 1,
+        GitPrReviewAction::RequestChanges => 2,
+    };
+    number as usize * 3 + slot
+}
+
+/// What a tap on a review button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTap {
+    /// First tap of 승인 or 변경 요청: the button asks again.
+    Arm,
+    /// A second tap before 600 ms: ignored.
+    Wait,
+    /// Send the review.
+    Send,
+    /// The armed state ran out: arm again.
+    Expired,
+}
+
+/// 승인 and 변경 요청 are public and cannot be taken back, so they ask twice like 병합.
+/// 코멘트 is one tap. `armed` is the key and arm time of the armed review button.
+pub fn review_tap(action: GitPrReviewAction, armed: Option<(usize, i64)>, number: u64, now: i64) -> ReviewTap {
+    if action == GitPrReviewAction::Comment {
+        return ReviewTap::Send;
+    }
+    match delete_tap(armed, pr_action_key(number, action), now) {
+        DeleteTap::Arm => ReviewTap::Arm,
+        DeleteTap::Wait => ReviewTap::Wait,
+        DeleteTap::Confirm => ReviewTap::Send,
+        DeleteTap::Expired => ReviewTap::Expired,
+    }
+}
+
+/// The label of a review button, with the question while it is armed.
+pub fn review_button_label(action: GitPrReviewAction, armed: bool) -> &'static str {
+    match (action, armed) {
+        (GitPrReviewAction::Approve, true) => "정말 승인합니다",
+        (GitPrReviewAction::RequestChanges, true) => "정말 변경을 요청합니다",
+        (GitPrReviewAction::Approve, false) => "승인",
+        (GitPrReviewAction::RequestChanges, false) => "변경 요청",
+        (GitPrReviewAction::Comment, _) => "코멘트",
+    }
+}
+
+/// The node's Korean line for a merge refused because the head moved (409). Copied from
+/// `ember/node/src/git_prs.rs` (the `GitError::Conflict` of the merge); a test pins the stem.
+pub const STALE_HEAD_TEXT: &str = "풀 리퀘스트가 바뀌었습니다";
+
+/// Whether an error line says the head moved since the detail was read.
+pub fn is_stale_head(error_line: &str) -> bool {
+    error_line.contains(STALE_HEAD_TEXT)
 }
 
 pub fn pr_review_notice(action: GitPrReviewAction) -> &'static str {
@@ -1800,7 +1884,7 @@ fn non_empty(text: &str) -> Option<&str> {
 
 /// The `pr/review` body. The caller confirmed by tapping, so `confirm` is true.
 pub fn pr_review_body(number: u64, action: GitPrReviewAction, body: &str) -> Value {
-    json!({ "number": number, "action": action, "body": non_empty(body), "confirm": true })
+    json!({ "number": number, "action": action, "body": non_empty(&clean_body(body)), "confirm": true })
 }
 
 /// The `pr/merge` body (squash by default; the branch stays). `head_sha` is the head the user saw.
@@ -1810,7 +1894,7 @@ pub fn pr_merge_body(number: u64, method: GitPrMergeMethod, head_sha: &str) -> V
 
 /// The `pr/create` body; an empty base or head is left to the node.
 pub fn pr_create_body(title: &str, body: &str, base: &str, head: &str, draft: bool) -> Value {
-    json!({ "title": title.trim(), "body": non_empty(body), "base": non_empty(base), "head": non_empty(head), "draft": draft, "confirm": true })
+    json!({ "title": title.trim(), "body": non_empty(&clean_body(body)), "base": non_empty(base), "head": non_empty(head), "draft": draft, "confirm": true })
 }
 
 /// Read one pull request. Runs on the runtime, not the UI thread.
@@ -4507,6 +4591,81 @@ rename to new.txt
         assert_eq!(pr_create_gate("Feat: x"), Ok(()));
         assert_eq!(pr_create_body(" Feat: x ", "", "", "feat/x", true), json!({ "title": "Feat: x", "body": null, "base": null, "head": "feat/x", "draft": true, "confirm": true }));
         assert_eq!(pr_created_notice(12), "풀 리퀘스트 #12을 만들었습니다");
+    }
+
+    const A: GitPrReviewAction = GitPrReviewAction::Approve;
+    const R: GitPrReviewAction = GitPrReviewAction::RequestChanges;
+    const C: GitPrReviewAction = GitPrReviewAction::Comment;
+
+    #[test]
+    fn fr_g11_approve_asks_twice() {
+        let k = pr_action_key(7, A);
+        assert_eq!(review_tap(A, None, 7, 10_000), ReviewTap::Arm);
+        assert_eq!(review_tap(A, Some((k, 10_000)), 7, 10_100), ReviewTap::Wait);
+        assert_eq!(review_tap(A, Some((k, 10_000)), 7, 10_600), ReviewTap::Send);
+        assert_eq!(review_tap(A, Some((k, 10_000)), 7, 14_000), ReviewTap::Expired);
+        assert_eq!(review_button_label(A, true), "정말 승인합니다");
+        assert_eq!(review_button_label(A, false), "승인");
+    }
+
+    #[test]
+    fn fr_g11_request_changes_asks_twice() {
+        let k = pr_action_key(7, R);
+        assert_eq!(review_tap(R, None, 7, 10_000), ReviewTap::Arm);
+        assert_eq!(review_tap(R, Some((k, 10_000)), 7, 10_100), ReviewTap::Wait);
+        assert_eq!(review_tap(R, Some((k, 10_000)), 7, 13_999), ReviewTap::Send);
+        assert_eq!(review_tap(R, Some((k, 10_000)), 7, 14_000), ReviewTap::Expired);
+        assert_eq!(review_button_label(R, true), "정말 변경을 요청합니다");
+    }
+
+    #[test]
+    fn fr_g11_comment_is_a_single_tap() {
+        assert_eq!(review_tap(C, None, 7, 10_000), ReviewTap::Send);
+        assert_eq!(review_tap(C, Some((pr_action_key(7, A), 10_000)), 7, 10_100), ReviewTap::Send);
+        assert_eq!(review_button_label(C, true), "코멘트");
+    }
+
+    #[test]
+    fn fr_g11_arming_one_review_action_disarms_the_other() {
+        // 승인 is armed; a tap on 변경 요청 (or on another pull request) arms afresh, never sends.
+        let armed = Some((pr_action_key(7, A), 10_000));
+        assert_eq!(review_tap(R, armed, 7, 10_900), ReviewTap::Arm);
+        assert_eq!(review_tap(A, armed, 8, 10_900), ReviewTap::Arm);
+        assert_ne!(pr_action_key(7, A), pr_action_key(7, R));
+        assert_ne!(pr_action_key(7, A), pr_action_key(8, A));
+        assert!(!armed_label_visible(armed, pr_action_key(7, R), 10_900));
+    }
+
+    #[test]
+    fn fr_g11_a_review_draft_belongs_to_one_pull_request() {
+        assert_ne!(review_draft_key("p", Some(1)), review_draft_key("p", Some(2)));
+        assert_ne!(review_draft_key("p", Some(1)), review_draft_key("q", Some(1)));
+        assert_eq!(review_draft_key("p", Some(1)), review_draft_key("p", Some(1)));
+    }
+
+    #[test]
+    fn fr_g12_new_pr_title_limits() {
+        assert_eq!(pr_create_gate("a\nb"), Err("제목은 한 줄로 입력해 주세요"));
+        assert_eq!(pr_create_gate("a\u{1b}b"), Err("제목은 한 줄로 입력해 주세요"));
+        assert_eq!(pr_create_gate(&"가".repeat(256)), Ok(()));
+        assert_eq!(pr_create_gate(&"가".repeat(257)), Err("제목은 256자까지 입력할 수 있습니다"));
+        assert_eq!(pr_create_gate("  Feat: x \n"), Ok(()));
+    }
+
+    #[test]
+    fn fr_g11_review_body_is_cleaned() {
+        assert_eq!(clean_body("a\u{1b}[31m b\r\n\tc\u{0}"), "a[31m b\n\tc");
+        assert_eq!(pr_review_body(7, C, "x\u{7}y")["body"], json!("xy"));
+        assert_eq!(pr_create_body("t", "d\u{0}e", "", "", false)["body"], json!("de"));
+    }
+
+    #[test]
+    fn fr_g11_a_stale_head_error_is_recognised() {
+        // The node's line, from ember/node/src/git_prs.rs (the merge's head check).
+        let node = "풀 리퀘스트가 바뀌었습니다. 다시 불러온 뒤 병합하세요.";
+        assert!(is_stale_head(node));
+        assert!(!is_stale_head("CI 체크가 실패했습니다."));
+        assert!(include_str!("../../../node/src/git_prs.rs").contains(STALE_HEAD_TEXT));
     }
 
     #[test]

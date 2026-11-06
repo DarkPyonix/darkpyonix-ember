@@ -12,7 +12,7 @@
 use std::collections::BTreeSet;
 
 use compose_rust::runtime::{current_window_size, key, launched_effect, mutable_state_of, remember, remember_with_key, MutableState};
-use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
+use crate::ui::vcs::{choice_label, fetch_conflict, run_resolve, ConflictChoice, ConflictStep, cancel_preview, confirm, ResolveTap, ConflictFile, ConflictLoad, ConflictSegment, fetch_stashes, run_stash_action, run_stash_push, stash_action_notice, stash_from, StashAction, StashEntry, StashLoad, fetch_history, history_append, history_from, fetch_prs, prs_from, PrEntry, PrFilter, PrLoad, section_count_with, section_count_with_branches, fetch_branches, branches_from, split_branches, branch_bar_fractions, worktree_tail, branch_create_body, stash_now_gate, stash_now_error, BranchEntry, BranchLoad, HistoryEntry, HistoryLoad, HistoryRef, Load, fetch_snapshot, load_from, CommitRequest, plan_staging, run_commit, run_remote, git_call, valid_branch_name, failure_text, CONFLICT_PREVIEW_LINES, amend_warning, amend_button_label, amend_tap, AmendTap, armed_label_visible, delete_tap, stash_button_label, stash_button_text, stash_tap, stash_tap_key, DeleteTap, STASH_DIRTY_WARNING, STASH_POP_NOTE, section_count_with_team, team_rows, MemberCwd, TeamRow, fetch_pr_detail, pr_detail_from, run_pr_review, run_pr_merge, run_pr_create, review_request_gate, pr_create_gate, review_tap, ReviewTap, pr_action_key, review_button_label, review_draft_key, is_stale_head, clean_body, merge_button_state, merge_button_text, MERGE_METHOD_TEXT, PrDetailLoad, PrDetailView, CheckClass, ReviewerState};
 use ember_client::api::{GitPrMergeMethod, GitPrReviewAction};
 use serde_json::{json, Value};
 use compose_rust::ui as cu;
@@ -2132,6 +2132,8 @@ fn StatusDot(class: CheckClass) {
 struct DetailControls<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone + 'static> {
     review_text: MutableState<String>,
     review_gen: MutableState<u64>,
+    /// The review action that is armed and asks again, if any.
+    armed_review: Option<GitPrReviewAction>,
     busy: bool,
     merge_armed: bool,
     on_review: R,
@@ -2222,12 +2224,13 @@ fn PrDetailActions<R: Fn(GitPrReviewAction) + Clone + 'static, M: Fn() + Clone +
                         .on_value_change(move |value| text.set(value));
                 });
                 cu::Row().alignment(Alignment::CenterStart).spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(|| {
-                    for (label, action, kind) in [
-                        ("코멘트", GitPrReviewAction::Comment, ButtonKind::Default),
-                        ("변경 요청", GitPrReviewAction::RequestChanges, ButtonKind::Destructive),
-                        ("승인", GitPrReviewAction::Approve, ButtonKind::Default),
+                    for (action, kind) in [
+                        (GitPrReviewAction::Comment, ButtonKind::Default),
+                        (GitPrReviewAction::RequestChanges, ButtonKind::Destructive),
+                        (GitPrReviewAction::Approve, ButtonKind::Default),
                     ] {
                         let on_review = ctl.on_review.clone();
+                        let label = review_button_label(action, ctl.armed_review == Some(action));
                         AppButton(label, None, kind, true, !ctl.busy, false, move || on_review(action));
                     }
                 });
@@ -2258,8 +2261,6 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     let selected = remember_with_key(key_project.clone(), || mutable_state_of(std::env::var("EMBER_CR_VCS_PR").ok().and_then(|v| v.parse::<u64>().ok())));
     let detail = remember_with_key(key_project, || mutable_state_of(PrDetailLoad::Idle));
     let wanted = remember(|| mutable_state_of(None::<u64>));
-    let review_text = remember(|| mutable_state_of(String::new()));
-    let review_gen = remember(|| mutable_state_of(0_u64));
     let busy = remember(|| mutable_state_of(false));
     // The merge button as (pull request number, arm time in ms); cleared by a reload or a timeout.
     let armed = remember(|| mutable_state_of(None::<(usize, i64)>));
@@ -2295,11 +2296,18 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
         _ => None,
     };
     let effective = selected.get().or(first);
+    // The draft of the review box belongs to one pull request: another one starts empty.
+    let draft_key = review_draft_key(actions.as_ref().map(|a| a.project.as_str()).unwrap_or(""), effective);
+    let review_text = remember_with_key(draft_key.clone(), || mutable_state_of(String::new()));
+    let review_gen = remember_with_key(draft_key, || mutable_state_of(0_u64));
+    // 승인 and 변경 요청 as (key of the action, arm time in ms); only one is armed, and 병합 clears it.
+    let review_armed = remember(|| mutable_state_of(None::<(usize, i64)>));
 
     if let Some(a) = actions.clone() {
-        let (det, disarm, wanted) = (detail.clone(), armed.clone(), wanted.clone());
+        let (det, disarm, disarm_review, wanted) = (detail.clone(), armed.clone(), review_armed.clone(), wanted.clone());
         launched_effect((a.project.clone(), effective, a.reload.get(), retry.get()), move || async move {
             disarm.set(None);
+            disarm_review.set(None);
             wanted.set(effective);
             let Some(number) = effective else {
                 det.set(PrDetailLoad::Idle);
@@ -2339,14 +2347,26 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
 
     // A review: busy before the request, then the notice, and the list and the detail again.
     let on_review = {
-        let (actions, busy, retry, review_text, review_gen) = (actions.clone(), busy.clone(), retry.clone(), review_text.clone(), review_gen.clone());
+        let (actions, busy, retry, review_text, review_gen, armed, review_armed) =
+            (actions.clone(), busy.clone(), retry.clone(), review_text.clone(), review_gen.clone(), armed.clone(), review_armed.clone());
         move |action: GitPrReviewAction| {
             let Some(a) = actions.clone() else { return };
             let Some(number) = effective else { return };
-            let body = review_text.get();
+            let body = clean_body(&review_text.get());
             if let Err(line) = review_request_gate(action, &body) {
                 notice::post(line.to_string());
                 return;
+            }
+            // 승인 and 변경 요청 ask twice; any other tap disarms 병합 and the other review button.
+            let now = crate::demo::now_ms();
+            armed.set(None);
+            match review_tap(action, review_armed.get(), number, now) {
+                ReviewTap::Arm | ReviewTap::Expired => {
+                    review_armed.set(Some((pr_action_key(number, action), now)));
+                    return;
+                }
+                ReviewTap::Wait => return,
+                ReviewTap::Send => review_armed.set(None),
             }
             busy.set(true);
             let (busy, retry, review_text, review_gen) = (busy.clone(), retry.clone(), review_text.clone(), review_gen.clone());
@@ -2366,11 +2386,12 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
     };
     // 병합 asks twice: the first tap arms it, the second counts after 600 ms and before 4 s.
     let on_merge = {
-        let (actions, busy, retry, armed, head_sha) = (actions.clone(), busy.clone(), retry.clone(), armed.clone(), head_sha.clone());
+        let (actions, busy, retry, armed, head_sha, review_armed) = (actions.clone(), busy.clone(), retry.clone(), armed.clone(), head_sha.clone(), review_armed.clone());
         move || {
             let Some(a) = actions.clone() else { return };
             let Some(number) = effective else { return };
             let now = crate::demo::now_ms();
+            review_armed.set(None);
             match delete_tap(armed.get(), number as usize, now) {
                 DeleteTap::Arm | DeleteTap::Expired => armed.set(Some((number as usize, now))),
                 DeleteTap::Wait => {}
@@ -2386,7 +2407,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
                             }
                             Err(line) => {
                                 // The head moved since the detail was read: show the Korean line and read it again.
-                                if line.contains("바뀌었습니다") {
+                                if is_stale_head(&line) {
                                     retry.set(retry.get() + 1);
                                 }
                                 notice::post(line);
@@ -2398,6 +2419,11 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
             }
         }
     };
+    let armed_review = effective.and_then(|n| {
+        [GitPrReviewAction::Approve, GitPrReviewAction::RequestChanges]
+            .into_iter()
+            .find(|&act| armed_label_visible(review_armed.get(), pr_action_key(n, act), crate::demo::now_ms()))
+    });
     let merge_armed = effective.is_some_and(|n| armed_label_visible(armed.get(), n as usize, crate::demo::now_ms()));
 
     let create = {
@@ -2405,7 +2431,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
             (actions.clone(), busy.clone(), retry.clone(), form_open.clone(), f_title.clone(), f_body.clone(), f_draft.clone(), f_gen.clone(), branch.clone());
         move || {
             let Some(a) = actions.clone() else { return };
-            let (title, body, draft) = (f_title.get(), f_body.get(), f_draft.get());
+            let (title, body, draft) = (f_title.get(), clean_body(&f_body.get()), f_draft.get());
             if let Err(line) = pr_create_gate(&title) {
                 notice::post(line.to_string());
                 return;
@@ -2559,7 +2585,7 @@ fn PullRequestsPane(actions: Option<Actions>, count: MutableState<Option<usize>>
         }
     };
 
-    let ctl = DetailControls { review_text, review_gen, busy: is_busy, merge_armed, on_review, on_merge };
+    let ctl = DetailControls { review_text, review_gen, armed_review, busy: is_busy, merge_armed, on_review, on_merge };
     if two {
         cu::Row()
             .modifier(Modifier::new().fill_max_width().fill_max_height())

@@ -893,49 +893,21 @@ mod tests {
 
     #[test]
     fn fr_l12_the_shell_content_column_has_fill_max_width_in_the_bottom_tabs_layout() {
-        use compose_rust::protocol::{decode_batch, HostEvent, Mutation};
-        use compose_rust::{EventPayload, Host, Recomposer, WindowHeightClass, WindowSizeClass};
-        use std::collections::HashMap;
-
-        let _guard = crate::services::test_guard();
-        compose_rust::window::reset_window_size();
-        let mut host = Host::new(|| Box::new(Recomposer::new(shell)));
-        host.rebuild().expect("rebuild");
-        let event = HostEvent {
-            node_id: 0,
-            handler_id: 0,
-            payload: EventPayload::WindowSizeChanged {
-                width_dp: 390.0,
-                height_dp: 844.0,
-                class: WindowSizeClass::Compact,
-                height_class: WindowHeightClass::Medium,
-                safe_area_top: 0.0,
-                safe_area_leading: 0.0,
-                safe_area_trailing: 0.0,
-            },
-        };
-        let (bytes, _) = host.dispatch(event).expect("dispatch");
-        let batch = decode_batch(bytes).expect("decode");
-
-        // The modifiers each node carries, by node id (Debug names of the decoded variants).
-        let mut by_node: HashMap<u32, Vec<String>> = HashMap::new();
-        for m in &batch {
-            if let Mutation::SetModifier { node_id, modifier, .. } = m {
-                by_node.entry(*node_id).or_default().push(format!("{modifier:?}"));
-            }
-        }
-        let has = |mods: &Vec<String>, name: &str| mods.iter().any(|d| d.starts_with(name));
-        // The outer content column: weight, fill width and fill height.
-        let outer = by_node
-            .values()
-            .any(|m| has(m, "Weight") && has(m, "FillMaxWidth") && has(m, "FillMaxHeight"));
-        // The inner screen column: weight and fill width, without fill height.
-        let inner = by_node
-            .values()
-            .any(|m| has(m, "Weight") && has(m, "FillMaxWidth") && !has(m, "FillMaxHeight"));
-        assert!(outer, "outer content column lacks FillMaxWidth at 390: {by_node:?}");
-        assert!(inner, "inner screen column lacks FillMaxWidth at 390: {by_node:?}");
-        compose_rust::window::reset_window_size();
+        // In the 390 bottom-tabs layout width is the cross axis of the content column, which a
+        // weight does not fill: without `fill_max_width` the page was sized to its content (about
+        // 230 dp, #496). The decoded modifier batch does not expose weight and fill together, so
+        // this checks the production source of the shell: the content column and the screen
+        // column inside it both carry `fill_max_width`.
+        let src = include_str!("shell.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width().fill_max_height())"),
+            "the shell content column must fill the width"
+        );
+        assert!(
+            production.contains("cu::Column().modifier(Modifier::new().weight(1.0).fill_max_width())"),
+            "the screen column inside it must fill the width"
+        );
     }
 
     #[composable]

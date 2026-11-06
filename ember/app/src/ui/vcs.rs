@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitBranchInfo, GitCommitApplied, GitCommitDetail, GitCommitFileStatus, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrCheckState, GitPrCreated, GitPrDetail, GitPrMergeMethod, GitPrReview, GitPrReviewAction, GitPrReviewItem, GitPrReviewState, GitPrState, GitPrs, GitStashEntry, GitStatus,
+    ApiError, GitBranchInfo, GitCommitApplied, GitCommitDetail, GitMergeState, GitCommitFileStatus, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrCheckState, GitPrCreated, GitPrDetail, GitPrMergeMethod, GitPrReview, GitPrReviewAction, GitPrReviewItem, GitPrReviewState, GitPrState, GitPrs, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -3176,6 +3176,186 @@ pub async fn run_resolve(project: &str, path: &str, content: &str) -> Result<(),
         .map_err(|e| failure_text("충돌 해결을 ", &e))
 }
 
+/// The merge in progress, as the banner on the conflict screen shows it (FR-G16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeView {
+    /// The branch merged in; empty when the node does not know it.
+    pub from: String,
+    /// The current branch; empty on a detached HEAD.
+    pub into: String,
+    /// Files that still conflict.
+    pub remaining: usize,
+    /// True when no unmerged path is left, so 병합 커밋 can run.
+    pub can_commit: bool,
+}
+
+/// The state of the merge banner's read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeLoad {
+    Idle,
+    Loading,
+    /// `None` when no merge is in progress (a stash pop or a cherry-pick shows no banner).
+    Ready(Option<MergeView>),
+    Failed(String),
+}
+
+/// The banner state from the node's answer.
+pub fn merge_view_from(result: Result<GitMergeState, ApiError>) -> MergeLoad {
+    match result {
+        Ok(m) if m.in_progress => MergeLoad::Ready(Some(MergeView {
+            from: m.from.unwrap_or_default(),
+            into: m.into.unwrap_or_default(),
+            remaining: m.conflict_files as usize,
+            can_commit: m.can_commit,
+        })),
+        Ok(_) => MergeLoad::Ready(None),
+        Err(e) => MergeLoad::Failed(failure_text("병합 상태를 확인", &e)),
+    }
+}
+
+/// Read the merge state. Runs on the runtime, not the UI thread.
+pub async fn fetch_merge_state(project: &str) -> MergeLoad {
+    merge_view_from(git_call::<GitMergeState>(project, "merge", json!({})).await)
+}
+
+/// The banner's title: "feat/x \u{2192} main 병합 중"; "병합 중" when a name is unknown.
+pub fn banner_title(v: &MergeView) -> String {
+    if v.from.is_empty() || v.into.is_empty() {
+        "병합 중".to_string()
+    } else {
+        format!("{} \u{2192} {} 병합 중", v.from, v.into)
+    }
+}
+
+/// The banner's second line.
+pub fn banner_sub(remaining: usize) -> String {
+    if remaining == 0 { "모든 충돌을 해결했습니다".to_string() } else { format!("남은 충돌 파일 {remaining}개") }
+}
+
+/// The line shown when a merge call fails with a message that is not Korean.
+pub const MERGE_FAILED_LINE: &str = "작업을 하지 못했습니다. 저장소 상태를 확인해 주세요.";
+/// Under 병합 취소.
+pub const MERGE_ABORT_NOTE: &str = "병합 중이던 변경을 모두 되돌립니다";
+/// Under 병합 커밋 once armed (git includes the index).
+pub const MERGE_COMMIT_NOTE: &str = "이미 스테이징해 둔 다른 변경도 이 커밋에 들어갑니다";
+
+/// The two buttons of the banner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeAction {
+    Abort,
+    Commit,
+}
+
+/// The key of a banner button in the armed state; one key per action.
+pub fn merge_tap_key(action: MergeAction) -> usize {
+    match action {
+        MergeAction::Abort => 1,
+        MergeAction::Commit => 2,
+    }
+}
+
+/// What a tap on a banner button does (two taps: arm, then confirm after 600 ms, within 4 s).
+pub fn merge_tap(action: MergeAction, armed: Option<(usize, i64)>, now: i64) -> DeleteTap {
+    delete_tap(armed, merge_tap_key(action), now)
+}
+
+/// The visible text of a banner button.
+pub fn banner_button_text(action: MergeAction, armed: bool) -> &'static str {
+    match (action, armed) {
+        (MergeAction::Abort, false) => "병합 취소",
+        (MergeAction::Abort, true) => "정말 취소합니다",
+        (MergeAction::Commit, false) => "병합 커밋",
+        (MergeAction::Commit, true) => "정말 커밋합니다",
+    }
+}
+
+/// The Korean line for a failed merge call: the node's own fixed Korean line as given, else a
+/// fixed Korean line (git's English text never reaches the screen).
+pub fn merge_failure(e: &ApiError) -> String {
+    match e {
+        ApiError::Status { message, .. } if is_korean(message) => message.clone(),
+        ApiError::Status { .. } => MERGE_FAILED_LINE.to_string(),
+        other => korean_failure("병합 작업을", other),
+    }
+}
+
+/// The notice after a merge commit.
+pub fn merge_commit_notice(sha: &str) -> String {
+    let short: String = sha.chars().take(7).collect();
+    format!("병합 커밋 {short}을 만들었습니다")
+}
+
+/// The result of the abort call: `Ok` is the notice, `Err` the Korean line.
+pub fn merge_abort_result(r: Result<ember_client::api::GitMergeAborted, ApiError>) -> Result<String, String> {
+    r.map(|_| "병합을 취소했습니다".to_string()).map_err(|e| merge_failure(&e))
+}
+
+/// The result of the commit call.
+pub fn merge_commit_result(r: Result<GitCommitApplied, ApiError>) -> Result<String, String> {
+    r.map(|c| merge_commit_notice(&c.new_sha)).map_err(|e| merge_failure(&e))
+}
+
+/// Cancel the merge in progress. Runs on the runtime, not the UI thread.
+pub async fn run_merge_abort(project: &str) -> Result<String, String> {
+    merge_abort_result(git_call(project, "merge/abort", json!({ "confirm": true })).await)
+}
+
+/// Finish the merge with a merge commit. Runs on the runtime, not the UI thread.
+pub async fn run_merge_commit(project: &str) -> Result<String, String> {
+    merge_commit_result(git_call(project, "merge/commit", json!({ "confirm": true })).await)
+}
+
+impl ConflictFile {
+    /// The same file with every block set to `choice` (모두 현재 것 / 모두 들어오는 것).
+    pub fn pick_all(&self, choice: ConflictChoice) -> ConflictFile {
+        let segments = self
+            .segments
+            .iter()
+            .map(|seg| match seg {
+                ConflictSegment::Block { ours_label, theirs_label, ours, theirs, .. } => ConflictSegment::Block {
+                    ours_label: ours_label.clone(),
+                    theirs_label: theirs_label.clone(),
+                    ours: ours.clone(),
+                    theirs: theirs.clone(),
+                    choice,
+                },
+                other => other.clone(),
+            })
+            .collect();
+        ConflictFile { path: self.path.clone(), segments }
+    }
+}
+
+/// The line under 모두 현재 것 / 모두 들어오는 것 when a block already has a choice.
+pub const PICK_ALL_NOTE: &str = "이미 고른 블록의 선택이 바뀝니다";
+
+/// The note under the pick-all chips: `Some` only when some block is already chosen, because
+/// only then does one tap replace a choice the user made.
+pub fn pick_all_note(file: &ConflictFile) -> Option<&'static str> {
+    if file.resolved_count() > 0 { Some(PICK_ALL_NOTE) } else { None }
+}
+
+/// The key of a pick-all button in the armed state (`delete_tap`); one key per choice, so only
+/// one of the two can be armed at a time.
+pub fn pick_all_key(choice: ConflictChoice) -> usize {
+    match choice {
+        ConflictChoice::Ours => 1,
+        ConflictChoice::Theirs => 2,
+        _ => 0,
+    }
+}
+
+/// The visible text of a pick-all button; the armed second tap asks again.
+pub fn pick_all_text(base: &'static str, armed: bool) -> &'static str {
+    if armed { "정말 모두 바꿉니다" } else { base }
+}
+
+/// Whether the answer of a merge abort or commit makes the screen read the state again. Both
+/// answers do: after an error (a 409 means the state on screen was stale) as after success.
+pub fn merge_answer_reloads(_result: &Result<String, String>) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4355,6 +4535,38 @@ rename to new.txt
     }
 
     #[test]
+    fn fr_g7_pick_all_asks_twice_when_a_choice_exists() {
+        // The two buttons have their own keys, so arming one never confirms the other.
+        assert_ne!(pick_all_key(ConflictChoice::Ours), pick_all_key(ConflictChoice::Theirs));
+        let (ours, theirs) = (pick_all_key(ConflictChoice::Ours), pick_all_key(ConflictChoice::Theirs));
+        assert_eq!(delete_tap(None, ours, 10_000), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((ours, 10_000)), ours, 10_100), DeleteTap::Wait);
+        assert_eq!(delete_tap(Some((ours, 10_000)), ours, 10_600), DeleteTap::Confirm);
+        assert_eq!(delete_tap(Some((ours, 10_000)), theirs, 10_900), DeleteTap::Arm);
+        assert_eq!(delete_tap(Some((ours, 10_000)), ours, 14_000), DeleteTap::Expired);
+        assert!(armed_label_visible(Some((ours, 10_000)), ours, 10_000));
+        assert!(!armed_label_visible(Some((ours, 10_000)), theirs, 10_000));
+        assert_eq!(pick_all_text("모두 현재 것", true), "정말 모두 바꿉니다");
+        assert_eq!(pick_all_text("모두 현재 것", false), "모두 현재 것");
+    }
+
+    #[test]
+    fn fr_g7_pick_all_note_only_when_a_block_is_chosen() {
+        let f = two_blocks();
+        assert_eq!(pick_all_note(&f), None);
+        assert_eq!(pick_all_note(&f.with_choice(1, ConflictChoice::Both)), Some("이미 고른 블록의 선택이 바뀝니다"));
+    }
+
+    #[test]
+    fn fr_g17_a_409_answer_reloads_the_state() {
+        let stale = ApiError::Status { status: 409, message: "병합 중이 아닙니다.".into(), code: None };
+        let answer = merge_abort_result(Err(stale));
+        assert!(answer.is_err());
+        assert!(merge_answer_reloads(&answer));
+        assert!(merge_answer_reloads(&Ok("병합을 취소했습니다".to_string())));
+    }
+
+    #[test]
     fn fr_g7_a_choice_can_change_and_a_bad_index_changes_nothing() {
         let f = two_blocks().with_choice(0, ConflictChoice::Ours);
         let again = f.with_choice(0, ConflictChoice::Theirs);
@@ -4970,6 +5182,79 @@ rename to new.txt
         let gate = ApiError::Status { status: 409, message: "CI 체크가 실패했습니다.".into(), code: None };
         assert_eq!(korean_failure("병합", &gate), "CI 체크가 실패했습니다.");
         assert!(!korean_failure("병합", &ApiError::Peer("refused".into())).contains("refused"));
+    }
+
+    // ---- merge banner and pick-all (FR-G16, FR-G17, FR-G7, #382) ----
+
+    fn merge_state(in_progress: bool, files: u32, can_commit: bool) -> GitMergeState {
+        GitMergeState { in_progress, from: Some("feat/x".into()), into: Some("main".into()), conflict_files: files, can_commit }
+    }
+
+    #[test]
+    fn fr_g16_a_merge_in_progress_becomes_a_view_and_none_shows_no_banner() {
+        let v = MergeView { from: "feat/x".into(), into: "main".into(), remaining: 2, can_commit: false };
+        assert_eq!(merge_view_from(Ok(merge_state(true, 2, false))), MergeLoad::Ready(Some(v)));
+        assert_eq!(merge_view_from(Ok(merge_state(false, 3, false))), MergeLoad::Ready(None));
+        let e = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert!(matches!(merge_view_from(Err(e)), MergeLoad::Failed(t) if t.contains("하지 못했습니다")));
+    }
+
+    #[test]
+    fn fr_g16_unknown_names_become_an_empty_string_and_a_short_title() {
+        let m = GitMergeState { in_progress: true, from: None, into: None, conflict_files: 0, can_commit: true };
+        let MergeLoad::Ready(Some(v)) = merge_view_from(Ok(m)) else { panic!("view") };
+        assert_eq!((v.from.as_str(), v.into.as_str(), v.can_commit), ("", "", true));
+        assert_eq!(banner_title(&v), "병합 중");
+    }
+
+    #[test]
+    fn fr_g16_banner_title_and_sub() {
+        let v = MergeView { from: "feat/x".into(), into: "main".into(), remaining: 1, can_commit: false };
+        assert_eq!(banner_title(&v), "feat/x \u{2192} main 병합 중");
+        assert_eq!(banner_sub(2), "남은 충돌 파일 2개");
+        assert_eq!(banner_sub(0), "모든 충돌을 해결했습니다");
+    }
+
+    #[test]
+    fn fr_g17_buttons_ask_twice_with_their_own_key() {
+        assert_ne!(merge_tap_key(MergeAction::Abort), merge_tap_key(MergeAction::Commit));
+        assert_eq!(merge_tap(MergeAction::Abort, None, 1_000), DeleteTap::Arm);
+        let armed = Some((merge_tap_key(MergeAction::Abort), 1_000));
+        assert_eq!(merge_tap(MergeAction::Abort, armed, 1_100), DeleteTap::Wait);
+        assert_eq!(merge_tap(MergeAction::Abort, armed, 1_600), DeleteTap::Confirm);
+        assert_eq!(merge_tap(MergeAction::Abort, armed, 5_000), DeleteTap::Expired);
+        assert_eq!(merge_tap(MergeAction::Commit, armed, 1_600), DeleteTap::Arm);
+        assert_eq!(banner_button_text(MergeAction::Abort, true), "정말 취소합니다");
+        assert_eq!(banner_button_text(MergeAction::Commit, true), "정말 커밋합니다");
+        assert_eq!(banner_button_text(MergeAction::Commit, false), "병합 커밋");
+    }
+
+    #[test]
+    fn fr_g17_results_are_korean_notices_and_lines() {
+        assert_eq!(merge_commit_result(Ok(GitCommitApplied { new_sha: "0123456789abcdef".into() })), Ok("병합 커밋 0123456을 만들었습니다".to_string()));
+        assert_eq!(merge_abort_result(Ok(ember_client::api::GitMergeAborted { ok: true })), Ok("병합을 취소했습니다".to_string()));
+        let ko = ApiError::Status { status: 409, message: "진행 중인 병합이 없습니다.".into(), code: None };
+        assert_eq!(merge_commit_result(Err(ko)), Err("진행 중인 병합이 없습니다.".to_string()));
+        let en = ApiError::Status { status: 409, message: "fatal: nope".into(), code: None };
+        assert_eq!(merge_abort_result(Err(en)), Err(MERGE_FAILED_LINE.to_string()));
+        assert!(!merge_failure(&ApiError::Peer("refused".into())).contains("refused"));
+    }
+
+    #[test]
+    fn fr_g7_pick_all_sets_every_block_and_keeps_the_text() {
+        let f = two_blocks().with_choice(0, ConflictChoice::Both);
+        let ours = f.pick_all(ConflictChoice::Ours);
+        assert!(ours.is_resolved());
+        assert_eq!(ours.resolved_count(), 2);
+        let theirs = f.pick_all(ConflictChoice::Theirs);
+        assert_eq!(theirs.block_count(), 2);
+        assert_ne!(ours.resolved_content(), theirs.resolved_content());
+    }
+
+    #[test]
+    fn fr_g7_pick_all_on_a_file_without_blocks_changes_nothing() {
+        let f = ConflictFile { path: "a".into(), segments: vec![ConflictSegment::Common("x".into())] };
+        assert_eq!(f.pick_all(ConflictChoice::Ours), f);
     }
 }
 

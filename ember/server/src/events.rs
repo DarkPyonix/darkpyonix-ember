@@ -264,7 +264,6 @@ mod tests {
             call_id: "c".into(),
             name: "Read".into(),
             input: serde_json::json!({}),
-            needs_person: false,
         });
         assert_eq!(s, SessionStatus::WaitingForApproval);
         let s = s.after(&AgentEvent::ApprovalResolved {

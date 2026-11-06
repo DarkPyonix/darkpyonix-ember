@@ -1290,7 +1290,7 @@ mod tests {
         let flagged = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"p"},"requires_user_interaction":true}}"#;
         let plain = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Write","input":{}}}"#;
         let falsy = r#"{"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"Write","input":{},"requires_user_interaction":false}}"#;
-        let np = |l: &str| match p.parse(l).remove(0) {
+        let mut np = |l: &str| match p.parse(l).remove(0) {
             Parsed::PermissionRequest { needs_person, .. } => needs_person,
             other => panic!("{other:?}"),
         };

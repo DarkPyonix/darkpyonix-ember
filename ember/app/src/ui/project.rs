@@ -20,6 +20,7 @@
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::state::Reachability;
+use std::collections::BTreeMap;
 use ember_client::wire::{MemberDefaults, Project, ProjectPatch, TeamView};
 use ember_client::{LauncherStatus, State};
 
@@ -436,7 +437,7 @@ pub enum SettingsPart {
 /// Whether the main server can save a part today: computer assignment (FR-L4) and, through
 /// `PATCH /api/projects/{name}`, name, repository and branch, new member defaults and character
 /// style (FR-L26). The rest is shown disabled with an explanation.
-/// TODO(#384): leader, profile override, archive and delete (server answers 400 `not_yet`).
+/// TODO(#384): leader, archive and delete (server answers 400 `not_yet`).
 pub fn part_supported(part: SettingsPart) -> bool {
     matches!(
         part,
@@ -445,6 +446,7 @@ pub fn part_supported(part: SettingsPart) -> bool {
             | SettingsPart::Repository
             | SettingsPart::CharacterStyle
             | SettingsPart::MemberDefaults
+            | SettingsPart::ProfileOverride
     )
 }
 
@@ -475,6 +477,9 @@ pub struct SettingsDraft {
     pub model: String,
     pub mode: String,
     pub style: String,
+    /// Profile override per harness kind to account id (FR-L26); a harness without an entry is
+    /// unset. A deleted account (`null` on the server) counts as unset.
+    pub overrides: BTreeMap<String, String>,
 }
 
 impl SettingsDraft {
@@ -489,6 +494,7 @@ impl SettingsDraft {
             model: d.model.unwrap_or_default(),
             mode: d.mode.unwrap_or_default(),
             style: p.character_style.clone().unwrap_or_default(),
+            overrides: loaded_overrides(p),
         }
     }
 
@@ -496,6 +502,43 @@ impl SettingsDraft {
         let some = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
         MemberDefaults { agent: some(&self.agent), model: some(&self.model), mode: some(&self.mode) }
     }
+}
+
+/// The overrides the server holds, without the entries whose account was deleted (FR-L26).
+pub fn loaded_overrides(p: &Project) -> BTreeMap<String, String> {
+    p.profile_overrides.iter().filter_map(|(h, a)| a.clone().map(|a| (h.clone(), a))).collect()
+}
+
+/// The `profile_overrides` object the patch sends: the whole map, every entry an account id.
+pub fn overrides_map(draft: &BTreeMap<String, String>) -> BTreeMap<String, Option<String>> {
+    draft.iter().filter(|(_, a)| !a.is_empty()).map(|(h, a)| (h.clone(), Some(a.clone()))).collect()
+}
+
+/// The harnesses the override section offers: server kind and label (Claude Code, Codex and
+/// Antigravity, the kinds that have accounts).
+pub fn override_harnesses() -> [(&'static str, &'static str); 3] {
+    [("claude-code", "Claude Code"), ("codex", "Codex"), ("antigravity", "Antigravity")]
+}
+
+/// The picker choices of one harness: "" for no fixed account, then that harness's accounts as
+/// (id, label). `accounts` are (id, kind, label).
+pub fn override_options(harness: &str, accounts: &[(String, String, String)]) -> Vec<(String, String)> {
+    let mut v = vec![(String::new(), "기본(고정 없음)".to_string())];
+    v.extend(accounts.iter().filter(|(_, k, _)| k == harness).map(|(id, _, l)| (id.clone(), l.clone())));
+    v
+}
+
+/// What the picker of `harness` shows as chosen: the account label, "기본(고정 없음)" when unset,
+/// and "삭제된 계정" when the server holds a `null` for it (the account is gone) and the draft has
+/// not picked another.
+pub fn override_label(server: &Project, draft: &SettingsDraft, harness: &str, accounts: &[(String, String, String)]) -> String {
+    if let Some(id) = draft.overrides.get(harness) {
+        return accounts.iter().find(|(a, _, _)| a == id).map_or_else(|| "삭제된 계정".to_string(), |(_, _, l)| l.clone());
+    }
+    if matches!(server.profile_overrides.get(harness), Some(None)) {
+        return "삭제된 계정".to_string();
+    }
+    "기본(고정 없음)".to_string()
 }
 
 /// The patch that turns `server` into `d`: only changed fields are set (FR-L26). A field the
@@ -520,6 +563,9 @@ pub fn build_patch(server: &Project, d: &SettingsDraft) -> ProjectPatch {
     }
     if d.style != was.style {
         patch.character_style = Some(d.style.clone());
+    }
+    if d.overrides != was.overrides {
+        patch.profile_overrides = Some(overrides_map(&d.overrides));
     }
     patch
 }
@@ -597,6 +643,7 @@ pub fn patch_error_message(status: Option<u16>, code: Option<&str>) -> &'static 
     match (status, code) {
         (Some(409), Some("name_taken")) => "이미 있는 이름입니다",
         (Some(403), Some("protected_project")) => "기본 프로젝트의 이름은 바꿀 수 없습니다",
+        (Some(400), Some("invalid_field")) => "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.",
         (Some(400), _) => "입력한 값이 올바르지 않습니다",
         (Some(404), _) => "프로젝트를 찾지 못했습니다",
         _ => "설정을 저장하지 못했습니다. 잠시 뒤에 다시 시도해 주세요",
@@ -921,19 +968,19 @@ mod tests {
 
     // FR-L26: only what the server supports is enabled; the rest says the server cannot yet.
     #[test]
-    fn fr_l26_the_server_saves_metadata_but_not_leader_profile_archive_or_delete() {
+    fn fr_l26_the_server_saves_metadata_and_profile_override_but_not_leader_archive_or_delete() {
         for part in [
             SettingsPart::Computers,
             SettingsPart::Name,
             SettingsPart::Repository,
             SettingsPart::CharacterStyle,
             SettingsPart::MemberDefaults,
+            SettingsPart::ProfileOverride,
         ] {
             assert!(part_supported(part), "{part:?}");
         }
         for part in [
             SettingsPart::Leader,
-            SettingsPart::ProfileOverride,
             SettingsPart::Links,
             SettingsPart::Archive,
             SettingsPart::Delete,
@@ -982,6 +1029,57 @@ mod tests {
         assert_eq!((md.agent.as_deref(), md.model.as_deref(), md.mode.as_deref()), (Some("codex"), Some("opus"), Some("plan")));
         assert_eq!(patch.character_style.as_deref(), Some("cream"));
         assert!(patch.name.is_none());
+    }
+
+    fn acc() -> Vec<(String, String, String)> {
+        vec![
+            ("a1".into(), "claude-code".into(), "개인".into()),
+            ("a2".into(), "claude-code".into(), "회사".into()),
+            ("c1".into(), "codex".into(), "코덱스".into()),
+        ]
+    }
+
+    #[test]
+    fn fr_l26_profile_override_unchanged_sends_nothing_and_a_deleted_account_is_unset() {
+        let mut p = server_project();
+        p.profile_overrides.insert("codex".into(), Some("c1".into()));
+        p.profile_overrides.insert("claude-code".into(), None);
+        let d = SettingsDraft::from_project(&p);
+        assert_eq!(d.overrides.len(), 1, "a null entry counts as unset");
+        assert!(build_patch(&p, &d).profile_overrides.is_none());
+        assert_eq!(override_label(&p, &d, "claude-code", &acc()), "삭제된 계정");
+        assert_eq!(override_label(&p, &d, "codex", &acc()), "코덱스");
+        assert_eq!(override_label(&p, &d, "antigravity", &acc()), "기본(고정 없음)");
+    }
+
+    #[test]
+    fn fr_l26_profile_override_a_change_sends_the_whole_map() {
+        let mut p = server_project();
+        p.profile_overrides.insert("codex".into(), Some("c1".into()));
+        let mut d = SettingsDraft::from_project(&p);
+        d.overrides.insert("claude-code".into(), "a2".into());
+        let m = build_patch(&p, &d).profile_overrides.expect("sent");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("codex"), Some(&Some("c1".to_string())));
+        assert_eq!(m.get("claude-code"), Some(&Some("a2".to_string())));
+        d.overrides.clear();
+        assert_eq!(build_patch(&p, &d).profile_overrides, Some(BTreeMap::new()), "clearing all sends {{}}");
+    }
+
+    #[test]
+    fn fr_l26_profile_override_options_list_that_harness_only() {
+        let o = override_options("claude-code", &acc());
+        assert_eq!(o.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["", "a1", "a2"]);
+        assert_eq!(o[0].1, "기본(고정 없음)");
+        assert_eq!(override_options("antigravity", &acc()).len(), 1);
+        assert_eq!(override_harnesses().len(), 3);
+    }
+
+    #[test]
+    fn fr_l26_profile_override_invalid_field_reads_a_fixed_sentence() {
+        let m = patch_error_message(Some(400), Some("invalid_field"));
+        assert_eq!(m, "선택한 계정을 쓸 수 없습니다. 다시 고르십시오.");
+        assert!(!m.contains('\u{2014}'));
     }
 
     #[test]

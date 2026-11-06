@@ -379,6 +379,7 @@ async fn main() -> anyhow::Result<()> {
     // "Open IDE" takes its computers from the registry and the session's current computer
     // (FR-L7, FR-W4); EMBER_IDE_COMPUTERS stays as an override merged onto them.
     let ide = Arc::new(ember_server::api::ide::IdeConfig::from_env()?);
+    let ose = Arc::new(ember_server::ose::OseManager::default());
     // The guest router is built only when the door is on, wrapped only by the door's guards, and
     // never merged into `app` (not under auth::protect either).
     let guest_app = guest_door.as_ref().map(|d| {
@@ -399,7 +400,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(computers::fs::router(computers.clone()))
         .merge(computers::ports::router(computers.clone()))
         .merge(ember_server::api::git::router(sessions.clone(), computers.clone()))
-        .merge(ember_server::api::ide::router_with_computers(sessions.clone(), ide, computers.clone()))
+        .merge(ember_server::api::ide::router_with_computers_and_ose(sessions.clone(), ide, computers.clone(), ose.clone()))
+        .merge(ember_server::api::ide_extensions::router(computers.clone(), ose))
         .merge(ember_server::schedules::api::agent_router(scheduler.clone(), a2a.clone()))
         .merge(ember_server::schedules::api::router(scheduler))
         .merge(ember_server::mcp::api::router(mcp))

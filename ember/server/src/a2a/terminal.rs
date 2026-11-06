@@ -44,6 +44,7 @@ fn render(event: &AgentEvent) -> Option<String> {
         AgentEvent::ApprovalResolved { decision, .. } => format!("[approval: {decision:?}]"),
         AgentEvent::TurnEnded { outcome } => format!("[turn ended: {outcome:?}]"),
         AgentEvent::Error { message } => format!("error: {message}"),
+        AgentEvent::TurnError { code, message } => format!("error ({code}): {message}"),
         AgentEvent::RateLimited { message, .. } => format!("rate limited: {message}"),
         _ => return None,
     })

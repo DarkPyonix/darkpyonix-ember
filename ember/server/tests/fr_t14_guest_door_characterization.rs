@@ -285,19 +285,12 @@ async fn fr_t14_char_head_trace_and_connect_are_405_with_no_body_after_the_host_
         assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "{m}");
         assert!(body.is_empty(), "{m}");
         // The reply has no content type. Whether it also carries `allow` depends on the method and
-        // on which layer answered, not on the door's own code (the door has no per-method branch):
-        // CHARACTERISES CURRENT BEHAVIOUR as observed in CI: HEAD has NO `allow`, TRACE has one.
-        // CONNECT was not observed yet (an earlier assertion failed first), so it is only printed
-        // here and pinned in the next change once CI has shown it.
+        // on which layer answered, not on the door's own code (the door has no per-method branch).
+        // CHARACTERISES CURRENT BEHAVIOUR, measured in CI (#560): HEAD has NO `allow`; TRACE and
+        // CONNECT have one. Its value is not pinned.
         match m {
             "HEAD" => assert_eq!(names(&h), ["cache-control", "x-content-type-options"], "{m}"),
-            "TRACE" => assert_eq!(names(&h), ["allow", "cache-control", "x-content-type-options"], "{m}"),
-            _ => {
-                // cargo hides the output of a passing test; a direct write to the real stdout
-                // reaches the CI log as a notice (the same trick as tests/script_ready.rs).
-                use std::io::Write;
-                let _ = writeln!(std::io::stdout(), "::notice title=OBSERVE::{m} 405 header names: {:?}", names(&h));
-            }
+            _ => assert_eq!(names(&h), ["allow", "cache-control", "x-content-type-options"], "{m}"),
         }
         // Never more than the door's two headers plus, at most, `allow`.
         assert!(names(&h).iter().all(|n| ["allow", "cache-control", "x-content-type-options"].contains(&n.as_str())), "{m}: {:?}", names(&h));

@@ -327,6 +327,16 @@ pub fn ThemeButton(ui: &SharedUi) {
     );
 }
 
+/// The icon toggles the filter row. Closing it clears the query, so the list is never left
+/// filtered by a field nobody can see.
+pub fn toggle_search(open: bool, query: &str) -> (bool, String) {
+    if open {
+        (false, String::new())
+    } else {
+        (true, query.to_string())
+    }
+}
+
 /// Whether the inline project filter is drawn: always above 900 dp, else when the icon opened it.
 pub fn search_field_visible(w: f32, open: bool) -> bool {
     w > 900.0 || open
@@ -350,7 +360,13 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     }
     if search_icon_visible(w) {
         let o = st.search_open.clone();
-        IconButton(IconRole::Search, false, move || o.set(!o.get_untracked()));
+        let q = st.query.clone();
+        // TODO(compose-rust#428, #429): a name "팀원 검색 열기/닫기" and the expanded state.
+        IconButton(IconRole::Search, false, move || {
+            let (open, query) = toggle_search(o.get_untracked(), &q.get_untracked());
+            o.set(open);
+            q.set(query);
+        });
     }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
@@ -1858,6 +1874,13 @@ mod tests {
         assert!(!search_hook_open(false, Some("open")));
         assert!(!search_hook_open(true, Some("1")));
         assert!(!search_hook_open(true, None));
+    }
+
+    #[test]
+    fn fr_l26_closing_the_filter_clears_the_query() {
+        assert_eq!(toggle_search(true, "abc"), (false, String::new()));
+        assert_eq!(toggle_search(false, "abc"), (true, "abc".to_string()));
+        assert_eq!(toggle_search(false, ""), (true, String::new()));
     }
 
     #[test]

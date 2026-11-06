@@ -33,7 +33,8 @@
 //!   observed with 2.1.288) and ends the turn with a `result` of subtype `error_during_execution`,
 //!   which the adapter reports as `TurnEnded { Interrupted }` without an `Error`.
 //! * stdout, `control_cancel_request` `{"request_id": …}` withdraws a pending permission prompt
-//!   (SDK `query.py`).
+//!   (SDK `query.py`). The adapter drops the approval or question it holds and emits
+//!   `PromptWithdrawn { prompt_id }`; for an id it does not hold it emits nothing.
 //!
 //! # Approvals
 //!
@@ -401,6 +402,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 }
 
+/// Drop the approval or question `request_id` from `st`; whether the adapter held one.
+fn withdraw_prompt(st: &mut RunState, request_id: &str) -> bool {
+    let approval = st.pending.remove(request_id).is_some();
+    let question = st.pending_questions.remove(request_id).is_some();
+    approval || question
+}
+
 /// State shared between the run handle and its stdout reader.
 #[derive(Default)]
 struct RunState {
@@ -605,10 +613,14 @@ async fn read_stdout(
                     AgentEvent::ApprovalRequested { approval_id: request_id, tool, input, needs_person }
                 }
                 Parsed::CancelRequest { request_id } => {
-                    let mut st = state.lock().unwrap();
-                    st.pending.remove(&request_id);
-                    st.pending_questions.remove(&request_id);
-                    continue;
+                    // The CLI withdrew the prompt: say so, or the feed and the API keep showing
+                    // it as pending until the turn ends. An id this adapter does not hold (it was
+                    // answered already) emits nothing.
+                    let removed = withdraw_prompt(&mut state.lock().unwrap(), &request_id);
+                    if !removed {
+                        continue;
+                    }
+                    AgentEvent::PromptWithdrawn { prompt_id: request_id }
                 }
                 Parsed::UnsupportedRequest { request_id, subtype } => {
                     tracing::warn!(target: "ember::claude", "unsupported control request {subtype}");
@@ -859,7 +871,7 @@ pub enum Parsed {
         input: Value,
         questions: Vec<Question>,
     },
-    /// `control_cancel_request`: a pending permission prompt was withdrawn.
+    /// `control_cancel_request`: a pending permission prompt or question was withdrawn.
     CancelRequest {
         request_id: String,
     },
@@ -1358,6 +1370,26 @@ mod tests {
         let init = r#"{"type":"system","subtype":"init","session_id":"abc"}"#;
         assert_eq!(p.parse(init).len(), 1);
         assert!(p.parse(init).is_empty());
+    }
+
+    #[test]
+    fn fr_a5_a_cancel_request_withdraws_the_approval_or_question_it_names() {
+        let mut st = RunState::default();
+        st.pending.insert("a1".into(), ("Bash".into(), json!({}), false));
+        st.pending_questions.insert("q1".into(), PendingQuestion { input: json!({}), questions: Vec::new() });
+        assert!(withdraw_prompt(&mut st, "a1"));
+        assert!(st.pending.is_empty() && st.pending_questions.len() == 1);
+        assert!(withdraw_prompt(&mut st, "q1"));
+        assert!(st.pending_questions.is_empty());
+        // An id the adapter does not hold (answered already, or never seen) emits nothing.
+        assert!(!withdraw_prompt(&mut st, "q1"));
+        assert!(!withdraw_prompt(&mut st, "nope"));
+        // The frame parses to the cancel item the reader turns into `PromptWithdrawn`.
+        assert_eq!(
+            LineParser::default().parse(r#"{"type":"control_cancel_request","request_id":"q1"}"#),
+            [Parsed::CancelRequest { request_id: "q1".into() }]
+        );
+        assert!(LineParser::default().parse(r#"{"type":"control_cancel_request"}"#).is_empty());
     }
 
     #[test]

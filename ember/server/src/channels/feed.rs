@@ -209,6 +209,10 @@ impl Store {
                     AgentEvent::ApprovalResolved { approval_id, .. } => {
                         pending.retain(|p| p.approval_id.as_deref() != Some(approval_id.as_str()))
                     }
+                    AgentEvent::PromptWithdrawn { prompt_id } => pending.retain(|p| {
+                        p.approval_id.as_deref() != Some(prompt_id.as_str())
+                            && p.question_id.as_deref() != Some(prompt_id.as_str())
+                    }),
                     AgentEvent::AssistantMessage { text } => summary = Some(text),
                     AgentEvent::Error { message } | AgentEvent::TurnError { message, .. } => error = Some(message),
                     AgentEvent::TurnEnded { outcome } => {

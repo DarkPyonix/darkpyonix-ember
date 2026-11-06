@@ -196,11 +196,11 @@ whose node is unreachable fails with "computer … is unreachable".
 
 ## Adding a computer with an enrol code
 
-`FR-C1` and `FR-C2`, `INTENT.md` D39, issue #491. All [provisional]. Today a computer is added by pasting a long-lived node token into `POST /api/computers`. The enrol code replaces the paste: the server mints a one-time code, the user runs one command on the other machine, and the machine registers itself.
+`FR-C1`, `FR-C2` and `FR-C2a` to `FR-C2k`, `INTENT.md` D39 ("Confirm at join"), issues #491 and #526. The design was approved by the leader on 2026-11-06 [user, relayed by the supervisor]; the full memo is `.scratch/pz/enrol-door-design.md` (labels D1 to D13 below are the memo's). Today a computer is added by pasting a long-lived node token into `POST /api/computers`. The enrol code replaces the paste: the server mints a one-time code, the owner runs one command on the other machine, confirms the machine in the app, and the machine registers itself.
 
-### What this unit does
+### What is built (FR-C1, #523)
 
-Code: `ember/server/src/computers/enrol.rs`. Written, not compiled.
+Code: `ember/server/src/computers/enrol.rs`. Merged in #523; CI compiled it and ran the `fr_c1_*` tests. It has not run between two real machines.
 
 - Store migration `crate::computers::enrol::MIGRATION` (appended last to `store::MIGRATIONS`): `enrol_codes(id, code_hash BLOB UNIQUE, name, created_ms, expires_ms, used_ms, computer_id)`. The code is never stored, only its SHA-256 digest.
 - `Enrol::mint(name, now, ttl, base_url)` returns `{id, code, expires_ms, command}`. The code is `dpe_` plus 244 random bits made like the channel invite secrets (`channels::invites::new_secret`). The lifetime defaults to 10 minutes and is clamped to 10 minutes; zero is refused. The name is checked like a computer name (not empty, not `local` or `this server`) plus the guest-name shape rules. Expired rows older than one hour are deleted on mint.
@@ -211,23 +211,72 @@ Code: `ember/server/src/computers/enrol.rs`. Written, not compiled.
 - Admin routes, merged into the local token-protected router only (not the transport `app`, not the guest door): `POST /api/computers/enrol-codes {name, ttl_secs?}` answers 201 `{id, code, expires_ms, command, warning}` with `Cache-Control: no-store`; `GET /api/computers/enrol-codes/{id}` answers `{status}`; `DELETE /api/computers/enrol-codes/{id}` answers 204, or 409 when the code was already redeemed.
 - The code is in no log: `EnrolCode` and `Minted` print a redacted `Debug`, and the mint log line names the enrol id only.
 
-### What is not done
+### Decided design (FR-C2, not built)
 
-- Redeem is not exposed. There is no route and no listener for it.
-- `ember-node enrol <code> --server <url>` does not exist.
-- The registration step (credential issue, `Computers::register*`, calling `Enrol::complete`) does not exist.
-- The project screen does not poll the status route.
+**Door (D1, D2).** The redeem route cannot sit behind `auth::protect`, and a `token_exempt` path on the owner listener would put an unauthenticated write route next to every admin route. So the enrol door is a listener of its own, like the guest door: `EMBER_ENROL_LISTEN`, default OFF, `EMBER_ENROL_LISTEN_ALLOW_REMOTE`, `EMBER_ENROL_TRUSTED_PROXIES`, and `EMBER_ENROL_PUBLIC_URL` for the URL in the printed command. It serves exactly `POST /enrol/redeem` and `GET /enrol/status/{enrol_id}` and answers 404 for the rest. When the door is off, the mint answer says `door: off` and prints no command. A restart turns it on; auto-close is Later. Option (b), redeem over the `FR-N5` transport, is not built (D10): it would weaken the rule that every transport caller is authenticated, and a machine that already has a device key uses the hub device-link route (`POST /api/hub/devices/{id}/computer`).
 
-### Open security decision: where does redeem live?
+**Confirm at join (D3, D4, D5).** The review of #523 asked that the owner see the computer and confirm before it gets what D37 grants. The redeem therefore releases no credential:
 
-A redeem route must be reachable by a machine that has no credential yet, so it cannot sit behind `auth::protect`. Adding a `token_exempt` path to the local listener would put an unauthenticated write route next to every admin route. Options:
+```
+node                         enrol door                    server core / admin router        app (owner)
+ |                               |                                 |                              |
+ |                               |                                 |<-- mint (name) --------------|
+ |                               |                                 |--- code, command, warning -->|   state: waiting
+ |<============ owner copies the command to the other machine ====================================  |
+ |-- redeem {code, node_info} -->|                                 |                              |
+ |                               |-- redeem (atomic) ------------->|                              |   state: awaiting_confirmation
+ |<-- {enrol_id, poll_secret} ---|                                 |                              |   (deadline = redeem + 10 min)
+ |-- poll (Bearer poll_secret) ->|-- status ---------------------->|                              |
+ |<-- awaiting_confirmation -----|                                 |--- GET status: node_info, -->|   host name, observed address,
+ |                               |                                 |    observed_addr, fingerprint|   fingerprint, rename
+ |                               |                                 |<-- confirm {name?} ----------|
+ |                               |                                 | name-clash check (409), mint |
+ |                               |                                 | token, register, complete    |
+ |-- poll ---------------------->|-- status ---------------------->|                              |
+ |<-- {token, name, peer id} ----|    (delivered ONCE, then wiped) |                              |   state: joined
+ |  write enrol.json 0600        |                                 |                              |
+ |-- ember-node starts, serves the node API with the token; the server connects and lists it online -|
+```
 
-- **(a) A dedicated enrol door**, like the guest door: its own router that holds only the redeem route, its own listener, default OFF (`EMBER_ENROL_LISTEN`), its own per-address and global limits, no shared routes with the owner server. The owner turns it on, mints a code, and turns it off. Cost: a second listener and its limits to build and test. Benefit: the exposure is one route on a port that is closed by default, and the guest door already shows the pattern.
-- **(b) Over the FR-N5 transport**, as an unauthenticated `enrol` stream that the device gate lets through for this one operation. Benefit: no new port. Cost: the gate (FR-N7) assumes every stream comes from an allowed device, so an exception inside it weakens the invariant that all transport callers are authenticated, and the new machine needs the server's peer address before it has anything.
-- **(c) Require the new machine to be signed in to the account** (hub device-link, no code). Benefit: no unauthenticated route at all. Cost: it is the existing first step and does not cover headless machines that are not signed in, which is the reason for the code.
+States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C2a`). A deny, or no answer within 10 minutes of the redeem, registers nothing. A redeem burns the code, so a denied, failed or expired enrolment needs a new mint.
 
-Recommendation: (a). It keeps the one unauthenticated route off the owner listener and off the transport gate, it is off until the owner asks, and the limits can be tuned without touching the admin surface. Keep (c) as the path for machines that are already signed in. Needs the supervisor's decision before the redeem route is written.
+- **Why a poll and a server-minted token (D3).** Releasing the credential at redeem would give it to a node before any owner act. Holding the redeem request open runs into the request timeout and lets one redeem pin an in-flight permit. A node-chosen token would make the node send a secret that controls itself to a server nobody has confirmed. The `poll_secret` is 256 random bits, stored as a SHA-256 hash, and can only ask this enrolment's status.
+- **What the owner sees (`FR-C2c`).** The owner-chosen name, the host name the node reports, the address the server observed (after the trusted-proxy rule) and a peer-id fingerprint, all rendered as plain text. A mismatch warns and never blocks. The owner can rename at confirm. Confirm checks the name against the registry again and answers 409 on a clash; the enrolment stays `awaiting_confirmation` and the same call takes a new name.
+- **Address.** The node's `url` or `peer_addr` after validation. If it sent neither, the server proposes the observed address with port 8741 and the app shows it for editing; it is never trusted automatically (D11, [provisional, pT/pX]; whether 8741 is fixed in every deployment is unknown). The server probes `GET /health` once at confirm and reports reachability without blocking.
+- **Registration is an owner act.** The door never calls `Computers::register*`; the confirm route does, and rolls the registration back if `Enrol::complete` fails.
+- **Limits (D6, `FR-C2f`).** A global failed-redeem cap of 60 per 10 minutes across all sources, so rotating source keys cannot reset the per-source window; door bucket 5 per second with burst 10, 8 in flight, 32 connections, 4 KiB body. The numbers live in a configurable struct. The cost is that a loud attacker can block a real enrolment for a while; the owner re-mints.
+- **Logging (`FR-C2g`).** The code, poll secret and token appear in no log; lines name the enrol id and the source address.
+
+**Node side (D9, D13, `FR-C2h`).** `ember-node enrol <code> --server <url>` shows the server and asks "Continue? [y/N]" unless `--yes`. Plain http on a loopback or private address is allowed; a public address needs `--allow-http`. The node warns about plain http (`FR-C2i`), polls every 2 s, and on delivery writes `enrol.json` (0600) in its state dir and the server's peer id into `allowed-peers`. `EMBER_NODE_TOKEN` wins over `enrol.json`. A revoked computer leaves `enrol.json` on the node: `ember-node enrol --forget` removes it, and a re-enrol needs a new code. The node's reqwest needs a TLS feature for https servers.
+
+**Warning text.** In the mint answer and, in the same words, on the node: "The enrol door speaks plain HTTP. Anyone on the network path can read the code and the credential. Use it on a trusted network, or put TLS in front of it and set EMBER_ENROL_PUBLIC_URL to the https address. If the door is off, this command will not work."
+
+### Threat summary and residual risks (`FR-C2j`)
+
+| Risk | What stops it | Residual |
+|-|-|-|
+| Code leaked (screenshot, chat, LAN sniffer) | Single use, 10 minutes, owner confirm with node details, deny | A sniffer that wins the redeem gets the `poll_secret`; the owner must read the details |
+| Malicious or confused node with a valid code | Owner confirm, owner-chosen name, deny, removable at once | The owner misjudges; the card puts details in front of the owner |
+| Plain http | TLS in front is the owner's duty; warnings on both sides; `--allow-http` for public addresses | Code, poll secret and token cross the LAN in clear; sealed delivery is Later (D7) |
+| Rogue server URL | Command copied from the app; node shows the URL and asks; TLS | The node cannot verify the server; a rogue controller can run commands within the node's roots. Fingerprint pinning is Later (D8) |
+| Door open by mistake | Default OFF, startup error without ALLOW_REMOTE, global failure cap, no admin route on the door | Cleartext, and a bounded DoS; auto-close is Later (D12) |
+| Replay, oracle | One atomic statement, one generic refusal, poll 404 for unknown id and wrong secret, constant-time compare, token wiped on delivery | None found |
+
+### Build order
+
+1. Confirm at join in the core and the admin confirm and deny routes, the global failure cap, name-clash check at mint and confirm. No door needed.
+2. Door skeleton and limits (shared module extracted from `guest_door.rs`; guest tests stay green). Security review.
+3. Redeem and poll routes. Security review.
+4. `ember-node enrol`, the token-file fallback and the TLS feature; dependants' `Cargo.lock` files in the same PR.
+5. App: mint dialog with command and warning, the "wants to join" card, rename on a name clash.
+6. A real two-machine run by the owner (LAN, then through a TLS proxy). It gates marking `FR-C1` and `FR-C2` verified.
+
+### Later
+
+- **D12, door auto-close.** Open and close the door at runtime for the life of a pending code (needs a bind and unbind path the guest door lacks).
+- **D7, sealed delivery.** The node sends an ephemeral X25519 key in `node_public_info`; the server seals the credential with an AEAD to it. Removes the passive-sniffer case; an active MITM still needs TLS.
+- **D8, server fingerprint pinning.** `--server-fingerprint` in the command, checked against the server's reply; needs the server to expose its peer id first.
 
 ### Not verified
 
-Nothing in this unit is compiled or run. The migration, the `UPDATE ... RETURNING` statement (needs SQLite 3.35, bundled by `rusqlite`), the route merge with `/api/computers/{id}` (a static segment should win over a parameter) and the tracing capture test need a builder run. No real second machine or network was involved.
+Nothing of the FR-C2 design is built, compiled or run. The unknowns are how the server exposes its own peer id, whether an X25519 crate is already in `Cargo.lock`, whether the node's reqwest has TLS, and whether 8741 is the node port everywhere. The LAN path, a real browser confirm, a node behind NAT, TLS in front of the door, XFF behind a real proxy and sniffing need two real machines and are UNVERIFIED.

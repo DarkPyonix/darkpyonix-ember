@@ -9,6 +9,7 @@ pub mod characters;
 pub mod coexist;
 pub mod cr;
 pub mod compat;
+pub mod add_computer;
 pub mod agents;
 pub mod channel_owner;
 pub mod channels;

@@ -32,7 +32,9 @@ pub use crate::ui::routines::{
     last_run_text, minutes_at, ms_to_minutes, name_from_prompt, new_schedule, next_run,
     overall_success, pane_mode, run_from_server, schedule_line, schedule_patch,
     schedule_to_entry, schedule_to_routine, success_percent, weekday, weekday_bars, DayBar,
-    Entry, FormDraft, FormError, Group, LocalStore, Minutes, PaneMode, Routine, RoutineKpi,
+    Entry, FormDraft, FormError, FormField, Leave, LeaveDecision, leave_decision, routine_form_dirty,
+    ROUTINE_DISCARD_QUESTION, FormLayout, Group, FORM_FIELDS, form_layout,
+    model_choices, schedule_description, when_big_max_lines, LocalStore, Minutes, PaneMode, Routine, RoutineKpi,
     RoutineStore, Run, RunStatus, StoreError, Trigger, LOCAL_NOTE, LOCAL_OFFSET_MIN, OFFLINE_NOTE,
 };
 use crate::ui::home::{
@@ -41,7 +43,7 @@ use crate::ui::home::{
 };
 use super::components::{
     pill_colors, pill_metrics, AppButton, ButtonKind, EmberCard, EmberField, EmberSheet, InsetPanel,
-    FieldOptions, Label, PickChip, Pill, PillTone, SheetFooter,
+    FieldOptions, Label, PickChip, Pill, PillTone, Select, SheetFooter,
 };
 use super::project::PHONE_MENU_ROOM;
 use super::shell::NavIcon;
@@ -492,6 +494,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
     let launch_tick = try_services().map(|s| s.ui.live.launcher.get()).unwrap_or(0);
     let tick = remember(|| mutable_state_of(0_u32));
     let entries_for_preset = entries.clone();
+    let entries_for_selected = entries.clone();
     let selected = remember_with_key(launch_tick, move || {
         let preset = std::env::var("EMBER_CR_ROUTINE")
             .ok()
@@ -499,14 +502,30 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             .and_then(|v| {
                 v.parse::<usize>()
                     .ok()
-                    .and_then(|i| entries_for_preset.get(i))
+                    .and_then(|i| entries_for_selected.get(i))
                     .map(|e| e.routine.id.clone())
                     .or(Some(v))
             });
         mutable_state_of(preset)
     });
     let panel_preset = capture_edit_panel(selected.get().as_deref());
+    let preset_initial = match &panel_preset {
+        Panel::Edit(id) => entries_for_preset
+            .iter()
+            .find(|e| e.routine.id == *id)
+            .map(|e| FormDraft::from_routine(&e.routine)),
+        _ => None,
+    }
+    .unwrap_or_else(|| FormDraft::new(DEFAULT_PROJECT));
     let panel = remember_with_key(launch_tick, move || mutable_state_of(panel_preset));
+    // The form's draft and the draft it opened with live here, so every route out of the form
+    // can ask whether it holds changes (FR-L25, #511).
+    let form_draft = remember_with_key(launch_tick, {
+        let d = preset_initial.clone();
+        move || mutable_state_of(d)
+    });
+    let form_init = remember_with_key(launch_tick, move || mutable_state_of(preset_initial));
+    let pending_leave = remember_with_key(launch_tick, || mutable_state_of(None::<Leave>));
     let filter = remember_with_key(launch_tick, || mutable_state_of(None::<String>));
     let query = remember_with_key(launch_tick, || mutable_state_of(String::new()));
     let capture_sel = selected.get();
@@ -728,6 +747,64 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
         }
     };
 
+    let form_panel = panel.get();
+    let form_initial = match &form_panel {
+        Panel::View => None,
+        Panel::New => Some((form_init.get(), None)),
+        Panel::Edit(id) => cur_entries
+            .iter()
+            .any(|e| e.routine.id == *id)
+            .then(|| (form_init.get(), Some(id.clone()))),
+    };
+    let form_dirty = form_initial.is_some() && routine_form_dirty(&form_init.get(), &form_draft.get());
+
+    // Opening a form starts it from the stored routine (or an empty draft) and remembers that
+    // starting point, which is what "changed" is measured against.
+    let perform = {
+        let (panel, selected, form_draft, form_init) =
+            (panel.clone(), selected.clone(), form_draft.clone(), form_init.clone());
+        let (entries_st, filter) = (entries_state.clone(), filter.clone());
+        move |leave: Leave| {
+            let open_form = |p: Panel| {
+                let init = match &p {
+                    Panel::Edit(id) => entries_st
+                        .get()
+                        .iter()
+                        .find(|e| e.routine.id == *id)
+                        .map(|e| FormDraft::from_routine(&e.routine)),
+                    _ => None,
+                }
+                .unwrap_or_else(|| FormDraft::new(filter.get().as_deref().unwrap_or(DEFAULT_PROJECT)));
+                form_init.set(init.clone());
+                form_draft.set(init);
+                panel.set(p);
+            };
+            match leave {
+                Leave::Cancel => panel.set(Panel::View),
+                Leave::OpenRoutine(id) => {
+                    panel.set(Panel::View);
+                    selected.set(Some(id));
+                    if let Some(d) = detail_state() {
+                        d.set(true);
+                    }
+                }
+                Leave::NewForm => open_form(Panel::New),
+                Leave::EditForm(id) => open_form(Panel::Edit(id)),
+            }
+        }
+    };
+    let request_leave = {
+        let (perform, pending) = (perform.clone(), pending_leave.clone());
+        let open = form_initial.is_some();
+        move |leave: Leave| match leave_decision(open, form_dirty, false) {
+            LeaveDecision::Go => perform(leave),
+            LeaveDecision::Ask => pending.set(Some(leave)),
+            LeaveDecision::Block => {}
+        }
+    };
+
+    let inline_form = form_initial.is_some() && form_layout(mode) == FormLayout::Inline;
+
     cu::ScrollColumn()
         .modifier(Modifier::new().fill_max_width().fill_max_height())
         .content(|| {
@@ -736,7 +813,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 .modifier(Modifier::new().fill_max_width().padding(pad))
                 .content(|| {
                     if mode != PaneMode::DetailOnly {
-                        let panel_new = panel.clone();
+                        let rl_new = request_leave.clone();
                         RoutineHeader(compact, move || {
                             if compact {
                                 cu::Box()
@@ -751,7 +828,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     .alignment(Alignment::Center)
                                     .content(move || {
                                         NavIcon(super::shell::ICON_PLUS_SVG, p.ink_text.to_argb(), 18.0);
-                                        FocusOverlay("새 루틴", move || panel_new.set(Panel::New));
+                                        FocusOverlay("새 루틴", move || rl_new(Leave::NewForm));
                                     });
                             } else {
                                 let label = "새 루틴";
@@ -770,7 +847,7 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             .border(1.0, paint(p.ink))
                                             .shape_role(ShapeRole::Full),
                                     )
-                                    .on_click(move || panel_new.set(Panel::New));
+                                    .on_click(move || rl_new(Leave::NewForm));
                             }
                         });
                     }
@@ -797,17 +874,31 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                         &computers,
                                         {
                                             let sel = selected.clone();
-                                            move |id| {
-                                                sel.set(Some(id));
-                                                if let Some(d) = detail_state() {
-                                                    d.set(true);
-                                                }
-                                            }
+                                            // Opening another routine leaves the inline form, asking first.
+                                            let rl = request_leave.clone();
+                                            move |id| rl(Leave::OpenRoutine(id))
                                         },
                                         on_toggle.clone(),
                                     );
                                 });
                                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                                    if let (true, Some((initial, editing))) = (inline_form, form_initial.as_ref()) {
+                                        let rl_close = request_leave.clone();
+                                        let save_cb = on_save.clone();
+                                        let editing_save = editing.clone();
+                                        RoutineForm(
+                                            initial.clone(),
+                                            editing.clone(),
+                                            editing.as_deref().is_some_and(is_remote),
+                                            &computers,
+                                            &existing_projects,
+                                            FormLayout::Inline,
+                                            &form_draft,
+                                            move |d| save_cb((d, editing_save.clone())),
+                                            move || rl_close(Leave::Cancel),
+                                        );
+                                        return;
+                                    }
                                     DetailPane(
                                         detail.as_ref(),
                                         now,
@@ -825,8 +916,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                             }
                                         },
                                         {
-                                            let pan = panel.clone();
-                                            move |id| pan.set(Panel::Edit(id))
+                                            let rl = request_leave.clone();
+                                            move |id| rl(Leave::EditForm(id))
                                         },
                                         on_run_now.clone(),
                                         on_toggle.clone(),
@@ -874,8 +965,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                                     }
                                 },
                                 {
-                                    let pan = panel.clone();
-                                    move |id| pan.set(Panel::Edit(id))
+                                    let rl = request_leave.clone();
+                                    move |id| rl(Leave::EditForm(id))
                                 },
                                 on_run_now.clone(),
                                 on_toggle.clone(),
@@ -888,21 +979,8 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
                 });
         });
 
-    let form_panel = panel.get();
-    let form_initial = match &form_panel {
-        Panel::View => None,
-        Panel::New => Some((
-            FormDraft::new(filter.get().as_deref().unwrap_or(DEFAULT_PROJECT)),
-            None,
-        )),
-        Panel::Edit(id) => cur_entries
-            .iter()
-            .find(|e| e.routine.id == *id)
-            .map(|e| (FormDraft::from_routine(&e.routine), Some(id.clone()))),
-    };
-
-    if let Some((initial, editing)) = form_initial {
-        let panel_close = panel.clone();
+    if let (false, Some((initial, editing))) = (inline_form, form_initial) {
+        let rl_close = request_leave.clone();
         let save_cb = on_save.clone();
         RoutineForm(
             initial,
@@ -910,9 +988,34 @@ pub fn RoutinesScreenWith(entries: Vec<Entry>, online: bool) {
             editing.as_deref().is_some_and(is_remote),
             &computers,
             &existing_projects,
+            FormLayout::Sheet,
+            &form_draft,
             move |d| save_cb((d, editing.clone())),
-            move || panel_close.set(Panel::View),
+            move || rl_close(Leave::Cancel),
         );
+    }
+    // The unsaved-changes question: 버리기 goes where the user was going, 계속 편집 stays.
+    {
+        let keep = {
+            let c = pending_leave.clone();
+            move || c.set(None)
+        };
+        let asked = pending_leave.get();
+        EmberSheet("변경 사항", asked.is_some(), keep.clone(), None, || {
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
+                Label(ROUTINE_DISCARD_QUESTION, Fs::Md, Weight::Regular, None, Some(3));
+            });
+            SheetFooter(|| {
+                AppButton("계속 편집", None, ButtonKind::Default, true, true, false, keep.clone());
+                let (c, perform) = (pending_leave.clone(), perform.clone());
+                AppButton("버리기", None, ButtonKind::Primary, true, true, false, move || {
+                    if let Some(l) = c.get() {
+                        c.set(None);
+                        perform(l);
+                    }
+                });
+            });
+        });
     }
 }
 
@@ -1289,6 +1392,7 @@ fn ListPane(
                                 bare: true,
                                 background: Some(Paint::Literal(Color::argb(0))),
                                 border_width: Some(0.0),
+                                border_color: Some(Paint::Literal(Color::argb(0))),
                                 height: Some(H_BTN),
                                 fill_max_width: true,
                                 placeholder: "루틴 검색".to_string(),
@@ -1645,7 +1749,7 @@ fn DetailPane(
                     // Schedule & Ring
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[3]).modifier(Modifier::new().fill_max_width()).content(move || {
                         cu::Column().modifier(Modifier::new().weight(1.0)).spacing(SP[0]).content(move || {
-                            Label(&when_big, Fs::Xl4, Weight::Semibold, None, Some(1));
+                            Label(&when_big, if routine_trigger == Trigger::Event { Fs::Xl2 } else { Fs::Xl4 }, Weight::Semibold, None, Some(when_big_max_lines(routine_trigger)));
                             Label(&routine_line, Fs::Sm, Weight::Medium, None, Some(1));
                             if routine_trigger == Trigger::Time && cron_valid(&routine_cron) {
                                 Label(&routine_cron, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
@@ -1759,53 +1863,109 @@ fn RunTile(run: &Run, now: Minutes, simulated: bool) {
 // Routine form
 // ---------------------------------------------------------------------------------------------
 
+/// The state and handlers both form shells (inline panel, sheet) share, so the save path is
+/// written once (FR-L25, #511).
+#[derive(Clone)]
+struct FormCtx {
+    draft: MutableState<FormDraft>,
+    tried: MutableState<bool>,
+    initial: FormDraft,
+    editing: bool,
+    server: bool,
+    computers: Vec<(String, String)>,
+    projects: Vec<String>,
+}
+
+/// The 저장 handler of either shell: validate, then hand the draft to the one save path.
+fn form_save_handler(
+    draft: MutableState<FormDraft>,
+    tried: MutableState<bool>,
+    mut on_save: impl FnMut(FormDraft) + 'static,
+) -> impl FnMut() + 'static {
+    move || {
+        let cur = draft.get();
+        if cur.errors().is_empty() {
+            on_save(cur);
+        } else {
+            tried.set(true);
+        }
+    }
+}
+
 fn RoutineForm(
     initial: FormDraft,
     editing: Option<String>,
     server: bool,
     computers: &[(String, String)],
     projects: &[String],
-    mut on_save: impl FnMut(FormDraft) + Clone + 'static,
-    mut on_close: impl FnMut() + Clone + 'static,
+    layout: FormLayout,
+    draft: &MutableState<FormDraft>,
+    on_save: impl FnMut(FormDraft) + Clone + 'static,
+    on_close: impl FnMut() + Clone + 'static,
 ) {
     let p = ember_theme().palette;
-    let draft = remember(|| mutable_state_of(initial.clone()));
+    let draft = draft.clone();
     let tried = remember(|| mutable_state_of(false));
-
-    let agents = live_agents();
-    let d = draft.get();
-    let errors = d.errors();
-    let mut project_choices = project_options(projects);
-    if !project_choices.contains(&d.sel.project) {
-        project_choices.push(d.sel.project.clone());
-    }
-    let models = filter_models(&model_catalog(), Some(d.sel.option.harness), "");
+    let ctx = FormCtx {
+        draft,
+        tried,
+        initial: initial.clone(),
+        editing: editing.is_some(),
+        server,
+        computers: computers.to_vec(),
+        projects: projects.to_vec(),
+    };
     let title = if editing.is_some() {
         "루틴 편집"
     } else {
         "새 루틴"
     };
-    let schedule_hint = match d.trigger {
-        Trigger::Time => {
-            let now = now_local();
-            match next_run(d.cron.trim(), now) {
-                Some(t) => format!(
-                    "{} · 다음 실행 {}",
-                    describe_cron(d.cron.trim()),
-                    format_next(t, now)
-                ),
-                None => describe_cron(d.cron.trim()),
-            }
-        }
-        Trigger::Event => "이벤트가 일어날 때 실행됩니다".to_string(),
-    };
+
+    if layout == FormLayout::Inline {
+        // The detail area: a card with the title, 취소 and 저장 in its header, then the fields
+        // in the page's own scroll (mockup v8: the form replaces the detail panel).
+        let (close, save) = (on_close.clone(), form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
+        EmberCard(false, true, None, Some(0.0), None, move || {
+            cu::Column().modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Row()
+                    .alignment(Alignment::CenterStart)
+                    .spacing(SP[2])
+                    .modifier(Modifier::new().fill_max_width().height(64.0).padding(16.0))
+                    .content(move || {
+                        cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
+                            Label(title, Fs::Xl, Weight::Semibold, None, Some(1));
+                        });
+                        let mut close = close;
+                        AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
+                        AppButton("저장", None, ButtonKind::Primary, true, true, false, save);
+                    });
+                cu::Spacer().modifier(Modifier::new().fill_max_width().height(1.0).background(paint(p.line)));
+                // The first error also sits under the header buttons once a save was tried, so
+                // it is seen without scrolling to the end of the form.
+                if ctx.tried.get() {
+                    if let Some(e) = ctx.draft.get().errors().first() {
+                        cu::Column().modifier(Modifier::new().fill_max_width().padding(16.0)).content(|| {
+                            Label(e.message(), Fs::Sm, Weight::Medium, Some(paint(p.red.strong)), Some(2));
+                        });
+                    }
+                }
+                cu::Column()
+                    .spacing(SP[3])
+                    .modifier(Modifier::new().fill_max_width().padding(16.0))
+                    .content(move || {
+                        FormFields(&ctx);
+                        // The last field clears the page bottom.
+                        cu::Spacer().modifier(Modifier::new().height(SP[4]));
+                    });
+            });
+        });
+        return;
+    }
 
     let body_height = {
         let w = current_window_size();
         super::components::sheet_body_max_height(w.width_dp, w.height_dp, false, 60.0 + 65.0).min(600.0)
     };
-    let comp_list = computers.to_vec();
-
     EmberSheet(title, true, on_close.clone(), None, move || {
         cu::ScrollColumn()
             .modifier(Modifier::new().fill_max_width().height(body_height))
@@ -1813,197 +1973,211 @@ fn RoutineForm(
                 cu::Column()
                     .spacing(SP[3])
                     .modifier(Modifier::new().fill_max_width().padding(SP[4]))
-                    .content(|| {
-                        if editing.is_some() {
-                            Label(
-                                "입력하지 않은 항목은 지금 값을 유지합니다",
-                                Fs::Xs,
-                                Weight::Regular,
-                                Some(paint(p.muted)),
-                                None,
-                            );
-                        }
-                        // TODO(compose-rust#374): the text field has no initial value, so each
-                        // text field shows the stored value on a "현재 값" line above it and stays
-                        // empty; typing replaces the value, leaving it empty keeps it. The chips
-                        // below already start on the stored project, harness, model, mode and
-                        // computer (the draft is built by `FormDraft::from_routine`).
-                        FormLabel("이름");
-                        if server {
-                            Label(NAME_SERVER_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                        } else {
-                            CurrentValue(editing.is_some(), &initial.name);
-                        }
-                        let draft_name = draft.clone();
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            // TODO(server): `SchedulePatch` takes no name, so a server routine's
-                            // name is shown as is and cannot be edited.
-                            text: server.then(|| initial.name.clone()),
-                            enabled: server.then_some(false),
-                            placeholder: if editing.is_some() {
-                                "바꾸려면 새 이름을 입력하세요".to_string()
-                            } else {
-                                "예: develop CI 실패 요약".to_string()
-                            },
-                            on_value_change: Some(Box::new(move |v| {
-                                draft_name.update(|d| d.name = v);
-                            })),
-                            ..Default::default()
-                        });
-                        FormLabel("프로젝트");
-                        FrozenReason(server);
-                        cu::ScrollRow()
-                            .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                            .content(|| {
-                                for name in &project_choices {
-                                    let sel_proj = draft.clone();
-                                    let n = name.clone();
-                                    let selected = d.sel.project == *name;
-                                    PickChip(name, None, selected, false, move || {
-                                        if server {
-                                            return;
-                                        }
-                                        sel_proj.update(|d| d.sel.project = n.clone());
-                                    });
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                }
-                            });
-                        FormLabel("트리거");
-                        cu::Row().spacing(SP[1]).content(|| {
-                            for t in Trigger::ALL {
-                                let sel_trig = draft.clone();
-                                PickChip(t.label(), None, d.trigger == t, false, move || {
-                                    sel_trig.update(|d| *d = d.with_trigger(t));
-                                });
-                            }
-                        });
-                        FormLabel(if d.trigger == Trigger::Time { "일정 (cron)" } else { "이벤트" });
-                        CurrentValue(editing.is_some() && initial.trigger == d.trigger, &initial.cron);
-                        let sel_cron = draft.clone();
-                        let ph = if editing.is_some() && initial.trigger == d.trigger {
-                            "바꾸려면 새 값을 입력하세요".to_string()
-                        } else if d.trigger == Trigger::Time {
-                            "0 9 * * *".to_string()
-                        } else {
-                            "예: PR이 열릴 때".to_string()
-                        };
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            placeholder: ph,
-                            on_value_change: Some(Box::new(move |v| {
-                                sel_cron.update(|d| d.cron = v);
-                            })),
-                            ..Default::default()
-                        });
-                        Label(&schedule_hint, Fs::Xs, Weight::Regular, Some(paint(p.text_2)), Some(2));
-                        FormLabel("하네스");
-                        FrozenReason(server);
-                        cu::ScrollRow()
-                            .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                            .content(|| {
-                                for h in Harness::ALL {
-                                    if harness_block(h, &agents, &[]).is_none() {
-                                        let sel_h = draft.clone();
-                                        PickChip(h.label(), None, d.sel.option.harness == h, false, move || {
-                                            if !server {
-                                                sel_h.update(|d| d.sel = d.sel.with_harness(h));
-                                            }
-                                        });
-                                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                    }
-                                }
-                            });
-                        FormLabel("모델과 추론 강도");
-                        cu::ScrollRow()
-                            .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                            .content(|| {
-                                for o in &models {
-                                    let sel_o = draft.clone();
-                                    let opt = *o;
-                                    PickChip(&o.row_title(), None, d.sel.option == *o, false, move || {
-                                        sel_o.update(|d| d.sel = d.sel.with_option(opt));
-                                    });
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                }
-                            });
-                        Label("프로필은 하네스를 따릅니다. 계정을 따로 고르지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
-                        FormLabel("권한 모드");
-                        cu::ScrollRow()
-                            .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                            .content(|| {
-                                for m in modes_for(d.sel.option.harness).iter().copied() {
-                                    let sel_m = draft.clone();
-                                    PickChip(m.label(), None, d.sel.mode == m, false, move || {
-                                        sel_m.update(|d| d.sel = d.sel.with_mode(m));
-                                    });
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                }
-                            });
-                        FormLabel("컴퓨터");
-                        FrozenReason(server);
-                        cu::ScrollRow()
-                            .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
-                            .content(|| {
-                                let sel_c = draft.clone();
-                                PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
-                                    if !server {
-                                        sel_c.update(|d| d.sel.computer = None);
-                                    }
-                                });
-                                cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                for (cid, cname) in &comp_list {
-                                    let sel_c = draft.clone();
-                                    let cid_clone = cid.clone();
-                                    let selected = d.sel.computer.as_deref() == Some(cid.as_str());
-                                    PickChip(cname, None, selected, false, move || {
-                                        if !server {
-                                            sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
-                                        }
-                                    });
-                                    cu::Spacer().modifier(Modifier::new().width(SP[1]));
-                                }
-                            });
-                        FormLabel("프롬프트");
-                        CurrentValue(editing.is_some(), &initial.prompt);
-                        let sel_p = draft.clone();
-                        EmberField(FieldOptions {
-                            fill_max_width: true,
-                            height: Some(120.0),
-                            multiline: true,
-                            placeholder: if editing.is_some() {
-                                "바꾸려면 새 지시를 입력하세요".to_string()
-                            } else {
-                                "에이전트에게 매번 줄 지시를 적어 주세요".to_string()
-                            },
-                            on_value_change: Some(Box::new(move |v| {
-                                sel_p.update(|d| d.prompt = v);
-                            })),
-                            ..Default::default()
-                        });
-                        if tried.get() {
-                            for e in errors {
-                                Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
-                            }
-                        }
-                    });
+                    .content(|| FormFields(&ctx));
             });
         SheetFooter(move || {
             let mut close = on_close.clone();
             AppButton("취소", None, ButtonKind::Default, true, true, false, move || close());
-            let mut save = on_save.clone();
-            let draft_save = draft.clone();
-            let tried_set = tried.clone();
-            AppButton("저장", None, ButtonKind::Primary, true, true, false, move || {
-                let cur = draft_save.get();
-                if cur.errors().is_empty() {
-                    save(cur);
-                } else {
-                    tried_set.set(true);
-                }
-            });
+            AppButton("저장", None, ButtonKind::Primary, true, true, false, form_save_handler(ctx.draft.clone(), ctx.tried.clone(), on_save.clone()));
         });
     });
+}
+
+/// The fields, in `FORM_FIELDS` order, for both shells.
+fn FormFields(ctx: &FormCtx) {
+    let p = ember_theme().palette;
+    let (draft, tried, initial, server) = (&ctx.draft, &ctx.tried, &ctx.initial, ctx.server);
+    let editing = ctx.editing;
+    let agents = live_agents();
+    let d = draft.get();
+    let errors = d.errors();
+    let mut project_choices = project_options(&ctx.projects);
+    if !project_choices.contains(&d.sel.project) {
+        project_choices.push(d.sel.project.clone());
+    }
+    let allowed: Vec<Harness> = Harness::ALL
+        .iter()
+        .copied()
+        .filter(|h| harness_block(*h, &agents, &[]).is_none())
+        .collect();
+    let models = model_choices(&model_catalog(), &allowed, d.sel.option.harness, server);
+    let model_labels: Vec<String> = models.iter().map(|o| o.chip_label()).collect();
+    let model_at = models.iter().position(|o| *o == d.sel.option).unwrap_or(0);
+    let modes: Vec<crate::ui::home::PermMode> = modes_for(d.sel.option.harness).to_vec();
+    let mode_labels: Vec<String> = modes.iter().map(|m| m.label().to_string()).collect();
+    let mode_at = modes.iter().position(|m| *m == d.sel.mode).unwrap_or(0);
+    let schedule_hint = schedule_description(d.trigger, &d.cron, now_local());
+
+    if editing {
+        Label(
+            "입력하지 않은 항목은 지금 값을 유지합니다",
+            Fs::Xs,
+            Weight::Regular,
+            Some(paint(p.muted)),
+            None,
+        );
+    }
+    // TODO(compose-rust#374): the text field has no initial value, so each text field shows the
+    // stored value on a "현재 값" line above it and stays empty; typing replaces the value,
+    // leaving it empty keeps it. The pickers start on the stored project, harness, model, mode
+    // and computer (the draft is built by `FormDraft::from_routine`).
+    for f in FORM_FIELDS {
+        match f {
+            FormField::Name => {
+                FormLabel("이름");
+                if server {
+                    Label(NAME_SERVER_REASON, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+                } else {
+                    CurrentValue(editing, &initial.name);
+                }
+                let draft_name = draft.clone();
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    // TODO(server): `SchedulePatch` takes no name, so a server routine's name is
+                    // shown as is and cannot be edited.
+                    text: server.then(|| initial.name.clone()),
+                    enabled: server.then_some(false),
+                    placeholder: if editing {
+                        "바꾸려면 새 이름을 입력하세요".to_string()
+                    } else {
+                        "예: develop CI 실패 요약".to_string()
+                    },
+                    on_value_change: Some(Box::new(move |v| {
+                        draft_name.update(|d| d.name = v);
+                    })),
+                    ..Default::default()
+                });
+            }
+            FormField::Project => {
+                FormLabel("프로젝트");
+                FrozenReason(server);
+                cu::ScrollRow()
+                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
+                    .content(|| {
+                        for name in &project_choices {
+                            let sel_proj = draft.clone();
+                            let n = name.clone();
+                            let selected = d.sel.project == *name;
+                            PickChip(name, None, selected, false, move || {
+                                if server {
+                                    return;
+                                }
+                                sel_proj.update(|d| d.sel.project = n.clone());
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        }
+                    });
+            }
+            FormField::Trigger => {
+                FormLabel("트리거");
+                cu::Row().spacing(SP[1]).content(|| {
+                    for t in Trigger::ALL {
+                        let sel_trig = draft.clone();
+                        PickChip(t.label(), None, d.trigger == t, false, move || {
+                            sel_trig.update(|d| *d = d.with_trigger(t));
+                        });
+                    }
+                });
+            }
+            FormField::ScheduleDescription => {
+                // Read only: the server stores no description, so this is the schedule in words.
+                FormLabel("일정 설명");
+                Label(&schedule_hint, Fs::Sm, Weight::Regular, Some(paint(p.text_2)), Some(2));
+            }
+            FormField::Schedule => {
+                FormLabel(if d.trigger == Trigger::Time { "cron" } else { "이벤트" });
+                CurrentValue(editing && initial.trigger == d.trigger, &initial.cron);
+                let sel_cron = draft.clone();
+                let ph = if editing && initial.trigger == d.trigger {
+                    "바꾸려면 새 값을 입력하세요".to_string()
+                } else if d.trigger == Trigger::Time {
+                    "0 9 * * *".to_string()
+                } else {
+                    "예: PR이 열릴 때".to_string()
+                };
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    placeholder: ph,
+                    on_value_change: Some(Box::new(move |v| {
+                        sel_cron.update(|d| d.cron = v);
+                    })),
+                    ..Default::default()
+                });
+            }
+            FormField::Model => {
+                FormLabel("하네스 · 모델 · 추론 강도");
+                FrozenReason(server);
+                let (pick, choices) = (draft.clone(), models.clone());
+                Select(&model_labels[model_at.min(model_labels.len().saturating_sub(1))], &model_labels, model_at, 320.0, move |i| {
+                    if let Some(o) = choices.get(i).copied() {
+                        pick.update(|d| {
+                            d.sel = d.sel.with_harness(o.harness).with_option(o);
+                        });
+                    }
+                });
+                Label("프로필은 하네스를 따릅니다. 계정을 따로 고르지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(2));
+            }
+            FormField::Mode => {
+                FormLabel("권한 모드");
+                let (pick, choices) = (draft.clone(), modes.clone());
+                Select(&mode_labels[mode_at], &mode_labels, mode_at, 300.0, move |i| {
+                    if let Some(m) = choices.get(i).copied() {
+                        pick.update(|d| d.sel = d.sel.with_mode(m));
+                    }
+                });
+            }
+            FormField::Computer => {
+                FormLabel("컴퓨터");
+                FrozenReason(server);
+                cu::ScrollRow()
+                    .modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0]))
+                    .content(|| {
+                        let sel_c = draft.clone();
+                        PickChip("이 서버", None, d.sel.computer.is_none(), false, move || {
+                            if !server {
+                                sel_c.update(|d| d.sel.computer = None);
+                            }
+                        });
+                        cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        for (cid, cname) in &ctx.computers {
+                            let sel_c = draft.clone();
+                            let cid_clone = cid.clone();
+                            let selected = d.sel.computer.as_deref() == Some(cid.as_str());
+                            PickChip(cname, None, selected, false, move || {
+                                if !server {
+                                    sel_c.update(|d| d.sel.computer = Some(cid_clone.clone()));
+                                }
+                            });
+                            cu::Spacer().modifier(Modifier::new().width(SP[1]));
+                        }
+                    });
+            }
+            FormField::Prompt => {
+                FormLabel("프롬프트");
+                CurrentValue(editing, &initial.prompt);
+                let sel_p = draft.clone();
+                EmberField(FieldOptions {
+                    fill_max_width: true,
+                    height: Some(120.0),
+                    multiline: true,
+                    placeholder: if editing {
+                        "바꾸려면 새 지시를 입력하세요".to_string()
+                    } else {
+                        "에이전트에게 매번 줄 지시를 적어 주세요".to_string()
+                    },
+                    on_value_change: Some(Box::new(move |v| {
+                        sel_p.update(|d| d.prompt = v);
+                    })),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    if tried.get() {
+        for e in errors {
+            Label(e.message(), Fs::Xs, Weight::Regular, Some(paint(p.red.strong)), None);
+        }
+    }
 }
 
 /// The reason beside the chips a server routine cannot change (TODO(server)).
@@ -2521,6 +2695,121 @@ mod tests {
         let nav = if w >= 1280.0 { 234.0 } else if compact { 0.0 } else { 72.0 };
         let pad = if compact { SP[3] } else { SP[6] };
         (w - nav - 2.0 * pad, compact)
+    }
+
+    #[test]
+    fn fr_l25_form_is_inline_where_the_detail_area_exists_and_a_sheet_when_compact() {
+        for (w, expect) in [
+            (1440.0, FormLayout::Inline),
+            (1024.0, FormLayout::Inline),
+            (768.0, FormLayout::Inline),
+            (390.0, FormLayout::Sheet),
+        ] {
+            let (_, compact) = content_at(w);
+            // New is pressed from the list, edit from an open detail: both layouts agree.
+            for open in [false, true] {
+                assert_eq!(form_layout(pane_mode(compact, open)), expect, "width {w}, open {open}");
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l25_form_is_dirty_when_any_field_differs_from_where_it_opened() {
+        let init = FormDraft::new("ember");
+        assert!(!routine_form_dirty(&init, &init.clone()));
+        let mut d = init.clone();
+        d.name = "a".into();
+        assert!(routine_form_dirty(&init, &d));
+        d.name.clear();
+        assert!(!routine_form_dirty(&init, &d), "typing and deleting again is clean");
+        for edit in [
+            |d: &mut FormDraft| d.cron = "0 10 * * *".into(),
+            |d: &mut FormDraft| d.prompt = "x".into(),
+            |d: &mut FormDraft| d.sel.project = "core".into(),
+            |d: &mut FormDraft| d.sel.computer = Some("c1".into()),
+            |d: &mut FormDraft| d.sel = d.sel.with_harness(Harness::Codex),
+            |d: &mut FormDraft| *d = d.with_trigger(Trigger::Event),
+        ] {
+            let mut d = init.clone();
+            edit(&mut d);
+            assert!(routine_form_dirty(&init, &d));
+        }
+        let mut m = init.clone();
+        m.sel = m.sel.with_mode(PermMode::Plan);
+        assert!(routine_form_dirty(&init, &m));
+    }
+
+    #[test]
+    fn fr_l25_every_route_out_of_a_dirty_form_asks_and_a_clean_one_goes() {
+        assert_eq!(leave_decision(true, true, false), LeaveDecision::Ask);
+        assert_eq!(leave_decision(true, false, false), LeaveDecision::Go);
+        assert_eq!(leave_decision(false, true, false), LeaveDecision::Go, "no form, nothing to lose");
+        assert_eq!(leave_decision(true, true, true), LeaveDecision::Block);
+        assert_eq!(leave_decision(true, false, true), LeaveDecision::Block);
+    }
+
+    #[test]
+    fn fr_l25_form_routes_all_go_through_request_leave() {
+        let src = include_str!("routines.rs");
+        let screen = src.split("pub fn RoutinesScreenWith").nth(1).unwrap().split("pub fn preview").next().unwrap();
+        for route in ["Leave::NewForm", "Leave::OpenRoutine", "Leave::Cancel", "Leave::EditForm"] {
+            assert!(screen.contains(route), "{route}");
+        }
+        assert!(!screen.contains("pan.set(Panel::Edit"));
+        assert!(!screen.contains("panel_new.set"));
+        assert_eq!(ROUTINE_DISCARD_QUESTION, "변경 사항을 버릴까요?");
+    }
+
+    #[test]
+    fn fr_l25_form_fields_follow_the_mockup_order_with_one_model_picker() {
+        assert_eq!(
+            FORM_FIELDS,
+            [
+                FormField::Name,
+                FormField::Project,
+                FormField::Trigger,
+                FormField::ScheduleDescription,
+                FormField::Schedule,
+                FormField::Model,
+                FormField::Mode,
+                FormField::Computer,
+                FormField::Prompt,
+            ]
+        );
+        // One picker for harness, model and effort: no separate harness field.
+        assert_eq!(FORM_FIELDS.iter().filter(|f| **f == FormField::Model).count(), 1);
+    }
+
+    #[test]
+    fn fr_l25_model_picker_lists_every_runnable_harness_but_one_for_a_server_routine() {
+        let all = model_catalog();
+        let free = model_choices(&all, &[Harness::ClaudeCode, Harness::Codex], Harness::ClaudeCode, false);
+        assert!(free.iter().any(|o| o.harness == Harness::ClaudeCode));
+        assert!(free.iter().any(|o| o.harness == Harness::Codex));
+        assert!(!free.iter().any(|o| o.harness == Harness::Gemini));
+        let server = model_choices(&all, &[Harness::ClaudeCode, Harness::Codex], Harness::Codex, true);
+        assert!(!server.is_empty() && server.iter().all(|o| o.harness == Harness::Codex));
+        // The current harness stays listed even when it cannot run now, so the picker shows it.
+        let kept = model_choices(&all, &[], Harness::Codex, false);
+        assert!(kept.iter().all(|o| o.harness == Harness::Codex) && !kept.is_empty());
+    }
+
+    #[test]
+    fn fr_l25_schedule_description_reads_the_cron_and_the_event() {
+        let now = at(2026, 11, 6, 8, 0);
+        let t = schedule_description(Trigger::Time, "0 9 * * *", now);
+        assert!(t.starts_with("매일 오전 9시 · 다음 실행"), "{t}");
+        assert_eq!(schedule_description(Trigger::Time, "nope", now), describe_cron("nope"));
+        assert_eq!(
+            schedule_description(Trigger::Event, "pull_request.opened", now),
+            "이벤트가 일어날 때 실행됩니다"
+        );
+    }
+
+    #[test]
+    fn fr_l25_event_title_wraps_and_a_time_stays_on_one_line() {
+        assert_eq!(when_big_max_lines(Trigger::Time), 1);
+        assert!(when_big_max_lines(Trigger::Event) > 1);
     }
 
     #[test]

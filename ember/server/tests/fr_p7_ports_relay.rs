@@ -55,6 +55,7 @@ async fn fr_p7_ports_relay_returns_the_node_list_and_errors_map() {
         assert_eq!(r.status(), 200);
         let empty: PortsResponse = r.json().await.unwrap();
         assert!(empty.ports.is_empty());
+        assert_eq!(empty.supported, cfg!(any(target_os = "linux", target_os = "macos")));
 
         // A node job that listens shows up through the relay (Linux and macOS, with python3).
         let have_python = std::process::Command::new("python3").arg("--version").output().is_ok();
@@ -75,6 +76,7 @@ async fn fr_p7_ports_relay_returns_the_node_list_and_errors_map() {
             assert_eq!(p.scope, PortScope::Loopback);
             assert_eq!(p.owner.kind, PortOwnerKind::Job);
             assert_eq!(p.owner.id, job.id);
+            assert!(got.supported);
             nc.kill_job(&job.id, None).await.unwrap();
         }
 

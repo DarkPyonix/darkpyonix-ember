@@ -1033,8 +1033,6 @@ pub struct ListeningPort {
     pub port: u16,
     #[serde(default)]
     pub scope: PortScope,
-    #[serde(default)]
-    pub pid: u32,
     /// Executable name only.
     #[serde(default)]
     pub process: String,
@@ -1043,10 +1041,23 @@ pub struct ListeningPort {
 }
 
 /// `GET /api/computers/{id}/ports` answer.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Ports {
     #[serde(default)]
     pub ports: Vec<ListeningPort>,
+    /// False where the node cannot look (not Linux or macOS). Older nodes omit it: true.
+    #[serde(default = "ports_supported_default")]
+    pub supported: bool,
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Ports { ports: Vec::new(), supported: true }
+    }
+}
+
+fn ports_supported_default() -> bool {
+    true
 }
 
 impl Api {
@@ -1073,9 +1084,9 @@ mod ports_tests {
     fn fr_p7_a_ports_answer_decodes() {
         let p: Ports = serde_json::from_value(json!({
             "ports": [
-                {"port": 3000, "scope": "loopback", "pid": 7, "process": "node", "owner": {"kind": "job", "id": "j1"}},
-                {"port": 8080, "scope": "any", "pid": 8, "process": "python3", "owner": {"kind": "term", "id": "t1"}},
-                {"port": 22, "scope": "future", "pid": 9, "process": "x", "owner": {"kind": "term", "id": "t2"}}
+                {"port": 3000, "scope": "loopback", "process": "node", "owner": {"kind": "job", "id": "j1"}},
+                {"port": 8080, "scope": "any", "process": "python3", "owner": {"kind": "term", "id": "t1"}},
+                {"port": 22, "scope": "future", "process": "x", "owner": {"kind": "term", "id": "t2"}}
             ]
         }))
         .unwrap();
@@ -1084,7 +1095,10 @@ mod ports_tests {
         assert_eq!(p.ports[0].owner, PortOwner { kind: "job".into(), id: "j1".into() });
         assert_eq!(p.ports[1].scope, PortScope::Any);
         assert_eq!(p.ports[2].scope, PortScope::Lan);
+        assert!(p.supported, "an older node omits supported: true");
         assert_eq!(serde_json::from_value::<Ports>(json!({})).unwrap(), Ports::default());
+        let off: Ports = serde_json::from_value(json!({"ports": [], "supported": false})).unwrap();
+        assert!(!off.supported);
     }
 }
 

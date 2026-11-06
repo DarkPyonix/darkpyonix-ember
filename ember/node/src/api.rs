@@ -757,7 +757,7 @@ async fn list_ports(State(n): State<Node>) -> Json<PortsResponse> {
         }
     }
     let ports = crate::ports::listening(roots).await;
-    Json(PortsResponse { ports })
+    Json(PortsResponse { ports, supported: crate::ports::ports_supported() })
 }
 
 async fn list_terms(State(n): State<Node>, Query(q): Query<TermListQuery>) -> Json<Vec<TermInfo>> {

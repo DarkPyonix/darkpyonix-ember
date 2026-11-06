@@ -57,6 +57,11 @@ const LSOF_TIMEOUT: Duration = Duration::from_secs(5);
 // Pure parts
 // ---------------------------------------------------------------------------------------------
 
+/// Whether this platform can list ports (Linux reads `/proc`, macOS runs `lsof`).
+pub fn ports_supported() -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+}
+
 fn parse_v4(hex: &str) -> Option<Ipv4Addr> {
     if hex.len() != 8 {
         return None;
@@ -204,8 +209,8 @@ pub fn owned_pids(
 }
 
 fn dedupe_sorted(mut v: Vec<ListeningPort>) -> Vec<ListeningPort> {
-    v.sort_by(|a, b| (a.port, a.pid, a.scope as u8).cmp(&(b.port, b.pid, b.scope as u8)));
-    v.dedup_by(|a, b| a.port == b.port && a.pid == b.pid && a.scope == b.scope);
+    v.sort_by(|a, b| (a.port, a.scope as u8, &a.owner.id).cmp(&(b.port, b.scope as u8, &b.owner.id)));
+    v.dedup_by(|a, b| a.port == b.port && a.scope == b.scope && a.owner == b.owner);
     v
 }
 
@@ -220,7 +225,6 @@ fn from_proc(
             Some(ListeningPort {
                 port: l.port,
                 scope: classify(l.ip),
-                pid,
                 process: o.name.clone(),
                 owner: o.owner.clone(),
             })
@@ -238,7 +242,6 @@ fn from_lsof(listeners: Vec<LsofListener>, owned: &HashMap<u32, Owned>) -> Vec<L
             Some(ListeningPort {
                 port: l.port,
                 scope: l.ip.map(classify).unwrap_or(PortScope::Any),
-                pid: l.pid,
                 process: if o.name.is_empty() { l.command.clone() } else { o.name.clone() },
                 owner: o.owner.clone(),
             })
@@ -491,6 +494,11 @@ mod tests {
         let edges = [(2, 1), (1, 2)];
         let owned = owned_pids(&edges, &HashMap::new(), &[root(1, PortOwnerKind::Term, "t")]);
         assert_eq!(owned.len(), 2);
+    }
+
+    #[test]
+    fn fr_p7_unsupported_platforms_say_so() {
+        assert_eq!(ports_supported(), cfg!(any(target_os = "linux", target_os = "macos")));
     }
 
     #[test]

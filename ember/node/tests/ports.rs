@@ -88,7 +88,6 @@ async fn fr_p7_a_job_listener_is_listed_with_its_owner_and_the_test_process_is_n
         let mine_listed = ports.iter().find(|p| p.port == port).unwrap_or_else(|| panic!("{port} not in {ports:?}"));
         assert_eq!(mine_listed.owner, PortOwner { kind: PortOwnerKind::Job, id: job.id.clone() });
         assert_eq!(mine_listed.scope, PortScope::Loopback);
-        assert!(mine_listed.pid > 0);
         assert!(mine_listed.process.to_lowercase().contains("python"), "{}", mine_listed.process);
 
         // Security: the test process's own listener is absent.
@@ -97,6 +96,7 @@ async fn fr_p7_a_job_listener_is_listed_with_its_owner_and_the_test_process_is_n
         // No command line text anywhere in the raw body.
         let raw = serde_json::to_string(&ports).unwrap();
         assert!(!raw.contains("socket"), "{raw}");
+        assert!(!raw.contains("\"pid\""), "no pid in the response: {raw}");
         assert!(!raw.contains("time.sleep"), "{raw}");
         assert!(!raw.contains("127.0.0.1\",0"), "{raw}");
 

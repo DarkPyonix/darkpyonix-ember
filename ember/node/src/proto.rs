@@ -228,7 +228,6 @@ pub struct PortOwner {
 pub struct ListeningPort {
     pub port: u16,
     pub scope: PortScope,
-    pub pid: u32,
     /// Executable name only.
     pub process: String,
     pub owner: PortOwner,
@@ -238,6 +237,13 @@ pub struct ListeningPort {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortsResponse {
     pub ports: Vec<ListeningPort>,
+    /// False where the node cannot look (platforms other than Linux and macOS); `ports` is then empty.
+    #[serde(default = "ports_supported_default")]
+    pub supported: bool,
+}
+
+fn ports_supported_default() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -98,9 +98,9 @@ pub fn parse_name_status(out: &str) -> Result<Vec<NameStatus>, GitError> {
             Some('T') => GitCommitFileStatus::TypeChanged,
             _ => return Err(bad_output()),
         };
-        let first = tokens.next().ok_or_else(bad_output)?.to_owned();
+        let first = tokens.next().filter(|t| !t.is_empty()).ok_or_else(bad_output)?.to_owned();
         if matches!(status, GitCommitFileStatus::Renamed | GitCommitFileStatus::Copied) {
-            let second = tokens.next().ok_or_else(bad_output)?.to_owned();
+            let second = tokens.next().filter(|t| !t.is_empty()).ok_or_else(bad_output)?.to_owned();
             files.push(NameStatus { status, path: second, old_path: Some(first) });
         } else {
             files.push(NameStatus { status, path: first, old_path: None });

@@ -290,7 +290,7 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
                 .content(|| {
                     // The mockup opens the first room, so its only empty wording is the list's
                     // "채널이 없습니다". A filter that hides every room keeps the old prompt.
-                    let text = if rooms.is_empty() { "채널이 없습니다" } else { "채널을 선택하십시오" };
+                    let text = if rooms.is_empty() { "채널이 없습니다" } else { "선택한 채널이 없습니다" };
                     Label(text, Fs::Md, Weight::Regular, Some(paint(p.muted)), None)
                 });
         }
@@ -309,6 +309,15 @@ fn ChannelsView(rooms: Vec<Room>, load: Load, feed: Option<Feed>) {
     super::new_channel::NewChannelSheet(&new_ch, &rooms, feed.clone(), &open);
 }
 
+/// The list title is 18 (Fs::Xl) Semibold at every width (FR-L12).
+pub fn list_title_size() -> Fs {
+    Fs::Xl
+}
+/// A room row is a 44 icon with 10 above and below, so 64 high (FR-L12); the list insets the sides.
+pub const ROOM_ICON: f32 = 44.0;
+pub const ROOM_ROW_PAD_V: f32 = 10.0;
+pub const ROOM_ROW_HEIGHT: f32 = ROOM_ICON + 2.0 * ROOM_ROW_PAD_V;
+
 fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>, open: &MutableState<Option<String>>, current_room: Option<String>, narrow: bool, load: &Load, new_ch: &super::new_channel::NewChannelState, live: bool, feed: Option<Feed>) {
     let p = ember_theme().palette;
     let current = filter.get();
@@ -322,7 +331,7 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
             .modifier(Modifier::new().fill_max_width().height(56.0))
             .content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
-                Label("채널", if narrow { Fs::Xl2 } else { Fs::Lg }, Weight::Semibold, None, Some(1));
+                Label("채널", list_title_size(), Weight::Semibold, None, Some(1));
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
                 // FR-T10, #499: the button opens the 새 채널 sheet; in demo it says why not.
                 super::new_channel::NewChannelButton(new_ch, live, current.project.clone());
@@ -419,7 +428,7 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
     let unread = row.unread;
     let fill = if selected { paint(p.sel) } else { paint(compose_rust::Color::argb(0)) };
     super::components::Clickable(
-        Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(SP[1]),
+        Modifier::new().fill_max_width().background(fill).corner_radius(CORNER_SM).padding(ROOM_ROW_PAD_V),
         Alignment::CenterStart,
         move || {
             if let Some(d) = &detail {
@@ -435,7 +444,9 @@ fn RoomItem(row: &RoomRow, project: &str, _members: &[Member], selected: bool, o
         },
         || {
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
-                RoomIcon(&row.id, project, 40.0);
+                // Row = 44 icon + 2 x 10 padding = 64 high. The list already insets the row, so the
+                // side gap is the 10 of the padding (the capture showed a 6 spacer pushed the icon to 22+).
+                RoomIcon(&row.id, project, ROOM_ICON);
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     cu::Row().alignment(Alignment::CenterStart).space_role(SpaceRole::Xs).content(|| {
                         Label(&row.name, Fs::Md, Weight::Medium, Some(paint(p.text)), Some(1));
@@ -786,6 +797,17 @@ pub fn preview() {
 mod tests {
     use super::*;
     use compose_rust::{Host, Recomposer};
+
+    #[test]
+    fn fr_l12_channels_title_is_18_at_every_width() {
+        assert_eq!(list_title_size(), Fs::Xl);
+    }
+
+    #[test]
+    fn fr_l12_channels_row_is_64_high() {
+        assert_eq!(ROOM_ICON, 44.0);
+        assert_eq!(ROOM_ROW_HEIGHT, 64.0);
+    }
 
     fn text_of(content: fn()) -> String {
         let mut host = Host::new(move || Box::new(Recomposer::new(content)));

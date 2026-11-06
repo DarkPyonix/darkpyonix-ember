@@ -152,7 +152,7 @@ pub fn CharactersScreen() {
             });
 
             // 1. The catalog.
-            Section("스타일 여섯 가지", "하나를 누르면 아래 미리보기가 바뀝니다. 프로젝트에 쓰려면 적용하십시오", false, || {
+            Section("스타일 여섯 가지", "하나를 누르면 아래 미리보기가 바뀝니다. 프로젝트에 쓰려면 적용하세요", false, || {
                 let cols = if width > 1000.0 { 3 } else { 2 };
                 Grid(&CharStyle::ALL, cols, SP[2], |&s| {
                     Card(|| {

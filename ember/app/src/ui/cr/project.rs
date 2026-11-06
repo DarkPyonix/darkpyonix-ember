@@ -995,8 +995,13 @@ fn Sheets(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi) 
             }
         };
         let p = ember_theme().palette;
+        // The body follows the window like the settings sheet (a fixed 560 dp cut the last
+        // style rows at 390).
+        let new_window = compose_rust::runtime::current_window_size();
+        let new_body_height =
+            super::components::sheet_body_max_height(new_window.width_dp, new_window.height_dp, false, 60.0).min(900.0);
         EmberSheet("새 프로젝트", st.new_project.get(), request_close.clone(), None, || {
-            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(560.0)).content(|| {
+            cu::ScrollColumn().modifier(Modifier::new().fill_max_width().height(new_body_height)).content(|| {
                 cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[4])).content(|| {
                     // TODO(compose-rust#374): the fields are uncontrolled with no initial value.
                     let (d1, d2, d3) = (st.new_draft.clone(), st.new_draft.clone(), st.new_draft.clone());

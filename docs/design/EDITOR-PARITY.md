@@ -10,7 +10,7 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 
 | Function | OSE behaviour | Ember today | Connection (ember-editor-conn) | Issue |
 |---|---|---|---|---|
-| Open folder, explorer tree | Explorer view over the file service; expand, create, rename, delete, copy, drag | 부분 | FS-CH: the `remoteFilesystem` channel (stat, readdir, mkdir, delete, rename, writeFile, watch) is wrapped in `RemoteFs`; `EditorSession` exposes only read_dir and stat | #438 |
+| Open folder, explorer tree | Explorer view over the file service; expand, create, rename, delete, copy, drag | 부분 (the tree is a flat list; a folder on another computer cannot be opened at all, see Server and node) | FS-CH: the `remoteFilesystem` channel (stat, readdir, mkdir, delete, rename, writeFile, watch) is wrapped in `RemoteFs`; `EditorSession` exposes only read_dir and stat | #438 |
 | Tabs (open, close, dirty) | Editor groups: pin, preview, split, reorder, close others, confirm on dirty close | 부분 (open, close, dirty dot 있음; pin, split, reorder 없음) | In the window (no wire) | #439, #305 (label clipped) |
 | Editing core: undo, clipboard, auto-indent | Monaco | 있음 (CodeEditor widget) | Widget in the renderer; edits go `on_change` -> bridge -> extension-host mirror | - |
 | Editing core: find/replace, multi-cursor, minimap, word wrap, bracket match | Monaco | 없음 | Renderer widget work (compose-rust), then wiring | #440 |
@@ -20,11 +20,11 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Hover | Hover providers | 부분 (data requested and merged, no popup) | EXISTS: `$provideHover` | #442 |
 | CodeLens, inline completion (ghost text) | Language providers | 있음 in the session, on-screen unverified | EXISTS | - |
 | Completion list, definition, references, rename, code actions, format, signature help | Language providers and LSP clients in the extension host | 없음 | EH-REG decoding of `$register*` plus ExtHost* call builders (ids are pinned) | #442 |
-| Search across files, replace | Ripgrep through the extension host search provider | 없음 | MainThreadSearch/ExtHostSearch (ids only) | #443 |
-| SCM / git view, diff gutter | Built-in git extension, MainThreadSCM | 없음 (stripes post 준비 중) | EH-REG for MainThreadSCM, or Ember's own git API (FR-L19) | #444 |
-| Debug | DAP through the extension host, launch.json | 없음 | MainThreadDebugService (id only); scope decision | #445 |
+| Search across files, replace | Ripgrep through the extension host search provider | 없음 | MainThreadSearch/ExtHostSearch (ids only). The node has `POST /fs/glob` and `/fs/grep` but no server route reaches them from the editor: #456 | #443 |
+| SCM / git view, diff gutter | Built-in git extension, MainThreadSCM | 없음 (stripes post 준비 중) | EH-REG for MainThreadSCM, or Ember's own git relay `POST /api/projects/{name}/git/{op}` (FR-L19), which the editor does not call | #444 |
+| Debug | DAP through the extension host, launch.json | 없음 (works only in the VS Code Web fallback through the companion extension) | MainThreadDebugService (id only, default reply); the companion extension is browser-only (no `main`), so it does not run in the Ember editor's Node extension host | #445 |
 | Extensions panel, install | Extension management service, Open VSX | 없음 (extensions run, no panel) | Management channels `remoteextensionsenvironment` and `remoteExtensionsScanner` are wrapped; install through the server CLI via ember node | #446 |
-| Integrated terminal | Server pty host, profiles, tasks, shell integration | 부분 (one terminal over ember node as plain text lines) | ember node terminals (not the OSE pty host), `terminal_stream.rs` | #334 (resize), #335 (paste, IME), #336 (reconnect), #337 (list, kill), #333 (TLS), #26 |
+| Integrated terminal | Server pty host, profiles, tasks, shell integration | 부분 (one terminal over ember node as plain text lines; the relay answers 400 for the local computer) | ember node terminals through the server relay `/api/computers/{id}/terms` (not the OSE pty host), `terminal_stream.rs` | #334 (resize), #335 (paste, IME), #336 (reconnect), #337 (list, kill), #333 (TLS), #26, #455 (local computer) |
 | Command palette, quick open | Quick-access over all commands, files and symbols | 없음 (menu items post 준비 중) | Commands from `$registerCommand` (EXISTS) plus Ember's; files from the explorer or search | #447 |
 | Settings UI, settings.json | Settings editor, profiles | 없음 (only the keymap choice) | Native screen; `SessionConfig.user_settings` feeds the extension host once | #449 |
 | Keybindings, keymap | Keybinding service and editor | 부분 (VS Code and JetBrains tables, 19 actions, most post 준비 중) | Native (FR-L30) | #447, #449 |
@@ -40,6 +40,47 @@ The owner's rule [user, 2026-11-06, `INTENT.md` D38]: the Ember editor does what
 | Accessibility | ARIA in the DOM, a11y help, audio cues | 없음 | Native roles and focus order | #302 |
 | Layout, window resize | - | 부분 | dioxus-compose page | #301, #320 |
 | Localisation | Language packs as extensions | 부분 (the extension host gets the language; no packs) | scanExtensions language pack | - |
+
+## Server and node (facts from the server side, `develop` bc0f328)
+
+Written from `.scratch/pz/editor-parity-server-facts.md` (file and line evidence there; nothing built or run). Where the code does not say, the word is **unknown** and stays unknown here.
+
+### Blockers
+
+1. **The OSE runs on the server machine only.** `ember/server/src/ose.rs` spawns one OSE process per canonical project folder, on the server (`--host 127.0.0.1`, an OS-chosen port that is read and released before the child binds it, a 64-hex connection token). `ember/server/src/api/ide.rs:263-266` refuses a non-local computer with "OSE server is only available on the local computer"; the node has no OSE or `/ide` route (`ember/node/src/api.rs:147-203`). So remote files, language servers, file watching and extensions are all relative to the server's disk. How the OSE behaves when several folders share the default data dir (no `--server-data-dir`, `ose.rs:65`) is unknown.
+2. **The endpoint is a plain-TCP loopback address that the app dials itself** (`http://127.0.0.1:<port>`, `ember/editor/src/session.rs:112-120`). A device on another machine connects to itself. No relay, TLS or transport carries the OSE socket.
+3. **The IDE computer list is hand-written** (`EMBER_IDE_COMPUTERS`, TODO at `ide.rs:18-21`), separate from the computers registry, while the terminal relay expects registry ids; whether the names match is unknown. The terminal relay answers 400 for the local computer.
+4. **Search and SCM have node routes but no editor path:** `POST /fs/glob`, `/fs/grep` on the node, the server's git relay; the editor calls none of them.
+5. **The companion extension is browser-only** (`package.json` declares `browser`, no `main`), so tasks, debug and the `ember-term` automation profile run only in the VS Code Web fallback, not in the Ember editor's Node extension host; `ember-editor-conn` answers `MainThreadTask*` and `MainThreadDebugService` with default replies.
+6. **Client limits:** one workspace folder (`session.rs:205`), no reconnect (the building block `reconnect_loop` exists), no configuration change at runtime.
+
+### Unblock order (server and node)
+
+| # | Task | Size | Unblocks | Issue |
+|---|---|---|---|---|
+| 1 | IDE computer from the registry and the session's current computer | small | terminal for any computer; prerequisite for 2 and 4 | #454 |
+| 2 | In-process node for the local computer's terminal relay | small to medium | terminal and tasks on the server machine | #455 |
+| 3 | Server relay of node file operations incl. glob and grep | small to medium | native search, tree and read/write for other computers | #456 |
+| 4 | **Decision**: remote-files model, OSE on the node (large) or the server OSE on the project mount (medium) | decision | remote files, language servers, extensions per computer | #457 |
+| 5 | Authenticated relay of the OSE socket | medium | phone and second computer can connect | #458 |
+| 6 | Extension install route and a data dir per computer | small | extensions view, stable extensions across folders | #459 |
+| 7 | Node file watching streamed to the server | medium | refresh for remote files, only if 4 is not the node OSE | #460 |
+
+Client work that needs no server or node change: multi-root, a tasks runner over the terminals API, the debug UI, `$acceptConfigurationChanged`, reconnect, an SCM panel on the existing git relay, the settings storage design.
+
+### Security of the IdeLaunch endpoint and token (as written by the server side)
+
+- **Who can obtain it.** `GET /api/sessions/{id}/ide` is an owner route. On the local TCP listener it is behind the Host check, the Origin check and `Authorization: Bearer <server-token>` (D37 part 2; the token file is `<data dir>/server-token`, mode 0600); over the transport it is served to devices that passed the device gate (D37 part 1, FR-N7), without the token layer. A guest cannot reach it: the guest door serves only guest routes on a separate listener.
+- **What an admitted device is trusted with.** D37: "full authority for now, scope later", comparable to an SSH key (per-device scope: #366). The IdeLaunch JSON hands such a device the OSE connection token, which gives code execution (terminal, extension host) as the server user. That is within the D37 trust level and not a new hole, but it is a second credential path beside the server token (#461).
+- **Loopback only.** The OSE listens on `127.0.0.1`; any local process on the server machine can reach the port but needs the 64-hex token for the handshake. Whether the OSE answers `GET /version` and the static workbench without a token is **unknown** (the live test ran with `--without-connection-token`).
+- **Can a remote device use the endpoint?** Not as built (blocker 2).
+- **Token properties.** Random (two v4 UUIDs), per folder, stable for the life of the child, returned on every `GET /ide` for that folder, plain text in the JSON (`Debug` redacts it); no rotation, no per-client token, no revocation short of killing the child; the child's stdout and stderr go to null.
+- **Transport.** Plain TCP on loopback, no TLS.
+- **The VS Code Web path is weaker:** `--without-connection-token`; its protection is the proxy's own auth (`ember/proxy/dpx/auth`), not reviewed here (unknown).
+
+### Unknowns to resolve before relying on this
+
+Whether `dpx-ose-server` answers `GET /version` and static files without the token; whether a registered node's computer id ever equals an `EMBER_IDE_COMPUTERS` name; whether the project mount exists when the editor opens a folder (it is made only for agent session starts); which OSE IPC channels exist for search, extension management and user-data sync at the pinned commit (the connection layer uses exactly three); how two OSE processes behave when they share the default server data dir; the FR-W5b ide-gateway (mobile) is design only and a possible carrier for task 5.
 
 ## Notes
 

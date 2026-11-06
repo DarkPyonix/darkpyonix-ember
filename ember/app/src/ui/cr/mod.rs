@@ -17,6 +17,7 @@ pub mod characters;
 pub mod characters_screen;
 pub mod monitor;
 pub mod channel_owner;
+pub mod new_channel;
 pub mod channels;
 pub mod home;
 pub mod project;

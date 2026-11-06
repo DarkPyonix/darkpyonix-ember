@@ -388,6 +388,12 @@ pub fn view_chips_below(window_dp: f32) -> bool {
     window_dp <= crate::ui::shell::BAR_MAX_DP
 }
 
+/// Whether the 멀티/싱글/상태 chips show only their icons (mockup `.viewseg`: icons below the
+/// desktop width, including the full-width row at phone width, FR-L18, #512).
+pub fn view_seg_icon_only(window_dp: f32) -> bool {
+    window_dp < 1280.0
+}
+
 /// 264 dp at 1440 in the design.
 pub const SIDE_LIST_W: f32 = 264.0;
 /// A pane's height in the grid (a scroll column cannot give a list a bounded height).
@@ -812,6 +818,22 @@ impl PaneToggle {
         match self {
             PaneToggle::Conversation => "대화",
             PaneToggle::Terminal => "터미널",
+        }
+    }
+
+    /// The view the pane header's single icon button switches to (`.ph-mode`, FR-L18).
+    pub fn other(self) -> PaneToggle {
+        match self {
+            PaneToggle::Conversation => PaneToggle::Terminal,
+            PaneToggle::Terminal => PaneToggle::Conversation,
+        }
+    }
+
+    /// Label of that icon button: it names the view it opens, not the current one.
+    pub fn switch_label(self) -> &'static str {
+        match self {
+            PaneToggle::Conversation => "터미널로 보기",
+            PaneToggle::Terminal => "대화로 보기",
         }
     }
 }
@@ -1747,6 +1769,22 @@ mod tests {
     fn fr_l18_pane_toggle_has_conversation_and_terminal() {
         let l: Vec<_> = PaneToggle::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(l, ["대화", "터미널"]);
+    }
+
+    #[test]
+    fn fr_l18_pane_header_has_one_icon_toggle_that_names_the_other_view() {
+        assert_eq!(PaneToggle::Conversation.other(), PaneToggle::Terminal);
+        assert_eq!(PaneToggle::Terminal.other(), PaneToggle::Conversation);
+        assert_eq!(PaneToggle::Conversation.switch_label(), "터미널로 보기");
+        assert_eq!(PaneToggle::Terminal.switch_label(), "대화로 보기");
+    }
+
+    #[test]
+    fn fr_l18_view_segment_is_icon_only_below_desktop_width() {
+        assert!(view_seg_icon_only(390.0));
+        assert!(view_seg_icon_only(1024.0));
+        assert!(!view_seg_icon_only(1280.0));
+        assert!(!view_seg_icon_only(1440.0));
     }
 
     #[test]

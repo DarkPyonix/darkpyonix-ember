@@ -14,6 +14,11 @@ pub enum HostCommand {
     Focus(String),
     Widget(UriComponents, u64, WidgetEvent),
     Resync(UriComponents),
+    /// Explorer edits through the OSE file channel; each lists the parent directory again after.
+    CreateFile { parent: String, name: String },
+    CreateDir { parent: String, name: String },
+    Rename { path: String, new_name: String },
+    Delete { path: String, is_dir: bool },
 }
 
 #[derive(Default)]
@@ -23,6 +28,12 @@ pub struct HostState {
     pub entries: Vec<(String, u32)>,
     /// Every directory listed so far, by path, for the explorer tree.
     pub listings: std::collections::HashMap<String, Vec<(String, u32)>>,
+    /// Failures of explorer edits, for the window to show once.
+    pub edit_errors: Vec<String>,
+    /// Paths an explorer edit deleted, for the window to close their tabs.
+    pub gone: Vec<String>,
+    /// (old, new) paths an explorer edit renamed, for the window to move their tabs.
+    pub renamed: Vec<(String, String)>,
     pub updates: Vec<SessionUpdate>,
 }
 
@@ -61,6 +72,11 @@ impl HostState {
         self.set_listing(result);
     }
 
+    /// Forget the listings of a path that was deleted or renamed and of everything below it.
+    pub fn forget_below(&mut self, path: &str) {
+        self.listings.retain(|dir, _| !crate::ui::editor::is_at_or_below(dir, path));
+    }
+
     /// Handle one session update: connection loss is recorded, every update is queued in order.
     pub fn apply_update(&mut self, update: SessionUpdate) {
         if let SessionUpdate::ConnectionLost { reason } = &update {
@@ -73,6 +89,29 @@ impl HostState {
     pub fn take_updates(&mut self) -> Vec<SessionUpdate> {
         std::mem::take(&mut self.updates)
     }
+}
+
+fn parent_of(path: &str) -> String {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+    }
+}
+
+/// After an explorer edit: record a failure for the window, then list the parent again so the tree
+/// shows what is on disk.
+async fn finish_edit(session: &ember_editor::EditorSession, shared: &Arc<Mutex<HostState>>, action: &str, parent: &str, result: Result<(), ember_editor::Error>) {
+    if let Err(error) = result {
+        // The window shows a Korean reason; the server's own text goes to the log.
+        tracing::warn!("explorer edit failed ({action}): {error}");
+        let text = match &error {
+            ember_editor::Error::Path(path) => format!("{action} 실패: {path}"),
+            other => crate::ui::editor::edit_failure_text(action, &other.to_string()),
+        };
+        shared.lock().unwrap().edit_errors.push(text);
+    }
+    let listed = session.read_dir(&session.uri(parent)).await;
+    shared.lock().unwrap().set_dir_listing(parent, listed);
 }
 
 #[derive(Clone)]
@@ -117,6 +156,34 @@ impl EditorHost {
                         Some(HostCommand::List(path)) => {
                             let result = session.read_dir(&session.uri(&path)).await;
                             shared.lock().unwrap().set_dir_listing(&path, result);
+                        }
+                        Some(HostCommand::CreateFile { parent, name }) => {
+                            let result = session.create_file(&parent, &name).await;
+                            finish_edit(&session, &shared, "새 파일", &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::CreateDir { parent, name }) => {
+                            let result = session.create_dir(&parent, &name).await;
+                            finish_edit(&session, &shared, "새 폴더", &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::Rename { path, new_name }) => {
+                            let parent = parent_of(&path);
+                            let result = session.rename_path(&path, &new_name).await;
+                            if let Ok(new_path) = &result {
+                                let mut state = shared.lock().unwrap();
+                                state.forget_below(&path);
+                                state.renamed.push((path.clone(), new_path.clone()));
+                            }
+                            finish_edit(&session, &shared, "이름 변경", &parent, result.map(|_| ())).await;
+                        }
+                        Some(HostCommand::Delete { path, is_dir }) => {
+                            let parent = parent_of(&path);
+                            let result = session.delete_path(&path, is_dir).await;
+                            if result.is_ok() {
+                                let mut state = shared.lock().unwrap();
+                                state.forget_below(&path);
+                                state.gone.push(path.clone());
+                            }
+                            finish_edit(&session, &shared, "삭제", &parent, result).await;
                         }
                         Some(HostCommand::Open(path)) => { let _ = session.open(session.uri(&path)); }
                         Some(HostCommand::Close(path)) => { let _ = session.close(session.uri(&path)); }

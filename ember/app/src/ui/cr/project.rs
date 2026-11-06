@@ -903,12 +903,7 @@ fn MembersCard(b: &ProjectBox, st: &Ui, ui: &SharedUi) {
                 Pill(&format!("{}명", b.members.len()), PillTone::Grey, false);
             });
             let q = st.member_query.clone();
-            EmberField(FieldOptions {
-                fill_max_width: true,
-                placeholder: "멤버 검색".to_string(),
-                on_value_change: Some(Box::new(move |v| q.set(v))),
-                ..Default::default()
-            });
+            SearchField("멤버 검색", H_CTL, move |v| q.set(v));
             cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
                 for f in MemberFilter::ALL {
                     let s = st.filter.clone();

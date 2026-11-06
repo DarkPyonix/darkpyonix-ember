@@ -2281,8 +2281,8 @@ mod tests {
             (harness_columns(1440.0), harness_columns(1280.0), harness_columns(1024.0), harness_columns(768.0), harness_columns(390.0)),
             (2, 2, 1, 1, 1)
         );
-        // 1024 (rail): one card of 679 dp, where two columns were about 320 dp each.
-        assert_eq!(agent_card_width(1024.0), 679.0);
+        // 1024 (rail): one card of 663 dp, where two columns were about 320 dp each.
+        assert_eq!(agent_card_width(1024.0), 663.0);
         assert!(agent_card_width(1024.0) > 600.0);
         // No width makes a card narrower than 340 dp (a hint beside its control stays readable).
         for w in [390.0, 560.0, 768.0, 900.0, 1024.0, 1280.0, 1440.0, 1920.0] {

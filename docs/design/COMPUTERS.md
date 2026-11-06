@@ -282,6 +282,53 @@ States: `waiting`, `awaiting_confirmation`, `joined`, `denied`, `expired` (`FR-C
 - **D7, sealed delivery.** The node sends an ephemeral X25519 key in `node_public_info`; the server seals the credential with an AEAD to it. Removes the passive-sniffer case; an active MITM still needs TLS.
 - **D8, server fingerprint pinning.** `--server-fingerprint` in the command, checked against the server's reply; the server now exposes its peer id in the `joined` answer (C3b, written, not compiled), so the pin can be checked once `ember-node enrol` exists; requirements for the node step, in full: R1 pin first: the command the mint prints carries `--server-fingerprint <full 64 hex peer id>`, and the node compares the delivered id with it BEFORE writing anything; a mismatch aborts, writes nothing and prints both fingerprints. R2 no pin means no automatic trust: the node prints the delivered id's fingerprint and asks whether it matches the server's console or app; non-interactive use needs `--server-fingerprint` or an explicit `--trust-unverified-server` (its help text and a warning say that it widens the node's reach to an unverified server), and by default the id is NOT added to `allowed-peers` (the token-only HTTP path still works as before). R3 verify, then write: `enrol.json` (0600, tmp and rename) and `allowed-peers` together or neither; the id is shape-checked (64 lowercase hex) first and only that one id is added. R4 the node prints what it will allow: commands from this server's fingerprint over the transport and from the token holder over HTTP. The `ember-node enrol` parser that enforces R1 to R4 is NOT BUILT (the node step, a later PR with its own tests); until it exists no node consumes the id, so the delivery adds no reach by itself.
 
+### Real-hardware run (FR-C2k)
+
+A checklist for the owner's two-machine run. Machine S runs `ember-server`, machine N is the computer to add; both are on one LAN, N is reachable from S on port 8741. Everything below is built and merged (C3a to C3c, N1, N1b, N2, N2b; N2c, the signal handling, is a follow-up); none of it has been run on real machines. Mark FR-C1 and FR-C2 verified only after the steps and the negative checks have passed; do not mark them on a green CI.
+
+**On S**
+
+1. Start the server with the door on a LAN address and the transport on (the transport is what gives the node a pin to check):
+   `EMBER_ENROL_LISTEN=<S-lan-ip>:8742 EMBER_ENROL_LISTEN_ALLOW_REMOTE=1 EMBER_ENROL_PUBLIC_URL=http://<S-lan-ip>:8742 EMBER_TRANSPORT=1 ember-server`
+   The server logs a warning that the door speaks plain HTTP. It prints `ember server peer id: <64 hex>`; note it. The owner API stays on `127.0.0.1:8740`.
+2. Mint a code. The token is in `<data dir>/server-token`:
+   `curl -s -X POST http://127.0.0.1:8740/api/computers/enrol-codes -H "Authorization: Bearer $(cat <data dir>/server-token)" -H 'content-type: application/json' -d '{"name":"laptop"}'`
+   The answer has `id`, `code`, `command`, `server`, `door`, `server_peer_id` and `server_fingerprint`. Expect `command` to start `ember-node enrol dpe_`, to name `http://<S-lan-ip>:8742` (not port 8740) and to end `--server-fingerprint <the 64 hex id>`.
+
+**On N**
+
+3. Run the command exactly as printed, adding `--url http://<N-lan-ip>:8741` so the server does not have to guess the address (it would otherwise use the source address it sees and port 8741). Expect, in order: the server URL, `TLS: no`, `This node will accept commands from this server.`, the plain-HTTP warning, `Continue? [y/N]`, then `Waiting for the owner to confirm this computer in Ember`.
+
+**On S again**
+
+4. See the pending request: `curl -s http://127.0.0.1:8740/api/computers/enrol-codes/<id> -H "Authorization: Bearer ..."` shows `status: awaiting_confirmation`, `node_info`, `observed_addr` and `fingerprint`. Compare `fingerprint` with the one N printed. Confirm: `curl -s -X POST .../enrol-codes/<id>/confirm -H "Authorization: Bearer ..." -H 'content-type: application/json' -d '{}'`.
+
+**On N again**
+
+5. Within a poll or two N prints `Enrolled as laptop (...)`, the line that it accepts commands from the server's fingerprint over the transport and from the token holder over HTTP, and the SIGHUP hint. Check `~/.ember/node/enrol.json` exists with mode 600 (the token is in it; do not paste it anywhere) and that `~/.ember/node/allowed-peers` contains exactly the server's peer id.
+6. Start the node so S can reach it: `EMBER_NODE_LISTEN=0.0.0.0:8741 EMBER_NODE_TRANSPORT=1 ember-node` (no `EMBER_NODE_TOKEN`: it reads `enrol.json`; the log says `node token source` is `enrol.json`).
+
+**Check**
+
+7. On S: `curl -s http://127.0.0.1:8740/api/computers -H "Authorization: Bearer ..."` lists `laptop` and its status becomes online. Open it in the app: files, a terminal, an agent session.
+
+**Negative checks (these are the security properties; each must be run)**
+
+8. Wrong pin: mint a new code and rerun step 3 with one character of `--server-fingerprint` changed. Expect: it aborts after the owner confirms, prints both fingerprints and the computer name, and writes NOTHING (`enrol.json` and `allowed-peers` unchanged). The server has registered the computer anyway: remove it with `curl -s -X DELETE .../api/computers/<computer_id>`.
+9. No pin, not interactive: mint, then run the command without `--server-fingerprint` and with `--yes` and the input piped from `/dev/null`. Expect `enrol.json` written, `allowed-peers` NOT touched, and the text that says how to add the id.
+10. The code is single use: run the same command a second time with the old code. Expect `this enrol code cannot be used` and no detail.
+11. A wrong Host is refused: `curl -s -i http://<S-lan-ip>:8742/enrol/status/x -H 'Host: evil.example'` returns 403; the same request with the right Host returns 404.
+
+**Undo**
+
+12. On S: `curl -s -X DELETE http://127.0.0.1:8740/api/computers/<computer_id> -H "Authorization: Bearer ..."`. On N: delete `enrol.json`, delete the server's line from `allowed-peers`, send the node SIGHUP (it disconnects removed peers).
+
+**What this run does NOT cover, and one gap it will show**
+
+- https in front of the door (a reverse proxy with TLS) and `X-Forwarded-For` behind a proxy: a second run with a proxy.
+- A node behind NAT: enrolment registers the computer by the HTTP address (`--url`, or the source address plus port 8741), even when `--transport` was given. The node's peer id is sent and shown, but a computer reached only through the transport (no address S can use) is not registered by peer after an enrol; today that needs `POST /api/computers` with `peer`. This is a finding of the review, recorded as a follow-up, not a defect of the run.
+- Plain-HTTP exposure: on a shared LAN the code, the poll secret and the credential cross in clear (the warning says so); run it on a network you trust.
+
 ### Not verified
 
 Nothing of the FR-C2 design is built, compiled or run. The unknowns are whether an X25519 crate is already in `Cargo.lock`, whether the node's reqwest has TLS, and whether 8741 is the node port everywhere. The LAN path, a real browser confirm, a node behind NAT, TLS in front of the door, XFF behind a real proxy and sniffing need two real machines and are UNVERIFIED.

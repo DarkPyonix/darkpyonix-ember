@@ -298,6 +298,30 @@ fn FocusOverlay(label: &str, on_click: impl FnMut() + 'static) {
         .on_click(on_click);
 }
 
+/// One unmerged file of the 충돌 list: a warning mark and the mono path, left-aligned, the whole row
+/// is the tap target and carries the path as its accessible name.
+fn ConflictFileRow(path: &str, on_click: impl FnMut() + 'static) {
+    let p = ember_theme().palette;
+    let shown = path.to_string();
+    cu::Box()
+        .modifier(
+            Modifier::new()
+                .fill_max_width()
+                .height(H_BTN)
+                .background(paint(p.surface_2))
+                .border(1.0, paint(p.line))
+                .corner_radius(CORNER_SM),
+        )
+        .alignment(Alignment::CenterStart)
+        .content(move || {
+            cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).modifier(Modifier::new().fill_max_width().padding(SP[2])).content(|| {
+                NavIcon(ICON_WARN_SVG, p.orange.strong.to_argb(), 16.0);
+                Txt(&shown, TypeRole::Mono, Some(paint(p.text)), Some(1), Some(TextOverflow::Ellipsis), Some(1.0), None);
+            });
+            FocusOverlay(&shown, on_click);
+        });
+}
+
 /// Card shown when a section's server data is not yet available.
 pub fn Unavailable(section: Section) {
     let p = ember_theme().palette;
@@ -1753,16 +1777,24 @@ fn ConflictsBody(paths: &[String], actions: Option<Actions>, layout: PaneLayout)
         }
         let paths = paths.to_vec();
         EmberCard(false, true, None, Some(SP[3]), None, move || {
-            Label("충돌", Fs::Lg, Weight::Semibold, None, None);
-            Label("파일을 눌러 충돌을 해결합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
-            for path in paths {
-                let (open, state, has_server) = (open.clone(), state.clone(), actions.is_some());
-                let target = path.clone();
-                AppButton(&path, None, ButtonKind::Default, true, true, true, move || {
-                    state.set(if has_server { ConflictLoad::Loading } else { ConflictLoad::Ready(sample_conflict()) });
-                    open.set(Some(target.clone()));
+            cu::Column().spacing(SP[2]).modifier(Modifier::new().fill_max_width()).content(move || {
+                cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+                    Label("충돌", Fs::Lg, Weight::Semibold, None, None);
+                    Label("파일을 눌러 충돌을 해결합니다", Fs::Sm, Weight::Regular, Some(paint(p.text_2)), None);
                 });
-            }
+                // Left-aligned rows with a warning mark, like the mockup's file list, and a gap under
+                // the explanation (the old full-width pills centred the path and touched the text).
+                cu::Column().spacing(SP[1]).modifier(Modifier::new().fill_max_width()).content(move || {
+                    for path in paths {
+                        let (open, state, has_server) = (open.clone(), state.clone(), actions.is_some());
+                        let target = path.clone();
+                        ConflictFileRow(&path, move || {
+                            state.set(if has_server { ConflictLoad::Loading } else { ConflictLoad::Ready(sample_conflict()) });
+                            open.set(Some(target.clone()));
+                        });
+                    }
+                });
+            });
         });
         return;
     };
@@ -4896,6 +4928,19 @@ mod tests {
             let text = text_of(content);
             assert!(text.contains("a.rs"));
         }
+    }
+
+    #[compose_rust::runtime::composable]
+    fn conflict_file_row_sample() {
+        ConflictFileRow("docs/SPEC.md", || {});
+    }
+
+    #[test]
+    fn fr_l19_conflict_list_row_shows_the_path_and_is_one_tap_target() {
+        let _guard = crate::services::test_guard();
+        compose_rust::window::reset_window_size();
+        let text = text_of(conflict_file_row_sample as fn());
+        assert!(text.contains("docs/SPEC.md"), "the path is shown (and is the row's accessible name)");
     }
 
     #[test]

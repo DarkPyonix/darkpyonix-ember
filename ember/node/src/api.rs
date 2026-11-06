@@ -34,6 +34,8 @@
 //! | POST | `/git/checkout` | [`GitCheckoutRequest`] → 204 |
 //! | POST | `/git/branch` | [`GitBranchRequest`] → 204 (creates and checks out) |
 //! | POST | `/git/fetch`, `/git/pull`, `/git/push` | [`GitRemoteRequest`] → [`GitOutput`] (409 with a Korean message and git's text; 400 for a remote that is not in `git remote`; 504 `timeout` after 60 s; pull is fast-forward only; none of them holds the write lock across the network) |
+//! | POST | `/git/merge` | [`GitRepoRequest`] → [`git_merge::GitMergeState`] (FR-G16: is a merge in progress, from, into, conflict count, `can_commit`) |
+//! | POST | `/git/merge/abort`, `/git/merge/commit` | [`git_merge::GitMergeActionRequest`] → [`git_merge::GitMergeAborted`] or [`git_commit::GitCommitActionResponse`] (FR-G17; need `confirm: true`; 409 without a merge, and for commit with conflicts left) |
 //! | POST | `/git/stash/{list,push,apply,pop,drop}` | FR-G6 stash list and operations (409 on conflicts) |
 //! | POST | `/git/conflict`, `/git/resolve` | conflict blocks and resolution (FR-G7) |
 //! | POST | `/git/conflicts` | [`GitRepoRequest`] → [`GitConflicts`] |
@@ -86,6 +88,7 @@ use crate::exec::{self, kill_group};
 use crate::fs::{self, FsError};
 use crate::git::{self, *};
 use crate::git::git_commit;
+use crate::git::git_merge;
 use crate::git::git_stash::{self, GitStashEntry, GitStashIndexRequest, GitStashOperation, GitStashPushRequest};
 use crate::git_conflict::{self, GitConflict, GitConflictRequest, GitResolveRequest};
 use crate::jobs::{Jobs, Removal};
@@ -172,6 +175,9 @@ pub fn router(node: Node) -> Router {
         .route("/git/commit/show", post(git_commit_show_handler))
         .route("/git/revert", post(git_revert_handler))
         .route("/git/cherry-pick", post(git_cherry_pick_handler))
+        .route("/git/merge", post(git_merge_state_handler))
+        .route("/git/merge/abort", post(git_merge_abort_handler))
+        .route("/git/merge/commit", post(git_merge_commit_handler))
         .route("/git/branches", post(git_branches_handler))
         .route("/git/prs", post(git_prs_handler))
         .route("/git/github", post(git_github_handler))
@@ -947,3 +953,19 @@ async fn git_cherry_pick_handler(State(n): State<Node>, Json(r): Json<git_commit
     Ok(Json(git_commit::cherry_pick(&n.0.policy, &r).await?))
 }
 // End FR-G14, FR-G15.
+
+// FR-G16, FR-G17: merge state, abort and commit.
+async fn git_merge_state_handler(State(n): State<Node>, Json(r): Json<GitRepoRequest>) -> ApiResult<git_merge::GitMergeState> {
+    Ok(Json(git_merge::state(&n.0.policy, &r).await?))
+}
+
+async fn git_merge_abort_handler(State(n): State<Node>, Json(r): Json<git_merge::GitMergeActionRequest>) -> ApiResult<git_merge::GitMergeAborted> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_merge::abort(&n.0.policy, &r).await?))
+}
+
+async fn git_merge_commit_handler(State(n): State<Node>, Json(r): Json<git_merge::GitMergeActionRequest>) -> ApiResult<git_commit::GitCommitActionResponse> {
+    let _guard = n.0.write_lock.lock().await;
+    Ok(Json(git_merge::commit(&n.0.policy, &r).await?))
+}
+// End FR-G16, FR-G17.

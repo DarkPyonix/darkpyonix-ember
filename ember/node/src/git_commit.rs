@@ -161,7 +161,7 @@ pub fn check_sha(sha: &str) -> Result<&str, GitError> {
     }
 }
 
-fn cut_chars(text: &str, max: usize) -> String {
+pub(super) fn cut_chars(text: &str, max: usize) -> String {
     match text.char_indices().nth(max) {
         Some((at, _)) => text[..at].to_owned(),
         None => text.to_owned(),
@@ -182,12 +182,12 @@ async fn resolve(dir: &Path, sha: &str) -> Result<String, GitError> {
     Ok(full)
 }
 
-const GENERIC_FAILURE: &str = "git 작업에 실패했습니다.";
+pub(super) const GENERIC_FAILURE: &str = "git 작업에 실패했습니다.";
 const IN_PROGRESS: &str = "진행 중인 git 작업이 있습니다. 먼저 끝내거나 중단하세요.";
 const ABORT_FAILED: &str = "되돌리기를 취소하지 못했습니다. 저장소에 진행 중인 작업이 남아 있을 수 있으니 터미널에서 git status를 확인하세요.";
 const TOO_MANY_FILES: &str = "변경된 파일이 너무 많아 목록을 만들 수 없습니다.";
 /// The user's hooks never run through the API (SPEC FR-G15).
-const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+pub(super) const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
 
 /// Korean text for a failed git call. Git's own text is never returned to the client.
 pub fn failure_message(git_text: &str) -> &'static str {
@@ -224,7 +224,7 @@ pub fn strip_controls(text: &str, keep_whitespace: bool) -> String {
 }
 
 /// Run git; a failure becomes a Korean message with no git text (the text is only logged).
-async fn run_k(dir: &Path, args: &[&str], too_big: &str) -> Result<Out, GitError> {
+pub(super) async fn run_k(dir: &Path, args: &[&str], too_big: &str) -> Result<Out, GitError> {
     let o = run(dir, args, None).await?;
     if o.truncated {
         return Err(GitError::TooLarge(too_big.to_owned()));

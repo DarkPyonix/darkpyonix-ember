@@ -73,6 +73,19 @@ ignored until the files are written: answer the fingerprint question with n, Ent
 
 /// The exact text printed for every http server (design 4.2).
 pub const PLAIN_HTTP_WARNING: &str = "This server speaks plain HTTP. Anyone on the network path can read the enrol code, the poll secret and the credential this node receives, and whoever reads the poll secret can fetch the credential before this node does. Use a network you trust, or an https address.";
+/// The plain-http notice for a server on THIS machine (a loopback address): the traffic does not
+/// leave the machine, so the warning is weaker, but it is still printed (supervisor, 2026-11-06).
+pub const LOOPBACK_HTTP_NOTE: &str = "This server speaks plain HTTP, but its address is on this machine: the enrol code, the poll secret and the credential travel only inside this machine. Use an https address if the server is not on this machine.";
+
+/// The plain-http text to print for `server` (only for http): the full warning, or the weaker note
+/// for a loopback address.
+pub fn plain_http_text(server: &ServerUrl) -> &'static str {
+    if server.loopback {
+        LOOPBACK_HTTP_NOTE
+    } else {
+        PLAIN_HTTP_WARNING
+    }
+}
 
 /// The only answer to a refused code, whatever the reason.
 pub const REFUSED_TEXT: &str = "this enrol code cannot be used";
@@ -247,6 +260,8 @@ pub struct ServerUrl {
     /// A loopback, private, link-local or unique-local IP literal, `localhost`, or a `.local`
     /// name. A name is never resolved.
     pub private: bool,
+    /// The host is this machine: a loopback IP literal or `localhost` (a name is never resolved).
+    pub loopback: bool,
 }
 
 enum Host {
@@ -347,12 +362,17 @@ pub(crate) fn classify_server_url(raw: &str) -> anyhow::Result<ServerUrl> {
         Host::V6(a) => (format!("[{a}]"), is_private_v6(*a)),
         Host::Name(n) => (n.clone(), n == "localhost" || n.ends_with(".local")),
     };
+    let loopback = match &host {
+        Host::V4(a) => a.is_loopback(),
+        Host::V6(a) => a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v| v.is_loopback()),
+        Host::Name(n) => n == "localhost",
+    };
     let scheme = if https { "https" } else { "http" };
     let base = match port {
         Some(p) => format!("{scheme}://{host_text}:{p}"),
         None => format!("{scheme}://{host_text}"),
     };
-    Ok(ServerUrl { base, https, private })
+    Ok(ServerUrl { base, https, private, loopback })
 }
 
 /// Plain http to a public host is refused unless `allow_http`. Checked before any request.
@@ -726,7 +746,7 @@ pub async fn run(opts: Options, io: &mut dyn EnrolIo) -> anyhow::Result<Outcome>
     io.say(&format!("TLS: {}", if server.https { "yes" } else { "no" }));
     io.say("This node will accept commands from this server.");
     if !server.https {
-        io.say(PLAIN_HTTP_WARNING);
+        io.say(plain_http_text(&server));
     }
     let interactive = io.interactive();
     if !opts.yes {
@@ -1327,6 +1347,37 @@ mod tests {
         check_transport_policy(&classify_server_url("https://ember.example").unwrap(), false).unwrap();
         check_transport_policy(&classify_server_url("http://10.0.0.5").unwrap(), false).unwrap();
         check_transport_policy(&classify_server_url("http://localhost:1").unwrap(), false).unwrap();
+    }
+
+    #[test]
+    fn fr_c2_node_cli_a_loopback_server_gets_the_weaker_plain_http_note_others_the_full_warning() {
+        for (url, loopback) in [
+            ("http://127.0.0.1:8742", true),
+            ("http://127.1.2.3", true),
+            ("http://[::1]:8742", true),
+            ("http://localhost:1", true),
+            ("http://10.0.0.5:8742", false),
+            ("http://192.168.1.2", false),
+            ("http://169.254.1.1", false),
+            ("http://host.local", false),
+            ("http://ember.example", false),
+        ] {
+            let u = classify_server_url(url).unwrap();
+            assert_eq!(u.loopback, loopback, "{url}");
+            let text = plain_http_text(&u);
+            if loopback {
+                assert_eq!(text, LOOPBACK_HTTP_NOTE, "{url}");
+                assert!(text.contains("plain HTTP") && text.contains("on this machine"), "{url}");
+            } else {
+                assert_eq!(text, PLAIN_HTTP_WARNING, "{url}");
+            }
+        }
+        // The note is still a warning about plain HTTP, never silent, and has no em-dash.
+        assert!(LOOPBACK_HTTP_NOTE.starts_with("This server speaks plain HTTP"));
+        assert!(!LOOPBACK_HTTP_NOTE.contains('\u{2014}'));
+        // A loopback address is always private; the reverse is not true.
+        assert!(classify_server_url("http://127.0.0.1").unwrap().private);
+        assert!(!classify_server_url("http://10.0.0.5").unwrap().loopback);
     }
 
     #[test]

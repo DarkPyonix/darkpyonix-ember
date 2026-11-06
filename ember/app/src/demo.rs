@@ -1180,6 +1180,10 @@ struct GitState {
     stashes: Vec<DemoStash>,
     /// Unmerged files (FR-G7), in path order; resolving one removes it.
     conflicts: Vec<DemoConflict>,
+    /// A merge of `origin/main` is in progress (FR-G16); abort and commit end it.
+    merging: bool,
+    /// Files staged by resolving a conflict during the merge; abort drops them and the merge commit takes them.
+    merge_resolved: Vec<String>,
     /// Pull requests (FR-G8, FR-G10 to FR-G12), each as the node's detail JSON; the list op
     /// strips the detail-only keys. Review, merge and create change this in memory.
     prs: Vec<Value>,
@@ -1370,6 +1374,8 @@ impl GitState {
             fetched_age_secs: Some(300),
             commits: 0,
             conflicts: demo_conflicts(),
+            merging: true,
+            merge_resolved: Vec::new(),
             prs: demo_pr_details(now_ms() / 1000),
             applied: Vec::new(),
             stashes: {
@@ -1498,6 +1504,36 @@ impl GitState {
         self.commits += 1;
         let new_sha = format!("{:040x}", 0x00de_c0de_0000_u128 + self.commits);
         self.applied.insert(0, DemoApplied { sha: new_sha.clone(), subject, time: now_ms() / 1000, source, invert });
+        self.branch_mut().ahead += 1;
+        Ok(json!({ "new_sha": new_sha }))
+    }
+
+    /// `merge/abort` and `merge/commit` (FR-G17), refusing as the node does.
+    fn merge_end(&mut self, op: &str, body: &Value) -> Result<Value, GitError> {
+        if !body.get("confirm").and_then(Value::as_bool).unwrap_or(false) {
+            return Err(GitError::bad("확인이 필요합니다."));
+        }
+        if !self.merging {
+            return Err(GitError::conflict("진행 중인 병합이 없습니다."));
+        }
+        let resolved = std::mem::take(&mut self.merge_resolved);
+        if op == "merge/abort" {
+            self.conflicts.clear();
+            self.files.retain(|f| !resolved.contains(&f.path));
+            self.merging = false;
+            return Ok(json!({ "ok": true }));
+        }
+        if !self.conflicts.is_empty() {
+            self.merge_resolved = resolved;
+            return Err(GitError::conflict("충돌이 남아 있어 병합 커밋을 만들 수 없습니다."));
+        }
+        // The merge commit takes the files the resolutions staged.
+        self.files.retain(|f| !resolved.contains(&f.path));
+        self.merging = false;
+        self.commits += 1;
+        let new_sha = format!("{:040x}", 0x00de_c0de_0000_u128 + self.commits);
+        let subject = format!("Merge origin/main into {}", self.current);
+        self.applied.insert(0, DemoApplied { sha: new_sha.clone(), subject, time: now_ms() / 1000, source: 0, invert: false });
         self.branch_mut().ahead += 1;
         Ok(json!({ "new_sha": new_sha }))
     }
@@ -1757,6 +1793,9 @@ impl GitState {
                 let content = str_of(body, "content").ok_or_else(|| GitError::bad("content is required"))?.to_string();
                 let at = self.conflicts.iter().position(|c| c.path == path).ok_or_else(|| GitError::conflict(NOT_UNMERGED))?;
                 self.conflicts.remove(at);
+                if self.merging && !self.merge_resolved.contains(&path) {
+                    self.merge_resolved.push(path.clone());
+                }
                 // Resolving stages the file: the whole content as one staged hunk.
                 let lines: Vec<String> = content.lines().map(|l| format!("+{l}")).collect();
                 let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
@@ -1809,6 +1848,14 @@ impl GitState {
             }
             "commit/show" => self.commit_show(body),
             "revert" | "cherry-pick" => self.commit_apply(op, body),
+            "merge" => Ok(json!({
+                "in_progress": self.merging,
+                "from": if self.merging { json!("origin/main") } else { Value::Null },
+                "into": self.current,
+                "conflict_files": self.conflicts.len(),
+                "can_commit": self.merging && self.conflicts.is_empty(),
+            })),
+            "merge/abort" | "merge/commit" => self.merge_end(op, body),
             "branches" => Ok(json!({ "branches": demo_branches(now_ms() / 1000) })),
             "prs" => {
                 let state = body.get("state").and_then(Value::as_str).unwrap_or("open");
@@ -2289,6 +2336,67 @@ mod tests {
         assert_eq!(log["commits"][0]["subject"], "Test: cover unborn branch history");
         let e = gs(&d, "cherry-pick", json!({ "sha": "2b3c4d5", "confirm": true })).unwrap_err();
         assert_eq!((e.status, e.message.as_str()), (400, "병합 커밋은 지원하지 않습니다."));
+    }
+
+    fn resolve_all(d: &DemoSource) {
+        for p in conflict_paths(d) {
+            gs(d, "resolve", json!({ "path": p, "content": "merged\n" })).unwrap();
+        }
+    }
+
+    #[test]
+    fn fr_g16_demo_merge_state_reports_origin_main_into_the_current_branch() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let v = gs(&d, "merge", json!({})).unwrap();
+        assert_eq!(v, json!({ "in_progress": true, "from": "origin/main", "into": status(&d)["branch"], "conflict_files": 2, "can_commit": false }));
+        let path = conflict_paths(&d)[0].clone();
+        gs(&d, "resolve", json!({ "path": path, "content": "x\n" })).unwrap();
+        assert_eq!(gs(&d, "merge", json!({})).unwrap()["conflict_files"], 1);
+        resolve_all(&d);
+        let v = gs(&d, "merge", json!({})).unwrap();
+        assert_eq!((v["conflict_files"].clone(), v["can_commit"].clone()), (json!(0), json!(true)));
+    }
+
+    #[test]
+    fn fr_g17_demo_abort_clears_the_conflicts_and_the_merge() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let path = conflict_paths(&d)[0].clone();
+        gs(&d, "resolve", json!({ "path": path.clone(), "content": "x\n" })).unwrap();
+        assert_eq!(gs(&d, "merge/abort", json!({ "confirm": true })).unwrap(), json!({ "ok": true }));
+        assert!(conflict_paths(&d).is_empty());
+        let v = gs(&d, "merge", json!({})).unwrap();
+        assert_eq!((v["in_progress"].clone(), v["from"].clone(), v["can_commit"].clone()), (json!(false), Value::Null, json!(false)));
+        assert!(status(&d)["files"].as_array().unwrap().iter().all(|f| f["path"] != path.as_str()));
+        for op in ["merge/abort", "merge/commit"] {
+            let e = gs(&d, op, json!({ "confirm": true })).unwrap_err();
+            assert_eq!((e.status, e.message.as_str()), (409, "진행 중인 병합이 없습니다."), "{op}");
+        }
+    }
+
+    #[test]
+    fn fr_g17_demo_commit_needs_every_conflict_resolved_then_adds_a_commit() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let e = gs(&d, "merge/commit", json!({ "confirm": true })).unwrap_err();
+        assert_eq!((e.status, e.message.as_str()), (409, "충돌이 남아 있어 병합 커밋을 만들 수 없습니다."));
+        assert_eq!(conflict_paths(&d).len(), 2);
+        resolve_all(&d);
+        let before = gs(&d, "log", json!({})).unwrap()["commits"].as_array().unwrap().len();
+        let r = gs(&d, "merge/commit", json!({ "confirm": true })).unwrap();
+        let log = gs(&d, "log", json!({})).unwrap();
+        assert_eq!(log["commits"].as_array().unwrap().len(), before + 1);
+        assert_eq!(log["commits"][0]["sha"], r["new_sha"]);
+        assert!(log["commits"][0]["subject"].as_str().unwrap().starts_with("Merge origin/main into "));
+        assert_eq!(gs(&d, "merge", json!({})).unwrap()["in_progress"], false);
+    }
+
+    #[test]
+    fn fr_g17_demo_confirm_is_required() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        for op in ["merge/abort", "merge/commit"] {
+            let e = gs(&d, op, json!({})).unwrap_err();
+            assert_eq!((e.status, e.message.as_str()), (400, "확인이 필요합니다."), "{op}");
+        }
+        assert_eq!(conflict_paths(&d).len(), 2);
     }
 
     #[test]

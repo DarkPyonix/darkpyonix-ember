@@ -1,22 +1,27 @@
 //! The channel feed (SPEC FR-T11): what a channel's member agents request from or report to the
 //! person, derived from the session events and status, with no store of its own.
 //!
-//! Two kinds of item, newest first:
+//! Three kinds of item, newest first:
 //! - `approval`: a tool approval a member session asked for and nobody has answered or withdrawn
 //!   (`FR-A5`). It leaves the feed when answered, interrupted or ended.
+//! - `question`: an agent's question to the person (`QuestionAsked`, FR-A5) that nobody has
+//!   answered, skipped or withdrawn. Listed with `question_id` and `questions` (labels only); it
+//!   cannot be answered through the feed yet (the answer route is `POST
+//!   /api/sessions/{id}/questions/{question_id}/answer`). It leaves the feed when answered,
+//!   skipped, interrupted or ended.
 //! - `report`: how a member's last turn ended (`completed`, `failed`, `interrupted`; `FR-T8`),
 //!   shown while that session is `finished` or `failed`. A new turn clears it.
 //!
 //! An approval for `AskUserQuestion` also carries `questions` (the question text and option
 //! labels), because the person must answer it and no automatic mode may.
 //!
-//! Not built: a question event of its own (no agent event carries one yet), stall reports, and dismissing a report
+//! Not built: answering a question through the feed, stall reports, and dismissing a report
 //! without starting another turn.
 
 use serde::Serialize;
 
 use super::{ChannelError, Member, Store};
-use crate::events::{is_user_question_tool, AgentEvent, SessionStatus, TurnOutcome};
+use crate::events::{is_user_question_tool, AgentEvent, Question, SessionStatus, TurnOutcome};
 
 /// Characters of the last reply kept in a report's summary.
 const SUMMARY_CHARS: usize = 500;
@@ -46,6 +51,36 @@ fn clip(s: &str) -> String {
     let mut out: String = s.chars().take(QUESTION_CHARS - 1).collect();
     out.push('\u{2026}');
     out
+}
+
+/// Largest serialized `input` a feed approval item echoes; a bigger one is replaced by
+/// `{"truncated": true, "bytes": <length>}`.
+pub const INPUT_BYTES_MAX: usize = 8 * 1024;
+
+/// `input` as the feed echoes it: unchanged up to [`INPUT_BYTES_MAX`] serialized bytes, else a
+/// marker with the real size.
+fn capped_input(input: serde_json::Value) -> serde_json::Value {
+    let bytes = serde_json::to_string(&input).map(|s| s.len()).unwrap_or(0);
+    if bytes > INPUT_BYTES_MAX {
+        serde_json::json!({ "truncated": true, "bytes": bytes })
+    } else {
+        input
+    }
+}
+
+/// The feed form of the questions of a `QuestionAsked`: labels only, same caps as
+/// [`feed_questions`].
+fn feed_questions_of(questions: &[Question]) -> Vec<FeedQuestion> {
+    questions
+        .iter()
+        .take(QUESTIONS_MAX)
+        .map(|q| FeedQuestion {
+            header: q.header.as_deref().map(clip),
+            text: clip(&q.text),
+            options: q.options.iter().take(OPTIONS_MAX).map(|o| clip(&o.label)).collect(),
+            multi_select: q.multi_select,
+        })
+        .collect()
 }
 
 /// The readable questions of an approval for a question tool, or `None` for any other tool or an
@@ -91,9 +126,9 @@ pub struct FeedAgent {
 /// One feed entry. Fields not meant for the kind are absent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FeedItem {
-    /// `approval:<approval_id>` or `report:<session id>:<seq>`.
+    /// `approval:<approval_id>`, `question:<question_id>` or `report:<session id>:<seq>`.
     pub id: String,
-    /// `approval` or `report`.
+    /// `approval`, `question` or `report`.
     pub kind: &'static str,
     pub agent: FeedAgent,
     pub session_id: String,
@@ -103,6 +138,9 @@ pub struct FeedItem {
     pub at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
+    /// The request id of a `question` item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +175,7 @@ impl Store {
                 link: format!("/sessions/{}", m.id),
                 at: at_ms / 1000,
                 approval_id: None,
+                question_id: None,
                 tool: None,
                 input: None,
                 questions: None,
@@ -150,13 +189,22 @@ impl Store {
             let mut ended: Option<(i64, i64, TurnOutcome, Option<String>, Option<String>)> = None;
             for e in self.events_after(&m.id, 0)? {
                 match e.event {
-                    AgentEvent::ApprovalRequested { approval_id, tool, input } => {
+                    AgentEvent::ApprovalRequested { approval_id, tool, input, .. } => {
                         let mut it = base(format!("approval:{approval_id}"), "approval", e.at);
                         it.approval_id = Some(approval_id);
                         it.questions = feed_questions(&tool, &input);
                         it.tool = Some(tool);
-                        it.input = Some(input);
+                        it.input = Some(capped_input(input));
                         pending.push(it);
+                    }
+                    AgentEvent::QuestionAsked { question_id, questions } => {
+                        let mut it = base(format!("question:{question_id}"), "question", e.at);
+                        it.question_id = Some(question_id);
+                        it.questions = Some(feed_questions_of(&questions));
+                        pending.push(it);
+                    }
+                    AgentEvent::QuestionAnswered { question_id, .. } => {
+                        pending.retain(|p| p.question_id.as_deref() != Some(question_id.as_str()))
                     }
                     AgentEvent::ApprovalResolved { approval_id, .. } => {
                         pending.retain(|p| p.approval_id.as_deref() != Some(approval_id.as_str()))
@@ -253,5 +301,42 @@ mod tests {
         let ok = json!({"questions": [{"question": "q"}]});
         assert_eq!(feed_questions("Bash", &ok), None);
         assert_eq!(feed_questions("mcp__x__AskUserQuestion", &ok), None);
+    }
+
+    #[test]
+    fn fr_t11_a_feed_input_is_capped_at_8_kib_serialized() {
+        // A JSON string serializes to its length plus two quotes.
+        let at_cap = serde_json::Value::String("x".repeat(INPUT_BYTES_MAX - 2));
+        assert_eq!(serde_json::to_string(&at_cap).unwrap().len(), INPUT_BYTES_MAX);
+        assert_eq!(capped_input(at_cap.clone()), at_cap);
+        let over = serde_json::Value::String("x".repeat(INPUT_BYTES_MAX - 1));
+        assert_eq!(capped_input(over), json!({"truncated": true, "bytes": INPUT_BYTES_MAX + 1}));
+        assert_eq!(capped_input(json!({"command": "ls"})), json!({"command": "ls"}));
+    }
+
+    #[test]
+    fn fr_t11_questions_of_a_question_event_keep_labels_only_with_the_same_caps() {
+        use crate::events::QuestionOption;
+        let long = "\u{d55c}".repeat(300);
+        let q = Question {
+            id: "q0".into(),
+            header: Some(long.clone()),
+            text: long,
+            options: (0..12)
+                .map(|i| QuestionOption { label: format!("o{i}"), description: Some("secret detail".into()) })
+                .collect(),
+            multi_select: true,
+            secret: false,
+            allow_other: true,
+        };
+        let qs: Vec<Question> = (0..6).map(|_| q.clone()).collect();
+        let out = feed_questions_of(&qs);
+        assert_eq!(out.len(), QUESTIONS_MAX);
+        assert_eq!(out[0].options.len(), OPTIONS_MAX);
+        assert_eq!(out[0].options[0], "o0");
+        assert_eq!(out[0].text.chars().count(), QUESTION_CHARS);
+        assert_eq!(out[0].header.as_ref().unwrap().chars().count(), QUESTION_CHARS);
+        assert!(out[0].multi_select);
+        assert!(!serde_json::to_string(&out).unwrap().contains("secret detail"));
     }
 }

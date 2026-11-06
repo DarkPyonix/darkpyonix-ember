@@ -98,6 +98,7 @@ async fn call(
 const FAMILIES: &[(&str, &str)] = &[
     ("GET", "/api/sessions"),
     ("POST", "/api/sessions"),
+    ("POST", "/api/sessions/s1/questions/q1/answer"),
     ("GET", "/api/projects"),
     ("GET", "/api/agents"),
     ("GET", "/api/computers"),
@@ -159,6 +160,26 @@ async fn fr_s9_right_token_passes_every_family() {
     let (st, body) = call(&f.app, Method::GET, "/api/sessions", &[("authorization", &h)]).await;
     assert_eq!(st, StatusCode::OK);
     assert!(body.is_array() || body.is_object());
+}
+
+/// FR-A5: only the owner answers a question. A runtime token (a team leader or an A2A agent) is
+/// not the server token, so the question route refuses it before any handler runs.
+#[tokio::test]
+async fn fr_a5_the_question_route_is_not_reachable_with_a_runtime_token() {
+    let f = fx();
+    let path = "/api/sessions/s1/questions/q1/answer";
+    for h in ["Bearer runtime-token", "Bearer "] {
+        let (st, body) = call(&f.app, Method::POST, path, &[("authorization", h)]).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{h:?}");
+        assert!(body["error"].is_string(), "{body}");
+        assert!(body.get("code").is_none(), "refused by the server token layer, not an A2A route: {body}");
+    }
+    let (st, _) = call(&f.app, Method::POST, path, &[]).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    // The owner's token gets past the layer (the handler then answers; here the body is empty).
+    let h = format!("Bearer {}", f.token);
+    let (st, _) = call(&f.app, Method::POST, path, &[("authorization", &h)]).await;
+    assert_ne!(st, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

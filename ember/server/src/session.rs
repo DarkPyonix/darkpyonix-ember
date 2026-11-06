@@ -14,10 +14,10 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::agents::{AgentAdapter, AgentKind, AgentRun, Detected, Probe, StartRequest};
-use crate::events::{is_user_question_tool, AgentEvent, ApprovalDecision, SessionStatus};
-
-/// Shown when approve-everything leaves an agent's question for a person (FR-A5).
-const QUESTION_WAITS_NOTICE: &str = "Approve everything does not answer questions; waiting for you.";
+use crate::events::{
+    approval_policy, redact_secret_answers, validate_question_answers, AgentEvent, AnswerInvalid, ApprovalDecision,
+    Question, QuestionAnswer, SessionStatus, QUESTION_WAITS_NOTICE,
+};
 use crate::projects::Project;
 use crate::schedules::{Schedule, ScheduleRun};
 use crate::store::{SessionPatch, SessionRecord, Store, StoredEvent};
@@ -62,6 +62,21 @@ pub enum SessionError {
     /// The requested account cannot be used, or the router found none available (FR-U2/U3).
     #[error("{0}")]
     Account(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// Why a question could not be answered or skipped (FR-A5).
+#[derive(Debug, thiserror::Error)]
+pub enum QuestionError {
+    #[error("session {0} not found")]
+    NoSession(String),
+    #[error("question {0} is not pending")]
+    NotPending(String),
+    #[error("{0}")]
+    Invalid(#[from] AnswerInvalid),
+    #[error("session {0} has no running agent")]
+    NoAgent(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -167,6 +182,9 @@ pub struct Sessions {
     /// Sessions in approve-everything mode (FR-A5). Opt-in per session, kept in memory: a server
     /// restart returns every session to asking.
     approve_all: std::sync::Mutex<HashSet<String>>,
+    /// Questions answered or skipped through this server: `(session, question)`. Stops a second
+    /// answer to the same question while the first one's event is still on its way to the store.
+    questions_taken: std::sync::Mutex<HashSet<(String, String)>>,
     /// Memory limit in MiB per agent kind, from the settings (FR-L20, FR-S8). Applies to agents
     /// started afterwards; a running shim keeps the limit it started with.
     mem_limits: std::sync::Mutex<HashMap<AgentKind, u64>>,
@@ -192,6 +210,7 @@ impl Sessions {
             last_active: std::sync::Mutex::new(HashMap::new()),
             leases: std::sync::Mutex::new(HashMap::new()),
             approve_all: std::sync::Mutex::new(HashSet::new()),
+            questions_taken: std::sync::Mutex::new(HashSet::new()),
             mem_limits: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -506,6 +525,10 @@ impl Sessions {
         if !pending.is_empty() {
             run.restore_pending_approvals(pending).await;
         }
+        let questions = self.pending_questions(id)?;
+        if !questions.is_empty() {
+            run.restore_pending_questions(questions).await;
+        }
         let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let run = LiveRun { run: Arc::new(Mutex::new(run)), events: tx, generation };
         live.insert(id.to_string(), run.clone());
@@ -540,20 +563,29 @@ impl Sessions {
                 }
                 // Approve-everything mode answers a new request itself (FR-A5). Spawned: the
                 // answer goes back through this very channel.
-                if let AgentEvent::ApprovalRequested { approval_id, tool, .. } = &event {
-                    if this.approve_all(&sid) && is_user_question_tool(tool) {
-                        // A question is for a person; no automatic mode answers it (FR-A5).
-                        let note = AgentEvent::Notice { message: QUESTION_WAITS_NOTICE.into() };
-                        if let Err(e) = this.record(&sid, &note) {
-                            tracing::warn!(session = %sid, "failed to store notice: {e:#}");
-                        }
-                    } else if this.approve_all(&sid) {
-                        let (this, sid, approval_id) = (this.clone(), sid.clone(), approval_id.clone());
-                        tokio::spawn(async move {
-                            if let Err(e) = this.answer(&sid, &approval_id, ApprovalDecision::AllowOnce).await {
-                                tracing::warn!(session = %sid, "auto-approve failed: {e}");
+                if let AgentEvent::ApprovalRequested { approval_id, tool, needs_person, .. } = &event {
+                    if this.approve_all(&sid) {
+                        let policy = approval_policy(tool, *needs_person);
+                        if policy.auto_in_approve_all {
+                            if let Some(message) = policy.auto_notice {
+                                let note = AgentEvent::Notice { message: message.into() };
+                                if let Err(e) = this.record(&sid, &note) {
+                                    tracing::warn!(session = %sid, "failed to store notice: {e:#}");
+                                }
                             }
-                        });
+                            let (this, sid, approval_id) = (this.clone(), sid.clone(), approval_id.clone());
+                            tokio::spawn(async move {
+                                if let Err(e) = this.answer(&sid, &approval_id, ApprovalDecision::AllowOnce).await {
+                                    tracing::warn!(session = %sid, "auto-approve failed: {e}");
+                                }
+                            });
+                        } else {
+                            // A question is for a person; no automatic mode answers it (FR-A5).
+                            let note = AgentEvent::Notice { message: QUESTION_WAITS_NOTICE.into() };
+                            if let Err(e) = this.record(&sid, &note) {
+                                tracing::warn!(session = %sid, "failed to store notice: {e:#}");
+                            }
+                        }
                     }
                 }
             }
@@ -574,12 +606,27 @@ impl Sessions {
         let mut pending: Vec<(String, String, serde_json::Value)> = Vec::new();
         for e in self.store.events_after(id, 0)? {
             match e.event {
-                AgentEvent::ApprovalRequested { approval_id, tool, input } => {
+                AgentEvent::ApprovalRequested { approval_id, tool, input, .. } => {
                     pending.push((approval_id, tool, input))
                 }
                 AgentEvent::ApprovalResolved { approval_id, .. } => {
                     pending.retain(|(p, _, _)| *p != approval_id)
                 }
+                AgentEvent::TurnEnded { .. } => pending.clear(),
+                _ => {}
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Questions of `id` that were asked and not answered, skipped or withdrawn by a turn end:
+    /// `(question id, questions)`, oldest first (FR-A5).
+    pub fn pending_questions(&self, id: &str) -> anyhow::Result<Vec<(String, Vec<Question>)>> {
+        let mut pending: Vec<(String, Vec<Question>)> = Vec::new();
+        for e in self.store.events_after(id, 0)? {
+            match e.event {
+                AgentEvent::QuestionAsked { question_id, questions } => pending.push((question_id, questions)),
+                AgentEvent::QuestionAnswered { question_id, .. } => pending.retain(|(p, _)| *p != question_id),
                 AgentEvent::TurnEnded { .. } => pending.clear(),
                 _ => {}
             }
@@ -717,6 +764,69 @@ impl Sessions {
         Ok(())
     }
 
+    /// Answer a pending question (FR-A5). Checked against the stored question, recorded as
+    /// [`AgentEvent::QuestionAnswered`] (values of a `secret` question as `***`), then sent to
+    /// the agent with the real values.
+    pub async fn answer_question(
+        self: &Arc<Self>,
+        id: &str,
+        question_id: &str,
+        answers: Vec<QuestionAnswer>,
+    ) -> Result<(), QuestionError> {
+        self.resolve_question(id, question_id, Some(answers)).await
+    }
+
+    /// Skip a pending question: the agent is told that the person did not answer (FR-A5). An
+    /// explicit choice, recorded as [`AgentEvent::QuestionAnswered`] with no answers.
+    pub async fn decline_question(self: &Arc<Self>, id: &str, question_id: &str) -> Result<(), QuestionError> {
+        self.resolve_question(id, question_id, None).await
+    }
+
+    async fn resolve_question(
+        self: &Arc<Self>,
+        id: &str,
+        question_id: &str,
+        answers: Option<Vec<QuestionAnswer>>,
+    ) -> Result<(), QuestionError> {
+        self.store.session(id)?.ok_or_else(|| QuestionError::NoSession(id.into()))?;
+        let questions = self
+            .pending_questions(id)?
+            .into_iter()
+            .find(|(q, _)| q == question_id)
+            .map(|(_, questions)| questions)
+            .ok_or_else(|| QuestionError::NotPending(question_id.into()))?;
+        if let Some(answers) = &answers {
+            validate_question_answers(&questions, answers)?;
+        }
+        let live = self
+            .live
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| QuestionError::NoAgent(id.into()))?;
+        let key = (id.to_string(), question_id.to_string());
+        if !self.questions_taken.lock().unwrap().insert(key.clone()) {
+            return Err(QuestionError::NotPending(question_id.into()));
+        }
+        let stored = answers.as_deref().map(|a| redact_secret_answers(&questions, a)).unwrap_or_default();
+        if live
+            .events
+            .send(AgentEvent::QuestionAnswered { question_id: question_id.to_string(), answers: stored })
+            .await
+            .is_err()
+        {
+            self.questions_taken.lock().unwrap().remove(&key);
+            return Err(QuestionError::Other(anyhow::anyhow!("agent for session {id} has exited")));
+        }
+        let mut run = live.run.lock().await;
+        match answers {
+            Some(answers) => run.answer_question(question_id, &answers).await?,
+            None => run.decline_question(question_id).await?,
+        }
+        Ok(())
+    }
+
     /// Whether `id` is in approve-everything mode (FR-A5).
     pub fn approve_all(&self, id: &str) -> bool {
         self.approve_all.lock().unwrap().contains(id)
@@ -742,19 +852,25 @@ impl Sessions {
         };
         self.record(id, &AgentEvent::Notice { message: message.into() })?;
         if enabled {
-            let mut pending: Vec<String> = Vec::new();
+            let mut pending: Vec<(String, Option<&'static str>)> = Vec::new();
             for e in self.store.events_after(id, 0)? {
                 match e.event {
-                    // A question is never answered by the mode (FR-A5).
-                    AgentEvent::ApprovalRequested { approval_id, tool, .. } if !is_user_question_tool(&tool) => {
-                        pending.push(approval_id)
+                    AgentEvent::ApprovalRequested { approval_id, tool, needs_person, .. } => {
+                        // A question is never answered by the mode (FR-A5, one policy table).
+                        let policy = approval_policy(&tool, needs_person);
+                        if policy.auto_in_approve_all {
+                            pending.push((approval_id, policy.auto_notice));
+                        }
                     }
-                    AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|p| *p != approval_id),
+                    AgentEvent::ApprovalResolved { approval_id, .. } => pending.retain(|(p, _)| *p != approval_id),
                     AgentEvent::TurnEnded { .. } => pending.clear(),
                     _ => {}
                 }
             }
-            for approval_id in pending {
+            for (approval_id, notice) in pending {
+                if let Some(message) = notice {
+                    self.record(id, &AgentEvent::Notice { message: message.into() })?;
+                }
                 if let Err(e) = self.answer(id, &approval_id, ApprovalDecision::AllowOnce).await {
                     tracing::warn!(session = %id, "approve-all of pending {approval_id} failed: {e}");
                 }

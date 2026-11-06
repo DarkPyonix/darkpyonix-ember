@@ -365,6 +365,26 @@ pub trait AgentRun: Send {
     /// adapter that holds its pending approvals in memory rebuilds them here. Default: nothing.
     async fn restore_pending_approvals(&mut self, _pending: Vec<(String, String, serde_json::Value)>) {}
 
+    /// Questions that were pending when the previous server died, found in the store after this
+    /// run rejoined its surviving agent: `(question id, questions)`. Default: nothing.
+    async fn restore_pending_questions(&mut self, _pending: Vec<(String, Vec<crate::events::Question>)>) {}
+
+    /// Answer a pending question with the person's answers (already validated against the
+    /// stored question by the session). Default: the agent has no questions.
+    async fn answer_question(
+        &mut self,
+        _question_id: &str,
+        _answers: &[crate::events::QuestionAnswer],
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("this agent does not support questions")
+    }
+
+    /// The person skips a pending question: the agent is told that nobody answered. Default: the
+    /// agent has no questions.
+    async fn decline_question(&mut self, _question_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this agent does not support questions")
+    }
+
     /// Interrupt the current turn; the adapter emits `TurnEnded { Interrupted }`.
     async fn interrupt(&mut self) -> anyhow::Result<()>;
 

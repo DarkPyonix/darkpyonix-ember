@@ -42,7 +42,7 @@ async fn until_approval(rx: &mut mpsc::Receiver<AgentEvent>) -> (String, Vec<Age
     let mut before = Vec::new();
     loop {
         match next(rx, 20).await {
-            AgentEvent::ApprovalRequested { approval_id, tool, input } => {
+            AgentEvent::ApprovalRequested { approval_id, tool, input, .. } => {
                 assert_eq!(tool, "run_command");
                 assert_eq!(input["CommandLine"], "echo hi");
                 return (approval_id, before);

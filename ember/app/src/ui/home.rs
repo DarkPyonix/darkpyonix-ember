@@ -216,15 +216,39 @@ pub fn popover_width(want: f32, window_dp: f32) -> f32 {
 
 /// The composer's chips in order: project, model, mode, computer.
 pub const CHIP_COUNT: usize = 4;
-/// The most text (modelled pixels, `files::chip_text_px`) each chip shows: the model chip about
-/// 200, the mode chip about 150.
-pub const CHIP_TEXT_CAPS: [f32; CHIP_COUNT] = [160.0, 200.0, 150.0, 160.0];
-/// The least text each chip keeps while the row is narrow: project and computer four Korean
-/// glyphs (4 x 16 = 64 modelled px), model and mode enough for "Claud...".
-pub const CHIP_TEXT_MINS: [f32; CHIP_COUNT] = [64.0, 45.0, 45.0, 64.0];
-/// Icon (16), its 8 gap and 12 padding either side, beside the text.
-const CHIP_FRAME: f32 = 48.0;
+/// The most text (composer pixels, [`composer_text_px`]) each chip shows: project 170, model 240
+/// ("Claude Code · Opus 5.5 · 높음" measures about 215), mode 140, computer 150.
+pub const CHIP_TEXT_CAPS: [f32; CHIP_COUNT] = [170.0, 240.0, 140.0, 150.0];
+/// The least text each chip keeps when a line is very narrow: project and computer four Korean
+/// glyphs (4 x 13.5), model and mode enough for "Claud...".
+pub const CHIP_TEXT_MINS: [f32; CHIP_COUNT] = [54.0, 40.0, 40.0, 54.0];
+/// Icon (16) and the chip's padding beside the text.
+const CHIP_FRAME: f32 = 30.0;
 const CHIP_GAP: f32 = 6.0;
+
+/// A label's width at the composer's chip font: about 13.5 dp per Korean glyph and 7.8 per ASCII
+/// character or middle dot. The send sheet's estimate (`files::chip_text_px`, 16 and 9) is
+/// deliberately more pessimistic and stays as it is.
+pub fn composer_text_px(text: &str) -> f32 {
+    text.chars().map(|c| if c.is_ascii() || c == '\u{b7}' { 7.8 } else { 13.5 }).sum()
+}
+
+/// `text` cut with an ellipsis so [`composer_text_px`] stays within `max_px`.
+pub fn composer_fit_text(text: &str, max_px: f32) -> String {
+    if composer_text_px(text) <= max_px {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        let next = format!("{out}{c}\u{2026}");
+        if composer_text_px(&next) > max_px {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('\u{2026}');
+    out
+}
 
 /// The width the chips may use in a composer card `composer_w` wide: less its 16 padding either
 /// side, the 36 dp add and send buttons and the gaps between them.
@@ -232,23 +256,15 @@ pub fn composer_chips_avail(composer_w: f32) -> f32 {
     composer_w - 32.0 - 72.0 - 2.0 * CHIP_GAP
 }
 
-/// The text width each chip may use (project, model, mode, computer): the caps when all fit one
-/// row, else a share between the minimums and the caps in proportion to how much each may give
-/// up. Below the sum of the minimums every chip keeps its minimum and the row wraps instead
-/// ([`composer_chip_rows`]); no chip is ever dropped.
+/// The text width each chip may use (project, model, mode, computer): its cap, or what a whole
+/// line leaves if that is less, never below the minimum. A label is cut only at its cap; when
+/// the chips do not fit one line the row wraps ([`composer_chip_rows`]) rather than cutting
+/// labels that have room or dropping a chip.
 pub fn composer_chip_budget(composer_w: f32) -> [f32; CHIP_COUNT] {
-    let room = composer_chips_avail(composer_w) - (CHIP_COUNT as f32 - 1.0) * CHIP_GAP - CHIP_COUNT as f32 * CHIP_FRAME;
-    let (cap, min): (f32, f32) = (CHIP_TEXT_CAPS.iter().sum(), CHIP_TEXT_MINS.iter().sum());
-    if room >= cap {
-        return CHIP_TEXT_CAPS;
-    }
-    if room <= min {
-        return CHIP_TEXT_MINS;
-    }
-    let t = (room - min) / (cap - min);
-    let mut out = CHIP_TEXT_MINS;
-    for (o, (c, m)) in out.iter_mut().zip(CHIP_TEXT_CAPS.iter().zip(CHIP_TEXT_MINS)) {
-        *o = m + (c - m) * t;
+    let line = composer_chips_avail(composer_w) - CHIP_FRAME;
+    let mut out = CHIP_TEXT_CAPS;
+    for (o, m) in out.iter_mut().zip(CHIP_TEXT_MINS) {
+        *o = o.min(line).max(m);
     }
     out
 }
@@ -261,7 +277,7 @@ pub fn composer_chip_rows(widths: &[f32], composer_w: f32) -> Vec<Vec<usize>> {
 
 /// A chip's full width for `text` (icon, padding and the text).
 pub fn composer_chip_width(text: &str) -> f32 {
-    CHIP_FRAME + crate::ui::files::chip_text_px(text)
+    CHIP_FRAME + composer_text_px(text)
 }
 
 pub fn default_mode(_h: Harness) -> PermMode {
@@ -1178,38 +1194,63 @@ mod tests {
 
     #[test]
     fn fr_l15_chip_budget_gives_every_chip_its_icon_and_some_text() {
-        for w in [300.0_f32, 400.0, 450.0, 520.0, 560.0, 640.0, 720.0] {
+        for w in [200.0_f32, 300.0, 400.0, 450.0, 520.0, 560.0, 640.0, 720.0] {
             let b = composer_chip_budget(w);
             for i in 0..CHIP_COUNT {
                 assert!(b[i] >= CHIP_TEXT_MINS[i] && b[i] <= CHIP_TEXT_CAPS[i], "{w} {i} {}", b[i]);
             }
             // Project and computer keep at least four Korean glyphs.
-            assert!(b[0] >= 64.0 && b[3] >= 64.0);
+            assert!(b[0] >= 54.0 && b[3] >= 54.0);
         }
     }
 
     #[test]
-    fn fr_l15_chip_budget_caps_the_model_and_mode_chips_when_there_is_room() {
-        // A composer wide enough for every cap (the 718 dp composer at 1440 is not: its chips share).
-        let b = composer_chip_budget(1200.0);
-        assert_eq!(b[1], 200.0);
-        assert_eq!(b[2], 150.0);
+    fn fr_l15_chip_budget_is_the_caps_when_a_line_has_room() {
+        let b = composer_chip_budget(718.0);
+        assert_eq!(b, CHIP_TEXT_CAPS);
+        assert_eq!(b[1], 240.0);
+        assert_eq!(b[2], 140.0);
     }
 
     #[test]
-    fn fr_l15_chip_budget_shrinks_with_the_composer_and_fits_one_line_when_it_can() {
-        let (wide, mid) = (composer_chip_budget(720.0), composer_chip_budget(560.0));
-        for i in 0..CHIP_COUNT {
-            assert!(mid[i] <= wide[i]);
-        }
-        // A budget that was shared out (neither all caps nor all minimums) fits one line.
-        for w in [480.0_f32, 520.0, 560.0, 600.0] {
+    fn fr_l15_composer_estimate_matches_the_measured_label() {
+        let w = composer_text_px("Claude Code \u{b7} Opus 5.5 \u{b7} 높음");
+        assert!((205.0..=235.0).contains(&w), "{w}");
+        // The send sheet's pessimistic estimate is a different, larger function.
+        assert!(crate::ui::files::chip_text_px("가나다") > composer_text_px("가나다"));
+    }
+
+    /// The demo labels of the composer chips.
+    fn demo_chip_labels() -> [String; CHIP_COUNT] {
+        [
+            DEFAULT_PROJECT.to_string(),
+            default_option(Harness::ClaudeCode).chip_label(),
+            PermMode::Ask.label().to_string(),
+            "이 컴퓨터".to_string(),
+        ]
+    }
+
+    #[test]
+    fn fr_l15_default_demo_labels_are_not_truncated_at_718_and_640() {
+        for w in [718.0_f32, 640.0, 700.0] {
             let b = composer_chip_budget(w);
-            if b != CHIP_TEXT_MINS && b != CHIP_TEXT_CAPS {
-                let widths: Vec<f32> = b.iter().map(|t| CHIP_FRAME + t).collect();
-                assert_eq!(composer_chip_rows(&widths, w).len(), 1, "{w}");
+            for (t, max) in demo_chip_labels().iter().zip(b) {
+                assert_eq!(&composer_fit_text(t, max), t, "{w} {t}");
             }
         }
+    }
+
+    #[test]
+    fn fr_l15_demo_labels_fit_one_line_at_718() {
+        let b = composer_chip_budget(718.0);
+        let widths: Vec<f32> = demo_chip_labels().iter().zip(b).map(|(t, m)| composer_chip_width(&composer_fit_text(t, m))).collect();
+        assert_eq!(composer_chip_rows(&widths, 718.0).len(), 1, "{widths:?}");
+    }
+
+    #[test]
+    fn fr_l15_fit_text_cuts_with_an_ellipsis_only_over_the_budget() {
+        assert_eq!(composer_fit_text("가나다라마바사", 40.0), "가나\u{2026}");
+        assert_eq!(composer_fit_text("abc", 100.0), "abc");
     }
 
     #[test]

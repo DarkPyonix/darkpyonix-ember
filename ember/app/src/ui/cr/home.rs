@@ -392,14 +392,34 @@ enum Pick {
     Computer,
 }
 
-/// `EMBER_CR_HOME_PICK=project|model|mode|computer` opens one list at the start, and
-/// `EMBER_CR_HOME_SUGGEST=0..2` takes a suggestion, for review captures.
+/// `EMBER_CR_HOME_PICK=project|model|mode|computer|mode_armed` opens one list at the start
+/// (`mode_armed` opens the permission picker with the bypass confirmation armed, so its row
+/// reads "다시 눌러 바이패스 적용"), `EMBER_CR_HOME_MODE=bypass` presets the permission mode so the
+/// composer shows the warning chip, and `EMBER_CR_HOME_SUGGEST=0..2` takes a suggestion, for
+/// review captures.
 fn initial_pick() -> Option<Pick> {
-    match std::env::var("EMBER_CR_HOME_PICK").ok().as_deref() {
-        Some("project") => Some(Pick::Project),
-        Some("model") => Some(Pick::Model),
-        Some("mode") => Some(Pick::Mode),
-        Some("computer") => Some(Pick::Computer),
+    pick_from(std::env::var("EMBER_CR_HOME_PICK").ok().as_deref()).0
+}
+
+/// The list a `EMBER_CR_HOME_PICK` value opens and whether it also arms the bypass confirm.
+fn pick_from(value: Option<&str>) -> (Option<Pick>, bool) {
+    match value {
+        Some("project") => (Some(Pick::Project), false),
+        Some("model") => (Some(Pick::Model), false),
+        Some("mode") => (Some(Pick::Mode), false),
+        Some("mode_armed") => (Some(Pick::Mode), true),
+        Some("computer") => (Some(Pick::Computer), false),
+        _ => (None, false),
+    }
+}
+
+/// The permission mode a `EMBER_CR_HOME_MODE` value presets.
+fn mode_from(value: Option<&str>) -> Option<PermMode> {
+    match value {
+        Some("bypass") => Some(PermMode::Bypass),
+        Some("edits") => Some(PermMode::Edits),
+        Some("plan") => Some(PermMode::Plan),
+        Some("ask") => Some(PermMode::Ask),
         _ => None,
     }
 }
@@ -495,12 +515,17 @@ struct Composer {
 impl Composer {
     fn new() -> Self {
         Composer {
-            selection: mutable_state_of(Selection::initial()),
+            selection: mutable_state_of(match mode_from(std::env::var("EMBER_CR_HOME_MODE").ok().as_deref()) {
+                Some(m) => Selection::initial().with_mode(m),
+                None => Selection::initial(),
+            }),
             typed: mutable_state_of(String::new()),
             suggestion: mutable_state_of(initial_suggestion()),
             busy: mutable_state_of(false),
             open: mutable_state_of(initial_pick()),
-            mode_pending: mutable_state_of(None),
+            mode_pending: mutable_state_of(
+                pick_from(std::env::var("EMBER_CR_HOME_PICK").ok().as_deref()).1.then(|| (PermMode::Bypass, now_ms())),
+            ),
             harness_filter: mutable_state_of(None),
             query: mutable_state_of(String::new()),
         }
@@ -1071,7 +1096,7 @@ fn ComposerCard(c: &Composer, ui: &SharedUi, w: f32, l: Layout) {
                             let fitted: Vec<String> = texts
                                 .iter()
                                 .zip(composer_chip_budget(w))
-                                .map(|(t, b)| crate::ui::files::fit_chip_text(t, b))
+                                .map(|(t, b)| crate::ui::home::composer_fit_text(t, b))
                                 .collect();
                             let widths: Vec<f32> = fitted.iter().map(|t| composer_chip_width(t)).collect();
                             // A line per row of chips: a narrow card wraps rather than drops a chip.
@@ -1645,6 +1670,19 @@ fn ProjectsTile(tiles: &[ProjectTile], ui: &SharedUi, l: Layout) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l16_capture_hooks_map_env_values() {
+        assert_eq!(pick_from(Some("mode")), (Some(Pick::Mode), false));
+        assert_eq!(pick_from(Some("mode_armed")), (Some(Pick::Mode), true));
+        assert_eq!(pick_from(Some("model")), (Some(Pick::Model), false));
+        assert_eq!(pick_from(Some("zzz")), (None, false));
+        assert_eq!(pick_from(None), (None, false));
+        assert_eq!(mode_from(Some("bypass")), Some(PermMode::Bypass));
+        assert_eq!(mode_from(Some("plan")), Some(PermMode::Plan));
+        assert_eq!(mode_from(Some("nope")), None);
+        assert_eq!(mode_from(None), None);
+    }
+
     use super::*;
     use compose_rust::protocol::{decode_batch, HostEvent, Mutation, PropertyValue};
     use compose_rust::{Host, Recomposer};

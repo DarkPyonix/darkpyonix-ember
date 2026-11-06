@@ -18,6 +18,39 @@ use ember_node::api::{self, Node};
 use ember_node::client::NodeClient;
 use ember_node::config::NodeConfig;
 
+/// The paths the local node refuses: the server data dir (`EMBER_DATA_DIR`, else `<home>/.ember`,
+/// where `ember.db`, `secret.key`, the server token and `accounts/` live) and the OSE data root
+/// (`EMBER_OSE_DATA_DIR`, else `<data dir>/ose-data`, holding connection token files), when it is
+/// a different path. Kept pure so tests need no environment.
+///
+/// This narrows the `/fs` API only. It is not a sandbox: terminals and agents run as the server
+/// user and can read these folders by shell (D37 full authority is unchanged).
+pub fn denied_paths(
+    data_dir: Option<std::path::PathBuf>,
+    ose_dir: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    let non_empty = |p: Option<std::path::PathBuf>| p.filter(|p| !p.as_os_str().is_empty());
+    let (data_dir, home) = (non_empty(data_dir), non_empty(home));
+    let mut out = Vec::new();
+    match (&data_dir, &home) {
+        (Some(d), _) => out.push(d.clone()),
+        (None, Some(h)) => out.push(h.join(".ember")),
+        (None, None) => {}
+    }
+    if let Ok(ose) = crate::ose::data_root_from(ose_dir, data_dir, home) {
+        if !out.iter().any(|p| ose.starts_with(p)) {
+            out.push(ose);
+        }
+    }
+    out
+}
+
+fn denied_from_env() -> Vec<std::path::PathBuf> {
+    let var = |k: &str| std::env::var_os(k).map(std::path::PathBuf::from);
+    denied_paths(var("EMBER_DATA_DIR"), var("EMBER_OSE_DATA_DIR"), var("HOME"))
+}
+
 pub struct LocalNode {
     addr: SocketAddr,
     token: String,
@@ -31,12 +64,13 @@ impl Drop for LocalNode {
 }
 
 impl LocalNode {
-    /// Bind `127.0.0.1:0` and serve a node rooted at `$HOME`. Needs a Tokio runtime.
+    /// Bind `127.0.0.1:0` and serve a node rooted at `$HOME`, refusing the server data dir and the
+    /// OSE data root ([`denied_paths`]). Needs a Tokio runtime.
     pub fn start() -> anyhow::Result<LocalNode> {
         let handle = tokio::runtime::Handle::try_current().context("the local node needs a Tokio runtime")?;
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
         let roots = std::env::var_os("HOME").map(std::path::PathBuf::from).into_iter().collect();
-        let node = Node::new(NodeConfig::new(token.clone(), roots))?;
+        let node = Node::new(NodeConfig::new(token.clone(), roots).with_denied(denied_from_env()))?;
         let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         std_listener.set_nonblocking(true)?;
         let addr = std_listener.local_addr()?;

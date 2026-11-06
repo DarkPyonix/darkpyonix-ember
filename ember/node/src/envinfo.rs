@@ -71,7 +71,7 @@ async fn first_line(program: &Path, args: &[&str]) -> Option<String> {
         .find(|l| !l.is_empty())
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: buffer and length are valid; result is NUL-terminated on success.
     let r = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };

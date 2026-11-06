@@ -143,6 +143,7 @@ const MIGRATIONS: &[&str] = &[
     crate::channels::MENTIONS_MIGRATION,
     crate::projects::schema::SETTINGS_MIGRATION,
     crate::channels::invites::MIGRATION,
+    crate::projects::schema::PROFILE_OVERRIDES_MIGRATION,
 ];
 
 /// Bring `conn` up to the latest schema version.
@@ -517,6 +518,36 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
         assert_eq!(store.sessions(None).unwrap().len(), 2);
+    }
+
+    /// FR-L26: a database from before the profile override column gains it as NULL and keeps its
+    /// projects; an override can then be stored.
+    #[test]
+    fn fr_l26_old_database_gains_profile_overrides_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ember.db");
+        let before =
+            MIGRATIONS.iter().position(|m| *m == crate::projects::schema::PROFILE_OVERRIDES_MIGRATION).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            for (i, sql) in MIGRATIONS.iter().enumerate().take(before) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.pragma_update(None, "user_version", (i + 1) as i64).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.execute_batch("INSERT INTO projects (name, created_at) VALUES ('alpha', 5);").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let alpha = store.project("alpha").unwrap().unwrap();
+        assert_eq!(alpha.created_at, 5);
+        assert!(alpha.profile_overrides.is_empty());
+        let stored: Option<String> = store
+            .conn()
+            .query_row("SELECT profile_overrides FROM projects WHERE name = 'alpha'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, None, "existing rows hold NULL");
     }
 
     /// FR-L26: a database from before the project settings columns gains them in place, with

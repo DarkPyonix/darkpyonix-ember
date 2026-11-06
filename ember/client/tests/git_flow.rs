@@ -39,6 +39,10 @@ async fn handle(
         "fetch" | "pull" | "push" => (StatusCode::OK, Json(json!({ "output": format!("{op} ok") }))),
         "conflicts" => (StatusCode::OK, Json(json!({ "paths": ["c.rs"] }))),
         "log" => (StatusCode::OK, Json(json!({"commits": [{"sha":"abc", "parents":["def"], "author":"A", "email":"a@example.com", "time":123, "subject":"subject", "refs":[{"name":"HEAD", "kind":"head"}]}]}))),
+        "branches" => (StatusCode::OK, Json(json!({"branches": [
+            {"name":"feat/x", "is_current":true, "is_default":false, "upstream":"origin/feat/x", "ahead":2, "behind":1,
+             "last_sha":"abc1234", "last_subject":"Fix: x", "last_time":"2026-11-05T10:00:00+09:00", "worktree":"/w/ember"},
+            {"name":"main", "is_current":false, "is_default":true}]}))),
         "prs" if body["state"] == "closed" => (StatusCode::CONFLICT, Json(json!({"error": "GitHub에 로그인되어 있지 않습니다.\ngh auth login"}))),
         "prs" => (StatusCode::OK, Json(json!({"prs": [{
             "number": 7, "title": "Add the pull request list", "state": "open", "draft": false, "author": "octo",
@@ -179,4 +183,18 @@ async fn fr_g8_prs_call_decodes_the_nodes_shape_and_carries_gh_errors() {
     assert!(!pr.merge.can_merge && pr.merge.reason.contains("CI"));
     let err = api.git_prs("ember", "closed", 30).await.unwrap_err();
     assert!(err.to_string().contains("gh auth login"), "{err}");
+}
+
+#[tokio::test]
+async fn fr_g9_branches_call_decodes_the_nodes_shape_with_defaults() {
+    let (api, seen) = start().await;
+    let list = api.git_branches("ember").await.unwrap();
+    assert_eq!((last(&seen).1, last(&seen).2), ("branches".into(), json!({})));
+    let a = &list.branches[0];
+    assert_eq!((a.name.as_str(), a.is_current, a.is_default), ("feat/x", true, false));
+    assert_eq!((a.upstream.as_deref(), a.ahead, a.behind), (Some("origin/feat/x"), 2, 1));
+    assert_eq!((a.last_sha.as_str(), a.last_subject.as_str()), ("abc1234", "Fix: x"));
+    assert_eq!((a.last_time.as_deref(), a.worktree.as_deref()), (Some("2026-11-05T10:00:00+09:00"), Some("/w/ember")));
+    let m = &list.branches[1];
+    assert!(m.is_default && m.upstream.is_none() && m.worktree.is_none() && (m.ahead, m.behind) == (0, 0));
 }

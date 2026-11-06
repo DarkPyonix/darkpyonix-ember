@@ -1513,6 +1513,7 @@ impl GitState {
                 let skip = body["skip"].as_u64().unwrap_or(0) as usize;
                 Ok(json!({ "commits": demo_log(now_ms() / 1000).into_iter().skip(skip).take(limit).collect::<Vec<_>>() }))
             }
+            "branches" => Ok(json!({ "branches": demo_branches(now_ms() / 1000) })),
             "prs" => {
                 let state = body.get("state").and_then(Value::as_str).unwrap_or("open");
                 if !["open", "closed", "merged", "all"].contains(&state) {
@@ -1532,6 +1533,36 @@ impl GitState {
             _ => Err(GitError::new(404, "not_found", "unknown git operation")),
         }
     }
+}
+
+/// Local branches as the node answers them (`/git/branches`, FR-G9): the current one with an
+/// upstream ahead 2 behind 1, the default, a plain one and one checked out in a worktree.
+/// `now` is unix seconds.
+fn demo_branches(now: i64) -> Vec<Value> {
+    // (name, current, default, upstream, ahead, behind, sha, subject, minutes ago, worktree)
+    type Row = (&'static str, bool, bool, Option<&'static str>, u32, u32, &'static str, &'static str, i64, Option<&'static str>);
+    const ROWS: &[Row] = &[
+        ("feat/git-api", true, false, Some("origin/feat/git-api"), 2, 1, "a1b2c3d", "Feat: Git log API and history list", 12, Some("/Users/demo/darkpyonix-ember")),
+        ("main", false, true, Some("origin/main"), 0, 0, "7f6e5d4", "Merge pull request #398 from docs/commit-rules", 60 * 26, None),
+        ("develop", false, false, Some("origin/develop"), 0, 3, "3c2b1a0", "Docs: describe the commit message rules", 60 * 5, None),
+        ("feat/ui-phase-6", false, false, None, 0, 0, "9e8d7c6", "Feat: screen 6 layout", 60 * 30, Some("/Users/demo/worktrees/ui-phase-6")),
+    ];
+    ROWS.iter()
+        .map(|(name, current, default, upstream, ahead, behind, sha, subject, minutes, worktree)| {
+            json!({
+                "name": name,
+                "is_current": current,
+                "is_default": default,
+                "upstream": upstream,
+                "ahead": ahead,
+                "behind": behind,
+                "last_sha": sha,
+                "last_subject": subject,
+                "last_time": iso_time(now - minutes * 60),
+                "worktree": worktree,
+            })
+        })
+        .collect()
 }
 
 /// Pull requests as the node answers them (`/git/prs`, FR-G8): an approved one with green checks,
@@ -1776,6 +1807,23 @@ mod tests {
         assert_eq!(page[0]["sha"], all[3]["sha"]);
         let past = gs(&d, "log", json!({ "limit": 5, "skip": 100 })).unwrap();
         assert!(past["commits"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fr_g9_demo_branches_have_the_node_shape_and_order() {
+        let d = DemoSource::new(0, std::env::temp_dir().join("ember-demo-test"));
+        let list = gs(&d, "branches", json!({})).unwrap();
+        let decoded: ember_client::api::GitBranches = serde_json::from_value(list).unwrap();
+        let names: Vec<&str> = decoded.branches.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names[..2], ["feat/git-api", "main"]);
+        let cur = &decoded.branches[0];
+        assert!(cur.is_current && !cur.is_default);
+        assert_eq!((cur.upstream.as_deref(), cur.ahead, cur.behind), (Some("origin/feat/git-api"), 2, 1));
+        assert!(decoded.branches[1].is_default);
+        let wt = decoded.branches.iter().find(|b| b.name == "feat/ui-phase-6").unwrap();
+        assert_eq!(wt.worktree.as_deref(), Some("/Users/demo/worktrees/ui-phase-6"));
+        assert!(wt.upstream.is_none());
+        assert!(decoded.branches.iter().all(|b| b.last_time.as_deref().is_some_and(|t| t.contains('T')) && !b.last_sha.is_empty()));
     }
 
     fn prs(d: &DemoSource, body: Value) -> Vec<Value> {

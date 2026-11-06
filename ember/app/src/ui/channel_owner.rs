@@ -250,6 +250,16 @@ pub fn known_door(door: Option<&GuestDoorState>) -> DoorStatus {
     }
 }
 
+/// The fixed sentence shown when the door state could not be read (never the server's text).
+pub const DOOR_READ_FAILED_NOTE: &str = "게스트 문 상태를 읽지 못했습니다";
+
+/// Merges what the owner knew with a fresher answer: a read of the door or the create-invite
+/// response. A fresh answer wins; a failed read (`None`) keeps what was known, which is nothing
+/// (unknown) before the first answer.
+pub fn merge_door(known: Option<GuestDoorState>, fresh: Option<GuestDoorState>) -> Option<GuestDoorState> {
+    fresh.or(known)
+}
+
 /// The label of the create button: a door known to be off needs a deliberate second tap.
 pub fn create_label(door: DoorStatus, armed: bool) -> &'static str {
     match (door, armed) {
@@ -538,5 +548,34 @@ mod tests {
         assert_eq!(known_door(Some(&un)), DoorStatus::Open { warning: true });
         let ok = GuestDoorState { state: "on".into(), listen: Some("10.0.0.2:7071".into()), public_url: None, link_warning: false };
         assert_eq!(known_door(Some(&ok)), DoorStatus::Open { warning: false });
+    }
+
+    #[test]
+    fn fr_t14_door_state_is_known_before_the_first_invite() {
+        let read = merge_door(None, Some(door("off")));
+        assert_eq!(known_door(read.as_ref()), DoorStatus::Off);
+        assert_eq!(create_label(known_door(read.as_ref()), true), "그래도 초대 만들기");
+        let on = merge_door(None, Some(door("on")));
+        assert_eq!(known_door(on.as_ref()), DoorStatus::Open { warning: false });
+        assert_eq!(known_door(on.as_ref()).text(), "게스트 문이 켜져 있습니다");
+        let lo = GuestDoorState { state: "on".into(), listen: Some("127.0.0.1:7071".into()), public_url: None, link_warning: false };
+        assert_eq!(known_door(merge_door(None, Some(lo)).as_ref()), DoorStatus::Open { warning: true });
+    }
+
+    #[test]
+    fn fr_t14_a_failed_door_read_stays_unknown() {
+        let read = merge_door(None, None);
+        assert_eq!(known_door(read.as_ref()), DoorStatus::Unknown);
+        assert_eq!(DoorStatus::Unknown.text(), "게스트 문 상태: 아직 알 수 없습니다");
+        assert!(!DOOR_READ_FAILED_NOTE.contains('\u{2014}'));
+        // A failed read does not erase an answer already known.
+        assert_eq!(merge_door(Some(door("on")), None), Some(door("on")));
+    }
+
+    #[test]
+    fn fr_t14_the_invite_response_refreshes_the_door_state() {
+        let known = merge_door(None, Some(door("off")));
+        let after = merge_door(known, Some(door("on")));
+        assert_eq!(known_door(after.as_ref()), DoorStatus::Open { warning: false });
     }
 }

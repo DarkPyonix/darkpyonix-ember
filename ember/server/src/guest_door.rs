@@ -187,14 +187,29 @@ impl GuestDoor {
 /// Door on without: absolute from the listen address, `link_warning` true ("check that this
 /// address is reachable from outside").
 pub fn invite_link(door: Option<&GuestDoor>, token: &str) -> (String, bool, Value) {
-    let state = GuestDoor::state_json(door);
-    match door {
-        None => (format!("/join#{token}"), false, state),
+    let (state, warn) = door_status(door);
+    let link = match door {
+        None => format!("/join#{token}"),
         Some(d) => match &d.public_url {
-            Some(u) => (format!("{u}/join#{token}"), false, state),
-            None => (format!("http://{}/join#{token}", d.listen), true, state),
+            Some(u) => format!("{u}/join#{token}"),
+            None => format!("http://{}/join#{token}", d.listen),
         },
-    }
+    };
+    (link, warn, state)
+}
+
+/// The `guest_door` object and `link_warning`, the one source of both the invite response and
+/// `GET /api/guest-door` (FR-T14). `link_warning` is true only when the door is on and no public
+/// URL is set.
+pub fn door_status(door: Option<&GuestDoor>) -> (Value, bool) {
+    (GuestDoor::state_json(door), door.is_some_and(|d| d.public_url.is_none()))
+}
+
+/// The body of `GET /api/guest-door`: `{state, listen, public_url, link_warning}`.
+pub fn status_body(door: Option<&GuestDoor>) -> Value {
+    let (mut v, warn) = door_status(door);
+    v["link_warning"] = json!(warn);
+    v
 }
 
 fn parse_public_url(u: &str) -> Result<String, DoorError> {

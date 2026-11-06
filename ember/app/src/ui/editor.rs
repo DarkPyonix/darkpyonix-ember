@@ -85,6 +85,21 @@ impl EditorTabs {
         };
     }
 
+    /// A path was renamed: every tab at or below `old` takes the matching path below `new`, keeping its
+    /// place and its dirty mark. Returns the (old, new) pairs of the tabs that moved.
+    pub fn rename_prefix(&mut self, old: &str, new: &str) -> Vec<(String, String)> {
+        let old = old.trim_end_matches('/');
+        let new = new.trim_end_matches('/');
+        let mut moved = Vec::new();
+        for (path, _) in &mut self.tabs {
+            if is_at_or_below(path, old) {
+                let renamed = format!("{new}{}", &path[old.len()..]);
+                moved.push((std::mem::replace(path, renamed.clone()), renamed));
+            }
+        }
+        moved
+    }
+
     pub fn set_dirty(&mut self, path: &str, dirty: bool) {
         if let Some(i) = self.index(path) {
             self.tabs[i].1 = dirty;
@@ -200,6 +215,78 @@ pub fn editor_grid_style_maximized() -> String {
 /// The breadcrumb line: segments joined with a right-angle quote.
 pub fn breadcrumb_text(path: &str, folder: &str) -> String {
     breadcrumb_segments(path, folder).join(" \u{203A} ")
+}
+
+/// A pending explorer edit the tree is asking a name or a confirmation for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreePrompt {
+    NewFile { parent: String },
+    NewDir { parent: String },
+    Rename { path: String },
+    Delete { path: String, is_dir: bool },
+}
+
+/// The directory a new file or folder goes in: the selected directory, the directory of the
+/// selected file, or the project folder when nothing is selected.
+pub fn new_item_parent(selected: Option<(&str, bool)>, root: &str) -> String {
+    match selected {
+        Some((path, true)) => path.to_string(),
+        Some((path, false)) => match path.trim_end_matches('/').rsplit_once('/') {
+            Some(("", _)) | None => "/".to_string(),
+            Some((parent, _)) => parent.to_string(),
+        },
+        None => root.to_string(),
+    }
+}
+
+/// What the delete confirmation says. There is no trash, so it says the deletion cannot be undone,
+/// a directory goes with everything in it, and which open files have unsaved changes that go too.
+pub fn delete_confirmation(path: &str, folder: &str, is_dir: bool, unsaved: &[String]) -> String {
+    let name = breadcrumb_segments(path, folder).join("/");
+    let mut text = if is_dir {
+        format!("폴더 {name}와 그 안의 모든 파일을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    } else {
+        format!("파일 {name}을 삭제할까요? 휴지통이 없어 되돌릴 수 없습니다.")
+    };
+    if !unsaved.is_empty() {
+        let names: Vec<String> = unsaved.iter().map(|p| breadcrumb_segments(p, folder).join("/")).collect();
+        text.push_str(&format!(" 저장하지 않은 변경이 있는 파일: {}. 삭제하면 그 편집도 사라집니다.", names.join(", ")));
+    }
+    text
+}
+
+/// Why an explorer edit failed, in Korean: the server's own English text is not shown, only what kind
+/// of failure it was.
+pub fn edit_failure_text(action: &str, detail: &str) -> String {
+    let d = detail.to_lowercase();
+    let reason = if d.contains("exists") || d.contains("eexist") {
+        "같은 이름이 이미 있습니다"
+    } else if d.contains("not found") || d.contains("enoent") || d.contains("does not exist") {
+        "대상을 찾을 수 없습니다"
+    } else if d.contains("permission") || d.contains("eacces") || d.contains("eperm") {
+        "권한이 없습니다"
+    } else if d.contains("not empty") || d.contains("enotempty") {
+        "폴더가 비어 있지 않습니다"
+    } else if d.contains("closed") || d.contains("timed out") || d.contains("connection") {
+        "서버와의 연결이 끊겼습니다"
+    } else {
+        "서버가 요청을 처리하지 못했습니다"
+    };
+    format!("{action} 실패: {reason}")
+}
+
+/// The delete button answers only once the question has been on screen for 600 ms, so a stray double
+/// click that opened it cannot also confirm it.
+pub const DELETE_GUARD_MS: u64 = 600;
+
+pub fn delete_click_allowed(opened_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(opened_ms) >= DELETE_GUARD_MS
+}
+
+/// Whether closing `tab` is needed after `gone` was deleted or renamed: it is that path or below it.
+pub fn is_at_or_below(tab: &str, gone: &str) -> bool {
+    let gone = gone.trim_end_matches('/');
+    tab == gone || tab.strip_prefix(gone).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// The problems tab's label: the tool window's name, with the count when there is one.

@@ -34,6 +34,7 @@ pub mod coords;
 pub mod engine;
 pub mod fallback;
 pub mod diagnostics;
+pub mod paths;
 pub mod document;
 pub mod hover;
 pub mod ids;
@@ -70,4 +71,7 @@ pub enum Error {
     /// The session task has ended.
     #[error("session closed")]
     Closed,
+    /// An explorer edit named a path or a name that is not allowed.
+    #[error("{0}")]
+    Path(crate::paths::PathError),
 }

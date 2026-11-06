@@ -552,6 +552,17 @@ Security boundary:
   dir's settings (`ember/ose/smoke.sh` writes it for the Machine and User scopes). The route does not set it and
   does not verify any signature, so an install from the route either fails on the signature check or, with the
   setting off, runs unverified code, and installed extension code later runs in the editor's extension host.
+- **The connection token is not on the command line (#461).** The OSE start writes the token to
+  `<data root>/<computer id>/tokens/<first 16 hex of SHA-256 of the canonical folder>.token` and passes
+  `--connection-token-file <path>`, so `ps` shows no secret. The `tokens` directory is made 0700 (a symlink is
+  refused); the file is created with `create_new` and mode 0600, so it never exists with wider permissions,
+  and holds the 64-hex token without a trailing newline. A stale file at the path is removed first (a
+  directory there is refused). The file is deleted when the process entry goes away (child exited, manager
+  dropped) and when the start fails. The token is still returned in the IdeLaunch JSON. Test:
+  `fr_w4_ose_token_file_*` in `ember/server/tests/fr_w4_ose_data_dir.rs` (written, not yet run). Unverified
+  with the real `dpx-ose-server`: that it reads the file once at start and honours it, and whether it expects
+  or trims a trailing newline (`ember/ose/README.md` only names the flag). The `tokens` dir lies inside
+  `--server-data-dir`; the OSE is not known to serve or list it (unverified).
 - The 200 and 502 `output` is what the OSE printed and can contain absolute paths of the server machine; only the
   owner sees it.
 - Tests: `ember/server/tests/fr_w4_ose_data_dir.rs`.

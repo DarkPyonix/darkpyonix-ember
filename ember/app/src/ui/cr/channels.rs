@@ -311,7 +311,6 @@ fn RoomList(rooms: &[Room], order: &[String], filter: &MutableState<ListFilter>,
                     )
                     .content(|| {
                         super::shell::NavIcon(super::shell::ICON_PLUS_SVG, p.text_2.to_argb(), 16.0);
-                        super::a11y::Named(super::a11y::NEW_CHANNEL);
                     });
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
             });
@@ -463,7 +462,6 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                         move || st.open.set(true),
                         || {
                             super::shell::NavIcon(super::shell::ICON_USERS_SVG, p.text_2.to_argb(), 16.0);
-                            super::a11y::Named(super::a11y::MEMBERS);
                         },
                     );
                 }
@@ -479,7 +477,6 @@ fn RoomView(room: &Room, show_back: bool, live: Option<Feed>, on_back: impl FnMu
                         )
                         .content(|| {
                             super::shell::NavIcon(svg, p.text_2.to_argb(), 16.0);
-                            super::a11y::Named(super::a11y::MORE);
                         });
                 }
                 cu::Spacer().modifier(Modifier::new().width(SP[3]));
@@ -572,7 +569,6 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                         .modifier(Modifier::new().size(H_CTL, H_CTL))
                         .content(|| {
                             super::shell::NavIcon(svg, p.text_2.to_argb(), 18.0);
-                            super::a11y::Named(super::a11y::ATTACH);
                         });
                 }
                 EmberField(FieldOptions {
@@ -595,7 +591,6 @@ fn InputBar(room_id: &str, live: Option<Feed>) {
                     .modifier(Modifier::new().size(H_CTL, H_CTL))
                     .content(|| {
                         super::shell::NavIcon(super::shell::ICON_SMILE_SVG, p.text_2.to_argb(), 18.0);
-                        super::a11y::Named(super::a11y::EMOJI);
                     });
                 // Sending is for the server's rooms; the sample rooms (demo) cannot send.
                 let sending = state.get() == SendState::Sending;

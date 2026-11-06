@@ -305,7 +305,6 @@ pub fn ThemeButton(ui: &SharedUi) {
         move || u.set_theme_pref(u.theme_pref.get_untracked().next()),
         || {
             NavIcon(if dark { shell::ICON_SUN_SVG } else { shell::ICON_MOON_SVG }, p.text_2.to_argb(), 18.0);
-            super::a11y::Named(super::a11y::THEME);
         },
     );
 }
@@ -552,7 +551,6 @@ fn OpenSessionButton(b: &ProjectBox, ui: &SharedUi, small: bool) {
         },
         || {
             NavIcon(super::session::ICON_GRID_SVG, p.ink_text.to_argb(), if small { 16.0 } else { 18.0 });
-            super::a11y::Named(super::a11y::OPEN_SESSION);
         },
     );
 }
@@ -567,7 +565,6 @@ fn IconAction(svg: &'static str, label: &'static str, on_click: impl FnMut() + '
         on_click,
         move || {
             NavIcon(svg, p.text_2.to_argb(), 16.0);
-            super::a11y::Named(label);
         },
     );
 }

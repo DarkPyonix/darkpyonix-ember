@@ -1209,7 +1209,7 @@ mod tests {
                 "files.rs" => 1,
                 "home.rs" => 2,
                 "launcher.rs" => 1,
-                "project.rs" => 2,
+                "project.rs" => 1,
                 "routines.rs" => 2,
                 // FocusOverlay and the StashPill accessible-name overlay (FR-G6, #350).
                 "vcs.rs" => 2,

@@ -202,7 +202,6 @@ pub fn RailItem(menu: NavMenu, active: bool, badge: NavBadge, on_click: impl FnM
         on_click,
         || {
             NavIcon(menu.svg(), fg.to_argb(), 20.0);
-            super::a11y::Named(menu.label());
             if let NavBadge::Alert(n) = badge {
                 cu::Box()
                     .modifier(Modifier::new().fill_max_width().fill_max_height())
@@ -230,7 +229,6 @@ pub fn ToolRow(svg: &'static str, label: &str, rail: bool, on_click: impl FnMut(
             on_click,
             || {
                 NavIcon(svg, p.muted.to_argb(), 20.0);
-                super::a11y::Named(label);
             },
         );
         return;
@@ -502,7 +500,6 @@ pub fn PhoneMenu(open: compose_rust::runtime::MutableState<bool>, on_settings: i
                 move || o.set(!o.get_untracked()),
                 || {
                     NavIcon(ICON_MENU_SVG, p.text_2.to_argb(), 16.0);
-                    super::a11y::Named(super::a11y::MENU);
                 },
             );
             if open.get() {

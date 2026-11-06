@@ -1,20 +1,12 @@
 //! Accessible names of the icon-only controls of the rail, the channel header and the project
 //! boxes (FR-L28, FR-L10, #501). The names are Korean and match the mockup's titles.
 //!
-//! The pinned compose-rust (v0.0.6) has no label or content-description modifier on a
-//! container `on_click` (compose-rust#460, earlier #429), and a toolkit `Button` with an empty
-//! text takes its name from the icon role, in English. Until the toolkit has the setter,
-//! `Named` puts the label as a fully transparent `Text` child of the control; the renderer's
-//! semantics merge descendant text into the control's name. TODO(compose-rust#460): replace
-//! `Named` by the label modifier when it lands.
-
-#![allow(non_snake_case)]
-
-use compose_rust::ui as cu;
-use compose_rust::ui::Modifier;
-
-use super::components::Label;
-use super::theme::{Fs, Weight};
+//! The pinned compose-rust (v0.0.6) has no label or content-description modifier for an
+//! icon-only `on_click` container (compose-rust#460, earlier #429), and a toolkit `Button`
+//! with empty text is named from its icon role, in English. An invisible text child does not
+//! name the button (verified with a macOS AX dump, it becomes a separate static text), so the
+//! controls below stay unnamed.
+//! TODO(compose-rust#460): pass these names to the label modifier when the toolkit has one.
 
 pub const THEME: &str = "테마 전환";
 pub const SETTINGS: &str = "설정";
@@ -29,19 +21,13 @@ pub const VERSION_CONTROL: &str = "버전 관리";
 pub const PROJECT_SETTINGS: &str = "프로젝트 설정";
 pub const OPEN_SESSION: &str = "세션 열기";
 
-/// Every label of the icon-only controls outside the nav menus (those take `NavMenu::label`).
+/// The reviewed Korean names of the icon-only controls outside the nav menus (those take
+/// `NavMenu::label`).
 pub fn rail_labels() -> [&'static str; 12] {
     [
         THEME, SETTINGS, PLATFORM, MENU, NEW_CHANNEL, MEMBERS, MORE, ATTACH, EMOJI,
         VERSION_CONTROL, PROJECT_SETTINGS, OPEN_SESSION,
     ]
-}
-
-/// The accessible name of the control this is composed inside: an invisible one-line text.
-pub fn Named(label: &str) {
-    cu::Box()
-        .modifier(Modifier::new().alpha(0.0))
-        .content(|| Label(label, Fs::Xs, Weight::Regular, None, Some(1)));
 }
 
 #[cfg(test)]

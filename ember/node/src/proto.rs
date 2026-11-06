@@ -194,6 +194,53 @@ pub struct MetricsQuery {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Listening ports of node-owned sessions (FR-P7)
+// ---------------------------------------------------------------------------------------------
+
+/// How far a listening socket is reachable, from its local address.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PortScope {
+    /// 127.0.0.0/8 or ::1.
+    Loopback,
+    /// Any other concrete address.
+    Lan,
+    /// 0.0.0.0 or ::.
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PortOwnerKind {
+    Term,
+    Job,
+}
+
+/// The terminal or job a listening process descends from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortOwner {
+    pub kind: PortOwnerKind,
+    pub id: String,
+}
+
+/// One TCP port in LISTEN state. Carries no command line, environment, cwd or user name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListeningPort {
+    pub port: u16,
+    pub scope: PortScope,
+    pub pid: u32,
+    /// Executable name only.
+    pub process: String,
+    pub owner: PortOwner,
+}
+
+/// `GET /ports`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortsResponse {
+    pub ports: Vec<ListeningPort>,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Files
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -278,6 +278,40 @@ pub fn request_usage_summary() {
     s.spawn(async move { fetch_usage_summary(services()).await });
 }
 
+/// Minimum gap between two timer reads of the GitHub card (the server caches for 90 s).
+const GITHUB_MIN_GAP: Duration = Duration::from_secs(90);
+static GITHUB_LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Ask for the GitHub card now (Home opened, FR-L35). Not in the demo, which shows a sample.
+pub fn request_github_summary() {
+    let s = services();
+    if s.demo.is_some() {
+        return;
+    }
+    s.spawn(async move { fetch_github(services(), true).await });
+}
+
+/// Read `GET /api/integrations/github`. The timer passes `force = false` and is held to the
+/// server cache time. A failed call keeps the last answer.
+async fn fetch_github(s: &'static Services, force: bool) {
+    if s.demo.is_some() {
+        return;
+    }
+    {
+        let mut last = GITHUB_LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if !force && last.is_some_and(|t| t.elapsed() < GITHUB_MIN_GAP) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let got = s.client.api().github_summary().await.map_err(|e| e.to_string());
+    let old = s.ui.live.github.get_untracked();
+    let new = crate::ui::home::GithubFetch::settle(&old, got.map(|g| crate::ui::home::github_state_from(&g)));
+    if new != old {
+        s.ui.live.github.set(new);
+    }
+}
+
 /// Run the harness detection again (`POST /api/computers/local/harnesses/detect`, FR-A6.1) and
 /// say how it ended in `agents_rescan` (FR-L21). Nothing is reported before the answer arrived.
 /// The demo re-reads its canned list and marks the sentence 예시. The sentence returns to
@@ -454,6 +488,9 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
         Err(e) => tracing::debug!("usage refresh failed: {e}"),
     }
     fetch_usage_summary(s).await;
+    if !first {
+        fetch_github(s, false).await;
+    }
     fetch_project_days(s).await;
     match s.client.agents().await {
         Ok(a) => {

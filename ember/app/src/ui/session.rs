@@ -79,6 +79,8 @@ pub fn timeline_summary(demo: bool) -> &'static str {
 pub const UI_STRINGS: &[&str] = &[
     crate::ui::home::INTEGRATIONS_TITLE,
     crate::ui::home::GITHUB_NO_INFO,
+    crate::ui::home::GITHUB_UNKNOWN,
+    crate::ui::home::GITHUB_SAMPLE_MARK,
     crate::ui::home::GITHUB_NO_ACTIVITY,
     crate::ui::home::GITHUB_LOGIN_HINT,
     crate::ui::home::GITHUB_UNAVAILABLE_HINT,

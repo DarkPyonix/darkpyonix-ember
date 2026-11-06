@@ -827,6 +827,7 @@ pub fn share_file_card(files: &[String], picker_available: bool) -> (String, Opt
         [one] => (one.clone(), None),
         [first, rest @ ..] => (format!("{first} 외 {}개", rest.len()), None),
     }
+}
 
 /// Shown when the chosen device is not online.
 pub const TARGET_OFFLINE: &str = "이 장비는 지금 연결되어 있지 않습니다";

@@ -26,6 +26,7 @@ pub mod api;
 pub mod client;
 pub mod config;
 pub mod egress;
+pub mod enrol;
 pub mod envinfo;
 pub mod exec;
 pub mod exec_server;

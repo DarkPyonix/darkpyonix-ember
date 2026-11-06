@@ -12,7 +12,9 @@ use axum::Router;
 use ember_server::agents::scripted::ScriptedAdapter;
 use ember_server::agents::{AgentAdapter, AgentKind};
 use ember_server::channels::guest::{guest_router, GUEST_ROUTES};
-use ember_server::guest_door::{invite_link, GuestDoor, JOIN_CSP, JOIN_ROUTE};
+use ember_server::guest_door::{
+    invite_link, with_timeout, GuestDoor, JOIN_CSP, JOIN_ROUTE, MAX_BODY_BYTES, REQUEST_TIMEOUT,
+};
 use ember_server::session::Sessions;
 use ember_server::store::Store;
 use http_body_util::BodyExt;
@@ -222,36 +224,55 @@ async fn fr_t14_join_page_has_csp_nosniff_and_no_referrer() {
     assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
 }
 
-/// Fills `{id}` so a pattern can be requested.
-fn concrete(p: &str) -> String {
-    p.replace("{id}", "x")
-}
-
 #[tokio::test]
 async fn fr_t14_guest_door_serves_exactly_the_route_table() {
     let d = door(&[("EMBER_GUEST_LISTEN", "127.0.0.1:9000")]);
-    let a = app(&d);
+    let (store, sessions) = store_and_sessions();
+    store.create_session("core", AgentKind::Scripted, "/tmp/x", None, "alpha").unwrap();
+    let ch = store.channels(None).unwrap().remove(0).id;
+    let (_, token) = store.create_invite(&ch, "user", None).unwrap();
+    let (_, cred) = store.accept_invite(&token, "A").unwrap();
+    let a = d.wrap(guest_router(store, sessions));
+    let bearer = format!("Bearer {cred}");
+    let authed: Vec<(&str, &str)> = vec![("host", "127.0.0.1:9000"), ("authorization", &bearer)];
+
     let mut table: Vec<(&str, &str)> = GUEST_ROUTES.to_vec();
     table.push(JOIN_ROUTE);
     let methods = ["GET", "POST", "PUT", "DELETE", "PATCH"];
     let paths: std::collections::BTreeSet<&str> = table.iter().map(|r| r.1).collect();
     for path in paths {
+        let uri = path.replace("{id}", &ch);
         for m in methods {
-            let (s, _, _) = send(&a, m, &concrete(path), LOCAL).await;
             let listed = table.contains(&(m, path));
+            // Without a credential: auth runs before the method match, so a non-table method may
+            // be 401 (an unauthenticated caller learns nothing about methods), 404 or 405,
+            // never 2xx or 3xx. A table row is never the router's "no such route".
+            let (s, _, _) = send(&a, m, &uri, LOCAL).await;
+            assert!(!s.is_success() || listed, "{m} {path} anonymous: {s}");
+            assert!(!s.is_redirection(), "{m} {path} anonymous: {s}");
             if listed {
-                // A row in the table answers (401 without a credential, 400/415/422 on a bad accept
-                // body, 200 for /join): never the router's "no such route".
                 assert!(s != StatusCode::NOT_FOUND && s != StatusCode::METHOD_NOT_ALLOWED, "{m} {path}: {s}");
             } else {
-                assert!(s == StatusCode::METHOD_NOT_ALLOWED || s == StatusCode::NOT_FOUND, "{m} {path}: {s}");
-                assert_ne!(s, StatusCode::OK, "{m} {path}");
+                assert!(
+                    [StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED].contains(&s),
+                    "{m} {path} anonymous: {s}"
+                );
+            }
+            // With a valid guest credential the answer is exact.
+            let (s, _, _) = send(&a, m, &uri, &authed).await;
+            if listed {
+                assert!(s != StatusCode::NOT_FOUND && s != StatusCode::METHOD_NOT_ALLOWED, "{m} {path} authed: {s}");
+            } else {
+                assert!(
+                    s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED,
+                    "{m} {path} authed: {s}"
+                );
             }
         }
     }
     // The documented four plus /join; a fifth guest route must be added to the table on purpose.
     assert_eq!(GUEST_ROUTES.len(), 4);
-    // Siblings of the table's paths are not served.
+    // Siblings of the table's paths are not served, with or without a credential.
     for p in [
         "/api/guest/channels/x/feed",
         "/api/guest/channels/x/approvals",
@@ -262,10 +283,97 @@ async fn fr_t14_guest_door_serves_exactly_the_route_table() {
         "/api/guest",
     ] {
         for m in methods {
-            let (s, _, _) = send(&a, m, p, LOCAL).await;
-            assert!(s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED, "{m} {p}: {s}");
+            for h in [LOCAL, &authed[..]] {
+                let (s, _, _) = send(&a, m, p, h).await;
+                assert!(s == StatusCode::NOT_FOUND || s == StatusCode::METHOD_NOT_ALLOWED, "{m} {p}: {s}");
+            }
         }
     }
+}
+
+#[tokio::test]
+async fn fr_t14_trace_connect_and_head_answer_405_everywhere() {
+    let d = door(&[("EMBER_GUEST_LISTEN", "127.0.0.1:9000")]);
+    let a = app(&d);
+    let mut paths: Vec<String> = GUEST_ROUTES.iter().map(|r| r.1.replace("{id}", "x")).collect();
+    paths.push(JOIN_ROUTE.1.to_string());
+    for p in paths {
+        for m in ["TRACE", "CONNECT", "HEAD"] {
+            let (s, _, body) = send(&a, m, &p, LOCAL).await;
+            // Chosen: 405 for all three (HEAD /join too, so nothing leaks).
+            assert_eq!(s, StatusCode::METHOD_NOT_ALLOWED, "{m} {p}");
+            assert!(body.is_empty(), "{m} {p} has a body");
+        }
+    }
+}
+
+#[tokio::test]
+async fn fr_t14_an_oversized_body_is_413_on_every_route() {
+    let d = door(&[("EMBER_GUEST_LISTEN", "127.0.0.1:9000")]);
+    let a = app(&d);
+    assert_eq!(MAX_BODY_BYTES, 16 * 1024);
+    let big = vec![b'a'; MAX_BODY_BYTES + 1];
+    for path in ["/api/guest/accept", "/api/guest/channels/x/messages", "/api/sessions", "/nothing", "/join"] {
+        // Declared length.
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "127.0.0.1:9000")
+            .header("content-type", "application/json")
+            .header("content-length", big.len().to_string())
+            .body(Body::from(big.clone()))
+            .unwrap();
+        let res = a.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path} declared");
+    }
+    // No declared length: the body extractor stops at the limit (accept reads a JSON body).
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/guest/accept")
+        .header("host", "127.0.0.1:9000")
+        .header("content-type", "application/json")
+        .body(Body::from(big))
+        .unwrap();
+    let res = a.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn fr_t14_a_slow_request_is_408() {
+    assert_eq!(REQUEST_TIMEOUT, std::time::Duration::from_secs(10));
+    let slow = Router::new().route(
+        "/slow",
+        axum::routing::get(|| async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            "late"
+        }),
+    );
+    let app = with_timeout(slow, std::time::Duration::from_millis(50));
+    let (s, _, _) = send(&app, "GET", "/slow", &[]).await;
+    assert_eq!(s, StatusCode::REQUEST_TIMEOUT);
+}
+
+#[test]
+fn fr_t14_an_unspecified_address_on_the_same_port_is_a_startup_error() {
+    let check = |owner: &str, guest: &str| {
+        let m: HashMap<String, String> = [
+            ("EMBER_GUEST_LISTEN".to_string(), guest.to_string()),
+            ("EMBER_GUEST_LISTEN_ALLOW_REMOTE".to_string(), "1".to_string()),
+        ]
+        .into();
+        GuestDoor::from_lookup(|k| m.get(k).cloned(), owner.parse::<SocketAddr>().unwrap())
+    };
+    for (owner, guest) in [
+        ("0.0.0.0:9000", "127.0.0.1:9000"),
+        ("127.0.0.1:9000", "0.0.0.0:9000"),
+        ("[::]:9000", "[::1]:9000"),
+        ("[::1]:9000", "[::]:9000"),
+        ("0.0.0.0:9000", "[::]:9000"),
+    ] {
+        assert!(check(owner, guest).is_err(), "{owner} vs {guest}");
+    }
+    assert!(check("0.0.0.0:8740", "127.0.0.1:9000").unwrap().is_some());
+    assert!(check("127.0.0.1:8740", "127.0.0.1:9000").unwrap().is_some());
 }
 
 #[tokio::test]

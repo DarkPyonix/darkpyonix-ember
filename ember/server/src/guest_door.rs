@@ -23,9 +23,10 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -42,6 +43,15 @@ pub const PUBLIC_URL_VAR: &str = "EMBER_GUEST_PUBLIC_URL";
 
 /// The one non-API route the door serves.
 pub const JOIN_ROUTE: (&str, &str) = ("GET", "/join");
+
+/// The most a request body may be on the door, for every route including `accept` and unknown
+/// paths: a larger `Content-Length` is 413 before any handler, and body extractors stop at it.
+pub const MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// A request that takes longer than this (handler included) is answered 408. A slow header read
+/// on the connection itself is not covered: that needs a hyper builder or tower-http, which this
+/// crate does not depend on.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `Content-Security-Policy` of `/join`: no script, no style, nothing framed, requests to the
 /// door itself only. The real guest page (a later client task) needs its own policy.
@@ -89,7 +99,11 @@ impl GuestDoor {
             Ok(a) => a,
             Err(_) => return err(format!("{LISTEN_VAR}={raw:?} is not an ip:port address")),
         };
-        if listen == owner_listen {
+        // An unspecified address (0.0.0.0, ::) on either side takes the port on every interface.
+        let same_port = listen.port() == owner_listen.port();
+        if listen == owner_listen
+            || (same_port && (listen.ip().is_unspecified() || owner_listen.ip().is_unspecified()))
+        {
             return err(format!("{LISTEN_VAR} must differ from EMBER_LISTEN ({owner_listen})"));
         }
         if !listen.ip().is_loopback() && get(ALLOW_REMOTE_VAR).as_deref().map(str::trim) != Some("1") {
@@ -127,11 +141,12 @@ impl GuestDoor {
     /// This is the only way the door builds an app.
     pub fn wrap(&self, guest: Router) -> Router {
         let guard = Guard { hosts: self.hosts.clone() };
-        guest
+        let app = guest
             .route(JOIN_ROUTE.1, get(join))
             .fallback(not_found)
-            .layer(middleware::from_fn_with_state(guard, guard_layer))
-            .layer(middleware::from_fn(response_headers))
+            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+            .layer(middleware::from_fn_with_state(guard, guard_layer));
+        with_timeout(app, REQUEST_TIMEOUT).layer(middleware::from_fn(response_headers))
     }
 
     /// Binds the door's socket.
@@ -196,6 +211,19 @@ fn parse_public_url(u: &str) -> Result<String, DoorError> {
     Ok(format!("{scheme}://{rest}"))
 }
 
+/// Answers 408 when the request (handler included) exceeds `limit`.
+pub fn with_timeout(app: Router, limit: Duration) -> Router {
+    app.layer(middleware::from_fn_with_state(limit, timeout_layer))
+}
+
+async fn timeout_layer(State(limit): State<Duration>, req: Request, next: Next) -> Response {
+    match tokio::time::timeout(limit, next.run(req)).await {
+        Ok(r) => r,
+        Err(_) => (StatusCode::REQUEST_TIMEOUT, axum::Json(json!({ "error": "request timed out", "code": "timeout" })))
+            .into_response(),
+    }
+}
+
 #[derive(Clone)]
 struct Guard {
     hosts: Arc<HashSet<String>>,
@@ -228,6 +256,20 @@ async fn guard_layer(State(g): State<Guard>, req: Request, next: Next) -> Respon
     }
     if !origin_ok(req.headers(), &host, &g.hosts) {
         return forbid("origin not allowed");
+    }
+    // HEAD would be answered by axum from every GET route; nothing needs it, so nothing leaks.
+    if matches!(req.method().as_str(), "HEAD" | "TRACE" | "CONNECT") {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let too_big = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64);
+    if too_big {
+        return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(json!({ "error": "body too large", "code": "too_large" })))
+            .into_response();
     }
     if req.headers().contains_key(header::UPGRADE) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "no upgrade here", "code": "bad_request" })))

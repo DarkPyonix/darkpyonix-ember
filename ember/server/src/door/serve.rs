@@ -9,7 +9,9 @@ use std::time::Duration;
 use axum::extract::connect_info::ConnectInfo;
 use axum::Router;
 
+/// `label` names the door in the three log lines (`"guest door"` for the guest door).
 pub async fn serve_capped(
+    label: &'static str,
     listener: tokio::net::TcpListener,
     app: Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -30,7 +32,7 @@ pub async fn serve_capped(
                 Ok(x) => x,
                 Err(e) => {
                     // Out of descriptors and the like: back off, never spin, never stop the door.
-                    tracing::warn!("guest door accept failed: {e}");
+                    tracing::warn!("{label} accept failed: {e}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
@@ -39,7 +41,7 @@ pub async fn serve_capped(
         };
         let Ok(permit) = conns.clone().try_acquire_owned() else {
             dropped += 1;
-            tracing::debug!("guest door at its connection cap, dropped {peer} ({dropped} dropped so far)");
+            tracing::debug!("{label} at its connection cap, dropped {peer} ({dropped} dropped so far)");
             drop(stream);
             continue;
         };
@@ -55,7 +57,7 @@ pub async fn serve_capped(
         tokio::spawn(async move {
             let _permit = permit; // held for the life of the connection
             if let Err(e) = conn.await {
-                tracing::debug!("guest door connection closed: {e}");
+                tracing::debug!("{label} connection closed: {e}");
             }
         });
     }

@@ -345,21 +345,14 @@ pub fn EmberField(o: FieldOptions) {
     let theme = ember_theme();
     let p = theme.palette;
     let (fill, border_w) = if o.bare { (Color::argb(0), 0.0) } else { (p.surface, 1.0) };
-    // The renderer paints the design system's own field frame over these, so a frame drawn here
-    // only shows at the corners as a second box. The height is honored; the rest is left to the
-    // toolkit until #376, and only a caller that asks for a frame gets one.
-    let asked = o.background.is_some() || o.border_width.is_some() || o.border_color.is_some() || o.corner_radius.is_some();
-    let mut modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
-        .fill_max_width_if(o.fill_max_width);
-    if asked {
-        modifier = modifier
-            .background(o.background.unwrap_or_else(|| paint(fill)))
-            .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
-            .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
-    }
-    // TODO(compose-rust#376): the renderer paints the design system's field frame over these
-    // modifiers, so only the height shows today; the fill, border, radius and 12 px padding
-    // appear once the node's own are honored. 14 px text needs #374.
+    // compose-rust v0.0.5 (#376) honours a TextField's own Background, Border and Shape in place
+    // of the design system's frame, which stays light in the dark scheme (#510). So every field
+    // names its frame: the token fill and line, or a transparent one when `bare`.
+    let modifier = with_height(with_weight(Modifier::new(), o.weight), o.height.or(if o.multiline || o.bare { None } else { Some(H_BTN) }))
+        .fill_max_width_if(o.fill_max_width)
+        .background(o.background.unwrap_or_else(|| paint(fill)))
+        .border(o.border_width.unwrap_or(border_w), o.border_color.unwrap_or_else(|| paint(p.line)))
+        .corner_radius(o.corner_radius.unwrap_or(CORNER_SM));
     // TODO(compose-rust#444): TextField has no word_break or overflow builder; its
     // multiline placeholder can break Korean words inside a line.
     let mut f = cu::TextField()
@@ -528,6 +521,19 @@ pub fn button_style(kind: ButtonKind, small: bool, p: &Palette) -> ButtonStyle {
     }
 }
 
+/// `button_style` for a button that may be disabled. A disabled primary button keeps its
+/// filled shape, in `muted` with the `ink_text` on it: the toolkit's own disabled fade turned it
+/// into grey text on a grey fill, 1.5:1 in the dark scheme (NFR-L3, #510). The other kinds keep
+/// their style; the toolkit fades them.
+pub fn button_style_for(kind: ButtonKind, small: bool, enabled: bool, p: &Palette) -> ButtonStyle {
+    let s = button_style(kind, small, p);
+    if kind == ButtonKind::Primary && !enabled {
+        ButtonStyle { fill: p.muted, border: p.muted, text: p.ink_text, ..s }
+    } else {
+        s
+    }
+}
+
 /// A pill button. Text is a call to action, so it ends in "하세요" or is a plain noun label.
 pub fn AppButton(
     text: &str,
@@ -539,7 +545,7 @@ pub fn AppButton(
     on_click: impl FnMut() + 'static,
 ) {
     let theme = ember_theme();
-    let s = button_style(kind, small, theme.palette);
+    let s = button_style_for(kind, small, enabled, theme.palette);
     let mut b = cu::Button(text)
         .enabled(enabled)
         .variant(ButtonVariant::Text)
@@ -697,9 +703,15 @@ pub fn InsetPanel(fill_max_width: bool, content: impl FnOnce()) {
         )
         .content(|| {
             // 4 dp more on each side makes the mockup's 12 16 (`.inset`).
-            cu::Row().content(|| {
+            // The Row and the Column take the panel's width (a Column with no weight shrinks to
+            // its widest word, which broke the routine prompt into one word per line, #492).
+            cu::Row().modifier(Modifier::new().fill_max_width_if(fill_max_width)).content(|| {
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
-                cu::Column().content(content);
+                if fill_max_width {
+                    cu::Column().modifier(Modifier::new().weight(1.0)).content(content);
+                } else {
+                    cu::Column().content(content);
+                }
                 cu::Spacer().modifier(Modifier::new().width(SP[0]));
             });
         });
@@ -753,6 +765,11 @@ pub(crate) fn sheet_max_height(window_width_dp: f32, window_height_dp: f32, moni
 }
 
 /// The body height used while the window height is unknown (not yet reported).
+///
+/// TODO(compose-rust#467, compose-rust#479): at 390x844 the implicit window never reports its dp
+/// size (`current_window_size()` reads 0x0 with class Compact, measured on v0.0.6 with the shell
+/// and with a sheet opened by a real press), so every sheet body is this constant. Remove it and
+/// check the 85 percent formula at 390 once the implicit window can opt in to `report_size`.
 const SHEET_BODY_UNKNOWN_H: f32 = 240.0;
 
 /// The one formula for a sheet body's height: what is left of the sheet's maximum height after
@@ -1048,7 +1065,10 @@ mod tests {
             EmberField(FieldOptions { ..Default::default() });
         });
         assert!(field.iter().any(|m| m == "Height(40.0)"), "{field:?}");
-        assert!(!field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
+        // NFR-L3 (#510): the field names its frame, so the toolkit's light one is not drawn.
+        assert!(field.iter().any(|m| m.starts_with("Shape")), "{field:?}");
+        assert!(field.iter().any(|m| m.starts_with("Background")), "{field:?}");
+        assert!(field.iter().any(|m| m.starts_with("Border")), "{field:?}");
     }
 
     #[test]

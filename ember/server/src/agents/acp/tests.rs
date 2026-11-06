@@ -983,18 +983,10 @@ fn fr_a10_flag_rejection_needs_the_flag_and_not_just_an_invalid_option() {
 }
 
 fn probe_adapter(script_body: &str) -> (tempfile::TempDir, AcpAdapter) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("probe.sh");
-    // Write, flush to disk and close the handle before chmod and use: a script still open for
-    // writing is "text file busy" (ETXTBSY) when executed (#546).
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(format!("#!/bin/sh\n{script_body}\n").as_bytes()).unwrap();
-        f.sync_all().unwrap();
-    }
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Written, probed for ETXTBSY and renamed into place by the shared helper (#546, #555).
+    crate::test_exec::write_exec_ready(&path, &format!("#!/bin/sh\n{script_body}\n"));
     let mut config = AcpConfig::preset("gemini", Some(path)).unwrap();
     config.env_policy = EnvPolicy::Inherit;
     (dir, AcpAdapter::new(config).unwrap())

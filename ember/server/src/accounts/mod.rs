@@ -978,17 +978,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn login_check_runs_the_agent_status_command_with_the_account_dir() {
-        use std::os::unix::fs::PermissionsExt;
         let (d, mut a) = setup();
         // A stand-in `claude` that is logged in only in dirs containing a marker file.
         let bin = d.path().join("fake-claude");
-        std::fs::write(
+        crate::test_exec::write_exec_ready(
             &bin,
             "#!/bin/sh\nif [ -f \"$CLAUDE_CONFIG_DIR/marker\" ]; then echo '{\"loggedIn\": true}'; \
              else echo '{\"loggedIn\": false}'; fi\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         a.set_bin(AgentKind::ClaudeCode, bin);
         let x = a.create(AgentKind::ClaudeCode, "x").unwrap();
         let y = a.create(AgentKind::ClaudeCode, "y").unwrap();

@@ -92,24 +92,192 @@ impl PermMode {
         }
     }
 
+    /// The one-line description under the row title (copied from mockup v8, `data.js` modes).
+    pub fn description(self) -> &'static str {
+        match self {
+            PermMode::Ask => "파일을 고치거나 명령을 실행하기 전에 매번 묻습니다",
+            PermMode::Edits => "파일 편집은 바로 하고, 명령은 실행 전에 묻습니다",
+            PermMode::Bypass => "묻지 않고 모두 실행합니다. 믿을 수 있는 환경에서만 쓰세요",
+            PermMode::Plan => "읽기만 하고 계획을 세운 뒤 승인을 기다립니다",
+        }
+    }
+
     /// Bypass is drawn in the warning colour so it is never chosen by accident.
     pub fn is_bypass(self) -> bool {
         self == PermMode::Bypass
     }
 }
 
-/// The modes a harness supports, in menu order. [provisional] until each CLI is verified
-/// (FR-L16): Claude Code has the four, Codex and Gemini three.
+/// The modes a harness supports, in menu order (mockup v8: ask, edits, bypass, plan).
+/// [provisional] until each CLI is verified (FR-L16): Claude Code has the four, Codex and
+/// Gemini three.
 pub fn modes_for(h: Harness) -> &'static [PermMode] {
     match h {
         Harness::ClaudeCode => &[
             PermMode::Ask,
             PermMode::Edits,
-            PermMode::Plan,
             PermMode::Bypass,
+            PermMode::Plan,
         ],
         Harness::Codex | Harness::Gemini => &[PermMode::Ask, PermMode::Edits, PermMode::Bypass],
     }
+}
+
+/// One row of the permission picker (FR-L16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeRow {
+    pub mode: PermMode,
+    pub title: &'static str,
+    pub description: &'static str,
+    /// Drawn with the red shield (bypass).
+    pub danger: bool,
+    /// The row of the current mode, drawn with a check mark.
+    pub chosen: bool,
+}
+
+/// The header of the permission picker: "권한 모드 · Claude Code".
+pub fn mode_header(h: Harness) -> String {
+    format!("권한 모드 \u{b7} {}", h.label())
+}
+
+/// The title of the bypass row while it waits for the second tap.
+pub const BYPASS_CONFIRM_TITLE: &str = "다시 눌러 바이패스 적용";
+/// The description of the bypass row while it waits for the second tap.
+pub const BYPASS_CONFIRM_TEXT: &str = "한 번 더 누르면 모든 작업을 묻지 않고 실행합니다";
+
+/// The rows of the permission picker for a harness, in menu order, with `current` marked.
+pub fn mode_picker_rows(h: Harness, current: PermMode) -> Vec<ModeRow> {
+    mode_picker_rows_pending(h, current, None)
+}
+
+/// [`mode_picker_rows`] with the mode that waits for its confirming tap: that row (only bypass
+/// ever waits) says so in its title and description.
+pub fn mode_picker_rows_pending(h: Harness, current: PermMode, pending: Option<PermMode>) -> Vec<ModeRow> {
+    modes_for(h)
+        .iter()
+        .map(|m| {
+            let confirming = pending == Some(*m) && m.is_bypass();
+            ModeRow {
+                mode: *m,
+                title: if confirming { BYPASS_CONFIRM_TITLE } else { m.label() },
+                description: if confirming { BYPASS_CONFIRM_TEXT } else { m.description() },
+                danger: m.is_bypass(),
+                chosen: *m == current,
+            }
+        })
+        .collect()
+}
+
+/// A mode waiting for its confirming tap: the mode and the time (ms) of the first tap.
+pub type ModePending = Option<(PermMode, i64)>;
+
+/// A tap on a mode row at `now` ms (FR-L16): `(pending, applied)`. Bypass is applied only by a
+/// second tap on the row that is already waiting and only `AMEND_CONFIRM_DELAY_MS` after the
+/// first, so a fast double tap cannot skip the question (the rule of #424); an earlier second
+/// tap keeps waiting. Any other row applies at once and clears the wait. Tapping the mode that
+/// is already current applies nothing new and needs no confirmation.
+pub fn mode_tap(current: PermMode, pending: ModePending, tapped: PermMode, now: i64) -> (ModePending, Option<PermMode>) {
+    if !tapped.is_bypass() || tapped == current {
+        return (None, Some(tapped));
+    }
+    match pending {
+        Some((m, at)) if m == tapped => {
+            if now - at >= crate::ui::vcs::AMEND_CONFIRM_DELAY_MS {
+                (None, Some(tapped))
+            } else {
+                (pending, None)
+            }
+        }
+        _ => (Some((tapped, now)), None),
+    }
+}
+
+/// Pointing at another row withdraws the confirmation.
+pub fn mode_hover(pending: ModePending, hovered: PermMode) -> ModePending {
+    pending.filter(|(p, _)| *p == hovered)
+}
+
+/// Width of the shell's navigation at a window width, by the layout that width asks for.
+pub fn nav_width_for(window_dp: f32) -> f32 {
+    use crate::ui::shell::{nav_mode, ShellMode};
+    match nav_mode(window_dp, false) {
+        ShellMode::BottomTabs => 0.0,
+        ShellMode::Rail => crate::ui::theme::RAIL_W,
+        ShellMode::Sidebar => crate::ui::theme::SIDE_W,
+    }
+}
+
+/// The width a popover gets: what it wants, but never more than the window leaves beside the
+/// navigation, less a 24 dp margin (and not below 280). The toolkit keeps a popup's start
+/// edge inside the window, so a popover that fits never crosses the window's edge.
+pub fn popover_width(want: f32, window_dp: f32) -> f32 {
+    want.min(window_dp - nav_width_for(window_dp) - 24.0).max(280.0)
+}
+
+/// The composer's chips in order: project, model, mode, computer.
+pub const CHIP_COUNT: usize = 4;
+/// The most text (composer pixels, [`composer_text_px`]) each chip shows: project 170, model 240
+/// ("Claude Code · Opus 5.5 · 높음" measures about 215), mode 140, computer 150.
+pub const CHIP_TEXT_CAPS: [f32; CHIP_COUNT] = [170.0, 240.0, 140.0, 150.0];
+/// The least text each chip keeps when a line is very narrow: project and computer four Korean
+/// glyphs (4 x 13.5), model and mode enough for "Claud...".
+pub const CHIP_TEXT_MINS: [f32; CHIP_COUNT] = [54.0, 40.0, 40.0, 54.0];
+/// Icon (16) and the chip's padding beside the text.
+const CHIP_FRAME: f32 = 30.0;
+const CHIP_GAP: f32 = 6.0;
+
+/// A label's width at the composer's chip font: about 13.5 dp per Korean glyph and 7.8 per ASCII
+/// character or middle dot. The send sheet's estimate (`files::chip_text_px`, 16 and 9) is
+/// deliberately more pessimistic and stays as it is.
+pub fn composer_text_px(text: &str) -> f32 {
+    text.chars().map(|c| if c.is_ascii() || c == '\u{b7}' { 7.8 } else { 13.5 }).sum()
+}
+
+/// `text` cut with an ellipsis so [`composer_text_px`] stays within `max_px`.
+pub fn composer_fit_text(text: &str, max_px: f32) -> String {
+    if composer_text_px(text) <= max_px {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        let next = format!("{out}{c}\u{2026}");
+        if composer_text_px(&next) > max_px {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('\u{2026}');
+    out
+}
+
+/// The width the chips may use in a composer card `composer_w` wide: less its 16 padding either
+/// side, the 36 dp add and send buttons and the gaps between them.
+pub fn composer_chips_avail(composer_w: f32) -> f32 {
+    composer_w - 32.0 - 72.0 - 2.0 * CHIP_GAP
+}
+
+/// The text width each chip may use (project, model, mode, computer): its cap, or what a whole
+/// line leaves if that is less, never below the minimum. A label is cut only at its cap; when
+/// the chips do not fit one line the row wraps ([`composer_chip_rows`]) rather than cutting
+/// labels that have room or dropping a chip.
+pub fn composer_chip_budget(composer_w: f32) -> [f32; CHIP_COUNT] {
+    let line = composer_chips_avail(composer_w) - CHIP_FRAME;
+    let mut out = CHIP_TEXT_CAPS;
+    for (o, m) in out.iter_mut().zip(CHIP_TEXT_MINS) {
+        *o = o.min(line).max(m);
+    }
+    out
+}
+
+/// The chips (by index) per line, `widths` being each chip's full width: a line breaks when the
+/// next chip would not fit, so a narrow card shows two lines of chips instead of dropping any.
+pub fn composer_chip_rows(widths: &[f32], composer_w: f32) -> Vec<Vec<usize>> {
+    crate::ui::files::chip_rows(widths, CHIP_GAP, composer_chips_avail(composer_w))
+}
+
+/// A chip's full width for `text` (icon, padding and the text).
+pub fn composer_chip_width(text: &str) -> f32 {
+    CHIP_FRAME + composer_text_px(text)
 }
 
 pub fn default_mode(_h: Harness) -> PermMode {
@@ -137,18 +305,18 @@ pub struct ModelOption {
 }
 
 impl ModelOption {
-    /// "Opus 5.5 (High)", the row title; a harness without effort shows the name alone.
+    /// "Opus 5.5 (높음)", the row title; a harness without effort shows the name alone.
     pub fn row_title(&self) -> String {
         match self.effort {
-            Some(e) => format!("{} ({})", self.name, e),
+            Some(e) => format!("{} ({})", self.name, effort_name(e)),
             None => self.name.to_string(),
         }
     }
 
-    /// "Claude Code · Opus 5.5 · High", the chip text.
+    /// "Claude Code · Opus 5.5 · 높음", the chip text.
     pub fn chip_label(&self) -> String {
         match self.effort {
-            Some(e) => format!("{} · {} · {}", self.harness.label(), self.name, e),
+            Some(e) => format!("{} · {} · {}", self.harness.label(), self.name, effort_name(e)),
             None => format!("{} · {}", self.harness.label(), self.name),
         }
     }
@@ -176,6 +344,18 @@ const GEMINI_MODELS: [(&str, &str); 2] = [
 
 /// The efforts of a harness that has them, lowest first.
 pub const EFFORTS: [&str; 3] = ["Low", "Medium", "High"];
+
+/// The Korean name of an effort, as in mockup v8 (낮음, 보통, 높음). The English key stays the
+/// id handed to the agent and kept in settings; only what the user reads is Korean (FR-L15).
+/// An unknown key is shown as it is.
+pub fn effort_name(key: &str) -> &str {
+    match key {
+        "Low" => "낮음",
+        "Medium" => "보통",
+        "High" => "높음",
+        other => other,
+    }
+}
 
 fn models_of(h: Harness) -> &'static [(&'static str, &'static str)] {
     match h {
@@ -243,11 +423,12 @@ pub fn filter_models(
                 harness.is_none_or(|h| o.harness == h)
             } else {
                 let hay = format!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     o.name,
                     o.model,
                     o.harness.label(),
-                    o.effort.unwrap_or("")
+                    o.effort.unwrap_or(""),
+                    o.effort.map(effort_name).unwrap_or("")
                 )
                 .to_lowercase();
                 q.split_whitespace().all(|w| hay.contains(w))
@@ -880,13 +1061,225 @@ mod tests {
     }
 
     #[test]
-    fn fr_l16_every_harness_lists_its_default_and_bypass_last() {
+    fn fr_l16_every_harness_lists_its_default_and_bypass_before_plan() {
         for h in Harness::ALL {
             let m = modes_for(h);
             assert!(m.contains(&default_mode(h)));
-            assert_eq!(m.last(), Some(&PermMode::Bypass));
+            // Mockup v8 order: ask, edits, bypass, then plan where the harness has it.
+            let bypass = m.iter().position(|x| x.is_bypass()).unwrap();
+            if let Some(plan) = m.iter().position(|x| *x == PermMode::Plan) {
+                assert!(bypass < plan);
+            } else {
+                assert_eq!(bypass, m.len() - 1);
+            }
             assert_eq!(m.iter().filter(|x| x.is_bypass()).count(), 1);
         }
+    }
+
+    #[test]
+    fn fr_l16_picker_order_is_ask_edits_bypass_plan() {
+        let rows = mode_picker_rows(Harness::ClaudeCode, PermMode::Ask);
+        let order: Vec<PermMode> = rows.iter().map(|r| r.mode).collect();
+        assert_eq!(order, [PermMode::Ask, PermMode::Edits, PermMode::Bypass, PermMode::Plan]);
+        let codex: Vec<PermMode> = mode_picker_rows(Harness::Codex, PermMode::Ask).iter().map(|r| r.mode).collect();
+        assert_eq!(codex, [PermMode::Ask, PermMode::Edits, PermMode::Bypass]);
+    }
+
+    #[test]
+    fn fr_l16_every_row_has_a_korean_description() {
+        for h in Harness::ALL {
+            for r in mode_picker_rows(h, PermMode::Ask) {
+                assert!(!r.description.is_empty());
+                assert!(r.description.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)), "{}", r.description);
+                assert_ne!(r.description, r.title);
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l16_only_the_bypass_row_is_danger() {
+        for h in Harness::ALL {
+            let rows = mode_picker_rows(h, PermMode::Ask);
+            assert_eq!(rows.iter().filter(|r| r.danger).count(), 1);
+            assert!(rows.iter().find(|r| r.danger).unwrap().mode == PermMode::Bypass);
+        }
+    }
+
+    #[test]
+    fn fr_l16_exactly_the_current_mode_is_marked_chosen() {
+        for m in modes_for(Harness::ClaudeCode) {
+            let rows = mode_picker_rows(Harness::ClaudeCode, *m);
+            assert_eq!(rows.iter().filter(|r| r.chosen).count(), 1);
+            assert_eq!(rows.iter().find(|r| r.chosen).unwrap().mode, *m);
+        }
+        // A mode the harness lacks marks nothing.
+        assert!(mode_picker_rows(Harness::Codex, PermMode::Plan).iter().all(|r| !r.chosen));
+    }
+
+    const T0: i64 = 10_000;
+
+    #[test]
+    fn fr_l16_first_tap_on_bypass_only_asks_for_confirmation() {
+        let (pending, applied) = mode_tap(PermMode::Ask, None, PermMode::Bypass, T0);
+        assert_eq!((pending, applied), (Some((PermMode::Bypass, T0)), None));
+    }
+
+    #[test]
+    fn fr_l16_a_fast_second_tap_keeps_waiting() {
+        let armed = Some((PermMode::Bypass, T0));
+        let (pending, applied) = mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + 100);
+        assert_eq!((pending, applied), (armed, None));
+        let last = crate::ui::vcs::AMEND_CONFIRM_DELAY_MS - 1;
+        assert_eq!(mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + last).1, None);
+    }
+
+    #[test]
+    fn fr_l16_second_tap_after_600_ms_applies_bypass() {
+        let armed = Some((PermMode::Bypass, T0));
+        assert_eq!(mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + 700), (None, Some(PermMode::Bypass)));
+        assert_eq!(
+            mode_tap(PermMode::Ask, armed, PermMode::Bypass, T0 + crate::ui::vcs::AMEND_CONFIRM_DELAY_MS).1,
+            Some(PermMode::Bypass)
+        );
+    }
+
+    #[test]
+    fn fr_l16_tapping_another_row_applies_it_and_clears_the_wait() {
+        for m in [PermMode::Ask, PermMode::Edits, PermMode::Plan] {
+            assert_eq!(mode_tap(PermMode::Ask, Some((PermMode::Bypass, T0)), m, T0 + 50), (None, Some(m)));
+            assert_eq!(mode_tap(PermMode::Ask, None, m, T0), (None, Some(m)));
+        }
+    }
+
+    #[test]
+    fn fr_l16_tapping_the_current_bypass_needs_no_confirmation() {
+        assert_eq!(mode_tap(PermMode::Bypass, None, PermMode::Bypass, T0), (None, Some(PermMode::Bypass)));
+    }
+
+    #[test]
+    fn fr_l16_pointing_at_another_row_withdraws_the_confirmation() {
+        let armed = Some((PermMode::Bypass, T0));
+        assert_eq!(mode_hover(armed, PermMode::Ask), None);
+        assert_eq!(mode_hover(armed, PermMode::Bypass), armed);
+        assert_eq!(mode_hover(None, PermMode::Ask), None);
+    }
+
+    #[test]
+    fn fr_l16_a_waiting_bypass_row_says_so() {
+        let rows = mode_picker_rows_pending(Harness::ClaudeCode, PermMode::Ask, Some(PermMode::Bypass));
+        let b = rows.iter().find(|r| r.mode == PermMode::Bypass).unwrap();
+        assert_eq!(b.title, "다시 눌러 바이패스 적용");
+        assert_eq!(b.description, "한 번 더 누르면 모든 작업을 묻지 않고 실행합니다");
+        assert!(b.danger);
+        let others = rows.iter().filter(|r| r.mode != PermMode::Bypass);
+        assert!(others.clone().all(|r| r.title == r.mode.label()));
+        let idle = mode_picker_rows(Harness::ClaudeCode, PermMode::Ask);
+        assert_eq!(idle.iter().find(|r| r.danger).unwrap().title, PermMode::Bypass.label());
+    }
+
+    #[test]
+    fn fr_l15_popover_width_fits_the_window_beside_the_navigation() {
+        // 561: rail 72 + margin 24 leaves 465. 700: 604 leaves room for 560. 900 and 1024: rail.
+        // 1440: sidebar 234.
+        assert_eq!(popover_width(560.0, 561.0), 465.0);
+        assert_eq!(popover_width(560.0, 700.0), 560.0);
+        assert_eq!(popover_width(560.0, 900.0), 560.0);
+        assert_eq!(popover_width(560.0, 1024.0), 560.0);
+        assert_eq!(popover_width(560.0, 1440.0), 560.0);
+        assert_eq!(popover_width(340.0, 561.0), 340.0);
+        for w in [561.0_f32, 600.0, 700.0, 900.0, 1024.0, 1440.0] {
+            assert!(popover_width(560.0, w) + nav_width_for(w) <= w);
+        }
+    }
+
+    #[test]
+    fn fr_l15_chip_budget_gives_every_chip_its_icon_and_some_text() {
+        for w in [200.0_f32, 300.0, 400.0, 450.0, 520.0, 560.0, 640.0, 720.0] {
+            let b = composer_chip_budget(w);
+            for i in 0..CHIP_COUNT {
+                assert!(b[i] >= CHIP_TEXT_MINS[i] && b[i] <= CHIP_TEXT_CAPS[i], "{w} {i} {}", b[i]);
+            }
+            // Project and computer keep at least four Korean glyphs.
+            assert!(b[0] >= 54.0 && b[3] >= 54.0);
+        }
+    }
+
+    #[test]
+    fn fr_l15_chip_budget_is_the_caps_when_a_line_has_room() {
+        let b = composer_chip_budget(718.0);
+        assert_eq!(b, CHIP_TEXT_CAPS);
+        assert_eq!(b[1], 240.0);
+        assert_eq!(b[2], 140.0);
+    }
+
+    #[test]
+    fn fr_l15_composer_estimate_matches_the_measured_label() {
+        let w = composer_text_px("Claude Code \u{b7} Opus 5.5 \u{b7} 높음");
+        assert!((205.0..=235.0).contains(&w), "{w}");
+        // The send sheet's pessimistic estimate is a different, larger function.
+        assert!(crate::ui::files::chip_text_px("가나다") > composer_text_px("가나다"));
+    }
+
+    /// The demo labels of the composer chips.
+    fn demo_chip_labels() -> [String; CHIP_COUNT] {
+        [
+            DEFAULT_PROJECT.to_string(),
+            default_option(Harness::ClaudeCode).chip_label(),
+            PermMode::Ask.label().to_string(),
+            "이 컴퓨터".to_string(),
+        ]
+    }
+
+    #[test]
+    fn fr_l15_default_demo_labels_are_not_truncated_at_718_and_640() {
+        for w in [718.0_f32, 640.0, 700.0] {
+            let b = composer_chip_budget(w);
+            for (t, max) in demo_chip_labels().iter().zip(b) {
+                assert_eq!(&composer_fit_text(t, max), t, "{w} {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l15_demo_labels_fit_one_line_at_718() {
+        let b = composer_chip_budget(718.0);
+        let widths: Vec<f32> = demo_chip_labels().iter().zip(b).map(|(t, m)| composer_chip_width(&composer_fit_text(t, m))).collect();
+        assert_eq!(composer_chip_rows(&widths, 718.0).len(), 1, "{widths:?}");
+    }
+
+    #[test]
+    fn fr_l15_fit_text_cuts_with_an_ellipsis_only_over_the_budget() {
+        // The ellipsis counts like a Korean glyph (13.5): two glyphs plus it would be 40.5 > 40.
+        assert_eq!(composer_fit_text("가나다라마바사", 40.0), "가\u{2026}");
+        assert_eq!(composer_fit_text("가나다라마바사", 41.0), "가나\u{2026}");
+        assert_eq!(composer_fit_text("abc", 100.0), "abc");
+    }
+
+    #[test]
+    fn fr_l15_chip_rows_wrap_instead_of_dropping_a_chip() {
+        for w in [300.0_f32, 340.0, 400.0, 480.0, 560.0, 720.0] {
+            let b = composer_chip_budget(w);
+            let widths: Vec<f32> = b.iter().map(|t| CHIP_FRAME + t).collect();
+            let rows = composer_chip_rows(&widths, w);
+            let mut all: Vec<usize> = rows.iter().flatten().copied().collect();
+            all.sort();
+            assert_eq!(all, vec![0, 1, 2, 3], "{w}");
+        }
+        // 300 dp is too narrow for four chips in one line.
+        let b = composer_chip_budget(300.0);
+        let widths: Vec<f32> = b.iter().map(|t| CHIP_FRAME + t).collect();
+        assert!(composer_chip_rows(&widths, 300.0).len() > 1);
+    }
+
+    #[test]
+    fn fr_l15_chip_width_counts_the_frame_and_the_text() {
+        assert_eq!(composer_chip_width(""), CHIP_FRAME);
+        assert_eq!(composer_chip_width("가나"), CHIP_FRAME + 27.0);
+    }
+
+    #[test]
+    fn fr_l16_header_names_the_harness() {
+        assert_eq!(mode_header(Harness::ClaudeCode), format!("권한 모드 \u{b7} {}", Harness::ClaudeCode.label()));
     }
 
     #[test]
@@ -949,10 +1342,40 @@ mod tests {
     }
 
     #[test]
+    fn fr_l15_effort_names_are_korean() {
+        assert_eq!(effort_name("Low"), "낮음");
+        assert_eq!(effort_name("Medium"), "보통");
+        assert_eq!(effort_name("High"), "높음");
+        assert_eq!(effort_name("Max"), "Max");
+        for e in EFFORTS {
+            assert_ne!(effort_name(e), e);
+        }
+    }
+
+    #[test]
+    fn fr_l15_no_row_or_chip_shows_an_english_effort() {
+        for o in model_catalog() {
+            for t in [o.row_title(), o.chip_label()] {
+                for en in EFFORTS {
+                    assert!(!t.contains(en), "{t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fr_l15_search_finds_a_row_by_its_korean_effort() {
+        let all = model_catalog();
+        let hits = filter_models(&all, None, "높음");
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|o| o.effort == Some("High")));
+    }
+
+    #[test]
     fn fr_l15_chip_and_row_text() {
         let o = default_option(Harness::ClaudeCode);
-        assert_eq!(o.chip_label(), "Claude Code · Opus 5.5 · High");
-        assert_eq!(o.row_title(), "Opus 5.5 (High)");
+        assert_eq!(o.chip_label(), "Claude Code · Opus 5.5 · 높음");
+        assert_eq!(o.row_title(), "Opus 5.5 (높음)");
         let g = default_option(Harness::Gemini);
         assert_eq!(g.chip_label(), "Gemini · Gemini Pro");
         assert_eq!(g.row_title(), "Gemini Pro");

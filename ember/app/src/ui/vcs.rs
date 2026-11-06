@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dioxus_compose::prelude::WindowSizeClass;
 
 use ember_client::api::{
-    ApiError, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrReview, GitPrState, GitPrs, GitStashEntry, GitStatus,
+    ApiError, GitBranchInfo, GitBranches, GitCommitted, GitConflict, GitConflictBlock, GitConflicts, GitDiff, GitLog, GitLogCommit, GitLogRefKind, GitOutput, GitPr, GitPrReview, GitPrState, GitPrs, GitStashEntry, GitStatus,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -1545,6 +1545,138 @@ pub async fn fetch_prs(project: &str, filter: PrFilter) -> Result<GitPrs, ApiErr
 }
 
 // ---------------------------------------------------------------------------------------------
+// Branches (FR-G9)
+// ---------------------------------------------------------------------------------------------
+
+/// Commits the ahead/behind bars show at full width; more is drawn as full.
+pub const BRANCH_BAR_CAP: u32 = 10;
+
+/// One row of the branch list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchEntry {
+    pub name: String,
+    pub current: bool,
+    pub default: bool,
+    /// The upstream's short name, or "업스트림 없음".
+    pub upstream_text: String,
+    pub has_upstream: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    /// "a1b2c3d \u{b7} subject \u{b7} 12분 전" (the parts that exist).
+    pub last_line: String,
+    /// The path of the worktree that has the branch checked out.
+    pub worktree: Option<String>,
+}
+
+impl BranchEntry {
+    /// "앞섬 2 · 뒤처짐 1", "원격과 같음" or "업스트림 없음".
+    pub fn sync_text(&self) -> String {
+        if self.has_upstream {
+            ahead_behind_label(self.ahead, self.behind)
+        } else {
+            "업스트림 없음".to_string()
+        }
+    }
+}
+
+/// The state of the branch list of one project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchLoad {
+    Loading,
+    Ready(Vec<BranchEntry>),
+    /// The Korean line with the node's message (shown with a retry button).
+    Failed(String),
+}
+
+/// "앞섬 2 · 뒤처짐 1", "앞섬 2", "뒤처짐 1" or "원격과 같음" (for a branch that has an upstream).
+pub fn ahead_behind_label(ahead: u32, behind: u32) -> String {
+    match (ahead, behind) {
+        (0, 0) => "원격과 같음".to_string(),
+        (a, 0) => format!("앞섬 {a}"),
+        (0, b) => format!("뒤처짐 {b}"),
+        (a, b) => format!("앞섬 {a} \u{00b7} 뒤처짐 {b}"),
+    }
+}
+
+/// The widths of the ahead and behind bars as fractions of the full bar (0.0 to 1.0).
+pub fn branch_bar_fractions(ahead: u32, behind: u32) -> (f32, f32) {
+    let f = |n: u32| n.min(BRANCH_BAR_CAP) as f32 / BRANCH_BAR_CAP as f32;
+    (f(ahead), f(behind))
+}
+
+/// The last folder of a worktree path ("/Users/a/worktrees/ui" gives "ui").
+pub fn worktree_tail(path: &str) -> String {
+    let t = path.trim_end_matches('/');
+    t.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(t).to_string()
+}
+
+/// The row of one branch. A time that cannot be read shows as the node sent it.
+pub fn branch_entry(b: &GitBranchInfo, now: i64) -> BranchEntry {
+    let time = b.last_time.as_deref().map(|t| iso_to_unix(t).map(|u| history_time_text(now, u)).unwrap_or_else(|| t.to_string()));
+    let parts: Vec<String> = [Some(b.last_sha.clone()), Some(b.last_subject.clone()), time].into_iter().flatten().filter(|s| !s.trim().is_empty()).collect();
+    BranchEntry {
+        name: b.name.clone(),
+        current: b.is_current,
+        default: b.is_default,
+        upstream_text: b.upstream.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| "업스트림 없음".to_string()),
+        has_upstream: b.upstream.as_deref().is_some_and(|u| !u.is_empty()),
+        ahead: b.ahead,
+        behind: b.behind,
+        last_line: parts.join(" \u{00b7} "),
+        worktree: b.worktree.clone().filter(|w| !w.is_empty()),
+    }
+}
+
+/// The list as a view state, in the node's order (current, default, then newest). An empty list
+/// is a ready, empty state, not an error.
+pub fn branches_from(result: Result<GitBranches, ApiError>, now: i64) -> BranchLoad {
+    match result {
+        Ok(list) => BranchLoad::Ready(list.branches.iter().map(|b| branch_entry(b, now)).collect()),
+        Err(e) => BranchLoad::Failed(failure_text("브랜치 목록을 확인", &e)),
+    }
+}
+
+/// The 기본 브랜치 row (the first default one) and the 작업 브랜치 rows (all others, in order).
+pub fn split_branches(list: &[BranchEntry]) -> (Option<&BranchEntry>, Vec<&BranchEntry>) {
+    let default = list.iter().find(|b| b.default);
+    let rest = list.iter().filter(|b| default.map_or(true, |d| !std::ptr::eq(*b, d))).collect();
+    (default, rest)
+}
+
+/// Read a project's branches. Runs on the runtime, not the UI thread.
+pub async fn fetch_branches(project: &str) -> Result<GitBranches, ApiError> {
+    git_call(project, "branches", json!({})).await
+}
+
+/// The `branch` body: create `name` and switch to it, from `base` when one is chosen.
+pub fn branch_create_body(name: &str, base: Option<&str>) -> Value {
+    match base {
+        Some(b) => json!({ "name": name, "from": b }),
+        None => json!({ "name": name }),
+    }
+}
+
+/// The 스태시 button of 변경 사항: a clean tree has nothing to stash, and the API is not called.
+/// The Korean line for a failed stash-now. An untracked-only tree passes the gate (the gate counts
+/// every change) but git has nothing to stash because untracked files are left out; its English
+/// text is replaced by a line that says so.
+pub fn stash_now_error(line: &str) -> String {
+    if line.contains("No local changes") {
+        "스태시할 추적 중인 변경이 없습니다. 추적하지 않는 파일은 포함되지 않습니다".to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+pub fn stash_now_gate(changes_len: usize) -> Result<(), &'static str> {
+    if changes_len == 0 {
+        Err("스태시할 변경이 없습니다")
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Stash (FR-G6)
 // ---------------------------------------------------------------------------------------------
 
@@ -1988,6 +2120,89 @@ pub fn section_count(section: Section, snap: Option<&RepoSnapshot>) -> Option<us
     }
 }
 
+/// A session of the project with its folder, as the 팀 작업 tab matches it to a worktree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberCwd {
+    pub name: String,
+    pub harness: String,
+    pub leader: bool,
+    pub cwd: String,
+    /// "실행 중", "승인 대기" and so on.
+    pub state_text: String,
+    pub status: ember_client::LauncherStatus,
+}
+
+/// The member of a worktree row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamMember {
+    pub name: String,
+    pub harness: String,
+    pub leader: bool,
+    pub state_text: String,
+    pub status: ember_client::LauncherStatus,
+}
+
+/// One row of 팀 작업: a worktree, its branch, its member and the branch's pull request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TeamRow {
+    pub branch: String,
+    pub worktree: String,
+    /// `None` shows "담당 없음".
+    pub member: Option<TeamMember>,
+    /// "앞섬 2 \u{b7} 뒤처짐 1", "원격과 같음" or "업스트림 없음".
+    pub sync_text: String,
+    /// "#398 열림" for the branch's pull request (an open one first), `None` when there is none.
+    pub pr_text: Option<String>,
+    /// The branch the project's main checkout has open.
+    pub current: bool,
+}
+
+/// `cwd` is `worktree` or inside it (a path boundary, so "/w/ui2" is not inside "/w/ui").
+fn cwd_in_worktree(cwd: &str, worktree: &str) -> bool {
+    let (c, w) = (cwd.trim_end_matches('/'), worktree.trim_end_matches('/'));
+    // A worktree of "/" would hold every folder: it holds none.
+    !w.is_empty() && (c == w || (c.starts_with(w) && c[w.len()..].starts_with('/')))
+}
+
+/// The rows of 팀 작업, one per branch that has a worktree: the current branch (the main
+/// checkout) first, then by branch name. A member belongs to the worktree with the longest path
+/// that holds its folder; when several members share one worktree the leader, else the first in
+/// `members`, is shown.
+pub fn team_rows(branches: &[BranchEntry], members: &[MemberCwd], prs: &[PrEntry]) -> Vec<TeamRow> {
+    let trees: Vec<(&BranchEntry, &str)> = branches.iter().filter_map(|b| b.worktree.as_deref().filter(|w| !w.is_empty()).map(|w| (b, w))).collect();
+    let owner = |m: &MemberCwd| -> Option<usize> {
+        trees.iter().enumerate().filter(|(_, (_, w))| cwd_in_worktree(&m.cwd, w)).max_by_key(|(_, (_, w))| w.trim_end_matches('/').len()).map(|(i, _)| i)
+    };
+    let mut rows: Vec<TeamRow> = trees
+        .iter()
+        .enumerate()
+        .map(|(i, (b, w))| {
+            let mine: Vec<&MemberCwd> = members.iter().filter(|m| owner(m) == Some(i)).collect();
+            let chosen = mine.iter().find(|m| m.leader).or_else(|| mine.first());
+            let pr = prs.iter().filter(|p| p.head == b.name).max_by_key(|p| (p.state == GitPrState::Open, p.number));
+            TeamRow {
+                branch: b.name.clone(),
+                worktree: w.to_string(),
+                member: chosen.map(|m| TeamMember { name: m.name.clone(), harness: m.harness.clone(), leader: m.leader, state_text: m.state_text.clone(), status: m.status }),
+                sync_text: b.sync_text(),
+                pr_text: pr.map(|p| format!("#{} {}", p.number, p.state_text)),
+                current: b.current,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.current.cmp(&a.current).then_with(|| a.branch.cmp(&b.branch)));
+    rows
+}
+
+/// Like `section_count_with_branches`, plus the count the 팀 작업 section read (`None` until read;
+/// the snapshot count stands in meanwhile).
+pub fn section_count_with_team(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>, branches: Option<usize>, team: Option<usize>) -> Option<usize> {
+    match section {
+        Section::Team => team.or_else(|| section_count(section, snap)),
+        _ => section_count_with_branches(section, snap, stash, prs, branches),
+    }
+}
+
 /// The count beside a section's name, with the stash count read by the stash section (`None`
 /// until it has been read). The stash count does not need the repository snapshot.
 pub fn section_count_with_stash(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>) -> Option<usize> {
@@ -1997,9 +2212,16 @@ pub fn section_count_with_stash(section: Section, snap: Option<&RepoSnapshot>, s
 /// The count beside a section's name, with the counts the stash and pull request sections read
 /// themselves (`None` until read). Neither needs the repository snapshot.
 pub fn section_count_with(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>) -> Option<usize> {
+    section_count_with_branches(section, snap, stash, prs, None)
+}
+
+/// Like `section_count_with`, plus the count the branch section read (`None` until read; the
+/// snapshot's branch count stands in meanwhile).
+pub fn section_count_with_branches(section: Section, snap: Option<&RepoSnapshot>, stash: Option<usize>, prs: Option<usize>, branches: Option<usize>) -> Option<usize> {
     match section {
         Section::Stash => stash,
         Section::PullRequests => prs,
+        Section::Branches => branches.or_else(|| section_count(section, snap)),
         _ => section_count(section, snap),
     }
 }
@@ -3588,6 +3810,123 @@ rename to new.txt
         assert_eq!(section_count_with(Section::Branches, Some(&snap), None, Some(3)), Some(1));
     }
 
+    // ---- FR-G9: branches ----
+
+    fn a_branch(name: &str, current: bool, default: bool, upstream: Option<&str>, ahead: u32, behind: u32, worktree: Option<&str>) -> GitBranchInfo {
+        GitBranchInfo {
+            name: name.into(),
+            is_current: current,
+            is_default: default,
+            upstream: upstream.map(String::from),
+            ahead,
+            behind,
+            last_sha: "a1b2c3d".into(),
+            last_subject: "Fix: x".into(),
+            last_time: Some("2026-11-06T12:00:00Z".into()),
+            worktree: worktree.map(String::from),
+        }
+    }
+
+    #[test]
+    fn fr_g9_branches_ahead_behind_label_reads_in_korean() {
+        assert_eq!(ahead_behind_label(2, 1), "앞섬 2 \u{00b7} 뒤처짐 1");
+        assert_eq!(ahead_behind_label(3, 0), "앞섬 3");
+        assert_eq!(ahead_behind_label(0, 4), "뒤처짐 4");
+        assert_eq!(ahead_behind_label(0, 0), "원격과 같음");
+    }
+
+    #[test]
+    fn fr_g9_branches_a_branch_without_an_upstream_says_so() {
+        let now = iso_to_unix("2026-11-06T14:00:00Z").unwrap();
+        let e = branch_entry(&a_branch("feat/x", false, false, None, 0, 0, None), now);
+        assert_eq!((e.sync_text().as_str(), e.upstream_text.as_str(), e.has_upstream), ("업스트림 없음", "업스트림 없음", false));
+        let t = branch_entry(&a_branch("feat/y", true, false, Some("origin/feat/y"), 2, 1, None), now);
+        assert_eq!((t.sync_text().as_str(), t.upstream_text.as_str()), ("앞섬 2 \u{00b7} 뒤처짐 1", "origin/feat/y"));
+        assert_eq!(t.last_line, "a1b2c3d \u{00b7} Fix: x \u{00b7} 2시간 전");
+    }
+
+    #[test]
+    fn fr_g9_branches_an_unreadable_time_shows_as_sent_and_blank_parts_drop() {
+        let mut b = a_branch("m", false, true, None, 0, 0, None);
+        b.last_time = Some("yesterday".into());
+        b.last_sha = String::new();
+        assert_eq!(branch_entry(&b, 0).last_line, "Fix: x \u{00b7} yesterday");
+        b.last_time = None;
+        assert_eq!(branch_entry(&b, 0).last_line, "Fix: x");
+    }
+
+    #[test]
+    fn fr_g9_branches_worktree_shows_its_last_folder() {
+        assert_eq!(worktree_tail("/Users/demo/worktrees/ui-phase-6"), "ui-phase-6");
+        assert_eq!(worktree_tail("/Users/demo/darkpyonix-ember/"), "darkpyonix-ember");
+        assert_eq!(worktree_tail("ember"), "ember");
+        let e = branch_entry(&a_branch("w", false, false, None, 0, 0, Some("/w/ui")), 0);
+        assert_eq!(e.worktree.as_deref(), Some("/w/ui"));
+        assert_eq!(branch_entry(&a_branch("w", false, false, None, 0, 0, Some("")), 0).worktree, None);
+    }
+
+    #[test]
+    fn fr_g9_branches_the_bars_are_proportional_and_capped() {
+        assert_eq!(branch_bar_fractions(0, 0), (0.0, 0.0));
+        assert_eq!(branch_bar_fractions(5, 1), (0.5, 0.1));
+        assert_eq!(branch_bar_fractions(50, 10), (1.0, 1.0));
+    }
+
+    #[test]
+    fn fr_g9_branches_the_default_is_split_from_the_work_branches_in_node_order() {
+        let list = GitBranches { branches: vec![
+            a_branch("feat/a", true, false, Some("origin/feat/a"), 1, 0, None),
+            a_branch("main", false, true, Some("origin/main"), 0, 0, None),
+            a_branch("develop", false, false, None, 0, 0, None),
+        ] };
+        let BranchLoad::Ready(entries) = branches_from(Ok(list), 0) else { panic!() };
+        let (default, rest) = split_branches(&entries);
+        assert_eq!(default.map(|d| d.name.as_str()), Some("main"));
+        assert_eq!(rest.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["feat/a", "develop"]);
+        assert!(rest[0].current);
+        let (none, all) = split_branches(&entries[..1]);
+        assert!(none.is_none() && all.len() == 1);
+    }
+
+    #[test]
+    fn fr_g9_branches_the_list_is_a_view_state_and_an_error_carries_the_message() {
+        assert_eq!(branches_from(Ok(GitBranches::default()), 0), BranchLoad::Ready(Vec::new()));
+        let boom = ApiError::Status { status: 500, message: "boom".into(), code: None };
+        assert_eq!(branches_from(Err(boom), 0), BranchLoad::Failed("브랜치 목록을 확인하지 못했습니다: boom".into()));
+        let down = ApiError::Peer("refused".into());
+        assert!(matches!(branches_from(Err(down), 0), BranchLoad::Failed(t) if t.contains("서버에 닿지 않습니다")));
+    }
+
+    #[test]
+    fn fr_g9_branches_create_sends_the_base_only_when_chosen() {
+        assert_eq!(branch_create_body("feat/n", None), json!({ "name": "feat/n" }));
+        assert_eq!(branch_create_body("feat/n", Some("main")), json!({ "name": "feat/n", "from": "main" }));
+    }
+
+    #[test]
+    fn fr_g9_branches_the_tab_count_is_the_loaded_count() {
+        assert_eq!(section_count_with_branches(Section::Branches, None, None, None, None), None);
+        assert_eq!(section_count_with_branches(Section::Branches, None, None, None, Some(4)), Some(4));
+        let snap = RepoSnapshot { branches: s(&["main", "x"]), ..Default::default() };
+        assert_eq!(section_count_with_branches(Section::Branches, Some(&snap), None, None, None), Some(2), "snapshot count until read");
+        assert_eq!(section_count_with_branches(Section::Branches, Some(&snap), None, None, Some(5)), Some(5));
+        assert_eq!(section_count_with_branches(Section::Stash, Some(&snap), Some(1), None, Some(5)), Some(1));
+    }
+
+    #[test]
+    fn fr_l19_stash_now_an_untracked_only_tree_says_so_in_korean() {
+        let raw = "스태시 만들기를 하지 못했습니다: No local changes to save";
+        assert!(stash_now_error(raw).contains("추적 중인 변경이 없습니다"));
+        assert_eq!(stash_now_error("다른 오류입니다"), "다른 오류입니다");
+    }
+
+    #[test]
+    fn fr_l19_stash_now_refuses_a_clean_tree_without_calling_the_api() {
+        assert_eq!(stash_now_gate(0), Err("스태시할 변경이 없습니다"));
+        assert_eq!(stash_now_gate(1), Ok(()));
+        assert_eq!(stash_now_gate(40), Ok(()));
+    }
+
     // ---- conflict editor follow-ups (#382) ----
 
     #[test]
@@ -3652,4 +3991,84 @@ rename to new.txt
         assert!(build_snapshot(&st, SAMPLE, "", &BTreeMap::new()).notes.is_empty());
     }
 
+
+    // ---- 팀 작업 (#482) ----
+
+    fn a_member(name: &str, leader: bool, cwd: &str) -> MemberCwd {
+        MemberCwd { name: name.into(), harness: "claude-code".into(), leader, cwd: cwd.into(), state_text: "실행 중".into(), status: ember_client::LauncherStatus::Running }
+    }
+
+    fn branches_of(list: &[(&str, bool, Option<&str>)]) -> Vec<BranchEntry> {
+        list.iter().map(|(n, cur, wt)| branch_entry(&a_branch(n, *cur, false, Some("origin/x"), 2, 1, *wt), 0)).collect()
+    }
+
+    #[test]
+    fn fr_g9_team_a_root_worktree_holds_no_member_folder() {
+        assert!(!cwd_in_worktree("/Users/x", "/"));
+        assert!(!cwd_in_worktree("/", "/"));
+        assert!(cwd_in_worktree("/a/b", "/a/"));
+    }
+
+    #[test]
+    fn fr_g9_team_longest_prefix_wins_for_a_nested_worktree() {
+        let b = branches_of(&[("main", true, Some("/r")), ("feat/ui", false, Some("/r/.claude/worktrees/ui"))]);
+        let m = [a_member("ui-agent", false, "/r/.claude/worktrees/ui/ember/app"), a_member("lead", true, "/r/docs")];
+        let rows = team_rows(&b, &m, &[]);
+        assert_eq!(rows[0].branch, "main");
+        assert_eq!(rows[0].member.as_ref().unwrap().name, "lead");
+        assert_eq!(rows[1].member.as_ref().unwrap().name, "ui-agent");
+    }
+
+    #[test]
+    fn fr_g9_team_a_sibling_folder_with_the_same_prefix_is_not_inside() {
+        let b = branches_of(&[("feat/ui", false, Some("/w/ui"))]);
+        let rows = team_rows(&b, &[a_member("x", false, "/w/ui2")], &[]);
+        assert_eq!(rows[0].member, None);
+        assert_eq!(team_rows(&b, &[a_member("x", false, "/w/ui/")], &[])[0].member.as_ref().unwrap().name, "x");
+    }
+
+    #[test]
+    fn fr_g9_team_a_worktree_without_a_member_has_none() {
+        let b = branches_of(&[("main", true, Some("/r"))]);
+        let rows = team_rows(&b, &[a_member("far", false, "/elsewhere")], &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].member, None);
+        assert_eq!(rows[0].sync_text, "앞섬 2 \u{00b7} 뒤처짐 1");
+    }
+
+    #[test]
+    fn fr_g9_team_lists_only_branches_with_a_worktree_main_first_then_by_name() {
+        let b = branches_of(&[("zeta", false, Some("/w/z")), ("develop", false, None), ("alpha", false, Some("/w/a")), ("main", true, Some("/r"))]);
+        let names: Vec<String> = team_rows(&b, &[], &[]).into_iter().map(|r| r.branch).collect();
+        assert_eq!(names, ["main", "alpha", "zeta"]);
+        assert!(team_rows(&b, &[], &[])[0].current);
+    }
+
+    #[test]
+    fn fr_g9_team_a_shared_worktree_shows_the_leader() {
+        let b = branches_of(&[("main", true, Some("/r"))]);
+        let m = [a_member("first", false, "/r"), a_member("lead", true, "/r/x")];
+        assert_eq!(team_rows(&b, &m, &[])[0].member.as_ref().unwrap().name, "lead");
+    }
+
+    #[test]
+    fn fr_g9_team_the_pr_text_is_the_branch_pr_open_first() {
+        let b = branches_of(&[("feat/x", false, Some("/w/x")), ("main", true, Some("/r"))]);
+        let prs = [
+            pr_entry(&a_pr(7, GitPrState::Merged, GitPrReview::None, (0, 0, 0), (false, "")), 0),
+            pr_entry(&a_pr(9, GitPrState::Open, GitPrReview::None, (0, 0, 0), (false, "")), 0),
+        ];
+        let rows = team_rows(&b, &[], &prs);
+        let x = rows.iter().find(|r| r.branch == "feat/x").unwrap();
+        assert_eq!(x.pr_text.as_deref(), Some("#9 열림"));
+        assert_eq!(rows.iter().find(|r| r.branch == "main").unwrap().pr_text, None);
+    }
+
+    #[test]
+    fn fr_g9_team_empty_input_gives_no_rows_and_the_count_is_the_loaded_count() {
+        assert!(team_rows(&[], &[], &[]).is_empty());
+        assert_eq!(section_count_with_team(Section::Team, None, None, None, None, None), None);
+        assert_eq!(section_count_with_team(Section::Team, None, None, None, None, Some(3)), Some(3));
+        assert_eq!(section_count_with_team(Section::Branches, None, None, None, Some(4), Some(3)), Some(4));
+    }
 }

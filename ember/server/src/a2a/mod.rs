@@ -30,6 +30,7 @@ use futures::future::BoxFuture;
 use serde::Serialize;
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::agents::{AgentKind, McpServer, StartRequest};
 use crate::events::{AgentEvent, SessionStatus};
 use crate::session::{Push, Sessions};
 use crate::store::SessionRecord;
@@ -37,6 +38,13 @@ pub use store::{A2aMessage, A2aStore};
 
 /// Name of the agent-side command (a bin target of this crate).
 pub const CLI_NAME: &str = "ember-a2a";
+
+/// Name of the MCP server that carries the `channel_post` tool (FR-T12, #380).
+pub const CHANNEL_MCP_SERVER: &str = "ember-channels";
+/// The tool as Claude Code names it: `mcp__<server>__<tool>`. A literal, because constants cannot
+/// be concatenated; a unit test builds it from [`CHANNEL_MCP_SERVER`] and [`mcp::TOOL_NAME`] and
+/// compares, so the three cannot drift apart. It is the one tool the allow rule names.
+pub const CHANNEL_POST_TOOL: &str = "mcp__ember-channels__channel_post";
 
 /// How many posts one session may make into one channel per minute (FR-T12, `channel post`).
 pub const CHANNEL_POSTS_PER_MINUTE: u32 = 6;
@@ -211,6 +219,14 @@ impl A2a {
         self.sessions.add_instructions_hook(Arc::new(move |rec: &SessionRecord| {
             weak.upgrade().map(|a| a.instructions_for(rec))
         }));
+        // FR-T12 (#380): Claude Code answers a mention through the `channel_post` MCP tool.
+        let weak = Arc::downgrade(self);
+        self.sessions.add_start_config_hook(Arc::new(move |rec: &SessionRecord, req: &mut StartRequest| {
+            if let Some(a) = weak.upgrade() {
+                a.channel_tool_config(rec, req);
+            }
+            Ok(())
+        }));
         // Mentions in user messages (FR-T6).
         let weak = Arc::downgrade(self);
         self.sessions.add_user_message_hook(Arc::new(move |session: String, text: String| {
@@ -231,6 +247,71 @@ impl A2a {
 
     pub fn store(&self) -> &A2aStore {
         &self.store
+    }
+
+    /// Whether `rec` answers a channel mention through the `channel_post` MCP tool instead of the
+    /// `ember-a2a channel post` command (FR-T12, FR-T13). Only Claude Code does (the only harness
+    /// where the tool name and the approval rule are measured), only with the `ember-a2a` binary
+    /// installed, and only on this computer: on another computer the MCP child would need the
+    /// binary there, so those sessions keep the command. The start hook and both prompt builders
+    /// ask this one function, so they cannot disagree. A lookup error counts as another computer.
+    fn channel_reply_by_tool(&self, rec: &SessionRecord) -> bool {
+        if rec.agent != AgentKind::ClaudeCode || self.config.cli_path.is_none() {
+            return false;
+        }
+        match self.session_computer_id(&rec.id) {
+            Ok(None) => true,
+            Ok(Some(id)) => id == crate::computers::LOCAL,
+            Err(e) => {
+                tracing::warn!(session = %rec.id, "reading the session's computer failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// The computer id recorded for a session by `crate::computers` (`None` = never switched).
+    fn session_computer_id(&self, session: &str) -> Result<Option<String>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        let conn = self.sessions.store().conn();
+        conn.query_row(
+            "SELECT computer_id FROM session_computer WHERE session_id = ?1",
+            rusqlite::params![session],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+    }
+
+    /// Start-config hook (FR-T12): register the `ember-channels` MCP server and its one allow
+    /// rule for a Claude Code session that [`A2a::channel_reply_by_tool`]. It reuses the
+    /// `EMBER_URL` and `EMBER_RUNTIME_TOKEN` already in `req.env` (made by [`A2a::runtime_env`]),
+    /// so no second token is issued and the child gets no wider scope than the CLI has. Claude
+    /// Code writes an MCP entry with environment into a private file, never onto the command line.
+    /// Never logs the token.
+    fn channel_tool_config(&self, rec: &SessionRecord, req: &mut StartRequest) {
+        if !self.channel_reply_by_tool(rec) || req.remote.is_some() || req.computer.is_some() {
+            return;
+        }
+        let Some(cli) = self.config.cli_path.as_ref() else { return };
+        let env_value = |name: &str| {
+            req.env.iter().rev().find(|(k, v)| k == name && !v.is_empty()).map(|(_, v)| v.clone())
+        };
+        let (Some(url), Some(token)) = (env_value("EMBER_URL"), env_value("EMBER_RUNTIME_TOKEN")) else {
+            return;
+        };
+        if req.mcp_servers.iter().any(|s| s.name == CHANNEL_MCP_SERVER) {
+            tracing::warn!(session = %rec.id, "an MCP server named {CHANNEL_MCP_SERVER} already exists; not adding another");
+            return;
+        }
+        req.mcp_servers.push(McpServer {
+            name: CHANNEL_MCP_SERVER.to_string(),
+            command: cli.to_string_lossy().into_owned(),
+            args: vec!["mcp".to_string()],
+            startup_timeout_secs: Some(10),
+            env: vec![("EMBER_URL".to_string(), url), ("EMBER_RUNTIME_TOKEN".to_string(), token)],
+        });
+        if !req.allowed_tools.iter().any(|t| t == CHANNEL_POST_TOOL) {
+            req.allowed_tools.push(CHANNEL_POST_TOOL.to_string());
+        }
     }
 
     /// Environment for an agent process: a fresh runtime token per process start.
@@ -265,6 +346,24 @@ impl A2a {
     /// How the agent uses A2A. Stable across restarts (no per-process values), so it does not
     /// disturb prompt caching on resume.
     pub fn instructions(&self) -> String {
+        self.instructions_with(false)
+    }
+
+    /// [`A2a::instructions`]; `channel_by_tool` names the `channel_post` MCP tool as the way to
+    /// answer a channel mention (with the command as a fallback) instead of the command alone.
+    fn instructions_with(&self, channel_by_tool: bool) -> String {
+        let channel_answer = if channel_by_tool {
+            format!(
+                "call the tool `{CHANNEL_POST_TOOL}` with `channel` set to the channel id and \
+                 `text` set to your answer; if the tool is not available, run `{CLI_NAME} channel \
+                 post <channel-id> \"<text>\"`"
+            )
+        } else {
+            format!(
+                "run `{CLI_NAME} channel post <channel-id> \"<text>\"` (use `-` to read the text \
+                 from stdin)"
+            )
+        };
         let path_note = match &self.config.cli_path {
             Some(p) => format!(" (also at `{}`, or `$EMBER_A2A_BIN`)", p.display()),
             None => String::new(),
@@ -333,8 +432,7 @@ impl A2a {
              A person can mention you with `@name` in a channel. That message reaches you as a \
              user message whose first line starts with `{HEADER_TAG}` and names the person, the \
              channel and the channel id. A plain reply in your own session is not shown in the \
-             channel. To answer there, run `{CLI_NAME} channel post <channel-id> \"<text>\"` \
-             (use `-` to read the text from stdin). Reply only when you were addressed, and keep \
+             channel. To answer there, {channel_answer}. Reply only when you were addressed, and keep \
              it short. You may post only in a channel you belong to, for 30 minutes after a \
              person mentioned you there, at most {CHANNEL_POSTS_PER_MINUTE} posts a minute. \
              Your post is shown to the people in the channel; `@name` in it does not reach \
@@ -344,9 +442,10 @@ impl A2a {
 
     /// [`A2a::instructions`] plus, for an active teammate, its team role.
     pub fn instructions_for(&self, rec: &SessionRecord) -> String {
+        let base = self.instructions_with(self.channel_reply_by_tool(rec));
         match self.teammate_instructions(rec) {
-            Some(team) => format!("{}\n\n{team}", self.instructions()),
-            None => self.instructions(),
+            Some(team) => format!("{base}\n\n{team}"),
+            None => base,
         }
     }
 
@@ -620,7 +719,7 @@ impl A2a {
         if pending.is_empty() {
             return Ok(false);
         }
-        let text = self.render(&pending)?;
+        let text = self.render(&rec, &pending)?;
         // Before sending: the turn could end before `send` returns.
         self.awaiting
             .lock()
@@ -676,18 +775,20 @@ impl A2a {
     }
 
     /// The user-message text for a batch of messages to one target (FR-T3).
-    fn render(&self, msgs: &[A2aMessage]) -> anyhow::Result<String> {
+    fn render(&self, rec: &SessionRecord, msgs: &[A2aMessage]) -> anyhow::Result<String> {
+        let by_tool = self.channel_reply_by_tool(rec);
         let mut parts = Vec::new();
         for m in msgs {
             if let (Some(channel_id), Some(until)) = (&m.origin_channel, m.origin_guest_until) {
                 // A guest in a channel (FR-T17): the text is untrusted and fenced.
-                parts.push(channel::guest_message_text(
+                parts.push(channel::guest_message_text_for(
                     &m.id,
                     m.origin_label.as_deref().unwrap_or("guest"),
                     self.sessions.store().channel_name(channel_id).as_deref(),
                     channel_id,
                     until,
                     &m.text,
+                    by_tool,
                 ));
                 continue;
             }
@@ -698,10 +799,11 @@ impl A2a {
                     Some(name) => format!("channel #{name}, id {channel_id}"),
                     None => format!("channel {channel_id}"),
                 };
+                let reply_hint = channel::reply_hint(channel_id, by_tool);
                 parts.push(format!(
                     "{HEADER_TAG} Message {} from {who} ({place})\n\
                      This message is from a person in a channel, not from another agent.\n\
-                     To reply in the channel: {CLI_NAME} channel post {channel_id} \"...\"\n\n{}",
+                     {reply_hint}\n\n{}",
                     m.id, m.text
                 ));
                 continue;
@@ -757,5 +859,309 @@ async fn watch_turns(a2a: Weak<A2a>, mut rx: tokio::sync::broadcast::Receiver<Pu
             }
             Err(RecvError::Closed) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod channel_tool_tests {
+    //! FR-T12 (#380 b): Claude Code answers a channel mention through the `channel_post` MCP tool.
+    use super::*;
+    use crate::agents::claude_code::{mcp_config, mcp_needs_file, ClaudeCodeAdapter, PrivateConfigFile};
+    use crate::agents::scripted::ScriptedAdapter;
+    use crate::agents::AgentAdapter;
+    use crate::store::Store;
+
+    const CLI: &str = "/opt/ember/ember-a2a";
+
+    fn world(cli: Option<&str>) -> Arc<A2a> {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sessions = Sessions::new(store, vec![Arc::new(ScriptedAdapter) as Arc<dyn AgentAdapter>]);
+        let mut config = A2aConfig::new("http://127.0.0.1:8740");
+        config.cli_path = cli.map(PathBuf::from);
+        A2a::new(sessions, A2aStore::open_in_memory().unwrap(), config)
+    }
+
+    fn rec(a: &A2a, agent: AgentKind) -> SessionRecord {
+        a.sessions.store().create_session("core", agent, "/tmp", None, "t").unwrap()
+    }
+
+    /// A request as the start hooks leave it: runtime env made by `runtime_env`.
+    fn request(a: &A2a, r: &SessionRecord) -> StartRequest {
+        StartRequest { cwd: ".".into(), env: a.runtime_env(r), ..Default::default() }
+    }
+
+    fn env_of(req: &StartRequest, name: &str) -> String {
+        req.env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).unwrap()
+    }
+
+    fn move_to(a: &A2a, r: &SessionRecord, computer: &str) {
+        a.sessions
+            .store()
+            .conn()
+            .execute(
+                "INSERT INTO session_computer (session_id, computer_id, switched_at) VALUES (?1, ?2, 0)",
+                rusqlite::params![r.id, computer],
+            )
+            .unwrap();
+    }
+
+    fn acp() -> AgentKind {
+        AgentKind::Acp(crate::agents::AcpName::register("acp-t12-tool").unwrap())
+    }
+
+    #[test]
+    fn fr_t12_the_constants_are_built_from_each_other() {
+        assert_eq!(CHANNEL_MCP_SERVER, "ember-channels");
+        assert_eq!(CHANNEL_POST_TOOL, "mcp__ember-channels__channel_post");
+        assert_eq!(CHANNEL_POST_TOOL, format!("mcp__{CHANNEL_MCP_SERVER}__{}", mcp::TOOL_NAME));
+    }
+
+    #[test]
+    fn fr_t12_hook_registers_the_server_and_the_one_allow_rule_for_local_claude_code() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.allowed_tools, vec![CHANNEL_POST_TOOL.to_string()]);
+        assert_eq!(req.mcp_servers.len(), 1);
+        let s = &req.mcp_servers[0];
+        assert_eq!(s.name, "ember-channels");
+        assert_eq!(s.command, CLI);
+        assert_eq!(s.args, vec!["mcp".to_string()]);
+        assert_eq!(s.startup_timeout_secs, Some(10));
+        assert_eq!(s.env.len(), 2);
+        assert!(s.env.contains(&("EMBER_URL".into(), "http://127.0.0.1:8740".into())));
+    }
+
+    #[test]
+    fn fr_t12_hook_reuses_the_token_in_the_env_and_issues_no_second_one() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        let entry = req.mcp_servers[0].env.iter().find(|(k, _)| k == "EMBER_RUNTIME_TOKEN").unwrap();
+        assert_eq!(entry.1, token);
+        // A second `issue_token` would replace the stored hash: the env token would stop working.
+        assert_eq!(a.store.session_for_token(&token).unwrap().as_deref(), Some(r.id.as_str()));
+    }
+
+    #[test]
+    fn fr_t12_hook_treats_a_session_on_the_local_computer_row_as_local() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        move_to(&a, &r, crate::computers::LOCAL);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn fr_t12_hook_skips_a_claude_session_on_another_computer() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        move_to(&a, &r, "pi-1");
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty());
+        assert!(!a.channel_reply_by_tool(&r));
+        assert!(a.instructions_for(&r).contains("run `ember-a2a channel post <channel-id>"));
+    }
+
+    #[test]
+    fn fr_t12_hook_skips_without_the_cli_binary() {
+        let a = world(None);
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty());
+        assert!(!a.channel_reply_by_tool(&r));
+    }
+
+    #[test]
+    fn fr_t12_hook_never_touches_other_harnesses() {
+        let a = world(Some(CLI));
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, AgentKind::Scripted, acp()] {
+            let r = rec(&a, agent);
+            let mut req = request(&a, &r);
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty(), "{agent:?}");
+            assert!(req.allowed_tools.is_empty(), "{agent:?}");
+            assert!(!a.channel_reply_by_tool(&r), "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn fr_t12_hook_skips_a_request_that_already_runs_elsewhere() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        req.remote = Some(crate::agents::RemoteExec {
+            environment_id: "ember-x".into(),
+            exec_server_url: "ws://x".into(),
+        });
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn fr_t12_hook_skips_when_the_env_lacks_the_url_or_the_token() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        for drop in ["EMBER_RUNTIME_TOKEN", "EMBER_URL"] {
+            let mut req = request(&a, &r);
+            req.env.retain(|(k, _)| k != drop);
+            a.channel_tool_config(&r, &mut req);
+            assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "{drop}");
+        }
+        let mut req = request(&a, &r);
+        for (k, v) in req.env.iter_mut() {
+            if k == "EMBER_RUNTIME_TOKEN" {
+                v.clear();
+            }
+        }
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty() && req.allowed_tools.is_empty(), "empty token");
+        let mut req = StartRequest { cwd: ".".into(), ..Default::default() };
+        a.channel_tool_config(&r, &mut req);
+        assert!(req.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn fr_t12_hook_does_not_add_a_second_server_of_the_same_name() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        req.mcp_servers.push(McpServer {
+            name: CHANNEL_MCP_SERVER.into(),
+            command: "/usr/bin/other".into(),
+            ..Default::default()
+        });
+        a.channel_tool_config(&r, &mut req);
+        assert_eq!(req.mcp_servers.len(), 1);
+        assert_eq!(req.mcp_servers[0].command, "/usr/bin/other");
+        assert!(req.allowed_tools.is_empty(), "no allow rule for a server we did not register");
+    }
+
+    #[test]
+    fn fr_t12_the_token_is_in_the_private_file_and_not_in_argv_or_debug() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let mut req = request(&a, &r);
+        let token = env_of(&req, "EMBER_RUNTIME_TOKEN");
+        a.channel_tool_config(&r, &mut req);
+        assert!(mcp_needs_file(&req), "the entry has env, so it goes through the private file");
+        let config = mcp_config(&req.mcp_servers).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = PrivateConfigFile::create(dir.path(), &config).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let contents = std::fs::read_to_string(file.path()).unwrap();
+        assert!(contents.contains(&token), "the private file holds the token");
+        assert!(contents.contains("ember-channels"));
+        let args = ClaudeCodeAdapter::args_with(&req, Some(file.path()));
+        assert!(!args.join("\n").contains(&token), "{args:?}");
+        assert!(!format!("{:?}", req.mcp_servers).contains(&token), "Debug of an MCP server shows only the keys");
+        let i = args.iter().position(|x| x == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1], CHANNEL_POST_TOOL);
+        assert!(args[i + 2].starts_with("--mcp-config="), "a flag follows the tool: {args:?}");
+    }
+
+    #[test]
+    fn fr_t12_claude_prompt_names_the_tool_keeps_the_rules_and_the_fallback() {
+        let a = world(Some(CLI));
+        let r = rec(&a, AgentKind::ClaudeCode);
+        let text = a.instructions_for(&r);
+        assert!(text.contains(&format!("call the tool `{CHANNEL_POST_TOOL}` with `channel` set to the channel id and `text` set to your answer")), "{text}");
+        assert!(text.contains("if the tool is not available, run `ember-a2a channel post <channel-id> \"<text>\"`"), "{text}");
+        assert!(text.contains("Reply only when you were addressed"));
+        assert!(text.contains("for 30 minutes after a person mentioned you there"));
+        assert!(text.contains(&format!("at most {CHANNEL_POSTS_PER_MINUTE} posts a minute")));
+        assert!(text.contains("Your post is shown to the people in the channel"));
+    }
+
+    /// The channel paragraph as it was before the tool existed.
+    const OLD_CHANNEL_PARAGRAPH: &str = "To answer there, run `ember-a2a channel post <channel-id> \"<text>\"` \
+        (use `-` to read the text from stdin). Reply only when you were addressed, and keep \
+        it short. You may post only in a channel you belong to, for 30 minutes after a \
+        person mentioned you there, at most 6 posts a minute. \
+        Your post is shown to the people in the channel; `@name` in it does not reach \
+        another agent.";
+
+    #[test]
+    fn fr_t12_other_harnesses_keep_the_old_prompt_byte_for_byte() {
+        let a = world(Some(CLI));
+        let claude = a.instructions_for(&rec(&a, AgentKind::ClaudeCode));
+        for agent in [AgentKind::Codex, AgentKind::Antigravity, AgentKind::Scripted, acp()] {
+            let text = a.instructions_for(&rec(&a, agent));
+            assert!(text.ends_with(OLD_CHANNEL_PARAGRAPH), "{agent:?}: {text}");
+            assert_eq!(text, a.instructions(), "{agent:?}");
+            // Everything before the channel answer is shared with Claude Code.
+            let cut = "To answer there, ";
+            assert_eq!(text[..text.find(cut).unwrap()], claude[..claude.find(cut).unwrap()]);
+        }
+        // Without the binary Claude Code keeps the old text as well.
+        let b = world(None);
+        assert!(b.instructions_for(&rec(&b, AgentKind::ClaudeCode)).ends_with(OLD_CHANNEL_PARAGRAPH));
+    }
+
+    fn mention(id: &str, channel: &str, guest_until: Option<i64>) -> A2aMessage {
+        A2aMessage {
+            id: id.into(),
+            from_session: String::new(),
+            to_session: "x".into(),
+            reply_to: None,
+            text: "hi there".into(),
+            created_at: 0,
+            delivered_at: None,
+            origin_channel: Some(channel.into()),
+            origin_label: Some("Mina".into()),
+            origin_guest_until: guest_until,
+        }
+    }
+
+    #[test]
+    fn fr_t12_person_mention_footer_per_recipient() {
+        let a = world(Some(CLI));
+        let m = mention("m1", "chan1", None);
+        let claude = a.render(&rec(&a, AgentKind::ClaudeCode), &[m.clone()]).unwrap();
+        assert!(
+            claude.contains(&format!(
+                "To reply in the channel: call the tool {CHANNEL_POST_TOOL} with channel \"chan1\" and text \"...\"\n\nhi there"
+            )),
+            "{claude}"
+        );
+        assert!(!claude.contains("ember-a2a channel post"));
+        let codex = a.render(&rec(&a, AgentKind::Codex), &[m]).unwrap();
+        assert_eq!(
+            codex,
+            "[ember a2a] Message m1 from Mina (channel chan1)\n\
+             This message is from a person in a channel, not from another agent.\n\
+             To reply in the channel: ember-a2a channel post chan1 \"...\"\n\nhi there"
+        );
+    }
+
+    #[test]
+    fn fr_t12_guest_footer_per_recipient_keeps_the_untrusted_block() {
+        let a = world(Some(CLI));
+        let m = mention("m2", "chan1", Some(0));
+        let codex = a.render(&rec(&a, AgentKind::Codex), &[m.clone()]).unwrap();
+        assert_eq!(
+            codex,
+            channel::guest_message_text("m2", "Mina", None, "chan1", 0, "hi there"),
+            "unchanged for Codex"
+        );
+        assert!(codex.ends_with("To reply in the channel: ember-a2a channel post chan1 \"...\""));
+        let claude = a.render(&rec(&a, AgentKind::ClaudeCode), &[m]).unwrap();
+        let tail = format!(
+            "To reply in the channel: call the tool {CHANNEL_POST_TOOL} with channel \"chan1\" and text \"...\""
+        );
+        assert!(claude.ends_with(&tail), "{claude}");
+        let cut = |s: &str| s[..s.rfind("To reply in the channel:").unwrap()].to_string();
+        assert_eq!(cut(&claude), cut(&codex), "header and markers are byte-identical");
+        assert!(claude.contains("UNTRUSTED input"));
     }
 }

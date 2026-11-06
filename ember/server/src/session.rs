@@ -457,6 +457,7 @@ impl Sessions {
             computer: None,
             fork_from: None,
             mem_limit_mb: self.mem_limit_mb(rec.agent),
+            allowed_tools: Vec::new(),
         };
         let prepare_hooks: Vec<PrepareHook> = self.prepare_hooks.lock().unwrap().clone();
         for hook in &prepare_hooks {

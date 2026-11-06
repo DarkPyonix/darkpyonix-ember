@@ -23,7 +23,8 @@ use super::notice;
 use super::project::wrap_lines;
 use super::theme::*;
 use crate::ui::channel_owner::{
-    capped_note, door_status, error_message, guest_rows, invite_rows, parse_hours, DoorStatus,
+    capped_note, clears_sheet_state, create_label, create_runs, door_status, error_message, guest_rows, invite_rows,
+    known_door, parse_hours, Confirm, DoorStatus,
     InviteState, ALLOW_PRESETS, DEFAULT_TTL_HOURS, MAX_HOURS, MIN_HOURS, TTL_CHOICES,
 };
 
@@ -53,6 +54,12 @@ pub struct OwnerState {
     busy: MutableState<bool>,
     /// The last action's outcome sentence (a fixed text, never the server's).
     note: MutableState<Option<String>>,
+    /// The row waiting for a second tap (remove or revoke).
+    confirm: MutableState<Confirm>,
+    /// The door as the server last said, kept after close (it holds no secret).
+    door: MutableState<Option<GuestDoorState>>,
+    /// Create was tapped once while the door is known off.
+    create_armed: MutableState<bool>,
     /// Review-window sample data is shown: nothing is fetched and no action reaches a server.
     sample: bool,
 }
@@ -152,6 +159,9 @@ impl OwnerState {
             custom: mutable_state_of(String::new()),
             custom_gen: mutable_state_of(0),
             busy: mutable_state_of(false),
+            confirm: mutable_state_of(Confirm::None),
+            door: mutable_state_of(sample.as_ref().and_then(|s| s.created.as_ref().and_then(|c| c.guest_door.clone()))),
+            create_armed: mutable_state_of(false),
             note: mutable_state_of(sample.and_then(|s| s.note)),
             }
         })
@@ -159,8 +169,21 @@ impl OwnerState {
 
     fn close(&self) {
         self.open.set(false);
+        self.reset();
+    }
+
+    /// Drops what must not outlive the sheet: the link, the confirm, the armed create, the
+    /// custom hours text (the field is redrawn empty).
+    fn reset(&self) {
+        if self.sample {
+            return;
+        }
         self.created.set(None);
         self.note.set(None);
+        self.confirm.set(Confirm::None);
+        self.create_armed.set(false);
+        self.custom.set(String::new());
+        self.custom_gen.set(self.custom_gen.get_untracked() + 1);
     }
 
     /// Reads invites and guests; a failure keeps what is shown and says so.
@@ -226,7 +249,11 @@ impl OwnerState {
         self.act(
             channel,
             async move { crate::services::services().client.api().create_invite(&c, Some(ttl)).await },
-            |st, made| st.created.set(Some(made)),
+            |st, made| {
+                st.door.set(made.guest_door.clone());
+                st.create_armed.set(false);
+                st.created.set(Some(made));
+            },
         );
     }
 
@@ -269,10 +296,23 @@ pub fn MembersSheet(channel: &str, channel_name: &str, st: &OwnerState, live: bo
     // Review sample data stands in for a server; it is never fetched over.
     let live = live || st.sample;
     let fetch = live && !st.sample;
+    // Entering a room starts with the sheet shut and nothing left from an earlier visit.
+    {
+        let st2 = st.clone();
+        launched_effect(format!("enter:{channel}"), move || async move {
+            if clears_sheet_state(st2.open.get_untracked(), true) && !st2.sample {
+                st2.open.set(false);
+                st2.reset();
+            }
+        });
+    }
     // Fetch when the sheet opens (the key changes with the open flag).
     {
         let (st2, c, open) = (st.clone(), channel.to_string(), st.open.get());
         launched_effect(format!("{channel}:{open}"), move || async move {
+            if clears_sheet_state(open, false) {
+                st2.reset();
+            }
             if open && fetch {
                 st2.refresh(&c);
             }
@@ -344,24 +384,36 @@ fn InviteSection(channel: &str, st: &OwnerState) {
     Label("링크는 한 번만 보이며, 한 사람이 한 번만 쓸 수 있습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
     let current = st.ttl.get();
     let ttl = st.ttl.clone();
-    HourChips(&TTL_CHOICES, current, move |h| ttl.set(h));
+    let st_c = st.clone();
+    HourChips(&TTL_CHOICES, current, move |h| {
+        st_c.confirm.set(Confirm::None);
+        ttl.set(h)
+    });
     let (s, c) = (st.clone(), channel.to_string());
-    AppButton("초대 링크 만들기", None, ButtonKind::Primary, true, !st.busy.get(), false, move || s.create_invite(&c));
-
-    // The door: unknown until an invite has been made, then what the server said.
+    // The door: unknown until an invite has been made, then what the server last said.
     let created = st.created.get();
     let status = match &created {
         Some(c) => door_status(c.guest_door.as_ref(), Some(&c.link), c.link_warning),
-        None => door_status(None, None, false),
+        None => known_door(st.door.get().as_ref()),
     };
+    // A door known to be off makes a dead invite: the owner taps once more, knowingly.
+    let armed = st.create_armed.get();
+    AppButton(create_label(status, armed), None, ButtonKind::Primary, true, !st.busy.get(), false, move || {
+        if create_runs(status, armed) {
+            s.create_invite(&c);
+        } else {
+            s.create_armed.set(true);
+        }
+    });
     let tone = if matches!(status, DoorStatus::Off) { p.red.strong } else { p.text_2 };
     Label(status.text(), Fs::Sm, Weight::Regular, Some(paint(tone)), None);
     if let Some(w) = status.warning() {
         Label(w, Fs::Sm, Weight::Regular, Some(paint(p.orange.strong)), None);
+        Label("127.0.0.1 같은 내 컴퓨터 주소나 0.0.0.0 주소는 밖에서 닿지 않습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
     if let Some(c) = created.filter(|_| status.can_copy()) {
         // TODO(compose-rust#471): no clipboard facility in the app or the toolkit, so the link is
-        // shown as text to select and the 복사 button waits. File the issue and replace NNN.
+        // shown as text to select and the 복사 button waits.
         Label(&c.link, Fs::Sm, Weight::Regular, None, None);
         Label("이 링크는 지금만 보입니다. 닫으면 다시 볼 수 없습니다", Fs::Xs, Weight::Regular, Some(paint(p.muted)), None);
     }
@@ -402,7 +454,19 @@ fn InviteList(channel: &str, st: &OwnerState) {
             cu::Spacer().modifier(Modifier::new().weight(1.0));
             if r.can_revoke {
                 let (s, c, id) = (st.clone(), channel.to_string(), r.id.clone());
-                AppButton("취소", None, ButtonKind::Destructive, true, !st.busy.get(), false, move || s.revoke(&c, &id));
+                let sure = st.confirm.get().is_revoke(&r.id);
+                if sure {
+                    let s2 = st.clone();
+                    AppButton("아니요", None, ButtonKind::Default, true, true, false, move || s2.confirm.set(Confirm::None));
+                }
+                let label = if sure { "정말 취소합니다" } else { "취소" };
+                AppButton(label, None, ButtonKind::Destructive, true, !st.busy.get(), false, move || {
+                    let (next, fire) = s.confirm.get_untracked().tap_revoke(&id);
+                    s.confirm.set(next);
+                    if fire {
+                        s.revoke(&c, &id);
+                    }
+                });
             }
         });
     }
@@ -418,10 +482,18 @@ fn GuestList(channel: &str, st: &OwnerState) {
     Label("허용 시간 (이 시간 동안 게스트의 멘션이 에이전트에 닿습니다)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
     let current = st.hours.get();
     let hours = st.hours.clone();
-    HourChips(&ALLOW_PRESETS, current, move |h| hours.set(h));
-    let _gen = st.custom_gen.get();
+    let st_c = st.clone();
+    HourChips(&ALLOW_PRESETS, current, move |h| {
+        // A preset replaces a typed value: the field is redrawn empty (generation bump).
+        st_c.confirm.set(Confirm::None);
+        st_c.custom.set(String::new());
+        st_c.custom_gen.set(st_c.custom_gen.get_untracked() + 1);
+        hours.set(h)
+    });
     let custom = st.custom.get();
     cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+        // Read here so a generation bump redraws the field empty.
+        let _gen = st.custom_gen.get();
         // TODO(compose-rust#374): the field is uncontrolled with no initial value.
         let (text, hours) = (st.custom.clone(), st.hours.clone());
         EmberField(FieldOptions {
@@ -461,14 +533,35 @@ fn GuestList(channel: &str, st: &OwnerState) {
             });
             cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 let (s, c, id) = (st.clone(), channel.to_string(), g.id.clone());
-                AppButton(&format!("{hours}시간 허용"), None, ButtonKind::Default, true, !st.busy.get() && custom_ok, false, move || s.allow(&c, &id, hours));
+                AppButton(&format!("{hours}시간 허용"), None, ButtonKind::Default, true, !st.busy.get() && custom_ok, false, move || {
+                    s.confirm.set(Confirm::None);
+                    s.allow(&c, &id, hours)
+                });
                 if g.can_clear {
                     let (s, c, id) = (st.clone(), channel.to_string(), g.id.clone());
-                    AppButton("허용 해제", None, ButtonKind::Default, true, !st.busy.get(), false, move || s.clear(&c, &id));
+                    AppButton("허용 해제", None, ButtonKind::Default, true, !st.busy.get(), false, move || {
+                        s.confirm.set(Confirm::None);
+                        s.clear(&c, &id)
+                    });
                 }
+            });
+            // Remove sits on its own row, away from the allowance buttons.
+            cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
                 cu::Spacer().modifier(Modifier::new().weight(1.0));
+                let sure = st.confirm.get().is_remove(&g.id);
+                if sure {
+                    let s2 = st.clone();
+                    AppButton("아니요", None, ButtonKind::Default, true, true, false, move || s2.confirm.set(Confirm::None));
+                }
                 let (s, c, id) = (st.clone(), channel.to_string(), g.id.clone());
-                AppButton("제거", None, ButtonKind::Destructive, true, !st.busy.get(), false, move || s.remove(&c, &id));
+                let label = if sure { "정말 제거합니다" } else { "제거" };
+                AppButton(label, None, ButtonKind::Destructive, true, !st.busy.get(), false, move || {
+                    let (next, fire) = s.confirm.get_untracked().tap_remove(&id);
+                    s.confirm.set(next);
+                    if fire {
+                        s.remove(&c, &id);
+                    }
+                });
             });
         });
     }

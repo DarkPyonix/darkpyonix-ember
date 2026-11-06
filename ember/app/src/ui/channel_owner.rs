@@ -157,6 +157,82 @@ pub fn capped_note(capped: bool) -> Option<&'static str> {
     capped.then_some("게스트 자격의 만료 시각까지로 줄었습니다")
 }
 
+/// The one irreversible action waiting for a second tap, for one row only (FR-T14, FR-T15).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Confirm {
+    #[default]
+    None,
+    Remove(String),
+    Revoke(String),
+}
+
+impl Confirm {
+    /// A tap on a guest's 제거: the first arms that row, the second on the same row fires.
+    /// Returns the new state and whether to run the action now.
+    pub fn tap_remove(&self, guest_id: &str) -> (Confirm, bool) {
+        if *self == Confirm::Remove(guest_id.to_string()) {
+            (Confirm::None, true)
+        } else {
+            (Confirm::Remove(guest_id.to_string()), false)
+        }
+    }
+
+    /// A tap on an invite's 취소, the same way.
+    pub fn tap_revoke(&self, invite_id: &str) -> (Confirm, bool) {
+        if *self == Confirm::Revoke(invite_id.to_string()) {
+            (Confirm::None, true)
+        } else {
+            (Confirm::Revoke(invite_id.to_string()), false)
+        }
+    }
+
+    pub fn is_remove(&self, guest_id: &str) -> bool {
+        *self == Confirm::Remove(guest_id.to_string())
+    }
+
+    pub fn is_revoke(&self, invite_id: &str) -> bool {
+        *self == Confirm::Revoke(invite_id.to_string())
+    }
+}
+
+/// What the sheet drops when it closes or the room changes: the link (shown once), the confirm
+/// and the armed create. `true` means clear.
+pub fn clears_sheet_state(open: bool, room_changed: bool) -> bool {
+    !open || room_changed
+}
+
+/// True for an address that does not reach from outside: loopback or unspecified.
+pub fn listen_unreachable(listen: Option<&str>) -> bool {
+    let Some(l) = listen else { return false };
+    let host = l.trim().rsplit_once(':').map(|(h, _)| h).unwrap_or(l.trim());
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    matches!(host, "127.0.0.1" | "0.0.0.0" | "::" | "::1" | "localhost") || host.starts_with("127.")
+}
+
+/// The door as last reported by the server, before a link exists (kept after the sheet closes:
+/// it holds no secret). A loopback or unspecified listen address asks for a reach check.
+pub fn known_door(door: Option<&GuestDoorState>) -> DoorStatus {
+    match door {
+        None => DoorStatus::Unknown,
+        Some(d) if !d.is_on() => DoorStatus::Off,
+        Some(d) => DoorStatus::Open { warning: d.public_url.is_none() && listen_unreachable(d.listen.as_deref()) },
+    }
+}
+
+/// The label of the create button: a door known to be off needs a deliberate second tap.
+pub fn create_label(door: DoorStatus, armed: bool) -> &'static str {
+    match (door, armed) {
+        (DoorStatus::Off, true) => "그래도 초대 만들기",
+        (DoorStatus::Off, false) => "초대 링크 만들기 (문이 꺼져 있음)",
+        _ => "초대 링크 만들기",
+    }
+}
+
+/// Whether a tap on create runs now: not while the door is known off and not yet armed.
+pub fn create_runs(door: DoorStatus, armed: bool) -> bool {
+    !matches!(door, DoorStatus::Off) || armed
+}
+
 /// One invite row of the sheet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InviteRow {
@@ -354,5 +430,49 @@ mod tests {
         assert!(!error_message(Some("boom raw text")).contains("boom"));
         assert!(capped_note(true).is_some());
         assert_eq!(capped_note(false), None);
+    }
+
+    #[test]
+    fn fr_t14_remove_needs_a_second_tap() {
+        let c = Confirm::None;
+        let (c, fire) = c.tap_remove("g1");
+        assert!(!fire && c.is_remove("g1"));
+        let (c, fire) = c.tap_remove("g1");
+        assert!(fire && c == Confirm::None);
+        let (c, fire) = Confirm::None.tap_revoke("i1");
+        assert!(!fire && c.is_revoke("i1"));
+        assert!(c.tap_revoke("i1").1);
+    }
+
+    #[test]
+    fn fr_t14_confirm_resets_when_another_row_is_tapped() {
+        let (c, _) = Confirm::None.tap_remove("g1");
+        let (c, fire) = c.tap_remove("g2");
+        assert!(!fire && c.is_remove("g2") && !c.is_remove("g1"));
+        let (c, fire) = c.tap_revoke("i1");
+        assert!(!fire && c.is_revoke("i1") && !c.is_remove("g2"));
+    }
+
+    #[test]
+    fn fr_t14_link_is_cleared_on_close_and_room_switch() {
+        assert!(clears_sheet_state(false, false));
+        assert!(clears_sheet_state(true, true));
+        assert!(!clears_sheet_state(true, false));
+    }
+
+    #[test]
+    fn fr_t14_a_known_off_door_needs_a_second_tap_and_loopback_warns() {
+        assert!(!create_runs(DoorStatus::Off, false));
+        assert!(create_runs(DoorStatus::Off, true));
+        assert!(create_runs(DoorStatus::Unknown, false));
+        assert_eq!(create_label(DoorStatus::Off, true), "그래도 초대 만들기");
+        assert_eq!(known_door(None), DoorStatus::Unknown);
+        assert_eq!(known_door(Some(&door("off"))), DoorStatus::Off);
+        let lo = GuestDoorState { state: "on".into(), listen: Some("127.0.0.1:7071".into()), public_url: None };
+        assert_eq!(known_door(Some(&lo)), DoorStatus::Open { warning: true });
+        let un = GuestDoorState { state: "on".into(), listen: Some("[::]:7071".into()), public_url: None };
+        assert_eq!(known_door(Some(&un)), DoorStatus::Open { warning: true });
+        let ok = GuestDoorState { state: "on".into(), listen: Some("10.0.0.2:7071".into()), public_url: None };
+        assert_eq!(known_door(Some(&ok)), DoorStatus::Open { warning: false });
     }
 }

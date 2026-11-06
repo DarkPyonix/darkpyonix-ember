@@ -68,6 +68,9 @@ Channels (FR-T12):
 Environment (set by Ember for every agent session):
   EMBER_URL, EMBER_RUNTIME_TOKEN";
 
+/// The one error text for a base URL the client refuses. Fixed: the URL may hold credentials.
+pub const BAD_BASE_URL: &str = "EMBER_URL is not a plain http://host[:port] address";
+
 pub struct Client {
     host: String,
     port: u16,
@@ -76,27 +79,53 @@ pub struct Client {
 }
 
 impl Client {
-    /// `base_url` must be `http://host[:port][/prefix]`.
+    /// `base_url` must be `http://host[:port][/prefix]`. A URL with userinfo (`@`), a `\`, `?` or
+    /// `#` before the path, an empty host, or a port that is not 1..=65535 in ASCII digits is
+    /// refused with [`BAD_BASE_URL`]; the URL (it may hold credentials) is never put in an error.
     pub fn new(base_url: &str, token: &str) -> anyhow::Result<Client> {
-        let rest = base_url
-            .strip_prefix("http://")
-            .with_context(|| format!("EMBER_URL must start with http:// (got {base_url})"))?;
-        let (authority, prefix) = match rest.find('/') {
-            Some(i) => (&rest[..i], rest[i..].trim_end_matches('/')),
+        let rest = base_url.strip_prefix("http://").ok_or_else(|| anyhow::anyhow!(BAD_BASE_URL))?;
+        // The authority ends at the first `/`, `\`, `?` or `#`, as in WHATWG URL parsing. Only a
+        // `/` may follow it: the other three would make the host differ between parsers.
+        let end = rest.find(['/', '\\', '?', '#']);
+        let (authority, prefix) = match end {
+            Some(i) if rest.as_bytes()[i] == b'/' => (&rest[..i], rest[i..].trim_end_matches('/')),
+            Some(_) => bail!(BAD_BASE_URL),
             None => (rest, ""),
         };
-        // The port follows the last ':' that is not inside an IPv6 literal.
-        let port_sep = authority
-            .rfind(':')
-            .filter(|i| !authority[*i..].contains(']'));
-        let (host, port) = match port_sep {
-            Some(i) => (
-                authority[..i].to_string(),
-                authority[i + 1..]
-                    .parse()
-                    .with_context(|| format!("bad port in {base_url}"))?,
-            ),
-            None => (authority.to_string(), 80),
+        if authority.contains('@') {
+            bail!(BAD_BASE_URL);
+        }
+        // IPv6 literals are bracketed; the port follows the closing bracket or the one `:`.
+        let (host, port_text) = if let Some(inner) = authority.strip_prefix('[') {
+            let Some((addr, after)) = inner.split_once(']') else { bail!(BAD_BASE_URL) };
+            if addr.is_empty() {
+                bail!(BAD_BASE_URL);
+            }
+            let port = match after {
+                "" => None,
+                _ => Some(after.strip_prefix(':').ok_or_else(|| anyhow::anyhow!(BAD_BASE_URL))?),
+            };
+            (authority[..addr.len() + 2].to_string(), port)
+        } else {
+            match authority.split_once(':') {
+                Some((h, p)) => (h.to_string(), Some(p)),
+                None => (authority.to_string(), None),
+            }
+        };
+        if host.is_empty() || (!host.starts_with('[') && host.contains([':', '[', ']'])) {
+            bail!(BAD_BASE_URL);
+        }
+        let port = match port_text {
+            None => 80,
+            Some(p) => {
+                if p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()) {
+                    bail!(BAD_BASE_URL);
+                }
+                match p.parse::<u16>() {
+                    Ok(n) if n != 0 => n,
+                    _ => bail!(BAD_BASE_URL),
+                }
+            }
         };
         Ok(Client {
             host,
@@ -908,6 +937,61 @@ mod tests {
         let c = Client::new("http://[::1]:9000", "t").unwrap();
         assert_eq!((c.host.as_str(), c.port), ("[::1]", 9000));
         assert!(Client::new("https://x", "t").is_err());
+    }
+
+    #[test]
+    fn accepts_plain_addresses_with_one_optional_trailing_slash() {
+        for (url, host, port) in [
+            ("http://127.0.0.1:8740", "127.0.0.1", 8740),
+            ("http://127.0.0.1:8740/", "127.0.0.1", 8740),
+            ("http://localhost:8740", "localhost", 8740),
+            ("http://[::1]:8740", "[::1]", 8740),
+            ("http://[::1]:8740/", "[::1]", 8740),
+            ("http://[::1]", "[::1]", 80),
+            ("http://example.com", "example.com", 80),
+            ("http://example.com/", "example.com", 80),
+            ("http://example.com:65535", "example.com", 65535),
+            ("http://example.com:1", "example.com", 1),
+        ] {
+            let c = Client::new(url, "t").unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!((c.host.as_str(), c.port, c.prefix.as_str()), (host, port, ""), "{url}");
+        }
+    }
+
+    #[test]
+    fn refuses_userinfo_separators_bad_ports_and_empty_hosts_without_echoing_the_url() {
+        for url in [
+            "http://user:SECRET-PW@127.0.0.1:8740",
+            "http://user@127.0.0.1",
+            "http://a@b@host.example",
+            "http://127.0.0.1\\@evil.com",
+            "http://evil.com\\@127.0.0.1",
+            "http://127.0.0.1?x@evil.com",
+            "http://127.0.0.1#frag",
+            "http://127.0.0.1:8740?x=1",
+            "http://127.0.0.1:8740#x",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:99999999999",
+            "http://127.0.0.1:+80",
+            "http://127.0.0.1:-1",
+            "http://127.0.0.1:8a",
+            "http://127.0.0.1:",
+            "http://:8740",
+            "http://",
+            "http:///path",
+            "http://[]:80",
+            "http://[::1",
+            "http://[::1]x:80",
+            "http://::1:80",
+            "https://SECRET-HOST.example",
+            "ftp://SECRET-HOST.example",
+        ] {
+            let e = Client::new(url, "t").err().unwrap_or_else(|| panic!("accepted {url}"));
+            let text = format!("{e:#}");
+            assert_eq!(text, BAD_BASE_URL, "{url}");
+            assert!(!text.contains("SECRET") && !text.contains("127.0.0.1") && !text.contains("evil"), "{text}");
+        }
     }
 
     #[test]

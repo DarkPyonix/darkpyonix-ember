@@ -18,7 +18,9 @@ use ember_client::channels::{CreatedInvite, Guest, GuestDoorState, Invite};
 use super::components::{
     AppButton, ButtonKind, EmberField, EmberSheet, FieldOptions, FilterChip, Label, Pill, PillTone, SheetFooter,
 };
+use super::home::text_px;
 use super::notice;
+use super::project::wrap_lines;
 use super::theme::*;
 use crate::ui::channel_owner::{
     capped_note, door_status, error_message, guest_rows, invite_rows, parse_hours, DoorStatus,
@@ -302,18 +304,47 @@ fn Heading(text: &str) {
     Label(text, Fs::Md, Weight::Semibold, None, Some(1));
 }
 
+/// Width of one hour chip: the 12 px label between two `SP[2]` paddings. `text_px` runs short of
+/// the rendered Korean glyphs (the 390 dp capture clipped `168시간`), so the label gets 30 percent.
+fn hour_chip_width(h: u32) -> f32 {
+    2.0 * SP[2] + 1.3 * text_px(&format!("{h}시간"), Fs::Sm.size())
+}
+
+/// Rows the hour chips pack into, as indices of `choices`, in `avail` dp (chips wrap, never clip).
+pub fn hour_chip_rows(choices: &[u32], avail: f32) -> Vec<Vec<usize>> {
+    let widths: Vec<f32> = choices.iter().map(|h| hour_chip_width(*h)).collect();
+    wrap_lines(&widths, SP[0], avail)
+}
+
+/// The room the chips have: the sheet's width (bottom sheet: the window) less its padding.
+fn chip_avail() -> f32 {
+    let w = compose_rust::runtime::current_window_size().width_dp;
+    let sheet = if w > 0.0 { w.min(760.0) } else { 760.0 };
+    sheet - 2.0 * SP[4]
+}
+
+fn HourChips(choices: &[u32], current: u32, on_pick: impl Fn(u32) + Clone + 'static) {
+    let rows = hour_chip_rows(choices, chip_avail());
+    cu::Column().spacing(SP[0]).modifier(Modifier::new().fill_max_width()).content(|| {
+        for row in rows {
+            cu::Row().spacing(SP[0]).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
+                for i in row {
+                    let h = choices[i];
+                    let pick = on_pick.clone();
+                    FilterChip(&format!("{h}시간"), h == current, move || pick(h));
+                }
+            });
+        }
+    });
+}
+
 fn InviteSection(channel: &str, st: &OwnerState) {
     let p = ember_theme().palette;
     Heading("초대 만들기");
     Label("링크는 한 번만 보이며, 한 사람이 한 번만 쓸 수 있습니다", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-        let current = st.ttl.get();
-        for h in TTL_CHOICES {
-            let ttl = st.ttl.clone();
-            FilterChip(&format!("{h}시간"), h == current, move || ttl.set(h));
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
-        }
-    });
+    let current = st.ttl.get();
+    let ttl = st.ttl.clone();
+    HourChips(&TTL_CHOICES, current, move |h| ttl.set(h));
     let (s, c) = (st.clone(), channel.to_string());
     AppButton("초대 링크 만들기", None, ButtonKind::Primary, true, !st.busy.get(), false, move || s.create_invite(&c));
 
@@ -385,14 +416,9 @@ fn GuestList(channel: &str, st: &OwnerState) {
     }
     // Hours the allowance gets: presets, or a custom whole number within the range.
     Label("허용 시간 (이 시간 동안 게스트의 멘션이 에이전트에 닿습니다)", Fs::Sm, Weight::Regular, Some(paint(p.muted)), None);
-    cu::ScrollRow().modifier(Modifier::new().fill_max_width().height(H_CTL + SP[0])).content(|| {
-        let current = st.hours.get();
-        for h in ALLOW_PRESETS {
-            let hours = st.hours.clone();
-            FilterChip(&format!("{h}시간"), h == current, move || hours.set(h));
-            cu::Spacer().modifier(Modifier::new().width(SP[0]));
-        }
-    });
+    let current = st.hours.get();
+    let hours = st.hours.clone();
+    HourChips(&ALLOW_PRESETS, current, move |h| hours.set(h));
     let _gen = st.custom_gen.get();
     let custom = st.custom.get();
     cu::Row().space_role(SpaceRole::Sm).alignment(Alignment::CenterStart).modifier(Modifier::new().fill_max_width()).content(|| {
@@ -463,6 +489,19 @@ mod tests {
         let st = OwnerState::new("c1");
         st.open.set(true);
         MembersSheet("c1", "전체", &st, false);
+    }
+
+    #[test]
+    fn fr_t14_allowance_chips_wrap_to_a_second_row_at_390() {
+        let avail = 390.0 - 2.0 * SP[4];
+        let rows = hour_chip_rows(&ALLOW_PRESETS, avail);
+        assert!(rows.len() >= 2, "{rows:?}");
+        assert_eq!(rows.concat(), vec![0, 1, 2, 3, 4]);
+        for row in &rows {
+            let w: f32 = row.iter().map(|i| hour_chip_width(ALLOW_PRESETS[*i])).sum::<f32>() + SP[0] * (row.len() - 1) as f32;
+            assert!(w <= avail, "{row:?} {w}");
+        }
+        assert_eq!(hour_chip_rows(&ALLOW_PRESETS, 760.0 - 2.0 * SP[4]).len(), 1);
     }
 
     #[test]

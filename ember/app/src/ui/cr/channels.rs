@@ -675,6 +675,16 @@ pub fn sample_rooms() -> Vec<Room> {
         author_name: String::new(),
         author_kind: String::new(),
     };
+    // A guest's message (FR-T15): shows the name and a 게스트 tag, never the id. Sample data only.
+    let guest_msg = Message {
+        id: "m3g".into(),
+        from: "guest:g1".into(),
+        text: "저도 같이 확인해 볼게요".into(),
+        at: now - 450,
+        unread: 0,
+        author_name: "민수".into(),
+        author_kind: "guest".into(),
+    };
     let team = vec![member("me", "나", false, ""), member("kim", "김하나", false, ""), member("a1", "ember-리더", true, "claude-code")];
     vec![
         Room {
@@ -686,6 +696,7 @@ pub fn sample_rooms() -> Vec<Room> {
                 msg("m1", "kim", "어제 빌드 확인해 주세요", 100_000, 0),
                 msg("m2", "me", "확인했습니다. 한 군데 실패해요", 99_000, 1),
                 msg("m3", "a1", "원인을 찾아서 고치겠습니다.", 600, 2),
+                guest_msg,
                 msg("m4", "me", "고마워요", 300, 0),
             ],
             unread: 3,

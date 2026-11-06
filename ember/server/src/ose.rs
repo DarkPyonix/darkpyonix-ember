@@ -21,6 +21,48 @@ use crate::api::ide::EmberOseConnection;
 struct Process {
     child: Child,
     connection: EmberOseConnection,
+    /// Removed when the entry goes away (child exited, manager dropped, start failed).
+    _token_file: TokenFile,
+}
+
+/// The connection token file of one OSE process. The file is deleted on drop.
+struct TokenFile(PathBuf);
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `token` to `<tokens dir>/<first 16 hex of SHA-256 of the folder>.token`, mode 0600
+/// from creation (`create_new`), without a trailing newline. A stale file at the path is removed
+/// first; a directory there is refused. The token never exists with wider permissions.
+fn write_token_file(tokens_dir: &Path, folder: &Path, token: &str) -> std::io::Result<TokenFile> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Error, ErrorKind, Write};
+    make_private_dir(tokens_dir)?;
+    let digest = Sha256::digest(folder.as_os_str().as_encoded_bytes());
+    let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let path = tokens_dir.join(format!("{name}.token"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(md) if md.is_dir() => {
+            return Err(Error::new(ErrorKind::InvalidInput, format!("{} is a directory", path.display())));
+        }
+        Ok(_) => std::fs::remove_file(&path)?,
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    let guard = TokenFile(path);
+    file.write_all(token.as_bytes())?;
+    Ok(guard)
 }
 
 impl Drop for Process {
@@ -432,15 +474,18 @@ impl OseManager {
         let address = listener.local_addr().map_err(|e| format!("cannot read OSE port: {e}"))?;
         drop(listener);
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let token_file = write_token_file(&data_dir.join("tokens"), &folder, &token)
+            .map_err(|e| format!("cannot write the OSE token file: {e}"))?;
         let child = ose_command(binary)
-            .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token", &token,
-                "--accept-server-license-terms", "--telemetry-level", "off"])
+            .args(["--host", "127.0.0.1", "--port", &address.port().to_string(), "--connection-token-file"])
+            .arg(&token_file.0)
+            .args(["--accept-server-license-terms", "--telemetry-level", "off"])
             .args(Self::dir_args(&data_dir))
             .current_dir(&folder)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("cannot start OSE server: {e}"))?;
         let connection = EmberOseConnection { endpoint: format!("http://{address}"), connection_token: token };
-        let mut process = Process { child, connection: connection.clone() };
+        let mut process = Process { child, connection: connection.clone(), _token_file: token_file };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(Some(status)) = process.child.try_wait() {

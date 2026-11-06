@@ -173,6 +173,13 @@ struct Ui {
     expanded: MutableState<Vec<String>>,
     filter: MutableState<MemberFilter>,
     member_query: MutableState<String>,
+    /// The inline search row opened by the header icon at 900 dp and below (FR-L26).
+    search_open: MutableState<bool>,
+}
+
+/// `EMBER_CR_PROJECT_SEARCH=open` starts with the inline search row open. Debug builds only.
+fn search_hook_open(debug: bool, value: Option<&str>) -> bool {
+    debug && value == Some("open")
 }
 
 impl Ui {
@@ -185,6 +192,10 @@ impl Ui {
         };
         let sheet = std::env::var("EMBER_CR_PROJECT_SHEET").ok();
         let expand = std::env::var("EMBER_CR_PROJECT_EXPAND").as_deref() == Ok("1");
+        let search = search_hook_open(
+            cfg!(debug_assertions),
+            std::env::var("EMBER_CR_PROJECT_SEARCH").ok().as_deref(),
+        );
         Ui {
             settings: mutable_state_of((sheet.as_deref() == Some("settings")).then(|| full.clone().or(first.clone())).flatten()),
             computer: mutable_state_of((sheet.as_deref() == Some("computer")).then(|| chips.first().map(|c| c.id.clone())).flatten()),
@@ -199,6 +210,7 @@ impl Ui {
             expanded: mutable_state_of(if expand { boxes.iter().map(|b| b.id.clone()).collect() } else { Vec::new() }),
             filter: mutable_state_of(MemberFilter::All),
             member_query: mutable_state_of(String::new()),
+            search_open: mutable_state_of(search),
         }
     }
 }
@@ -315,9 +327,19 @@ pub fn ThemeButton(ui: &SharedUi) {
     );
 }
 
-/// The list header's actions: search, 새 프로젝트, the theme toggle and 새 팀원. Up to 900 px
-/// the search is a button, up to 900 the labels of the first two drop, and on a phone 새 팀원
-/// is a round button too (`hide-md`).
+/// Whether the inline project filter is drawn: always above 900 dp, else when the icon opened it.
+pub fn search_field_visible(w: f32, open: bool) -> bool {
+    w > 900.0 || open
+}
+
+/// Whether the search icon button is drawn: only at 900 dp and below (the mockup hides it above).
+pub fn search_icon_visible(w: f32) -> bool {
+    w <= 900.0
+}
+
+/// The list header's actions: the inline filter (above 900 dp), 새 프로젝트, the theme toggle and
+/// 새 팀원. At 900 dp and below a search icon toggles the filter row under the header. The global
+/// search is the 검색 row of the sidebar tools (FR-L10).
 fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
     if w > 900.0 {
         let q = st.query.clone();
@@ -326,10 +348,10 @@ fn ListActions(st: &Ui, ui: &SharedUi, w: f32) {
             SearchField("팀원 검색", H_BTN, move |v| q.set(v));
         });
     }
-    // Two controls, not a duplicate: the inline field above filters this list (`st.query`),
-    // the icon opens the global search (Route::Search). Drawn at every width.
-    let u_search = ui.clone();
-    IconButton(IconRole::Search, false, move || u_search.go(crate::ui::Route::Search));
+    if search_icon_visible(w) {
+        let o = st.search_open.clone();
+        IconButton(IconRole::Search, false, move || o.set(!o.get_untracked()));
+    }
     let n = st.new_project.clone();
     // Enabled in the demo only: it makes a local project there (#218).
     let can_create = services().demo.is_some();
@@ -370,6 +392,13 @@ fn Grid(boxes: &[ProjectBox], chips: &[ComputerChip], st: &Ui, ui: &SharedUi, w:
     let query = st.query.get();
     let shown: Vec<&ProjectBox> = boxes.iter().filter(|b| box_matches(b, &query)).collect();
     Header("프로젝트", "프로젝트를 누르면 세션으로 들어가 팀원들의 대화를 함께 봅니다.", w <= 560.0, || ListActions(st, ui, w));
+    if w <= 900.0 && search_field_visible(w, st.search_open.get()) {
+        // TODO: focus the field on open once the toolkit exposes focus (compose-rust#374).
+        let q = st.query.clone();
+        cu::Column().modifier(Modifier::new().fill_max_width()).content(|| {
+            SearchField("팀원 검색", H_BTN, move |v| q.set(v));
+        });
+    }
     ComputerStrip(chips, st);
     if shown.is_empty() {
         let text = if boxes.is_empty() { "아직 프로젝트가 없습니다" } else { "일치하는 프로젝트가 없습니다" };
@@ -1773,7 +1802,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_l9_wide_header_renders_global_search_icon_button_beside_inline_filter() {
+    fn fr_l26_wide_header_has_inline_search_and_no_icon_button() {
         use compose_rust::{EventPayload, WindowHeightClass, WindowSizeClass};
         let _guard = crate::services::test_guard();
         let ui = shared_ui();
@@ -1801,11 +1830,34 @@ mod tests {
             matches!(m, Mutation::SetProp { value: PropertyValue::String(s), .. } if *s == "팀원 검색")
         });
         let has_search_icon = batch.iter().any(|m| {
-            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. })
+            matches!(m, Mutation::SetProp { property: compose_rust::schema::PropertyKind::Icon, .. }) && format!("{m:?}").contains("Search")
         });
         assert!(has_placeholder, "expected inline filter field at 1440dp");
-        assert!(has_search_icon, "expected global search icon button at 1440dp");
+        assert!(!has_search_icon, "no search icon button above 900dp");
         compose_rust::window::reset_window_size();
+    }
+
+    #[test]
+    fn fr_l26_header_search_icon_toggles_field_at_900_and_below() {
+        assert!(search_icon_visible(900.0));
+        assert!(search_icon_visible(390.0));
+        assert!(!search_field_visible(800.0, false));
+        assert!(search_field_visible(800.0, true));
+        assert!(search_field_visible(1440.0, false));
+    }
+
+    #[test]
+    fn fr_l26_header_has_no_icon_above_900() {
+        assert!(!search_icon_visible(901.0));
+        assert!(!search_icon_visible(1440.0));
+    }
+
+    #[test]
+    fn fr_l26_project_search_hook_is_debug_only() {
+        assert!(search_hook_open(true, Some("open")));
+        assert!(!search_hook_open(false, Some("open")));
+        assert!(!search_hook_open(true, Some("1")));
+        assert!(!search_hook_open(true, None));
     }
 
     #[test]

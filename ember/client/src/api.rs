@@ -319,6 +319,7 @@ pub struct Api {
 }
 
 /// A status and a fully read body.
+#[derive(Debug)]
 struct Raw {
     status: StatusCode,
     body: Bytes,
@@ -1670,5 +1671,73 @@ mod usage_summary_tests {
         assert!(!u.reported, "a missing flag is unknown, not reported");
         let u: SessionUsage = serde_json::from_value(json!({"session_id": "s", "total_tokens": 9, "reported": true})).unwrap();
         assert!(u.reported && u.total_tokens == 9);
+    }
+}
+
+// ---- harness detection (FR-A6.1) -------------------------------------------------------------
+
+/// One entry of `POST /api/computers/{id}/harnesses/detect`. Every field but `harness` is
+/// tolerant: a missing `version` or `path` is unknown, never invented.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct DetectedHarness {
+    pub harness: String,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Epoch ms of the probe.
+    #[serde(default)]
+    pub detected_at: Option<i64>,
+}
+
+/// `POST /computers/{id}/harnesses/detect`, below `/api`.
+pub(crate) fn detect_path(computer_id: &str) -> String {
+    format!("/computers/{}/harnesses/detect", seg(computer_id))
+}
+
+impl Api {
+    /// Probe a computer's harnesses now. `local` is this server. Another computer answers
+    /// 501 `not_implemented` (`code()` says so) and an unknown id 404.
+    pub async fn detect_harnesses(&self, computer_id: &str) -> ApiResult<Vec<DetectedHarness>> {
+        let raw = self.post(&detect_path(computer_id), json!({})).await?;
+        serde_json::from_slice(&raw.body).map_err(|e| ApiError::Decode(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod detect_tests {
+    use super::*;
+
+    #[test]
+    fn fr_a6_1_detect_decodes_server_shape_and_nulls() {
+        let v: Vec<DetectedHarness> = serde_json::from_value(json!([
+            {"harness": "claude-code", "installed": true, "version": "2.1.4", "path": "/opt/x/claude", "detected_at": 1761900000000i64},
+            {"harness": "codex", "installed": false, "version": null, "path": null, "detected_at": 1761900000000i64},
+            {"harness": "omp"}
+        ]))
+        .unwrap();
+        assert_eq!(v[0].path.as_deref(), Some("/opt/x/claude"));
+        assert_eq!(v[0].detected_at, Some(1761900000000));
+        assert!(!v[1].installed && v[1].version.is_none() && v[1].path.is_none());
+        assert_eq!(v[2], DetectedHarness { harness: "omp".into(), ..Default::default() });
+    }
+
+    #[test]
+    fn fr_a6_1_detect_path_escapes_the_id() {
+        assert_eq!(detect_path("local"), "/computers/local/harnesses/detect");
+        assert_eq!(detect_path("a/b c"), "/computers/a%2Fb%20c/harnesses/detect");
+    }
+
+    #[test]
+    fn fr_a6_1_not_implemented_maps_to_status_and_code() {
+        let raw = Raw {
+            status: StatusCode::NOT_IMPLEMENTED,
+            body: Bytes::from_static(br#"{"error":"not yet","code":"not_implemented"}"#),
+        };
+        let e = Api::check(raw).unwrap_err();
+        assert_eq!(e.status(), Some(501));
+        assert_eq!(e.code(), Some("not_implemented"));
     }
 }

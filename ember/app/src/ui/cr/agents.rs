@@ -129,6 +129,8 @@ pub struct AgentsLive {
     pub default_ids: Vec<String>,
     /// Review-capture sample data (`EMBER_CR_ROUTE=agents`): numbers are flagged 예시.
     pub sample: bool,
+    /// Demo mode (`--demo`): agents, versions and counts are canned, so they carry 예시.
+    pub demo: bool,
 }
 
 fn account_infos(accounts: &[Account]) -> Vec<AccountInfo> {
@@ -167,7 +169,10 @@ fn effective_profiles(store: &LocalStore, live: &AgentsLive) -> Vec<Profile> {
 
 /// The main Agents screen, called from the shell.
 pub fn AgentsScreen() {
-    let is_sample = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("agents");
+    // `EMBER_CR_AGENTS_LIVE=1` (debug builds, with `EMBER_CR_ROUTE=agents`) opens the screen on
+    // the real data path, so a capture can show the honest empty state with no server.
+    let live_path = cfg!(debug_assertions) && std::env::var("EMBER_CR_AGENTS_LIVE").as_deref() == Ok("1");
+    let is_sample = std::env::var("EMBER_CR_ROUTE").as_deref() == Ok("agents") && !live_path;
     let (live, computers, bars, usage_load) = if is_sample {
         (sample_live(), sample_computers(), sample_bars(), Load::Ready(crate::demo::usage_summary(crate::demo::now_ms())))
     } else if let Some(s) = crate::services::try_services() {
@@ -187,6 +192,7 @@ pub fn AgentsScreen() {
             chatgpt: chatgpt.clone(),
             default_ids,
             sample: false,
+            demo: s.demo.is_some(),
         };
         let computers = s.client.read(|st| {
             st.computers()
@@ -802,13 +808,14 @@ fn draw_split_bar(p: &Palette, w: f32, input: u64, output: u64) -> DrawList {
 // 1. 하네스 (Harnesses)
 // ---------------------------------------------------------------------------------------------
 
-fn harness_path(h: AgentHarness) -> &'static str {
-    match h {
-        AgentHarness::ClaudeCode => "/usr/local/bin/claude",
-        AgentHarness::Codex => "/opt/homebrew/bin/codex",
-        AgentHarness::Gemini => "/usr/local/bin/gemini",
-        AgentHarness::Antigravity => "/usr/local/bin/agy",
-        AgentHarness::Acp => "/usr/local/bin/omp",
+/// Sample-capture paths (`EMBER_CR_ROUTE=agents`), shown marked 예시. Real screens show only
+/// the path the server reported (FR-L20); Gemini has no adapter, so no path.
+fn sample_path(kind: &str) -> Option<String> {
+    match kind {
+        "claude-code" => Some("/usr/local/bin/claude".into()),
+        "codex" => Some("/opt/homebrew/bin/codex".into()),
+        "antigravity" => Some("/usr/local/bin/agy".into()),
+        _ => None,
     }
 }
 
@@ -861,26 +868,35 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
     } else {
         crate::ui::agents::last_detect_label(crate::demo::now_ms().max(0) as u64, checked)
     };
+    let example = live.sample || live.demo;
     let sample_pill = |on: bool| on.then_some(("예시", PillTone::Orange));
     let total = format!("전체 {}", AgentHarness::ALL.len());
     cu::Row().modifier(Modifier::new().fill_max_width()).content(|| {
         KpiItem(
             "설치된 하네스",
             &crate::ui::agents::kpi_text(installed_count.map(|n| n.to_string())),
-            installed_count.map(|_| (total.as_str(), PillTone::Grey)),
+            installed_count.map(|_| if example { ("예시", PillTone::Orange) } else { (total.as_str(), PillTone::Grey) }),
         );
         KpiItem(
             "상주 shim",
             &crate::ui::agents::kpi_text(shim_count.map(|n| n.to_string())),
-            sample_pill(live.sample && shim_count.is_some()),
+            sample_pill(example && shim_count.is_some()),
         );
         KpiItem(
             "세션 메모리 한도 합",
             &crate::ui::agents::kpi_text(mem_total),
             None,
         );
-        KpiItem("마지막 감지", &last_detect, sample_pill(live.sample));
+        KpiItem("마지막 감지", &last_detect, sample_pill(example && checked.is_some() || live.sample));
     });
+
+    // The outcome of 다시 찾기, once, near the buttons; it goes back to nothing after a few seconds.
+    if let Some(note) = crate::services::try_services()
+        .and_then(|s| crate::ui::agents::rescan_note(&s.ui.live.agents_rescan.get()))
+    {
+        let p = ember_theme().palette;
+        Label(&note, Fs::Xs, Weight::Medium, Some(paint(p.muted)), None);
+    }
 
     let harnesses = [
         AgentHarness::ClaudeCode,
@@ -891,7 +907,7 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
 
     if compact {
         for h in harnesses {
-            HarnessCard(h, store, &live.detected, &profiles, compact);
+            HarnessCard(h, store, &live.detected, &profiles, compact, example);
         }
     } else {
         cu::Row()
@@ -900,10 +916,10 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
             .modifier(Modifier::new().fill_max_width())
             .content(|| {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[0], store, &live.detected, &profiles, compact);
+                    HarnessCard(harnesses[0], store, &live.detected, &profiles, compact, example);
                 });
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[1], store, &live.detected, &profiles, compact);
+                    HarnessCard(harnesses[1], store, &live.detected, &profiles, compact, example);
                 });
             });
         cu::Row()
@@ -912,10 +928,10 @@ fn HarnessSection(store: &MutableState<LocalStore>, live: &AgentsLive, compact: 
             .modifier(Modifier::new().fill_max_width())
             .content(|| {
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[2], store, &live.detected, &profiles, compact);
+                    HarnessCard(harnesses[2], store, &live.detected, &profiles, compact, example);
                 });
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
-                    HarnessCard(harnesses[3], store, &live.detected, &profiles, compact);
+                    HarnessCard(harnesses[3], store, &live.detected, &profiles, compact, example);
                 });
             });
     }
@@ -927,9 +943,12 @@ fn HarnessCard(
     detected: &[DetectedAgent],
     profiles: &[Profile],
     _compact: bool,
+    example: bool,
 ) {
     let p = ember_theme().palette;
     let (state, tone, version) = harness_status(h, detected);
+    let installed = h != AgentHarness::Gemini && state == "설치되어 있습니다";
+    let path_text = crate::ui::agents::harness_path_text(h, detected, example);
     let rescan = crate::services::try_services().map(|s| s.ui.live.agents_rescan.get());
     let settings = store.get().settings(h).clone();
     let of_h: Vec<Profile> = profiles
@@ -954,11 +973,16 @@ fn HarnessCard(
                 cu::Column().modifier(Modifier::new().weight(1.0)).content(|| {
                     Label(h.label(), Fs::Md, Weight::Semibold, None, Some(1));
                     cu::Spacer().modifier(Modifier::new().height(2.0));
-                    let sub = crate::ui::agents::harness_subtitle(h.run_mode(), version.as_deref());
+                    let mut sub = crate::ui::agents::harness_subtitle(h.run_mode(), version.as_deref());
+                    if example && version.is_some() {
+                        sub.push_str(" (예시)");
+                    }
                     Label(&sub, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
                 });
                 if h == AgentHarness::Antigravity {
                     Pill("확인 필요", PillTone::Orange, true);
+                } else if h == AgentHarness::Gemini {
+                    Pill(crate::ui::agents::SOON, PillTone::Grey, true);
                 } else {
                     Pill(state, tone.into(), true);
                 }
@@ -967,24 +991,29 @@ fn HarnessCard(
             // Row 1: 설치와 버전
             SettingRow(
                 "설치와 버전",
-                harness_path(h),
+                &path_text,
                 || {
                     cu::Row().alignment(Alignment::CenterStart).spacing(SP[2]).content(|| {
-                        match crate::ui::agents::version_pill(version.as_deref()) {
+                        match crate::ui::agents::version_text(installed, version.as_deref(), example) {
                             Some(v) => Pill(&v, PillTone::Grey, true),
+                            None if h == AgentHarness::Gemini => Pill(crate::ui::agents::SOON, PillTone::Grey, true),
                             None => Pill(crate::ui::agents::NO_INFO, PillTone::Grey, true),
                         }
-                        let running = matches!(rescan, Some(crate::ui::agents::Rescan::Running));
-                        let label = crate::ui::agents::rescan_label(&rescan.clone().unwrap_or_default());
+                        let rstate = rescan.clone().unwrap_or_default();
+                        let (can, reason) = crate::ui::agents::rescan_enabled(h, &rstate);
+                        let label = crate::ui::agents::rescan_label(&rstate);
+                        if let Some(r) = reason {
+                            Label(r, Fs::Xs, Weight::Regular, Some(paint(p.muted)), Some(1));
+                        }
                         AppButton(
                             &label,
                             Some(IconRole::History),
                             ButtonKind::Default,
                             true,
-                            !running,
+                            can,
                             false,
                             || {
-                                // Runs the detection again (`GET /agents`) and reports its real
+                                // Runs the detection again (`POST .../harnesses/detect`) and reports its real
                                 // result; without services (a capture) there is nothing to ask.
                                 if crate::services::try_services().is_some() {
                                     crate::bridge::rescan_agents();
@@ -2185,6 +2214,8 @@ pub fn sample_live() -> AgentsLive {
         kind: k.into(),
         installed: i,
         version: v.map(String::from),
+        path: if i { sample_path(k) } else { None },
+        detected_at: None,
     };
     let detected = vec![
         d("claude-code", true, Some("2.1.4")),
@@ -2248,6 +2279,7 @@ pub fn sample_live() -> AgentsLive {
         chatgpt,
         default_ids,
         sample: true,
+        demo: false,
     }
 }
 
@@ -2799,6 +2831,7 @@ mod tests {
             kind: k.into(),
             installed: i,
             version: v.map(String::from),
+            ..Default::default()
         };
         let list = vec![
             d("claude-code", true, Some("2.1.0")),
@@ -2978,5 +3011,16 @@ mod tests {
             assert!(names.iter().any(|n| n.ends_with(" 기본 모델로 선택") && n.len() > " 기본 모델로 선택".len()));
             assert!(names.iter().any(|n| n.contains("활성화") && n.len() > "활성화 끄기".len()));
         }
+    }
+
+    #[test]
+    fn fr_l20_sample_paths_are_marked_and_gemini_has_none() {
+        let live = sample_live();
+        let claude = AgentHarness::ClaudeCode;
+        assert!(crate::ui::agents::harness_path_text(claude, &live.detected, true).ends_with("(예시)"));
+        assert_eq!(crate::ui::agents::harness_path_text(AgentHarness::Gemini, &live.detected, true), "준비 중입니다");
+        // Real (non-sample) data without a reported path shows no path at all.
+        let bare = vec![DetectedAgent { kind: "claude-code".into(), installed: true, ..Default::default() }];
+        assert_eq!(crate::ui::agents::harness_path_text(claude, &bare, false), crate::ui::agents::NO_INFO);
     }
 }

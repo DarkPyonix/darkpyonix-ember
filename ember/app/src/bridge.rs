@@ -278,33 +278,48 @@ pub fn request_usage_summary() {
     s.spawn(async move { fetch_usage_summary(services()).await });
 }
 
-/// Run the agent detection again (`GET /agents`, FR-A6) and say how it ended in
-/// `agents_rescan` (FR-L21). Nothing is reported before the answer arrived.
+/// Run the harness detection again (`POST /api/computers/local/harnesses/detect`, FR-A6.1) and
+/// say how it ended in `agents_rescan` (FR-L21). Nothing is reported before the answer arrived.
+/// The demo re-reads its canned list and marks the sentence 예시. The sentence returns to
+/// the idle button label after a few seconds.
 pub fn rescan_agents() {
+    use crate::ui::agents::{self as ag, Rescan};
     let s = services();
-    if matches!(s.ui.live.agents_rescan.get_untracked(), crate::ui::agents::Rescan::Running) {
+    if matches!(s.ui.live.agents_rescan.get_untracked(), Rescan::Running) {
         return;
     }
-    s.ui.live.agents_rescan.set(crate::ui::agents::Rescan::Running);
+    s.ui.live.agents_rescan.set(Rescan::Running);
     s.spawn(async move {
         let s = services();
         let before = s.ui.live.agents.get_untracked();
-        let got = match &s.demo {
-            Some(_) => Ok(crate::demo::agents()),
-            None => s.client.agents().await.map_err(|e| e.to_string()),
-        };
-        let sentence = match &got {
-            Ok(a) => crate::ui::agents::rescan_sentence(&before, Ok(a)),
-            Err(e) => {
-                tracing::debug!("agents rescan failed: {e}");
-                crate::ui::agents::rescan_sentence(&before, Err(()))
+        let demo = s.demo.is_some();
+        let got: Result<Vec<_>, ag::RescanFailure> = if demo {
+            Ok(crate::demo::agents())
+        } else {
+            match s.client.api().detect_harnesses("local").await {
+                Ok(v) => Ok(ag::detect_to_agents(&v)),
+                Err(e) => {
+                    tracing::debug!("harness detect failed: {e}");
+                    Err(ag::rescan_failure(e.status(), e.code()))
+                }
             }
         };
-        if let Ok(a) = got {
-            s.ui.live.agents_checked_ms.set(Some(crate::demo::now_ms().max(0) as u64));
-            s.ui.live.agents.set(a);
+        let mut sentence = ag::rescan_sentence(&before, got.as_deref().map_err(|e| *e));
+        if demo {
+            sentence.push_str(" (예시)");
         }
-        s.ui.live.agents_rescan.set(crate::ui::agents::Rescan::Done(sentence));
+        if let Ok(fresh) = got {
+            let at = if demo { Some(crate::demo::now_ms().max(0) as u64) } else { ag::latest_detected_at(&fresh) };
+            if at.is_some() {
+                s.ui.live.agents_checked_ms.set(at);
+            }
+            s.ui.live.agents.set(ag::merge_detected(&before, &fresh));
+        }
+        s.ui.live.agents_rescan.set(Rescan::Done(sentence.clone()));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        if s.ui.live.agents_rescan.get_untracked() == Rescan::Done(sentence) {
+            s.ui.live.agents_rescan.set(Rescan::Idle);
+        }
     });
 }
 
@@ -442,7 +457,8 @@ async fn refresh_slow(s: &'static Services, live: Option<Live>, first: bool) {
     fetch_project_days(s).await;
     match s.client.agents().await {
         Ok(a) => {
-            s.ui.live.agents_checked_ms.set(Some(crate::demo::now_ms().max(0) as u64));
+            s.ui.live.agents_checked_ms
+                .set(Some(crate::ui::agents::latest_detected_at(&a).unwrap_or_else(|| crate::demo::now_ms().max(0) as u64)));
             s.ui.live.agents.set(a.clone());
             if let Some(mut live) = live {
                 if *live.agents.peek() != a {

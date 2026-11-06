@@ -670,11 +670,63 @@ pub enum Rescan {
     Done(String),
 }
 
-/// The sentence a finished re-detection ends with. `after` is `Err` when the server could not
-/// be asked or answered nothing.
-pub fn rescan_sentence(before: &[DetectedAgent], after: Result<&[DetectedAgent], ()>) -> String {
-    let Ok(after) = after else {
-        return "찾지 못했습니다".to_string();
+/// Why a re-detection gave no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescanFailure {
+    /// The computer cannot be probed from here yet (501 `not_implemented`).
+    NotImplemented,
+    Failed,
+}
+
+pub const RESCAN_NOT_IMPLEMENTED: &str = "이 컴퓨터에서는 아직 다시 찾을 수 없습니다";
+pub const RESCAN_FAILED: &str = "다시 찾지 못했습니다. 잠시 뒤에 다시 시도해 주세요";
+/// The Gemini card: no CLI adapter yet, so nothing is detected or invented.
+pub const SOON: &str = "준비 중입니다";
+pub const NO_VERSION: &str = "버전을 알 수 없습니다";
+
+/// Map a failed `POST .../harnesses/detect` to what the screen says.
+pub fn rescan_failure(status: Option<u16>, code: Option<&str>) -> RescanFailure {
+    if status == Some(501) || code == Some("not_implemented") {
+        RescanFailure::NotImplemented
+    } else {
+        RescanFailure::Failed
+    }
+}
+
+/// The detect answer as agent entries (path and probe time kept as reported).
+pub fn detect_to_agents(got: &[ember_client::api::DetectedHarness]) -> Vec<DetectedAgent> {
+    got.iter()
+        .map(|h| DetectedAgent {
+            kind: h.harness.clone(),
+            installed: h.installed,
+            version: h.version.clone(),
+            path: h.path.clone(),
+            detected_at: h.detected_at,
+        })
+        .collect()
+}
+
+/// `before` with the entries of `fresh` replacing the same kinds; kinds the probe did not
+/// answer (Gemini) keep their entry.
+pub fn merge_detected(before: &[DetectedAgent], fresh: &[DetectedAgent]) -> Vec<DetectedAgent> {
+    let mut out: Vec<DetectedAgent> =
+        before.iter().filter(|b| !fresh.iter().any(|f| f.kind == b.kind)).cloned().collect();
+    out.extend(fresh.iter().cloned());
+    out
+}
+
+/// The newest probe time the server reported (epoch ms).
+pub fn latest_detected_at(list: &[DetectedAgent]) -> Option<u64> {
+    list.iter().filter_map(|d| d.detected_at).filter(|t| *t > 0).max().map(|t| t as u64)
+}
+
+/// The sentence a finished re-detection ends with. `after` is the failure when the server could
+/// not be asked or answered nothing.
+pub fn rescan_sentence(before: &[DetectedAgent], after: Result<&[DetectedAgent], RescanFailure>) -> String {
+    let after = match after {
+        Ok(a) => a,
+        Err(RescanFailure::NotImplemented) => return RESCAN_NOT_IMPLEMENTED.to_string(),
+        Err(RescanFailure::Failed) => return RESCAN_FAILED.to_string(),
     };
     let found = after.iter().filter(|d| d.installed).count();
     let was = |kind: &str| before.iter().any(|d| d.kind == kind && d.installed);
@@ -688,13 +740,59 @@ pub fn rescan_sentence(before: &[DetectedAgent], after: Result<&[DetectedAgent],
     }
 }
 
-/// What the 다시 찾기 button says while it is `Idle`, `Running` or `Done`.
+/// What the 다시 찾기 button says: always the action, or that it is running. The outcome is
+/// shown once beside the button ([`rescan_note`]), not in the label of every card.
 pub fn rescan_label(state: &Rescan) -> String {
     match state {
-        Rescan::Idle => "다시 찾기".to_string(),
         Rescan::Running => "찾는 중입니다".to_string(),
-        Rescan::Done(s) => s.clone(),
+        Rescan::Idle | Rescan::Done(_) => "다시 찾기".to_string(),
     }
+}
+
+/// The outcome sentence to show near the buttons, while there is one.
+pub fn rescan_note(state: &Rescan) -> Option<String> {
+    match state {
+        Rescan::Done(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a harness card's 다시 찾기 can be pressed, and the reason when it cannot.
+/// Gemini has no adapter yet (owner decision), so its probe would answer nothing.
+pub fn rescan_enabled(h: AgentHarness, state: &Rescan) -> (bool, Option<&'static str>) {
+    if h == AgentHarness::Gemini {
+        (false, Some(SOON))
+    } else {
+        (!matches!(state, Rescan::Running), None)
+    }
+}
+
+/// The path line of a harness card: the path the server reported for an installed harness,
+/// [`SOON`] for Gemini, otherwise [`NO_INFO`]. `example` marks sample or demo data.
+pub fn harness_path_text(h: AgentHarness, detected: &[DetectedAgent], example: bool) -> String {
+    if h == AgentHarness::Gemini {
+        return SOON.to_string();
+    }
+    let path = detected
+        .iter()
+        .find(|d| d.installed && AgentHarness::of_kind(&d.kind) == Some(h))
+        .and_then(|d| d.path.as_deref())
+        .filter(|p| !p.is_empty());
+    match path {
+        Some(p) if example => format!("{p} (예시)"),
+        Some(p) => p.to_string(),
+        None => NO_INFO.to_string(),
+    }
+}
+
+/// The version pill text of an installed harness: the version, or [`NO_VERSION`] when the
+/// server reported none; a harness that is not installed has no pill text.
+pub fn version_text(installed: bool, version: Option<&str>, example: bool) -> Option<String> {
+    if !installed {
+        return None;
+    }
+    let v = version_pill(version).unwrap_or_else(|| NO_VERSION.to_string());
+    Some(if example && version.is_some() { format!("{v} (예시)") } else { v })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -784,7 +882,7 @@ mod tests {
     use super::*;
 
     fn det(kind: &str, installed: bool, version: Option<&str>) -> DetectedAgent {
-        DetectedAgent { kind: kind.into(), installed, version: version.map(String::from) }
+        DetectedAgent { kind: kind.into(), installed, version: version.map(String::from), ..Default::default() }
     }
 
     #[test]
@@ -847,7 +945,7 @@ mod tests {
         assert_eq!(rescan_sentence(&before, Ok(&more)), "찾았습니다: 1개");
         let none = [det("claude-code", false, None)];
         assert_eq!(rescan_sentence(&before, Ok(&none)), "찾지 못했습니다");
-        assert_eq!(rescan_sentence(&before, Err(())), "찾지 못했습니다");
+        assert_eq!(rescan_sentence(&before, Err(RescanFailure::Failed)), RESCAN_FAILED);
         assert_eq!(rescan_sentence(&[], Ok(&more)), "찾았습니다: 2개");
     }
 
@@ -855,7 +953,9 @@ mod tests {
     fn fr_l21_rescan_label_follows_state() {
         assert_eq!(rescan_label(&Rescan::Idle), "다시 찾기");
         assert_eq!(rescan_label(&Rescan::Running), "찾는 중입니다");
-        assert_eq!(rescan_label(&Rescan::Done("찾았습니다: 1개".into())), "찾았습니다: 1개");
+        assert_eq!(rescan_label(&Rescan::Done("찾았습니다: 1개".into())), "다시 찾기");
+        assert_eq!(rescan_note(&Rescan::Done("x".into())).as_deref(), Some("x"));
+        assert_eq!(rescan_note(&Rescan::Idle), None);
     }
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -1311,6 +1411,7 @@ mod tests {
             kind: k.into(),
             installed: i,
             version: v.map(String::from),
+            ..Default::default()
         };
         let list = vec![
             d("claude-code", true, Some("2.1.0")),
@@ -1336,5 +1437,64 @@ mod tests {
             "확인 중입니다"
         );
         assert_eq!(harness_status(AgentHarness::Gemini, &list).0, UNAVAILABLE);
+    }
+
+    #[test]
+    fn fr_l20_path_shown_only_when_reported() {
+        let mut c = det("claude-code", true, Some("2.1.4"));
+        assert_eq!(harness_path_text(AgentHarness::ClaudeCode, &[c.clone()], false), NO_INFO);
+        c.path = Some("/opt/x/claude".into());
+        assert_eq!(harness_path_text(AgentHarness::ClaudeCode, &[c.clone()], false), "/opt/x/claude");
+        assert_eq!(harness_path_text(AgentHarness::ClaudeCode, &[c.clone()], true), "/opt/x/claude (예시)");
+        // Not installed: a stale path is not shown. Other harness: nothing.
+        let mut n = det("codex", false, None);
+        n.path = Some("/old/codex".into());
+        assert_eq!(harness_path_text(AgentHarness::Codex, &[n], false), NO_INFO);
+        assert_eq!(harness_path_text(AgentHarness::Codex, &[c], false), NO_INFO);
+        assert_eq!(harness_path_text(AgentHarness::Gemini, &[], false), SOON);
+    }
+
+    #[test]
+    fn fr_l20_version_text_says_unknown_for_null() {
+        assert_eq!(version_text(true, None, false).as_deref(), Some(NO_VERSION));
+        assert_eq!(version_text(false, Some("1.0"), false), None);
+        assert!(version_text(true, Some("2.1.0"), true).unwrap().ends_with("(예시)"));
+    }
+
+    #[test]
+    fn fr_l20_rescan_outcome_maps_failures_incl_501() {
+        assert_eq!(rescan_failure(Some(501), Some("not_implemented")), RescanFailure::NotImplemented);
+        assert_eq!(rescan_failure(Some(501), None), RescanFailure::NotImplemented);
+        assert_eq!(rescan_failure(Some(404), None), RescanFailure::Failed);
+        assert_eq!(rescan_failure(None, None), RescanFailure::Failed);
+        assert_eq!(rescan_sentence(&[], Err(RescanFailure::NotImplemented)), "이 컴퓨터에서는 아직 다시 찾을 수 없습니다");
+        assert_eq!(rescan_sentence(&[], Err(RescanFailure::Failed)), RESCAN_FAILED);
+    }
+
+    #[test]
+    fn fr_l20_detect_answer_replaces_entries_and_keeps_gemini() {
+        let before = vec![det("gemini", false, None), det("codex", false, None)];
+        let got = vec![ember_client::api::DetectedHarness {
+            harness: "codex".into(),
+            installed: true,
+            version: None,
+            path: Some("/p/codex".into()),
+            detected_at: Some(1_761_900_000_000),
+        }];
+        let fresh = detect_to_agents(&got);
+        let merged = merge_detected(&before, &fresh);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|d| d.kind == "gemini"));
+        let c = merged.iter().find(|d| d.kind == "codex").unwrap();
+        assert!(c.installed && c.path.as_deref() == Some("/p/codex"));
+        assert_eq!(latest_detected_at(&merged), Some(1_761_900_000_000));
+        assert_eq!(latest_detected_at(&before), None);
+    }
+
+    #[test]
+    fn fr_l20_gemini_rescan_is_disabled_with_a_reason() {
+        assert_eq!(rescan_enabled(AgentHarness::Gemini, &Rescan::Idle), (false, Some("준비 중입니다")));
+        assert_eq!(rescan_enabled(AgentHarness::Codex, &Rescan::Idle), (true, None));
+        assert_eq!(rescan_enabled(AgentHarness::Codex, &Rescan::Running), (false, None));
     }
 }

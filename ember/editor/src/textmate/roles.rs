@@ -3,8 +3,10 @@
 //! The widget takes runs painted with a code colour role (keyword, string, comment, ...) and resolves
 //! each role in the design system, light and dark. A token carries a stack of scopes, outermost first;
 //! the role comes from the innermost scope that has one, the way a VS Code theme picks the most specific
-//! rule. Scopes that no role covers (`meta.*`, `source.*`, plain `variable.other.readwrite` text in a
-//! grammar that has no better scope) leave the text in the default colour.
+//! rule. A scope that no role covers leaves the text in the default colour: `source.*`, `text.*`, and the
+//! `meta.*` scopes, of which only three carry a role (`meta.preprocessor` is a macro, `meta.object-literal.key`
+//! a property) because their grammars have nothing more specific to give. Every `variable.*` scope that is
+//! not a property, a parameter or a language variable gets the plain variable role.
 
 /// The roles. They mirror the widget's `Syntax*` colour roles one to one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

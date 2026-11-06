@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ember_editor::coords::{WidgetPos, WidgetRange};
-use ember_editor::textmate::{parse_grammar, role_for_scopes, DocumentTokens, EditError, Grammar, GrammarSet, SyntaxRole};
+use ember_editor::textmate::{parse_grammar, role_for_scopes, DocumentTokens, EditError, Grammar, GrammarSet, SyntaxRole, TooLarge, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textmate")
@@ -57,7 +57,7 @@ fn fr_e6_prefixes_match_whole_scope_segments_only() {
 
 #[test]
 fn fr_e6_a_document_has_runs_in_utf16_columns_with_the_roles_of_its_tokens() {
-    let doc = DocumentTokens::new(grammar("source.ts"), "const a = \"한😀\"; // x");
+    let doc = DocumentTokens::new(grammar("source.ts"), "const a = \"한😀\"; // x").unwrap();
     let runs = doc.line_runs(0);
     let find = |role| runs.iter().find(|r| r.role == role).copied();
     let string = find(SyntaxRole::String).unwrap();
@@ -69,7 +69,7 @@ fn fr_e6_a_document_has_runs_in_utf16_columns_with_the_roles_of_its_tokens() {
 
 #[test]
 fn fr_e6_a_bad_edit_range_is_an_error_and_changes_nothing() {
-    let mut doc = DocumentTokens::new(grammar("source.ts"), "a\n😀b");
+    let mut doc = DocumentTokens::new(grammar("source.ts"), "a\n😀b").unwrap();
     assert_eq!(doc.apply_edit(range(5, 0, 5, 0), "x"), Err(EditError::OutOfRange));
     assert_eq!(doc.apply_edit(range(1, 1, 1, 1), "x"), Err(EditError::OutOfRange), "inside a surrogate pair");
     assert_eq!(doc.text(), "a\n😀b");
@@ -77,7 +77,7 @@ fn fr_e6_a_bad_edit_range_is_an_error_and_changes_nothing() {
 
 #[test]
 fn fr_e6_typing_inside_a_line_tokenizes_that_line_only() {
-    let mut doc = DocumentTokens::new(grammar("source.ts"), &sample("ts"));
+    let mut doc = DocumentTokens::new(grammar("source.ts"), &sample("ts")).unwrap();
     let line = doc.text().lines().position(|l| l.starts_with("const pattern")).unwrap() as u32;
     let changed = doc.apply_edit(range(line, 6, line, 6), "x").unwrap();
     assert_eq!(changed.tokenized, 1);
@@ -88,11 +88,11 @@ fn fr_e6_typing_inside_a_line_tokenizes_that_line_only() {
 fn fr_e6_opening_a_block_comment_changes_the_lines_up_to_where_it_closes_and_closing_it_restores_them() {
     let text = "let a = 1;\nlet b = 2;\nlet c = 3;\n/* note */\nlet d = 4;";
     let g = grammar("source.ts");
-    let before = DocumentTokens::new(g.clone(), text).runs();
-    let mut doc = DocumentTokens::new(g.clone(), text);
+    let before = DocumentTokens::new(g.clone(), text).unwrap().runs();
+    let mut doc = DocumentTokens::new(g.clone(), text).unwrap();
     let opened = doc.apply_edit(range(1, 0, 1, 0), "/*").unwrap();
     assert!(opened.last_line >= 3, "the comment now runs to the `*/` on line 3: {opened:?}");
-    assert_eq!(doc.runs(), DocumentTokens::new(g.clone(), &doc.text()).runs());
+    assert_eq!(doc.runs(), DocumentTokens::new(g.clone(), &doc.text()).unwrap().runs());
     doc.apply_edit(range(1, 0, 1, 2), "").unwrap();
     assert_eq!(doc.runs(), before, "removing the opening restores every run");
 }
@@ -138,7 +138,7 @@ fn random_edit(doc: &DocumentTokens, rng: &mut Rng, pool: &[&str]) -> (WidgetRan
 
 fn incremental_equals_fresh(scope: &str, ext: &str, rounds: usize, seed: u64, pool: &[&str]) {
     let g = grammar(scope);
-    let mut doc = DocumentTokens::new(g.clone(), &sample(ext));
+    let mut doc = DocumentTokens::new(g.clone(), &sample(ext)).unwrap();
     let mut rng = Rng(seed);
     let mut tokenized = 0u64;
     let mut all = 0u64;
@@ -151,7 +151,7 @@ fn incremental_equals_fresh(scope: &str, ext: &str, rounds: usize, seed: u64, po
             }
             Err(e) => panic!("round {round}: {e:?} for {r:?} {insert:?}"),
         }
-        let fresh = DocumentTokens::new(g.clone(), &doc.text());
+        let fresh = DocumentTokens::new(g.clone(), &doc.text()).unwrap();
         assert_eq!(doc.line_count(), fresh.line_count(), "round {round} {r:?} {insert:?}");
         for line in 0..doc.line_count() {
             assert_eq!(doc.line_runs(line), fresh.line_runs(line), "round {round}, line {line} after {r:?} {insert:?}");
@@ -179,4 +179,55 @@ fn fr_e6_incremental_runs_equal_a_fresh_pass_after_random_python_edits() {
 #[test]
 fn fr_e6_incremental_runs_equal_a_fresh_pass_after_random_rust_edits() {
     incremental_equals_fresh("source.rust", "rs", 200, 17, &["/*", "*/", "\"", "r#\"", "\"#", "'a", "{", "}", "//", "\n", "fn x() {}", "😀"]);
+}
+
+#[test]
+fn fr_e6_an_edit_whose_start_is_after_its_end_is_refused_and_changes_nothing() {
+    let mut doc = DocumentTokens::new(grammar("source.ts"), "const a = 1;\nlet b;").unwrap();
+    let reversed = WidgetRange { start: WidgetPos::new(0, 8), end: WidgetPos::new(0, 3) };
+    assert_eq!(doc.apply_edit(reversed, "x"), Err(EditError::OutOfRange));
+    assert_eq!(doc.text(), "const a = 1;\nlet b;");
+}
+
+#[test]
+fn fr_e6_a_carriage_return_before_the_line_feed_does_not_move_the_runs() {
+    let lf = "let a = 1; // note\nlet b = \"s\";\n/* c\nd */ let e;";
+    let crlf = lf.replace('\n', "\r\n");
+    let g = grammar("source.ts");
+    let (a, b) = (DocumentTokens::new(g.clone(), lf).unwrap(), DocumentTokens::new(g.clone(), &crlf).unwrap());
+    assert_eq!(a.line_count(), b.line_count());
+    for line in 0..a.line_count() {
+        let (ra, rb) = (a.line_runs(line), b.line_runs(line));
+        assert_eq!(ra.len(), rb.len(), "line {line}");
+        for (x, y) in ra.iter().zip(rb) {
+            assert_eq!((x.start, x.role), (y.start, y.role), "line {line}");
+            // Only a run that reaches the end of the line (a comment) may grow by the carriage return.
+            assert!(y.end == x.end || y.end == x.end + 1, "line {line}: {x:?} {y:?}");
+        }
+    }
+    // And editing a CRLF document stays equal to tokenizing it afresh.
+    let mut doc = DocumentTokens::new(g.clone(), &crlf).unwrap();
+    doc.apply_edit(range(2, 0, 2, 0), "x").unwrap();
+    assert_eq!(doc.runs(), DocumentTokens::new(g, &doc.text()).unwrap().runs());
+}
+
+#[test]
+fn fr_e6_a_document_over_the_size_limits_is_not_tokenized() {
+    let g = grammar("source.ts");
+    let big = "x".repeat(MAX_DOCUMENT_BYTES + 1);
+    assert_eq!(DocumentTokens::new(g.clone(), &big).err(), Some(TooLarge));
+    let many = "\n".repeat(MAX_DOCUMENT_LINES);
+    assert_eq!(DocumentTokens::new(g, &many).err(), Some(TooLarge));
+}
+
+#[test]
+fn fr_e6_lines_that_end_in_the_same_state_share_it() {
+    // The cost of a long document without block comments is its text, not a state per line: a smoke check that
+    // tokenizing 5000 plain lines and editing one of them stays correct and cheap.
+    let g = grammar("source.ts");
+    let text = "const a = 1;\n".repeat(5000);
+    let mut doc = DocumentTokens::new(g.clone(), &text).unwrap();
+    let changed = doc.apply_edit(range(2500, 0, 2500, 0), "// ").unwrap();
+    assert_eq!(changed.tokenized, 1);
+    assert_eq!(doc.runs(), DocumentTokens::new(g, &doc.text()).unwrap().runs());
 }

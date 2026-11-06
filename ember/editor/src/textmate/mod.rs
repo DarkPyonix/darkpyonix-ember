@@ -14,6 +14,6 @@ pub mod tokens;
 
 pub use catalog::{GrammarCatalog, GrammarEntry};
 pub use roles::{role_for_scopes, SyntaxRole};
-pub use tokens::{Changed, ColorRun, DocRun, DocumentTokens, EditError};
+pub use tokens::{Changed, ColorRun, DocRun, DocumentTokens, EditError, TooLarge, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_LINES};
 pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token, MAX_COMPILED_RULES, MAX_LINE_BYTES, MAX_STACK_DEPTH};
 pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_GRAMMAR_BYTES, MAX_RULES};

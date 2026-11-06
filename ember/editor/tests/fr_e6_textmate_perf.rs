@@ -47,7 +47,7 @@ fn fr_e6_tokenizing_cost_on_a_ten_thousand_line_file() {
         let g = grammar(scope);
 
         let started = Instant::now();
-        let mut doc = DocumentTokens::new(g.clone(), &text);
+        let mut doc = DocumentTokens::new(g.clone(), &text).unwrap();
         let full_ms = micros(started) / 1000.0;
 
         // Typing a character in the middle of a line.

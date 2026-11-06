@@ -6,12 +6,25 @@
 //! the first line that ends in the same state as it used to ends the work, because everything after it
 //! tokenizes as it did. Typing inside a line costs one line; opening a comment costs the lines up to
 //! where it closes.
+//!
+//! Memory: lines that end in the same state share one `Arc` of it, so a document costs its text and
+//! runs plus one state per distinct state, not one per line. A document over [`MAX_DOCUMENT_BYTES`] or
+//! [`MAX_DOCUMENT_LINES`] is not tokenized at all ([`TooLarge`]).
 
 use std::sync::Arc;
 
 use super::interpreter::{Grammar, StateStack};
 use super::roles::{role_for_scopes, SyntaxRole};
 use crate::coords::{utf16_len, utf16_to_byte, WidgetPos, WidgetRange};
+
+/// The largest document that is tokenized. Larger files are shown without colours, as VS Code does for
+/// its "large file" mode.
+pub const MAX_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_DOCUMENT_LINES: usize = 100_000;
+
+/// The document is over [`MAX_DOCUMENT_BYTES`] or [`MAX_DOCUMENT_LINES`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TooLarge;
 
 /// A coloured run on one line: UTF-16 columns, end exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +45,11 @@ pub struct DocRun {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
-    /// The range is outside the document or inside a surrogate pair.
+    /// The range is outside the document, reversed, or inside a surrogate pair.
     OutOfRange,
+    /// The edit would take the document over the size limits (the colours are then stale: the caller drops
+    /// the document's tokens).
+    TooLarge,
 }
 
 /// What an edit touched.
@@ -50,8 +66,8 @@ pub struct Changed {
 struct Line {
     text: String,
     runs: Vec<ColorRun>,
-    /// The state after this line.
-    end: StateStack,
+    /// The state after this line (shared with the neighbours that end in the same state).
+    end: Arc<StateStack>,
     /// Highlighting stopped on this line (too long, or too many rules open).
     skipped: bool,
 }
@@ -59,6 +75,8 @@ struct Line {
 pub struct DocumentTokens {
     grammar: Arc<Grammar>,
     lines: Vec<Line>,
+    /// The bytes of every line and its line break, kept up to date by each edit.
+    bytes: usize,
 }
 
 /// Splits text into lines at `\n` (a `\r` stays at the end of its line).
@@ -67,21 +85,23 @@ fn split(text: &str) -> Vec<String> {
 }
 
 impl DocumentTokens {
-    /// Tokenizes `text` from the start.
-    pub fn new(grammar: Arc<Grammar>, text: &str) -> Self {
-        let mut doc = Self { grammar, lines: Vec::new() };
-        let texts = split(text);
-        let mut prev: Option<StateStack> = None;
-        for t in texts {
+    /// Tokenizes `text` from the start; `Err` when it is too large to colour.
+    pub fn new(grammar: Arc<Grammar>, text: &str) -> Result<Self, TooLarge> {
+        if text.len() > MAX_DOCUMENT_BYTES || text.bytes().filter(|b| *b == b'\n').count() >= MAX_DOCUMENT_LINES {
+            return Err(TooLarge);
+        }
+        let mut doc = Self { grammar, lines: Vec::new(), bytes: text.len() + 1 };
+        let mut prev: Option<Arc<StateStack>> = None;
+        for t in split(text) {
             let line = doc.tokenize(t, prev.as_ref());
             prev = Some(line.end.clone());
             doc.lines.push(line);
         }
-        doc
+        Ok(doc)
     }
 
-    fn tokenize(&self, text: String, prev: Option<&StateStack>) -> Line {
-        let result = self.grammar.tokenize_line(&text, prev);
+    fn tokenize(&self, text: String, prev: Option<&Arc<StateStack>>) -> Line {
+        let result = self.grammar.tokenize_line(&text, prev.map(|a| &**a));
         let mut runs: Vec<ColorRun> = Vec::new();
         for t in &result.tokens {
             let Some(role) = role_for_scopes(&t.scopes) else { continue };
@@ -92,7 +112,12 @@ impl DocumentTokens {
                 _ => runs.push(ColorRun { start, end, role }),
             }
         }
-        Line { text, runs, end: result.end_state, skipped: result.skipped }
+        // Most lines end in the state the line before ended in: share it.
+        let end = match prev {
+            Some(p) if **p == result.end_state => p.clone(),
+            _ => Arc::new(result.end_state),
+        };
+        Line { text, runs, end, skipped: result.skipped }
     }
 
     pub fn line_count(&self) -> usize {
@@ -131,7 +156,7 @@ impl DocumentTokens {
     pub fn apply_edit(&mut self, range: WidgetRange, text: &str) -> Result<Changed, EditError> {
         let (start, end) = (range.start, range.end);
         let (sl, el) = (start.line as usize, end.line as usize);
-        if sl >= self.lines.len() || el >= self.lines.len() || sl > el {
+        if sl >= self.lines.len() || el >= self.lines.len() || sl > el || (sl == el && start.col > end.col) {
             return Err(EditError::OutOfRange);
         }
         let head_byte = utf16_to_byte(&self.lines[sl].text, start.col).ok_or(EditError::OutOfRange)?;
@@ -139,17 +164,20 @@ impl DocumentTokens {
         let head = self.lines[sl].text[..head_byte].to_owned();
         let tail = self.lines[el].text[tail_byte..].to_owned();
         let mut new_texts = split(text);
-        let first = new_texts.first_mut().expect("split gives at least one line");
-        first.insert_str(0, &head);
+        new_texts.first_mut().expect("split gives at least one line").insert_str(0, &head);
         new_texts.last_mut().expect("a last line").push_str(&tail);
+        let removed_bytes: usize = self.lines[sl..=el].iter().map(|l| l.text.len() + 1).sum();
+        let added_bytes: usize = new_texts.iter().map(|t| t.len() + 1).sum();
+        let new_bytes = self.bytes - removed_bytes + added_bytes;
+        if new_bytes > MAX_DOCUMENT_BYTES + 1 || self.lines.len() - (el - sl + 1) + new_texts.len() > MAX_DOCUMENT_LINES {
+            return Err(EditError::TooLarge);
+        }
+        self.bytes = new_bytes;
 
-        // The old lines after the edit keep their end states: the new line after the edit is compared to them.
-        let old_after: Vec<StateStack> = self.lines[el + 1..].iter().map(|l| l.end.clone()).collect();
         let old_last_end = self.lines[el].end.clone();
         let inserted = new_texts.len();
-        let removed = el - sl + 1;
         let mut replacement: Vec<Line> = Vec::with_capacity(inserted);
-        let mut prev = if sl == 0 { None } else { Some(self.lines[sl - 1].end.clone()) };
+        let mut prev: Option<Arc<StateStack>> = if sl == 0 { None } else { Some(self.lines[sl - 1].end.clone()) };
         let mut tokenized = 0u32;
         for t in new_texts {
             let line = self.tokenize(t, prev.as_ref());
@@ -157,26 +185,22 @@ impl DocumentTokens {
             replacement.push(line);
             tokenized += 1;
         }
-        let settled = replacement.last().is_some_and(|l| l.end == old_last_end);
+        // The last line of the edit ended in the state the old last line ended in: what follows is as before.
+        let settled = replacement.last().is_some_and(|l| *l.end == *old_last_end);
         self.lines.splice(sl..=el, replacement);
         let mut last_changed = sl + inserted - 1;
 
-        // Go on with the lines after the edit until one ends in the state it ended in before.
-        let after_first = sl + inserted;
-        let mut i = after_first;
-        let _ = removed;
-        // The last line of the edit ended in the state the old last line ended in: what follows is as before.
+        // Otherwise go on with the lines after the edit until one ends in the state it ended in before. The old
+        // end state is read from the line itself just before it is replaced, so nothing is copied up front.
+        let mut i = sl + inserted;
         while !settled && i < self.lines.len() {
-            let old_end = &old_after[i - after_first];
             let prev_state = self.lines[i - 1].end.clone();
-            // This line's text did not change, but its start state may have.
             let text = std::mem::take(&mut self.lines[i].text);
             let line = self.tokenize(text, Some(&prev_state));
-            let same = line.end == *old_end;
-            self.lines[i] = line;
+            let old = std::mem::replace(&mut self.lines[i], line);
             tokenized += 1;
             last_changed = i;
-            if same {
+            if *old.end == *self.lines[i].end {
                 break;
             }
             i += 1;

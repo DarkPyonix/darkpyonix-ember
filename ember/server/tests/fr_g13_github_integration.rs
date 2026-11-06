@@ -35,7 +35,11 @@ async fn stub_node() -> Node {
         let repo = body["repo"].as_str().unwrap_or("").to_string();
         s.calls.lock().unwrap().push(repo.clone());
         let (status, v) = s.answers.lock().unwrap().get(&repo).cloned().unwrap_or((404, json!({"error": "not_a_repo"})));
-        (StatusCode::from_u16(status).unwrap(), Json(v))
+        if status == 0 {
+            // A node that never answers.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+        (StatusCode::from_u16(status.max(100)).unwrap(), Json(v))
     }
     let answers: Answers = Arc::new(Mutex::new(HashMap::new()));
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -138,7 +142,8 @@ async fn fr_g13_signed_out_gives_warn() {
     assert_eq!(body["state"], "warn");
     assert!(body["reason"].as_str().unwrap().contains("gh auth login"));
     assert_eq!(body["account"], Value::Null);
-    assert_eq!(body["totals"]["open_prs"], 0);
+    assert_eq!(body["totals"]["open_prs"], Value::Null, "nothing known is null, not 0");
+    assert_eq!(body["totals"]["review_requested"], Value::Null);
     assert_eq!(body["totals"]["ci_pass_percent"], Value::Null);
 }
 
@@ -150,7 +155,8 @@ async fn fr_g13_no_projects_gives_off() {
     assert_eq!(body["state"], "off");
     assert!(body["reason"].is_string());
     assert_eq!(body["repos"], json!([]));
-    assert_eq!(body["totals"]["repos"], 0);
+    assert_eq!(body["totals"]["repos"], Value::Null);
+    assert_eq!(body["totals"]["open_prs"], Value::Null);
     assert_eq!(f.node_calls(), 0);
 }
 
@@ -208,4 +214,81 @@ async fn fr_g13_concurrent_callers_share_one_refresh() {
     assert_eq!(a.0, StatusCode::OK);
     assert_eq!(b.1, c.1);
     assert_eq!(f.node_calls(), 1);
+}
+
+#[tokio::test]
+async fn fr_g13_totals_are_null_when_no_repository_knows_the_value() {
+    let f = fixture().await;
+    f.project("alpha", "/w/a");
+    f.project("beta", "/w/b");
+    f.answer("/w/a", 200, summary("o/a", None, None, json!(["success"])));
+    f.answer("/w/b", 200, summary("o/b", None, None, json!(["failure"])));
+    let (_, body) = get(&f.app(LONG)).await;
+    assert_eq!(body["state"], "on");
+    assert_eq!(body["totals"]["repos"], 2);
+    assert_eq!(body["totals"]["open_prs"], Value::Null);
+    assert_eq!(body["totals"]["review_requested"], Value::Null);
+    assert_eq!(body["totals"]["ci_pass_percent"], 50);
+}
+
+#[tokio::test]
+async fn fr_g13_totals_sum_only_the_known_values() {
+    let f = fixture().await;
+    f.project("alpha", "/w/a");
+    f.project("beta", "/w/b");
+    f.project("gamma", "/w/c");
+    f.answer("/w/a", 200, summary("o/a", Some(4), None, json!([])));
+    f.answer("/w/b", 200, summary("o/b", None, Some(2), json!([])));
+    f.answer("/w/c", 200, summary("o/c", Some(0), None, json!([])));
+    let (_, body) = get(&f.app(LONG)).await;
+    assert_eq!(body["totals"]["repos"], 3);
+    assert_eq!(body["totals"]["open_prs"], 4);
+    assert_eq!(body["totals"]["review_requested"], 2);
+}
+
+#[tokio::test]
+async fn fr_g13_the_refresh_has_a_deadline() {
+    let f = fixture().await;
+    f.project("alpha", "/w/a");
+    f.project("beta", "/w/b");
+    f.answer("/w/a", 200, summary("o/a", Some(1), Some(0), json!(["success"])));
+    f.answer("/w/b", 0, json!({}));
+    let app = ember_server::api::integrations::router_with_limits(f.sessions.clone(), f.computers.clone(), LONG, LONG, Duration::from_millis(400));
+    let started = std::time::Instant::now();
+    let (status, body) = get(&app).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(started.elapsed() < Duration::from_secs(10), "the hung node did not hold the answer");
+    let repos = body["repos"].as_array().unwrap();
+    assert_eq!(repos.len(), 2);
+    assert!(repos.iter().any(|r| r["name_with_owner"] == "o/a" && r["open_prs"] == 1));
+    let missing = repos.iter().find(|r| r["name_with_owner"] == Value::Null).unwrap();
+    assert_eq!(missing["error"], "시간이 초과되었습니다");
+    assert_eq!(body["totals"]["open_prs"], 1);
+}
+
+#[tokio::test]
+async fn fr_g13_an_answer_where_every_call_failed_is_cached_briefly() {
+    let f = fixture().await;
+    f.project("alpha", "/w/a");
+    f.answer("/w/a", 500, json!({"error": "boom"}));
+    let app = ember_server::api::integrations::router_with_limits(f.sessions.clone(), f.computers.clone(), LONG, Duration::from_millis(300), Duration::from_secs(20));
+    let (_, first) = get(&app).await;
+    assert_eq!(first["repos"][0]["error"], "boom");
+    let _ = get(&app).await;
+    assert_eq!(f.node_calls(), 1, "the failure is cached, so polling does not hammer the node");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let _ = get(&app).await;
+    assert_eq!(f.node_calls(), 2, "the failure cache is short");
+}
+
+#[tokio::test]
+async fn fr_g13_names_from_the_node_are_cleaned_again() {
+    let f = fixture().await;
+    f.project("alpha", "/w/a");
+    let mut v = summary("o/\u{1b}[31mr", Some(1), Some(0), json!([]));
+    v["default_branch"] = json!("x".repeat(300));
+    f.answer("/w/a", 200, v);
+    let (_, body) = get(&f.app(LONG)).await;
+    assert_eq!(body["repos"][0]["name_with_owner"], "o/[31mr");
+    assert_eq!(body["repos"][0]["default_branch"].as_str().unwrap().chars().count(), 100);
 }

@@ -965,7 +965,7 @@ impl DemoSource {
                     projects: vec!["notes".into()],
                 },
             ],
-            totals: GithubTotals { repos: 2, open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(80) },
+            totals: GithubTotals { repos: Some(2), open_prs: Some(5), review_requested: Some(1), ci_pass_percent: Some(80) },
             checked_at: 0,
         }
     }
@@ -2073,7 +2073,7 @@ mod tests {
         assert_eq!(g.state, ember_client::api::GithubState::On);
         assert_eq!(g.account.as_deref(), Some("demo-user"));
         assert_eq!(g.repos.len(), 2);
-        assert_eq!(g.totals.repos, 2);
+        assert_eq!(g.totals.repos, Some(2));
         let sum = |f: fn(&ember_client::api::GithubRepo) -> Option<u64>| g.repos.iter().filter_map(f).sum::<u64>();
         assert_eq!(g.totals.open_prs, Some(sum(|r| r.open_prs)));
         assert_eq!(g.totals.review_requested, Some(sum(|r| r.review_requested)));

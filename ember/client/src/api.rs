@@ -266,12 +266,16 @@ pub struct GithubRepo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct GithubTotals {
+    /// Repositories listed; null when the state is `off` or none is listed.
     #[serde(default)]
-    pub repos: u64,
+    pub repos: Option<u64>,
+    /// Sum of the known values; null when no repository gave one (never an invented 0).
     #[serde(default)]
     pub open_prs: Option<u64>,
+    /// Sum of the known values; null when no repository gave one.
     #[serde(default)]
     pub review_requested: Option<u64>,
+    /// Null when no run is known.
     #[serde(default)]
     pub ci_pass_percent: Option<u64>,
 }

@@ -88,7 +88,7 @@ async fn fr_g16_state_during_a_conflicting_merge_then_after_resolving() {
     assert_eq!(status, 200, "{v}");
     assert_eq!(v, json!({"in_progress": true, "from": "feat/x", "into": "main", "conflict_files": 1, "can_commit": false}));
     let (status, r) = call(&client, &base, "resolve", json!({"repo": repo, "path": "a", "content": "1\nboth\n3\n"})).await;
-    assert_eq!(status, 200, "{r}");
+    assert_eq!(status, 204, "{r}");
     let (_, v) = call(&client, &base, "merge", json!({"repo": repo})).await;
     assert_eq!(v, json!({"in_progress": true, "from": "feat/x", "into": "main", "conflict_files": 0, "can_commit": true}));
 }

@@ -43,3 +43,5 @@ async def run(items, *, verbose=False, **kwargs):
 
 if __name__ == "__main__":
     print(os.environ.get("HOME"))
+greeting = "안녕 😀 world"  # 한글 주석 😀 ok
+print(f"{greeting!r} 이모지 😀")

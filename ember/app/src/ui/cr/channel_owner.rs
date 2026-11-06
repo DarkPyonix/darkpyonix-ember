@@ -111,7 +111,7 @@ pub fn review_sample_data(now_ms: i64, door: &str) -> ReviewSample {
         link: link.into(),
         expires_at: now_ms + 24 * H,
         link_warning: warning,
-        guest_door: door_state.map(|s| GuestDoorState { state: s.into(), listen: None, public_url: None }),
+        guest_door: door_state.map(|s| GuestDoorState { state: s.into(), listen: None, public_url: None, link_warning: false }),
     });
     ReviewSample {
         invites: vec![

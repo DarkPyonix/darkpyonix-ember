@@ -340,7 +340,7 @@ mod tests {
     }
 
     fn door(state: &str) -> GuestDoorState {
-        GuestDoorState { state: state.into(), listen: None, public_url: None }
+        GuestDoorState { state: state.into(), listen: None, public_url: None, link_warning: false }
     }
 
     #[test]
@@ -532,11 +532,11 @@ mod tests {
         assert_eq!(create_label(DoorStatus::Off, true), "그래도 초대 만들기");
         assert_eq!(known_door(None), DoorStatus::Unknown);
         assert_eq!(known_door(Some(&door("off"))), DoorStatus::Off);
-        let lo = GuestDoorState { state: "on".into(), listen: Some("127.0.0.1:7071".into()), public_url: None };
+        let lo = GuestDoorState { state: "on".into(), listen: Some("127.0.0.1:7071".into()), public_url: None, link_warning: false };
         assert_eq!(known_door(Some(&lo)), DoorStatus::Open { warning: true });
-        let un = GuestDoorState { state: "on".into(), listen: Some("[::]:7071".into()), public_url: None };
+        let un = GuestDoorState { state: "on".into(), listen: Some("[::]:7071".into()), public_url: None, link_warning: false };
         assert_eq!(known_door(Some(&un)), DoorStatus::Open { warning: true });
-        let ok = GuestDoorState { state: "on".into(), listen: Some("10.0.0.2:7071".into()), public_url: None };
+        let ok = GuestDoorState { state: "on".into(), listen: Some("10.0.0.2:7071".into()), public_url: None, link_warning: false };
         assert_eq!(known_door(Some(&ok)), DoorStatus::Open { warning: false });
     }
 }

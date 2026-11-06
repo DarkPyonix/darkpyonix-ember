@@ -437,6 +437,12 @@ pub fn split_view(class: WindowSizeClass) -> bool {
     class != WindowSizeClass::Compact
 }
 
+/// Whether opening a room calls the read marker: only when the person clicked it (the
+/// auto-selected room of `initial_room` stays unread) and it has unread messages. FR-L12, #509.
+pub fn should_mark_read(user_clicked: bool, unread: u32) -> bool {
+    user_clicked && unread > 0
+}
+
 /// The room to show when none is open. Side by side (the split layout) the first room the list
 /// shows is opened for the person (`channels.js` opens the first room); a compact window keeps
 /// the list first, and no rooms leave the empty state. FR-L12, #509.
@@ -685,6 +691,14 @@ pub fn create_error_text(status: Option<u16>, code: Option<&str>) -> &'static st
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fr_l12_only_a_click_on_an_unread_room_marks_it_read() {
+        assert!(super::should_mark_read(true, 3));
+        assert!(!super::should_mark_read(false, 3), "auto-selection never marks");
+        assert!(!super::should_mark_read(true, 0), "a read room needs no call");
+        assert!(!super::should_mark_read(false, 0));
+    }
+
     #[test]
     fn fr_t10_send_blocks_while_in_flight() {
         assert!(SendState::Idle.can_send("hi"));

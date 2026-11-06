@@ -53,7 +53,7 @@ fn router(dir: &std::path::Path) -> Router {
         .merge(computers::terms::router(computers.clone()))
         .merge(computers::enrol::router(
             enrol,
-            "http://127.0.0.1:8740".into(),
+            computers::enrol::DoorUrl::Url("http://127.0.0.1:8740".into()),
             Arc::new(computers::enrol::ComputersRegistrar::new(computers.clone())),
         ))
         .merge(ember_server::api::harnesses::router(sessions.clone(), computers.clone()))

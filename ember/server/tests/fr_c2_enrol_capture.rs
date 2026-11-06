@@ -61,7 +61,7 @@ fn fx_with(registrar: impl FnOnce(&Arc<Store>) -> Arc<dyn Registrar>) -> Fx {
     let token = auth::load_or_create_token(dir.path()).unwrap();
     let a = ServerAuth::new(token.clone(), LISTEN.parse::<SocketAddr>().unwrap(), []);
     let reg = registrar(&store);
-    let app = auth::protect(ember_server::computers::enrol::router(enrol.clone(), BASE.into(), reg), a);
+    let app = auth::protect(ember_server::computers::enrol::router(enrol.clone(), ember_server::computers::enrol::DoorUrl::Url(BASE.into()), reg), a);
     Fx { app, enrol, token, _dir: dir }
 }
 

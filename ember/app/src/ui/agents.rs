@@ -787,6 +787,22 @@ pub fn harness_path_text(h: AgentHarness, detected: &[DetectedAgent], example: b
 
 /// The version pill text of an installed harness: the version, or [`NO_VERSION`] when the
 /// server reported none; a harness that is not installed has no pill text.
+/// The version Ember verified for Antigravity (the 고정 버전 row).
+pub const PINNED_ANTIGRAVITY_VERSION: &str = "1.2.16";
+
+/// How the detected version compares with the pinned one. `None` when nothing was detected (no
+/// version reported): the row then shows no verdict, never a made-up "일치".
+pub fn pin_verdict(detected: Option<&str>, pinned: &str) -> Option<&'static str> {
+    let v = detected?.trim().trim_start_matches('v');
+    if v.is_empty() {
+        None
+    } else if v == pinned.trim_start_matches('v') {
+        Some("일치")
+    } else {
+        Some("다름")
+    }
+}
+
 pub fn version_text(installed: bool, version: Option<&str>, example: bool) -> Option<String> {
     if !installed {
         return None;
@@ -1496,5 +1512,14 @@ mod tests {
         assert_eq!(rescan_enabled(AgentHarness::Gemini, &Rescan::Idle), (false, Some("준비 중입니다")));
         assert_eq!(rescan_enabled(AgentHarness::Codex, &Rescan::Idle), (true, None));
         assert_eq!(rescan_enabled(AgentHarness::Codex, &Rescan::Running), (false, None));
+    }
+
+    #[test]
+    fn fr_l20_the_pin_verdict_needs_a_detected_version() {
+        assert_eq!(pin_verdict(None, PINNED_ANTIGRAVITY_VERSION), None);
+        assert_eq!(pin_verdict(Some(" "), PINNED_ANTIGRAVITY_VERSION), None);
+        assert_eq!(pin_verdict(Some("1.2.16"), PINNED_ANTIGRAVITY_VERSION), Some("일치"));
+        assert_eq!(pin_verdict(Some("v1.2.16"), PINNED_ANTIGRAVITY_VERSION), Some("일치"));
+        assert_eq!(pin_verdict(Some("1.3.0"), PINNED_ANTIGRAVITY_VERSION), Some("다름"));
     }
 }

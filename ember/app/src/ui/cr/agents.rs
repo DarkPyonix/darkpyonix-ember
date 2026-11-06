@@ -1030,7 +1030,13 @@ fn HarnessCard(
                     "고정 버전",
                     "Ember가 검증한 버전은 1.2.16입니다. 다른 버전은 읽기 전용으로만 실행됩니다.",
                     || {
-                        Pill("일치", PillTone::Green, true);
+                        // A verdict only for a version the server reported; nothing is shown
+                        // for an undetected harness.
+                        match crate::ui::agents::pin_verdict(version.as_deref(), crate::ui::agents::PINNED_ANTIGRAVITY_VERSION) {
+                            Some("일치") => Pill("일치", PillTone::Green, true),
+                            Some(_) => Pill("다름", PillTone::Orange, true),
+                            None => {}
+                        }
                     },
                 );
             }

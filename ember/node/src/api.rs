@@ -110,7 +110,7 @@ impl Node {
         let terms = Terms::new(config.state_dir.as_deref(), config.pty_keeper.clone(), jobs.clone());
         Ok(Self(Arc::new(Inner {
             token: config.token,
-            policy: PathPolicy::new(config.roots)?,
+            policy: PathPolicy::with_denied(config.roots, config.denied)?,
             jobs,
             terms,
             egress: Arc::new(config.egress),

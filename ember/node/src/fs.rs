@@ -404,9 +404,14 @@ fn literal_sep_matcher(pattern: &str) -> Result<GlobMatcher, FsError> {
 
 /// Files under `root`, honouring ignore files when asked. Never follows symlinks, so the walk
 /// stays inside the (already checked) root.
-fn walk(root: &Path, respect_ignore: bool) -> impl Iterator<Item = ignore::DirEntry> {
+///
+/// A denied directory (see [`PathPolicy::with_denied`]) is not descended into, so a search over
+/// a root never reads inside it.
+fn walk(policy: &PathPolicy, root: &Path, respect_ignore: bool) -> impl Iterator<Item = ignore::DirEntry> {
+    let denied: Vec<PathBuf> = policy.denied().to_vec();
     ignore::WalkBuilder::new(root)
         .standard_filters(respect_ignore)
+        .filter_entry(move |e| !denied.iter().any(|d| e.path().starts_with(d)))
         .require_git(false)
         .follow_links(false)
         .build()
@@ -419,7 +424,7 @@ pub fn glob(policy: &PathPolicy, req: &GlobRequest) -> Result<GlobResponse, FsEr
     let m = literal_sep_matcher(&req.pattern)?;
     let limit = req.limit.unwrap_or(1000);
     let mut found: Vec<(Option<u64>, PathBuf)> = Vec::new();
-    for e in walk(&root, req.respect_ignore) {
+    for e in walk(policy, &root, req.respect_ignore) {
         let rel = e.path().strip_prefix(&root).unwrap_or(e.path());
         if m.is_match(rel) {
             let mt = e.metadata().ok().as_ref().and_then(mtime_ms);
@@ -450,7 +455,7 @@ pub fn grep(policy: &PathPolicy, req: &GrepRequest) -> Result<GrepResponse, FsEr
     let files: Box<dyn Iterator<Item = PathBuf>> = if root.is_file() {
         Box::new(std::iter::once(root.clone()))
     } else {
-        Box::new(walk(&root, req.respect_ignore).map(|e| e.into_path()))
+        Box::new(walk(policy, &root, req.respect_ignore).map(|e| e.into_path()))
     };
     'files: for path in files {
         if let Some(f) = &filter {

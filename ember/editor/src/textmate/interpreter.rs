@@ -15,9 +15,35 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use onig::{Regex, RegexOptions, Region, SearchOptions, Syntax};
+use onig::{MatchParam, Regex, RegexOptions, Region, SearchOptions, Syntax};
 
 use super::grammar::{RawGrammar, RawRule};
+
+/// A line longer than this many bytes is not tokenized: it gets one token with the scopes in force and the
+/// state is left as it was. Minified files have lines of megabytes, and a search is linear in the line for
+/// every pattern. (VS Code's `editor.maxTokenizationLineLength` is 20000 as well.)
+pub const MAX_LINE_BYTES: usize = 20_000;
+/// The most rules open at once. A grammar that nests without end (a `begin` that matches again inside its
+/// own region) stops here instead of growing the stack for the whole file.
+pub const MAX_STACK_DEPTH: usize = 256;
+/// The most rules one compiled grammar may hold.
+pub const MAX_COMPILED_RULES: usize = 200_000;
+/// Backtracking steps one regular expression search may take before Oniguruma gives up (the search then
+/// finds nothing). Its default is ten million; a pattern such as `(a+)+$` on a long line would take
+/// seconds at that.
+const REGEX_RETRY_LIMIT: u32 = 500_000;
+/// Oniguruma's match stack, in elements: bounds the memory a single search may use.
+const REGEX_STACK_LIMIT: u32 = 1_000_000;
+
+/// One search with the limits above. A search that hits a limit (or fails for any other reason) finds
+/// nothing: the `onig` crate's own `search_with_options` panics on that, which a grammar must not be able
+/// to make the editor do.
+fn search(regex: &Regex, text: &str, from: usize, region: &mut Region) -> Option<usize> {
+    let mut param = MatchParam::default();
+    param.set_retry_limit_in_match(REGEX_RETRY_LIMIT);
+    param.set_match_stack_limit(REGEX_STACK_LIMIT);
+    regex.search_with_param(text, from, text.len(), SearchOptions::SEARCH_OPTION_NONE, Some(region), param).ok().flatten()
+}
 
 /// One scope name (`source.ts`, `string.quoted.double`), shared between tokens.
 pub type Scope = Arc<str>;
@@ -183,6 +209,8 @@ pub struct Token {
 pub struct LineTokens {
     pub tokens: Vec<Token>,
     pub end_state: StateStack,
+    /// The line was longer than [`MAX_LINE_BYTES`]: it has one token and the state is unchanged.
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,8 +256,12 @@ struct Builder<'a> {
     rules: Vec<Option<Rule>>,
     roots: HashMap<String, RuleId>,
     repo: HashMap<(String, String), RuleId>,
+    /// Rules compiled from a rule-local `repository` entry, by the entry's address, so an entry that
+    /// includes itself ends instead of compiling forever.
+    locals: HashMap<*const RawRule, RuleId>,
     problems: Vec<String>,
     base_scope: String,
+    too_many: bool,
 }
 
 struct Ctx<'a> {
@@ -239,6 +271,9 @@ struct Ctx<'a> {
 
 impl<'a> Builder<'a> {
     fn alloc(&mut self) -> RuleId {
+        if self.rules.len() >= MAX_COMPILED_RULES {
+            self.too_many = true;
+        }
         self.rules.push(None);
         self.rules.len() - 1
     }
@@ -297,6 +332,9 @@ impl<'a> Builder<'a> {
 
     /// The rule a raw rule stands for: an `include` stands for its target, anything else for a new rule.
     fn rule(&mut self, raw: &RawRule, ctx: &Ctx) -> Option<RuleId> {
+        if self.too_many {
+            return None;
+        }
         if let Some(include) = &raw.include {
             return self.include(include, ctx);
         }
@@ -316,7 +354,12 @@ impl<'a> Builder<'a> {
         if let Some(name) = include.strip_prefix('#') {
             for repo in ctx.locals.iter().rev() {
                 if let Some(raw) = repo.get(name) {
+                    let key: *const RawRule = raw;
+                    if let Some(id) = self.locals.get(&key) {
+                        return Some(*id);
+                    }
                     let id = self.alloc();
+                    self.locals.insert(key, id);
                     self.fill(id, raw, ctx);
                     return Some(id);
                 }
@@ -431,10 +474,15 @@ impl Grammar {
             rules: Vec::new(),
             roots: HashMap::new(),
             repo: HashMap::new(),
+            locals: HashMap::new(),
             problems: Vec::new(),
             base_scope: root.to_owned(),
+            too_many: false,
         };
         let root_id = builder.root_of(root)?;
+        if builder.too_many {
+            builder.problems.push(format!("{root}: more than {MAX_COMPILED_RULES} rules; the rest were left out"));
+        }
         let rules = builder
             .rules
             .into_iter()
@@ -520,6 +568,11 @@ impl Grammar {
         text.push('\n');
         let first_line = prev.is_none();
         let mut stack = prev.cloned().unwrap_or_else(|| self.initial_state());
+        if line.len() > MAX_LINE_BYTES {
+            let scopes = stack.frames.last().map(|f| f.content_scopes.clone()).unwrap_or_default();
+            let tokens = if line.is_empty() { Vec::new() } else { vec![Token { start: 0, end: line.len(), scopes }] };
+            return LineTokens { tokens, end_state: stack, skipped: true };
+        }
         for f in &mut stack.frames {
             f.enter_pos = None;
             f.anchor_pos = None;
@@ -536,7 +589,7 @@ impl Grammar {
                 tokens.push(Token { start, end, scopes });
             }
         }
-        LineTokens { tokens, end_state: stack }
+        LineTokens { tokens, end_state: stack, skipped: false }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -561,6 +614,11 @@ impl Grammar {
         loop {
             guard.steps += 1;
             if guard.steps > guard.limit {
+                out.produce(stack, len);
+                return;
+            }
+            if stack.frames.len() > MAX_STACK_DEPTH {
+                // Too many rules open: leave the rest of the line as it is.
                 out.produce(stack, len);
                 return;
             }
@@ -675,7 +733,7 @@ impl Grammar {
         let mut order = 0usize;
         let consider = |regex: &Regex, id: RuleId, order: usize, best: &mut Option<(usize, usize, Found)>| {
             let mut region = Region::new();
-            if let Some(start) = regex.search_with_options(text, pos, text.len(), SearchOptions::SEARCH_OPTION_NONE, Some(&mut region)) {
+            if let Some(start) = search(regex, text, pos, &mut region) {
                 let better = match best {
                     Some((s, o, _)) => start < *s || (start == *s && order < *o),
                     None => true,
@@ -747,7 +805,7 @@ impl Grammar {
             let matched = pattern
                 .as_ref()
                 .and_then(|p| p.regex(allow_a, allow_g))
-                .and_then(|re| re.search_with_options(text, pos, text.len(), SearchOptions::SEARCH_OPTION_NONE, Some(&mut region)))
+                .and_then(|re| search(re, text, pos, &mut region))
                 .is_some();
             if matched {
                 let caps: Vec<Option<(usize, usize)>> = (0..region.len()).map(|i| region.pos(i)).collect();

@@ -11,5 +11,5 @@ pub mod grammar;
 pub mod interpreter;
 
 pub use catalog::{GrammarCatalog, GrammarEntry};
-pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token};
+pub use interpreter::{Grammar, GrammarSet, LineTokens, Scope, StateStack, Token, MAX_COMPILED_RULES, MAX_LINE_BYTES, MAX_STACK_DEPTH};
 pub use grammar::{parse_grammar, read_grammar, GrammarError, RawGrammar, RawRule, MAX_GRAMMAR_BYTES, MAX_RULES};

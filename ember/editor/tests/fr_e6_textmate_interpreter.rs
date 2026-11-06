@@ -1,7 +1,7 @@
 //! FR-E6: the interpreter's rules on small grammars, one behaviour at a time (the golden tests cover the
 //! real grammars).
 
-use ember_editor::textmate::{parse_grammar, Grammar, GrammarSet, StateStack, Token};
+use ember_editor::textmate::{parse_grammar, Grammar, GrammarSet, StateStack, Token, MAX_LINE_BYTES, MAX_STACK_DEPTH};
 
 fn grammar(json: &str) -> Grammar {
     let mut set = GrammarSet::new();
@@ -192,4 +192,56 @@ fn fr_e6_offsets_are_bytes_of_the_line_and_the_line_break_is_not_part_of_it() {
     let spans: Vec<(usize, usize)> = r.tokens.iter().map(|t| (t.start, t.end)).collect();
     assert_eq!(spans, vec![(0, 3), (3, 6), (6, 9)]);
     assert!(g.tokenize_line("", None).tokens.is_empty());
+}
+
+// ---- limits on hostile or broken grammars and input ----------------------------------------------------
+
+#[test]
+fn fr_e6_a_local_repository_entry_that_includes_itself_compiles_and_runs() {
+    let g = grammar(
+        r##"{"scopeName":"source.t","patterns":[{"begin":"\\(","end":"\\)","name":"p","repository":{"loop":{"patterns":[{"include":"#loop"},{"match":"x","name":"x"}]}},"patterns":[{"include":"#loop"}]}]}"##,
+    );
+    assert_eq!(run(&g, "(xx)"), vec![vec!["(|p", "xx|p x", ")|p"]]);
+}
+
+#[test]
+fn fr_e6_repository_entries_that_include_each_other_and_self_do_not_loop() {
+    let g = grammar(
+        r##"{"scopeName":"source.t","patterns":[{"include":"#a"}],
+            "repository":{"a":{"patterns":[{"include":"#b"},{"match":"a","name":"A"}]},"b":{"patterns":[{"include":"#a"},{"include":"$self"},{"match":"b","name":"B"}]}}}"##,
+    );
+    assert_eq!(run(&g, "ab"), vec![vec!["a|A", "b|B"]]);
+}
+
+#[test]
+fn fr_e6_rules_that_nest_without_end_stop_at_the_stack_limit() {
+    let g = grammar(r#"{"scopeName":"source.t","patterns":[{"begin":"a","end":"z","name":"r","patterns":[{"include":"$self"}]}]}"#);
+    let line = "a".repeat(MAX_STACK_DEPTH * 4);
+    let r = g.tokenize_line(&line, None);
+    assert!(r.end_state.depth() <= MAX_STACK_DEPTH + 2, "depth {}", r.end_state.depth());
+    assert!(r.tokens.iter().all(|t| t.end <= line.len()));
+}
+
+#[test]
+fn fr_e6_a_very_long_line_is_not_tokenized_and_leaves_the_state_alone() {
+    let g = grammar(r#"{"scopeName":"source.t","patterns":[{"begin":"/\\*","end":"\\*/","name":"c"}]}"#);
+    let open = g.tokenize_line("/* open", None).end_state;
+    let line = "x".repeat(MAX_LINE_BYTES + 1);
+    let r = g.tokenize_line(&line, Some(&open));
+    assert!(r.skipped);
+    assert_eq!(r.end_state, open, "the state is as it was");
+    assert_eq!(r.tokens.len(), 1);
+    assert_eq!((r.tokens[0].start, r.tokens[0].end), (0, line.len()));
+    assert_eq!(r.tokens[0].scopes.last().map(|s| &**s), Some("c"), "the scopes in force");
+    assert!(!g.tokenize_line(&"x".repeat(MAX_LINE_BYTES), None).skipped, "exactly the limit is tokenized");
+}
+
+#[test]
+fn fr_e6_a_pattern_with_catastrophic_backtracking_gives_up_instead_of_hanging() {
+    let g = grammar(r#"{"scopeName":"source.t","patterns":[{"match":"^(a+)+$","name":"bad"},{"match":"b","name":"b"}]}"#);
+    let line = format!("{}b", "a".repeat(60));
+    let started = std::time::Instant::now();
+    let r = g.tokenize_line(&line, None);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
+    assert!(r.tokens.iter().all(|t| t.end <= line.len()));
 }
